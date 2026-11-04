@@ -24,12 +24,12 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
-import { createTestD1, mapAppToDefaultWorkspace } from "../store/helpers";
+import { migrationsAfter, createTestD1, mapAppToDefaultWorkspace } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -39,14 +39,13 @@ import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipe
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /**
- * Every migration after the 0036 identity rewrite, in wrangler's apply order.
- * Derived from the directory so a future migration cannot leave this fixture on
- * a stale schema; the 0036 boundary itself stays explicit below because that
- * loop exists to reconstruct a specific historical shape.
+ * Every migration after the 0036 identity rewrite, in wrangler's apply order
+ * (numeric prefix order, so `1000_*` follows `999_*`). Derived from the
+ * directory so a future migration cannot leave this fixture on a stale schema;
+ * the 0036 boundary itself stays explicit below because that loop exists to
+ * reconstruct a specific historical shape.
  */
-const MIGRATIONS_AFTER_0036 = readdirSync(MIGRATIONS_DIR)
-  .filter((name) => name.endsWith(".sql") && name > "0036_app_identity.sql")
-  .sort();
+const MIGRATIONS_AFTER_0036 = migrationsAfter(36);
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 /** Distinct fake App PEMs — isolation asserts the factory receives the right one. */

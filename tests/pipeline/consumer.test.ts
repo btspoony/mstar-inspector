@@ -38,7 +38,7 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -48,14 +48,11 @@ import { createArtifactStore } from "../../src/store/artifact-store";
 import { acquireInflight } from "../../src/store/inflight-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey } from "../../src/contracts/idem";
-import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
+import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
 import { REDACTED } from "../../src/pipeline/redact";
+import type { PipelineEnv } from "../../src/pipeline/consumer";
 import type { InstallationTokenGrant, ReviewCommenter, UpsertPlan } from "../../src/pipeline/comment";
-import {
-  createFakeCommenter,
-  initialFakeCommenterState,
-  type CommenterCall,
-} from "../helpers/review-commenter";
+import type { CommenterCall } from "../helpers/review-commenter";
 // the Check lifecycle is driven through PRODUCTION code — the real
 // registry double plus a scripted GitHub Checks surface (no live request).
 import { PreparedSendRejected } from "../../src/pipeline/comment";
@@ -83,382 +80,108 @@ import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
-import { sk, gh, AWS_CANARY_KEY, fakePem } from "../helpers/fake-secrets";
-
-const VALID_OUTPUT: ReviewOutput = {
-  schema: "mstar.review/v1",
-  verdict: "needs fixes",
-  summary_md: "Two issues found in the diff.",
-  findings: [
-    {
-      mergeClass: "should-fix",
-      category: "logic",
-      file_path: "src/auth.ts",
-      line_start: 21,
-      line_end: 21,
-      title: "Fractional expiry comparison",
-      body: "`claims.exp < Date.now() / 1000` compares against a fractional value.",
-    },
-  ],
-};
-
-const SHA = "0123456789abcdef0123456789abcdef01234567";
+import { sk, gh, AWS_CANARY_KEY } from "../helpers/fake-secrets";
+import {
+  SHA,
+  VALID_OUTPUT,
+  VALID_DIFF,
+  TEST_KEY,
+  TEST_APP_ID,
+  createSeededTestD1,
+  seedAppConfig,
+  TEST_APP_PEM,
+  PRIOR_PUB_ID,
+  PRIOR_SHA,
+  TARGET_ROW_ID,
+  ASSOC_ID,
+  TARGET_ORIGINAL,
+  seedPriorPublication,
+  seedOpenTarget,
+  seedAssociation,
+  ADDRESSED_QUOTE,
+  recheckDocWith,
+} from "../helpers/consumer-fixtures";
 
 /**
  * The migrations after the 0036 identity rewrite, in wrangler's apply order.
- * Derived from the directory so a future migration cannot leave the
- * equivalence fixture on a stale schema; the 0036 boundary stays explicit
- * because that fixture reconstructs a specific historical shape.
+ * Derived from the directory (numeric prefix order, so `1000_*` follows
+ * `999_*`) so a future migration cannot leave the equivalence fixture on a
+ * stale schema; the 0036 boundary stays explicit because that fixture
+ * reconstructs a specific historical shape.
  */
-const MIGRATIONS_AFTER_0036 = readdirSync(join(import.meta.dir, "../../migrations"))
-  .filter((name) => name.endsWith(".sql") && name > "0036_app_identity.sql")
-  .sort();
+const MIGRATIONS_AFTER_0036 = migrationsAfter(36);
 
-// --- default App row (every message is per-App) -------------
-/** base64 of exactly 32 bytes (the secretbox master-key requirement). */
-const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-/** Fixed App id every consumer-test payload is attributed to. */
-const TEST_APP_ID = "11111111-2222-3333-4444-555555555555";
-const TEST_APP_PEM = fakePem("FAKE-CONSUMER-TEST-PEM");
-// Pre-computed secretbox envelopes for the default App row (top-level await —
-// the file already awaits the consumer import below).
-const TEST_APP_PRIVATE_KEY_ENC = await createSecretbox(TEST_KEY).encryptSecret(
-  TEST_APP_PEM,
-  `github_apps.private_key_enc:${TEST_APP_ID}`,
-);
-const TEST_APP_WEBHOOK_SECRET_ENC = await createSecretbox(TEST_KEY).encryptSecret(
-  "whsec-consumer-test",
-  `github_apps.webhook_secret_enc:${TEST_APP_ID}`,
-);
-
-/**
- * Fully-migrated D1 with the default App row seeded — the consumer's
- * per-App credential resolution needs a real active row on every message
- * (appRef is required, the env-App branch is retired).
- * AL-24-5: the App is also given its AI-config health
- * baseline — a model chain (`ark-plan/deepseek-v4-flash`, the in-image
- * base provider) + the `ark` BYOK key carried in the provider's credential
- * payload pool the chain's provider reads — so a zero-extra-env
- * message passes the fail-closed gate and every success-path test sees the
- * ark pool + OMP_REVIEW_MODEL from the App config (no Worker-env
- * OMP_MODEL_KEY / OMP_REVIEW_MODEL exists).
- */
-async function createSeededTestD1(): Promise<TestD1> {
-  const db = createMigratedTestD1();
-  db.raw
-    .prepare(
-      `INSERT INTO github_apps
-         (id, github_app_id, name, private_key_enc, webhook_secret_enc,
-          created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, 424242, 'consumer-test-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
-    )
-    .run(TEST_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC);
-  // Production shape (migration 0026): createApp writes the App row and its
-  // `app_workspaces` mapping in ONE batch, so no App exists unmapped — the
-  // consumer's strict read face resolves a real App. A test that needs an
-  // orphan deletes this row explicitly.
-  db.raw
-    .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
-    .run(TEST_APP_ID);
-  // The default App's per-App AI config (AL-24-5 health baseline). AWAITED
-  // so the seed completes before any caller re-seeds the same app_id with a
-  // different chain (Rev24T6 Important-2: the fire-and-forget seed raced
-  // later awaited re-seeds — last-writer-wins could flake success paths).
-  await seedAppConfig(db, TEST_APP_ID);
-  return db;
-}
-
-/**
- * Seed one App's per-App AI config through the REAL store (composite-PK AAD
- * path): model chain + provider keys. Default = the ark-plan base chain with
- * the `ark` BYOK key; `extraKeys` adds per-App keys for chains that need
- * more providers.
- */
-async function seedAppConfig(
-  db: TestD1,
-  appId: string,
-  modelChain = "ark-plan/deepseek-v4-flash",
-  extraKeys: Record<string, string> = {},
-): Promise<void> {
-  const store = createAppConfigStore(db, TEST_KEY);
-  await store.setModelChain(appId, modelChain);
-  await store.addProviderKey(appId, "ark", "ark-key");
-  for (const [provider, key] of Object.entries(extraKeys)) {
-    await store.addProviderKey(appId, provider, key);
-  }
-}
-
-// --- sandbox fake (injected via createReviewConsumer overrides) -------------
-const sandboxCalls: Array<{ cmd: string; opts?: unknown }> = [];
-let runnerStdout = "";
-let resolvedSha = SHA;
-let revParseExitCode = 0;
-let sandboxError: Error | undefined;
-let destroyCalls = 0;
-let destroyError: Error | undefined;
-
-// the runtime runner contract — exit 0 ⇒ stdout is the
-// engine-validated envelope; stderr is diagnostics-only (no mode marker).
-let runnerStderr = "";
-let runnerExitCode = 0;
-let cloneExitCode = 0;
-let diffExitCode = 0;
-let numstatStdout = "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n";
-let numstatExitCode = 0;
-let writeInputExitCode = 0;
-/** Decoded runner --input JSON written via the base64 write step. */
-let writtenInputJson: string | undefined;
-/**
- * the diff stdout IS the worker-captured §7.3 trusted evidence —
- * the consumer reads it directly from the sandbox exec (no second prefetch).
- */
-let diffStdout = "";
-/**
- * the runner's `--recheck-out` file content, read back through
- * the audited bounded read. The double mirrors the REAL bytes of
- * `readRecheckCommand`: `<content>\n` + `wc -c`'s NEWLINE-TERMINATED count,
- * i.e. `…\n0\n` (fit) / `…\n1\n` (overflow). P67-QC-006: a shape that differs
- * from the shipped command is what let the parser defect hide here.
- */
-let recheckFileContent = "";
-let recheckFileOverflow = "0";
-
-/**
- * Optional gate on the FIRST runner exec: a test parks a review inside the
- * runner (its admission row live) while it dispatches another message.
- */
-let runnerGate:
-  | { released: Promise<void>; release: () => void; markReached: () => void }
-  | undefined;
-
-/** Hold the next runner exec; `reached` resolves once it is parked. */
-function holdFirstRunner(): { reached: Promise<void>; release: () => void } {
-  const released = Promise.withResolvers<void>();
-  const reached = Promise.withResolvers<void>();
-  runnerGate = { released: released.promise, release: released.resolve, markReached: reached.resolve };
-  return { reached: reached.promise, release: released.resolve };
-}
-
-/** Optional ordering probe: runs at the FIRST sandbox command of a test. */
-let sandboxProbe: (() => void) | undefined;
-
-const fakeSandbox = {
-  runCommand: mock(async (cmd: string, opts?: unknown) => {
-    const first = sandboxCalls.length === 0;
-    sandboxCalls.push({ cmd, opts });
-    if (first && sandboxProbe !== undefined) sandboxProbe();
-    if (sandboxError) throw sandboxError;
-    if (cmd.includes("rev-parse")) {
-      return { stdout: `${resolvedSha}\n`, stderr: "", exitCode: revParseExitCode };
-    }
-    if (cmd.includes("git init")) return { stdout: "", stderr: "", exitCode: cloneExitCode };
-    if (cmd.includes("gh pr diff")) return { stdout: diffStdout, stderr: "", exitCode: diffExitCode };
-    if (cmd.includes("git apply --numstat")) {
-      return { stdout: numstatStdout, stderr: "", exitCode: numstatExitCode };
-    }
-    if (cmd.includes("base64 -d")) {
-      const match = /printf '%s' '([A-Za-z0-9+/=]+)'/.exec(cmd);
-      writtenInputJson = match ? Buffer.from(match[1]!, "base64").toString("utf8") : undefined;
-      return { stdout: "", stderr: "", exitCode: writeInputExitCode };
-    }
-    if (cmd.includes("head -c") && cmd.includes("/tmp/mstar-recheck.json")) {
-      // Byte-for-byte the audited fixed-path recheck read's stdout.
-      return { stdout: `${recheckFileContent}\n${recheckFileOverflow}\n`, stderr: "", exitCode: 0 };
-    }
-    if (cmd.includes("--input")) {
-      if (runnerGate !== undefined) {
-        const gate = runnerGate;
-        runnerGate = undefined; // only the first runner exec is held
-        gate.markReached();
-        await gate.released;
-      }
-      return { stdout: runnerStdout, stderr: runnerStderr, exitCode: runnerExitCode };
-    }
-    return { stdout: "", stderr: "", exitCode: 0 };
-  }),
-  destroy: mock(async () => {
-    destroyCalls += 1;
-    if (destroyError) throw destroyError;
-  }),
-};
-
-// Load-shim only: consumer.ts statically imports ./sandbox → the workerd
-// builtin `cloudflare:workers` (unresolvable in Bun's test runner). The
-// consumer never calls the sandbox — every test injects the fake via
-// createReviewConsumer overrides.
-import "../helpers/cloudflare-workers-mock";
-
-// --- commenter fake (injected via createReviewConsumer overrides) -----------
-// the shared double (tests/helpers/review-commenter.ts) records
-// every op into commenterCalls and reads behavior from the mutable
-// commenterState (tests mutate it per case, like the `let` vars they
-// replace).
-const commenterCalls: CommenterCall[] = [];
-const commenterState = initialFakeCommenterState();
-
-// line comments: the prefetched diff fixture (now the
-// WORKER-CAPTURED sandbox diff — same text, one capture).
-/** Default diff fixture: a src/auth.ts hunk whose right range covers line 21. */
-const VALID_DIFF = [
-  "diff --git a/src/auth.ts b/src/auth.ts",
-  "index 1111111..2222222 100644",
-  "--- a/src/auth.ts",
-  "+++ b/src/auth.ts",
-  "@@ -18,4 +18,6 @@ export function verify() {",
-  " const header = req.headers;",
-  " const claims = decode(token);",
-  "-if (claims.exp < Date.now() / 1000) throw 401;",
-  "+if (!Number.isInteger(claims.exp)) throw 401;",
-  "+if (claims.exp < Math.floor(Date.now() / 1000)) throw 401;",
-  "+audit(claims.sub);",
-  " return claims;",
-  "",
-].join("\n");
-
-const fakeCommenter: ReviewCommenter = createFakeCommenter(commenterState, commenterCalls);
-
-// Injected into every consumer under test (DI replaces the old mock.module).
-const testOverrides = {
-  createAppCommenter: () => fakeCommenter,
-  getSandbox: async () => fakeSandbox,
-};
+// --- shared runtime doubles -------------------------------------------------
+// The sandbox/commenter/KV doubles, the payload + batch builders and `reset`
+// live in ONE place (tests/helpers/consumer-harness) — the same module the
+// recheck suites import — so a fixture change cannot leave this suite on stale
+// defaults. Only the Check-lifecycle surface below is local to this file.
+import {
+  CHECK_HOOK_TIMEOUT_MS,
+  DIFF_PREFETCH_MAX_BYTES,
+  INLINE_RESOLVE_MAX_ENTRIES,
+  commenterCalls,
+  commenterState,
+  createReviewConsumer,
+  failureRows,
+  fakeCommenter,
+  fakeSandbox,
+  guardRetryDelaysSeconds,
+  kvPuts,
+  kvState,
+  logLines,
+  makeBatch,
+  makeEnv,
+  makePayload,
+  messageAckCalls,
+  messageRetryCalls,
+  queueState,
+  reset as resetHarness,
+  reviewGuardTtlSeconds,
+  runnerTimeoutMs,
+  sandbox,
+  testLog,
+  testOverrides,
+} from "../helpers/consumer-harness";
 
 /** Runner exec call's env (the sandbox fake stores opts as unknown). */
 function runnerExecEnv(): Record<string, string> {
-  const call = sandboxCalls.find((c) => c.cmd.includes("bun run"))!;
+  const call = sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
   return (call.opts as { env?: Record<string, string> }).env ?? {};
 }
 /** The credential pools the runner exec transported over STDIN (the only channel). */
 function runnerCredentialPools(): Record<string, string[]> | undefined {
-  const call = sandboxCalls.find((c) => c.cmd.includes("bun run"))!;
+  const call = sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
   const stdin = (call.opts as { stdin?: string }).stdin;
   return stdin === undefined ? undefined : (JSON.parse(stdin) as { pools: Record<string, string[]> }).pools;
 }
 /** Runner exec call's timeout (the sandbox fake stores opts as unknown). */
 function runnerExecTimeout(): number | undefined {
-  const call = sandboxCalls.find((c) => c.cmd.includes("bun run"))!;
+  const call = sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
   return (call.opts as { timeout?: number }).timeout;
 }
 
-// --- consumer under test (dynamic import: mocks must be registered first) ---
-const {
-  createReviewConsumer,
-  runnerTimeoutMs,
-  reviewGuardTtlSeconds,
-  guardRetryDelaysSeconds,
-  DIFF_PREFETCH_MAX_BYTES,
-  INLINE_RESOLVE_MAX_ENTRIES,
-  CHECK_HOOK_TIMEOUT_MS,
-} = await import("../../src/pipeline/consumer");
-import type { PipelineEnv } from "../../src/pipeline/consumer";
-import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
-
-// --- test log sink (injected via the consumer's optional log param) --------
-const logLines: Array<{
-  level: "info" | "warn" | "error";
-  fields: ConsumerLogFields;
-  msg: string;
-}> = [];
-const testLog: ConsumerLog = {
-  info: (fields, msg) => logLines.push({ level: "info", fields, msg: msg ?? "" }),
-  warn: (fields, msg) => logLines.push({ level: "warn", fields, msg: msg ?? "" }),
-  error: (fields, msg) => logLines.push({ level: "error", fields, msg: msg ?? "" }),
-};
-// --- helpers ----------------------------------------------------------------
-const kvPuts: Array<{ key: string; value: string; options?: unknown }> = [];
-const messageRetryCalls: Array<{ attempts: number; delaySeconds?: number }> = [];
-const messageAckCalls: Array<{ attempts: number }> = [];
-let messageAttempts = 1;
-let kvPutError: Error | undefined;
-let kvGetValue: string | null = null;
-const kv = {
-  get: mock(async (_key: string) => kvGetValue),
-  put: mock(async (key: string, value: string, options?: unknown) => {
-    kvPuts.push({ key, value, options });
-    if (kvPutError) throw kvPutError;
-  }),
-  delete: mock(async (_key: string) => {}),
-};
-
-async function makeEnv(overrides: Partial<PipelineEnv> = {}): Promise<PipelineEnv> {
-  return {
-    DB: await createSeededTestD1() as never,
-    IDEMPOTENCY_KV: kv as never,
-    SANDBOX: {} as never,
-    DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
-    ...overrides,
-  };
+/** Hold the next runner exec; `reached` resolves once it is parked. */
+function holdFirstRunner(): { reached: Promise<void>; release: () => void } {
+  const released = Promise.withResolvers<void>();
+  const reached = Promise.withResolvers<void>();
+  sandbox.gate = { released: released.promise, markReached: reached.resolve };
+  return { reached: reached.promise, release: released.resolve };
 }
 
-function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
-  return {
-    installation_id: 123,
-    owner: "acme",
-    repo: "widgets",
-    pr_number: 42,
-    head_sha: SHA,
-    action: "opened",
-    triggered_by: "pull_request",
-    // Guard note (Step 4): a payload WITHOUT appRef is
-    // impossible at the type level (required field). At runtime the
-    // classifier never attaches App identity — the per-App route is the
-    // only producer that adds appRef, so every enqueued job carries it.
-    // No runtime guard is added (AL-24-4: no defensive checks).
-    appRef: { appId: TEST_APP_ID },
-    ...overrides,
-  };
+/** Count review rows in the real D1 double. */
+function reviewCount(db: TestD1): number {
+  const row = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+  return row.n;
 }
 
-function makeBatch(payload: ReviewJobPayload): MessageBatch<ReviewJobPayload> {
-  return {
-    queue: "review-queue",
-    messages: [
-      {
-        id: "m1",
-        timestamp: new Date(),
-        attempts: messageAttempts,
-        body: payload,
-        retry: (options?: { delaySeconds?: number }) => {
-          messageRetryCalls.push({ attempts: messageAttempts, delaySeconds: options?.delaySeconds });
-        },
-        ack: () => {
-          messageAckCalls.push({ attempts: messageAttempts });
-        },
-      },
-    ],
-  } as unknown as MessageBatch<ReviewJobPayload>;
-}
-
+/**
+ * The shared reset, plus this file's own scripted Checks surface (declared
+ * further down): harness state and Check state are cleared by one call, so no
+ * case can inherit a half-configured double.
+ */
 function reset(): void {
-  sandboxCalls.length = 0;
-  commenterCalls.length = 0;
-  Object.assign(commenterState, initialFakeCommenterState());
-  kvPuts.length = 0;
-  messageRetryCalls.length = 0;
-  messageAckCalls.length = 0;
-  messageAttempts = 1;
-  logLines.length = 0;
-  runnerStdout = "";
-  runnerStderr = "";
-  runnerExitCode = 0;
-  runnerGate = undefined;
-  sandboxProbe = undefined;
-  cloneExitCode = 0;
-  diffExitCode = 0;
-  numstatStdout = "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n";
-  numstatExitCode = 0;
-  writeInputExitCode = 0;
-  writtenInputJson = undefined;
-  resolvedSha = SHA;
-  revParseExitCode = 0;
-  sandboxError = undefined;
-  destroyCalls = 0;
-  destroyError = undefined;
-  diffStdout = "";
-  recheckFileContent = "";
-  recheckFileOverflow = "0";
-  kvPutError = undefined;
-  kvGetValue = null;
+  resetHarness();
   checkRequests.length = 0;
   checkRuns.clear();
   checkRequestOverrides = {};
@@ -466,26 +189,15 @@ function reset(): void {
   checkState.clockMs = 1_700_000_000_000;
 }
 
-/** Count review rows in the real D1 double. */
-function reviewCount(db: ReturnType<typeof createMigratedTestD1>): number {
-  const row = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
-  return row.n;
-}
-
-/** All rows of the review_failures table in the real D1 double. */
-function failureRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<string, unknown>> {
-  return db.raw.query("SELECT * FROM review_failures ORDER BY rowid").all() as Array<Record<string, unknown>>;
-}
-
 /** All rows of the usage_events ledger in the real D1 double. */
-function usageRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<string, unknown>> {
+function usageRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM usage_events ORDER BY review_id, seq").all() as Array<
     Record<string, unknown>
   >;
 }
 
 /** Live admission rows — the per-PR lock plus the capacity reservation. */
-function inflightRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<string, unknown>> {
+function inflightRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_inflight ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
@@ -552,25 +264,25 @@ describe("createReviewConsumer", () => {
 
     // The authoritative sha comes from the checkout, so the dedup runs after
     // clone + rev-parse; the D1 hit acks before any post/insert.
-    expect(sandboxCalls.map((c) => c.cmd)).toEqual([
+    expect(sandbox.calls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
     ]);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(kvPuts).toHaveLength(0);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
     expect(reviewCount(db)).toBe(1); // untouched
   });
 
   test("full flow: clone → rev-parse → diff → numstat → input → runner → parse → post → insert → KV done → destroy", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
-    expect(sandboxCalls.map((c) => c.cmd)).toEqual([
+    expect(sandbox.calls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
@@ -584,7 +296,7 @@ describe("createReviewConsumer", () => {
     // the envelope target (owner/repo#pr + the AUTHORITATIVE checkout sha),
     // the numstat seat-partition universe, and the App's resolved
     // sandbox image's capability hosts — the in-image synthesis base.
-    expect(JSON.parse(writtenInputJson!)).toEqual({
+    expect(JSON.parse(sandbox.writtenInputJson!)).toEqual({
       worktreePath: "/workspace/repo",
       reconFacts: ["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"],
       capabilityHosts: getSandboxImage("omp")!.hosts,
@@ -593,7 +305,7 @@ describe("createReviewConsumer", () => {
     // token lives in GIT_CONFIG_VALUE_0, never in the command string. Form is
     // basic auth with username `x-access-token` (GitHub app-token git auth);
     // a `Bearer` header would be rejected by GitHub even on public repos.
-    expect(sandboxCalls[0]!.opts).toEqual({
+    expect(sandbox.calls[0]!.opts).toEqual({
       env: {
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
@@ -602,16 +314,16 @@ describe("createReviewConsumer", () => {
       timeout: 120_000,
     });
     // rev-parse: no credentials needed.
-    expect(sandboxCalls[1]!.opts).toEqual({ timeout: 120_000 });
+    expect(sandbox.calls[1]!.opts).toEqual({ timeout: 120_000 });
     // Diff: gh step, GH_TOKEN via exec env only.
-    expect(sandboxCalls[2]!.opts).toEqual({ env: { GH_TOKEN: gh("s", "installation_token") }, timeout: 120_000 });
+    expect(sandbox.calls[2]!.opts).toEqual({ env: { GH_TOKEN: gh("s", "installation_token") }, timeout: 120_000 });
     // Numstat + input write: plain git/shell steps, git timeout.
-    expect(sandboxCalls[3]!.opts).toEqual({ timeout: 120_000 });
-    expect(sandboxCalls[4]!.opts).toEqual({ timeout: 120_000 });
+    expect(sandbox.calls[3]!.opts).toEqual({ timeout: 120_000 });
+    expect(sandbox.calls[4]!.opts).toEqual({ timeout: 120_000 });
     // Runner: cwd = clone dir; harness paths + the model chain via exec env,
     // and the App's key pool via the exec STDIN payload (the only credential
     // channel — the env carries no key).
-    expect(sandboxCalls[5]!.opts).toEqual({
+    expect(sandbox.calls[5]!.opts).toEqual({
       cwd: "/workspace/repo",
       env: {
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
@@ -697,22 +409,22 @@ describe("createReviewConsumer", () => {
         options: { expirationTtl: 86400 },
       },
     ]);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("null payload sha → actual sha read from the checkout (no gh pr view)", async () => {
     reset();
-    resolvedSha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.resolvedSha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment" })));
 
     // No gh pr view anywhere: the authoritative sha comes from the clone.
-    expect(sandboxCalls.some((c) => c.cmd.includes("gh pr view"))).toBe(false);
-    expect(sandboxCalls[0]!.cmd).toContain("git init '/workspace/repo'");
-    expect(sandboxCalls[1]!.cmd).toContain("git -C '/workspace/repo' rev-parse HEAD");
+    expect(sandbox.calls.some((c) => c.cmd.includes("gh pr view"))).toBe(false);
+    expect(sandbox.calls[0]!.cmd).toContain("git init '/workspace/repo'");
+    expect(sandbox.calls[1]!.cmd).toContain("git -C '/workspace/repo' rev-parse HEAD");
     const row = db.raw.query("SELECT * FROM reviews").get() as { head_sha: string };
     expect(row.head_sha).toBe("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
     expect(kvPuts).toEqual([
@@ -722,14 +434,14 @@ describe("createReviewConsumer", () => {
         options: { expirationTtl: 86400 },
       },
     ]);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("rev-parse sha differs from payload sha → D1 row, commit_id, KV all use the checkout sha", async () => {
     reset();
     const actualSha = "feedfacefeedfacefeedfacefeedfacefeedface";
-    resolvedSha = actualSha;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.resolvedSha = actualSha;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -749,12 +461,12 @@ describe("createReviewConsumer", () => {
         options: { expirationTtl: 86400 },
       },
     ]);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("parse failure → failure row (stage=parse) + degraded comment + ack, zero DLQ (AL-1)", async () => {
     reset();
-    runnerStdout = "not json at all";
+    sandbox.runnerStdout = "not json at all";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -796,7 +508,7 @@ describe("createReviewConsumer", () => {
     // Queue redelivery stops via the ack — no throw, no retry call.
     expect(messageAckCalls).toHaveLength(1);
     expect(messageRetryCalls).toHaveLength(0);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("parse error echoing a model-emitted token is REDACTED in the failure row and the warn log (qc3 F-001 / qc2 F-001)", async () => {
@@ -807,7 +519,7 @@ describe("createReviewConsumer", () => {
     // [REDACTED] form (the public degraded comment was already redacted by
     // buildDegradedBody; this pins the D1/log channel).
     const token = gh("p", "modelEmittedSecretToken123");
-    runnerStdout = JSON.stringify({
+    sandbox.runnerStdout = JSON.stringify({
       schema: "mstar.review/v1",
       verdict: token,
       summary_md: "x",
@@ -834,7 +546,7 @@ describe("createReviewConsumer", () => {
 
   test("parse failure with a failing failure-store → degrade still posts + acks (best-effort record)", async () => {
     reset();
-    runnerStdout = "not json at all";
+    sandbox.runnerStdout = "not json at all";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
@@ -857,7 +569,7 @@ describe("createReviewConsumer", () => {
 
   test("parse failure with a failing degraded SEND → typed UNKNOWN (post-attempt), journal stays sending, ack anyway", async () => {
     reset();
-    runnerStdout = "not json at all";
+    sandbox.runnerStdout = "not json at all";
     commenterState.preparedDegradedError = new Error("github down");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -884,7 +596,7 @@ describe("createReviewConsumer", () => {
 
   test("comment failure → failure row (stage=pipeline) + rethrow, destroy (AL-6)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     commenterState.preparedReviewError = new Error("post failed");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
@@ -894,12 +606,12 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline", head_sha: SHA });
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("sandbox exec failure → failure row (stage=sandbox) + rethrow, destroy (AL-6)", async () => {
     reset();
-    sandboxError = new Error("container unavailable");
+    sandbox.error = new Error("container unavailable");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -907,7 +619,7 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", error: "container unavailable" });
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("token mint failure → failure row (stage=pipeline, GitHub auth not sandbox) + rethrow, destroy", async () => {
@@ -923,12 +635,12 @@ describe("createReviewConsumer", () => {
     // The mint rides the payload sha (head not yet resolved) and the
     // "pipeline" stage — it sits between the sandbox window's edges.
     expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline", head_sha: SHA });
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("clone exitCode !== 0 → failure row (stage=sandbox) + rethrow, destroy, no post/insert", async () => {
     reset();
-    cloneExitCode = 128;
+    sandbox.cloneExitCode = 128;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -937,13 +649,13 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox" });
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("runtime runner: exit 0 with a valid envelope succeeds regardless of stderr diagnostics (no mode marker gate)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    runnerStderr = "seat full-diff/combined done in 41s\nsynthesizeReview ok\n";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStderr = "seat full-diff/combined done in 41s\nsynthesizeReview ok\n";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -951,15 +663,15 @@ describe("createReviewConsumer", () => {
 
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("runner exitCode !== 0 → failure row (stage=runner) + rethrow, destroy, no post/insert (AL-6)", async () => {
     reset();
-    runnerExitCode = 1;
+    sandbox.runnerExitCode = 1;
     // The seeded App's ark key is "ark-key" — it rides the credential payload
     // and a prompt-injected seat can echo it onto stderr.
-    runnerStderr = "review: session failed: boom\nprovider echo: ark-key\n";
+    sandbox.runnerStderr = "review: session failed: boom\nprovider echo: ark-key\n";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -979,13 +691,13 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "runner", head_sha: SHA });
     expect(failureRows(db)[0]!.error).toContain("runner failed");
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("runner failure with empty stderr says so explicitly", async () => {
     reset();
-    runnerExitCode = 124; // the exec bound fired — the run leaves nothing on stderr
-    runnerStderr = "";
+    sandbox.runnerExitCode = 124; // the exec bound fired — the run leaves nothing on stderr
+    sandbox.runnerStderr = "";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -996,8 +708,8 @@ describe("createReviewConsumer", () => {
 
   test("runner failure keeps the stderr TAIL, bounded", async () => {
     reset();
-    runnerExitCode = 124;
-    runnerStderr = `${"x".repeat(5000)}\nrunner: seat budget exceeded after 600s\n`;
+    sandbox.runnerExitCode = 124;
+    sandbox.runnerStderr = `${"x".repeat(5000)}\nrunner: seat budget exceeded after 600s\n`;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -1011,7 +723,7 @@ describe("createReviewConsumer", () => {
 
   test("infra failure with a failing failure-store → rethrow not masked (AL-6 best-effort)", async () => {
     reset();
-    runnerExitCode = 1;
+    sandbox.runnerExitCode = 1;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
@@ -1031,7 +743,7 @@ describe("createReviewConsumer", () => {
 
   test("in-flight legacy-shape payload (absent appRef) → structured channel + healthy batch sibling completes (F-001)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1071,7 +783,7 @@ describe("createReviewConsumer", () => {
     // The healthy sibling completed before the legacy message threw.
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
     // The structured channel caught the legacy message: error log + AL-6 row.
     const errLine = logLines.find((l) => l.level === "error" && l.msg.startsWith("review failed:"));
     expect(errLine).toBeDefined();
@@ -1083,54 +795,54 @@ describe("createReviewConsumer", () => {
 
   test("numstat failure → failure row (stage=sandbox) + no runner/post/insert, rethrow, destroy", async () => {
     reset();
-    numstatExitCode = 1;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.numstatExitCode = 1;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/numstat failed/);
 
-    expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", head_sha: SHA });
     expect(String(failureRows(db)[0]!.error)).toContain("numstat failed");
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
   });
 
   test("runner input write failure → no runner, no post, no insert, rethrow, destroy", async () => {
     reset();
-    writeInputExitCode = 1;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.writeInputExitCode = 1;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner input write failed/);
 
-    expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("REVIEW_LEVEL unset → runner runs the harness landing tier 'default' (AC-S7-level)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
-    const runnerCall = sandboxCalls.find((c) => c.cmd.includes("--input"))!;
+    const runnerCall = sandbox.calls.find((c) => c.cmd.includes("--input"))!;
     expect(runnerCall.cmd).toContain("--level 'default'");
   });
 
   test("REVIEW_LEVEL=quick → runner runs `--level 'quick'` (AC-S7-level configurable)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(
       await makeEnv({ DB: db as never, REVIEW_LEVEL: "quick" }),
@@ -1140,14 +852,14 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const runnerCall = sandboxCalls.find((c) => c.cmd.includes("--input"))!;
+    const runnerCall = sandbox.calls.find((c) => c.cmd.includes("--input"))!;
     expect(runnerCall.cmd).toContain("--level 'quick'");
     expect(reviewCount(db)).toBe(1);
   });
 
   test("REVIEW_LEVEL=deep → runner runs `--level 'deep'` forwarded unchanged (AC-S9-trigger)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(
       await makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
@@ -1157,16 +869,16 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const runnerCall = sandboxCalls.find((c) => c.cmd.includes("--input"))!;
+    const runnerCall = sandbox.calls.find((c) => c.cmd.includes("--input"))!;
     expect(runnerCall.cmd).toContain("--level 'deep'");
     expect(reviewCount(db)).toBe(1);
   });
   test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + admission TTL 1692; quick/default stay 600_000 (AC-S10-clock)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     let admissionTtlMs = -1;
-    sandboxProbe = () => {
+    sandbox.probe = () => {
       const row = inflightRows(db)[0]!;
       admissionTtlMs = Date.parse(String(row.expires_at)) - Date.parse(String(row.acquired_at));
     };
@@ -1194,7 +906,7 @@ describe("createReviewConsumer", () => {
 
   test("success path logs one runner-attempt line with level + runner_timeout_ms + elapsed_ms; default → bun-fanout (AC-S10-logs)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1213,7 +925,7 @@ describe("createReviewConsumer", () => {
 
   test("REVIEW_LEVEL=deep → runner log: level=deep, budget 840_000, orchestration=parent, NO fake seat_count (AC-S10-logs)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(
       await makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
@@ -1236,8 +948,8 @@ describe("createReviewConsumer", () => {
 
   test("runner failure → error log carries level + runner_timeout_ms + elapsed_ms (AC-S10-logs timeout path)", async () => {
     reset();
-    runnerExitCode = 1;
-    runnerStderr = "review: session failed: boom";
+    sandbox.runnerExitCode = 1;
+    sandbox.runnerStderr = "review: session failed: boom";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1271,7 +983,7 @@ describe("createReviewConsumer", () => {
 
       await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/invalid REVIEW_LEVEL/);
 
-      expect(sandboxCalls).toHaveLength(0);
+      expect(sandbox.calls).toHaveLength(0);
       expect(commenterCalls).toHaveLength(0);
       expect(reviewCount(db)).toBe(0);
       expect(inflightRows(db)).toHaveLength(0); // no admission row is ever written
@@ -1284,7 +996,7 @@ describe("createReviewConsumer", () => {
 
   test("envelope target folded from reconFacts agrees with the idem key → put cross-check passes (T4 store gate)", async () => {
     reset();
-    runnerStdout = JSON.stringify({
+    sandbox.runnerStdout = JSON.stringify({
       ...VALID_OUTPUT,
       target: { owner: "acme", repo: "widgets", pr: 42, head_sha: SHA },
     });
@@ -1303,8 +1015,8 @@ describe("createReviewConsumer", () => {
     // A parse failure no longer rethrows (it degrades + acks) — the
     // structured error-log-before-rethrow contract is pinned on a genuine
     // infra failure (runner non-zero exit).
-    runnerExitCode = 1;
-    runnerStderr = "review: session failed: boom";
+    sandbox.runnerExitCode = 1;
+    sandbox.runnerStderr = "review: session failed: boom";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1320,8 +1032,8 @@ describe("createReviewConsumer", () => {
 
   test("empty actual sha from rev-parse → failure row (stage=sandbox) + no post/insert, rethrow, destroy", async () => {
     reset();
-    resolvedSha = "";
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.resolvedSha = "";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1333,7 +1045,7 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", head_sha: SHA });
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.sandbox_id).toMatch(/^review-/);
   });
@@ -1353,14 +1065,14 @@ describe("createReviewConsumer", () => {
     // payload sha as the best attribution available ("pipeline" phase).
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline", head_sha: SHA });
-    expect(sandboxCalls).toHaveLength(0);
-    expect(destroyCalls).toBe(0);
+    expect(sandbox.calls).toHaveLength(0);
+    expect(sandbox.destroyCalls).toBe(0);
   });
 
   test("KV completion write failure → warn, still ack (D1 row is durable)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    kvPutError = new Error("kv down");
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    kvState.putError = new Error("kv down");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1377,8 +1089,8 @@ describe("createReviewConsumer", () => {
 
   test("destroy failure after success → warn with idempotency key, result not masked", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    destroyError = new Error("destroy boom");
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.destroyError = new Error("destroy boom");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1417,7 +1129,7 @@ describe("createReviewConsumer", () => {
         },
       ],
     };
-    runnerStdout = JSON.stringify(leaked);
+    sandbox.runnerStdout = JSON.stringify(leaked);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -1462,7 +1174,7 @@ describe("createReviewConsumer", () => {
         },
       ],
     };
-    runnerStdout = JSON.stringify(big);
+    sandbox.runnerStdout = JSON.stringify(big);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -1499,7 +1211,7 @@ describe("createReviewConsumer", () => {
     findings[0]!.mergeClass = "must-fix"; // earliest must-fix keeps its slot
     findings[59]!.mergeClass = "must-fix"; // later must-fix sorts after F0
     findings[58]!.mergeClass = "should-fix";
-    runnerStdout = JSON.stringify({
+    sandbox.runnerStdout = JSON.stringify({
       schema: "mstar.review/v1",
       verdict: "blocked",
       summary_md: "many findings",
@@ -1528,8 +1240,8 @@ describe("createReviewConsumer", () => {
 
   test("KV done-state hit → ack without post/insert (B3)", async () => {
     reset();
-    kvGetValue = "done";
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    kvState.getValue = "done";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1537,21 +1249,21 @@ describe("createReviewConsumer", () => {
 
     // Clone + rev-parse run (the authoritative sha is only known post-clone),
     // then the KV done hit acks before any post/insert.
-    expect(sandboxCalls.map((c) => c.cmd)).toEqual([
+    expect(sandbox.calls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
     ]);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(kvPuts).toHaveLength(0);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
     const infoLine = logLines.find((l) => l.level === "info" && l.msg.includes("KV idempotency hit"));
     expect(infoLine).toBeDefined();
   });
 
   test("lifecycle apply failure after a successful post → one comment, proof + KV done, warn + ack, no rethrow", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // §7.7 step 9: the store.put + lifecycle batch live INSIDE
     // applyPublishedLifecycle — the local-write failure is injected at the
@@ -1587,12 +1299,12 @@ describe("createReviewConsumer", () => {
     const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("lifecycle apply"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("BB-1: the App's modelChain is forwarded verbatim into the runner exec env (per-App only, AL-24-5)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // The chain's openrouter provider needs its per-App key (fail-closed gate).
     await seedAppConfig(db, TEST_APP_ID, "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4", {
@@ -1602,7 +1314,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const runnerCall = sandboxCalls.find((c) => c.cmd.includes("bun run"))!;
+    const runnerCall = sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
     const { stdin, ...runnerOpts } = runnerCall.opts as { stdin?: string; [key: string]: unknown };
     expect(runnerOpts).toEqual({
       cwd: "/workspace/repo",
@@ -1629,7 +1341,7 @@ describe("createReviewConsumer", () => {
 
   test("BB-1: an App with NO modelChain fails closed — no in-image default run, structured channel (AL-24-5)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // Clear the seeded chain (setModelChain("") removes the row).
     await createAppConfigStore(db, TEST_KEY).setModelChain(TEST_APP_ID, "");
@@ -1641,17 +1353,17 @@ describe("createReviewConsumer", () => {
 
     // F-001 channel: no runner exec, no review row, stage=pipeline failure
     // row, rethrow (retry → DLQ). The in-image default never runs.
-    expect(sandboxCalls.some((c) => c.cmd.includes("bun run"))).toBe(false);
+    expect(sandbox.calls.some((c) => c.cmd.includes("bun run"))).toBe(false);
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
     expect(String(failureRows(db)[0]!.error)).toContain("missing model chain");
-    expect(destroyCalls).toBe(0);
+    expect(sandbox.destroyCalls).toBe(0);
   });
 
   test("BB-1: a comma-only modelChain (',' — zero selectors) fails closed — structured channel, sibling completes (AL-24-5)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // A second App whose stored chain parses to ZERO selectors. The store
     // persists `","` verbatim (setModelChain only deletes null/whitespace),
@@ -1709,7 +1421,7 @@ describe("createReviewConsumer", () => {
     // The healthy sibling completed before the comma-only message threw.
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
     // Structured channel: error log + stage=pipeline failure row; the
     // failing message never reached the sandbox or wrote a review row.
     const errLine = logLines.find((l) => l.level === "error" && l.msg.startsWith("review failed:"));
@@ -1722,7 +1434,7 @@ describe("createReviewConsumer", () => {
 
   test("BB-1: a comma-only ROLE OVERRIDE chain (',' — zero selectors) fails closed — structured channel, sibling completes (PR #11 BUG-01)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // A second App with a HEALTHY base chain (passes the base gate) but a
     // raw `,` override chain inserted DIRECTLY into app_model_chains with a
@@ -1797,7 +1509,7 @@ describe("createReviewConsumer", () => {
     // The healthy sibling completed before the comma-override message threw.
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
     // Structured channel: error log + stage=pipeline failure row; the
     // failing message never reached the sandbox.
     const errLine = logLines.find((l) => l.level === "error" && l.msg.startsWith("review failed:"));
@@ -1812,7 +1524,7 @@ describe("createReviewConsumer", () => {
 
   test("migration equivalence: a pre-chains App (0006/0009 shape) resolves byte-identically after 0017's backfill (spec §4.4)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // Pre-0017 DB: 0001–0016 in filename order (the chains migration NOT
     // yet applied) — the wrangler state before the chains migration. Migrations
     // 0017–0020 are applied after the 0017 backfill below; the lifecycle
@@ -1936,14 +1648,14 @@ describe("createReviewConsumer", () => {
     // runner input for the migrated App.
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
     await consumer(makeBatch(makePayload({ appRef: { appId } })));
-    const input = JSON.parse(writtenInputJson!);
+    const input = JSON.parse(sandbox.writtenInputJson!);
     expect(input.modelOverrides).toEqual(preOverrides);
     expect(runnerExecEnv().OMP_REVIEW_MODEL).toBe(preChain);
   });
 
   test("BB-2: the App's stored keys are forwarded as their provider pool env; blank rows never inject (per-App BYOK)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // A chain needing openai + groq; anthropic/openrouter key rows ride along
     // in their provider pools; an empty mistral row never injects.
@@ -1975,7 +1687,7 @@ describe("createReviewConsumer", () => {
 
   test("BB-2: only App-config keys reach the container — arbitrary env is NEVER forwarded (allowlist)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app", { gemini: "gem-test", openai: sk("openai-x") });
     // Vars that are NOT in the PROVIDERS allowlist sit on the Worker env —
@@ -2007,7 +1719,7 @@ describe("createReviewConsumer", () => {
 
   test("a live admission row for the PR → guard-held delayed retry (60s), no throw, no post/insert (BB-3)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -2019,11 +1731,11 @@ describe("createReviewConsumer", () => {
     await consumer(makeBatch(makePayload()));
 
     // Fail fast: no sandbox, no token, no post, no insert, no extra row.
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
     expect(commenterCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(inflightRows(db)).toHaveLength(1); // the live row, untouched
-    expect(destroyCalls).toBe(0);
+    expect(sandbox.destroyCalls).toBe(0);
     // A DELAYED per-message retry is scheduled — 60s on the first attempt.
     expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     expect(messageAckCalls).toHaveLength(0);
@@ -2047,7 +1759,7 @@ describe("createReviewConsumer", () => {
       [2, 120],
       [3, 240],
     ] as const) {
-      messageAttempts = attempts;
+      queueState.attempts = attempts;
       await consumer(makeBatch(makePayload()));
     }
     expect(messageRetryCalls).toEqual([
@@ -2056,7 +1768,7 @@ describe("createReviewConsumer", () => {
       { attempts: 3, delaySeconds: 240 },
     ]);
     expect(messageAckCalls).toHaveLength(0);
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
   });
   test("REVIEW_LEVEL=deep guard-held → delayed retries use the deep backoff 180s → 360s → 720s (AC-S10-guard)", async () => {
     reset();
@@ -2072,7 +1784,7 @@ describe("createReviewConsumer", () => {
       [2, 360],
       [3, 720],
     ] as const) {
-      messageAttempts = attempts;
+      queueState.attempts = attempts;
       await consumer(makeBatch(makePayload()));
     }
     expect(messageRetryCalls).toEqual([
@@ -2081,19 +1793,19 @@ describe("createReviewConsumer", () => {
       { attempts: 3, delaySeconds: 720 },
     ]);
     expect(messageAckCalls).toHaveLength(0);
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
   });
 
   test("guard still held after the 3 delayed retries → ack with a warning, no DLQ (BB-3)", async () => {
     reset();
-    messageAttempts = 4; // final delivery before the queue would DLQ
+    queueState.attempts = 4; // final delivery before the queue would DLQ
     const db = await createSeededTestD1();
     await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload())); // resolves — acked, never DLQed
 
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
     expect(messageRetryCalls).toHaveLength(0);
     expect(messageAckCalls).toEqual([{ attempts: 4 }]);
     const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("acking"));
@@ -2112,7 +1824,7 @@ describe("createReviewConsumer", () => {
     // by it, so the drop must reach the failure sweep — a warn line alone
     // leaves the commit with no trace at all.
     reset();
-    messageAttempts = 4;
+    queueState.attempts = 4;
     const db = await createSeededTestD1();
     await seedInflight(db); // holds SHA
     const newer = "1111111111111111111111111111111111111111";
@@ -2121,7 +1833,7 @@ describe("createReviewConsumer", () => {
     await consumer(makeBatch(makePayload({ head_sha: newer })));
 
     expect(messageAckCalls).toEqual([{ attempts: 4 }]);
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
     expect(inflightRows(db)).toHaveLength(1); // the live row, untouched
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ pr_number: 42, stage: "pipeline", head_sha: newer });
@@ -2144,7 +1856,7 @@ describe("createReviewConsumer", () => {
       { held: SHA, payload: null, rows: 0 },
     ] as const) {
       reset();
-      messageAttempts = 4; // final delivery: the job is dropped here
+      queueState.attempts = 4; // final delivery: the job is dropped here
       const db = await createSeededTestD1();
       await seedInflight(db, { headSha: held });
       const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -2159,7 +1871,7 @@ describe("createReviewConsumer", () => {
 
   test("a comment-triggered delivery held by a live review stays silent (no sha to compare)", async () => {
     reset();
-    messageAttempts = 4;
+    queueState.attempts = 4;
     const db = await createSeededTestD1();
     await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -2174,8 +1886,8 @@ describe("createReviewConsumer", () => {
 
   test("a cap refusal that survives the whole backoff records ONE failure row (W-1)", async () => {
     reset();
-    messageAttempts = 4; // final delivery: the job is dropped here
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    queueState.attempts = 4; // final delivery: the job is dropped here
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     db.raw
       .prepare(
@@ -2188,7 +1900,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
     expect(messageAckCalls).toEqual([{ attempts: 4 }]);
     // The sweep counts `review_failures`; a dropped review must be visible
     // there, with the reason it was dropped.
@@ -2204,7 +1916,7 @@ describe("createReviewConsumer", () => {
 
   test("a storage error refusal that survives the whole backoff records one failure row (W-1)", async () => {
     reset();
-    messageAttempts = 4;
+    queueState.attempts = 4;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(
       await makeEnv({ DB: dbFailingOn(db, "review_inflight") as never }),
@@ -2229,7 +1941,7 @@ describe("createReviewConsumer", () => {
     // still be readable from the row, or the drop cannot be joined back to a
     // PR at all.
     reset();
-    messageAttempts = 4;
+    queueState.attempts = 4;
     const db = await createSeededTestD1();
     db.raw
       .prepare(
@@ -2258,7 +1970,7 @@ describe("createReviewConsumer", () => {
 
   test("a reached system cap refuses admission → guard-held, no sandbox (spec §1.3)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     db.raw
       .prepare(
@@ -2273,7 +1985,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     // The foreign row is neither deleted nor duplicated by the refusal.
@@ -2292,7 +2004,7 @@ describe("createReviewConsumer", () => {
 
   test("a reached WORKSPACE cap refuses admission while the global count has headroom (spec §1.3)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // The system cap stays at its default 32; this workspace may hold ONE review.
     db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
@@ -2302,7 +2014,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     expect(inflightRows(db)).toHaveLength(1);
@@ -2317,7 +2029,7 @@ describe("createReviewConsumer", () => {
 
   test("a workspace cap below the system cap bounds only its own workspace — a foreign live review admits", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
     // The live row belongs to ANOTHER workspace, so `default` still has its slot.
@@ -2327,7 +2039,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    expect(sandboxCalls.length).toBeGreaterThan(0);
+    expect(sandbox.calls.length).toBeGreaterThan(0);
     expect(messageRetryCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
     expect(inflightRows(db)).toHaveLength(1); // the foreign row, untouched
@@ -2335,7 +2047,7 @@ describe("createReviewConsumer", () => {
 
   test("the global count is bounded by the system cap even when every workspace is under its own cap", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     db.raw
       .prepare(
@@ -2351,7 +2063,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     expect(inflightRows(db)).toHaveLength(2);
@@ -2359,7 +2071,7 @@ describe("createReviewConsumer", () => {
 
   test("a D1 error at admission fails closed → guard-held, never admitted (spec §1.3)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(
       await makeEnv({ DB: dbFailingOn(db, "review_inflight") as never }),
@@ -2369,7 +2081,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
     expect(commenterCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
@@ -2384,7 +2096,7 @@ describe("createReviewConsumer", () => {
 
   test("a degraded caps read warns once and admits at the conservative cap (never unlimited)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(
       await makeEnv({ DB: dbFailingOn(db, "review_runtime_settings") as never }),
@@ -2410,8 +2122,8 @@ describe("createReviewConsumer", () => {
     reset();
     // A parse failure now DEGRADES (acks) — the real-failure throw path is
     // pinned on a genuine infra failure instead (runner non-zero exit).
-    runnerExitCode = 1;
-    runnerStderr = "review: session failed: boom";
+    sandbox.runnerExitCode = 1;
+    sandbox.runnerStderr = "review: session failed: boom";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -2421,17 +2133,17 @@ describe("createReviewConsumer", () => {
     // real failure rethrows exactly as before.
     expect(messageRetryCalls).toHaveLength(0);
     expect(messageAckCalls).toHaveLength(0);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
     // The admission row is released on the failure path too.
     expect(inflightRows(db)).toHaveLength(0);
   });
 
   test("admission row is written before the first sandbox step and released after the post settles (WF-002)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     let atFirstSandbox: Array<Record<string, unknown>> = [];
-    sandboxProbe = () => {
+    sandbox.probe = () => {
       atFirstSandbox = inflightRows(db);
     };
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -2459,7 +2171,7 @@ describe("createReviewConsumer", () => {
 
   test("the admission row is released AFTER the sandbox is destroyed (S-3)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // A release that ran before destroy would let the next attempt admit a
     // second live container while this one still runs.
@@ -2467,8 +2179,8 @@ describe("createReviewConsumer", () => {
     const original = fakeSandbox.destroy;
     fakeSandbox.destroy = mock(async () => {
       rowsAtDestroy = inflightRows(db).length;
-      destroyCalls += 1;
-      if (destroyError) throw destroyError;
+      sandbox.destroyCalls += 1;
+      if (sandbox.destroyError) throw sandbox.destroyError;
     });
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -2484,7 +2196,7 @@ describe("createReviewConsumer", () => {
 
   test("two messages for one PR never run concurrently — the second is guard-held while the first is in flight", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
     const gate = holdFirstRunner();
@@ -2495,7 +2207,7 @@ describe("createReviewConsumer", () => {
     await consumer(makeBatch(makePayload()));
 
     expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
-    expect(sandboxCalls.filter((c) => c.cmd.includes("--input"))).toHaveLength(1);
+    expect(sandbox.calls.filter((c) => c.cmd.includes("--input"))).toHaveLength(1);
     expect(reviewCount(db)).toBe(0); // the second message never ran a pipeline
 
     gate.release();
@@ -2506,7 +2218,7 @@ describe("createReviewConsumer", () => {
 
   test("two different PRs both admit a review while the first is still in flight", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
     const gate = holdFirstRunner();
@@ -2528,7 +2240,7 @@ describe("createReviewConsumer", () => {
 
   test("a release failure only warns — the review outcome and the TTL backstop stand", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(
       await makeEnv({ DB: dbFailingOn(db, "DELETE FROM review_inflight") as never }),
@@ -2579,7 +2291,7 @@ describe("createReviewConsumer", () => {
 describe("line comments (AL-3 layered delivery)", () => {
   test("no qualifying findings (no position) → zero line-comment API calls (byte-compat)", async () => {
     reset();
-    runnerStdout = JSON.stringify({
+    sandbox.runnerStdout = JSON.stringify({
       ...VALID_OUTPUT,
       findings: [
         { mergeClass: "nit", title: "Repo-wide nit", body: "No location." },
@@ -2598,7 +2310,7 @@ describe("line comments (AL-3 layered delivery)", () => {
     expect(commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "delete-degraded"]);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("hunk-external findings are excluded by the worker-captured diff; all excluded → no createReview call", async () => {
@@ -2607,8 +2319,8 @@ describe("line comments (AL-3 layered delivery)", () => {
     // outside every hunk; docs/readme.md is not in the diff at all. The
     // prefilter input is the SAME sandbox diff exec the evidence catalog
     // uses (one worker-controlled capture, no second prefetch).
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify({
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify({
       ...VALID_OUTPUT,
       findings: [
         { mergeClass: "must-fix", file_path: "src/auth.ts", line_start: 100, line_end: 100, title: "Outside", body: "B." },
@@ -2629,13 +2341,13 @@ describe("line comments (AL-3 layered delivery)", () => {
 
     // And when NOTHING survives, the createReview call is skipped entirely.
     reset();
-    runnerStdout = JSON.stringify({
+    sandbox.runnerStdout = JSON.stringify({
       ...VALID_OUTPUT,
       findings: [
         { mergeClass: "must-fix", file_path: "src/auth.ts", line_start: 100, line_end: 100, title: "Outside", body: "B." },
       ],
     });
-    diffStdout = VALID_DIFF;
+    sandbox.diffStdout = VALID_DIFF;
     const db2 = await createSeededTestD1();
     const consumer2 = createReviewConsumer(await makeEnv({ DB: db2 as never }), testLog, testOverrides);
     await consumer2(makeBatch(makePayload()));
@@ -2645,10 +2357,10 @@ describe("line comments (AL-3 layered delivery)", () => {
 
   test("no diff text (capture unavailable) → base-filter attempt (draft semantics)", async () => {
     reset();
-    // diffStdout stays "" — the prefilter has no trusted diff to compare
+    // sandbox.diffStdout stays "" — the prefilter has no trusted diff to compare
     // against, so the base layer alone decides (GitHub validates at send;
     // the hunk layer is skipped, never fabricated).
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -2661,7 +2373,7 @@ describe("line comments (AL-3 layered delivery)", () => {
     expect(logLines.some((l) => l.fields.line_comments_fallback === true)).toBe(false);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("diff over the in-memory bound → the hunk prefilter is skipped exactly like an unavailable diff (qc3 F-101)", async () => {
@@ -2669,11 +2381,11 @@ describe("line comments (AL-3 layered delivery)", () => {
     // A finding OUTSIDE every VALID_DIFF hunk (line 100): with a bounded
     // diff the hunk layer would EXCLUDE it — an over-cap diff must degrade
     // to the base-filter attempt, never materialize a multi-MB line array.
-    runnerStdout = JSON.stringify({
+    sandbox.runnerStdout = JSON.stringify({
       ...VALID_OUTPUT,
       findings: [{ ...VALID_OUTPUT.findings[0]!, line_start: 100, line_end: 100 }],
     });
-    diffStdout = `${VALID_DIFF}\n${" ".repeat(DIFF_PREFETCH_MAX_BYTES)}`;
+    sandbox.diffStdout = `${VALID_DIFF}\n${" ".repeat(DIFF_PREFETCH_MAX_BYTES)}`;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -2688,7 +2400,7 @@ describe("line comments (AL-3 layered delivery)", () => {
     expect(logLines.some((l) => l.fields.line_comments_fallback === true)).toBe(false);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 
   test("residual 422 / network error on createReview → line_comments_fallback log + continue, never throws", async () => {
@@ -2697,7 +2409,7 @@ describe("line comments (AL-3 layered delivery)", () => {
       new Error("socket hangup"),
     ]) {
       reset();
-      runnerStdout = JSON.stringify(VALID_OUTPUT);
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
       commenterState.lineCommentsError = failure;
       const db = await createSeededTestD1();
       const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -2719,7 +2431,7 @@ describe("line comments (AL-3 layered delivery)", () => {
       // The ok path resolves silently (queue auto-ack) — the point is that
       // NOTHING retried: the failure never escaped processMessage.
       expect(messageRetryCalls).toHaveLength(0);
-      expect(destroyCalls).toBe(1);
+      expect(sandbox.destroyCalls).toBe(1);
     }
   });
 });
@@ -2727,7 +2439,7 @@ describe("line comments (AL-3 layered delivery)", () => {
 describe("degraded-comment lifecycle (Bugbot finding)", () => {
   test("success flow with a pre-existing degraded comment → the delete scan runs after the upsert", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     commenterState.deleteDegradedOutcome = { deleted: 1, skipped: 1, errors: ["rate limited"] };
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -2760,7 +2472,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
 
   test("stale degraded comment delete failure → warn, review stands, never throws", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     commenterState.deleteDegradedError = new Error("delete 500");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -2776,14 +2488,14 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
     expect(messageRetryCalls).toHaveLength(0);
-    expect(destroyCalls).toBe(1);
+    expect(sandbox.destroyCalls).toBe(1);
   });
 });
 
 describe("line-comments round pin (AL-3)", () => {
   test("the line-comments round pins to the round the overall upsert returned", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // A create plan at round 4 is type-illegal (create pins round 1) — the
     // double is cast: the consumer pins the line comments to plan.round.
     commenterState.plan = { action: "create", round: 4 } as unknown as UpsertPlan;
@@ -2803,7 +2515,7 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
     // A UUID-shaped key evades every shape pattern — only the exact-value
     // pass (sessionSecretValues from the runner env) can remove it.
     const uuidKey = "3f2a1b4c-9d8e-4f6a-b7c2-1e0d9a8b7c6d";
-    runnerStdout = JSON.stringify({
+    sandbox.runnerStdout = JSON.stringify({
       ...VALID_OUTPUT,
       summary_md: `leaked ${uuidKey} in the summary`,
       findings: [
@@ -2833,7 +2545,7 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
     // The parse error echoes the installation token verbatim (a
     // prompt-injected echo) — the exact-value pass must remove it before
     // the prepared degraded send and the failure row.
-    runnerStdout = JSON.stringify({
+    sandbox.runnerStdout = JSON.stringify({
       schema: "mstar.review/v1",
       verdict: gh("s", "installation_token"),
       summary_md: "x",
@@ -2854,7 +2566,7 @@ describe("fingerprint choke point (S-1)", () => {
   test("oversized fingerprint_hint is clamped at the choke point — never lands verbatim in the D1 fingerprint column (S-1)", async () => {
     reset();
     const oversizedHint = "hint-" + "x".repeat(FINDING_TITLE_MAX + 100);
-    runnerStdout = JSON.stringify({
+    sandbox.runnerStdout = JSON.stringify({
       ...VALID_OUTPUT,
       findings: [{ ...VALID_OUTPUT.findings[0]!, fingerprint_hint: oversizedHint }],
     });
@@ -2871,123 +2583,13 @@ describe("fingerprint choke point (S-1)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Finding recheck & closure (spec §7.7 order / §7.4 conservative
-// reconciliation / §7.10 closure / §7.10 Check seam). Assertions target the
-// OBSERVABLE multi-round behavior: the captured call order, the prepared
-// publication body, and the D1 lifecycle rows — never internal wiring.
-// ---------------------------------------------------------------------------
-
-/** The prior round's publication row every lifecycle fixture hangs off. */
-const PRIOR_PUB_ID = "aaaaaaaa-0000-4000-8000-000000000001";
-const PRIOR_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const TARGET_ROW_ID = "bbbbbbbb-0000-4000-8000-000000000002";
-const ASSOC_ID = "cccccccc-0000-4000-8000-000000000003";
-
-/** The §7.3 OriginalFinding the seeded lifecycle row carries (different title/hint from the current finding). */
-const TARGET_ORIGINAL = {
-  title: "Old null deref on the config path",
-  body: "The original published concern body — never reduced to a title.",
-  filePath: "src/auth.ts",
-  lineStart: 21,
-  lineEnd: 21,
-  mergeClass: "should-fix",
-  category: "logic",
-  fingerprintHint: "old-fp-1",
-};
-
-async function seedPriorPublication(db: TestD1, nowMs = 1_000): Promise<void> {
-  db.raw
-    .prepare(
-      `INSERT INTO review_publications
-         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
-          payload_json, created_ms, updated_ms, recovery_state)
-       VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', 'applied', ?, ?, ?, 'done')`,
-    )
-    .run(PRIOR_PUB_ID, TEST_APP_ID, PRIOR_SHA, "{}", nowMs, nowMs);
-}
-
-async function seedOpenTarget(db: TestD1, state = "open", nowMs = 2_000): Promise<void> {
-  db.raw
-    .prepare(
-      `INSERT INTO review_findings
-         (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
-          first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
-          first_seen_round, last_seen_round, state, created_ms, updated_ms)
-       VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)`,
-    )
-    .run(
-      TARGET_ROW_ID,
-      TEST_APP_ID,
-      TARGET_ORIGINAL.fingerprintHint,
-      JSON.stringify(TARGET_ORIGINAL),
-      PRIOR_PUB_ID,
-      PRIOR_PUB_ID,
-      PRIOR_SHA,
-      PRIOR_SHA,
-      state,
-      nowMs,
-      nowMs,
-    );
-}
-
-async function seedAssociation(db: TestD1, threadId: string | null, nowMs = 3_000): Promise<void> {
-  const intent = {
-    associationId: ASSOC_ID,
-    findingRowId: TARGET_ROW_ID,
-    publicationId: PRIOR_PUB_ID,
-    scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
-    originalSha: PRIOR_SHA,
-    round: 1,
-    path: "src/auth.ts",
-    line: 21,
-    body: "old comment body",
-    bodySha256: "digest-old",
-  };
-  db.raw
-    .prepare(
-      `INSERT INTO review_threads
-         (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
-          original_sha, round, intent_json, resolution_state, thread_id, created_ms, updated_ms)
-       VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, 'pending', ?, ?, ?)`,
-    )
-    .run(ASSOC_ID, TARGET_ROW_ID, PRIOR_PUB_ID, TEST_APP_ID, PRIOR_SHA, 1, JSON.stringify(intent), threadId, nowMs, nowMs);
-}
-
-/** A current-code `addressed` recheck result for the seeded target (cites the trusted catalog slice). */
-const ADDRESSED_QUOTE =
-  "if (!Number.isInteger(claims.exp)) throw 401;\nif (claims.exp < Math.floor(Date.now() / 1000)) throw 401;";
-
-function recheckDocWith(result: Record<string, unknown>, rowId = TARGET_ROW_ID): string {
-  return JSON.stringify({
-    schema: "mstar.recheck/v1",
-    headSha: SHA,
-    results: [
-      {
-        rowId,
-        disposition: "addressed",
-        reason: "verified-fix",
-        evidence: {
-          kind: "current-code",
-          sliceId: "ev-1",
-          startLine: 20,
-          endLine: 21,
-          quote: ADDRESSED_QUOTE,
-          explanation: "The comparison now guards the fractional expiry.",
-        },
-        relatedCurrentFindingIndexes: [],
-        ...result,
-      },
-    ],
-  });
-}
 
 describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
   test("recheck round with an open prior row: recheck input rides the runner, closure renders the verified fix, resolution runs discovery then resolve", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    recheckFileContent = recheckDocWith({});
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     await seedOpenTarget(db);
@@ -3018,16 +2620,16 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     // Step 5: the runner input carries the typed recheck document (targets
     // with the ORIGINAL concern + trusted evidence + discussion), and the
     // runner gains --recheck-out, read back through the audited read.
-    const runnerInput = JSON.parse(writtenInputJson!) as { recheck?: { targets: RecheckTarget[]; evidence: unknown[]; discussion: { issueCoverage: string } } };
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as { recheck?: { targets: RecheckTarget[]; evidence: unknown[]; discussion: { issueCoverage: string } } };
     expect(runnerInput.recheck).toBeDefined();
     expect(runnerInput.recheck!.targets).toHaveLength(1);
     expect(runnerInput.recheck!.targets[0]!.original.title).toBe(TARGET_ORIGINAL.title);
     expect(runnerInput.recheck!.targets[0]!.original.body).toContain("never reduced to a title");
     expect(runnerInput.recheck!.evidence.length).toBeGreaterThan(0);
     expect(runnerInput.recheck!.discussion.issueCoverage).toBe("complete");
-    const runnerCmd = sandboxCalls.find((c) => c.cmd.includes("--input"))!.cmd;
+    const runnerCmd = sandbox.calls.find((c) => c.cmd.includes("--input"))!.cmd;
     expect(runnerCmd).toContain("--recheck-out '/tmp/mstar-recheck.json'");
-    expect(sandboxCalls.some((c) => c.cmd.includes("head -c") && c.cmd.includes("/tmp/mstar-recheck.json"))).toBe(true);
+    expect(sandbox.calls.some((c) => c.cmd.includes("head -c") && c.cmd.includes("/tmp/mstar-recheck.json"))).toBe(true);
 
     // Step 8/§7.10: the prepared body renders the closure with the verified
     // disposition and the queued resolve as not-yet-resolved (never a
@@ -3086,10 +2688,10 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       ["1", "unverifiable (invalid-output)"],
     ] as const) {
       reset();
-      diffStdout = VALID_DIFF;
-      runnerStdout = JSON.stringify(VALID_OUTPUT);
-      recheckFileContent = recheckDocWith({});
-      recheckFileOverflow = overflow;
+      sandbox.diffStdout = VALID_DIFF;
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      sandbox.recheckFileContent = recheckDocWith({});
+      sandbox.recheckFileOverflow = overflow;
       const db = await createSeededTestD1();
       await seedPriorPublication(db);
       await seedOpenTarget(db);
@@ -3126,9 +2728,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
   test("P67-QC-003: the seat receives the §7.8 bounded, neutralized discussion — never a raw captured body", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    recheckFileContent = recheckDocWith({});
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     await seedOpenTarget(db);
@@ -3170,7 +2772,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const runnerInput = JSON.parse(writtenInputJson!) as {
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
       recheck?: { discussion: { items: Array<{ body: string }>; issueCoverage: string; threads: Array<{ modelCoverage: string }> } };
     };
     const wire = runnerInput.recheck!.discussion;
@@ -3197,8 +2799,8 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
   test("same-round recurrence overrides the recheck closure (§7.4): unverifiable/conflict, row stays open, no resolution", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT); // current finding = same concern as the current envelope's
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT); // current finding = same concern as the current envelope's
     // The doc claims the concern was fixed — but the SAME round re-reports
     // it: the seeded target's ORIGINAL normalizes exactly to the current
     // finding (same path/bucket/title) under a DIFFERENT fingerprint (its
@@ -3211,7 +2813,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       TARGET_ROW_ID,
     );
     await seedAssociation(db, "PRRT_thread1");
-    recheckFileContent = recheckDocWith({});
+    sandbox.recheckFileContent = recheckDocWith({});
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -3234,10 +2836,10 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
   test("an omitted selected row is accounted but never assessed: coverage omitted, last_assessed_ms untouched", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // The recheck document is EMPTY — the selected target was omitted.
-    recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
+    sandbox.recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     await seedOpenTarget(db);
@@ -3267,7 +2869,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
   test("same-SHA issue-comment-triggered review with a pending journal row → hands off to recovery and acks (no recheck, no resolve, rows untouched)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // A PREPARED publication for this exact scope+SHA (a crashed round).
     db.raw
@@ -3285,7 +2887,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     await consumer(makeBatch(makePayload()));
 
     // The model work never started and nothing was published or resolved.
-    expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(commenterCalls.some((c) => c.op === "post-prepared")).toBe(false);
     expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
     expect(reviewCount(db)).toBe(0);
@@ -3307,7 +2909,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
   test("staging failure BEFORE any GitHub mutation → no publication, no KV, no reviews row; structured channel", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // Break ONLY the journal INSERT (stagePublication) — everything before
     // it (journal reads) keeps working.
@@ -3344,7 +2946,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
   test("the honest unknown-publication window: send succeeded, proof write lost → no KV done, no local rows, phase stays sending", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // Break ONLY the proof UPDATE (recordPublicationProof) — the send has
     // already happened when this runs.
@@ -3386,7 +2988,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
   test("recurrence reopen: a re-reported finding reopens its closed row with reopen_count+1 (§7.2)", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     // A row CLOSED addressed in an earlier round whose finding_id is the
@@ -3424,9 +3026,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
   test("force push between capture and resolve (HEAD changed) → the resolve is refused, verified snapshot stays queued", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    recheckFileContent = recheckDocWith({});
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     await seedOpenTarget(db);
@@ -3474,9 +3076,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       { kind: "foreign" },
     ] as const) {
       reset();
-      diffStdout = VALID_DIFF;
-      runnerStdout = JSON.stringify(VALID_OUTPUT);
-      recheckFileContent = recheckDocWith({});
+      sandbox.diffStdout = VALID_DIFF;
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      sandbox.recheckFileContent = recheckDocWith({});
       const db = await createSeededTestD1();
       await seedPriorPublication(db);
       await seedOpenTarget(db);
@@ -3516,9 +3118,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
   test("resolve API failure → typed retry outcome logged, message ok, durable queue state intact", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    recheckFileContent = recheckDocWith({});
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     await seedOpenTarget(db);
@@ -3555,7 +3157,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
   test("the Check seam: begin after dedup before model work; ONE terminalize after the proof is durable; hook throws are isolated", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const beginCalls: unknown[] = [];
     const terminalizeCalls: Array<{ publicationId: string | null; outcome: string }> = [];
@@ -3589,8 +3191,8 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(beginInput.headSha).toBe(SHA);
     expect(beginInput.triggeredBy).toBe("pull_request");
     expect(beginInput.executionDeadlineMs).toBeGreaterThan(Date.now() + 800_000);
-    const shaIdx = sandboxCalls.findIndex((c) => c.cmd.includes("rev-parse"));
-    const runnerIdx = sandboxCalls.findIndex((c) => c.cmd.includes("--input"));
+    const shaIdx = sandbox.calls.findIndex((c) => c.cmd.includes("rev-parse"));
+    const runnerIdx = sandbox.calls.findIndex((c) => c.cmd.includes("--input"));
     expect(beginCalls).toHaveLength(1);
     expect(commenterCalls.findIndex((c) => c.op === "plan")).toBeGreaterThan(-1);
     expect(shaIdx).toBeGreaterThan(-1);
@@ -3614,7 +3216,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     // (a) A throw AT the prepared send is post-attempt uncertainty: the hook
     // is terminalized WITH the publication id so its proof read decides.
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     commenterState.preparedReviewError = new Error("socket hangup after send");
     const db = await createSeededTestD1();
     const terminalizeCalls: Array<{ publicationId: string | null; outcome: string }> = [];
@@ -3641,7 +3243,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     // (b) A throw BEFORE any send (epoch-fenced claim refused) is a clean
     // pre-publication failure: terminalized with a null publication id.
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db2 = await createSeededTestD1();
     const failingDb = {
       ...db2,
@@ -3786,14 +3388,14 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
 
   test("admission exhaustion leaves the unvisited row durably pending with zero attempts and no resolve", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // One more eligible association than the inline lane may start.
     const count = INLINE_RESOLVE_MAX_ENTRIES + 1;
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     const seeded = seedOpenTargets(db, count);
-    recheckFileContent = recheckDocFor(seeded);
+    sandbox.recheckFileContent = recheckDocFor(seeded);
     commenterState.discussion = discussionFor(seeded);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -3841,8 +3443,8 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
 describe("definitive pre-send rejection in the consumer (spec §7.7, P67-QC-010)", () => {
   test("a prepared review refusal marks the journal failed, not unknown, and terminalizes pre-publication-failure", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // The send refuses BEFORE any request leaves the Worker (a foreign marker
     // appeared after the plan / the target lost its expected previous version).
     commenterState.preparedReviewReject = true;
@@ -3879,8 +3481,8 @@ describe("definitive pre-send rejection in the consumer (spec §7.7, P67-QC-010)
 
   test("a post-attempt send throw still classifies as publication-unknown with the id", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     commenterState.preparedReviewError = new Error("socket hangup after send");
     const db = await createSeededTestD1();
     const terminalized: Array<{ outcome: string; publicationId: string | null }> = [];
@@ -3907,7 +3509,7 @@ describe("definitive pre-send rejection in the consumer (spec §7.7, P67-QC-010)
 describe("degraded publication journal conflict guard (spec §7.7, P67-QC-012)", () => {
   test("a degraded staging conflict refuses to send under the existing identity", async () => {
     reset();
-    runnerStdout = "not valid json at all";
+    sandbox.runnerStdout = "not valid json at all";
     const db = await createSeededTestD1();
     // Pre-seed a TERMINAL degraded row for the SAME (scope, sha, kind) under
     // another id. It is terminal, so the earlier journal handoff does not ack
@@ -3939,8 +3541,8 @@ describe("degraded publication journal conflict guard (spec §7.7, P67-QC-012)",
 describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () => {
   test("an unconfirmed degraded publication preserves its comment body evidence", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // A prior degraded send whose proof was lost: its body is the ONLY
     // recovery evidence for a possibly-landed publication.
@@ -3964,8 +3566,8 @@ describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
 
   test("a terminal degraded row does not block the cleanup", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     db.raw
       .prepare(
@@ -4036,7 +3638,7 @@ const checkClock = (): number => checkState.clockMs;
  */
 function scriptedChecks(): ChecksOctokit {
   const record = (op: ChecksRequest["op"], params: Record<string, unknown>): void => {
-    checkRequests.push({ op, params, sandboxCalls: sandboxCalls.length, commenterCalls: commenterCalls.length });
+    checkRequests.push({ op, params, sandboxCalls: sandbox.calls.length, commenterCalls: commenterCalls.length });
   };
   return {
     rest: {
@@ -4165,7 +3767,7 @@ function beginInput(sha: string, executionDeadlineMs: number) {
 describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a published review creates one in-progress run and terminalizes success from the persisted proof", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
@@ -4193,8 +3795,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     // Order: the create lands after the authoritative-SHA step and before the
     // model work; the terminal update lands after the publication was posted.
-    const revParseIdx = sandboxCalls.findIndex((c) => c.cmd.includes("rev-parse"));
-    const runnerIdx = sandboxCalls.findIndex((c) => c.cmd.includes("--input"));
+    const revParseIdx = sandbox.calls.findIndex((c) => c.cmd.includes("rev-parse"));
+    const runnerIdx = sandbox.calls.findIndex((c) => c.cmd.includes("--input"));
     const postIdx = commenterCalls.findIndex((c) => c.op === "post-prepared");
     expect(revParseIdx).toBeGreaterThan(-1);
     expect(runnerIdx).toBeGreaterThan(revParseIdx);
@@ -4225,7 +3827,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: duplicate delivery takes no second claim and no second remote run", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
@@ -4250,7 +3852,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a same-SHA mention journal handoff claims no attempt and runs no Check", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // A PREPARED publication for this exact scope+SHA (a crashed round).
     db.raw
@@ -4269,7 +3871,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment" })));
 
-    expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(checkRequests).toHaveLength(0);
     expect(checkRows(db)).toHaveLength(0);
     expect(commenterCalls.some((c) => c.op === "post-prepared")).toBe(false);
@@ -4282,7 +3884,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a guard-held delivery claims no attempt and runs no Check", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedInflight(db);
     const adapter = checksAdapterFor(db);
@@ -4302,7 +3904,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a paused App claims no attempt and runs no Check", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     db.raw.prepare("UPDATE github_apps SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
     const adapter = checksAdapterFor(db);
@@ -4320,8 +3922,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a DLQ-bound runner failure terminalizes the same attempt as failure", async () => {
     reset();
-    runnerExitCode = 1;
-    runnerStderr = "review: session failed: boom";
+    sandbox.runnerExitCode = 1;
+    sandbox.runnerStderr = "review: session failed: boom";
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
@@ -4348,7 +3950,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a confirmed degraded publication concludes neutral on the same attempt", async () => {
     reset();
-    runnerStdout = "not valid json at all";
+    sandbox.runnerStdout = "not valid json at all";
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
@@ -4375,7 +3977,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a definitively rejected degraded send terminalizes the same attempt as failure", async () => {
     reset();
-    runnerStdout = "not valid json at all";
+    sandbox.runnerStdout = "not valid json at all";
     commenterState.preparedDegradedError = new PreparedSendRejected("degraded target no longer shows its expected version");
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
@@ -4403,7 +4005,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: an unavailable create is left recoverable and never blocks the review", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     checkRequestOverrides.create = () => {
       throw Object.assign(new Error("forbidden"), { status: 403 });
@@ -4438,7 +4040,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a published review stays success when the local persistence step fails", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // Fail ONLY a batch issued after the publication proof is durable: the
     // Check must keep reading the PERSISTED proof, not the failed code path.
@@ -4474,7 +4076,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a lost proof write concludes failure — never a false success", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // Break ONLY the proof UPDATE (recordPublicationProof): the send already
     // happened, so the honest durable state is the unknown-publication window.
@@ -4598,7 +4200,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a hung terminal hook cannot hold the published review past the 2s bound", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const real = lifecycleFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
@@ -4631,7 +4233,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a late BEGIN hook cannot hold the review past the 2s bound and creates nothing", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const real = lifecycleFor(db);
     const late = Promise.withResolvers<void>();
@@ -4716,7 +4318,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: an unavailable terminal update keeps the frozen intent and defers honestly", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // The create succeeds, the terminal UPDATE is rejected by GitHub (403).
     checkRequestOverrides.update = () => {
@@ -4949,7 +4551,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a terminalize that cannot obtain its Checks adapter releases to recovery, never blocking publication", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // The App DOES have a Checks surface at `begin` (the run is created and
     // attached), but the surface is resolved per call and is gone by the time
@@ -5001,7 +4603,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a real begin that outlives the budget still leaves a prompt terminal obligation", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // The REAL lifecycle with a create that outlives the consumer's bound: the
     // adapter's Checks callable is held open past the 2-second budget, then
@@ -5017,7 +4619,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
               checkRequests.push({
                 op: "create",
                 params: params as unknown as Record<string, unknown>,
-                sandboxCalls: sandboxCalls.length,
+                sandboxCalls: sandbox.calls.length,
                 commenterCalls: commenterCalls.length,
               });
               await held.promise; // outlives CHECK_HOOK_TIMEOUT_MS
@@ -5096,7 +4698,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a later message cannot un-abandon an earlier detached begin", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // Message A's create is held open past the budget; message B then runs its
     // OWN begin to completion; only THEN does A's create settle.
@@ -5113,7 +4715,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
               checkRequests.push({
                 op: "create",
                 params: params as unknown as Record<string, unknown>,
-                sandboxCalls: sandboxCalls.length,
+                sandboxCalls: sandbox.calls.length,
                 commenterCalls: commenterCalls.length,
               });
               // Only MESSAGE A's create (the first) is held open past the
@@ -5200,7 +4802,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a fast begin in one message cannot cancel a later message's Check", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
@@ -5228,7 +4830,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: an App without a Checks surface claims no attempt and still publishes", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // `testOverrides` builds the fake commenter (no Checks adapter): the
     // production seam is present, the App has no Checks surface, so the
@@ -5256,7 +4858,7 @@ describe("workspace attribution gate (one read face)", () => {
 
   test("an unmapped App fails at the credential gate — zero sandbox/token/GitHub, same retry→DLQ path", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     dropWorkspaceMapping(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -5267,7 +4869,7 @@ describe("workspace attribution gate (one read face)", () => {
 
     // Structural: nothing ran — no sandbox step, no commenter instance (so no
     // token mint), no admission row, no GitHub call, no review row.
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
     expect(commenterCalls).toHaveLength(0);
     expect(inflightRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
@@ -5292,14 +4894,14 @@ describe("workspace attribution gate (one read face)", () => {
     );
 
     expect(commenterCalls).toHaveLength(0);
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
   });
 });
 
 describe("usage ledger (migration 0031)", () => {
   test("a normal message writes exactly one row: the App's workspace, review id, seq 1", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -5349,14 +4951,14 @@ describe("usage ledger (migration 0031)", () => {
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/or its workspace is deleted/);
 
-    expect(sandboxCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
     expect(usageRows(db)).toHaveLength(0);
     expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
   });
 
   test("a failed usage insert is not retried: no row, one failure row carrying the identity", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     let insertAttempts = 0;
     // Smallest possible double: only the usage insert throws — and counts its
@@ -5404,7 +5006,7 @@ describe("usage ledger (migration 0031)", () => {
 
   test("an ambiguous usage failure records applied: true so it is not backfilled twice", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // The real insert runs, THEN the driver "throws" — the ambiguous failure
     // the ledger read-back exists to tell apart from a pre-commit one.
@@ -5441,7 +5043,7 @@ describe("usage ledger (migration 0031)", () => {
 
   test("a pre-commit failure on the second attempt is applied: false even with seq 1 present", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const reviewId = idemKey({
       installation_id: 123,
@@ -5490,7 +5092,7 @@ describe("usage ledger (migration 0031)", () => {
 
   test("an unreadable ledger records applied: \"unknown\" instead of a false claim", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // Both the insert AND the token read-back fail: the failure row must say
     // so instead of reporting "not applied", which would authorise a backfill.
@@ -5530,18 +5132,18 @@ describe("usage ledger (migration 0031)", () => {
 
   test("a genuine re-execution after a runner failure mints seq 2 for the same review", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     // Attempt 1: the runner fails, so no reviews row, KV done or journal row
     // exists — both dedup reads and the journal handoff miss on the retry.
-    runnerExitCode = 1;
+    sandbox.runnerExitCode = 1;
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
     expect(usageRows(db).map((row) => row.seq)).toEqual([1]);
 
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     await consumer(makeBatch(makePayload()));
 
     const key = idemKey({
@@ -5563,7 +5165,7 @@ describe("usage ledger (migration 0031)", () => {
 
   test("the payload sha is the metered identity — a differing checkout sha keeps one review_id", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -5573,8 +5175,8 @@ describe("usage ledger (migration 0031)", () => {
     // reads and the journal miss (they key off the checkout sha), so this is a
     // second started execution of the SAME payload review.
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
     await consumer(makeBatch(makePayload()));
 
     const key = idemKey({
@@ -5592,15 +5194,15 @@ describe("usage ledger (migration 0031)", () => {
 
   test("a job without a payload sha keeps one review identity across checkout shas", async () => {
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ head_sha: null })));
 
     reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
     await consumer(makeBatch(makePayload({ head_sha: null })));
 
     const key = idemKey({

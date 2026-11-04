@@ -79,6 +79,7 @@ import { REVIEW_EMOJI, renderReviewMarkdown } from "@mstar-harness/engine";
 import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../review/schema";
 import { redactSecrets } from "./redact";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
+import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
 import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
@@ -269,8 +270,13 @@ export function buildReviewBody(
 // round's closure, never a second closure-only comment.
 // ---------------------------------------------------------------------------
 
-/** §7.10: at most 25 selected prior rows are shown; the rest is a count. */
-export const CLOSURE_MAX_ROWS = 25;
+/**
+ * §7.10: at most this many selected prior rows are shown; the rest is a count.
+ * The third face of the round's one row budget (`recheck-wire.ts`): the table
+ * can only display rows the seat was sent, so the display cap IS the selection
+ * cap rather than a second literal.
+ */
+export const CLOSURE_MAX_ROWS = ASSESSMENT_TARGET_CAP;
 
 /** One closure table row (§7.10 columns: finding, disposition, evidence, thread). */
 export type ClosureRow = {
@@ -292,6 +298,13 @@ export type ClosureCoverage = {
   totalOpen: number;
   selected: number;
   assessed: number;
+  /**
+   * Selected rows the closure table renders as `unverifiable (invalid-output)`:
+   * sent and answered badly, or sent into a round whose document was absent.
+   * The SAME term as the table's reason column, so the line and the rows agree.
+   */
+  invalidOutput: number;
+  /** Selected rows that never got an answer and were never attempted. */
   omitted: number;
   capped: number;
   contextCoverage: Coverage;
@@ -315,8 +328,12 @@ export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[
   const lines: string[] = [
     "## Prior findings recheck",
     "",
+    // Every selected row lands in exactly one term here — `assessed`,
+    // `invalid-output` (the closure table's own label for those rows), or
+    // `omitted` — so `assessed + invalid-output + omitted === selected`.
     `Reassessed ${coverage.assessed}/${coverage.selected} open prior finding(s) this round` +
-      ` · ${coverage.omitted} omitted · ${coverage.capped} over cap · ${coverage.totalOpen} open` +
+      ` · ${coverage.invalidOutput} invalid-output · ${coverage.omitted} omitted` +
+      ` · ${coverage.capped} over cap · ${coverage.totalOpen} open` +
       ` · context coverage: ${coverage.contextCoverage}`,
   ];
   if (shown.length > 0) {

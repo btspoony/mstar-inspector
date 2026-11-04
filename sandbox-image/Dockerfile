@@ -36,6 +36,21 @@
 # `Bun.stdin.text()` read: the worker sends a complete document and no longer
 # relies on the write side closing, so that read never returned, the run emitted
 # nothing on either stream, and the outer exec bound killed it at exit 124.
+# rebuild: the recheck seat now writes a status document beside its findings
+# document, and a single failed row is dropped in place instead of failing the
+# whole round. A stale runner writes no status at all, so the worker reads
+# `absent` and the round loses its seat-supplied reason — it lands in
+# `review_failures` only when its document is also missing or invalid (or the
+# seat reported `failed`), never merely because the status is absent.
+# rebuild: the runner's status redaction now uses the shared credential-pattern
+# list (`packages/shared/src/secret-shapes.ts`) instead of a narrow local
+# subset, and a recheck document-write failure now exits 1 with no stdout (the
+# Worker's runner-failure path) instead of writing any status: the status is
+# written only once the document has landed. A stale image instead reports the
+# seat's optimistic `ok` for a round whose document never reached the Worker.
+# rebuild: evidence slices now carry `addedNewLines`, so a `current-code` proof
+# must cite a line the hunk added, and the status `reason` is a closed
+# vocabulary with `rejected_unnamed` counting the drops no row id could name.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and

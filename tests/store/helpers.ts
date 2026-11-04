@@ -30,13 +30,37 @@ import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/typ
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** Earliest review-store schema (production before the github_apps work). */
 const BASE_MIGRATIONS = ["0001_reviews.sql", "0002_mstar_review_v1.sql"];
+/** A migration filename's numeric prefix — the only part wrangler orders on. */
+const MIGRATION_PREFIX = /^(\d+)_/;
+
 /**
- * Full migration list, read from disk: filename order = wrangler apply order.
- * Reading the directory keeps this list correct as migrations are added.
+ * One migration's apply-order number. A `.sql` file without a numeric prefix
+ * has NO defined position in wrangler's order, so it fails here BY NAME
+ * instead of being dropped from every selector below — a silent drop would
+ * apply a partial schema on a fresh database and hide the cause.
  */
-const ALL_MIGRATIONS = readdirSync(MIGRATIONS_DIR)
-  .filter((name) => name.endsWith(".sql"))
-  .sort();
+export function migrationNumber(name: string): number {
+  const match = MIGRATION_PREFIX.exec(name);
+  if (match === null) {
+    throw new Error(`migration ${name} has no numeric prefix — its apply order is undefined`);
+  }
+  return Number.parseInt(match[1]!, 10);
+}
+
+/**
+ * Wrangler applies migrations in NUMERIC prefix order, so a lexical filename
+ * compare would put `1000_*` before `999_*`. Every migration selector below
+ * (and the equivalence fixtures in the pipeline suites) goes through this.
+ */
+export function migrationsAfter(number: number): string[] {
+  return readdirSync(MIGRATIONS_DIR)
+    .filter((name) => name.endsWith(".sql"))
+    .sort((a, b) => migrationNumber(a) - migrationNumber(b))
+    .filter((name) => migrationNumber(name) > number);
+}
+
+/** Full migration list, in wrangler's apply order (numeric, not lexical). */
+const ALL_MIGRATIONS = migrationsAfter(0);
 
 /** Execute the migration DDL on a fresh in-memory database. */
 function applyMigration(db: Database, migrations: readonly string[]): void {

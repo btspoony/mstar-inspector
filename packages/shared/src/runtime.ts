@@ -11,7 +11,7 @@
 
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent";
-import type { RecheckDoc, RecheckInput } from "./recheck-wire";
+import type { RecheckDoc, RecheckInput, RecheckStatus } from "./recheck-wire";
 
 /**
  * Full review-tier universe. `deep` is a first-class tier
@@ -149,7 +149,17 @@ export type AgentRuntimeRunInput = {
 };
 
 /** One completed review run: the validated envelope plus its optional recheck document (spec §7.8). */
-export type ReviewRunResult = { envelope: MstarReviewV1; recheck: RecheckDoc | null };
+export type ReviewRunResult = {
+  envelope: MstarReviewV1;
+  recheck: RecheckDoc | null;
+  /**
+   * Why the recheck round ended — present whenever the input carried a
+   * recheck document, so a round with `recheck: null` is still attributable
+   * (budget skip / seat failure / invalid document). Absent = no recheck
+   * round ran (legacy input).
+   */
+  recheckStatus?: RecheckStatus;
+};
 
 export interface AgentRuntime {
   /**

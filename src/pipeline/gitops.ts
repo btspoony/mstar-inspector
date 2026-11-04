@@ -30,7 +30,7 @@
  */
 
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
-import { RECHECK_FILE_MAX_BYTES } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_FILE_MAX_BYTES, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 export type GitOpsInput = {
@@ -58,6 +58,18 @@ export type GitOpsCommands = {
   /** Run the in-image review runner (`--level`/`--input` reconFacts JSON). */
   runner: ShellCommand;
 };
+
+/**
+ * The in-image layout every review run execs against. They live HERE so the
+ * Step 1–8 commands have ONE source: the consumer passes these paths into the
+ * builders, and the sandbox double in the consumer suites derives its
+ * expected commands from the same builders (a re-typed literal on either side
+ * would turn a real contract assertion into a lockstep edit).
+ */
+export const CLONE_DIR = "/workspace/repo";
+export const DIFF_PATH = "/workspace/pr.diff";
+export const RUNNER_INPUT_PATH = "/workspace/review-input.json";
+export const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
 
 /** GitHub name charset (owner/repo) — matches signed webhook payload reality. */
 const GITHUB_NAME_RE = /^[A-Za-z0-9._-]+$/;
@@ -180,6 +192,19 @@ export function readRecheckCommand(path: string): ShellCommand {
     `head -c '${RECHECK_FILE_MAX_BYTES}' '${path}' && printf '\\n' && ` +
       `tail -c '+${RECHECK_FILE_MAX_BYTES + 1}' '${path}' | head -c '1' | wc -c`,
   );
+}
+
+/**
+ * Bounded read of the seat's recheck STATUS document — the same audited
+ * transport (byte bound + overflow flag) as the document read. The production
+ * path is the fixed RECHECK_STATUS_PATH (the same constant the runner wrote);
+ * the optional parameter exists only so a shell-level oracle can point at a
+ * temporary file instead of the real one. A missing file fails the `head`
+ * chain exactly like the document read, which the consumer maps to "no status
+ * recorded".
+ */
+export function readRecheckStatusCommand(path: string = RECHECK_STATUS_PATH): ShellCommand {
+  return readRecheckCommand(path);
 }
 
 /** Main-flow commands in execution order (clone → sha → diff → numstat → runner). */

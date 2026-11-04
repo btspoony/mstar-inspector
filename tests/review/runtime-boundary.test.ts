@@ -243,11 +243,33 @@ describe("in-image module graph — the image ships packages/runner/src plus the
   const rootSrcCopies = copySources.filter(
     (spec) => spec === "src" || spec.startsWith("src/"),
   );
+  /**
+   * The admission boundary: a module may ship from the runner tree or from a
+   * shared file one of the COPY lines carries. The runner-import scan and the
+   * admission test below evaluate THIS predicate, so a widening shows up in
+   * both directions instead of being restated per test.
+   */
+  const isAdmittedModule = (target: string): boolean =>
+    target.startsWith(`${RUNNER_SRC}/`) || admittedShared.includes(target);
 
   test("the Dockerfile admits exactly the two package source trees", () => {
     // Derived, not restated: the assertion pins the derivation against the
     // Dockerfile, so a third admitted tree (or a retired package) fails here.
     expect(admittedFaces(copySources)).toEqual([...ADMITTED_FACE]);
+  });
+
+  test("the image's observable module surface is exactly the shared package tree", () => {
+    // Behaviour, not manifest parity: the image can only execute modules it
+    // ships, so `packages/shared/src` in the build context IS the image's
+    // shared surface. A second COPY line carrying a shared module — or one
+    // carrying a module from outside the package — widens that surface
+    // through a route the directory COPY does not describe, so the COPY set
+    // must stay the single directory line and must cover every module.
+    const sharedCopySources = copySources.filter(
+      (spec) => spec === "packages/shared/src" || spec.startsWith("packages/shared/src/"),
+    );
+    expect(sharedCopySources).toEqual(["packages/shared/src"]);
+    expect(admittedShared).toEqual(collectFiles(SHARED_SRC).sort());
   });
 
   test("no COPY line ships the repository root src/ tree", () => {
@@ -280,13 +302,31 @@ describe("in-image module graph — the image ships packages/runner/src plus the
     expect(() => dockerfileCopySources("COPY src ./ \\")).toThrow(/unterminated COPY/);
   });
 
-  test("the Dockerfile admits exactly the shared package modules", () => {
-    expect(admittedShared.map((file) => file.slice(REPO_ROOT.length + 1))).toEqual([
-      "packages/shared/src/credential-key.ts",
-      "packages/shared/src/credential-payload.ts",
-      "packages/shared/src/recheck-wire.ts",
-      "packages/shared/src/runtime.ts",
-    ]);
+  test("every shared module the runner imports is admitted, and the boundary refuses a widened COPY set", () => {
+    // Direction 1 — ADMIT: every shared module the runner graph actually
+    // imports resolves to a real file in the build context AND is one the
+    // Dockerfile copies, so the image's module graph is closed by construction
+    // (an import of an uncopied file fails the build, not this test).
+    const importedShared = new Set<string>();
+    for (const file of collectFiles(RUNNER_SRC)) {
+      for (const match of readFileSync(file, "utf8").matchAll(RELATIVE_IMPORT_RE)) {
+        const target = resolveModuleTarget(match[1]!, file);
+        if (!target.startsWith(`${RUNNER_SRC}/`)) importedShared.add(target);
+      }
+    }
+    expect(importedShared.size).toBeGreaterThan(0);
+    for (const target of importedShared) {
+      expect(existsSync(target), `${target} is not in the image build context`).toBe(true);
+      expect(isAdmittedModule(target), `${target} is imported but no COPY line ships it`).toBe(true);
+    }
+    // Direction 2 — REFUSE, driven through the guard's own derivation rather
+    // than a hand-called predicate on a phantom path: the repository root
+    // `src/` tree is refused as a face by `admittedFaces`, so the admission
+    // test and the "no COPY line ships src/" pin refuse the SAME input. A
+    // Dockerfile that started copying `src` would flip both.
+    const widened = dockerfileCopySources(`${readFileSync(OMP_DOCKERFILE, "utf8")}\nCOPY src /opt/runner/src\n`);
+    expect(admittedFaces(widened)).toContain("src");
+    expect(admittedFaces(widened)).not.toEqual([...ADMITTED_FACE]);
   });
 
   test("no packages/runner/src module imports outside that tree and the admitted files", () => {
@@ -296,8 +336,7 @@ describe("in-image module graph — the image ships packages/runner/src plus the
       for (const match of source.matchAll(RELATIVE_IMPORT_RE)) {
         const specifier = match[1]!;
         const target = resolveModuleTarget(specifier, file);
-        const admissible = target.startsWith(`${RUNNER_SRC}/`) || admittedShared.includes(target);
-        if (!admissible) offenders.push(`${file.slice(REPO_ROOT.length + 1)}: ${specifier}`);
+        if (!isAdmittedModule(target)) offenders.push(`${file.slice(REPO_ROOT.length + 1)}: ${specifier}`);
       }
     }
     expect(offenders).toEqual([]);

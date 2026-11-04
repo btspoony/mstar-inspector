@@ -55,7 +55,7 @@ import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, vali
 import type { AgentRuntime, ReviewLevel } from "../../packages/shared/src/runtime";
 import type { SupervisedSeat } from "../../packages/runner/src/runtime-omp";
 import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
-import type { RecheckDoc, RecheckInput } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_STATUS_ERROR_MAX_CHARS, type RecheckDoc, type RecheckInput } from "../../packages/shared/src/recheck-wire";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
 /**
@@ -81,6 +81,10 @@ let seatResults: Array<{
   abortReason?: string;
   /** When set, the seat's PROMISE rejects with this message — no settled result at all. */
   reject?: string;
+  /** When set, the seat rejects with a NON-Error value — the shape that has no `.message`. */
+  rejectWith?: unknown;
+  /** When set, the seat parks until ITS OWN abort signal fires, then rejects like the SDK. */
+  awaitAbort?: boolean;
 }> = [];
 /** Definition content snapshotted from the PR-clone cwd at session creation. */
 let installedSeatAgent: string | null = null;
@@ -362,9 +366,26 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
       await new Promise<void>((resolve) => seatReleases.push(resolve));
     }
     const plan = seatResults.shift() ?? {};
+    // A seat the caller cancels: it stays pending until ITS OWN signal fires,
+    // then rejects the way the SDK does. This is the path the runner takes
+    // when the main review settles before the recheck seat finishes.
+    if (plan.awaitAbort) {
+      const signal = request.signal as AbortSignal;
+      await new Promise<void>((_resolve, reject) => {
+        if (signal.aborted) {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+          return;
+        }
+        signal.addEventListener("abort", () =>
+          reject(new DOMException("The operation was aborted.", "AbortError")),
+        );
+      });
+    }
     // A seat whose promise REJECTS rather than settles: the SDK threw, or our
     // own code did. It produces no seat outcome at all.
     if (plan.reject !== undefined) throw new Error(plan.reject);
+    // A non-Error rejection: the shape with no `.message` to read.
+    if ("rejectWith" in plan) throw plan.rejectWith;
     const status = plan.status ?? "valid";
     return {
       result: {
@@ -2187,6 +2208,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
           oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
           newStart: 8,
           newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
+          addedNewLines: [9],
           oldBlobOid: "oid-old",
           headBlobOid: "oid-head",
           absentAtHead: false,
@@ -2266,7 +2288,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(subagentRequests[2]!.assignment).toContain("changeset-2-lib");
   });
 
-  test("invalid recheck payload → recheck null + stderr log; the envelope is untouched", async () => {
+  test("invalid recheck payload → recheck null + failed status (invalid-document); the envelope is untouched", async () => {
     seatResults = [{ data: staleRecheckDoc() }, { data: seatPayload() }];
     const errorCalls: unknown[][] = [];
     const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
@@ -2282,20 +2304,258 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(result.recheck).toBeNull();
     expect(result.envelope.schema).toBe("mstar.review/v1");
     expect(result.envelope.verdict).toBe("blocked");
+    // The round is attributable even though it produced no document.
+    expect(result.recheckStatus).toEqual({
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_SHA,
+      outcome: "failed",
+      reason: "invalid-document",
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 0,
+      error: expect.stringContaining("stale document"),
+    });
     const logged = errorCalls.map((args) => args.join(" ")).join("\n");
     expect(logged).toContain("recheck_seat_failed");
     expect(logged).toContain("stale document");
   });
 
-  test("exhausted budget → the seat is skipped entirely (no child started)", async () => {
+  test("exhausted budget → the seat is skipped entirely (no child started), status reason budget", async () => {
     anchorRecheckDeadline(Date.now() - 600_000, "quick"); // outer deadline already past → 0
     seatResults = [{ data: seatPayload() }];
-    const { recheck } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
+    const { recheck, recheckStatus } = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      recheck: recheckInput(),
+    });
 
     expect(recheck).toBeNull();
+    expect(recheckStatus).toEqual({
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_SHA,
+      outcome: "skipped",
+      reason: "budget",
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 0,
+      error: null,
+    });
     // Only the review seat ran — no recheck child was dispatched.
     expect(subagentRequests).toHaveLength(1);
     expect(subagentRequests[0]!.outputSchema).not.toBe(RECHECK_OUTPUT_SCHEMA);
+  });
+
+  test("a seat throw → recheck null + failed status (seat-failed) carrying the message", async () => {
+    seatResults = [{ reject: "provider boom" }, { data: seatPayload() }];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(result.recheck).toBeNull();
+    expect(result.recheckStatus?.outcome).toBe("failed");
+    expect(result.recheckStatus?.reason).toBe("seat-failed");
+    expect(result.recheckStatus?.error).toBe("provider boom");
+  });
+
+  test("a seat the runner cancels when the review settles reports skipped/aborted, never failed", async () => {
+    // The normal path: the recheck seat is still running when the review
+    // settles, so the runner aborts it (spec §7.8). That is a contract exit —
+    // the round answered nothing because it was stopped.
+    seatResults = [{ awaitAbort: true }, { data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, recheck: recheckInput() });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(result.recheck).toBeNull();
+    expect(result.recheckStatus).toEqual({
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_SHA,
+      outcome: "skipped",
+      reason: "aborted",
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 0,
+      error: null,
+    });
+  });
+
+  test("a seat rejecting with a plain string still resolves failed — never throws out of the catch", async () => {
+    // A non-Error rejection has no `.message`; reading it blind would make the
+    // documented never-throws catch throw and lose the real failure.
+    seatResults = [{ rejectWith: "provider boom" }, { data: seatPayload() }];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(result.recheck).toBeNull();
+    expect(result.recheckStatus).toMatchObject({
+      outcome: "failed",
+      reason: "seat-failed",
+      error: "provider boom",
+    });
+  });
+
+  test("a long secret-bearing seat error is redacted BEFORE it is truncated", async () => {
+    // The secret straddles the bound. `AIza…` needs 30 trailing chars to match,
+    // so slicing FIRST would leave `AIzaBBBBBB` — too short for the pattern —
+    // surviving in the status; redacting first replaces the whole token and the
+    // slice only ever sees the marker's prefix. Padding is sized off
+    // RECHECK_STATUS_ERROR_MAX_CHARS rather than a literal.
+    const token = `AIza${"B".repeat(40)}`;
+    const padding = "x".repeat(RECHECK_STATUS_ERROR_MAX_CHARS - 10);
+    seatResults = [{ reject: `${padding} ${token} tail` }, { data: seatPayload() }];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const error = result.recheckStatus?.error ?? "";
+    // The raw message exceeded the bound, so the redacted slice fills it —
+    // asserted as a bound, not as one exact width.
+    expect(error.length).toBeLessThanOrEqual(RECHECK_STATUS_ERROR_MAX_CHARS);
+    // No recognizable fragment of the key survives the cut.
+    expect(error).not.toContain("AIza");
+    expect(error).toContain("[REDACT");
+  });
+
+  test("row-level drops are counted: when EVERY submitted row is dropped the round is failed/all-rows-rejected", async () => {
+    const twoTargets = recheckInput({
+      targets: [
+        ...recheckInput().targets,
+        {
+          ...recheckInput().targets[0]!,
+          rowId: "row-2",
+          findingId: "f-2",
+          associationIds: [],
+        },
+      ],
+    });
+    // Both rows carry a legal enum value in the wrong pairing slot: each is
+    // dropped by the row-level rules, leaving an EMPTY document. The gate
+    // accepted the document but nothing survived it, so the round delivered
+    // nothing usable — `failed`/`all-rows-rejected`, not `ok`.
+    const docWithRejectedRows = {
+      schema: "mstar.recheck/v1",
+      headSha: RECHECK_SHA,
+      results: [
+        { rowId: "row-1", disposition: "addressed", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+        { rowId: "row-2", disposition: "dismissed", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] },
+      ],
+    };
+    seatResults = [{ data: docWithRejectedRows }, { data: seatPayload() }];
+    const { recheck, recheckStatus } = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      recheck: twoTargets,
+    });
+
+    expect(recheck?.results).toEqual([]);
+    expect(recheckStatus).toEqual({
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_SHA,
+      outcome: "failed",
+      rejected: 2,
+      rejected_row_ids: ["row-1", "row-2"],
+      rejected_unnamed: 0,
+      reason: "all-rows-rejected",
+      error: null,
+    });
+  });
+
+  test("a partial drop keeps the round ok: surviving rows still make it a usable document", async () => {
+    const twoTargets = recheckInput({
+      targets: [
+        ...recheckInput().targets,
+        {
+          ...recheckInput().targets[0]!,
+          rowId: "row-2",
+          findingId: "f-2",
+          associationIds: [],
+        },
+      ],
+    });
+    const docWithOneRejectedRow = {
+      schema: "mstar.recheck/v1",
+      headSha: RECHECK_SHA,
+      results: [
+        { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+        { rowId: "row-2", disposition: "dismissed", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] },
+      ],
+    };
+    seatResults = [{ data: docWithOneRejectedRow }, { data: seatPayload() }];
+    const { recheckStatus } = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      recheck: twoTargets,
+    });
+
+    expect(recheckStatus).toMatchObject({
+      outcome: "ok",
+      reason: null,
+      rejected: 1,
+      rejected_row_ids: ["row-2"],
+      rejected_unnamed: 0,
+    });
+  });
+
+  test("a nameless row drop is counted in `rejected_unnamed`, and `rejected` stays the named count", async () => {
+    const twoTargets = recheckInput({
+      targets: [
+        ...recheckInput().targets,
+        {
+          ...recheckInput().targets[0]!,
+          rowId: "row-2",
+          findingId: "f-2",
+          associationIds: [],
+        },
+      ],
+    });
+    // One row survives; the other carries an empty rowId, so the gate drops it
+    // without a name. The Worker can only attribute that drop if the status
+    // CARRIES the count — the named list cannot express it.
+    const docWithNamelessDrop = {
+      schema: "mstar.recheck/v1",
+      headSha: RECHECK_SHA,
+      results: [
+        { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+        { rowId: "", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+      ],
+    };
+    seatResults = [{ data: docWithNamelessDrop }, { data: seatPayload() }];
+    const { recheckStatus } = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      recheck: twoTargets,
+    });
+
+    expect(recheckStatus).toMatchObject({
+      outcome: "ok",
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 1,
+    });
+  });
+
+  test("legacy input (no recheck document) → no status at all", async () => {
+    seatResults = [{ data: seatPayload() }];
+    const result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+    expect(result.recheck).toBeNull();
+    expect("recheckStatus" in result).toBe(false);
   });
 
   test("a review failure aborts the recheck child and still rejects (never lose the review)", async () => {

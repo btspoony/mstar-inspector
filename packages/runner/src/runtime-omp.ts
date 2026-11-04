@@ -95,8 +95,7 @@ import {
   type MstarReviewV1,
 } from "@mstar-harness/engine";
 import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../shared/src/runtime";
-import { remainingOuterMs, remainingSoftMinutes, runRecheckSeat } from "./recheck";
-import type { RecheckDoc } from "../../shared/src/recheck-wire";
+import { remainingOuterMs, remainingSoftMinutes, runRecheckSeat, type RecheckSeatResult } from "./recheck";
 
 /**
  * Environment override for the mstar-harness plugin root — the primary,
@@ -1244,7 +1243,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       // isolation set — read/grep/glob only, no `task` tool, no yield
       // schema — its own in-memory session manager.
       const recheckController = new AbortController();
-      let recheckWork: Promise<RecheckDoc | null> | null = null;
+      let recheckWork: Promise<RecheckSeatResult> | null = null;
       if (input.recheck !== undefined) {
         const recheckCreated = await createAgentSession(
           buildSessionOptions({
@@ -1478,8 +1477,12 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       // The review settled: use an already-completed recheck or abort the
       // unfinished seat — never start or await a fresh budget after review.
       recheckController.abort();
-      const recheck = recheckWork ? await recheckWork : null;
-      return { envelope, recheck };
+      const settled = recheckWork ? await recheckWork : null;
+      return {
+        envelope,
+        recheck: settled?.doc ?? null,
+        ...(settled !== null ? { recheckStatus: settled.status } : {}),
+      };
     });
   } finally {
     // Teardown order: both sessions settle BEFORE the agent-file cleanup
@@ -1675,7 +1678,7 @@ export const ompAgentRuntime: AgentRuntime = {
         await supervision;
       }
       recheckController.abort();
-      const recheck = recheckWork ? await recheckWork : null;
+      const settled = recheckWork ? await recheckWork : null;
 
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
       // The seats this wave did not settle: every dispatched seat that stopped
@@ -1775,7 +1778,11 @@ export const ompAgentRuntime: AgentRuntime = {
         const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");
         throw new Error(`synthesized review failed mstar.review/v1 validation: ${detail}`);
       }
-      return { envelope, recheck };
+      return {
+        envelope,
+        recheck: settled?.doc ?? null,
+        ...(settled !== null ? { recheckStatus: settled.status } : {}),
+      };
     } finally {
       if (session) {
         try {

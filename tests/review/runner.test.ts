@@ -49,7 +49,7 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -57,15 +57,18 @@ import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../packages/shared/src/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
-import { capabilityHostsYaml } from "../../packages/runner/src/models-synthesis";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
-import { createInMemoryAuthStorage, main, readCredentialStdin } from "../../packages/runner/src/runner";
+import type { RecheckStatus } from "../../packages/shared/src/recheck-wire";
+import { readRecheckStatusCommand } from "../../src/pipeline/gitops";
+import { createInMemoryAuthStorage, main, readCredentialStdin, writeRecheckStatus } from "../../packages/runner/src/runner";
 import { sk } from "../helpers/fake-secrets";
 
 /** Envelope the fake runtime resolves with; overridden per test. */
 let fakeEnvelope: Record<string, unknown> | undefined;
 /** Recheck document the fake runtime resolves with (null = no result). */
 let fakeRecheck: Record<string, unknown> | null = null;
+/** Recheck status the fake runtime resolves with (undefined = no recheck round ran). */
+let fakeRecheckStatus: RecheckStatus | undefined;
 /** Error the fake runtime rejects with; takes precedence when set. */
 let runtimeError: Error | undefined;
 /** Captured runReview inputs. */
@@ -112,7 +115,11 @@ const fakeRuntime: AgentRuntime = {
     inFlight = { dir: input.agentDir, hadStore: existsSync(join(input.agentDir, "agent.db")) };
     preserveAgentDir(input.agentDir);
     if (runtimeError) throw runtimeError;
-    return { envelope: fakeEnvelope as MstarReviewV1, recheck: fakeRecheck as ReviewRunResult["recheck"] };
+    return {
+      envelope: fakeEnvelope as MstarReviewV1,
+      recheck: fakeRecheck as ReviewRunResult["recheck"],
+      ...(fakeRecheckStatus !== undefined ? { recheckStatus: fakeRecheckStatus } : {}),
+    };
   }),
 };
 
@@ -125,8 +132,6 @@ const ENVELOPE = {
 
 /** The omp capability hosts, exactly as the consumer resolves them. */
 const OMP_HOSTS = getSandboxImage("omp")!.hosts;
-/** The base those hosts generate — the zero-custom models.yml equivalence lock. */
-const OMP_BASE_YAML = capabilityHostsYaml(OMP_HOSTS);
 
 /**
  * Child-process probe for the SHARED store definition: build a store through
@@ -151,13 +156,25 @@ function writeInput(json: unknown): string {
   return path;
 }
 
+/**
+ * A fresh status path for one `main()` call. Production passes none and lands
+ * on the fixed `/tmp` path, so the test double must hand each run its own file
+ * — a real runner writing that path must never contend with these tests.
+ */
+function statusPathForRun(): string {
+  const dir = mkdtempSync(join(tmpdir(), "recheck-status-"));
+  statusDirs.push(dir);
+  return join(dir, "status.json");
+}
+
 /** Capture console.log / console.error while a runner main() call runs. */
 async function runCli(
   argv: string[],
   payload = encodeCredentialPayload({}),
-): Promise<{ code: number; stdout: string; stderr: string }> {
+): Promise<{ code: number; stdout: string; stderr: string; statusPath: string }> {
   const logs: string[] = [];
   const errors: string[] = [];
+  const statusPath = statusPathForRun();
   const originalLog = console.log;
   const originalError = console.error;
   console.log = (...args: unknown[]) => logs.push(args.join(" "));
@@ -165,8 +182,8 @@ async function runCli(
   try {
     // The credential payload rides STDIN in production; the injected reader is
     // the same seam the runtime double uses.
-    const code = await main(argv, fakeRuntime, async () => payload);
-    return { code, stdout: logs.join("\n"), stderr: errors.join("\n") };
+    const code = await main(argv, fakeRuntime, async () => payload, statusPath);
+    return { code, stdout: logs.join("\n"), stderr: errors.join("\n"), statusPath };
   } finally {
     console.log = originalLog;
     console.error = originalError;
@@ -293,9 +310,16 @@ function cleanupAgentDirs(): void {
   runDirs.length = 0;
 }
 
+/**
+ * Per-CLI-call temp dirs holding the recheck status file. Every `main()` call
+ * gets its own path, so no test ever writes the production fixed path.
+ */
+const statusDirs: string[] = [];
+
 afterEach(() => {
   fakeEnvelope = ENVELOPE;
   fakeRecheck = null;
+  fakeRecheckStatus = undefined;
   runtimeError = undefined;
   cleanupAgentDirs();
   runInputs.length = 0;
@@ -303,6 +327,8 @@ afterEach(() => {
   inFlight = undefined;
   for (const copy of preserved) rmSync(copy.parent, { recursive: true, force: true });
   preserved.length = 0;
+  for (const dir of statusDirs) rmSync(dir, { recursive: true, force: true });
+  statusDirs.length = 0;
   delete process.env.OMP_REVIEW_MODEL;
   for (const name of Object.keys(process.env)) {
     if (name.startsWith("MSTAR_POOL_")) delete process.env[name];
@@ -529,11 +555,13 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(runInputs).toHaveLength(1);
     const input = runInputs[0]!;
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
-    // The zero-custom equivalence lock: the file is EXACTLY the capability
-    // base (ark-plan included) — the poolized base, byte-for-byte.
+    // The file carries the capability base (ark-plan included). Its exact
+    // bytes are pinned against a literal in models-synthesis.test.ts; asserting
+    // this file against a fresh generator call would only compare the generator
+    // with itself.
     const yaml = readFileSync(join(preservedAgentDir(), "models.yml"), "utf8");
-    expect(yaml).toBe(OMP_BASE_YAML);
     expect(yaml).toContain("ark-plan:");
+    expect(yaml).toMatch(/^providers:\n/);
   });
 
   test("customProviders: merge into the capability base and ride agentDir into the runtime input", async () => {
@@ -650,16 +678,151 @@ describe("runner entry — --recheck-out channel", () => {
     expect(runInputs[0]).toMatchObject({ recheck: RECHECK_INPUT_DOC });
   });
 
-  test("null recheck result → no file created at the --recheck-out path", async () => {
+  test("null recheck result → no doc file, but the STATUS file is written (the whole point)", async () => {
     fakeEnvelope = ENVELOPE;
     fakeRecheck = null;
+    fakeRecheckStatus = {
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_INPUT_DOC.headSha,
+      outcome: "failed",
+      reason: "seat-failed",
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 0,
+      error: "provider boom",
+    };
     const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
     const outPath = join(outDir, "recheck.json");
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
-    const { code } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
+    const { code, stdout, statusPath } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
 
     expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    // No document exists, yet the round is attributable in D1.
     expect(existsSync(outPath)).toBe(false);
+    expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual(fakeRecheckStatus);
+  });
+
+  test("the written status file is the seat's status, field for field", async () => {
+    fakeEnvelope = ENVELOPE;
+    fakeRecheck = RECHECK_RESULT_DOC;
+    // The runner only transports the seat's status: `rejected` deliberately
+    // disagrees with the list length here, so the file cannot pass by
+    // re-deriving either field on the way out.
+    fakeRecheckStatus = {
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_INPUT_DOC.headSha,
+      outcome: "ok",
+      reason: null,
+      rejected: 3,
+      rejected_row_ids: ["row-1", "row-2"],
+      rejected_unnamed: 1,
+      error: null,
+    };
+    const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
+    const outPath = join(outDir, "recheck.json");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
+    const { code, statusPath } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
+
+    expect(code).toBe(0);
+    expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual(fakeRecheckStatus);
+  });
+
+  test("status write is best-effort: an unwritable status path never fails the run", () => {
+    // The real helper, no container: a directory at the target path makes the
+    // write throw (EISDIR), which must be swallowed.
+    const dir = mkdtempSync(join(tmpdir(), "recheck-status-"));
+    statusDirs.push(dir);
+    const target = join(dir, "status.json");
+    mkdirSync(target);
+    const original = console.error;
+    const errors: string[] = [];
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      expect(() =>
+        writeRecheckStatus({
+          schema: "mstar.recheck-status/v1",
+          headSha: RECHECK_INPUT_DOC.headSha,
+          outcome: "skipped",
+          reason: "budget",
+          rejected: 0,
+          rejected_row_ids: [],
+          rejected_unnamed: 0,
+          error: null,
+        }, target),
+      ).not.toThrow();
+      expect(errors.join("\n")).toContain("cannot write recheck status");
+    } finally {
+      console.error = original;
+    }
+  });
+
+  test("the status file's default target is the file the consumer's read command targets (round-trip)", async () => {
+    // The runner's production call sites pass no path (main's 4th arg and
+    // writeRecheckStatus both default to MSTAR_RECHECK_STATUS_PATH ||
+    // RECHECK_STATUS_PATH), and the Worker's read command defaults to the same
+    // constant. Nothing above proves those two defaults still MEET at the same
+    // file, so this test writes through the production write path and reads
+    // back through the production read command in a real shell. The env
+    // redirect keeps the write off the file a real runner on this machine
+    // owns; with it unset the effective default is that fixed literal.
+    const dir = mkdtempSync(join(tmpdir(), "recheck-status-"));
+    statusDirs.push(dir);
+    const statusFile = join(dir, "status.json");
+    const priorEnv = process.env.MSTAR_RECHECK_STATUS_PATH;
+    process.env.MSTAR_RECHECK_STATUS_PATH = ` ${statusFile} `;
+    try {
+      const status: RecheckStatus = {
+        schema: "mstar.recheck-status/v1",
+        headSha: RECHECK_INPUT_DOC.headSha,
+        outcome: "ok",
+        reason: null,
+        rejected: 0,
+        rejected_row_ids: [],
+        rejected_unnamed: 2,
+        error: null,
+      };
+      // 1. The writer's default target (the env redirect, trimmed).
+      writeRecheckStatus(status);
+      // 2. The reader's command, executed by a real shell: the stdout is
+      //    `<content>\n<flag>\n`, the flag being `wc -c`'s own newline.
+      const readBack = async (): Promise<unknown> => {
+        const proc = Bun.spawn(["sh", "-c", readRecheckStatusCommand(statusFile)]);
+        const stdout = await new Response(proc.stdout).text();
+        expect(await proc.exited).toBe(0);
+        const trimmed = stdout.trimEnd();
+        expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe("0");
+        return JSON.parse(trimmed.slice(0, trimmed.lastIndexOf("\n")));
+      };
+      expect(await readBack()).toEqual(status);
+
+      // 3. main() without the 4th argument writes the SAME file: the runtime
+      //    double returns a status, the runner transports it to its default.
+      fakeEnvelope = ENVELOPE;
+      fakeRecheck = null;
+      fakeRecheckStatus = status;
+      const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
+      const outPath = join(outDir, "recheck.json");
+      const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
+      const originalLog = console.log;
+      const originalError = console.error;
+      console.log = () => {};
+      console.error = () => {};
+      try {
+        const code = await main(["--level", "quick", "--input", inputPath, "--recheck-out", outPath], fakeRuntime);
+        expect(code).toBe(0);
+      } finally {
+        console.log = originalLog;
+        console.error = originalError;
+      }
+      // The SAME status, field for field, through the reader's own command:
+      // nothing the runner wrote was dropped, defaulted or re-derived on the
+      // way out.
+      expect(await readBack()).toEqual(status);
+    } finally {
+      if (priorEnv === undefined) delete process.env.MSTAR_RECHECK_STATUS_PATH;
+      else process.env.MSTAR_RECHECK_STATUS_PATH = priorEnv;
+    }
   });
 
   test("legacy input (no recheck field) → runtime input carries no recheck key, no file written", async () => {

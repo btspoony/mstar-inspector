@@ -11,9 +11,11 @@
  *
  * Module boundary (the global constraints, lock L1): zero-dependency leaf
  * consumed by dashboard routes, the worker webhook face, and the pipeline
- * consumer. Its one import is the zero-dependency sandbox-image contract
- * (src/contracts/sandbox-images.ts — the registry, not
- * pipeline/review code), which bounds the sandbox_image_id value domain.
+ * consumer. Its imports are zero-dependency contracts only
+ * (src/contracts/sandbox-images.ts — the registry, not pipeline/review code —
+ * and src/contracts/failure-stages.ts — the `review_failures` stage
+ * partition), which bound the sandbox_image_id value domain and keep the
+ * failure-count/history SQL off hand-written stage literals.
  * The `db` parameter is a locally-declared narrow D1 face (types
  * only, zero imports) — a real `D1Database`, the bun:sqlite test double
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
@@ -100,6 +102,7 @@
  *     (app_id, installation_id) pairs, and unknown app references are
  *     caller-visible errors, never swallowed.
  */
+import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { getSandboxImage } from "../contracts/sandbox-images";
 
 /** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
@@ -1071,6 +1074,16 @@ export function createAppsStore(db: AppsStoreD1) {
      * (a constraint) would refuse a legitimate re-install shape, and a
      * cross-App duplicate is a config mistake visible in the delivery health
      * panel, not a silent data problem.
+     *
+     * `PAGING_EXCLUDED_STAGES` rows are NOT failures of the review:
+     * both are per-round attribution written for rounds that continued
+     * (`recheck` a budget skip / dead seat / invalid document, `usage` a
+     * failed `usage_events` insert), so a clean PR would otherwise read a
+     * non-zero failure count. This count excludes both; the sweep excludes the
+     * same two stages from paging. The detail face's failure HISTORY excludes
+     * nothing: `usage` (a lost metered record) and `recheck` (a round that
+     * produced no usable document) each need a surface, and the detail's own
+     * `failure_count` still filters the same two stages out.
      */
     async listPullRequests(appId: string): Promise<PullRequestRow[]> {
       const results = await db.batch([
@@ -1099,7 +1112,8 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE (f.owner, f.repo, f.pr_number) IN (${PULL_REQUEST_WINDOW_SQL})
+             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND (f.owner, f.repo, f.pr_number) IN (${PULL_REQUEST_WINDOW_SQL})
              GROUP BY f.owner, f.repo, f.pr_number`,
           )
           .bind(appId, appId, PULL_REQUEST_LIST_LIMIT),
@@ -1171,7 +1185,11 @@ export function createAppsStore(db: AppsStoreD1) {
           .bind(appId, row.owner, row.repo, prNumber),
       ]);
       // The histories ARE the aggregates: reviews come newest first, so the
-      // first one is the latest verdict, and the failure rows count themselves.
+      // first one is the latest verdict; the failure COUNT excludes the
+      // paging set (`PAGING_EXCLUDED_STAGES` — per-round attribution of a
+      // review that continued), while the history list itself carries every
+      // stage, so a lost metered record and a degraded recheck round both
+      // keep a surface.
       const reviews = results[0]!.results as PullRequestReviewDetailRow[];
       const failures = results[1]!.results as PullRequestFailureDetailRow[];
       return {
@@ -1186,7 +1204,9 @@ export function createAppsStore(db: AppsStoreD1) {
           last_seen_at: row.last_seen_at,
           latest_review:
             reviews[0] === undefined ? null : { verdict: reviews[0].verdict, reviewed_at: reviews[0].reviewed_at },
-          failure_count: failures.length,
+          failure_count: failures.filter(
+            (failure) => !(PAGING_EXCLUDED_STAGES as readonly string[]).includes(failure.stage),
+          ).length,
         },
         reviews,
         failures,
