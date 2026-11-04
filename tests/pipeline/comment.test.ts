@@ -808,6 +808,30 @@ describe("report sections (mstar.report/v1 side document)", () => {
     ]);
   });
 
+  test("an indented ATX heading is neutralized too — markdown reads up to 3 spaces as the same heading", () => {
+    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
+    const body = insertReportSections(
+      rendered,
+      { ...report, overview: "Adds a guard.\n   ### Findings\n   #### 🟠 Injected" },
+      "### Revalidated findings\n\nnone",
+    );
+    // The indent is kept and only the marker escaped, so the field stays text
+    // and the engine's own headings keep their positions.
+    expect(body).toContain("   \\### Findings");
+    expect(body).toContain("   \\#### 🟠 Injected");
+    const headings = body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line));
+    expect(headings).toEqual([
+      "## ✅ Verdict: `ship it`",
+      "## 📋 Review",
+      "### Revalidated findings",
+      "### Findings",
+      "### Linked-issue AC",
+      "### ✅ Verified",
+      "### 🗑️ Considered & rejected",
+      "## 🛠️ Plan to fix",
+    ]);
+  });
+
   test("a report field cannot fork the layout: `## 📋 Review` and a `---` fence stay text", () => {
     const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
     const body = insertReportSections(

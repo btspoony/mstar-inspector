@@ -447,8 +447,11 @@ function insertBeforeHeading(body: string, anchor: string, block: string): strin
  * above them into a heading). The four raw report fields are model/PR-echoed
  * text, so a spoofed `### Findings` would otherwise steal the anchor the
  * revalidated table is inserted at and a `## 📋 Review` would fork the layout.
+ * Up to three leading spaces still count: markdown reads those as the same
+ * heading, so the indent is part of the match (4+ spaces is a code block, a
+ * structure no heading anchor can be forged in).
  */
-const REPORT_STRUCTURE_LINE = /^(?:#{1,6}\s|-{3,}\s*$|={3,}\s*$)/;
+const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|-{3,}\s*$|={3,}\s*$)/;
 
 /**
  * Escape the first character of every structure line, so the field stays text:
@@ -458,7 +461,10 @@ const REPORT_STRUCTURE_LINE = /^(?:#{1,6}\s|-{3,}\s*$|={3,}\s*$)/;
 function neutralizeReportText(text: string): string {
   return text
     .split("\n")
-    .map((line) => (REPORT_STRUCTURE_LINE.test(line) ? `\\${line}` : line))
+    .map((line) => {
+      const indent = REPORT_STRUCTURE_LINE.exec(line)?.[1];
+      return indent === undefined ? line : `${indent}\\${line.slice(indent.length)}`;
+    })
     .join("\n");
 }
 
