@@ -306,6 +306,12 @@ describe("incremental review rounds", () => {
     await consumer(makeBatch(makePayload()));
 
     expect(logLines.some((l) => l.fields.increment_since === PREVIOUS_SHA)).toBe(true);
+    // Its own field, so an increment capture failure never reads as a full-diff
+    // one — and the cause is the actual outcome, not a fixed word.
+    const capture = logLines.filter((l) => l.fields.increment_since === PREVIOUS_SHA);
+    expect(capture).toHaveLength(1);
+    expect(capture[0]!.fields.increment_capture).toBe("empty");
+    expect(capture[0]!.fields.diff_capture).toBeUndefined();
     const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(SHA) as {
       context_incomplete: number;
     };
@@ -379,32 +385,33 @@ describe("incremental review rounds", () => {
     expect(runnerInput().reconFacts).not.toContain(`since ${SHA}`);
   });
 
-  test("an unreadable base read keeps the full-diff round instead of failing it", async () => {
+  test("an unreadable base read keeps the full-diff round and says why", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     sandbox.diffStdout = VALID_DIFF;
     const db = await createSeededTestD1();
     seedReview(db, PREVIOUS_SHA);
-    // Fail ONLY the increment-base read: a D1 hiccup must degrade to "no
-    // increment", never fail a review over its own bookkeeping.
-    const failingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "prepare") {
-          return (query: string) => {
-            if (query.includes("SELECT head_sha FROM reviews")) throw new Error("base read boom");
-            return (target as typeof db).prepare(query);
-          };
-        }
-        return Reflect.get(target, prop, receiver);
+    // The lookup itself rejects — a D1 hiccup or a missing column. Injected
+    // through its seam, so this never depends on the query text: a D1 hiccup
+    // must degrade to "no increment", never fail a review over its bookkeeping.
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      findIncrementBase: async () => {
+        throw new Error("base read boom");
       },
     });
-    const consumer = createReviewConsumer(await makeEnv({ DB: failingDb as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
+    // The full-diff fallback: no compare, no `since` fact, the review published.
     expect(compareIssued()).toBe(false);
     expect(runnerInput().reconFacts).not.toContain(`since ${PREVIOUS_SHA}`);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    // …and the failure is not silent: one named warning carries the cause.
+    const warn = logLines.filter((line) => line.level === "warn" && line.fields.increment_base === "lookup-failed");
+    expect(warn).toHaveLength(1);
+    expect(warn[0]!.msg).toContain("full diff");
+    expect(warn[0]!.msg).toContain("base read boom");
   });
 
   test("the recheck catalog is still built from the FULL diff on an increment round", async () => {
@@ -469,9 +476,8 @@ describe("incremental review rounds", () => {
     expect(sandbox.calls.some((c) => c.cmd === issueView(7))).toBe(true);
     expect(body).toContain("**What this PR does**: Adds an expiry guard to the auth path.");
     expect(body).toContain("### Revalidated findings");
-    // ONE prior-findings rendering: the folded duplicate is not emitted, and
-    // the §7.10 coverage line + the row land exactly once.
-    expect(body).not.toContain("## Prior findings recheck");
+    // ONE prior-findings rendering: the §7.10 coverage line + the row land
+    // exactly once.
     expect(body.match(/\| finding \| disposition \| evidence \| thread \|/g)).toHaveLength(1);
     expect(body.match(/Reassessed /g)).toHaveLength(1);
     expect(body).toContain(`| ${TARGET_ORIGINAL.title} | addressed (verified-fix) | current-code |`);

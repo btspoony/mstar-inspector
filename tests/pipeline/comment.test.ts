@@ -31,7 +31,6 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { renderReviewMarkdown } from "@mstar-harness/engine";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
 import {
-  buildClosureSection,
   buildDegradedBody,
   buildPreparedDegradedBody,
   buildPreparedReviewBody,
@@ -119,6 +118,16 @@ describe("truncateSummary", () => {
   test("an unclosed fence under the budget is closed too", () => {
     // No cut means no ellipsis, but the fence still has to end before the body continues.
     expect(truncateSummary("Intro\n```\ncmd")).toBe("Intro\n```\ncmd\n```");
+  });
+
+  test("the closer counts against the budget even when the narrative alone fits", () => {
+    // At the limit with an open fence: the passthrough would overshoot by the
+    // closer's own length, so the head has to give up that much.
+    const narrative = `\`\`\`\n${"x".repeat(SUMMARY_MD_LIMIT - 4)}`;
+    expect(narrative).toHaveLength(SUMMARY_MD_LIMIT);
+    const truncated = truncateSummary(narrative);
+    expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
+    expect(truncated).toContain("\n```");
   });
 });
 
@@ -361,20 +370,13 @@ describe("buildReviewBody", () => {
   test("a narrative over the summary budget is cut, so the tail survives the body clamp", () => {
     // The runner fits its coverage notes to SUMMARY_MD_LIMIT and relies on this
     // publisher keeping the head from there; without the cut the body clamp —
-    // which also keeps the head — would be what removes the closure.
-    const closure = "## Prior findings recheck\n\nReassessed 1/1";
-    const body = buildReviewBody(
-      { ...output, summary_md: "x".repeat(REVIEW_BODY_LIMIT * 2) },
-      3,
-      closure,
-    );
+    // which also keeps the head — would be what removes the footer.
+    const body = buildReviewBody({ ...output, summary_md: "x".repeat(REVIEW_BODY_LIMIT * 2) }, 3);
     expect(body).toContain("more findings omitted");
-    expect(body).toContain(closure);
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
   });
 
   test("an over-long incomplete reason is bounded, so the tail survives the body clamp", () => {
-    const closure = "## Prior findings recheck\n\nReassessed 1/1";
     const body = buildReviewBody(
       {
         ...output,
@@ -382,10 +384,9 @@ describe("buildReviewBody", () => {
         findings: [],
         incomplete: { reason: "z".repeat(REVIEW_BODY_LIMIT * 2), unscanned: ["a.ts"] },
       },
-      0,
-      closure,
+      1,
     );
-    expect(body).toContain(closure);
+    expect(body).toContain("more findings omitted");
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
     expect(body.match(/^cause: /gm)).toHaveLength(1);
   });
@@ -410,12 +411,6 @@ describe("buildReviewBody", () => {
     expect(stored.incomplete!.reason).toBe(raw);
   });
 
-  test("the closure section is appended last", () => {
-    const body = buildReviewBody(output, 10, "## Prior findings recheck\n\nReassessed 1/1");
-    expect(body.endsWith("\n\n## Prior findings recheck\n\nReassessed 1/1")).toBe(true);
-    expect(body.indexOf("more findings omitted")).toBeLessThan(body.indexOf("Prior findings recheck"));
-  });
-
   test("incomplete verdict renders the engine's cause + unscanned pair exactly once", () => {
     const incomplete = { reason: "runner timed out", unscanned: ["tests/a.ts", "src/b.ts"] };
     const body = buildReviewBody({ ...output, verdict: "incomplete", findings: [], incomplete });
@@ -433,64 +428,6 @@ describe("buildReviewBody", () => {
       expect(body).not.toContain("cause:");
       expect(body).not.toContain("unscanned:");
     }
-  });
-});
-
-describe("buildClosureSection", () => {
-  const coverage: ClosureCoverage = {
-    totalOpen: 3,
-    selected: 2,
-    assessed: 1,
-    invalidOutput: 0,
-    omitted: 1,
-    capped: 0,
-    contextCoverage: "complete",
-  };
-  const rows: ClosureRow[] = [
-    {
-      title: "Fractional expiry comparison",
-      disposition: "addressed",
-      reason: "verified-fix",
-      evidenceKind: "diff",
-      thread: "-",
-    },
-  ];
-
-  test("folds into details, keeping the heading and the table inside the fold", () => {
-    const md = buildClosureSection(coverage, rows);
-    expect(
-      md.startsWith("<details>\n<summary>Prior findings recheck — 1/2 reassessed, 3 open</summary>\n\n"),
-    ).toBe(true);
-    expect(md.endsWith("\n\n</details>")).toBe(true);
-    expect(md).toContain("## Prior findings recheck");
-    expect(md).toContain("Reassessed 1/2 open prior finding(s) this round");
-    expect(md).toContain("| finding | disposition | evidence | thread |");
-    expect(md).toContain("| Fractional expiry comparison | addressed (verified-fix) | diff | - |");
-  });
-
-  test("the coverage line publishes every selected row exactly once", () => {
-    // The identity the line promises: assessed + invalid-output + omitted ===
-    // selected. Here 1 assessed + 1 invalid-output + 0 omitted on 2 selected.
-    const md = buildClosureSection({ ...coverage, invalidOutput: 1, omitted: 0 }, rows);
-    expect(md).toContain("Reassessed 1/2 open prior finding(s) this round · 1 invalid-output · 0 omitted");
-  });
-
-  test("empty rows still carry the coverage line inside the fold", () => {
-    const md = buildClosureSection({ ...coverage, selected: 0, assessed: 0 }, []);
-    expect(md.startsWith("<details>")).toBe(true);
-    expect(md).toContain("Reassessed 0/0 open prior finding(s) this round");
-    expect(md).not.toContain("| finding |");
-    expect(md.endsWith("</details>")).toBe(true);
-  });
-
-  test("the over-cap overflow line stays inside the fold, after the table", () => {
-    const many: ClosureRow[] = Array.from({ length: CLOSURE_MAX_ROWS + 2 }, (_, index) => ({
-      ...rows[0]!,
-      title: `Finding ${index}`,
-    }));
-    const md = buildClosureSection({ ...coverage, totalOpen: many.length }, many);
-    expect(md.indexOf("*(+2 more prior finding(s)")).toBeGreaterThan(md.indexOf("| Finding 0 |"));
-    expect(md.indexOf("*(+2 more prior finding(s)")).toBeLessThan(md.lastIndexOf("</details>"));
   });
 });
 
@@ -662,19 +599,6 @@ describe("review comment upsert (T5)", () => {
       expect(lines[lines.length - 2]).toBe("Review 3 · commit 0123456");
       expect(parseReviewRound(body)).toBe(3);
     });
-
-    test("a closure section renders before the publication marker (§7.10)", () => {
-      const body = buildPreparedReviewBody({
-        output,
-        omittedFindings: 0,
-        round: 1,
-        headSha: "abc1234",
-        closure: "## Prior findings recheck\n\nReassessed 1/1",
-        publicationMarker,
-      });
-      expect(body).toContain("## Prior findings recheck");
-      expect(body.indexOf("Prior findings recheck")).toBeLessThan(body.indexOf(publicationMarker));
-    });
   });
 });
 describe("report sections (mstar.report/v1 side document)", () => {
@@ -716,6 +640,10 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(md).toContain("| A \\| b | addressed (verified-fix) | current-code | not yet resolved |");
     expect(md).toContain("| C | dismissed (non-fix-dismissal) | - | - |");
     expect(md).toContain("| D | unverifiable (no-evidence) | - | - |");
+    // The line's identity: assessed + invalid-output + omitted === selected.
+    expect(buildRevalidatedSection({ ...coverage, invalidOutput: 1, omitted: 0 }, rows)).toContain(
+      "Reassessed 1/2 open prior finding(s) this round · 1 invalid-output · 0 omitted",
+    );
   });
 
   test("a prior-finding title cannot open an HTML fold around the later sections", () => {
@@ -768,20 +696,18 @@ describe("report sections (mstar.report/v1 side document)", () => {
     }
   });
 
-  test("a dismissed row reads the same in the revalidated and closure tables", () => {
+  test("a dismissed row never claims the defect still stands", () => {
     const rows: ClosureRow[] = [
       { title: "C", disposition: "dismissed", reason: "non-fix-dismissal", evidenceKind: null, thread: "-" },
     ];
     const revalidated = buildRevalidatedSection(coverage, rows);
-    const closure = buildClosureSection(coverage, rows);
-    // Both paths render THIS row's words: neither may claim the defect still
+    // The table renders THIS row's words: it may not claim the defect still
     // stands, because the store closed it as a non-fix dismissal.
     expect(revalidated).not.toContain("still present");
-    expect(closure).toContain("| C | dismissed (non-fix-dismissal)");
     expect(revalidated).toContain("| C | dismissed (non-fix-dismissal) |");
   });
 
-  test("buildRevalidatedSection marks rows past the display cap, like the closure table", () => {
+  test("buildRevalidatedSection marks rows past the display cap", () => {
     const rows: ClosureRow[] = Array.from({ length: CLOSURE_MAX_ROWS + 2 }, (_, i) => ({
       title: `finding ${i}`,
       disposition: "unverifiable" as const,
@@ -838,14 +764,10 @@ describe("report sections (mstar.report/v1 side document)", () => {
     const body = buildReviewBody(
       { schema: "mstar.review/v1", verdict: "needs fixes", summary_md: "One issue.", findings: [] },
       0,
-      buildClosureSection(coverage, rows),
       { report, revalidated: buildRevalidatedSection(coverage, rows) },
     );
-    // The folded closure would be a second, disagreeable rendering of the same
-    // rows: the report body never carries it.
-    expect(body).not.toContain("## Prior findings recheck");
+    // ONE rendering of the rows, the coverage line and the thread state.
     expect(body.match(/\| finding \| disposition \| evidence \| thread \|/g)).toHaveLength(1);
-    // …and the §7.10 facts survive the merge, once each.
     expect(body.match(/Reassessed /g)).toHaveLength(1);
     expect(body).toContain("| Fractional expiry comparison | addressed (verified-fix) | diff | - |");
   });
@@ -1165,52 +1087,6 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body).toContain("…");
   });
 
-  test("a cut that lands inside a fold closes it, so the collapse cannot swallow the trailer", () => {
-    const coverage: ClosureCoverage = {
-      totalOpen: 25,
-      selected: 25,
-      assessed: 25,
-      invalidOutput: 0,
-      omitted: 0,
-      capped: 0,
-      contextCoverage: "complete",
-    };
-    const rows: ClosureRow[] = Array.from({ length: 25 }, (_, index) => ({
-      title: `prior finding ${index}`,
-      disposition: "unverifiable",
-      reason: "no-evidence",
-      evidenceKind: null,
-      thread: "-",
-    }));
-    // Sized so the closure fold opens before the cut and would end after it.
-    const clogged: ReviewOutput = { ...output, summary_md: "x".repeat(REVIEW_BODY_LIMIT - 400) };
-    const closure = buildClosureSection(coverage, rows);
-    const body = buildReviewBody(clogged, 0, closure);
-    expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
-    expect(body).toContain("<details>");
-    expect((body.match(/<details>/g) ?? []).length).toBe((body.match(/<\/details>/g) ?? []).length);
-    // A cut outside every fence must not invent one: it closes only the details.
-    expect(fenceLines(body)).toEqual([]);
-
-    const publicationMarker = buildPublicationMarker({
-      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-      headSha: "0123456789abcdef0123456789abcdef01234567",
-      kind: "review",
-    });
-    const prepared = buildPreparedReviewBody({
-      output: clogged,
-      omittedFindings: 0,
-      round: 3,
-      headSha: "0123456789abcdef0123456789abcdef01234567",
-      publicationMarker,
-      closure,
-    });
-    expect(fenceLines(prepared)).toEqual([]);
-    expect((prepared.match(/<details>/g) ?? []).length).toBe((prepared.match(/<\/details>/g) ?? []).length);
-    expect(prepared).toContain("Review 3 · commit 0123456");
-    expect(prepared.trimEnd().endsWith(publicationMarker)).toBe(true);
-  });
-
   test("a cut inside the fix plan closes its fence before the fold, header and marker intact", () => {
     // The plan renders last, so an over-budget body cuts INSIDE its fenced
     // block: closing only the fold would still let the fence swallow the
@@ -1235,7 +1111,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
 
     // Both clamp sites: the inner body clamp and the prepared-body clamp.
-    const inner = buildReviewBody(small, 0, undefined, reportParts);
+    const inner = buildReviewBody(small, 0, reportParts);
     const prepared = buildPreparedReviewBody({ output: small, omittedFindings: 0, round: 7, headSha, publicationMarker, reportParts });
     for (const clamped of [inner, prepared]) {
       expect(clamped.length).toBeLessThan(65536);

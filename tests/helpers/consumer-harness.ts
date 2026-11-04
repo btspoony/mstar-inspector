@@ -61,6 +61,8 @@ export const {
   runnerTimeoutMs,
   reviewGuardTtlSeconds,
   guardRetryDelaysSeconds,
+  GUARD_TIMED_SANDBOX_STEPS,
+  EXEC_TIMEOUT_GIT_MS,
   INLINE_RESOLVE_MAX_ENTRIES,
   CHECK_HOOK_TIMEOUT_MS,
 } = await import("../../src/pipeline/consumer");

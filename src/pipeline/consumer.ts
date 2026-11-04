@@ -250,7 +250,7 @@ const OMP_AGENT_DIR = "/opt/omp-agent";
 // so a hung gh/git/model call fails deterministically instead of silently
 // eating a container (qc3 F-001).
 /** gh/git steps (clone, rev-parse, diff, numstat, runner-input write) — measured ~2.6s total, 2min each is generous. */
-const EXEC_TIMEOUT_GIT_MS = 120_000;
+export const EXEC_TIMEOUT_GIT_MS = 120_000;
 /**
  * In-image runner budget per review level (ms). One Worker deployment = one
  * REVIEW_LEVEL = one timeout table (spec d5-budget § Trigger): quick/default
@@ -468,6 +468,17 @@ export type ConsumerLogFields = {
   increment_status?: string;
   increment_since?: string;
   /**
+   * Set when the increment base read itself failed (a D1/schema fault): the
+   * round keeps the full-diff fallback, and this is the only trace of it.
+   */
+  increment_base?: "lookup-failed";
+  /**
+   * Why the increment capture could not be trusted — `empty` (exit 0, nothing
+   * delivered) or `unreadable` (no flag line). Its own field, so a full-diff
+   * capture failure and an increment capture failure never read alike.
+   */
+  increment_capture?: "empty" | "unreadable";
+  /**
    * Why the report seat's PR-context capture yielded nothing: `pr-view` (the
    * `gh pr view` exec failed), `pr-view-json` (its reply was not the JSON shape
    * asked for), `issue-view` (one referenced issue could not be read) or
@@ -509,17 +520,31 @@ export const defaultConsumerLog: ConsumerLog = {
 // ---------------------------------------------------------------------------
 
 /**
- * Sandbox commands that can each consume the full `EXEC_TIMEOUT_GIT_MS`
- * (120s), in execution order: clone / rev-parse / compare status (increment
- * selection) / full diff / increment diff / numstat / runner-input write /
- * `gh pr view` for the report context / up to `PR_CONTEXT_MAX_ISSUES` (3)
- * `gh issue view` reads / the recheck-doc read (`readRecheckDoc`) and the
- * report-document read, both AFTER the runner step. Every one of them was
- * added here only after it broke the row's TTL: the sixth in round 8, and the
- * seven report/increment steps in PR #162 — an uncounted step lets the row
- * expire while a legal review is still posting.
+ * The 120s windows a maximal round can consume, in execution order. Each entry
+ * is ONE window, not one command: `readRecheckDoc` issues the document and
+ * status reads in a single `Promise.all`, so the pair bills once.
+ *
+ * This list is the TTL's single source of truth (`reviewGuardTtlSeconds` bills
+ * its length) and it is pinned against a real round: consumer.test.ts runs the
+ * maximal round and requires exactly this many `EXEC_TIMEOUT_GIT_MS` commands.
+ * An uncounted step lets the row expire while a legal review is still posting,
+ * so a new one must fail that test until it is added here.
  */
-const GUARD_TIMED_SANDBOX_STEPS = 13;
+export const GUARD_TIMED_SANDBOX_STEPS: readonly string[] = [
+  "clone",
+  "rev-parse",
+  "compare-status",
+  "full-diff",
+  "increment-diff",
+  "numstat",
+  "pr-context-view",
+  "pr-context-issue-1",
+  "pr-context-issue-2",
+  "pr-context-issue-3",
+  "runner-input-write",
+  "recheck-reads",
+  "report-document-read",
+];
 /** Slack for the untimed steps (token mint, sandbox create, comment post, D1 puts). */
 const GUARD_SLACK_MS = 120_000;
 
@@ -530,14 +555,13 @@ const GUARD_SLACK_MS = 120_000;
  * whole inline-resolution budget (`INLINE_RESOLVE_BUDGET_MS`, which runs
  * last), plus `GUARD_SLACK_MS` — so the row can never expire mid-review and
  * unblock a concurrent duplicate. 2292s quick/default, 2532s deep. Pinned
- * exactly by consumer.test.ts ("reviewGuardTtlSeconds covers the full
- * step-budget arithmetic per level") so a future step addition re-breaks
- * loudly.
+ * exactly by consumer.test.ts — the per-level arithmetic AND a maximal round's
+ * command count — so a future step addition re-breaks loudly.
  */
 export function reviewGuardTtlSeconds(level: ReviewLevel): number {
   return Math.ceil(
     (runnerTimeoutMs(level) +
-      GUARD_TIMED_SANDBOX_STEPS * EXEC_TIMEOUT_GIT_MS +
+      GUARD_TIMED_SANDBOX_STEPS.length * EXEC_TIMEOUT_GIT_MS +
       INLINE_RESOLVE_BUDGET_MS +
       GUARD_SLACK_MS) /
       1000,
@@ -2164,6 +2188,13 @@ type ProcessDeps = {
     repo: string;
     prNumber: number;
   }) => Promise<{ headSha: string | null; headAt: string | null } | null>;
+  /**
+   * The incremental round's base lookup. A seam because the failure path is
+   * the contract under test: the round must survive ANY throw from it with the
+   * full-diff fallback, and injecting that throw through the DB would need the
+   * query text.
+   */
+  findIncrementBase: (db: PipelineEnv["DB"], scope: Scope) => Promise<string | null>;
 };
 
 /**
@@ -2891,7 +2922,7 @@ async function newerCommitHasJob(
 type ConsumerOverrides = Partial<
   Pick<
     ProcessDeps,
-    "store" | "failureStore" | "createAppCommenter" | "getSandbox" | "checks" | "selectPrHead"
+    "store" | "failureStore" | "createAppCommenter" | "getSandbox" | "checks" | "selectPrHead" | "findIncrementBase"
   >
 >;
 
@@ -2933,6 +2964,7 @@ export function createReviewConsumer(
     createAppCommenter: overrides.createAppCommenter ?? ((cred) => createReviewCommenter(cred, { db: env.DB })),
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
     selectPrHead: overrides.selectPrHead ?? appsStore.selectPrHead,
+    findIncrementBase: overrides.findIncrementBase ?? findIncrementBase,
     log,
     background,
   };
@@ -3606,9 +3638,19 @@ async function processMessage(
     // ask GitHub whether it is an ancestor of this one. Only `ahead` is an
     // honest increment (base...head is then exactly the work since the last
     // review); `behind`/`diverged`/`identical`/a 404 after a force-push or any
-    // non-zero exit keep the FULL diff. The base read never fails the round:
-    // a D1 hiccup or a malformed sha simply means "no increment".
-    const incrementBase = await findIncrementBase(deps.env.DB, lifecycleScope).catch(() => null);
+    // non-zero exit keep the FULL diff. A failed base read degrades the same
+    // way, but it is warned: a silent fallback would disable incremental
+    // rounds forever with no trace.
+    let incrementBase: string | null = null;
+    try {
+      incrementBase = await deps.findIncrementBase(deps.env.DB, lifecycleScope);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        { ...fields, increment_base: "lookup-failed" },
+        `increment base lookup failed — reviewing the full diff: ${detail}`,
+      );
+    }
     let sinceSha: string | null = null;
     if (incrementBase !== null && incrementBase !== headSha) {
       try {
@@ -3674,9 +3716,10 @@ async function processMessage(
       const incrementRead = parseBoundedRead(increment.stdout);
       if (incrementRead.failure === "unreadable" || (incrementRead.failure === null && incrementRead.text === "")) {
         captureFailed = true;
+        const cause: "empty" | "unreadable" = incrementRead.failure === "unreadable" ? "unreadable" : "empty";
         deps.log.warn(
-          { ...fields, diff_capture: "empty", increment_since: sinceSha },
-          "increment diff capture empty — context-unavailable (no evidence catalog; rows stay context-incomplete)",
+          { ...fields, increment_capture: cause, increment_since: sinceSha },
+          `increment diff capture ${cause} — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
         );
       }
     }
@@ -4244,8 +4287,7 @@ async function processMessage(
       };
     });
     // The §7.10 facts (coverage line, display cap, thread state) render ONCE,
-    // in the body's revalidated section — the folded closure is the no-report
-    // body's layout, not this one's.
+    // in the body's revalidated section — there is no second rendering.
     // 12. §7.7 step 7 — calculate round/target from the App's current single
     // comment (pre-staging read), assemble the FINAL body, and stage the
     // COMPLETE private payload BEFORE any GitHub mutation. Staging failure

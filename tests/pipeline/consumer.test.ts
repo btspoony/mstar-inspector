@@ -127,6 +127,8 @@ const MIGRATIONS_AFTER_0036 = migrationsAfter(36);
 import {
   CHECK_HOOK_TIMEOUT_MS,
   DIFF_PREFETCH_MAX_BYTES,
+  EXEC_TIMEOUT_GIT_MS,
+  GUARD_TIMED_SANDBOX_STEPS,
   INLINE_RESOLVE_MAX_ENTRIES,
   commenterCalls,
   commenterState,
@@ -2777,6 +2779,52 @@ describe("createReviewConsumer", () => {
     expect(reviewGuardTtlSeconds("quick")).toBe(2292);
     expect(reviewGuardTtlSeconds("default")).toBe(2292);
     expect(reviewGuardTtlSeconds("deep")).toBe(2532);
+  });
+
+  test("a maximal round issues exactly the steps the guard TTL bills", async () => {
+    reset();
+    // The widest round the consumer can build: a previously reviewed base (the
+    // compare gate + increment capture), three linked issues, an open prior
+    // finding to recheck (two bounded reads), and a report seat with context.
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.incrementDiffStdout = VALID_DIFF;
+    sandbox.compareStatus = "ahead";
+    sandbox.prBodyExitCode = 0;
+    sandbox.prBodyContent = "Closes #7\nFixes #8\nRefs #9";
+    for (const issueNumber of [7, 8, 9]) {
+      sandbox.issueBodies.set(issueNumber, { title: `Issue ${issueNumber}`, body: "body" });
+    }
+    sandbox.recheckFileContent = recheckDocWith({});
+    sandbox.reportFileContent = JSON.stringify({
+      schema: "mstar.report/v1",
+      headSha: SHA,
+      overview: "overview",
+      linkedIssueAc: "none",
+      verified: "none",
+      rejected: "none",
+      planToFix: "none",
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, {
+      ...testOverrides,
+      // Any previously reviewed head makes the compare gate reachable without
+      // seeding the `reviews` table.
+      findIncrementBase: async () => PRIOR_SHA,
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    const timed = sandbox.calls.filter(
+      (call) => (call.opts as { timeout?: number } | undefined)?.timeout === EXEC_TIMEOUT_GIT_MS,
+    );
+    // One command per billed window — except `readRecheckDoc`, which races the
+    // document and status reads in ONE Promise.all window (two commands, one
+    // entry). A new sandbox step without its ledger entry breaks this.
+    expect(timed.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 1);
   });
 
   test("guardRetryDelaysSeconds per level — the schedule covers the guard TTL (AC-4)", () => {

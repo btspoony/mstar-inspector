@@ -119,17 +119,20 @@ function openFoldCount(text: string): number {
 /**
  * Truncate summary_md to the body budget (char-based; GitHub counts chars).
  * A narrative may carry its own fence or `<details>`; left open, the rest of
- * the body renders inside it, so the cut closes both and pays for them.
+ * the body renders inside it, so the cut closes both and pays for them. The
+ * closers count against `limit` in EVERY branch: an untouched narrative that
+ * fits with its closers is returned whole, otherwise it is shortened again.
  */
 export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): string {
-  if (md.length <= limit) return `${md}${closersFor(md)}`;
+  const closers = closersFor(md);
+  if (md.length + closers.length <= limit) return `${md}${closers}`;
   // Shortening the head can drop the opener a closer answered, so re-derive
   // the closers on each shorter head until head + closers + "…" fits.
   let head = md.slice(0, limit - 1);
   for (;;) {
-    const closers = closersFor(head);
-    const next = head.slice(0, Math.max(0, limit - 1 - closers.length));
-    if (next === head) return `${head}${closers}…`;
+    const headClosers = closersFor(head);
+    const next = head.slice(0, Math.max(0, limit - 1 - headClosers.length));
+    if (next === head) return `${head}${headClosers}…`;
     head = next;
   }
 }
@@ -265,20 +268,14 @@ function stripFactEcho(
 /**
  * Assemble the overall review body: the engine's own layout, then the two
  * facts it has no vocabulary for — the omitted-findings footer (merge-class
- * cap) and the assembled §7.10 closure section — clamped to REVIEW_BODY_LIMIT
- * (qc2 F-003 / qc3 F-304 — the API never sees an over-limit body).
+ * cap) and the report sections — clamped to REVIEW_BODY_LIMIT (qc2 F-003 /
+ * qc3 F-304 — the API never sees an over-limit body).
  * `omittedFindings` is the count dropped by the consumer's merge-class cap
  * (B4): the footer tells readers the review is a Top-N subset.
- *
- * `closure` is the folded §7.10 section, rendered ONLY for a body without
- * report parts. A report body carries the same rows, coverage line and thread
- * state once, in-body, in `reportParts.revalidated` — appending the fold too
- * would publish two prior-findings tables that can disagree.
  */
 export function buildReviewBody(
   output: ReviewOutput,
   omittedFindings = 0,
-  closure?: string,
   reportParts?: { report: ReportDoc | null; revalidated: string },
 ): string {
   let rendered = output;
@@ -310,7 +307,6 @@ export function buildReviewBody(
   }
   const sections = [core];
   if (omittedFindings > 0) sections.push(`*(+${omittedFindings} more findings omitted)*`);
-  if (closure && reportParts === undefined) sections.push(closure);
   return clampKeepingHead(sections.join("\n\n"), REVIEW_BODY_LIMIT);
 }
 
@@ -378,9 +374,8 @@ function closureCoverageLine(coverage: ClosureCoverage): string {
 /**
  * The ONE prior-findings table (§7.10 columns: finding / disposition /
  * evidence / thread) plus its over-cap count, capped at `CLOSURE_MAX_ROWS`.
- * Both the in-body `### Revalidated findings` section and the legacy folded
- * closure render through this, so the two paths can never disagree on the
- * words a row carries. Leading blank line included: the callers join blocks.
+ * The body's `### Revalidated findings` section is its only renderer.
+ * Leading blank line included: the callers join blocks.
  */
 function priorFindingLines(rows: ClosureRow[]): string[] {
   const shown = rows.slice(0, CLOSURE_MAX_ROWS);
@@ -412,26 +407,6 @@ function priorFindingLines(rows: ClosureRow[]): string[] {
   return lines;
 }
 
-/**
- * Render the §7.10 closure section: one honest coverage line, then the
- * prior-findings table plus the overflow count. Deterministic; the caller
- * re-clamps via buildReviewBody's budget.
- *
- * Folded into `<details>`: the section grows every round while it is only read
- * when someone checks whether earlier concerns were fixed. The heading stays
- * INSIDE the fold — the summary line is a label, not a replacement for the
- * heading. The blank lines around the inner Markdown are required: without them
- * GitHub renders the table as literal text.
- *
- * Used ONLY by a body without report parts; a report body renders the same
- * rows once, in-body, through `buildRevalidatedSection`.
- */
-export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[]): string {
-  const lines: string[] = ["## Prior findings recheck", "", closureCoverageLine(coverage), ...priorFindingLines(rows)];
-  const summary = `Prior findings recheck — ${coverage.assessed}/${coverage.selected} reassessed, ${coverage.totalOpen} open`;
-  return `<details>\n<summary>${summary}</summary>\n\n${lines.join("\n")}\n\n</details>`;
-}
-
 // ---------------------------------------------------------------------------
 // Report sections (mstar.report/v1 side document): the narrative a human
 // report needs around the engine's layout. Inserted by ANCHOR, never by
@@ -446,9 +421,8 @@ const FINDINGS_HEADING = "### Findings";
 
 /**
  * The body's ONE prior-findings rendering (the template mandates the heading):
- * the §7.10 coverage line, then the round's rows — the SAME table renderer the
- * legacy folded closure uses, so the two can never disagree. `none` when the
- * round had no prior finding at all, so a first round's body stays clean.
+ * the §7.10 coverage line, then the round's rows. `none` when the round had no
+ * prior finding at all, so a first round's body stays clean.
  */
 export function buildRevalidatedSection(coverage: ClosureCoverage, rows: ClosureRow[]): string {
   const heading = ["### Revalidated findings", ""];
@@ -612,7 +586,6 @@ export function buildPreparedReviewBody(input: {
   omittedFindings: number;
   round: number;
   headSha: string;
-  closure?: string;
   publicationMarker: string;
   /**
    * Previous reviewed head this round was diffed against (increment rounds
@@ -638,7 +611,7 @@ export function buildPreparedReviewBody(input: {
     `Review ${input.round} · commit ${input.headSha.slice(0, 7)}` +
     (input.sinceSha === undefined ? "" : ` · since ${input.sinceSha.slice(0, 7)}`);
   const core = stripInspectorMarkerSyntax(
-    buildReviewBody(input.output, input.omittedFindings, input.closure, input.reportParts),
+    buildReviewBody(input.output, input.omittedFindings, input.reportParts),
   );
   // Both markers and the header are reserved before the clamp: two blank-line
   // separators (after the round marker, before the header), the header↔marker

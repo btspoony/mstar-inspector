@@ -24,7 +24,7 @@ v0.4 D5 originally locked a 30 minute deep runner (`1_800_000` ms). Plan QC foun
 
 ## Guidance
 
-Size the in-consumer runner **under 15 minutes with headroom**. v0.4 pin: deep `840_000` (14 min). Recompute guard TTL from the same formula: `ceil((runner + 13×git + inline + slack) / 1000)` — 13 is every `EXEC_TIMEOUT_GIT_MS`-bounded sandbox step the consumer can run (see `GUARD_TIMED_SANDBOX_STEPS`). Keep retry delays strictly below that TTL, with a cumulative sum above it.
+Size the in-consumer runner **under 15 minutes with headroom**. v0.4 pin: deep `840_000` (14 min). Recompute guard TTL from the same formula: `ceil((runner + N×git + inline + slack) / 1000)`, where `N` is `GUARD_TIMED_SANDBOX_STEPS.length` — one entry per 120s window, and the recheck document/status reads share one window because they run in a single `Promise.all`. That list is pinned against a real maximal round by the consumer suite, so a new sandbox step fails the suite until it is billed. Keep retry delays strictly below that TTL, with a cumulative sum above it.
 
 Do not advertise a runner budget the consumer cannot finish.
 
