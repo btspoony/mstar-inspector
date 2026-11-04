@@ -271,15 +271,22 @@ function stripFactEcho(
 /**
  * Assemble the overall review body: the engine's own layout, then the two
  * facts it has no vocabulary for — the omitted-findings footer (merge-class
- * cap) and the report sections — clamped to REVIEW_BODY_LIMIT (qc2 F-003 /
- * qc3 F-304 — the API never sees an over-limit body).
+ * cap) and the report sections — clamped to `limit` (qc2 F-003 / qc3 F-304 —
+ * the API never sees an over-limit body).
  * `omittedFindings` is the count dropped by the consumer's merge-class cap
  * (B4): the footer tells readers the review is a Top-N subset.
+ *
+ * The report tail is reserved BEFORE the clamp: the clamp keeps the head, so a
+ * tail appended first would be the first thing lost on a long body. The core
+ * is what gets shortened; the tail is only degraded when it cannot fit alone.
+ * `limit` lets the prepared body pass its marker-reserved ceiling, so the two
+ * clamps agree on what the tail may consume.
  */
 export function buildReviewBody(
   output: ReviewOutput,
   omittedFindings = 0,
   reportParts?: { report: ReportDoc | null; revalidated: string },
+  limit = REVIEW_BODY_LIMIT,
 ): string {
   let rendered = output;
   if (output.incomplete !== undefined) {
@@ -302,15 +309,20 @@ export function buildReviewBody(
     rendered = { ...rendered, summary_md: truncateSummary(rendered.summary_md) };
   }
   let core = renderReviewMarkdown(rendered);
-  // The report sections are composed into the engine's layout by ANCHOR, so
-  // the renderer keeps owning the layout and an absent report leaves the
-  // string byte-identical to the pre-report shape.
+  // The report fields are composed into the engine's layout by ANCHOR, so the
+  // renderer keeps owning the layout and an absent report leaves the string
+  // byte-identical to the pre-report shape.
+  const tail = reportParts === undefined ? "" : buildReportTail(reportParts.report, limit);
   if (reportParts !== undefined) {
-    core = insertReportSections(core, reportParts.report, reportParts.revalidated);
+    core = insertReportFields(core, reportParts.report, reportParts.revalidated);
   }
   const sections = [core];
   if (omittedFindings > 0) sections.push(`*(+${omittedFindings} more findings omitted)*`);
-  return clampKeepingHead(sections.join("\n\n"), REVIEW_BODY_LIMIT);
+  const body = sections.join("\n\n");
+  if (tail === "") return clampKeepingHead(body, limit);
+  // One blank line joins the tail; the tail already leaves room for the core's
+  // cut marker, so this never exceeds `limit`.
+  return `${clampKeepingHead(body, limit - tail.length - 2)}\n\n${tail}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,14 +450,24 @@ export function buildRevalidatedSection(coverage: ClosureCoverage, rows: Closure
 }
 
 /** The collapsible fix-plan block; markdown text must survive the outer fence. */
-function planBlock(planToFix: string | null): string {
+function planBlock(planToFix: string | null, budget = Number.POSITIVE_INFINITY): string {
   if (planToFix === null || planToFix === "none") return "none";
   // The outer fence must outrun every backtick run inside the plan, or a plan
   // that documents a fence closes this one early and the rest leaks as markup.
   let longest = 2;
   for (const run of planToFix.matchAll(/`+/g)) longest = Math.max(longest, run[0].length);
   const fence = "`".repeat(longest + 1);
-  return `<details><summary>Expand fix plan</summary>\n\n${fence}md\n${planToFix}\n${fence}\n\n</details>`;
+  const prefix = `<details><summary>Expand fix plan</summary>\n\n${fence}md\n`;
+  const suffix = `\n${fence}\n\n</details>`;
+  const room = budget - prefix.length - suffix.length;
+  // No room for a balanced block: a bare `none` keeps the heading honest and
+  // leaves no fence or fold open.
+  if (room < 1) return "none";
+  // Keep the head and mark the cut. The fence below it closes what is left of
+  // the block, so the cut never leaks into the sections after it.
+  const plan =
+    planToFix.length <= room ? planToFix : `${sliceWithoutSplittingPair(planToFix, room - 1)}…`;
+  return `${prefix}${plan}${suffix}`;
 }
 
 /** Insert `block` after the line that equals `anchor` (first occurrence). */
@@ -525,6 +547,14 @@ function neutralizeReportText(text: string): string {
  * deleted.
  */
 export function insertReportSections(rendered: string, report: ReportDoc | null, revalidated: string): string {
+  return `${insertReportFields(rendered, report, revalidated)}\n\n${buildReportTail(report)}`;
+}
+
+/**
+ * Compose the report fields INTO the engine layout — the overview and the
+ * revalidated table only. The tail is built separately by `buildReportTail`.
+ */
+function insertReportFields(rendered: string, report: ReportDoc | null, revalidated: string): string {
   let body = rendered;
   if (report !== null) {
     const overview = `**What this PR does**: ${neutralizeReportText(report.overview)}`;
@@ -538,30 +568,55 @@ export function insertReportSections(rendered: string, report: ReportDoc | null,
   if (withRevalidated === null) {
     // Zero-finding envelope: the renderer omitted the heading, so this IS the
     // template's self-add case — revalidated table, then the empty heading.
-    body = `${body}\n\n${revalidated}\n\n${FINDINGS_HEADING}\n\nnone`;
-  } else {
-    body = withRevalidated;
+    return `${body}\n\n${revalidated}\n\n${FINDINGS_HEADING}\n\nnone`;
   }
+  return withRevalidated;
+}
+
+/**
+ * The report tail: `### Linked-issue AC`, `### ✅ Verified`,
+ * `### 🗑️ Considered & rejected` and `## 🛠️ Plan to fix`.
+ *
+ * `buildReviewBody` reserves this tail BEFORE its body clamp, because the clamp
+ * keeps the head — a tail appended before the clamp is the first thing lost on
+ * a long body, exactly the newest sections the report exists to publish. When
+ * the tail alone does not fit `limit` (less the blank-line separator and the
+ * one-character core cut marker), it degrades in a fixed order:
+ *
+ *   1. truncate the plan block — it is the only section with a fence and a
+ *      fold, so it is the only one that can be cut without leaving markdown
+ *      structure open, and it frees the most bytes; fence and fold stay closed;
+ *   2. drop whole sections, lowest value first: rejected → verified →
+ *      linked-issue AC. The plan (the most actionable part) is kept last.
+ *
+ * Whatever survives is balanced and no longer than `limit`.
+ */
+function buildReportTail(report: ReportDoc | null, limit = Number.POSITIVE_INFINITY): string {
   const field = (value: string | undefined): string =>
     value === undefined ? "none" : neutralizeReportText(value);
-  const tail = [
-    "### Linked-issue AC",
-    "",
-    field(report?.linkedIssueAc),
-    "",
-    "### ✅ Verified",
-    "",
-    field(report?.verified),
-    "",
-    "### 🗑️ Considered & rejected",
-    "",
-    field(report?.rejected),
-    "",
-    "## 🛠️ Plan to fix",
-    "",
-    planBlock(report?.planToFix ?? null),
-  ].join("\n");
-  return `${body}\n\n${tail}`;
+  const planHeading = "## 🛠️ Plan to fix";
+  const sections = [
+    `### Linked-issue AC\n\n${field(report?.linkedIssueAc)}`,
+    `### ✅ Verified\n\n${field(report?.verified)}`,
+    `### 🗑️ Considered & rejected\n\n${field(report?.rejected)}`,
+    `${planHeading}\n\n${planBlock(report?.planToFix ?? null)}`,
+  ];
+  // The caller joins the tail with one blank line and keeps one character for
+  // the core's cut marker.
+  let tail = sections.join("\n\n");
+  if (tail.length + 3 <= limit) return tail;
+  const base = sections.slice(0, 3).join("\n\n");
+  // base + "\n\n" + heading + "\n\n" + block + "\n\n" + "…" <= limit.
+  const planBudget = limit - base.length - planHeading.length - 7;
+  sections[3] = `${planHeading}\n\n${planBlock(report?.planToFix ?? null, planBudget)}`;
+  tail = sections.join("\n\n");
+  if (tail.length + 3 <= limit) return tail;
+  for (const index of [2, 1, 0]) {
+    sections[index] = "";
+    tail = sections.filter((text) => text !== "").join("\n\n");
+    if (tail.length + 3 <= limit) return tail;
+  }
+  return "";
 }
 
 // ---------------------------------------------------------------------------
@@ -618,14 +673,16 @@ export function buildPreparedReviewBody(input: {
   const header =
     `Review ${input.round} · commit ${input.headSha.slice(0, 7)}` +
     (input.sinceSha === undefined ? "" : ` · since ${input.sinceSha.slice(0, 7)}`);
-  const core = stripInspectorMarkerSyntax(
-    buildReviewBody(input.output, input.omittedFindings, input.reportParts),
-  );
   // Both markers and the header are reserved before the clamp: two blank-line
   // separators (after the round marker, before the header), the header↔marker
   // newline, and the clamp's own ellipsis fit inside the 8.
   const reserve = roundMarker.length + header.length + input.publicationMarker.length + 8;
   const budget = REVIEW_BODY_LIMIT - reserve;
+  // The inner builder reserves its report tail against this same ceiling, so
+  // the prepared clamp never has to cut the tail the report exists to publish.
+  const core = stripInspectorMarkerSyntax(
+    buildReviewBody(input.output, input.omittedFindings, input.reportParts, budget),
+  );
   return `${roundMarker}\n\n${clampKeepingHead(core, budget)}\n\n${header}\n${input.publicationMarker}`;
 }
 

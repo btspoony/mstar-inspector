@@ -1224,6 +1224,71 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body).not.toContain("…");
     expect(body).toContain("small");
   });
+
+  const reportDoc: ReportDoc = {
+    schema: "mstar.report/v1",
+    headSha: "abc1234",
+    overview: "Adds an expiry guard to the auth path.",
+    linkedIssueAc: "Expiry rejected: met.",
+    verified: "- unit suite → green",
+    rejected: "**Retry loop**: rejected — the diff never touches it.",
+    planToFix: "1. Add the guard.\n2. Rerun the suite.",
+  };
+  const reportTailHeadings = [
+    "### Linked-issue AC",
+    "### ✅ Verified",
+    "### 🗑️ Considered & rejected",
+    "## 🛠️ Plan to fix",
+  ];
+
+  test("a body over the limit shortens the core, never the report tail", () => {
+    const long: ReviewOutput = {
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      findings: [
+        {
+          mergeClass: "must-fix",
+          title: "Long finding",
+          file_path: "src/auth.ts",
+          line_start: 1,
+          line_end: 1,
+          body: "x".repeat(REVIEW_BODY_LIMIT),
+        },
+      ],
+    };
+    const body = buildReviewBody(long, 0, {
+      report: reportDoc,
+      revalidated: "### Revalidated findings\n\nnone",
+    });
+    expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
+    expect(body).toContain("…");
+    for (const heading of reportTailHeadings) expect(body).toContain(heading);
+    // The plan is the LAST section, so its closed fold proves the tail survived.
+    expect(body.endsWith("</details>")).toBe(true);
+  });
+
+  test("an oversized plan is truncated before any report section is dropped", () => {
+    const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
+    const body = buildReviewBody(small, 0, {
+      report: { ...reportDoc, planToFix: "x".repeat(REVIEW_BODY_LIMIT * 2) },
+      revalidated: "### Revalidated findings\n\nnone",
+    });
+    expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
+    for (const heading of reportTailHeadings) expect(body).toContain(heading);
+    expect(body).toContain("…");
+    // Fence and fold stay balanced: opener plus closer each, nothing swallowed.
+    expect(fenceLines(body)).toHaveLength(2);
+    expect((body.match(/<details>/g) ?? []).length).toBe(1);
+    expect((body.match(/<\/details>/g) ?? []).length).toBe(1);
+  });
+
+  test("without report parts the body is the pre-report shape, unchanged", () => {
+    const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "ship it", summary_md: "Fine.", findings: [] };
+    expect(buildReviewBody(small, 2)).toBe(
+      `${renderReviewMarkdown(small)}\n\n*(+2 more findings omitted)*`,
+    );
+    expect(buildReviewBody(small)).not.toContain("### Linked-issue AC");
+  });
 });
 
 describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", () => {
