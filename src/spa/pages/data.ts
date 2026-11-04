@@ -1549,7 +1549,12 @@ function isSandboxImageList(value: unknown): value is Array<{ id: string; enable
   );
 }
 
-/** The review gate (migration 0045): an integer floor in the DDL's domain + a verdict list. */
+/** One entry of the verdict vocabulary — an off-vocabulary string fails the parse. */
+function isPrVerdict(value: unknown): value is (typeof PR_VERDICTS)[number] {
+  return (PR_VERDICTS as readonly string[]).includes(value as string);
+}
+
+/** The review gate (migration 0045): an integer floor in the DDL's domain + a verdict list on the engine vocabulary. */
 function isCheckGateSettings(value: unknown): value is CheckGateSettings {
   return (
     isRecord(value) &&
@@ -1557,7 +1562,8 @@ function isCheckGateSettings(value: unknown): value is CheckGateSettings {
     Number.isInteger(value.min_score) &&
     value.min_score >= 0 &&
     value.min_score <= 100 &&
-    isStringArray(value.pass_verdicts)
+    isStringArray(value.pass_verdicts) &&
+    value.pass_verdicts.every(isPrVerdict)
   );
 }
 

@@ -444,6 +444,13 @@ describe("members/apps/settings parsers", () => {
       expect(parseSettings({ ...base, check_gate: { ...base.check_gate, min_score: minScore } })).toBeNull();
     }
     expect(parseSettings({ ...base, check_gate: { ...base.check_gate, pass_verdicts: "ship it" } })).toBeNull();
+    // Every entry is checked, not just the array shape: one drifted verdict
+    // fails the parse, so the control never offers a value the store rejects.
+    expect(
+      parseSettings({ ...base, check_gate: { ...base.check_gate, pass_verdicts: ["ship it", "looks fine"] } }),
+    ).toBeNull();
+    // An empty set is a legal stored configuration (nothing passes).
+    expect(parseSettings({ ...base, check_gate: { min_score: 80, pass_verdicts: [] } })).not.toBeNull();
     expect(parseSettings({ ...base, allowlist: { ...base.allowlist, enabled: "yes" } })).toBeNull();
     expect(parseSettings({ ...base, allowlist: { ...base.allowlist, owners: [7] } })).toBeNull();
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "hidden" } })).toBeNull();
