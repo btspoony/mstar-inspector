@@ -455,6 +455,14 @@ export type ConsumerLogFields = {
    */
   increment_status?: string;
   increment_since?: string;
+  /**
+   * Why the seat's report document yielded no sections (the `none` headings):
+   * one named cause per rejected read, so a missing narrative is attributable
+   * instead of silently absent. `invalid-document` carries the gate's own
+   * reason in `report_doc_error`.
+   */
+  report_doc?: "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document";
+  report_doc_error?: string;
 };
 
 export type ConsumerLog = {
@@ -479,12 +487,16 @@ export const defaultConsumerLog: ConsumerLog = {
 
 /**
  * Sandbox commands that can each consume the full `EXEC_TIMEOUT_GIT_MS`
- * (120s): clone / rev-parse / diff / numstat / runner-input write, plus the
- * recheck-doc read `readRecheckDoc` runs AFTER the runner step — the sixth
- * was missing here, so the row could expire while a legal review was still
- * posting (round-8 review).
+ * (120s), in execution order: clone / rev-parse / compare status (increment
+ * selection) / full diff / increment diff / numstat / runner-input write /
+ * `gh pr view` for the report context / up to `PR_CONTEXT_MAX_ISSUES` (3)
+ * `gh issue view` reads / the recheck-doc read (`readRecheckDoc`) and the
+ * report-document read, both AFTER the runner step. Every one of them was
+ * added here only after it broke the row's TTL: the sixth in round 8, and the
+ * seven report/increment steps in PR #162 — an uncounted step lets the row
+ * expire while a legal review is still posting.
  */
-const GUARD_TIMED_SANDBOX_STEPS = 6;
+const GUARD_TIMED_SANDBOX_STEPS = 13;
 /** Slack for the untimed steps (token mint, sandbox create, comment post, D1 puts). */
 const GUARD_SLACK_MS = 120_000;
 
@@ -494,7 +506,7 @@ const GUARD_SLACK_MS = 120_000;
  * runner step (runnerTimeoutMs(level) — 600s quick/default, 840s deep), the
  * whole inline-resolution budget (`INLINE_RESOLVE_BUDGET_MS`, which runs
  * last), plus `GUARD_SLACK_MS` — so the row can never expire mid-review and
- * unblock a concurrent duplicate. 1452s quick/default, 1692s deep. Pinned
+ * unblock a concurrent duplicate. 2292s quick/default, 2532s deep. Pinned
  * exactly by consumer.test.ts ("reviewGuardTtlSeconds covers the full
  * step-budget arithmetic per level") so a future step addition re-breaks
  * loudly.
@@ -511,12 +523,12 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
 
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
- * — the first delivery is attempt 1). quick/default: 60s → 300s → 1200s; deep: 90s → 480s → 1200s.
+ * — the first delivery is attempt 1). quick/default: 60s → 300s → 2040s; deep: 90s → 480s → 2040s.
  *
  * The schedule must COVER the level's guard TTL, and its last entry must be
  * able to reclaim it: every entry stays BELOW the level's guard TTL
- * (1452s / 1692s) so no single delay outlives the lock, while the CUMULATIVE
- * sum (1560s / 1770s) EXCEEDS it — so by the final delayed attempt the
+ * (2292s / 2532s) so no single delay outlives the lock, while the CUMULATIVE
+ * sum (2400s / 2610s) EXCEEDS it — so by the final delayed attempt the
  * in-flight row has expired and the admission's expired-reclaim branch lets
  * this message take the lock instead of being dropped. Without that sum, a
  * legal review (600s+ runner) could hold the PR past the whole backoff and a
@@ -527,9 +539,9 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
  * DLQ).
  */
 const GUARD_RETRY_DELAYS_SECONDS: Record<ReviewLevel, readonly [number, number, number]> = {
-  quick: [60, 300, 1200],
-  default: [60, 300, 1200],
-  deep: [90, 480, 1200],
+  quick: [60, 300, 2040],
+  default: [60, 300, 2040],
+  deep: [90, 480, 2040],
 };
 
 /** Guard-held backoff schedule for the job's review level (spec d5-budget L4). */
@@ -600,8 +612,8 @@ export type AdmissionRefusalFields = Required<Pick<ConsumerLogFields, "system_ca
  *
  * `heldHeadSha` is the live row's sha: a `pr-held` drop is only benign while
  * that review covers THIS message's commit. The cumulative backoff
- * (1560s quick/default, 1770s deep) now EXCEEDS the level's guard TTL
- * (1452s / 1692s), so the final delayed attempt can reclaim the expired row
+ * (2400s quick/default, 2610s deep) now EXCEEDS the level's guard TTL
+ * (2292s / 2532s), so the final delayed attempt can reclaim the expired row
  * and review the new commit. A drop that still happens — a cap/storage
  * refusal, or a row that outlived the schedule — must leave a trace, so the
  * terminal ack records the drop row for a commit the live review never
@@ -885,21 +897,46 @@ async function applyPendingLifecycleJournals(
  * Bounded read + validation + redaction of the report seat's document: the
  * audited fixed-path read (`readReportCommand`) yields `<content>\n<flag>`;
  * anything other than a flag-0 document that passes `validateReportDoc` is NO
- * report (the sections render `none`). Each narrative field is redacted before
+ * report (the sections render `none`) and leaves ONE warn naming which of the
+ * four causes rejected it. Each narrative field is redacted before
  * it can reach a public body — the seat's text is model output like any other,
  * and a prompt-injected credential can hide in a PR description it quoted.
  */
-async function readReportDoc(sandbox: ReviewSandbox, secretValues: string[]): Promise<ReportDoc | null> {
+async function readReportDoc(
+  sandbox: ReviewSandbox,
+  secretValues: string[],
+  log: ConsumerLog,
+  fields: ConsumerLogFields,
+): Promise<ReportDoc | null> {
   const read = await boundedRead(sandbox, readReportCommand());
-  if (read.text === null || read.text.trim() === "") return null;
+  if (read.failure !== null) {
+    log.warn(
+      { ...fields, report_doc: read.failure === "overflow" ? "overflow" : "unreadable" },
+      `report document ${read.failure} — sections render none`,
+    );
+    return null;
+  }
+  if (read.text === null || read.text.trim() === "") {
+    log.warn({ ...fields, report_doc: "empty" }, "report document empty — sections render none");
+    return null;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(read.text);
   } catch {
+    // No parse-error detail: `JSON.parse` quotes the input, and the input is
+    // seat-authored text that may carry a credential-shaped value.
+    log.warn({ ...fields, report_doc: "invalid-json" }, "report document is not JSON — sections render none");
     return null;
   }
   const gate = validateReportDoc(parsed);
-  if (!gate.ok) return null;
+  if (!gate.ok) {
+    log.warn(
+      { ...fields, report_doc: "invalid-document", report_doc_error: gate.error },
+      `report document failed its gate — sections render none: ${gate.error}`,
+    );
+    return null;
+  }
   const redact = (text: string) => redactExactSecrets(redactSecrets(text), secretValues);
   return {
     schema: "mstar.report/v1",
@@ -3805,7 +3842,7 @@ async function processMessage(
     // gate and falls back to `none` headings, or null when the seat wrote
     // nothing. Read only when the runner was actually given `--report-out`.
     const report: ReportDoc | null =
-      prContext !== undefined ? await readReportDoc(sandbox, secretValues) : null;
+      prContext !== undefined ? await readReportDoc(sandbox, secretValues, deps.log, fields) : null;
 
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
