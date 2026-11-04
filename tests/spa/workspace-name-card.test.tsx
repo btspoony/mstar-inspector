@@ -203,7 +203,7 @@ describe("workspace name card", () => {
         });
       }
       if (url.endsWith("/api/settings/concurrency")) {
-        return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false, aboveLimit: false }), {
+        return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -276,7 +276,7 @@ describe("workspace name card", () => {
         });
       }
       if (url.endsWith("/api/settings/concurrency")) {
-        return new Response(JSON.stringify({ concurrency: 6, min: 1, max: 32, degraded: false, aboveLimit: false }), {
+        return new Response(JSON.stringify({ concurrency: 6, min: 1, max: 32, degraded: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -315,94 +315,6 @@ describe("workspace name card", () => {
     }
   });
 
-  test("a stored value above the system cap keeps the stored number and disables Save until an in-range value is typed", async () => {
-    // An operator lowered the platform cap to 4 after this workspace stored 8.
-    // An untouched save must NOT rewrite the tenant's value to the derived
-    // minimum, and it cannot send the stored 8 either (the server refuses it),
-    // so Save stays disabled with copy that says what to type.
-    const { win, cleanup } = installDom(`http://localhost${PATH}`);
-    const calls: Call[] = [];
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-      const method = init?.method ?? "GET";
-      const url = String(input);
-      calls.push({ method, url, body: String(init?.body ?? "") });
-      if (method === "PUT") {
-        return new Response(JSON.stringify({ concurrency: 3 }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      if (url.endsWith("/api/settings/concurrency")) {
-        return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false, aboveLimit: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return new Response(JSON.stringify({ grants: [] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
-    try {
-      const container = win.document.createElement("div");
-      win.document.body.appendChild(container);
-      const root = createRoot(container as unknown as Element);
-      await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
-
-      const input = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
-      // The field shows what the tenant stored, never the derived minimum.
-      expect(input.value).toBe("8");
-      expect(container.textContent).toContain(
-        t("en", "workspace.concurrencyStoredAboveSystem", { stored: 8 }),
-      );
-      const save = [...container.querySelectorAll("button")].find(
-        (button) => button.textContent === t("en", "workspace.concurrencySave"),
-      ) as unknown as HTMLButtonElement;
-      expect(save.disabled).toBe(true);
-
-      // Submit while untouched: nothing is written, so no stored value is
-      // silently replaced.
-      await act(async () =>
-        input
-          .closest("form")
-          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event),
-      );
-      expect(calls.filter((call) => call.method === "PUT")).toEqual([]);
-
-      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
-      await act(async () => {
-        setValue?.call(input, "3");
-        input.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
-      });
-      expect(save.disabled).toBe(false);
-      await act(async () =>
-        input
-          .closest("form")
-          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event),
-      );
-      expect(calls.filter((call) => call.method === "PUT")).toEqual([
-        {
-          method: "PUT",
-          url: "/dashboard/ws_acme/api/settings/concurrency",
-          body: JSON.stringify({ concurrency: 3 }),
-        },
-      ]);
-      expect(container.textContent).toContain(t("en", "workspace.concurrencySaved"));
-      // The accepted write proves the stored value is no longer above the cap
-      // in force: the warning is gone and an untouched Save is enabled again.
-      expect(container.textContent).not.toContain(
-        t("en", "workspace.concurrencyStoredAboveSystem", { stored: 3 }),
-      );
-      expect(save.disabled).toBe(false);
-
-      await act(async () => root.unmount());
-    } finally {
-      globalThis.fetch = realFetch;
-      cleanup();
-    }
-  });
-
   test("a non-JSON 2xx is a successful save with a cleared draft", async () => {
     // The write landed; only its body is unreadable. Reporting it as a failure
     // would leave the stale draft in the form after a save that stored a value.
@@ -419,7 +331,7 @@ describe("workspace name card", () => {
           headers: { "Content-Type": "text/html" },
         });
       }
-      return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false, aboveLimit: false }), {
+      return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -473,12 +385,12 @@ describe("workspace name card", () => {
         });
       }
       if (url === "/dashboard/ws_beta/api/settings/concurrency") {
-        return new Response(JSON.stringify({ concurrency: 5, min: 1, max: 32, degraded: false, aboveLimit: false }), {
+        return new Response(JSON.stringify({ concurrency: 5, min: 1, max: 32, degraded: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
       }
-      return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false, aboveLimit: false }), {
+      return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -510,10 +422,9 @@ describe("workspace name card", () => {
         win.dispatchEvent(new win.Event("popstate"));
       });
 
-      // B's read replaced A's: its stored value and ceiling, never A's draft.
+      // B's read replaced A's stored value, never A's draft.
       const reloaded = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
       expect(reloaded.value).toBe("5");
-      expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { max: 32 }));
       expect(calls.map((call) => call.url)).toContain("/dashboard/ws_beta/api/settings/concurrency");
 
       await act(async () => {
@@ -547,7 +458,7 @@ describe("workspace name card", () => {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       calls.push({ method: init?.method ?? "GET", url: String(input), body: String(init?.body ?? "") });
       return new Response(
-        JSON.stringify({ concurrency: 1, min: 1, max: 32, degraded, aboveLimit: false }),
+        JSON.stringify({ concurrency: 1, min: 1, max: 32, degraded }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }) as unknown as typeof fetch;

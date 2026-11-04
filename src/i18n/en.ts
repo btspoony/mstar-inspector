@@ -441,9 +441,6 @@ export const en = {
     concurrencyFailed: "Could not change the review concurrency — try again.",
     /** {max} = this workspace's own maximum. */
     concurrencyRange: "Up to {max} concurrent reviews.",
-    /** {stored} is above the cap currently in force (the platform number is never shown). */
-    concurrencyStoredAboveSystem:
-      "Stored value: {stored} — above the cap currently in force. Enter a smaller value to save; until then the current cap applies.",
     /** The stored cap could not be read — the numbers are a fallback, not this workspace's setting. */
     concurrencyUnreadable:
       "The stored review concurrency could not be read, so reviews are running one at a time. Nothing was changed and saving is disabled — retry the read.",
@@ -614,7 +611,6 @@ export const en = {
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
       concurrencyInvalid: "Concurrency must be a whole number from {min} to {max}. Nothing was stored.",
-      concurrencyAboveSystem: "That concurrency is above the cap currently in force — nothing was stored.",
     },
     ops: "Operations",
     opsCopy: "These actions change how this App answers incoming deliveries.",

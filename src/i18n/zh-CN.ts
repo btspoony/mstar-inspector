@@ -379,9 +379,6 @@ export const zhCN: Dictionary = {
     concurrencyFailed: "修改审查并发数失败，请重试。",
     /** {max} = 此工作区自己的上限。 */
     concurrencyRange: "最多 {max} 个并发审查。",
-    /** {stored} 高于当前生效的上限（不显示平台数值）。 */
-    concurrencyStoredAboveSystem:
-      "已存储值：{stored} — 高于当前生效的上限。请输入更小的值后再保存；在此之前按当前上限生效。",
     /** 已存储的并发上限无法读取——显示的数字只是兜底值，不是此工作区的设置。 */
     concurrencyUnreadable:
       "无法读取已存储的审查并发数，因此审查会逐个运行。设置未被修改且保存已禁用——请重新读取。",
@@ -519,7 +516,6 @@ export const zhCN: Dictionary = {
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
       concurrencyInvalid: "并发数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
-      concurrencyAboveSystem: "该并发数高于当前生效的上限 — 未存储任何内容。",
     },
     ops: "运维",
     opsCopy: "以下操作改变此 App 如何应答传入的投递。",

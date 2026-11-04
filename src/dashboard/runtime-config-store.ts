@@ -124,12 +124,11 @@ function resolveRow(
     : { concurrency: parsed, degraded: false };
 }
 
-/** Why a write was refused. `invalid_value` is the level's accepted range; `above_system`
- * is a workspace value over the system cap, refused so the route can answer a
- * keyed 400 instead of storing a number that would never apply;
- * `unknown_workspace` is a target that does not exist, so nothing was written.
+/** Why a write was refused: a value outside the level's accepted range, or a
+ * workspace target that does not exist. A workspace write is never refused for
+ * the system quota's sake — that comparison would disclose the platform number.
  */
-export type RuntimeConfigRefusal = "invalid_value" | "above_system" | "unknown_workspace";
+export type RuntimeConfigRefusal = "invalid_value" | "unknown_workspace";
 
 /** A refused write. The route maps `reason` to its keyed 400/404. */
 export class RuntimeConfigError extends Error {
@@ -139,18 +138,6 @@ export class RuntimeConfigError extends Error {
     super(message);
     this.name = "RuntimeConfigError";
     this.reason = reason;
-  }
-}
-
-/**
- * A workspace value above the system cap. The message never carries the system
- * number: the value is platform data, and the tenant face answers a refusal
- * without echoing it.
- */
-export class AboveSystemError extends RuntimeConfigError {
-  constructor(value: number) {
-    super("above_system", `workspace concurrency ${value} exceeds the current platform cap`);
-    this.name = "AboveSystemError";
   }
 }
 
@@ -250,15 +237,6 @@ const storedSystemCapSql = (keyParam: string, untrusted: string) =>
   `(SELECT ${trustedConcurrencySql("value", untrusted, SYSTEM_CONCURRENCY_MAX)} FROM review_runtime_settings WHERE key = ${keyParam})`;
 
 /**
- * The system cap as SQL, so a write statement can read the cap inside its own
- * predicate instead of trusting an earlier read. An absent row is the default;
- * anything not a trusted system integer is the conservative bound, matching what
- * a degraded read answers.
- */
-const systemCapSql = (keyParam: string) =>
-  `COALESCE(${storedSystemCapSql(keyParam, String(CONCURRENCY_MIN))}, ${SYSTEM_CONCURRENCY_DEFAULT})`;
-
-/**
  * Audit row + `review_runtime_settings` upsert, in that order, in ONE batch.
  * `before` carries the stored value only under the readers' trust rule, so a
  * corrupt row is recorded as `null` — a bare `CAST` would report `0` for
@@ -281,11 +259,10 @@ const SYSTEM_UPSERT_SQL = `
     updated_by = excluded.updated_by`;
 
 /**
- * The ledger row carries the same two guards as the UPDATE below — the target
- * exists and the value does not exceed the system cap — so a refused write
- * appends nothing. It computes `before` with a subquery against the
- * not-yet-updated row: a bind cannot read the old value after the write. That
- * subquery goes through the same trust fragment as the system audit, so a
+ * The ledger row carries the UPDATE's own guard — the target exists — so a
+ * refused write appends nothing. It computes `before` with a subquery against
+ * the not-yet-updated row: a bind cannot read the old value after the write.
+ * That subquery goes through the same trust fragment as the system audit, so a
  * corrupt stored value is recorded as `null` rather than the raw column.
  */
 const WORKSPACE_AUDIT_SQL = `
@@ -296,22 +273,17 @@ const WORKSPACE_AUDIT_SQL = `
                                   FROM workspaces WHERE id = ?3),
                      'after', ?4),
          ?5
-   WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)
-     AND ?4 <= ${WORKSPACE_CONCURRENCY_MAX}
-     AND ?4 <= ${systemCapSql("?6")}`;
+   WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;
 
 /**
- * The cap is part of the predicate: raising the workspace value above the
- * system cap is refused by this statement itself, against the cap as it stands
- * now, so no concurrent lowering can be raced by a separate check. Zero rows
- * changed means either refusal; the caller reads the post-write state to name
- * which one.
+ * The workspace value is bounded by its own maximum only. The system quota is
+ * NOT part of this predicate: refusing on it would let a tenant binary-search
+ * the platform number, and the quota already applies at admission as
+ * `min(system, workspace)`.
  */
 const WORKSPACE_UPDATE_SQL = `
   UPDATE workspaces SET max_concurrent_reviews = ?2
-   WHERE id = ?1 AND deleted_at IS NULL
-     AND ?2 <= ${WORKSPACE_CONCURRENCY_MAX}
-     AND ?2 <= ${systemCapSql("?3")}`;
+   WHERE id = ?1 AND deleted_at IS NULL`;
 
 /** Set the system cap. Audited with the actor; returns the stored value. */
 export async function setSystemConcurrency(
@@ -336,9 +308,10 @@ export async function setSystemConcurrency(
 }
 
 /**
- * Set the workspace cap. A value above the system cap is REFUSED (thrown as
- * `above_system`) rather than clamped; an unknown workspace is
- * `unknown_workspace`. Accepted writes are audited and return the stored value.
+ * Set the workspace cap. The value is validated against the workspace maximum
+ * only; an unknown workspace is `unknown_workspace`. Accepted writes are
+ * audited and return the stored value. The system quota is never compared
+ * here — it applies at admission and stays out of the tenant's answers.
  */
 export async function setWorkspaceConcurrency(
   db: DashboardD1,
@@ -356,26 +329,13 @@ export async function setWorkspaceConcurrency(
   const [, update] = await db.batch([
     db
       .prepare(WORKSPACE_AUDIT_SQL)
-      .bind(crypto.randomUUID(), actor, workspaceId, value, now, SYSTEM_CONCURRENCY_KEY),
-    db
-      .prepare(WORKSPACE_UPDATE_SQL)
-      .bind(workspaceId, value, SYSTEM_CONCURRENCY_KEY),
+      .bind(crypto.randomUUID(), actor, workspaceId, value, now),
+    db.prepare(WORKSPACE_UPDATE_SQL).bind(workspaceId, value),
   ]);
   if (update?.meta.changes === 1) return value;
 
-  // Zero rows: the write was refused, so nothing was written. The stored value
-  // was already validated against WORKSPACE_CONCURRENCY_MAX, so the only
-  // remaining refusal is the system cap — decided by the UPDATE's own
-  // predicate, never by a check before it. The refusal message carries no
-  // platform number.
-  const post = await db
-    .prepare(
-      `SELECT (SELECT 1 FROM workspaces WHERE id = ?1 AND deleted_at IS NULL) AS target`,
-    )
-    .bind(workspaceId)
-    .first<{ target: unknown }>();
-  if (post === null || post.target === null) throw new UnknownWorkspaceError(workspaceId);
-  throw new AboveSystemError(value);
+  // Zero rows: the target is not a live workspace, so nothing was written.
+  throw new UnknownWorkspaceError(workspaceId);
 }
 
 /** A refused write against a workspace id that does not exist. */

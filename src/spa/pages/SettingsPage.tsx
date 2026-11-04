@@ -1128,10 +1128,7 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
     // action in that state is the re-read.
     if (loaded.degraded) return;
     // An untouched form must submit the STORED value, never a derived one: the
-    // stored number is what the tenant set. Above the cap currently in force
-    // there is no honest untouched submit — the server would refuse it — so the
-    // form stays disabled until the operator types a value inside the range.
-    if (draft === null && loaded.aboveLimit) return;
+    // stored number is what the tenant set.
     setBusy(true);
     const submitted = Number((draft ?? String(loaded.concurrency)).trim());
     try {
@@ -1148,9 +1145,7 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         // `degraded` is NOT cleared here: it reports that some stored level could
         // not be read, and a workspace write does not repair an unreadable system
         // row — which is precisely the level that keeps reviews serial.
-        // `aboveLimit` IS cleared: the write predicate admitted this value
-        // against the cap in force, so the stored value is no longer above it.
-        setLoaded((previous) => previous && { ...previous, concurrency: stored, aboveLimit: false });
+        setLoaded((previous) => previous && { ...previous, concurrency: stored });
         setDraft(null);
       }
       setConcurrencyNotice(outcome);
@@ -1205,20 +1200,8 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
             <span className="text-xs text-muted-foreground">
               {t(locale, "workspace.concurrencyRange", { max: loaded.max })}
             </span>
-            {loaded.aboveLimit ? (
-              // The applicable cap was lowered after this workspace stored its
-              // own. The stored number is what the tenant set, so it stays in
-              // the field — but it is above what applies, so Save is disabled
-              // until the operator types a value the server accepts. The
-              // platform's number is never shown here.
-              <span className="text-xs text-muted-foreground">
-                {t(locale, "workspace.concurrencyStoredAboveSystem", {
-                  stored: loaded.concurrency,
-                })}
-              </span>
-            ) : null}
           </div>
-          <Button type="submit" disabled={busy || (draft === null && loaded.aboveLimit)}>
+          <Button type="submit" disabled={busy}>
             {t(locale, "workspace.concurrencySave")}
           </Button>
         </form>

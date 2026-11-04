@@ -12,8 +12,8 @@
  *   - absent system row → 256; NULL workspace column → 32
  *   - effective = min(system, workspace)
  *   - the system value is an integer in 1..256 (the platform quota);
- *     the workspace value is an integer in 1..32, and a value above the system
- *     cap is REFUSED by the write itself, never clamped
+ *     the workspace value is an integer in 1..32, independent of the system
+ *     quota — that quota applies at admission, never as a write refusal
  *   - a PRESENT but unparseable value degrades to the conservative cap
  *   - a PRESENT value that is not a string or number is untrusted, never
  *     coerced (`["16"]`, `true` and `{}` all degrade)
@@ -29,7 +29,6 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
-  AboveSystemError,
   CONCURRENCY_MIN,
   SYSTEM_CONCURRENCY_DEFAULT,
   SYSTEM_CONCURRENCY_KEY,
@@ -307,11 +306,19 @@ describe("runtime-config-store", () => {
     expect(auditRows(db)).toEqual([]);
   });
 
-  test("a first workspace write above the system value is refused and writes nothing", async () => {
+  test("a workspace write is never refused for the system quota's sake", async () => {
+    // Refusing on the system cap would let a tenant binary-search the platform
+    // number; the quota applies at admission as min(system, workspace).
     const db = fixture();
     await setSystemConcurrency(db, 8, ACTOR);
-    await expect(setWorkspaceConcurrency(db, WS, 16, ACTOR)).rejects.toThrow();
-    expect(storedWorkspace(db)).toBeNull();
+    expect(await setWorkspaceConcurrency(db, WS, 16, ACTOR)).toBe(16);
+    expect(storedWorkspace(db)).toBe(16);
+    expect(await getEffectiveConcurrency(db, WS)).toEqual({
+      system: 8,
+      workspace: 16,
+      effective: 8,
+      degraded: false,
+    });
   });
 
   test("a refused workspace write leaves an existing value untouched", async () => {
@@ -424,11 +431,9 @@ describe("runtime-config-store", () => {
     expect(auditRows(db)).toEqual([]);
   });
 
-  test("the above_system refusal never echoes the platform cap", async () => {
-    // A hand-edited `" 8"` (leading space) is a value the write predicate does
-    // NOT accept as a cap: `systemCapSql` answers the conservative 1, so every
-    // workspace write above 1 is refused. A second parser reading the row would
-    // report 8, i.e. a ceiling no write was ever compared against.
+  test("a corrupt system row does not affect workspace writes", async () => {
+    // The tenant path never parses the system row, so an unreadable quota can
+    // neither refuse a write nor leak its fallback through one.
     const db = fixture();
     db.raw
       .prepare(
@@ -436,34 +441,8 @@ describe("runtime-config-store", () => {
          VALUES (?1, ' 8', '2026-11-03T00:00:00.000Z')`,
       )
       .run(SYSTEM_CONCURRENCY_KEY);
-    const refusal = await setWorkspaceConcurrency(db, WS, 4, ACTOR).catch((error: unknown) => error);
-    expect(refusal).toBeInstanceOf(AboveSystemError);
-    expect((refusal as AboveSystemError).message).toBe(
-      "workspace concurrency 4 exceeds the current platform cap",
-    );
-    expect(storedWorkspace(db)).toBeNull();
-  });
-
-  test("a system cap lowered during the write refuses it instead of racing the check", async () => {
-    const db = fixture();
-    await setSystemConcurrency(db, 32, ACTOR);
-    // The cap drops to 8 after any pre-write read but before the UPDATE runs, so
-    // a separate check would still see 32 and admit 16.
-    const racing = lowerCapAtWrite(db, 8);
-    await expect(setWorkspaceConcurrency(racing, WS, 16, ACTOR)).rejects.toBeInstanceOf(
-      AboveSystemError,
-    );
-    expect(storedWorkspace(db)).toBeNull();
-    expect(auditRows(db)).toEqual([
-      { action: "runtime.concurrency.system.set", target_id: SYSTEM_CONCURRENCY_KEY },
-    ]);
-  });
-
-  test("a workspace value at the current system cap is accepted", async () => {
-    const db = fixture();
-    await setSystemConcurrency(db, 8, ACTOR);
-    expect(await setWorkspaceConcurrency(db, WS, 8, ACTOR)).toBe(8);
-    expect(storedWorkspace(db)).toBe(8);
+    expect(await setWorkspaceConcurrency(db, WS, 20, ACTOR)).toBe(20);
+    expect(storedWorkspace(db)).toBe(20);
   });
 
   test("an accepted write is stored and audited with its actor", async () => {
@@ -484,19 +463,3 @@ describe("runtime-config-store", () => {
     ]);
   });
 });
-
-/**
- * Wrap the fixture so the system cap is lowered the instant the write batch
- * starts — after any read the store might do first, before its UPDATE.
- */
-function lowerCapAtWrite(db: TestD1, cap: number): DashboardD1 {
-  return {
-    prepare: (query: string) => db.prepare(query),
-    async batch(statements) {
-      db.raw
-        .prepare("UPDATE review_runtime_settings SET value = ?2 WHERE key = ?1")
-        .run(SYSTEM_CONCURRENCY_KEY, String(cap));
-      return db.batch(statements);
-    },
-  };
-}

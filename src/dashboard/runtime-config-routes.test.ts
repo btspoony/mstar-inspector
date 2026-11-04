@@ -9,10 +9,10 @@
  *
  * Both routes write through the Task-1 store, so these tests also prove the
  * route-level mapping of every store refusal: a workspace value outside 1..32
- * (or a system value outside 1..250) is a keyed 400, and a workspace value above
- * the current system cap is a keyed 400 — never a silent clamp. Accepted writes
- * land with their `platform_audit_events` row; refused writes change no row and
- * append no audit row. The tenant read never returns the system value.
+ * (or a system value outside 1..256) is a keyed 400. Accepted writes land with
+ * their `platform_audit_events` row; refused writes change no row and append no
+ * audit row. The tenant read and write never compare against the system value —
+ * that quota applies at admission and stays out of this face.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -214,26 +214,15 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
     expect(auditRows(db)).toEqual([]);
   });
 
-  test("a value above the system cap is refused with a keyed 400, never clamped", async () => {
+  test("a value above the system quota is still accepted, with no system data exposed", async () => {
+    // Refusing on the quota would let a tenant binary-search the platform number
+    // through accepted and refused writes. The quota applies at admission.
     const { db } = fixture();
     seedSystemCap(db, 8);
     const res = await putConcurrency(db, "ws-acme", "dana", { concurrency: 20 });
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({
-      key: "settings.error.concurrencyAboveSystem",
-      message: expect.any(String),
-    });
-    // Nothing was stored and nothing was audited — a clamp would show up here.
-    expect(storedWorkspace(db)).toBeNull();
-    expect(auditRows(db)).toEqual([]);
-  });
-
-  test("a value equal to the system cap is accepted", async () => {
-    const { db } = fixture();
-    seedSystemCap(db, 8);
-    const res = await putConcurrency(db, "ws-acme", "dana", { concurrency: 8 });
     expect(res.status).toBe(200);
-    expect(storedWorkspace(db)).toBe(8);
+    expect(await res.json()).toEqual({ concurrency: 20 });
+    expect(storedWorkspace(db)).toBe(20);
   });
 
   test("an unreadable stored cap surfaces degraded on both read faces, not a normal number", async () => {
@@ -250,7 +239,6 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       min: 1,
       max: 32,
       degraded: true,
-      aboveLimit: false,
     });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
       concurrency: 1,
@@ -258,21 +246,6 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       max: 256,
       degraded: true,
     });
-  });
-
-  test("an unreadable stored cap refuses the write without naming the platform number", async () => {
-    // `systemCapSql` answers the conservative 1 for an untrusted value, so the
-    // write is refused against 1 — but the tenant face never learns that number.
-    const { db } = fixture();
-    seed(db, "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
-      "review.concurrency.system", "not-a-number", new Date().toISOString());
-    const res = await putConcurrency(db, "ws-acme", "dana", { concurrency: 4 });
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({
-      key: "settings.error.concurrencyAboveSystem",
-      message: expect.any(String),
-    });
-    expect(storedWorkspace(db)).toBeNull();
   });
 
   test("an out-of-range, non-integer or non-numeric value is a keyed 400", async () => {
@@ -307,7 +280,6 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
         min: 1,
         max: 32,
         degraded: false,
-        aboveLimit: false,
       });
     }
   });
@@ -319,19 +291,10 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       min: 1,
       max: 32,
       degraded: false,
-      aboveLimit: false,
     });
     expect((await getConcurrency(db, "ws-acme", "frank")).status).toBe(404);
   });
 
-  test("GET flags a stored value above the cap in force without echoing that cap", async () => {
-    const { db } = fixture();
-    await putConcurrency(db, "ws-acme", "dana", { concurrency: 20 });
-    seedSystemCap(db, 6);
-    const body = await (await getConcurrency(db, "ws-acme", "dana")).json();
-    expect(body).toMatchObject({ concurrency: 20, aboveLimit: true });
-    expect(body).not.toHaveProperty("system");
-  });
 });
 
 describe("GET/PATCH /_internal_admin/api/runtime", () => {

@@ -23,11 +23,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { stripJsonComments } from "../../scripts/check-image-inputs";
-import {
-  QUEUE_CONCURRENCY_CEILING,
-  SYSTEM_CONCURRENCY_MAX,
-  WORKSPACE_CONCURRENCY_MAX,
-} from "../../src/dashboard/runtime-config-store";
+import { QUEUE_CONCURRENCY_CEILING } from "../../src/dashboard/runtime-config-store";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const CONFIG_PATH = join(REPO_ROOT, "wrangler.jsonc");
@@ -268,8 +264,9 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
   /** `max_concurrency` is the deploy-time CEILING only — the effective
    * admission is min(system, workspace) read from D1 per message — so parity
    * alone would pass with any equal value. Both blocks therefore pin the same
-   * constant, `QUEUE_CONCURRENCY_CEILING`, which the runtime cap range reads as
-   * its own maximum (asserted immediately below): above the platform's 250/32
+   * constant, `QUEUE_CONCURRENCY_CEILING`: the platform's delivery ceiling. The
+ * accepted runtime ranges live beside their write predicates in
+ * runtime-config-store.test.ts, not here. Above the platform's 250/32
    * defaults and bounded because each attempt's own sandbox id starts its own
    * container. The other tuning values (`max_batch_size`, retries, DLQ) stay
    * config decisions: set-equality above already keeps the two blocks from
@@ -286,21 +283,6 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
         `wrangler.jsonc: ${block} max_concurrency ceiling`,
       ).toBe(QUEUE_CONCURRENCY_CEILING);
     }
-  });
-
-  /** The invariant the two numbers above exist for: a cap the deployed ceiling
-   * cannot deliver is a setting that silently never applies. A cap raised to 250
-   * against a ceiling of 64 was exactly that — accepted by every write and
-   * unreachable at admission. Asserted through the predicate the writes and
-   * reads actually run, so the bound is behaviour rather than a re-statement of
-   * the constant that defines it. */
-  test("the system quota may exceed the queue ceiling, and never falls below it", () => {
-    // The system quota may name more than the queue can saturate (256 vs 250):
-    // the difference is a documented, intentional gap, never a config drift.
-    // The accepted ranges themselves are driven through the real write
-    // predicates in runtime-config-store.test.ts, not re-stated here.
-    expect(SYSTEM_CONCURRENCY_MAX).toBeGreaterThanOrEqual(QUEUE_CONCURRENCY_CEILING);
-    expect(WORKSPACE_CONCURRENCY_MAX).toBeLessThanOrEqual(SYSTEM_CONCURRENCY_MAX);
   });
 
   /** A second/unregistered container entry must fail the lock, not hide behind

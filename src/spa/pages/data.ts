@@ -1507,24 +1507,22 @@ export function parseModels(data: unknown): ModelsPayload | null {
   return { groups };
 }
 
-/** The workspace concurrency face: the stored cap plus its own range and whether it is above what applies. */
+/** The workspace concurrency face: the stored cap plus its own range. */
 export type ConcurrencySettings = {
   concurrency: number;
   min: number;
   max: number;
   /** The stored cap could not be read: the numbers above are the conservative fallback. */
   degraded: boolean;
-  /** The stored value is above the cap currently in force; the server owns the comparison. */
-  aboveLimit: boolean;
 };
 
 export function parseConcurrencySettings(data: unknown): ConcurrencySettings | null {
   if (!isRecord(data)) return null;
-  const { concurrency, min, max, degraded, aboveLimit } = data;
+  const { concurrency, min, max, degraded } = data;
   if (typeof concurrency !== "number") return null;
   if (typeof min !== "number" || typeof max !== "number") return null;
-  if (typeof degraded !== "boolean" || typeof aboveLimit !== "boolean") return null;
-  return { concurrency, min, max, degraded, aboveLimit };
+  if (typeof degraded !== "boolean") return null;
+  return { concurrency, min, max, degraded };
 }
 
 /**

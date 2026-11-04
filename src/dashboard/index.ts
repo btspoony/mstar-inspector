@@ -182,7 +182,6 @@ import {
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
 import {
-  AboveSystemError,
   CONCURRENCY_MIN,
   RuntimeConfigError,
   WORKSPACE_CONCURRENCY_MAX,
@@ -2304,9 +2303,9 @@ const workspaceNameRoute = async (c: DashboardContext) => {
 // effective cap is min(system, this), but the system level is platform data —
 // the tenant payload exposes only the workspace's own value and its own
 // maximum. Owner/admin may read and change it; a plain member gets the tenant
-// 404 — the value is not theirs either way. The store owns validation and
-// refuses a value above the system cap rather than clamping it, so no request
-// can store a number that would never apply.
+// 404 — the value is not theirs either way. A write is validated against the
+// workspace maximum only: comparing it with the system quota would let the
+// tenant binary-search that number through accepted and refused writes.
 const workspaceConcurrencyGate = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return { ok: false as const, response: member.response };
@@ -2327,11 +2326,6 @@ const workspaceConcurrencyReadRoute = async (c: DashboardContext) => {
     min: CONCURRENCY_MIN,
     max: WORKSPACE_CONCURRENCY_MAX,
     degraded: caps.degraded,
-    // Only the fact that the stored value is above what currently applies:
-    // the system number itself is platform data and stays out of this face.
-    // The read path already rejects a workspace value above its own maximum
-    // (degraded → 1), so the system cap is the only bound left to compare.
-    aboveLimit: caps.workspace > caps.system,
   });
 };
 
@@ -2357,13 +2351,8 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
   } catch (err) {
     if (!(err instanceof RuntimeConfigError)) throw err;
     // A row retired between the gate and the UPDATE is the same 404 an unknown
-    // ref gets; the cap refusal carries the ceiling its own predicate compared
-    // against, so this route never re-derives it.
+    // ref gets.
     if (err.reason === "unknown_workspace") return await tenantNotFound(c);
-    if (err instanceof AboveSystemError) {
-      // No params: the refusal must not echo the platform cap.
-      return keyed400(c, SETTINGS_400_KEYS.concurrencyAboveSystem);
-    }
     return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
       min: CONCURRENCY_MIN,
       max: WORKSPACE_CONCURRENCY_MAX,
@@ -2862,7 +2851,6 @@ const SETTINGS_400_KEYS = {
   githubMetadataRefreshFailed: "settings.error.githubMetadataRefreshFailed",
   /** Workspace review-concurrency cap (iteration spec §2.3). */
   concurrencyInvalid: "settings.error.concurrencyInvalid",
-  concurrencyAboveSystem: "settings.error.concurrencyAboveSystem",
 } as const satisfies Record<string, DictionaryKey>;
 
 /**

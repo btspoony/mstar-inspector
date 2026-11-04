@@ -1834,3 +1834,37 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     expect((db.raw.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
   });
 });
+
+describe("migrations/0043_workspace_concurrency_bound.sql", () => {
+  test("clamps stored workspace caps above 32 and leaves every other row alone", () => {
+    const db = createMigratedTestD1();
+    const insert = db.raw.prepare(
+      `INSERT INTO workspaces (id, slug, name, created_at, max_concurrent_reviews)
+       VALUES (?1, ?1, ?1, '2026-11-04T00:00:00.000Z', ?2)`,
+    );
+    // 33 and 64 were legal under the previous shared 1..64 range; 32 is the
+    // new maximum, 8 an ordinary value, NULL the absent setting.
+    for (const [id, cap] of [
+      ["ws_40", 40],
+      ["ws_33", 33],
+      ["ws_32", 32],
+      ["ws_8", 8],
+      ["ws_null", null],
+    ] as const) {
+      insert.run(id, cap);
+    }
+
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0043_workspace_concurrency_bound.sql"), "utf8"));
+
+    const rows = db.raw
+      .query("SELECT id, max_concurrent_reviews AS cap FROM workspaces WHERE id LIKE 'ws\\_%' ESCAPE '\\' ORDER BY id")
+      .all() as Array<{ id: string; cap: number | null }>;
+    expect(Object.fromEntries(rows.map((row) => [row.id, row.cap]))).toEqual({
+      ws_40: 32,
+      ws_33: 32,
+      ws_32: 32,
+      ws_8: 8,
+      ws_null: null,
+    });
+  });
+});

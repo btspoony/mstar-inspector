@@ -2324,8 +2324,9 @@ Observation checklist after a concurrency change:
 
 - [ ] Both blocks carry the same ceiling — the `max_concurrency` constant and
       `max_batch_size: 1` at the top level and inside `env.production`
-      (`bun test tests/contracts/wrangler-env-parity.test.ts` locks the pair
-      and the runtime cap range).
+      (`bun test tests/contracts/wrangler-env-parity.test.ts` locks the pair;
+      the accepted runtime ranges are driven through their write predicates in
+      `src/dashboard/runtime-config-store.test.ts`).
 - [ ] Throughput moved the way the runtime caps predict: raising the D1 caps
       changes the admitted rate on the **next** message; raising only the
       ceiling changes nothing while the caps stay at 256/32.
@@ -2343,10 +2344,10 @@ request cache — so a change applies to the **next** message without a
 redeploy; reviews already running keep their slot until their `review_inflight`
 row expires.
 
-| Cap | Default / maximum | Stored in | Changed by |
+| Cap | Default and maximum | Stored in | Changed by |
 |---|---|---|---|
-| System | 256 | `review_runtime_settings`, key `review.concurrency.system` (migration `0040`; absent row = default) | platform operator — admin console `PATCH /_internal_admin/api/runtime` with `{"concurrency": <1..256>}` |
-| Workspace | 32 | `workspaces.max_concurrent_reviews` (migration `0040`; NULL = default) | workspace owner/admin — dashboard Settings, `PUT /<workspaceRef>/api/settings/concurrency` |
+| System | `256` (absent row = default) | `review_runtime_settings`, key `review.concurrency.system` (migration `0040`) | platform operator — admin console `PATCH /_internal_admin/api/runtime` with `{"concurrency": <1..256>}` |
+| Workspace | `32` (NULL column = default) | `workspaces.max_concurrent_reviews` (migration `0040`) | workspace owner/admin — dashboard Settings, `PUT /<workspaceRef>/api/settings/concurrency` |
 | Per PR | 1 | `review_inflight` primary key | never configurable |
 
 - The two levels have their own ranges: system `1..256`, workspace `1..32`.
@@ -2357,15 +2358,17 @@ row expires.
   (`WORKSPACE_CONCURRENCY_MAX`) is a tenant bound, so no workspace can ask for
   more than `32` no matter how high the system quota goes.
   `tests/contracts/wrangler-env-parity.test.ts` pins the config to
-  `QUEUE_CONCURRENCY_CEILING` and the accepted ranges to their own maxima.
+  `QUEUE_CONCURRENCY_CEILING`; `src/dashboard/runtime-config-store.test.ts`
+  drives the accepted ranges through the real write predicates.
 - The tenant face never renders or returns the system value: its settings read
-  answers `{ concurrency, min, max, degraded, aboveLimit }`, its write range is
-  `1..32`, and a refusal above the current system cap is a keyed 400 that echoes
-  no platform number.
-- A workspace value above the **current** system cap is refused with a keyed
-  400, never clamped; lowering the system cap below an existing workspace value
-  needs no workspace write — `min` applies the system value from the next
-  message on.
+  answers `{ concurrency, min, max, degraded }`, its write range is `1..32`, and
+  a workspace write is never compared with the system quota — that comparison
+  would let a tenant binary-search the platform number. The quota applies at
+  admission as `min(system, workspace)`.
+- A workspace value is accepted whenever it is inside `1..32`, regardless of
+  the current system quota. Lowering the quota below an existing workspace
+  value needs no workspace write — `min` applies the system value from the next
+  message on, and the tenant's card keeps showing its own stored value.
 - Migration `0043` rewrites every stored workspace value above `32` (legal
   under the previous `1..64` range) down to `32` when it applies. This is a
   one-time, customer-visible lowering of an existing setting, performed at
