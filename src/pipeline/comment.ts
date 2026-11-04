@@ -383,12 +383,14 @@ function closureCoverageLine(coverage: ClosureCoverage): string {
 function priorFindingLines(rows: ClosureRow[]): string[] {
   const shown = rows.slice(0, CLOSURE_MAX_ROWS);
   const overflow = rows.length - shown.length;
-  // Row text is model/lifecycle-echoed data, so it carries the SAME two
-  // structure channels as a report field: raw HTML can fold everything after
-  // it, and a newline would break the table row. Neutralize first (the `<`/`&`
-  // escape the report fields get), then escape the pipes the table grammar
-  // owns; a line break becomes a space because a cell is one line.
-  const cell = (text: string): string => neutralizeReportText(text.replace(/\n/g, " ")).replace(/\|/g, "\\|");
+  // Row text is model/lifecycle-echoed data: raw HTML can fold everything
+  // after it, and a newline would break the table row. So apply the same
+  // `&`-then-`<` escape a report field gets, escape the pipes the table
+  // grammar owns, and turn a line break into a space (a cell is one line).
+  // Line STRUCTURE is not escaped: every cell is embedded after `| `, so
+  // nothing in it can start a heading, fence or break.
+  const cell = (text: string): string =>
+    text.replace(/\n/g, " ").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replace(/\|/g, "\\|");
   const lines: string[] = [];
   if (shown.length > 0) {
     lines.push(
@@ -466,10 +468,11 @@ function insertBeforeHeading(body: string, anchor: string, block: string): strin
 
 /**
  * A report line markdown would read as STRUCTURE rather than text: an ATX
- * heading; a setext underline / thematic break (any of `-`, `*`, `_` at least
- * three times, optionally spaced — those turn the line above them into a
- * heading — or a `===` underline); or a code-fence opener (3+ backticks or
- * tildes), which left unclosed runs to the end of the comment. The four raw
+ * heading; a setext underline (the whole line is 1+ `=` or `-`, optionally
+ * followed by spaces — it turns the line above it into a heading) or a
+ * thematic break (any of `-`, `*`, `_` at least three times, optionally
+ * spaced); or a code-fence opener (3+ backticks or tildes), which left
+ * unclosed runs to the end of the comment. The four raw
  * report fields are model/PR-echoed text, so a spoofed `### Findings` would
  * otherwise steal the anchor the revalidated table is inserted at, a
  * `## 📋 Review` would fork the layout, and a stray `~~~` would swallow every
@@ -477,7 +480,7 @@ function insertBeforeHeading(body: string, anchor: string, block: string): strin
  * those as the same structure, so the indent is part of the match (4+ spaces
  * is a code block, a structure no heading anchor can be forged in).
  */
-const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|={3,}\s*$|`{3,}|~{3,})/;
+const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|`{3,}|~{3,})/;
 
 /**
  * Escape the first character of every structure line, so the field stays text:

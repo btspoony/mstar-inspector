@@ -1003,6 +1003,33 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(safe).toContain("-- two dashes");
   });
 
+  test("every setext-underline form is neutralized — a lone `=` or `-` shapes the line above too", () => {
+    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
+    for (const underline of ["===", "=", "-------", "-", "  ==="]) {
+      const indent = underline.slice(0, underline.length - underline.trimStart().length);
+      const marker = underline.slice(indent.length);
+      const body = insertReportSections(
+        rendered,
+        { ...report, verified: `suite green\n${underline}\ntail` },
+        "### Revalidated findings\n\nnone",
+      );
+      // Escaped in place, indent kept: the divider stays text, never a heading.
+      expect(body).toContain(`\n${indent}\\${marker}\ntail\n`);
+      expect(body.split("\n").filter((line) => /^ {0,3}[-=]+\s*$/.test(line))).toHaveLength(0);
+      // The sections after the field keep their levels: no line became setext.
+      expect(body.split("\n").filter((line) => /^#{2,4} /.test(line))).toEqual([
+        "## ✅ Verdict: `ship it`",
+        "## 📋 Review",
+        "### Revalidated findings",
+        "### Findings",
+        "### Linked-issue AC",
+        "### ✅ Verified",
+        "### 🗑️ Considered & rejected",
+        "## 🛠️ Plan to fix",
+      ]);
+    }
+  });
+
   test("an anchor miss skips that section silently, leaving the layout intact", () => {
     // Not the engine's layout: no `## 📋 Review` line. The renderer is pure —
     // it returns the body unchanged for that section and logs nothing.
