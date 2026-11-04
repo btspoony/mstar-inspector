@@ -90,6 +90,36 @@ describe("truncateSummary", () => {
     expect(truncated.startsWith("x".repeat(SUMMARY_MD_LIMIT - 1))).toBe(true);
     expect(truncated.endsWith("…")).toBe(true);
   });
+
+  test("a cut inside an unclosed fence closes it, so the rest of the body is not code", () => {
+    const narrative = `Intro.\n\n\`\`\`ts\n${"const x = 1;\n".repeat(900)}\`\`\`\n\nTail.`;
+    const truncated = truncateSummary(narrative);
+    const fenceLines = truncated.split("\n").filter((line) => /^ {0,3}`{3,}/.test(line));
+    expect(truncated.length).toBe(SUMMARY_MD_LIMIT);
+    expect(truncated.endsWith("…")).toBe(true);
+    // Opening fence plus the closer the cut appends — an odd count would render
+    // everything after the summary as code.
+    expect(fenceLines).toHaveLength(2);
+  });
+
+  test("a cut inside a fence inside a fold closes the fence before the fold", () => {
+    const narrative = `<details>\n<summary>Plan</summary>\n\n\`\`\`md\n${"step\n".repeat(3000)}\`\`\`\n</details>`;
+    const truncated = truncateSummary(narrative);
+    expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
+    // The fence opened inside the fold, so it has to close first.
+    expect(truncated.endsWith("```\n\n</details>…")).toBe(true);
+    expect((truncated.match(/<details>/g) ?? []).length).toBe((truncated.match(/<\/details>/g) ?? []).length);
+  });
+
+  test("a narrative without a fence or fold is byte-identical", () => {
+    const narrative = "Two issues found.\n\n- **auth**: expiry\n- 100% covered\n";
+    expect(truncateSummary(narrative)).toBe(narrative);
+  });
+
+  test("an unclosed fence under the budget is closed too", () => {
+    // No cut means no ellipsis, but the fence still has to end before the body continues.
+    expect(truncateSummary("Intro\n```\ncmd")).toBe("Intro\n```\ncmd\n```");
+  });
 });
 
 describe("buildReviewBody", () => {
@@ -110,6 +140,19 @@ describe("buildReviewBody", () => {
     expect(body).toContain("- **Location**: `src/auth.ts:21`");
     expect(body).toContain("- **Category**: logic");
     expect(body).toContain("- **Merge class**: should-fix");
+  });
+
+  test("a summary cut inside a fence keeps the findings outside the code block", () => {
+    const body = buildReviewBody({
+      ...output,
+      summary_md: `Intro.\n\n\`\`\`ts\n${"const x = 1;\n".repeat(900)}`,
+    });
+    const findingsAt = body.indexOf("### Findings");
+    expect(findingsAt).toBeGreaterThan(-1);
+    // The fence has to be balanced before the findings: an open one would
+    // render them, and the rest of the review, as code.
+    const fenceLines = body.slice(0, findingsAt).split("\n").filter((line) => /^ {0,3}`{3,}/.test(line));
+    expect(fenceLines).toHaveLength(2);
   });
 
   test("nothing is duplicated: verdict, score and each finding title appear exactly once", () => {
