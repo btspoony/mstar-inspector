@@ -2378,11 +2378,13 @@ async function processMessage(
     }
     const { commenter, githubAppId, workspaceId } = resolution;
     // Supersede skip (migration 0044): a queued delivery whose PR head has
-    // already advanced must cost nothing — no config read, no admission row,
-    // no container. The read is select-only and sits AFTER the paused gate
-    // (a paused App keeps today's ack-and-stop) and BEFORE
-    // assertAppConfigComplete / admission, so a storage fault can only add
-    // this one read, never a side effect.
+    // already advanced must cost nothing that can fail it, hold the guard, or
+    // start work — no admission row, no sandbox, no Check, no publication.
+    // The per-App credential resolution above has already run (the paused gate
+    // needs it); this read is select-only and sits AFTER that gate (a paused
+    // App keeps today's ack-and-stop) and BEFORE assertAppConfigComplete /
+    // admission, so a storage fault can only add this one read, never a side
+    // effect.
     //
     // The ledger advances on EVERY verified non-reject delivery, including the
     // ones that enqueue nothing (a `synchronize` in `open` mode, a paused App,
