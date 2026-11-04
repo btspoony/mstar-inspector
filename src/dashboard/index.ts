@@ -1705,10 +1705,10 @@ type AdminGate =
     }
   | { ok: false; response: Response };
 
-// GitHub login syntax (qc1/qc2 F-003): letters, digits, hyphens — 1–39
-// chars. Anything else can never match a real GitHub login and would sit in
-// the table as a dead row nobody can claim.
-const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9-]{1,39}$/;
+// GitHub login syntax (qc1/qc2 F-003): letters, digits, single hyphens — 1–39
+// chars, never starting or ending with a hyphen and never two in a row (the
+// grammar GitHub itself enforces, so every accepted entry is claimable).
+const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 
 /** Invitations live for 7 days — long enough to survive a weekend sign-up. */
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;

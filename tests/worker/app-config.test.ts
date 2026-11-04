@@ -2985,9 +2985,10 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "1", owners: "ada" });
     const before = gateRow(db, app.id);
-    // A leading @, a comma-joined pair and a login past GitHub's 39-char limit
-    // can never match a real owner: each is refused by name.
-    for (const bad of ["@acme", "acme, otherco", "a".repeat(40)]) {
+    // A leading @, a comma-joined pair, a login past GitHub's 39-char limit and
+    // the hyphen placements GitHub forbids (leading, trailing, doubled) can
+    // never match a real owner: each is refused by name.
+    for (const bad of ["@acme", "acme, otherco", "a".repeat(40), "-acme", "acme-", "a--b"]) {
       const res = await postForm(SETTINGS, cookie, makeEnv(db), {
         op: "save-allowlist",
         enabled: "1",

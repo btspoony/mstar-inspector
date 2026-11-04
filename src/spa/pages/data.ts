@@ -1651,7 +1651,7 @@ export function splitModelChain(raw: string | null | undefined): string[] {
 }
 
 /** Same GitHub login grammar the invite route enforces. */
-export const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9-]{1,39}$/;
+export const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 
 export function inviteLoginNoticeKey(login: string): "notice.error.enterLogin" | "notice.error.invalidLogin" | null {
   const trimmed = login.trim();
