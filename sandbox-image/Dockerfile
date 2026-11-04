@@ -7,6 +7,10 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the report seat's prompt now renders its character budgets from the
+# shared `REPORT_FIELD_MAX_CHARS` the validator enforces, so a budget change
+# cannot ask the seat for a document the gate then rejects whole. A stale image
+# keeps the hand-typed numbers and loses every report to `none` on any edit.
 # rebuild: the report document is now bound to the reviewed head — the runner
 # writes `headSha` from the envelope's `target.head_sha` and the Worker refuses
 # a document bound to another head, so a file left at the fixed path by an

@@ -16,7 +16,7 @@ import {
   revalidatedNotes,
   runReportSeat,
 } from "../../packages/runner/src/report";
-import type { PrContext } from "../../packages/shared/src/report-wire";
+import { REPORT_FIELD_MAX_CHARS, type PrContext } from "../../packages/shared/src/report-wire";
 import type { RecheckDoc, RecheckInput } from "../../packages/shared/src/recheck-wire";
 
 const PR_CONTEXT: PrContext = {
@@ -76,6 +76,20 @@ describe("reportAssignment", () => {
   test("is deterministic — the same input yields the same assignment", () => {
     const input = { envelopeJson: "{}", revalidated: "none", prContext: PR_CONTEXT };
     expect(reportAssignment(input)).toBe(reportAssignment(input));
+  });
+
+  test("renders every character budget from REPORT_FIELD_MAX_CHARS — the validator's own numbers", () => {
+    const assignment = reportAssignment({ envelopeJson: "{}", revalidated: "none", prContext: PR_CONTEXT });
+    for (const [field, max] of Object.entries(REPORT_FIELD_MAX_CHARS)) {
+      expect(assignment).toContain(`${field} ${max}`);
+    }
+    // Every "<field> <number>" pair the prompt states IS the shared constant: a
+    // re-typed literal would make the seat write documents the gate rejects.
+    const stated = [...assignment.matchAll(/\b(overview|linkedIssueAc|verified|rejected|planToFix) (\d+)/g)];
+    expect(stated).toHaveLength(Object.keys(REPORT_FIELD_MAX_CHARS).length);
+    for (const [, field, max] of stated) {
+      expect(Number(max)).toBe(REPORT_FIELD_MAX_CHARS[field as keyof typeof REPORT_FIELD_MAX_CHARS]);
+    }
   });
 });
 
