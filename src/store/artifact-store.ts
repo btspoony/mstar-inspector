@@ -180,6 +180,13 @@ export type ReviewArtifactDoc = ArtifactDoc & {
    * (architect AL-2: do not invent a mapping). Optional; omitted = NULL.
    */
   provider?: string | null;
+  /**
+   * The round's capture failed (empty/unreadable diff read), so this row's
+   * `verdict` does NOT cover the PR scope: the row is published and stored,
+   * but `findIncrementBase` must never diff a later round against it.
+   * Optional; omitted = 0 (byte-compat for every other caller).
+   */
+  contextIncomplete?: boolean;
 };
 
 /** The D1 store face: the engine `ArtifactStore` plus the consumer's pre-check. */
@@ -253,8 +260,8 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
       const appId = doc.appId;
       const reviewStmt = db
         .prepare(
-          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id, model, provider)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id, model, provider, context_incomplete)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO NOTHING`,
         )
         .bind(
@@ -278,6 +285,9 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           // undefined; omitted put-input fields persist NULL (byte-compat).
           doc.model ?? null,
           doc.provider ?? null,
+          // 1/0 (SQLite has no boolean): a capture-failed round is stored but
+          // is never an incremental base.
+          doc.contextIncomplete === true ? 1 : 0,
         );
       // raw_output stays NULL on the v1 path: the envelope is authoritative
       // (its 64KB truncation is not losslessly restorable).

@@ -944,9 +944,11 @@ async function readReportDoc(sandbox: ReviewSandbox, secretValues: string[]): Pr
 
 /**
  * The most recent REVIEWED head of this PR whose review was not an
- * `incomplete` (stopped) run — the base an incremental round diffs against.
- * `incomplete` rows are excluded on purpose: a stopped round never scanned
- * its scope, so diffing against it would silently inherit that gap.
+ * `incomplete` (stopped) run and whose own capture did not fail — the base an
+ * incremental round diffs against. Both exclusions are on purpose: a stopped
+ * round never scanned its scope, and a round whose diff capture failed
+ * published a verdict without evidence. Diffing against either would silently
+ * inherit that gap.
  *
  * `reviews` is keyed per (installation, owner, repo, pr) with one row per
  * reviewed sha, and `reviewed_at` is second-resolution, so `rowid` breaks
@@ -958,6 +960,7 @@ async function findIncrementBase(db: PipelineEnv["DB"], scope: Scope): Promise<s
       `SELECT head_sha FROM reviews
        WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND verdict <> 'incomplete'
+         AND context_incomplete = 0
        ORDER BY reviewed_at DESC, rowid DESC
        LIMIT 1`,
     )
@@ -4268,6 +4271,10 @@ async function processMessage(
         appId: payload.appRef.appId,
         model: chainHeadSelector(effectiveModelChain(appCfg).chain),
         provider: null,
+        // A capture-failed round still publishes, but its row must never be
+        // an incremental base: the flag rides the staged artifact so the put
+        // that writes it (here or on recovery) persists it.
+        contextIncomplete: captureFailed,
       },
       lifecycle: lifecycleRound,
       lineIntents,

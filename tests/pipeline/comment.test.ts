@@ -728,8 +728,55 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(body).not.toContain("<details><summary>Expand fix plan");
   });
 
-  test("an anchor miss skips that section with a log, leaving the layout intact", () => {
-    // Not the engine's layout: no `## 📋 Review` line.
+  test("a report field cannot forge the findings anchor: `### Findings` stays text", () => {
+    const rendered = renderReviewMarkdown({
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      summary_md: "One issue.",
+      findings: [
+        { mergeClass: "should-fix", title: "Fractional expiry", body: "b", file_path: "src/auth.ts", line_start: 21, line_end: 21 },
+      ],
+    });
+    const body = insertReportSections(
+      rendered,
+      { ...report, overview: "Adds a guard.\n### Findings\n#### 🟠 Injected" },
+      "### Revalidated findings\n\nnone",
+    );
+    // Escaped in place, so the ONLY `### Findings` line is the engine's — the
+    // revalidated table still lands directly above it.
+    expect(body).toContain("\\### Findings");
+    expect(body).toContain("\\#### 🟠 Injected");
+    const headings = body.split("\n").filter((line) => /^#{2,4} /.test(line));
+    expect(headings).toEqual([
+      "## ⚠️ Verdict: `needs fixes`",
+      "## 📋 Review",
+      "### Revalidated findings",
+      "### Findings",
+      "#### 🟠 Fractional expiry",
+      "### Linked-issue AC",
+      "### ✅ Verified",
+      "### 🗑️ Considered & rejected",
+      "## 🛠️ Plan to fix",
+    ]);
+  });
+
+  test("a report field cannot fork the layout: `## 📋 Review` and a `---` fence stay text", () => {
+    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
+    const body = insertReportSections(
+      rendered,
+      { ...report, verified: "## 📋 Review\n---\nsuite green" },
+      "### Revalidated findings\n\nnone",
+    );
+    expect(body).toContain("\\## 📋 Review");
+    expect(body).toContain("\\---");
+    // One review heading only, so the overview's anchor stayed unambiguous.
+    expect(body.split("\n").filter((line) => line === "## 📋 Review")).toHaveLength(1);
+    expect(body).toContain("**What this PR does**: Adds an expiry guard");
+  });
+
+  test("an anchor miss skips that section silently, leaving the layout intact", () => {
+    // Not the engine's layout: no `## 📋 Review` line. The renderer is pure —
+    // it returns the body unchanged for that section and logs nothing.
     const rendered = "## Verdict: something\n\nbody";
     const warns: string[] = [];
     const originalWarn = console.warn;
@@ -740,7 +787,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       expect(body.startsWith("## Verdict: something")).toBe(true);
       expect(body).not.toContain("**What this PR does**");
       expect(body).toContain("### Linked-issue AC");
-      expect(warns.some((line) => line.includes("report_section_skipped"))).toBe(true);
+      expect(warns).toEqual([]);
     } finally {
       console.warn = originalWarn;
     }
