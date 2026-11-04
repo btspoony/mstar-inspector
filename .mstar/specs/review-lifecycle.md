@@ -12,7 +12,7 @@ M8 verifies retained earlier findings against current code and discussion, rende
 
 - **D1:** Two serial implementation slices: M8 before M7.
 - **D2:** Relevant discussion is untrusted evidence, not instructions or natural-language commands.
-- **D3:** Normal review publication means Check success for every engine verdict; confirmed degraded publication means neutral; execution failure means failure. Check failure never blocks primary publication.
+- **D3:** A normal review publication concludes the Check against the App's configured review gate: `success` only when the applied review's verdict is one of the App's passing verdicts and its tally score meets the App's floor; a missed gate, an unreadable review, a degraded publication, an unconfirmed result and a failed execution are all `failure`. Check failure never blocks primary publication. (The user explicitly superseded the earlier "execution completion only" rule; see the §7.9 matrix.)
 - **D4:** Closure belongs in the existing single overall-comment upsert, not another closure comment.
 - **D5:** One fresh-App contract, no old-App migration/permission-acceptance UX, compatibility layer or rollout toggle. The user deletes old test Apps; agents do not delete Apps or data. Forward-only feature migrations are allowed.
 - **D6:** Automatic resolution after evidence-backed verification is required. Only exactly mapped Inspector-owned threads; absence-only, unresolved concerns, unverifiable evidence, stale HEAD and failed API calls never authorize a resolve claim.
@@ -31,7 +31,7 @@ M8 verifies retained earlier findings against current code and discussion, rende
 - **RL-7:** Discussions and findings are untrusted evidence. No command interpretation, arbitrary resolution or model-supplied credentials/remote identity.
 - **RL-8:** Bounded closure in one overall comment distinguishes finding disposition from actual thread state. Repeat display/tally behavior and engine verdict/score authority are unchanged.
 - **RL-9:** Publication precedes all **published result** writes and thread mutations. Record classes are disjoint: (a) execution attempts/leases contain no findings; (b) a **private pre-publication recovery journal** may hold a validated/redacted complete payload, but is not a published result and has no dashboard/insights/settings/HTTP/reporting read exposure; (c) `reviews`, `findings`, lifecycle rows and associations are applied only after positive publication proof. This explicit journal exception replaces the earlier comment-before-any-data formulation, which could not recover the publish→persist crash window. Check failure terminalization without publication remains allowed; it carries execution facts, not a fabricated result.
-- **RL-10:** Eligible attempts show in-progress Checks at the authoritative SHA. Desired conclusion is derived from publication proof, separately from observed remote state; remote update failure never converts a proven publication into execution failure. Genuine skip paths create no new Check.
+- **RL-10:** Eligible attempts show in-progress Checks at the authoritative SHA. Desired conclusion is derived from publication proof plus the applied review against the App's review gate, separately from observed remote state; remote update failure never converts a proven publication into execution failure. Genuine skip paths create no new Check.
 - **RL-11:** Fresh-App manifest/docs/test contracts agree; no legacy fallback, dual commit-status writes, annotations or rerun UI.
 - **RL-12:** Local fencing is not external exactly-once. GitHub offers neither conditional thread resolve nor idempotent Check/comment creation. Remaining remote races and unknown outcomes are stated honestly. No invented details URL or live-verification claim.
 
@@ -475,11 +475,17 @@ export function adoptCheckRun(input: { identity: CheckIdentity }): Promise<
 export function completeCheck(input: {
   identity: CheckIdentity; lease: Lease; checkRunId: number; conclusion: CheckConclusion;
 }): Promise<{ kind: 'completed'; remote: CheckRemote } | { kind: 'unavailable'; reason: string }>;
+export type ReviewGate = { minScore: number; passVerdicts: readonly string[] };
+export type PublishedReview = { verdict: string; scorePct: number | null };
 export function decideConclusion(input: {
   proof: PublicationProof | null;
   outcome: 'pre-publication-failure' | 'degraded-not-posted' | 'publication-unknown' | 'expired' | 'local-error';
+  gate: ReviewGate;
+  review: PublishedReview | null;
 }): CheckConclusion;
 ```
+
+`neutral` remains in the persisted vocabulary (`CheckDesired`, the `review_checks` DDL CHECK) for historical rows only; the current decision function never produces it. `gate` is the App's `check_min_score` / `check_pass_verdicts` pair (engine `PR_VERDICTS` vocabulary, validated before any write), read through the App store. `review` is the applied row read by exact `(installation_id, owner, repo, pr_number, head_sha)` from `reviews`: `verdict` from the row and `scorePct` from `envelope.tally.scorePct`. A missing row or a row without a readable tally is UNREADABLE — `null`/null score, never an assumed pass.
 
 Adapters use the existing Octokit's typed `rest.checks.create/update/get/listForRef` responses; no `Record<string,unknown>` return surface that omits App/status/conclusion evidence. `beginCheck` and `completeCheck` validate identity and current lease immediately before any send; they never mutate a caller-supplied run without its persisted ownership record.
 
@@ -489,19 +495,21 @@ All local updates require `(id,holder,lease_epoch,lease_until_ms > now)`; remote
 
 **Create/adopt:** persist create_state=sending before create, with the already-persisted external ID. On known response validate name, SHA, external ID and `app.id === githubAppId`, then attach ID under lease. Response loss sets unknown; first adopt using `listForRef({owner,repo,ref:headSha,check_name:CHECK_NAME,app_id:githubAppId,filter:'all',per_page:100,page})`, max 2 pages. Still verify each candidate's App ID, SHA, exact external ID/name; never infer ownership from PR association or name alone. Multiple/incomplete candidates remain unknown. A known terminal remote ID is retained, never cleared to create a lookalike. If create was possibly sent but no match is observable, do not blindly create again: read-only recovery/inspection is honest about external non-idempotency. A definitive no-send/rejection can retry create only while allowed; paused recovery cannot create a new Check. The API additionally caps `listForRef` results to the 1000 most recent check suites on a reference; when that bound (or the 2-page bound) is hit without an exact match, the result is incomplete/unknown, never absence.
 
-**Desired versus observed:** save immutable terminal intent (conclusion/title/summary and publication proof link) **before** update. Mark observed only when the response (or a subsequent GET) has matching identity, status=completed and the intended conclusion. `unavailable` changes recovery status/error/backoff only, never observed or desired. Terminal intent is monotonic except that newly discovered positive publication proof may correct a previously unknown failure into success/neutral on the **same owned run**; record that correction, do not create another run. Check request failure is not execution failure.
+**Desired versus observed:** save immutable terminal intent (conclusion/title/summary and publication proof link) **before** update. Mark observed only when the response (or a subsequent GET) has matching identity, status=completed and the intended conclusion. `unavailable` changes recovery status/error/backoff only, never observed or desired. Terminal intent is monotonic except that newly discovered positive publication proof may correct a previously unknown failure into the proof-and-gate-derived conclusion (`success` or `failure`) on the **same owned run**; record that correction, do not create another run. Check request failure is not execution failure.
 
 | Persisted proof / execution knowledge | Desired conclusion | Frozen truthful summary |
 |---|---|---|
-| Confirmed normal publication, even if result/thread/Check side effects fail | success | `Review published for <sha7> (round N). Execution completion only; not code approval or a merge gate.` |
-| Confirmed degraded publication | neutral | `Review output was invalid; a degraded summary comment was published.` |
+| Confirmed normal publication and the applied review MEETS the App gate (verdict on the passing list AND score ≥ floor) | success | `Review gate met for <sha7> (round N): verdict "<v>", score <s> (floor <min>; allowed: <list>).` |
+| Confirmed normal publication and the applied review misses the gate | failure | `Review gate missed for <sha7>: verdict "<v>", score <s> (floor <min>; allowed: <list>).` |
+| Confirmed normal publication and the review row or its tally is unreadable | failure | `Review gate could not be evaluated for <sha7>: no published review with a readable tally (floor <min>; allowed: <list>).` |
+| Confirmed degraded publication | failure | `Review output was invalid; a degraded summary comment was published.` |
 | Definitive failure before any publication send | failure | `Review execution failed before publication: <reason>. No review was published.` |
 | Definitive degraded send rejection and no earlier unknown send | failure | `Review output was invalid and the degraded notice was not published.` |
 | Any publication send with unconfirmed result, or expired attempt without proof | failure | `Review attempt could not be confirmed complete; publication status is unknown.` |
 | Recovery exhausted | Preserve proof-derived desired; if none, failure | `Finalization could not be confirmed. Manual inspection may be required.` |
 | Paused/guard-held/idempotent ACK before claim | no Check | No remote or attempt row |
 
-Titles/summary are redacted; summary ≤2000 chars, error ≤300. No verdict text is needed in proof to derive success. Read proof by **exact App/scope/SHA**, preferring this attempt's publication ID; a normal proof takes precedence over degraded only within that exact scope/SHA. Prepared payload is never publication proof.
+Titles/summaries are redacted and bounded; summary ≤2000 chars, error ≤300. The success/failure summary names the verdict, score, floor and allowed verdicts, so a red Check says what bar was missed. The gate and the applied review are read cold at decision time (App store + `reviews` by **exact App/scope/SHA**); read proof by the same exact App/scope/SHA, preferring this attempt's publication ID, with a normal proof taking precedence over degraded only within that exact scope/SHA. Prepared payload is never publication proof.
 
 ### 7.10 Closure and consumer Check handoff
 
@@ -575,7 +583,7 @@ LIMIT ?;
 
 ### 7.12 Fresh-App surfaces
 
-M8 updates contents:write; M7 adds checks:write. Final manifest permissions: contents write, metadata read, pull_requests write, issues write, checks write. Events remain pull_request and issue_comment only. Direct surfaces: `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, operator smoke documentation and the publication companion spec. No old-App acceptance branch. Documentation explains Worker-only writes, read-only Sandbox, success-not-approval, branch protection user control, and historical same-name Check generations (newest applicable attempt, not universal cross-App authority). The M8 slice ships the four-permission set in all named direct surfaces (manifest, env mirror, README, deploy runbook and the smoke runbook); the Check-facing items (success-not-approval, branch protection user control, same-name Check generations) describe the frozen M7 contract and are not shipped by M8 — the M7 slice ships them on the same surfaces (the final five-permission set above), together with §7.9/§7.11.2.
+M8 updates contents:write; M7 adds checks:write. Final manifest permissions: contents write, metadata read, pull_requests write, issues write, checks write. Events remain pull_request and issue_comment only. Direct surfaces: `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, operator smoke documentation and the publication companion spec. No old-App acceptance branch. Documentation explains Worker-only writes, read-only Sandbox, gate-aware Check conclusions (a green Check means the App's review gate was met, not merge approval), branch protection user control, and historical same-name Check generations (newest applicable attempt, not universal cross-App authority). The M8 slice ships the four-permission set in all named direct surfaces (manifest, env mirror, README, deploy runbook and the smoke runbook); the Check-facing items (gate-aware conclusions, branch protection user control, same-name Check generations) describe the frozen M7 contract and are not shipped by M8 — the M7 slice ships them on the same surfaces (the final five-permission set above), together with §7.9/§7.11.2.
 
 ### 7.13 Verification caliber and source basis
 

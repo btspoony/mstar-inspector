@@ -66,6 +66,7 @@ import {
   listReenableableCheckPairs,
   markCheckLocalError,
   readPublicationProof,
+  readPublishedReview,
   recordCheckObservation,
   reenableChecksForApps,
   releaseCheckClaim,
@@ -74,16 +75,19 @@ import {
   suspendCheckForPause,
   suspendCheckRecovery,
 } from "../store/review-checks";
-import type { CheckOwnership, Lease, PublicationProof } from "../store/review-checks";
+import type { CheckOwnership, Lease, PublicationProof, PublishedReview } from "../store/review-checks";
 import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
+  DEFAULT_REVIEW_GATE,
   decideConclusion,
   isRequestNotDispatched,
   type ChecksAdapter,
+  type ReviewGate,
 } from "../pipeline/checks";
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
+import { createAppsStore } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { sha256Hex } from "../pipeline/review-threads";
 import type { ReconcileTransport } from "./lifecycle-reconcile";
@@ -761,7 +765,12 @@ async function reconcileCheckAttempt(
   //    lane only ever READS what that lane persisted — never a send, replay
   //    or paid re-review.
   const proof = await readProof(db, owned);
-  const conclusion = terminalConclusion(owned, proof);
+  // The gate decision needs the App's stored gate and the APPLIED review by
+  // the same exact scope/SHA. A missing row or tallies-free review is
+  // unreadable, so it can never be corrected into a success (spec §7.9).
+  const gate = (await createAppsStore(db).getCheckGate(scope.appId)) ?? DEFAULT_REVIEW_GATE;
+  const review = await readPublishedReview(db, { scope, headSha: owned.identity.headSha });
+  const conclusion = terminalConclusion(owned, proof, gate, review);
 
   // Intent BEFORE any remote update: the persisted row is the only source the
   // send reads, so the frozen text cannot be swapped after this point.
@@ -1131,14 +1140,20 @@ async function readProof(db: D1Like, owned: CheckOwnership): Promise<Publication
 
 /**
  * The terminal conclusion for a due attempt (spec §7.9 matrix): a persisted
- * publication proof decides `success`/`neutral` regardless of how the attempt
- * expired; an expired attempt with no proof is the honest unconfirmed
- * `failure`. An intent the consumer already persisted is preserved verbatim —
- * this lane only ever corrects it upward, on proof.
+ * publication proof decides the conclusion against the App gate — a normal
+ * publication only succeeds when the applied review meets it — regardless of
+ * how the attempt expired; an expired attempt with no proof is the honest
+ * unconfirmed `failure`. An intent the consumer already persisted is preserved
+ * verbatim unless a proof-derived correction applies.
  */
-function terminalConclusion(owned: CheckOwnership, proof: PublicationProof | null): CheckConclusion {
-  if (proof !== null) return decideConclusion({ proof, outcome: "expired" });
-  if (owned.desired === "in_progress") return decideConclusion({ proof: null, outcome: "expired" });
+function terminalConclusion(
+  owned: CheckOwnership,
+  proof: PublicationProof | null,
+  gate: ReviewGate,
+  review: PublishedReview | null,
+): CheckConclusion {
+  if (proof !== null) return decideConclusion({ proof, outcome: "expired", gate, review });
+  if (owned.desired === "in_progress") return decideConclusion({ proof: null, outcome: "expired", gate, review });
   return {
     desired: owned.desired,
     title: owned.desiredTitle ?? CHECK_NAME,

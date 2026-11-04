@@ -165,6 +165,14 @@ export type CheckConclusion = {
   summary: string;
 };
 
+/**
+ * The applied review outcome the Check gate reads (spec §7.9): the row's
+ * verdict plus the persisted envelope's `tally.scorePct`. `scorePct` is null
+ * when the row carries no readable tally — the caller treats that as an
+ * unreadable gate input, never as a pass.
+ */
+export type PublishedReview = { verdict: string; scorePct: number | null };
+
 /** The §7.9 claim outcome union. */
 export type ClaimAttemptResult =
   | { kind: "claimed"; attempt: CheckAttempt; lease: Lease }
@@ -1386,3 +1394,46 @@ export async function retryCheckRecovery(
  * "not published".
  */
 export { readPublicationProof } from "./finding-lifecycle";
+
+/**
+ * The applied review for a Check's exact scope/SHA (spec §7.9 gate read):
+ * `reviews.verdict` plus `envelope.tally.scorePct`. Missing row → `null`; a row
+ * without a readable tally keeps its verdict with `scorePct: null`. Read-only:
+ * it never mutates or fabricates an outcome.
+ */
+export async function readPublishedReview(
+  db: D1Like,
+  input: { scope: Scope; headSha: string },
+): Promise<PublishedReview | null> {
+  const row = await db
+    .prepare(
+      `SELECT verdict, envelope FROM reviews
+       WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?`,
+    )
+    .bind(
+      input.scope.installationId,
+      input.scope.owner,
+      input.scope.repo,
+      input.scope.prNumber,
+      input.headSha,
+    )
+    .first<{ verdict: string; envelope: string | null }>();
+  if (row === null) return null;
+  return { verdict: row.verdict, scorePct: tallyScore(row.envelope) };
+}
+
+/** `envelope.tally.scorePct` when it is an integer inside the schema's 0..100 domain. */
+function tallyScore(envelope: string | null): number | null {
+  if (envelope === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(envelope);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || !("tally" in parsed)) return null;
+  const { tally } = parsed;
+  if (typeof tally !== "object" || tally === null || !("scorePct" in tally)) return null;
+  const { scorePct } = tally;
+  return typeof scorePct === "number" && Number.isInteger(scorePct) && scorePct >= 0 && scorePct <= 100 ? scorePct : null;
+}

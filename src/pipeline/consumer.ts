@@ -2663,6 +2663,9 @@ export function createReviewConsumer(
       db: env.DB,
       nowMs: () => Date.now(),
       getAdapter: (scope) => appCommenters.get(scope.appId)?.commenter.checks ?? null,
+      // The App gate is a stored configuration value, read through the same
+      // per-consumer store as the ledger reads (spec §7.9).
+      getCheckGate: (scope) => appsStore.getCheckGate(scope.appId),
     });
   return async (batch) => {
     for (const message of batch.messages) {

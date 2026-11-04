@@ -9,8 +9,9 @@
  *     `in_progress` attempt before its EXECUTION deadline, the attempt cap and
  *     suspended rows of an unusable App are all left alone
  *   - an expired `in_progress` attempt becomes a TERMINAL conclusion decided
- *     from persisted proof (normal → success, degraded → neutral, none →
- *     unconfirmed failure); `in_progress` is never handed to `completeCheck`
+ *     from persisted proof AND the App gate (normal meeting the gate → success,
+ *     gate missed/unreadable or degraded → failure, none → unconfirmed
+ *     failure); `in_progress` is never handed to `completeCheck`
  *   - adoption BEFORE create: a possibly-sent create is resolved read-only,
  *     a definitively `not-sent` row creates once, and an unproven/ambiguous
  *     absence never creates
@@ -204,6 +205,24 @@ function seedPublication(
       T0 - 10_000,
       T0 - 10_000,
     );
+}
+
+/** The applied review the gate reads (verdict + envelope tally); `scorePct` null = no tally. */
+function seedReview(db: TestD1, scope: Scope, headSha: string, verdict: string, scorePct: number | null): void {
+  const envelope = {
+    schema: "mstar.review/v1",
+    verdict,
+    findings: [],
+    ...(scorePct === null
+      ? {}
+      : { tally: { verdict, scorePct, tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 0 }, chatHeader: "h" } }),
+  };
+  db.raw
+    .prepare(
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, envelope)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(crypto.randomUUID(), scope.installationId, scope.owner, scope.repo, scope.prNumber, headSha, verdict, JSON.stringify(envelope));
 }
 
 async function rawRow(db: TestD1, id: string): Promise<Record<string, string | number | null>> {
@@ -554,11 +573,12 @@ describe("due selection (spec §7.11.2 predicate)", () => {
 // ---------------------------------------------------------------------------
 
 describe("expired attempt → terminal conclusion from persisted proof (spec §7.9)", () => {
-  test("a matching normal publication proof concludes success and marks observed", async () => {
+  test("a normal publication whose applied review meets the gate concludes success and marks observed", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     const proof = proofFor(attempt.identity, "review");
     seedPublication(db, SCOPE, SHA, proof);
+    seedReview(db, SCOPE, SHA, "ship it", 85);
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, {
@@ -572,8 +592,10 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
             // and the shipped text is the frozen proof-derived intent.
             expect(conclusion.desired).toBe("success");
             expect(conclusion.title).toBe(CHECK_NAME);
-            expect(conclusion.summary).toContain("Review published for 0123456 (round 3).");
-            expect(conclusion.summary).toContain("not code approval or a merge gate");
+            expect(conclusion.summary).toContain("Review gate met for 0123456 (round 3)");
+            expect(conclusion.summary).toContain('verdict "ship it"');
+            expect(conclusion.summary).toContain("score 85");
+            expect(conclusion.summary).toContain("floor 80");
             return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
           },
         }),
@@ -592,7 +614,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.publication_id).toBe(proof.publicationId);
   });
 
-  test("a confirmed degraded publication concludes neutral, not success", async () => {
+  test("a confirmed degraded publication concludes failure, not neutral", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     seedPublication(db, SCOPE, SHA, proofFor(attempt.identity, "degraded"), "applied");
@@ -605,9 +627,9 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
-            expect(conclusion.desired).toBe("neutral");
+            expect(conclusion.desired).toBe("failure");
             expect(conclusion.summary).toBe("Review output was invalid; a degraded summary comment was published.");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "neutral" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
           },
         }),
       });
@@ -616,8 +638,8 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       fetchStub.restore();
     }
     const row = await rawRow(db, attempt.identity.attemptId);
-    expect(row.desired).toBe("neutral");
-    expect(row.observed).toBe("neutral");
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
   });
 
   test("an expired attempt with NO proof concludes an honest unconfirmed failure", async () => {
@@ -663,6 +685,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     ).toBe(true);
     const proof = proofFor(attempt.identity, "review");
     seedPublication(db, SCOPE, SHA, proof);
+    seedReview(db, SCOPE, SHA, "ship it", 92);
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, {

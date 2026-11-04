@@ -34,9 +34,12 @@
  *     complete walk is `absent`; a saturated walk, a malformed candidate or two
  *     distinct matches is `incomplete`/`ambiguous` — never `absent`, because
  *     GitHub caps `listForRef` at the 1000 most recent check suites on a ref.
- *   - `decideConclusion` reads PERSISTED proof, never a code path. A confirmed
- *     normal publication is `success` for every engine verdict: execution
- *     completion, not approval and not a merge gate.
+ *   - `decideConclusion` reads PERSISTED proof plus the APPLIED review, never
+ *     a code path. A confirmed normal publication concludes `success` only
+ *     when the review satisfies the App's configured gate (score floor plus
+ *     passing verdicts); a missed gate, an unreadable review, a degraded
+ *     publication and every unconfirmed or failed execution are `failure`.
+ *     `neutral` is never produced.
  */
 
 import type { D1Like } from "../store/types";
@@ -47,6 +50,7 @@ import {
   claimAttempt,
   deferCheckRecovery,
   readPublicationProof,
+  readPublishedReview,
   recordCheckObservation,
   rollbackCheckCreateDispatch,
   setCheckCreateState,
@@ -58,6 +62,7 @@ import {
   type CheckRemote,
   type Lease,
   type PublicationProof,
+  type PublishedReview,
   type Scope,
   getCheckAttempt,
   getCheckOwnership,
@@ -740,19 +745,42 @@ function safeDetail(error: unknown): string {
 // Conclusions (spec §7.9 matrix)
 // ---------------------------------------------------------------------------
 
-/** The execution-completion disclaimer (D3/RL-10: a Check is never approval). */
-const SUCCESS_SUFFIX = "Execution completion only; not code approval or a merge gate.";
+/**
+ * The per-App review gate (spec §7.9): a published review satisfies it only
+ * when its verdict is one of `passVerdicts` AND its score is at least
+ * `minScore`. Both values come from the App row; `passVerdicts` is engine
+ * `PR_VERDICTS` vocabulary, validated by the store before any write.
+ */
+export type ReviewGate = { minScore: number; passVerdicts: readonly string[] };
+
+/**
+ * The gate used when the App row cannot be read. It mirrors migration 0045's
+ * DDL default, so a missing row behaves like a freshly created App.
+ * shortcut: duplicates the DDL default; upgrade by exporting it from the store
+ * if a third consumer appears.
+ */
+export const DEFAULT_REVIEW_GATE: ReviewGate = { minScore: 80, passVerdicts: ["ship it"] };
 
 /** Frozen summaries, exactly as spec §7.9's matrix spells them. */
 export const CHECK_SUMMARIES = {
-  success: (sha7: string, round: number) => `Review published for ${sha7} (round ${round}). ${SUCCESS_SUFFIX}`,
-  neutral: "Review output was invalid; a degraded summary comment was published.",
+  gateMet: (sha7: string, round: number, verdict: string, score: number, gate: ReviewGate) =>
+    `Review gate met for ${sha7} (round ${round}): verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
+  gateMissed: (sha7: string, verdict: string, score: number, gate: ReviewGate) =>
+    `Review gate missed for ${sha7}: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
+  gateUnreadable: (sha7: string, gate: ReviewGate) =>
+    `Review gate could not be evaluated for ${sha7}: no published review with a readable tally (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
+  degraded: "Review output was invalid; a degraded summary comment was published.",
   prePublicationFailure: (reason: string) =>
     `Review execution failed before publication: ${reason}. No review was published.`,
   degradedNotPosted: "Review output was invalid and the degraded notice was not published.",
   unconfirmed: "Review attempt could not be confirmed complete; publication status is unknown.",
   exhausted: "Finalization could not be confirmed. Manual inspection may be required.",
 } as const;
+
+/** The allowed-verdict list for a public summary — bounded even if a stored gate were malformed. */
+function verdictsText(gate: ReviewGate): string {
+  return gate.passVerdicts.map((verdict) => boundedText(verdict, "unknown")).join(" | ").slice(0, 400);
+}
 
 /** What the caller knows about execution, alongside the persisted proof. */
 export type CheckTerminalOutcome =
@@ -765,36 +793,54 @@ export type CheckTerminalOutcome =
 /**
  * Decide the Check conclusion from spec §7.9's matrix:
  *
- * | persisted proof / knowledge                     | desired |
- * |-------------------------------------------------|---------|
- * | confirmed normal (`review`) publication          | success |
- * | confirmed degraded publication                   | neutral |
- * | definitive failure before any publication send   | failure |
- * | degraded send rejected, no earlier unknown send  | failure |
- * | any send with unconfirmed result                 | failure |
- * | expired attempt without proof                    | failure |
- * | recovery exhausted                               | proof-derived desired, else failure |
+ * | persisted proof / knowledge                                   | desired |
+ * |---------------------------------------------------------------|---------|
+ * | confirmed normal publication that MEETS the App review gate    | success |
+ * | confirmed normal publication that misses the gate              | failure |
+ * | confirmed normal publication with an unreadable review/tally   | failure |
+ * | confirmed degraded publication                                 | failure |
+ * | definitive failure before any publication send                 | failure |
+ * | degraded send rejected, no earlier unknown send                | failure |
+ * | any send with unconfirmed result, or expired attempt w/o proof | failure |
+ * | recovery exhausted                                             | proof-derived, else failure |
  *
  * Proof precedence (normal over degraded within the exact scope/SHA) lives in
  * `readPublicationProof`, which the caller uses to obtain `proof`; this
  * function trusts what it is handed and reads `kind` alone. A `null` proof is
  * UNPROVEN — which is not the same as "not published", and is why an unknown
- * outcome must conclude `failure` rather than guess.
+ * outcome must conclude `failure` rather than guess. `review` is the applied
+ * review read by exact scope/SHA; `null` or a null score is UNREADABLE, never
+ * a pass. `neutral` is unreachable: a degraded publication cannot prove the
+ * gate was met (clarify C3).
  */
 export function decideConclusion(input: {
   proof: PublicationProof | null;
   outcome: CheckTerminalOutcome;
+  gate: ReviewGate;
+  review: PublishedReview | null;
   reason?: string;
 }): CheckConclusion {
-  const { proof, outcome } = input;
+  const { proof, outcome, gate, review } = input;
   if (proof !== null) {
-    return proof.kind === "review"
+    if (proof.kind === "degraded") {
+      return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degraded };
+    }
+    const sha7 = proof.headSha.slice(0, 7);
+    if (review === null || review.scorePct === null) {
+      return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.gateUnreadable(sha7, gate) };
+    }
+    const met = review.scorePct >= gate.minScore && gate.passVerdicts.includes(review.verdict);
+    return met
       ? {
           desired: "success",
           title: CHECK_NAME,
-          summary: CHECK_SUMMARIES.success(proof.headSha.slice(0, 7), proof.round),
+          summary: CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate),
         }
-      : { desired: "neutral", title: CHECK_NAME, summary: CHECK_SUMMARIES.neutral };
+      : {
+          desired: "failure",
+          title: CHECK_NAME,
+          summary: CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate),
+        };
   }
   if (outcome === "local-error") {
     return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.exhausted };
@@ -803,7 +849,7 @@ export function decideConclusion(input: {
     return {
       desired: "failure",
       title: CHECK_NAME,
-      summary: CHECK_SUMMARIES.prePublicationFailure(boundedReason(input.reason)),
+      summary: CHECK_SUMMARIES.prePublicationFailure(boundedText(input.reason ?? "", "unknown pipeline failure")),
     };
   }
   if (outcome === "degraded-not-posted") {
@@ -813,10 +859,10 @@ export function decideConclusion(input: {
   return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed };
 }
 
-/** Bounded, redacted failure text — a public Check summary must not leak a token. */
-function boundedReason(reason: string | undefined): string {
-  const text = reason === undefined || reason.trim().length === 0 ? "unknown pipeline failure" : reason;
-  return redactSecrets(text).replace(/[\r\n]+/g, " ").slice(0, 240);
+/** Bounded, redacted summary fragment (spec §7.9: summary ≤2000 chars). */
+function boundedText(text: string, fallback: string): string {
+  const value = text.trim().length === 0 ? fallback : text;
+  return redactSecrets(value).replace(/[\r\n]+/g, " ").slice(0, 240);
 }
 
 // ---------------------------------------------------------------------------
@@ -834,6 +880,12 @@ function boundedReason(reason: string | undefined): string {
 export type CheckLifecycleDeps = {
   db: D1Like;
   getAdapter(scope: Scope): ChecksAdapter | null;
+  /**
+   * The App's review gate (spec §7.9), read through the caller's store helper
+   * (`getCheckGate`). `null` = the App row is unreadable; the lifecycle then
+   * uses `DEFAULT_REVIEW_GATE`, whose values are the DDL default.
+   */
+  getCheckGate(scope: Scope): Promise<ReviewGate | null>;
   /** The transaction clock (spec §7.0) — re-read immediately before each fenced write. */
   nowMs(): number;
 };
@@ -1110,12 +1162,23 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // PROOF decides (spec §7.9): exact App/scope/SHA, this attempt's
       // publication id preferred. `null` is UNPROVEN — never "not published" —
       // which is why an unconfirmed send must conclude `failure`, not success.
-      const proof = await readPublicationProof(deps.db, {
-        scope: handle.scope,
-        headSha: handle.headSha,
-        publicationId: input.publicationId ?? undefined,
+      // The gate and the APPLIED review are read by the same exact scope/SHA;
+      // a review row without a readable tally stays unreadable, never a pass.
+      const [proof, gate, review] = await Promise.all([
+        readPublicationProof(deps.db, {
+          scope: handle.scope,
+          headSha: handle.headSha,
+          publicationId: input.publicationId ?? undefined,
+        }),
+        deps.getCheckGate(handle.scope),
+        readPublishedReview(deps.db, { scope: handle.scope, headSha: handle.headSha }),
+      ]);
+      const conclusion = decideConclusion({
+        proof,
+        outcome: input.outcome,
+        gate: gate ?? DEFAULT_REVIEW_GATE,
+        review,
       });
-      const conclusion = decideConclusion({ proof, outcome: input.outcome });
       // Freeze the boundary title/summary and the proof link BEFORE any remote
       // update, fenced on the CURRENT lease with a clock sampled for THIS write
       // (the proof read awaited D1; its pre-read clock cannot authorise it).
