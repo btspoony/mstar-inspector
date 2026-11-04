@@ -118,13 +118,14 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     expect(prepared.body).not.toContain("unverifiable (no-evidence)");
   });
 
-  test("an empty capture is a capture failure: context-incomplete, never no-evidence for every row", async () => {
-    // `gh pr diff` always emits at least a header for a real PR, so exit 0 with
-    // nothing to read means the capture failed. Publishing that as 25 confident
-    // `no-evidence` verdicts is a fabrication; the round must say its context
-    // was incomplete and send no recheck input.
+  test("an empty capture with a non-empty numstat is a capture failure: context-incomplete, never no-evidence for every row", async () => {
+    // The redirect wrote a diff (numstat is non-empty) but the bounded read
+    // delivered nothing: that is a CAPTURE FAILURE. Publishing it as 25
+    // confident `no-evidence` verdicts is a fabrication; the round must say its
+    // context was incomplete and send no recheck input.
     reset();
     sandbox.diffStdout = "";
+    sandbox.numstatStdout = "10\t2\tsrc/auth.ts\n";
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
@@ -145,6 +146,33 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     expect(prepared.body).not.toContain("unverifiable (no-evidence)");
     expect(prepared.body).toContain("context coverage: unavailable");
     // The row is never assessed, and a capture failure records no recheck row.
+    const findingRow = db.raw.query("SELECT last_assessed_ms FROM review_findings").get() as {
+      last_assessed_ms: number | null;
+    };
+    expect(findingRow.last_assessed_ms).toBeNull();
+    expect(db.raw.query("SELECT * FROM review_failures").all()).toHaveLength(0);
+  });
+
+  test("an empty capture with an empty numstat is a genuinely empty PR: a normal round", async () => {
+    // `gh pr diff` writes nothing for a zero-change PR, and the bounded read
+    // returns exactly that. Two empty captures are the same PR, not a lost
+    // read: no capture-failure warn, no context-incomplete labels.
+    reset();
+    sandbox.diffStdout = "";
+    sandbox.numstatStdout = "";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(logLines.some((l) => l.fields.diff_capture !== undefined)).toBe(false);
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (no-evidence)");
+    expect(prepared.body).not.toContain("context-incomplete");
     const findingRow = db.raw.query("SELECT last_assessed_ms FROM review_findings").get() as {
       last_assessed_ms: number | null;
     };

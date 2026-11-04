@@ -128,8 +128,6 @@ export async function seedAppConfig(
   }
 }
 
-// line comments: the prefetched diff fixture (now the
-// WORKER-CAPTURED sandbox diff — same text, one capture).
 /** Default diff fixture: a src/auth.ts hunk whose right range covers line 21. */
 export const VALID_DIFF = [
   "diff --git a/src/auth.ts b/src/auth.ts",
@@ -326,11 +324,18 @@ function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
       // A command with no bounded read is the retired redirect-only shape,
       // whose stdout is EMPTY by construction: answering it with the file
       // would hide exactly the regression this double exists to catch.
+      //
+      // A non-zero exit is `gh` failing the chain BEFORE the read half runs,
+      // so there is no bounded payload to answer with — never a body next to a
+      // failed exit, which production cannot produce.
+      if (state.diffExitCode !== 0) {
+        return { stdout: "", stderr: "gh failed", exitCode: state.diffExitCode };
+      }
       const bytes = Buffer.from(state.diffStdout);
       const bounded = cmd.includes("head -c '") && cmd.includes("wc -c");
       const head = bounded ? bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString() : "";
       const overflow = bounded && bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
-      return { stdout: bounded ? `${head}\n${overflow}\n` : "", stderr: "", exitCode: state.diffExitCode };
+      return { stdout: bounded ? `${head}\n${overflow}\n` : "", stderr: "", exitCode: 0 };
     }
     case "numstat":
       return { stdout: state.numstatStdout, stderr: "", exitCode: state.numstatExitCode };

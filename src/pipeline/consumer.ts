@@ -3273,29 +3273,22 @@ async function processMessage(
     // Diff (GH_TOKEN via exec env only — never in the command). The command
     // writes the file for numstat AND streams a BOUNDED copy back: that stdout
     // is the WORKER-CONTROLLED §7.3 trusted capture the evidence catalog
-    // slices and the line-intent hunk prefilter both derive from. Three
-    // outcomes, deliberately distinct:
-    //   fit       → the text IS the capture;
-    //   overflow  → over DIFF_PREFETCH_MAX_BYTES: unavailable (no slices;
-    //               base-filter line comments), never truncated slices;
-    //   empty     → exit 0 but nothing to read. `gh pr diff` always emits at
-    //               least a header for a real PR, so this is a CAPTURE
-    //               FAILURE: the round is context-incomplete, never every row
-    //               published as a confident `no-evidence`.
+    // slices and the line-intent hunk prefilter both derive from. The bounded
+    // read names three outcomes, deliberately distinct:
+    //   fit        → the text IS the capture;
+    //   overflow   → over DIFF_PREFETCH_MAX_BYTES: unavailable (no slices;
+    //                base-filter line comments), never truncated slices;
+    //   unreadable → no flag line at all: the transport broke, so the capture
+    //                failed whatever the file holds (a zero-change PR still
+    //                prints its `\n0\n` flag line).
+    // An empty `fit` payload is NOT decided here: `gh pr diff` also writes
+    // nothing for a PR with no changes, and only the numstat of the same round
+    // can tell the two apart (see step 6).
     const diff = await sandbox.runCommand(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
     if (diff.exitCode !== 0) {
       throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
     }
     const diffRead = parseBoundedRead(diff.stdout);
-    // `overflow` keeps the documented over-size path (no slices; base filter).
-    // An EMPTY payload at exit 0 is a capture failure, not a small diff.
-    if (diffRead.failure === "unreadable" || (diffRead.failure === null && diffRead.text === "")) {
-      captureFailed = true;
-      deps.log.warn(
-        { ...fields, diff_capture: "empty" },
-        "diff capture empty — context-unavailable (no evidence catalog; rows stay context-incomplete)",
-      );
-    }
     const diffText = diffRead.text ?? "";
 
     // Trusted evidence catalog (§7.3) for the selected targets, pinned to
@@ -3452,6 +3445,26 @@ async function processMessage(
       .split("\n")
       .map((line) => line.trimEnd())
       .filter((line) => line !== "");
+
+    // An EMPTY diff capture at exit 0 is ambiguous, and only THIS round's
+    // numstat — the diff FILE `git apply` read, not the bounded stdout — can
+    // resolve it. Non-empty numstat means the redirect wrote a diff the read
+    // did not deliver: a CAPTURE FAILURE, so the round is context-incomplete,
+    // never every row published as a confident `no-evidence`. Both empty is a
+    // genuinely empty PR: a normal round. `overflow` is neither — it keeps the
+    // documented over-size path. The recheck input built above cannot change:
+    // an empty capture leaves the catalog with no slices and every target
+    // excluded, so no input was built either way.
+    if (
+      diffRead.failure === "unreadable" ||
+      (diffRead.failure === null && diffRead.text === "" && numstatLines.length > 0)
+    ) {
+      captureFailed = true;
+      deps.log.warn(
+        { ...fields, diff_capture: "empty" },
+        "diff capture empty — context-unavailable (no evidence catalog; rows stay context-incomplete)",
+      );
+    }
 
     // 7. Runner input JSON (reconFacts): `<owner>/<repo>#<pr>` and
     // `head <sha>` fold into the envelope target INSIDE the runtime — the

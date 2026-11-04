@@ -890,6 +890,31 @@ describe("createReviewConsumer", () => {
     expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
   });
 
+  test("diff failure → failure row (stage=sandbox) + no runner/post/insert, rethrow, destroy", async () => {
+    // `gh pr diff` failing fails the chain BEFORE the bounded read, so the exec
+    // carries no stdout at all (the double answers the same shape). The round
+    // must take the failure path — never read the empty stdout as an empty
+    // document.
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.diffExitCode = 1;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/diff failed: exit 1, stdout 0B/);
+
+    expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", head_sha: SHA });
+    expect(String(failureRows(db)[0]!.error)).toContain("diff failed");
+    expect(sandbox.destroyCalls).toBe(1);
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+  });
+
   test("runner input write failure → no runner, no post, no insert, rethrow, destroy", async () => {
     reset();
     sandbox.writeInputExitCode = 1;
