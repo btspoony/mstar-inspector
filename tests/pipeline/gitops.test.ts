@@ -146,11 +146,17 @@ describe("gitops command builders", () => {
         },
       ]) {
         const overflowText = "b".repeat(read.maxBytes + 1);
-        for (const [text, flag, content] of [
-          [read.fit, "0", read.fit],
-          [overflowText, "1", overflowText.slice(0, read.maxBytes)],
-        ] as const) {
-          const path = join(dir, `${read.name}-${flag}.json`);
+        // The bound ITSELF is still a fit: the probe starts at byte bound+1, so
+        // content of exactly maxBytes must report flag 0. An off-by-one tail
+        // (`+maxBytes`) would flag an at-bound capture as overflow and throw
+        // away text the command had already delivered in full.
+        const atBoundText = "b".repeat(read.maxBytes);
+        for (const { label, text, flag, content } of [
+          { label: "fits", text: read.fit, flag: "0", content: read.fit },
+          { label: "at-bound", text: atBoundText, flag: "0", content: atBoundText },
+          { label: "over-bound", text: overflowText, flag: "1", content: overflowText.slice(0, read.maxBytes) },
+        ]) {
+          const path = join(dir, `${read.name}-${label}.json`);
           await Bun.write(path, text);
           const proc = Bun.spawn(["sh", "-c", read.command(path)]);
           const stdout = await new Response(proc.stdout).text();
@@ -196,6 +202,10 @@ describe("gitops command builders", () => {
     expect(cmds.clone).toContain("origin 'pull/7/head'");
     expect(cmds.checkedOutSha).toBe(shellCommand("git -C '/workspace/repo' rev-parse HEAD"));
     expect(cmds.diff).toContain("gh pr diff '7' --repo 'my-org.example/repo_name-2' > '/workspace/pr.diff'");
+    // The capture is the exec's STDOUT, so the wiring must also carry the
+    // bounded read — asserted through the shared builder that defines it, not
+    // as a second copy of the command string.
+    expect(cmds.diff).toContain(boundedFileReadCommand("/workspace/pr.diff", DIFF_PREFETCH_MAX_BYTES));
     expect(cmds.numstat).toBe(shellCommand("git apply --numstat '/workspace/pr.diff'"));
     expect(cmds.runner).toBe(
       shellCommand("bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'"),

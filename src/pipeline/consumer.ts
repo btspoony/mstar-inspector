@@ -262,16 +262,6 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
 export const QUEUE_MAX_ATTEMPTS = 4;
 
 /**
- * Cap on the captured PR diff considered for the line-comments hunk prefilter
- * (qc3 F-101): 2 MiB of diff text. Beyond it, parseDiffHunkRanges would
- * materialize a full line array per qualifying round on multi-MB PRs;
- * overflow degrades to the prefetch-failure path (base-filter attempt; a
- * residual 422 still falls back per AL-3). Re-exported from ./gitops — the
- * bound lives with the command that enforces it.
- */
-export { DIFF_PREFETCH_MAX_BYTES } from "./gitops";
-
-/**
  * Runner exec timeout for the job's review level (spec d5-budget L4 — the
  * helper trio runnerTimeoutMs / reviewGuardTtlSeconds /
  * guardRetryDelaysSeconds is the naming SSOT; no bare re-exported constants).
@@ -435,12 +425,14 @@ export type ConsumerLogFields = {
   rejected_unnamed_ignored?: number;
   assessed?: number;
   /**
-   * Set on the diff-capture warn: the exec exited 0 but yielded no diff text.
-   * `gh pr diff` always emits a header for a real PR, so an empty capture is a
-   * capture failure — the round's recheck context is incomplete rather than
-   * every row being published as `no-evidence`.
+   * Set on the diff-capture warn, naming WHY the captured text cannot prove a
+   * row: `empty` (the exec exited 0 and delivered nothing while the same
+   * round's numstat shows a diff — a capture failure), `overflow` (the diff
+   * exists but is over DIFF_PREFETCH_MAX_BYTES) or `unreadable` (no flag line,
+   * so the transport broke). All three make the round's recheck context
+   * unavailable; none is published as `no-evidence`.
    */
-  diff_capture?: "empty";
+  diff_capture?: "empty" | "overflow" | "unreadable";
 };
 
 export type ConsumerLog = {
@@ -1527,7 +1519,7 @@ function roundContextCoverage(discussion: Discussion): Coverage {
  * reads and the diff capture — the transport is identical, only the producer
  * differs.
  */
-type BoundedRead = { text: string | null; failure: string | null };
+type BoundedRead = { text: string | null; failure: "overflow" | "unreadable" | null };
 
 function parseBoundedRead(stdout: string): BoundedRead {
   const out = stdout.trimEnd();
@@ -3276,8 +3268,9 @@ async function processMessage(
     // slices and the line-intent hunk prefilter both derive from. The bounded
     // read names three outcomes, deliberately distinct:
     //   fit        → the text IS the capture;
-    //   overflow   → over DIFF_PREFETCH_MAX_BYTES: unavailable (no slices;
-    //                base-filter line comments), never truncated slices;
+    //   overflow   → over DIFF_PREFETCH_MAX_BYTES: the diff exists but cannot
+    //                prove any row (no slices; base-filter line comments),
+    //                never truncated slices;
     //   unreadable → no flag line at all: the transport broke, so the capture
     //                failed whatever the file holds (a zero-change PR still
     //                prints its `\n0\n` flag line).
@@ -3446,23 +3439,27 @@ async function processMessage(
       .map((line) => line.trimEnd())
       .filter((line) => line !== "");
 
-    // An EMPTY diff capture at exit 0 is ambiguous, and only THIS round's
+    // A non-delivered diff capture is ambiguous, and only THIS round's
     // numstat — the diff FILE `git apply` read, not the bounded stdout — can
-    // resolve it. Non-empty numstat means the redirect wrote a diff the read
-    // did not deliver: a CAPTURE FAILURE, so the round is context-incomplete,
-    // never every row published as a confident `no-evidence`. Both empty is a
-    // genuinely empty PR: a normal round. `overflow` is neither — it keeps the
-    // documented over-size path. The recheck input built above cannot change:
-    // an empty capture leaves the catalog with no slices and every target
-    // excluded, so no input was built either way.
-    if (
-      diffRead.failure === "unreadable" ||
-      (diffRead.failure === null && diffRead.text === "" && numstatLines.length > 0)
-    ) {
+    // resolve the EMPTY case. Non-empty numstat means the redirect wrote a diff
+    // the read did not deliver: a CAPTURE FAILURE, so the round is
+    // context-incomplete, never every row published as a confident
+    // `no-evidence`. Both empty is a genuinely empty PR: a normal round.
+    // `overflow` and `unreadable` are capture failures by construction — the
+    // diff exists but is over the bound, or the transport broke — so they take
+    // the same accounting with their own `diff_capture` cause: an over-bound
+    // capture is "too large to prove", never "nothing to prove". The recheck
+    // input built above cannot change: any of the three leaves the catalog
+    // with no slices and every target excluded, so no input was built either
+    // way. Line comments keep the over-size behaviour — `diffText` stays "",
+    // so the hunk prefilter degrades to the base filter.
+    const diffCaptureFailure =
+      diffRead.failure ?? (diffRead.text === "" && numstatLines.length > 0 ? "empty" : undefined);
+    if (diffCaptureFailure !== undefined) {
       captureFailed = true;
       deps.log.warn(
-        { ...fields, diff_capture: "empty" },
-        "diff capture empty — context-unavailable (no evidence catalog; rows stay context-incomplete)",
+        { ...fields, diff_capture: diffCaptureFailure },
+        `diff capture ${diffCaptureFailure} — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
       );
     }
 

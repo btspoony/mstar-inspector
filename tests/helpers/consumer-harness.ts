@@ -60,10 +60,13 @@ export const {
   runnerTimeoutMs,
   reviewGuardTtlSeconds,
   guardRetryDelaysSeconds,
-  DIFF_PREFETCH_MAX_BYTES,
   INLINE_RESOLVE_MAX_ENTRIES,
   CHECK_HOOK_TIMEOUT_MS,
 } = await import("../../src/pipeline/consumer");
+
+// The diff bound lives with the command that enforces it (gitops), not on the
+// consumer — the double below reproduces that read, so it takes the same one.
+export { DIFF_PREFETCH_MAX_BYTES } from "../../src/pipeline/gitops";
 
 // --- test log sink (injected via the consumer's optional log param) --------
 export const { lines: logLines, log: testLog } = createTestLog();

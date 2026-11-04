@@ -180,13 +180,12 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     expect(db.raw.query("SELECT * FROM review_failures").all()).toHaveLength(0);
   });
 
-  test("an over-bound capture is over-size, not a capture failure: no slices, never context-incomplete", async () => {
-    // The bounded read flags a byte beyond DIFF_PREFETCH_MAX_BYTES; the
-    // consumer treats that as the DOCUMENTED over-size path — the text is
-    // unavailable (no slices, no recheck input), the row stays `no-evidence`,
-    // and the round still runs. Collapsing overflow into the empty capture's
-    // failure would silently flip every multi-MB PR to `context-incomplete`,
-    // and only this case would notice.
+  test("an over-bound capture is context-incomplete, never a fabricated no-evidence per row", async () => {
+    // The bounded read flags a byte beyond DIFF_PREFETCH_MAX_BYTES. The diff
+    // exists but cannot prove a row, so the round must say "the context was
+    // incomplete" — publishing `no-evidence` per row would claim the diff was
+    // inspected and came up empty. Slices stay off and the round still runs
+    // (no throw, no failure row): only the accounting changes.
     reset();
     sandbox.diffStdout = "b".repeat(DIFF_PREFETCH_MAX_BYTES + 1);
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -198,15 +197,19 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    // Over-size is not a capture failure: no `diff_capture` warn at all.
-    expect(logLines.some((l) => l.fields.diff_capture !== undefined)).toBe(false);
+    // The warn names the over-size cause, not the empty-capture one.
+    const warn = logLines.find((l) => l.fields.diff_capture !== undefined);
+    expect(warn?.fields.diff_capture).toBe("overflow");
+    expect(warn?.level).toBe("warn");
+    expect(warn?.msg).toContain("context-unavailable");
     // No slices ride, so no recheck round is dispatched.
     const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { recheck?: unknown };
     expect(writtenInput.recheck).toBeUndefined();
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
-    expect(prepared.body).toContain("unverifiable (no-evidence)");
-    expect(prepared.body).not.toContain("context-incomplete");
+    expect(prepared.body).toContain("unverifiable (context-incomplete)");
+    expect(prepared.body).not.toContain("unverifiable (no-evidence)");
+    expect(prepared.body).toContain("context coverage: unavailable");
     // The row is never assessed, and over-size records no failure row.
     const findingRow = db.raw.query("SELECT last_assessed_ms FROM review_findings").get() as {
       last_assessed_ms: number | null;
