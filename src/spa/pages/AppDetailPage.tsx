@@ -405,21 +405,21 @@ export function AppDetailView({
           <TabsContent value="installations" forceMount>
             {/* Installed tab: the shareable install link leads, the owner
                 allowlist follows it (owners arrive through installations),
-                then the installation table and its delivery health. A private
-                App renders NO allowlist control — its installs all sit inside
-                one owner, so the list would show no visible effect — but the
-                server still applies a stored list to its deliveries, which is
-                what the save notice tells the operator. */}
+                then the installation table and its delivery health. The
+                allowlist renders for EVERY visibility: admission enforces a
+                stored list whatever the App's visibility, so a hidden control
+                would leave a live filter unmanageable. A private App instead
+                carries a line saying the control stays visible for that
+                reason. */}
             <div className="flex flex-col">
               <AppInstallSection locale={locale} app={payload.app} />
-              {payload.app.github_visibility === "private" ? null : (
-                <AllowlistSection
-                  locale={locale}
-                  appId={appId}
-                  allowlist={payload.allowlist}
-                  onReload={onReload}
-                />
-              )}
+              <AllowlistSection
+                locale={locale}
+                appId={appId}
+                allowlist={payload.allowlist}
+                privateApp={payload.app.github_visibility === "private"}
+                onReload={onReload}
+              />
               <InstallationsSection locale={locale} payload={payload} />
             </div>
           </TabsContent>

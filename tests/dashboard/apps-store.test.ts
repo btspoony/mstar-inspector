@@ -141,7 +141,7 @@ describe("owner allowlist (migration 0045)", () => {
     expect(rows.n).toBe(0);
   });
 
-  test("a soft-delete landing after the pre-read reports false and leaves the switch untouched", async () => {
+  test("a soft-delete landing after the pre-read reports false and writes nothing at all", async () => {
     const db = createMigratedTestD1();
     seedApp(db, "app-allow-race", { githubAppId: 5103 });
     // The pre-read cannot see a delete that lands before the batch, so the
@@ -161,6 +161,10 @@ describe("owner allowlist (migration 0045)", () => {
       allowlist_enabled: number;
     };
     expect(row.allowlist_enabled).toBe(0);
+    // The DELETE and each INSERT repeat the liveness predicate, so the deleted
+    // App is left with no orphan owner rows either.
+    const owners = db.raw.query("SELECT COUNT(*) AS n FROM app_owner_allowlist").get() as { n: number };
+    expect(owners.n).toBe(0);
   });
 });
 

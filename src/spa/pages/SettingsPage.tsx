@@ -845,20 +845,26 @@ export function AppInstallSection({
 /**
  * The Installed tab's second block: the owner allowlist (it sits above the
  * installation table and below the install link — owners arrive through
- * installations). The caller hides it entirely for a private App, where the
- * server ignores any stored rows. The switch and the logins save together:
- * `enabled` rides as exactly one `"1"` / `"0"` field and `owners` as one
- * newline-separated text field the server splits, trims and de-duplicates.
+ * installations). The caller renders it for EVERY visibility: admission
+ * enforces the stored list whatever the cached visibility, so hiding the
+ * control for a private App would leave a live filter unmanageable — a
+ * private App gets a line saying the control is shown for that reason
+ * (`privateApp`). The switch and the logins save together: `enabled` rides as
+ * exactly one `"1"` / `"0"` field and `owners` as one newline-separated text
+ * field the server splits, trims and de-duplicates.
  */
 export function AllowlistSection({
   locale,
   appId,
   allowlist,
+  privateApp,
   onReload,
 }: {
   locale: SpaBoot["locale"];
   appId: string;
   allowlist: AllowlistSettings;
+  /** The cached visibility is `private` — only the note below changes. */
+  privateApp: boolean;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const [enabled, setEnabled] = useState(allowlist.enabled);
@@ -904,6 +910,9 @@ export function AllowlistSection({
           void save();
         }}
       >
+        {privateApp ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "settings.allowlistPrivateStillApplies")}</p>
+        ) : null}
         {/* The switch: a native binary control bound to its label — the house
             primitives carry no switch, and a bespoke widget would duplicate
             keyboard and state handling the platform already gets right. */}
@@ -1030,6 +1039,11 @@ export function ReviewGateSection({
             </label>
           ))}
         </fieldset>
+        {verdicts.length === 0 ? (
+          <p role="status" className="text-sm text-(--tone-warn-fg)">
+            {t(locale, "settings.reviewGateFailClosed")}
+          </p>
+        ) : null}
         <div>
           <Button type="submit" disabled={busy}>
             {t(locale, "settings.reviewGateSave")}

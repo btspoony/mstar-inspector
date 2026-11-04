@@ -4259,11 +4259,11 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
     // Admission applies whenever this switch is on, whatever the cached
-    // visibility; `private` only hides the SPA's allowlist control. So the
-    // copy below reports the state the save just produced, and it needs the
-    // resolved visibility: a stored `private` hides a control that still
-    // matters, which is exactly what the operator must be told. Probe through
-    // the metadata refresh's anonymous probe and store the answer — `unknown`
+    // visibility; `private` only changes the SPA's private-App note under an
+    // allowlist control it renders regardless. So the copy below reports the
+    // state the save just produced, and it needs the resolved visibility so a
+    // `private` App is told the stored list still applies. Probe through the
+    // metadata refresh's anonymous probe and store the answer — `unknown`
     // when it cannot answer — then derive the copy from it. Bookkeeping only: a
     // probe or cache-write failure is logged and never blocks the save the
     // operator asked for.
@@ -4284,17 +4284,18 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         `Saved the owner allowlist for ${appDisplayName(gate.app)} — switched off; every owner is reviewed as before.`,
       );
     }
-    // One owner / many owners reads correctly, and a `private` App says where
-    // its control went instead of leaving the operator to wonder.
+    // One owner / many owners reads correctly, and a `private` App is told
+    // that its stored list still applies — the Settings control stays visible
+    // for it, so the notice must not claim the control went anywhere.
     const accepted = `${owners.length} ${owners.length === 1 ? "owner" : "owners"} accepted; every other owner is refused.`;
-    const hiddenControl =
+    const privateControl =
       visibility === "private"
-        ? " This App is private, so its Settings control stays hidden — the stored list still applies to its deliveries."
+        ? " This App is private, but the stored list still applies to its deliveries — the control stays visible so you can manage it."
         : "";
     return settingsPostResponse(
       c,
       gate.app.github_app_id,
-      `Saved the owner allowlist for ${appDisplayName(gate.app)} — ${accepted}${hiddenControl}`,
+      `Saved the owner allowlist for ${appDisplayName(gate.app)} — ${accepted}${privateControl}`,
     );
   }
   // Review fold-in: an unknown op is a validation failure like any

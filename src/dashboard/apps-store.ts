@@ -178,7 +178,9 @@ export type GithubAppRow = {
    * Cached GitHub App visibility (migration 0045): 'public' | 'private' |
    * 'unknown', written by the anonymous `GET /apps/{slug}` probe during the
    * metadata refresh. NULL = never probed; getGithubVisibility reads it as
-   * 'unknown' (cannot prove private, so the allowlist surface stays visible).
+   * 'unknown' (cannot prove private). Admission never reads this column: the
+   * allowlist applies whatever the visibility, which only picks the wording
+   * of the allowlist control's private-App note.
    */
   github_visibility: GithubVisibility | null;
   /** Last verified (2xx) webhook delivery (migration 0008); NULL = never. */
@@ -1022,12 +1024,12 @@ export function createAppsStore(db: AppsStoreD1) {
      * collapse (the set is keyed on (app_id, owner_login)); an empty set is
      * legal and, with the switch on, refuses every owner (fail closed).
      * Refuses a soft-deleted or unknown App BEFORE writing (the setAppStatus
-     * rule — a batch cannot skip itself on the UPDATE's row count) and writes
-     * updated_at (an operator mutation). Returns whether the App row was still
-     * live when the batch ran: the UPDATE repeats the `deleted_at IS NULL`
-     * predicate and its change count is the answer, so a delete landing
-     * between the pre-read and the batch reports `false` instead of a save
-     * that never took effect.
+     * rule) and writes updated_at (an operator mutation). Returns whether the
+     * App row was still live when the batch ran: every batch statement — the
+     * DELETE, each INSERT and the UPDATE — repeats the `deleted_at IS NULL`
+     * predicate, so a delete landing between the pre-read and the batch writes
+     * nothing at all (no orphan owner rows) and the UPDATE's change count
+     * reports `false` instead of a save that never took effect.
      */
     async saveAllowlist(id: string, allowlist: AppAllowlist): Promise<boolean> {
       const live = await db
@@ -1036,15 +1038,19 @@ export function createAppsStore(db: AppsStoreD1) {
         .first<{ id: string }>();
       if (!live) return false;
       const owners = [...new Set(allowlist.owners)];
+      // Every statement repeats the liveness predicate: a soft delete landing
+      // between the pre-read and the batch then writes NO owner rows and does
+      // not flip the switch, instead of leaving a deleted App's list behind.
+      const liveApp = `EXISTS (SELECT 1 FROM github_apps g WHERE g.id = ? AND g.deleted_at IS NULL)`;
       const results = await db.batch([
-        db.prepare(`DELETE FROM app_owner_allowlist WHERE app_id = ?`).bind(id),
+        db.prepare(`DELETE FROM app_owner_allowlist WHERE app_id = ? AND ${liveApp}`).bind(id, id),
         ...owners.map((owner) =>
           db
             .prepare(
               `INSERT INTO app_owner_allowlist (app_id, owner_login, created_at)
-               VALUES (?, ?, datetime('now'))`,
+               SELECT ?, ?, datetime('now') WHERE ${liveApp}`,
             )
-            .bind(id, owner),
+            .bind(id, owner, id),
         ),
         db
           .prepare(

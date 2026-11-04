@@ -662,12 +662,15 @@ export const zhCN: Dictionary = {
     allowlistEnable: "仅审查允许名单中的所有者",
     allowlistOwners: "允许的所有者（每行一个 GitHub 登录名）",
     allowlistFailClosed: "开关已打开但名单为空：所有交付都会被拒绝，不会有任何审查运行。",
+    allowlistPrivateStillApplies:
+      "此 App 为私有，但已存储的名单仍会作用于其交付 — 控件保持显示，以便你管理名单。",
     allowlistSave: "保存允许名单",
     // 设置标签页：Check 所报告的审查门禁（迁移 0045）。
     reviewGate: "审查门禁",
     reviewGateCopy: "仅当结论属于以下之一且分数达到下限时，Check 才通过。",
     reviewGateScore: "最低分数（0–100）",
     reviewGateVerdicts: "可通过的结论",
+    reviewGateFailClosed: "未选中任何结论：任何审查都无法通过 — 在你选中之前，每个 Check 都会失败。",
     reviewGateSave: "保存审查门禁",
   },
   manifest: {

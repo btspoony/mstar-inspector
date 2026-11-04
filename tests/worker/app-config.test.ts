@@ -2816,6 +2816,19 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     expect(gateRow(db, app.id)).toEqual(before);
   });
 
+  test("save-check-gate: non-owner member → 403, zero mutation", async () => {
+    const { db, app } = await seededWorld();
+    rawRun(db, "UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    const before = gateRow(db, app.id);
+    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
+      op: "save-check-gate",
+      min_score: "90",
+      pass_verdicts: "ship it",
+    });
+    expect(res.status).toBe(403);
+    expect(gateRow(db, app.id)).toEqual(before);
+  });
+
   test("save-allowlist: REPLACE semantics — an owner dropped from the textarea is removed", async () => {
     const { db, app } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
@@ -2849,6 +2862,27 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     });
     expect(res.status).toBe(200);
     expect(ownerLogins(db, app.id)).toEqual(["acme", "ada"]);
+  });
+
+  test("save-allowlist: non-owner member → 403, zero mutation (switch, owners and probe cache)", async () => {
+    const { db, app } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    // A stored list and a stale operator timestamp, so a write of ANY kind —
+    // the owners, the switch, the probe's visibility cache — shows up below.
+    await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "0", owners: "ada" });
+    rawRun(db, "UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    const before = gateRow(db, app.id);
+    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
+      op: "save-allowlist",
+      enabled: "1",
+      owners: "acme",
+    });
+    expect(res.status).toBe(403);
+    expect(gateRow(db, app.id)).toEqual(before);
+    expect(ownerLogins(db, app.id)).toEqual(["ada"]);
+    // Turning the switch on would have probed; the denied request never got
+    // that far, so the cache is still unprobed.
+    expect(visibilityRow(db, app.id)).toBeNull();
   });
 
   test("save-allowlist: an invalid switch value → keyed 400, zero writes", async () => {
@@ -2914,7 +2948,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     expect(visibilityRow(db, app.id)).toBe("unknown");
   });
 
-  test("save-allowlist ON: the notice states enforcement, and names the hidden control for a private App", async () => {
+  test("save-allowlist ON: the notice states enforcement, and says a private App keeps the control", async () => {
     const { db, app } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const publicSave = await postForm(SETTINGS, cookie, makeEnv(db), {
@@ -2929,8 +2963,8 @@ describe("review gate + owner allowlist (payload and ops)", () => {
       "Saved the owner allowlist for mallorys-app — 2 owners accepted; every other owner is refused.",
     );
 
-    // The probe proves this App private: the stored list still applies, but
-    // the Settings control is hidden — which is exactly what the copy says.
+    // The probe proves this App private: the stored list still applies, and
+    // the Settings control stays visible for exactly that reason.
     fetchSpy.mockImplementation((async () => new Response("{}", { status: 404 })) as unknown as typeof fetch);
     const privateSave = await postForm(SETTINGS, cookie, makeEnv(db), {
       op: "save-allowlist",
@@ -2941,7 +2975,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     expect(visibilityRow(db, app.id)).toBe("private");
     expect(await privateSave.text()).toBe(
       "Saved the owner allowlist for mallorys-app — 1 owner accepted; every other owner is refused. " +
-        "This App is private, so its Settings control stays hidden — the stored list still applies to its deliveries.",
+        "This App is private, but the stored list still applies to its deliveries — the control stays visible so you can manage it.",
     );
 
     // Switched off: neither caveat applies.

@@ -362,15 +362,22 @@ describe("installed tab configuration surface (static SSR)", () => {
     expect(noSlug).toContain(t("en", "settings.install"));
   });
 
-  test("a private App renders no allowlist control at all — absence pinned", () => {
+  test("a private App still renders the allowlist control, with a line saying why", () => {
     const priv = renderDetail(
       { ...managePayload, app: { ...managePayload.app, github_visibility: "private" } },
       true,
     );
-    expect(priv).not.toContain(t("en", "settings.allowlist"));
-    expect(priv).not.toContain(t("en", "settings.allowlistEnable"));
-    // `unknown` cannot prove private, so the control stays visible there.
+    // Admission enforces the stored list for every visibility, so the control
+    // is never hidden — a hidden control would leave a live filter
+    // unmanageable. The private case carries the one-line explanation.
+    expect(priv).toContain(t("en", "settings.allowlist"));
+    expect(priv).toContain(t("en", "settings.allowlistEnable"));
+    expect(priv).toContain(t("en", "settings.allowlistPrivateStillApplies"));
+    // Any other visibility renders the same control without that line.
     expect(renderDetail(managePayload, true)).toContain(t("en", "settings.allowlist"));
+    expect(renderDetail(managePayload, true)).not.toContain(
+      t("en", "settings.allowlistPrivateStillApplies"),
+    );
   });
 
   test("the switch on with an empty list states the fail-closed consequence", () => {
@@ -420,6 +427,16 @@ describe("installed tab configuration surface (static SSR)", () => {
     // verdicts are the checked subset.
     expect(gate.verdicts.map((box) => box.label)).toEqual([...PR_VERDICTS]);
     expect(gate.verdicts.filter((box) => box.checked).map((box) => box.label)).toEqual(["ship it"]);
+  });
+
+  test("the review gate with no verdict checked states that no review can pass", () => {
+    const empty = renderDetail(
+      { ...managePayload, check_gate: { min_score: 80, pass_verdicts: [] } },
+      true,
+    );
+    expect(empty).toContain(t("en", "settings.reviewGateFailClosed"));
+    // The stored default passes on "ship it", so it carries no warning.
+    expect(renderDetail(managePayload, true)).not.toContain(t("en", "settings.reviewGateFailClosed"));
   });
 
   test("no release version string renders anywhere on the page", () => {

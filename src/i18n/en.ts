@@ -788,12 +788,16 @@ export const en = {
     allowlistOwners: "Allowed owners (one GitHub login per line)",
     allowlistFailClosed:
       "The switch is on and the list is empty: every delivery is refused, so no review will run.",
+    allowlistPrivateStillApplies:
+      "This App is private, but the stored list still applies to its deliveries — the control stays visible so you can manage it.",
     allowlistSave: "Save allowlist",
     // Settings tab: the review gate the Check reports (migration 0045).
     reviewGate: "Review gate",
     reviewGateCopy: "The Check passes only when the verdict is one of these and the score meets the floor.",
     reviewGateScore: "Minimum score (0–100)",
     reviewGateVerdicts: "Verdicts that pass",
+    reviewGateFailClosed:
+      "No verdict is selected: no review can ever pass, so every Check fails until you pick one.",
     reviewGateSave: "Save review gate",
   },
   manifest: {
