@@ -130,6 +130,7 @@ import {
   EXEC_TIMEOUT_GIT_MS,
   GUARD_TIMED_SANDBOX_STEPS,
   INLINE_RESOLVE_MAX_ENTRIES,
+  captureFundedOverrides,
   commenterCalls,
   commenterState,
   createReviewConsumer,
@@ -321,7 +322,9 @@ describe("createReviewConsumer", () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    // Funded round clock: the production window cannot pay for the capture AND
+    // the run, so the widest flow is exercised through the injectable budget.
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, captureFundedOverrides);
 
     await consumer(makeBatch(makePayload()));
 
@@ -496,7 +499,7 @@ describe("createReviewConsumer", () => {
     sandbox.resolvedSha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, captureFundedOverrides);
 
     await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment" })));
 
@@ -2812,7 +2815,7 @@ describe("createReviewConsumer", () => {
     await seedOpenTarget(db);
     await seedAssociation(db, "PRRT_thread1");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, {
-      ...testOverrides,
+      ...captureFundedOverrides,
       // Any previously reviewed head makes the compare gate reachable without
       // seeding the `reviews` table.
       findIncrementBase: async () => PRIOR_SHA,

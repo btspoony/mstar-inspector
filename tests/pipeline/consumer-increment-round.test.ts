@@ -9,7 +9,7 @@
  * Everything else (`behind`, `diverged`, a 404 after a force-push, any non-zero
  * exit) keeps the full-diff round.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 
 import {
   SHA,
@@ -40,6 +40,7 @@ import {
   DIFF_PATH,
 } from "../../src/pipeline/gitops";
 import {
+  captureFundedOverrides as captureFunded,
   commenterCalls,
   createReviewConsumer,
   extractIssueRefs,
@@ -50,6 +51,7 @@ import {
   makePayload,
   PR_CONTEXT_WORST_CASE_MS,
   reset,
+  runnerTimeoutMs,
   sandbox,
   testLog,
   testOverrides,
@@ -399,15 +401,17 @@ describe("incremental review rounds", () => {
     expect(storedContextIncomplete(db)).toBe(0);
   });
 
-  test("an empty increment capture marks the round context-incomplete instead of a silent full diff", async () => {
+  test("an empty increment capture with a NON-empty numstat is a round failure, never a silent full diff", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     sandbox.diffStdout = VALID_DIFF;
     // `ahead` turns the round incremental, but the base...head capture comes
-    // back empty at exit 0 — the same capture failure the full diff's empty
-    // read is, and it must reach the stored row.
+    // back empty at exit 0 while the same round's numstat reads the increment
+    // FILE and finds a diff: the transport lost the capture, so the round is
+    // context-incomplete (an empty FILE would be nothing to review instead).
     sandbox.compareStatus = "ahead";
     sandbox.incrementDiffStdout = "";
+    sandbox.numstatStdout = "3\t1\tsrc/auth.ts\n";
     const db = await createSeededTestD1();
     seedReview(db, PREVIOUS_SHA);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -422,6 +426,61 @@ describe("incremental review rounds", () => {
     expect(capture[0]!.fields.increment_capture).toBe("empty");
     expect(capture[0]!.fields.diff_capture).toBeUndefined();
     expect(storedContextIncomplete(db)).toBe(1);
+  });
+
+  test("an empty increment FILE (empty capture and empty numstat) is nothing to review: ack, no publication, no context-incomplete, Check skipped", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    // The eligible base is an ancestor and `base...head` truly has no changes:
+    // both reads of the increment — the bounded stdout copy and the numstat of
+    // the file it wrote — are empty. The prior round already covers this head's
+    // content, so a verdict here would be computed from nothing.
+    sandbox.compareStatus = "ahead";
+    sandbox.incrementDiffStdout = "";
+    sandbox.numstatStdout = "";
+    const db = await createSeededTestD1();
+    seedReview(db, PREVIOUS_SHA);
+    const terminalized: Array<{ publicationId: string | null; outcome: string }> = [];
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: mock(async () => ({
+          attemptId: "attempt-1",
+          scope: {
+            appId: TEST_APP_ID,
+            installationId: TEST_INSTALLATION_ID,
+            owner: TEST_OWNER,
+            repo: TEST_REPO,
+            prNumber: TEST_PR_NUMBER,
+          },
+          githubAppId: 424242,
+          headSha: SHA,
+          lease: { holder: "h", epoch: 1, untilMs: 1 },
+        })),
+        terminalize: mock(async (input: { publicationId: string | null; outcome: string }) => {
+          terminalized.push({ publicationId: input.publicationId, outcome: input.outcome });
+        }),
+      },
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // Acked with no review: no body, no paid run, no review row.
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    expect(sandbox.writtenInputJson).toBeUndefined();
+    expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    const rows = db.raw.query("SELECT count(*) AS c FROM reviews WHERE head_sha = ?").get(SHA) as { c: number };
+    expect(rows.c).toBe(0);
+    // …and it is NOT the capture-failure path.
+    expect(logLines.some((l) => l.fields.increment_capture !== undefined)).toBe(false);
+    expect(logLines.some((l) => l.fields.diff_capture !== undefined)).toBe(false);
+    // ONE structured line names the outcome.
+    const noIncrement = logLines.filter((l) => l.fields.event === "review_no_increment");
+    expect(noIncrement).toHaveLength(1);
+    expect(noIncrement[0]!.fields.increment_since).toBe(PREVIOUS_SHA);
+    // The Check ends non-failing — never a failure over a round with nothing to do.
+    expect(terminalized).toEqual([{ publicationId: null, outcome: "skipped" }]);
   });
 
   test("an over-size increment stdout copy is not a capture failure — numstat still reads the file", async () => {
@@ -570,7 +629,7 @@ describe("incremental review rounds", () => {
     await seedPriorPublication(db);
     await seedOpenTarget(db);
     await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 
@@ -600,7 +659,7 @@ describe("incremental review rounds", () => {
     sandbox.diffStdout = VALID_DIFF;
     // gh cannot answer → no prContext → no report seat → no --report-out.
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 
@@ -615,7 +674,7 @@ describe("incremental review rounds", () => {
   // The PR-context capture is best-effort, but its failures are named: an
   // unattributed `none` section is indistinguishable from a PR with nothing to
   // say, and the report seat simply never runs.
-  test("a round without the budget for the capture skips it, says so once, and still publishes", async () => {
+  test("the capture gate keeps the level's runner budget: a remainder that funds the capture alone still skips it", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     sandbox.diffStdout = VALID_DIFF;
@@ -623,10 +682,12 @@ describe("incremental review rounds", () => {
     sandbox.prBodyExitCode = 0;
     sandbox.prBodyContent = "Closes #7";
     const db = await createSeededTestD1();
+    const runnerBudgetMs = runnerTimeoutMs("default");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
-      // Half the capture's worst case: the round cannot fund it.
-      roundBudgetMs: PR_CONTEXT_WORST_CASE_MS / 2,
+      // Above the capture's own worst case, but below capture + the run: the
+      // capture would fit and would eat the window the paid run needs.
+      roundBudgetMs: PR_CONTEXT_WORST_CASE_MS + runnerBudgetMs - 60_000,
     });
 
     await consumer(makeBatch(makePayload()));
@@ -638,12 +699,13 @@ describe("incremental review rounds", () => {
     expect(warns).toHaveLength(1);
     expect(warns[0]!.fields.report_context).toBe("budget");
     expect(warns[0]!.msg).toContain(`${PR_CONTEXT_WORST_CASE_MS}ms`);
+    expect(warns[0]!.msg).toContain(`${runnerBudgetMs}ms`);
     // Never a failed review: the report degrades to `none` and the body lands.
     expect(preparedBody()).toContain("### Linked-issue AC\n\nnone");
     expect(sandbox.calls.some((c) => c.cmd.includes("--report-out"))).toBe(false);
   });
 
-  test("the remaining round time bounds the issue lookups the capture starts", async () => {
+  test("an ample remainder runs the capture, and the issue cap still bounds its lookups", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     sandbox.diffStdout = VALID_DIFF;
@@ -654,12 +716,9 @@ describe("incremental review rounds", () => {
       sandbox.issueBodies.set(number, { title: `issue ${number}`, body: "none" });
     }
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, {
-      ...testOverrides,
-      // Just over the worst case, so the gate admits the capture and the
-      // remaining time is what caps the lookups.
-      roundBudgetMs: PR_CONTEXT_WORST_CASE_MS + 60_000,
-    });
+    // Capture cost plus the run's whole budget and then some: the gate admits
+    // the capture.
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 
@@ -680,7 +739,7 @@ describe("incremental review rounds", () => {
     sandbox.diffStdout = VALID_DIFF;
     // The default state: `gh pr view` exits 1, so no PR context is captured.
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 
@@ -698,7 +757,7 @@ describe("incremental review rounds", () => {
     sandbox.prBodyExitCode = 0;
     sandbox.prBodyRaw = "<html>502 Bad Gateway</html>";
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 
@@ -717,7 +776,7 @@ describe("incremental review rounds", () => {
     sandbox.issueBodies.set(7, { title: "Guard", body: "- reject expired tokens" });
     sandbox.issueViewExitCode = 1;
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 
@@ -744,7 +803,7 @@ describe("incremental review rounds", () => {
       planToFix: "none",
     });
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 
@@ -775,7 +834,7 @@ describe("incremental review rounds", () => {
       planToFix: "none",
     });
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 
@@ -807,7 +866,7 @@ describe("incremental review rounds", () => {
       sandbox.prBodyContent = "no issues referenced";
       arrange();
       const db = await createSeededTestD1();
-      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, captureFunded);
 
       await consumer(makeBatch(makePayload()));
 
@@ -837,7 +896,7 @@ describe("incremental review rounds", () => {
       planToFix: "none",
     });
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 
@@ -870,7 +929,7 @@ describe("incremental review rounds", () => {
       [hostile]: hostile,
     });
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 
@@ -893,7 +952,7 @@ describe("incremental review rounds", () => {
       body: "b".repeat(PR_CONTEXT_MAX_CHARS + 10),
     });
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 
@@ -920,7 +979,7 @@ describe("incremental review rounds", () => {
       sandbox.issueBodies.set(number, { title: `issue ${number}`, body: "none" });
     }
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, captureFunded);
 
     await consumer(makeBatch(makePayload()));
 

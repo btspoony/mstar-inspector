@@ -190,7 +190,12 @@ import {
 import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandbox-images";
 // §7.10 Check seam implementation: `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
-import { createCheckBeginLatch, createCheckLifecycle, type CheckBeginLatch } from "./checks";
+import {
+  createCheckBeginLatch,
+  createCheckLifecycle,
+  type CheckBeginLatch,
+  type CheckTerminalOutcome,
+} from "./checks";
 // Review admission (review-concurrency §1.2): one `review_inflight` row is the
 // per-PR lock and the capacity reservation; the cap comes from the pipeline's
 // single runtime-config reader (never a dashboard route import).
@@ -327,8 +332,11 @@ export type ConsumerLogFields = {
    * concurrency reader's degraded-read warn, relayed on this channel.
    * `review_check_budgets_degraded` (same channel, spec §7.10): the check-budget
    * reader's degraded-read warn.
+   * `review_no_increment` (union widened ADDITIVELY): an incremental round whose
+   * `base...head` is genuinely empty — the prior round already covers this head,
+   * so the delivery is acked without a new review body.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_no_increment";
   action: string;
   installation_id: number;
   owner: string;
@@ -836,7 +844,7 @@ export type CheckLifecycleHooks = {
     latch?: CheckBeginLatch;
   }): Promise<CheckHandle | null>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
-    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error";
+    outcome: CheckTerminalOutcome;
     /** The operator-configured bound on the terminal `checks.update` (spec §7.10). */
     updateBudgetMs: number }): Promise<void>;
 };
@@ -1116,10 +1124,10 @@ export const PR_CONTEXT_WORST_CASE_MS = (1 + PR_CONTEXT_MAX_ISSUES) * EXEC_TIMEO
  *
  * Bounded by the ROUND's clock: the capture runs before the paid run, and each
  * gh read can consume its whole `EXEC_TIMEOUT_GIT_MS`, so a slow sandbox could
- * spend the round's window on a narrative. When the remainder cannot cover the
- * worst-case capture the step is skipped with ONE log line, and otherwise the
- * remaining time bounds how many issue reads start — so the review itself never
- * carries the cost.
+ * spend the round's window on a narrative. The gate therefore requires the
+ * remainder to cover the worst-case capture AND the level's runner budget — the
+ * run must still fit after the capture — and only then does the remaining time
+ * bound how many issue reads start, so the review itself never carries the cost.
  *
  * Any failure (gh missing, API error, non-JSON output, no budget) resolves
  * `undefined` after ONE warn naming the cause: the report sections then degrade
@@ -1133,6 +1141,7 @@ async function capturePrContext(
   token: string,
   log: ConsumerLog,
   fields: ConsumerLogFields,
+  level: ReviewLevel,
   roundDeadlineMs: number,
 ): Promise<PrContext | undefined> {
   const exec = { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS };
@@ -1143,10 +1152,14 @@ async function capturePrContext(
     );
   };
   const remainingMs = roundDeadlineMs - Date.now();
-  if (remainingMs < PR_CONTEXT_WORST_CASE_MS) {
+  // The capture is spent BEFORE the paid run, so its bound must leave the
+  // level's own exec budget intact: a capture that fits but eats the runner's
+  // window turns a review into a timeout.
+  const captureBudgetMs = PR_CONTEXT_WORST_CASE_MS + runnerTimeoutMs(level);
+  if (remainingMs < captureBudgetMs) {
     log.warn(
       { ...fields, report_context: "budget" },
-      `report context budget — ${remainingMs}ms left of the round, the capture costs up to ${PR_CONTEXT_WORST_CASE_MS}ms — skipped, report sections degrade to none`,
+      `report context budget — ${remainingMs}ms left of the round, the capture costs up to ${PR_CONTEXT_WORST_CASE_MS}ms and the run still needs its ${runnerTimeoutMs(level)}ms — skipped, report sections degrade to none`,
     );
     return undefined;
   }
@@ -3155,7 +3168,7 @@ async function processMessage(
   let sendAttempt: { publicationId: string } | null = null;
   const terminalizeCheck = async (
     publicationId: string | null,
-    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error",
+    outcome: CheckTerminalOutcome,
   ): Promise<void> => {
     if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
     checkTerminalized = true;
@@ -3771,6 +3784,12 @@ async function processMessage(
     // Failure discipline is the diff text's own — a non-zero exit throws, an
     // unreadable/empty capture marks the round context-incomplete. Never a
     // silent fall back to the full diff: the `since` fact would then be a lie.
+    // An empty bounded read is NOT decided here: as with the full diff, only
+    // the same round's numstat tells a genuinely unchanged increment (empty
+    // file) from a capture that delivered nothing. Until that read, an empty
+    // capture counts as a failure — the conservative side, which also keeps the
+    // recheck input unbuilt exactly as before.
+    let incrementEmpty = false;
     if (sinceSha !== null) {
       const increment = await sandbox.runCommand(
         incrementDiffCommand(payload.owner, payload.repo, sinceSha, headSha, DIFF_PATH),
@@ -3780,13 +3799,15 @@ async function processMessage(
         throw new Error(`increment diff failed: exit ${increment.exitCode}, stdout ${increment.stdout.length}B`);
       }
       const incrementRead = parseBoundedRead(increment.stdout);
-      if (incrementRead.failure === "unreadable" || (incrementRead.failure === null && incrementRead.text === "")) {
+      if (incrementRead.failure === "unreadable") {
         captureFailed = true;
-        const cause: "empty" | "unreadable" = incrementRead.failure === "unreadable" ? "unreadable" : "empty";
         deps.log.warn(
-          { ...fields, increment_capture: cause, increment_since: sinceSha },
-          `increment diff capture ${cause} — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+          { ...fields, increment_capture: "unreadable", increment_since: sinceSha },
+          `increment diff capture unreadable — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
         );
+      } else if (incrementRead.failure === null && incrementRead.text === "") {
+        incrementEmpty = true;
+        captureFailed = true;
       }
     }
 
@@ -3956,6 +3977,29 @@ async function processMessage(
       .map((line) => line.trimEnd())
       .filter((line) => line !== "");
 
+    // An ELIGIBLE base plus two empty reads of the SAME increment file means
+    // `base...head` has no changes: the prior round already covers this head's
+    // content, so there is nothing to review. A verdict over an empty file
+    // universe would be an assertion about nothing — and a `context-incomplete`
+    // flag would wrongly exclude this head as a future increment base — so the
+    // round acks instead: no publication, no review row, and the Check ends
+    // non-failing. Empty stdout with a NON-empty numstat is the capture failure
+    // right below, which keeps its context-incomplete accounting.
+    if (sinceSha !== null && incrementEmpty && numstatLines.length === 0) {
+      deps.log.info(
+        { ...fields, event: "review_no_increment", increment_since: sinceSha },
+        `no increment to review — ${sinceSha.slice(0, 7)}..${headSha.slice(0, 7)} is empty and the last reviewed head already covers this content; acking without a new review`,
+      );
+      await terminalizeCheck(null, "skipped");
+      return { kind: "ok" };
+    }
+    if (sinceSha !== null && incrementEmpty) {
+      deps.log.warn(
+        { ...fields, increment_capture: "empty", increment_since: sinceSha },
+        `increment diff capture empty — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+      );
+    }
+
     // A non-delivered diff capture is ambiguous, and only THIS round's
     // numstat — the diff FILE `git apply` read, not the bounded stdout — can
     // resolve the EMPTY case. Non-empty numstat means the redirect wrote a diff
@@ -4010,15 +4054,17 @@ async function processMessage(
     // PR context for the report seat (best-effort): the description plus the
     // issues it closes/references, read through gh with the same exec env the
     // diff uses. Bounded by the round's own clock (each read can burn a whole
-    // 120s window), and any failure or a budget skip resolves undefined (with
-    // one named warn) so the published report sections degrade to `none` — a
-    // narrative gap never fails a review.
+    // 120s window) and gated so the level's runner budget survives the capture;
+    // any failure or a budget skip resolves undefined (with one named warn) so
+    // the published report sections degrade to `none` — a narrative gap never
+    // fails a review.
     const prContext = await capturePrContext(
       sandbox,
       payload,
       token,
       deps.log,
       fields,
+      level,
       roundStartedAt + deps.roundBudgetMs,
     );
 

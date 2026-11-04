@@ -73,6 +73,17 @@ export const {
 // consumer — the double below reproduces that read, so it takes the same one.
 export { DIFF_PREFETCH_MAX_BYTES } from "../../src/pipeline/gitops";
 
+/**
+ * `testOverrides` with a round budget that funds the PR-context capture AND the
+ * level's runner. The production window (`ROUND_BUDGET_MS` = 900 s) cannot fund
+ * both (capture worst case 480 s + a default run's 600 s), so the report cases
+ * pay for the capture explicitly through the injectable clock.
+ */
+export const captureFundedOverrides = {
+  ...testOverrides,
+  roundBudgetMs: PR_CONTEXT_WORST_CASE_MS + runnerTimeoutMs("default") + 60_000,
+};
+
 // --- test log sink (injected via the consumer's optional log param) --------
 export const { lines: logLines, log: testLog } = createTestLog();
 

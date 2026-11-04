@@ -23,8 +23,12 @@ category: Added
 - **Increment bases and report context are bounded**: two Apps on one installation never share an increment
   base — only the reviewing App's own last reviewed head can bound the delta — and the best-effort PR
   context is skipped with one named log line when the round no longer has the wall clock it costs, so a slow
-  sandbox cannot spend the review's window on narrative. The report document's byte bound is derived from
-  its per-field character budgets, so a document that honours every budget can never be rejected.
+  sandbox cannot spend the review's window on narrative. The capture gate reserves the level's own runner
+  budget as well, so a capture that fits but would starve the paid run is skipped too. An eligible increment
+  base whose `base...head` is genuinely empty is nothing to review: the delivery is acked with one structured
+  line, no review body and no `context_incomplete` row, and its Check ends neutral rather than failed. The
+  report document's byte bound is derived from its per-field character budgets, so a document that honours
+  every budget can never be rejected.
 
 <!-- CN -->
 - **增量审查轮次**：当本 PR 上一个已审查的 head 是新 head 的祖先（GitHub `compare` 返回 `ahead`）时，各席位
@@ -42,5 +46,7 @@ category: Added
   证据、thread 与展示上限），因此带报告正文只发布一张既有 finding 表，而不再在下方折叠出第二份。
 - **增量基线与报告上下文均有界**：同一 installation 下的两个 App 不会共用增量基线——只有本 App 自己上一个已
   审查的 head 才能界定增量；当本轮剩余的墙钟时间不足以支付 PR 上下文抓取成本时，该步骤直接跳过并打一条具名
-  日志，慢沙箱因此无法把审查窗口耗在叙述上。报告文档的字节上限由各字段的字符预算推导而来，任何满足预算的
-  文档都不可能被字节门拒绝。
+  日志，慢沙箱因此无法把审查窗口耗在叙述上。抓取门禁同时预留本档位 runner 自己的预算，因此“装得下抓取却会
+  挤掉付费运行”的情况同样跳过。若合法增量基线的 `base...head` 确实为空，则视为无可审查内容：本次投递打一条
+  结构化日志后直接 ack，不发布新评论、不写 `context_incomplete` 行，Check 以 neutral 结束而非失败。报告文档
+  的字节上限由各字段的字符预算推导而来，任何满足预算的文档都不可能被字节门拒绝。

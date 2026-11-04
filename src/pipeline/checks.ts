@@ -825,6 +825,8 @@ export const CHECK_SUMMARIES = {
   degradedNotPosted: "Review output was invalid and the degraded notice was not published.",
   unconfirmed: "Review attempt could not be confirmed complete; publication status is unknown.",
   exhausted: "Finalization could not be confirmed. Manual inspection may be required.",
+  /** Nothing to review: an eligible increment base with an empty `base...head`. */
+  skipped: "No new changes since the last reviewed head; nothing to review for this head.",
 } as const;
 
 /** The allowed-verdict list for a public summary — bounded even if a stored gate were malformed. */
@@ -838,7 +840,9 @@ export type CheckTerminalOutcome =
   | "degraded-not-posted"
   | "publication-unknown"
   | "expired"
-  | "local-error";
+  | "local-error"
+  /** The round was acked without a review because the increment was empty. */
+  | "skipped";
 
 /**
  * Decide the Check conclusion from spec §7.9's matrix:
@@ -854,6 +858,7 @@ export type CheckTerminalOutcome =
  * | degraded send rejected, no earlier unknown send                | failure |
  * | any send with unconfirmed result, or expired attempt w/o proof | failure |
  * | recovery exhausted                                             | proof-derived, else failure |
+ * | nothing to review (`skipped`, no send possible)                | neutral |
  *
  * Proof precedence (normal over degraded within the exact scope/SHA) lives in
  * `readPublicationProof`, which the caller uses to obtain `proof`; this
@@ -898,6 +903,11 @@ export function decideConclusion(input: {
           title: CHECK_NAME,
           summary: CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate),
         };
+  }
+  // A round with nothing to review never had a send to lose: it is not an
+  // execution failure, so its own neutral conclusion is the honest one.
+  if (outcome === "skipped") {
+    return { desired: "neutral", title: CHECK_NAME, summary: CHECK_SUMMARIES.skipped };
   }
   if (outcome === "local-error") {
     return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.exhausted };

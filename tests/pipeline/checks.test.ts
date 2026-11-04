@@ -1196,6 +1196,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     "publication-unknown",
     "expired",
     "local-error",
+    "skipped",
   ] as const;
 
   test("a confirmed normal publication decides from proof: success when the gate is met, whatever the terminal outcome", () => {
@@ -1330,6 +1331,14 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     expect(decided.summary).toBe("Review output was invalid and the degraded notice was not published.");
   });
 
+  test("no proof + skipped (nothing to review) is neutral, never a failure", () => {
+    // An empty increment never had a send to lose: the round is not an
+    // execution failure, so it must not fail the Check.
+    const decided = decideConclusion({ proof: null, outcome: "skipped" });
+    expect(decided.desired).toBe("neutral");
+    expect(decided.summary).toBe(CHECK_SUMMARIES.skipped);
+  });
+
   test("no proof + publication-unknown / expired is the unconfirmed failure", () => {
     for (const outcome of ["publication-unknown", "expired"] as const) {
       const decided = decideConclusion({ proof: null, outcome, gate, review: null });
@@ -1376,6 +1385,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       decideConclusion({ proof: null, outcome: "degraded-not-posted", gate, review: null }),
       decideConclusion({ proof: null, outcome: "expired", gate, review: null }),
       decideConclusion({ proof: null, outcome: "local-error", gate, review: null }),
+      decideConclusion({ proof: null, outcome: "skipped", gate, review: null }),
     ]) {
       expect(decided.summary.length).toBeLessThanOrEqual(2_000);
       expect(decided.desired).not.toBe("in_progress");
