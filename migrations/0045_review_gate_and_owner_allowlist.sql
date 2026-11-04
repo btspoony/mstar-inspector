@@ -21,12 +21,15 @@
 --   github_visibility    TEXT CHECK(... IN ('public','private','unknown')) —
 --                        the anonymous `GET /apps/{slug}` probe cached during
 --                        the existing metadata refresh. NULL = never probed,
---                        which the store reads as 'unknown' (cannot prove
---                        private, so the allowlist surface stays visible). A
---                        private App never applies its allowlist rows.
+--                        which the store reads as 'unknown'. Delivery
+--                        admission never reads this column — the owner
+--                        allowlist applies whatever the visibility — it only
+--                        decides whether the dashboard renders the allowlist
+--                        control. It exists so the settings page can stop
+--                        offering a control to a private App.
 --
--- `app_owner_allowlist` holds the owner logins a public App will accept review
--- work from — one row per (app, login). `created_at` is the datetime('now')
+-- `app_owner_allowlist` holds the owner logins the App will accept review work
+-- from — one row per (app, login). `created_at` is the datetime('now')
 -- TEXT convention shared with the rest of this table family. The row set is
 -- replaced atomically by the store (delete-then-insert in one batch), never
 -- merged, so removing an owner is the same operation as adding one. The

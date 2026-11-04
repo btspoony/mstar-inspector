@@ -8,7 +8,7 @@ applies_when:
   - deciding whether a GitHub App is public or private
   - adding delivery admission rules to a webhook handler
   - choosing fail-open or fail-closed for a store read on the delivery path
-tags: [github-apps, webhook, allowlist, visibility, fail-open, admission]
+tags: [github-apps, webhook, allowlist, visibility, fail-closed, admission]
 ---
 
 # App visibility and delivery admission
@@ -27,14 +27,17 @@ public App and `404` for a private one. Probe it that way:
 - anything else, or a timeout -> keep the previously stored value
 
 A `404` is ambiguous: it is also what a missing or renamed slug returns, so a
-stale cached slug can read as `private`. The probe runs on two occasions: after
+stale cached slug can read as `private`. That no longer costs anything on the
+delivery path — admission never reads this cache — it only hides the owner
+allowlist control on the settings page while the stored list stays enforced.
+
+The probe runs on two occasions: after
 a successful profile fetch, on the slug that fetch resolved (or the already
 cached one when the payload carries none); and whenever the owner allowlist is
-switched ON, because admission trusts this cache and a stale `private` would
-silently leave the gate inert. An uncertain answer (any other status, or a
-timeout) keeps the previously stored value on the refresh path, while the
-enable path stores `unknown` — the cache it replaces is exactly what may be
-wrong.
+switched ON, so the control the settings page shows matches the App instead of a
+stale cache. An uncertain answer (any other status, or a timeout) keeps the
+previously stored value on the refresh path, while the enable path stores
+`unknown` — the cache it replaces is exactly what may be wrong.
 
 The probe must not send the App JWT or installation token; authenticating it
 would make a private App answer `200` and erase the distinction.
@@ -50,35 +53,41 @@ An App can restrict review work to a set of repository owners. The switch is
 off by default and off means the pre-existing behavior exactly.
 
 When the switch is on, admission happens after classification and before the
-first write:
+first write, for EVERY cached visibility. `private` never exempts a delivery:
+it only hides the dashboard control, so a stale `private` cache can never leave
+the gate inert.
 
 - owner readable and listed -> continue
 - owner readable and not listed -> respond `200` with a short body and write
   nothing: no delivery row, no PR ledger row, no `last_webhook_at` update, no
   enqueue
 - owner unreadable -> continue; the gate cannot be applied
-- App visibility is `private` -> ignore stored allowlist rows entirely
 
 `200` is deliberate. A refusal is a policy outcome, not a retryable error, and
 GitHub redelivers non-2xx responses.
 
-## Read failures on the admission path fail open
+## Read failures on the admission path fail closed
 
-A failed allowlist read (store error, timeout, missing row) lets the delivery
-proceed, and logs a structured warning. This is the chosen direction, recorded
-here because it is not obvious from the code:
+A failed allowlist read refuses the delivery with `500` and writes nothing: no
+delivery row, no PR ledger row, no `last_webhook_at` update, no enqueue. GitHub
+then retries the delivery.
 
-- signature verification and installation identity already ran; an attacker
-  cannot reach this point without a valid App-signed payload
-- the opposite direction silently drops real review work whenever D1 is
-  degraded, and the tenant has no surface that would show the drop
-- a refusal leaves no delivery record: it is one structured log line
-  (`owner_not_allowlisted`) with no `webhook_deliveries` row, no PR ledger row
-  and no `last_webhook_at` touch. An outage-caused admission is therefore
-  distinguishable only by the ABSENCE of that log line — nothing in the
-  delivery ledger counts refusals
+The direction is deliberate, and it is the opposite of the earlier fail-open
+choice:
 
-The Check path takes the opposite direction on unreadable configuration: an
-App row or review row that cannot be read concludes `failure`, because a pass
-would assert a review bar that was never evaluated. Read failure on an
-admission gate and read failure on an evidence gate are not symmetric.
+- the read IS the gate: "cannot read" must not mean "admit every owner"
+- a degraded D1 costs delayed deliveries (GitHub redelivers 5xx), never
+  silently admitted work
+- a store error and a null on an App row resolved moments earlier are both
+  "unknown", so both refuse — the operator sees
+  `owner_allowlist_read_failed` / `owner_allowlist_row_vanished`
+
+A refusal the gate DOES produce is log-only (`owner_not_allowlisted`): the
+delivery ledger never counts refusals, so an outage-caused refusal is
+distinguishable by its `500`-warn event, not by any ledger row.
+
+The Check path takes the same direction on unreadable configuration: an App row
+or review row that cannot be read concludes `failure`, because a pass would
+assert a review bar that was never evaluated. Both gates treat an unreadable
+input as a refusal to pass; only the surface differs — a `500` GitHub retries
+versus a Check conclusion a human reads.
