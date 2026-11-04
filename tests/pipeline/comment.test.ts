@@ -1043,6 +1043,9 @@ describe("report sections (mstar.report/v1 side document)", () => {
 });
 
 describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
+  /** Lines that open or close a fenced block (the plan's renderer is the only source). */
+  const fenceLines = (text: string): string[] => text.split("\n").filter((line) => /^ {0,3}`{3,}/.test(line));
+
   const output: ReviewOutput = {
     schema: "mstar.review/v1",
     verdict: "blocked",
@@ -1088,10 +1091,70 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     }));
     // Sized so the closure fold opens before the cut and would end after it.
     const clogged: ReviewOutput = { ...output, summary_md: "x".repeat(REVIEW_BODY_LIMIT - 400) };
-    const body = buildReviewBody(clogged, 0, buildClosureSection(coverage, rows));
+    const closure = buildClosureSection(coverage, rows);
+    const body = buildReviewBody(clogged, 0, closure);
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
     expect(body).toContain("<details>");
     expect((body.match(/<details>/g) ?? []).length).toBe((body.match(/<\/details>/g) ?? []).length);
+    // A cut outside every fence must not invent one: it closes only the details.
+    expect(fenceLines(body)).toEqual([]);
+
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "review",
+    });
+    const prepared = buildPreparedReviewBody({
+      output: clogged,
+      omittedFindings: 0,
+      round: 3,
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      publicationMarker,
+      closure,
+    });
+    expect(fenceLines(prepared)).toEqual([]);
+    expect((prepared.match(/<details>/g) ?? []).length).toBe((prepared.match(/<\/details>/g) ?? []).length);
+    expect(prepared).toContain("Review 3 · commit 0123456");
+    expect(prepared.trimEnd().endsWith(publicationMarker)).toBe(true);
+  });
+
+  test("a cut inside the fix plan closes its fence before the fold, header and marker intact", () => {
+    // The plan renders last, so an over-budget body cuts INSIDE its fenced
+    // block: closing only the fold would still let the fence swallow the
+    // trailer. A validated document caps planToFix at 6000 chars, so the plan
+    // has to be inflated directly to reach the cut this clamp must survive.
+    const headSha = "0123456789abcdef0123456789abcdef01234567";
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha,
+      kind: "review",
+    });
+    const report: ReportDoc = {
+      schema: "mstar.report/v1",
+      headSha,
+      overview: "Adds an expiry guard.",
+      linkedIssueAc: "Expiry rejected: met.",
+      verified: "- suite → green",
+      rejected: "none",
+      planToFix: "x".repeat(REVIEW_BODY_LIMIT + 5000),
+    };
+    const reportParts = { report, revalidated: "Reassessed 0/0 open prior finding(s) this round" };
+    const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
+
+    // Both clamp sites: the inner body clamp and the prepared-body clamp.
+    const inner = buildReviewBody(small, 0, undefined, reportParts);
+    const prepared = buildPreparedReviewBody({ output: small, omittedFindings: 0, round: 7, headSha, publicationMarker, reportParts });
+    for (const clamped of [inner, prepared]) {
+      expect(clamped.length).toBeLessThan(65536);
+      expect(clamped).toContain("…");
+      // Opening fence plus the closer the clamp appends — an odd count means
+      // the rest of the comment renders as code, marker lines included.
+      expect(fenceLines(clamped)).toHaveLength(2);
+      expect((clamped.match(/<details>/g) ?? []).length).toBe(1);
+      expect((clamped.match(/<\/details>/g) ?? []).length).toBe(1);
+    }
+    expect(prepared).toContain("Review 7 · commit 0123456");
+    expect(prepared.trimEnd().endsWith(publicationMarker)).toBe(true);
   });
 
   test("within-limit bodies pass through verbatim", () => {
