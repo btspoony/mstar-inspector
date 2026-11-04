@@ -57,11 +57,19 @@ export const testOverrides = {
 // this ONE loader (a static import would run before the workerd shim above).
 export const {
   createReviewConsumer,
+  extractIssueRefs,
   runnerTimeoutMs,
   reviewGuardTtlSeconds,
   guardRetryDelaysSeconds,
+  GUARD_TIMED_SANDBOX_STEPS,
+  EXEC_TIMEOUT_GIT_MS,
   INLINE_RESOLVE_MAX_ENTRIES,
   CHECK_HOOK_TIMEOUT_MS,
+  ROUND_BUDGET_MS,
+  PR_CONTEXT_EXEC_TIMEOUT_MS,
+  PR_CONTEXT_WORST_CASE_MS,
+  POST_RUNNER_READ_TIMEOUT_MS,
+  POST_RUNNER_READ_BUDGET_MS,
 } = await import("../../src/pipeline/consumer");
 
 // The diff bound lives with the command that enforces it (gitops), not on the

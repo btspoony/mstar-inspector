@@ -11,6 +11,13 @@
 # and its lockfile are image inputs, so the container must be rebuilt with them).
 # rebuild: the image's CLI pin and harness clone ref move to 4.2.0
 # (`sandbox-image/cli-global/**` and the pinned ref are image inputs too).
+# rebuild: the report document is now bound to the reviewed head — the runner
+# writes `headSha` from the envelope's `target.head_sha` and the Worker refuses
+# a document bound to another head, so a file left at the fixed path by an
+# earlier run can never publish its narrative under this review. A stale image
+# writes an unbound document that the Worker renders as `none`. The report seat
+# also degrades to no report when its definition is missing or the envelope
+# carries no head, instead of failing a review that already settled.
 # rebuild: the runner stopped requiring a seat summary — the review body is the
 # engine's own layout now instead of a consumer rebuild of it, so the two halves
 # of that change (the 4.1.6 harness pin and the no-longer-required output field)
@@ -55,6 +62,35 @@
 # rebuild: evidence slices now carry `addedNewLines`, so a `current-code` proof
 # must cite a line the hunk added, and the status `reason` is a closed
 # vocabulary with `rejected_unnamed` counting the drops no row id could name.
+# rebuild: incremental rounds and the narrative report seat. The runner gains
+# `--report-out` (a second side document, `mstar.report/v1`, written beside the
+# recheck document) and the report seat itself; the Worker's compare gate and
+# its `since <base>` reconFact assume a runner that understands a delta
+# universe. A stale image does NOT degrade to `none`: its runner rejects the
+# unknown `--report-out` flag with a usage error, exits 2 with no stdout, and
+# the round fails as a runner failure — so the image must be rebuilt before the
+# Worker sends that flag.
+# rebuild: the report validator now rejects a document that is over the read's
+# BYTE bound (character budgets alone cannot bound UTF-8 bytes) with an explicit
+# reason, and the report seat honours a caller signal aborted before the call
+# instead of running to its own timeout. A stale image accepts the over-byte
+# document, writes it, and loses it to the Worker's overflow read.
+# rebuild: the report seat now receives the run's teardown signal (joined with a
+# caller abort), so a torn-down run stops an in-flight seat, and the shared
+# report gate no longer echoes the seat's own keys/values in its rejection
+# reason. A stale image runs the seat to its full timer after teardown and logs
+# seat-authored text into the structured report diagnostics.
+# rebuild: the report file's byte bound is now DERIVED from the per-field
+# character budgets (6 bytes × 16,500 chars + 256 bytes of envelope), so a
+# maximal document the budgets allow can no longer be rejected by the byte gate.
+# A stale image still enforces the retired 64 KiB bound: its runner rejects the
+# document and writes nothing, so the Worker renders `none` for a report the
+# current shared gate accepts.
+# rebuild: the shared seat definition is installed for EVERY dispatch that needs
+# it — the recheck seat and the report seat, which runs on the PR context alone.
+# A deep report round without a recheck used to install nothing yet dispatch the
+# seat anyway, so the SDK resolved no agent and the seat failed anonymously; the
+# runtime now refuses to dispatch a report seat whose definition is missing.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and

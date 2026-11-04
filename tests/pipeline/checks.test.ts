@@ -1196,6 +1196,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     "publication-unknown",
     "expired",
     "local-error",
+    "skipped",
   ] as const;
 
   test("a confirmed normal publication decides from proof: success when the gate is met, whatever the terminal outcome", () => {
@@ -1330,6 +1331,78 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     expect(decided.summary).toBe("Review output was invalid and the degraded notice was not published.");
   });
 
+  test("no proof + skipped (nothing to review and nothing to inherit) is neutral, never a failure", () => {
+    // The callers that know the reviewed head pass it (`inherited`); without
+    // one there is no result to carry, and the round is not an execution
+    // failure either.
+    const decided = decideConclusion({ proof: null, outcome: "skipped", gate, review: null });
+    expect(decided.desired).toBe("neutral");
+    expect(decided.summary).toBe(CHECK_SUMMARIES.skipped);
+  });
+
+  // An EMPTY increment is not a free-standing round: its content IS the
+  // reviewed head's, so the Check inherits THAT head's gate result. There is
+  // no neutral exit on this branch (not even an unreadable baseline) —
+  // otherwise one empty commit would replace a failing required Check for the
+  // same content with `neutral`.
+  const base7 = "fedcba9";
+  const inherited = { headSha: SHA, reviewedHeadSha: "fedcba9876543210fedcba9876543210fedcba98" };
+
+  test("an empty increment inherits a missed baseline gate as failure", () => {
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "skipped",
+      gate,
+      review: review("needs fixes", 40),
+      inherited,
+    });
+    expect(decided.desired).toBe("failure");
+    expect(decided.summary).toBe(CHECK_SUMMARIES.inheritedGateMissed(sha7, base7, "needs fixes", 40, gate));
+    // The head has no new changes and the result belongs to the reviewed head.
+    expect(decided.summary).toContain(`No new changes at ${sha7}`);
+    expect(decided.summary).toContain(base7);
+    expect(decided.summary).toContain('verdict "needs fixes"');
+    expect(decided.summary).not.toMatch(/approve|approved|merge gate/i);
+  });
+
+  test("an empty increment inherits a met baseline gate as success", () => {
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "skipped",
+      gate,
+      review: review("ship it", 92),
+      inherited,
+    });
+    expect(decided.desired).toBe("success");
+    expect(decided.summary).toBe(CHECK_SUMMARIES.inheritedGateMet(sha7, base7, "ship it", 92, gate));
+    expect(decided.summary).toContain(`No new changes at ${sha7}`);
+    expect(decided.summary).toContain(`score 92`);
+    // Naming the inherited result is not an approval of the head under check.
+    expect(decided.summary).not.toMatch(/approve|approved/i);
+  });
+
+  test("an empty increment fails closed when the current gate or the inherited score is unreadable", () => {
+    const unreadable: Array<{ gate: ReviewGate | null; review: { verdict: string; scorePct: number | null } }> = [
+      { gate: null, review: review("ship it", 96) },
+      { gate, review: review("ship it", null) },
+    ];
+    for (const input of unreadable) {
+      const decided = decideConclusion({ proof: null, outcome: "skipped", ...input, inherited });
+      expect(decided.desired).toBe("failure");
+      expect(decided.summary).toContain(`No new changes at ${sha7}`);
+      expect(decided.summary).toContain(base7);
+    }
+  });
+
+  test("an empty increment whose baseline result is unreadable fails closed and says why", () => {
+    const decided = decideConclusion({ proof: null, outcome: "skipped", gate, review: null, inherited });
+    expect(decided.desired).toBe("failure");
+    expect(decided.summary).toBe(CHECK_SUMMARIES.inheritedUnreadable(sha7, base7));
+    expect(decided.summary).toContain(base7);
+    expect(decided.summary).toContain("could not be read");
+    expect(decided.summary).toContain("failing closed");
+  });
+
   test("no proof + publication-unknown / expired is the unconfirmed failure", () => {
     for (const outcome of ["publication-unknown", "expired"] as const) {
       const decided = decideConclusion({ proof: null, outcome, gate, review: null });
@@ -1397,6 +1470,125 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     expect(decided.summary).not.toContain("ghp_SECRETVALUE123");
     expect(decided.summary).not.toContain("\n");
     expect(decided.summary).toContain("[REDACTED]");
+  });
+});
+
+describe("empty increment inheritance (spec §7.9)", () => {
+  const BASE_SHA = "fedcba9876543210fedcba9876543210fedcba98";
+  const BASE7 = BASE_SHA.slice(0, 7);
+
+  /** The reviewed head's row: exactly the fields the inherited read consumes. */
+  function seedBaselineReview(
+    db: TestD1,
+    verdict: string,
+    scorePct: number | null,
+    envelope = JSON.stringify(scorePct === null ? { verdict } : { verdict, tally: { scorePct } }),
+    /**
+     * The schema's `json_valid(envelope)` CHECK normally forbids an unparseable
+     * payload; disable it for the one case that exercises the reader's own
+     * defensive parse (a schema divergence or a pre-CHECK row).
+     */
+    corruptEnvelope = false,
+  ): void {
+    if (corruptEnvelope) db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, envelope)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        SCOPE.installationId,
+        SCOPE.owner,
+        SCOPE.repo,
+        SCOPE.prNumber,
+        BASE_SHA,
+        verdict,
+        SCOPE.appId,
+        envelope,
+      );
+  }
+
+  test("the terminal Check carries the inherited baseline result, never an unconditional neutral", async () => {
+    const cases: Array<{
+      name: string;
+      baseline: { verdict: string; scorePct: number | null } | null;
+      /** Raw row envelope, for a row whose payload cannot be read. */
+      envelope?: string;
+      /** Insert the envelope with the schema's JSON CHECK disabled. */
+      corruptEnvelope?: boolean;
+      gate: ReviewGate | null;
+      desired: CheckConclusion["desired"];
+    }> = [
+      // The bypass this test exists for: an empty commit must not turn the
+      // reviewed head's failing gate into a neutral required check.
+      { name: "baseline below the gate", baseline: { verdict: "needs fixes", scorePct: 40 }, gate: GATE, desired: "failure" },
+      { name: "baseline meets the gate", baseline: { verdict: "ship it", scorePct: 92 }, gate: GATE, desired: "success" },
+      { name: "readable baseline, unreadable gate", baseline: { verdict: "ship it", scorePct: 92 }, gate: null, desired: "failure" },
+      { name: "unreadable baseline", baseline: null, gate: GATE, desired: "failure" },
+      // The row exists but its payload cannot be read: still a failure, never
+      // a neutral that an empty commit could use to shed a required check.
+      { name: "corrupt baseline envelope", baseline: null, envelope: "{not json", corruptEnvelope: true, gate: GATE, desired: "failure" },
+      { name: "baseline envelope without a verdict", baseline: null, envelope: JSON.stringify({ tally: { scorePct: 90 } }), gate: GATE, desired: "failure" },
+    ];
+
+    for (const testCase of cases) {
+      const db = await seededDb();
+      if (testCase.baseline !== null) {
+        seedBaselineReview(db, testCase.baseline.verdict, testCase.baseline.scorePct, testCase.envelope, testCase.corruptEnvelope);
+      } else if (testCase.envelope !== undefined) {
+        seedBaselineReview(db, "ship it", 100, testCase.envelope, testCase.corruptEnvelope);
+      }
+      const { attempt, lease } = await claimedAttempt(db);
+      await attachedRun(db, attempt, lease, 4242);
+      const fake = fakeChecks({
+        update: () => runPayload(attempt.identity, { status: "completed", conclusion: testCase.desired }),
+      });
+      const lifecycle = createCheckLifecycle({
+        db,
+        nowMs: () => CLOCK,
+        getAdapter: () => adapterFor(db, fake.octokit),
+        getCheckGate: async () => testCase.gate,
+      });
+
+      await lifecycle.terminalize({
+        handle: {
+          attemptId: attempt.identity.attemptId,
+          scope: SCOPE,
+          githubAppId: GITHUB_APP_ID,
+          headSha: SHA,
+          lease,
+        },
+        publicationId: null,
+        outcome: "skipped",
+        inheritedHeadSha: BASE_SHA,
+      });
+
+      // The ONE remote send is the inherited conclusion, the row freezes and
+      // observes it, and nothing was published: the Check is the only change.
+      expect(fake.updates).toHaveLength(1);
+      const row = await rowOf(db, attempt);
+      expect({
+        case: testCase.name,
+        sent: fake.updates[0]!.raw.conclusion,
+        desired: row.desired,
+        observed: row.observed,
+      }).toEqual({
+        case: testCase.name,
+        sent: testCase.desired,
+        desired: testCase.desired,
+        observed: testCase.desired,
+      });
+      expect(fake.updates[0]!.raw.summary).toContain(`No new changes at ${SHA.slice(0, 7)}`);
+      expect(fake.updates[0]!.raw.summary).toContain(BASE7);
+      if (testCase.baseline === null) {
+        // A baseline that cannot be read fails the check closed.
+        expect(fake.updates[0]!.raw.summary).toContain("could not be read");
+        expect(fake.updates[0]!.raw.summary).toContain("failing closed");
+      } else if (testCase.gate !== null) {
+        expect(fake.updates[0]!.raw.summary).toContain(`verdict "${testCase.baseline.verdict}"`);
+      }
+    }
   });
 });
 

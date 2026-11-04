@@ -20,10 +20,15 @@ import {
   boundedFileReadCommand,
   buildGitOpsCommands,
   CLONE_DIR,
+  compareStatusCommand,
   DIFF_PATH,
   DIFF_PREFETCH_MAX_BYTES,
+  incrementDiffCommand,
+  issueViewCommand,
+  prBodyCommand,
   readRecheckCommand,
   readRecheckStatusCommand,
+  readReportCommand,
   RUNNER_INPUT_PATH,
   RUNNER_PATH,
   runnerCommand,
@@ -32,6 +37,7 @@ import {
 import type { GitOpsCommands } from "../../src/pipeline/gitops";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
+import { REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -71,6 +77,24 @@ const TEST_APP_WEBHOOK_SECRET_ENC = await createSecretbox(TEST_KEY).encryptSecre
   "whsec-consumer-test",
   `github_apps.webhook_secret_enc:${TEST_APP_ID}`,
 );
+
+/**
+ * A SECOND App row (`reviews.app_id`'s FK needs a real one) whose id no test
+ * payload carries: the cross-App increment-base cases attribute a review to it
+ * and prove the read stays inside the reviewing App.
+ */
+export const TEST_OTHER_APP_ID = "99999999-8888-7777-6666-555555555555";
+
+export function seedOtherApp(db: TestD1): void {
+  db.raw
+    .prepare(
+      `INSERT INTO github_apps
+         (id, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, 434343, 'consumer-test-other-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+    )
+    .run(TEST_OTHER_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC);
+}
 
 /**
  * Fully-migrated D1 with the default App row seeded — the consumer's
@@ -187,9 +211,6 @@ function gitOpsCommandsFor(payload: {
     prNumber: payload.pr_number,
     cloneDir: CLONE_DIR,
     diffPath: DIFF_PATH,
-    runnerPath: RUNNER_PATH,
-    level: TEST_REVIEW_LEVEL,
-    inputPath: RUNNER_INPUT_PATH,
   });
   return new Map(
     Object.entries(commands).map(([kind, command]) => [command, kind as keyof GitOpsCommands] as const),
@@ -217,6 +238,8 @@ const RUNNER_CMDS: ReadonlySet<string> = new Set(
   REVIEW_LEVELS.flatMap((level) => [
     runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH),
     runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, RECHECK_OUTPUT_PATH),
+    runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, undefined, REPORT_OUTPUT_PATH),
+    runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, RECHECK_OUTPUT_PATH, REPORT_OUTPUT_PATH),
   ]),
 );
 /**
@@ -228,6 +251,24 @@ const DIFF_READ = boundedFileReadCommand(DIFF_PATH, DIFF_PREFETCH_MAX_BYTES);
 /** The audited bounded reads, built by production code from the fixed paths. */
 const RECHECK_DOC_READ = readRecheckCommand(RECHECK_OUTPUT_PATH);
 const RECHECK_STATUS_READ = readRecheckStatusCommand(RECHECK_STATUS_PATH);
+const REPORT_READ = readReportCommand();
+const PR_BODY_READ = prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER);
+/**
+ * The two increment commands carry per-round shas, so the double matches them
+ * by the fixed head and tail the production builders emit AROUND those shas:
+ * a command-shape change edits the product, never a hand-typed prefix here.
+ */
+const SHA_PROBE = "0".repeat(40);
+function aroundSha(command: string): { head: string; tail: string } {
+  return {
+    head: command.slice(0, command.indexOf(SHA_PROBE)),
+    tail: command.slice(command.lastIndexOf(SHA_PROBE) + SHA_PROBE.length),
+  };
+}
+const COMPARE = aroundSha(compareStatusCommand(TEST_OWNER, TEST_REPO, SHA_PROBE, SHA_PROBE));
+const INCREMENT_DIFF = aroundSha(
+  incrementDiffCommand(TEST_OWNER, TEST_REPO, SHA_PROBE, SHA_PROBE, DIFF_PATH),
+);
 /**
  * The input write carries no per-round payload in its command any more: the
  * document travels the exec STDIN pipe, so the command is fixed and comes
@@ -254,9 +295,22 @@ export type FakeSandboxState = {
   diffReadStdout: string | null;
   numstatStdout: string;
   numstatExitCode: number;
+  /** The `gh api .../compare/base...head` verdict (`ahead` starts an increment round). */
+  compareStatus: string;
+  compareExitCode: number;
+  /** The increment round's base...head diff FILE content + its command's exit. */
+  incrementDiffStdout: string;
+  incrementDiffExitCode: number;
   writeInputExitCode: number;
   /** Decoded runner --input JSON written via the base64 write step. */
   writtenInputJson: string | undefined;
+  /** `gh pr view`/`gh issue view` answers for the report seat's PR context. */
+  prBodyContent: string;
+  prBodyExitCode: number;
+  /** Raw `gh pr view` stdout override — a reply that is not JSON at all. */
+  prBodyRaw: string | null;
+  issueBodies: Map<number, { title: string; body: string }>;
+  issueViewExitCode: number;
   /** The runner's recheck document and the `wc -c` overflow flag of its read. */
   recheckFileContent: string;
   recheckFileOverflow: string;
@@ -265,6 +319,10 @@ export type FakeSandboxState = {
   recheckStatusContent: string | null;
   recheckStatusOverflow: string;
   recheckStatusExitCode: number;
+  /** The runner's report document (mstar.report/v1) and its read's overflow flag. */
+  reportFileContent: string;
+  reportFileOverflow: string;
+  reportFileExitCode: number;
   runnerStdout: string;
   runnerStderr: string;
   runnerExitCode: number;
@@ -293,14 +351,31 @@ export function initialFakeSandboxState(): FakeSandboxState {
     diffReadStdout: null,
     numstatStdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n",
     numstatExitCode: 0,
+    // NON-increment by default: a case that seeds a prior review stays a
+    // full-diff round unless it opts in with `ahead`.
+    compareStatus: "identical",
+    compareExitCode: 0,
+    incrementDiffStdout: "",
+    incrementDiffExitCode: 0,
     writeInputExitCode: 0,
     writtenInputJson: undefined,
+    // Default: gh cannot answer, so no prContext is captured and the runner
+    // gets no `--report-out` — every pre-report call sequence stays intact.
+    // A report-path case sets this to 0 and scripts `prBodyContent`.
+    prBodyContent: "",
+    prBodyExitCode: 1,
+    prBodyRaw: null,
+    issueBodies: new Map(),
+    issueViewExitCode: 0,
     recheckFileContent: "",
     recheckFileOverflow: "0",
     recheckFileExitCode: 0,
     recheckStatusContent: null,
     recheckStatusOverflow: "0",
     recheckStatusExitCode: 0,
+    reportFileContent: "",
+    reportFileOverflow: "0",
+    reportFileExitCode: 0,
     runnerStdout: "",
     runnerStderr: "",
     runnerExitCode: 0,
@@ -355,8 +430,6 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     }
     case "numstat":
       return { stdout: state.numstatStdout, stderr: "", exitCode: state.numstatExitCode };
-    case "runner":
-      return { stdout: state.runnerStdout, stderr: state.runnerStderr, exitCode: state.runnerExitCode };
     default:
       break;
   }
@@ -374,6 +447,25 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     }
     return { stdout: `${state.recheckFileContent}\n${state.recheckFileOverflow}\n`, stderr: "", exitCode: 0 };
   }
+  // The report seat's PR context reads. The PR body is OPTIONAL (`null` = gh
+  // failed), so a case that does not script one sees the real "no context"
+  // path: no prContext, no --report-out, `none` headings.
+  if (cmd === PR_BODY_READ) {
+    // `gh pr view` failing (non-zero exit) is the real "no PR context" path.
+    if (state.prBodyExitCode !== 0) return { stdout: "", stderr: "gh failed", exitCode: state.prBodyExitCode };
+    // A reply that is not JSON at all (an HTML error page, a banner).
+    if (state.prBodyRaw !== null) return { stdout: state.prBodyRaw, stderr: "", exitCode: 0 };
+    return { stdout: JSON.stringify({ body: state.prBodyContent }), stderr: "", exitCode: 0 };
+  }
+  for (const [issueNumber, issue] of state.issueBodies) {
+    if (cmd !== issueViewCommand(TEST_OWNER, TEST_REPO, issueNumber)) continue;
+    if (state.issueViewExitCode !== 0) return { stdout: "", stderr: "gh failed", exitCode: state.issueViewExitCode };
+    return {
+      stdout: JSON.stringify({ number: issueNumber, title: issue.title, body: issue.body }),
+      stderr: "",
+      exitCode: 0,
+    };
+  }
   if (cmd === RECHECK_STATUS_READ) {
     if (state.recheckStatusExitCode !== 0) {
       return { stdout: "", stderr: "read failed", exitCode: state.recheckStatusExitCode };
@@ -381,6 +473,25 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     // A missing status file fails the head chain, exactly like the real one.
     if (state.recheckStatusContent === null) return { stdout: "", stderr: "no such file", exitCode: 1 };
     return { stdout: `${state.recheckStatusContent}\n${state.recheckStatusOverflow}\n`, stderr: "", exitCode: 0 };
+  }
+  // Increment rounds: the compare verdict, then base...head replacing the diff
+  // file. Both are matched by the production builder's fixed head/tail around
+  // the per-round shas, so the double stays payload-agnostic exactly like the
+  // diff read.
+  if (cmd.startsWith(COMPARE.head) && cmd.endsWith(COMPARE.tail)) {
+    return { stdout: `${state.compareStatus}\n`, stderr: "", exitCode: state.compareExitCode };
+  }
+  if (cmd.startsWith(INCREMENT_DIFF.head) && cmd.endsWith(INCREMENT_DIFF.tail)) {
+    const bytes = Buffer.from(state.incrementDiffStdout);
+    const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
+    const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
+    return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: state.incrementDiffExitCode };
+  }
+  if (cmd === REPORT_READ) {
+    if (state.reportFileExitCode !== 0) {
+      return { stdout: "", stderr: "read failed", exitCode: state.reportFileExitCode };
+    }
+    return { stdout: `${state.reportFileContent}\n${state.reportFileOverflow}\n`, stderr: "", exitCode: 0 };
   }
   if (RUNNER_CMDS.has(cmd)) {
     return { stdout: state.runnerStdout, stderr: state.runnerStderr, exitCode: state.runnerExitCode };

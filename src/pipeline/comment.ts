@@ -80,6 +80,7 @@ import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../revi
 import { redactSecrets } from "./redact";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
+import type { ReportDoc } from "../../packages/shared/src/report-wire";
 import type { LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
 import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
@@ -110,19 +111,30 @@ export const SUMMARY_MD_LIMIT = 8000;
  */
 export const REVIEW_BODY_LIMIT = 65000;
 
-/** Close every fold `text` leaves open — a lone `</details>` closes only one. */
-function closeOpenFolds(text: string): string {
-  const open = (text.match(/<details>/g) ?? []).length - (text.match(/<\/details>/g) ?? []).length;
-  if (open <= 0) return text;
-  return `${text}${Array.from({ length: open }, () => "\n\n</details>").join("")}`;
+/** How many `<details>` folds `text` leaves open — a lone `</details>` closes one. */
+function openFoldCount(text: string): number {
+  return (text.match(/<details>/g) ?? []).length - (text.match(/<\/details>/g) ?? []).length;
 }
 
-/** Truncate summary_md to the body budget (char-based; GitHub counts chars). */
+/**
+ * Truncate summary_md to the body budget (char-based; GitHub counts chars).
+ * A narrative may carry its own fence or `<details>`; left open, the rest of
+ * the body renders inside it, so the cut closes both and pays for them. The
+ * closers count against `limit` in EVERY branch: an untouched narrative that
+ * fits with its closers is returned whole, otherwise it is shortened again.
+ */
 export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): string {
-  const cut = md.length <= limit ? md : `${md.slice(0, limit - 1)}…`;
-  // A narrative may carry its own `<details>`; a cut inside one would swallow
-  // the rest of the body.
-  return closeOpenFolds(cut);
+  const closers = closersFor(md);
+  if (md.length + closers.length <= limit) return `${md}${closers}`;
+  // Shortening the head can drop the opener a closer answered, so re-derive
+  // the closers on each shorter head until head + closers + "…" fits.
+  let head = md.slice(0, limit - 1);
+  for (;;) {
+    const headClosers = closersFor(head);
+    const next = head.slice(0, Math.max(0, limit - 1 - headClosers.length));
+    if (next === head) return `${head}${headClosers}…`;
+    head = next;
+  }
 }
 
 
@@ -183,22 +195,54 @@ function boundIncomplete(fact: { reason: string; unscanned: readonly string[] })
 }
 
 /**
- * Cut `text` to `budget` chars, keeping the head — and close any fold the cut
- * left open. An unclosed `<details>` makes GitHub route the rest of the
- * comment into the collapsed block, so the trailer and the publication marker
- * would vanish behind a fold nobody opened. Every clamp that can cut inside a
- * fold goes through here.
+ * The closing fence for the code block `text` leaves open ("" when none). A
+ * fenced block runs from an opening line (0-3 spaces, 3+ backticks OR 3+
+ * tildes, an info string without a backtick when the fence is backticked) to
+ * the next line of only the same character, at least as long. The fix plan
+ * renders inside `<details>` as a backticked `md` block, so a cut inside it
+ * closes only the fold and leaves the fence open — GitHub then routes
+ * everything after it, trailer and publication marker included, into the code
+ * block instead of publishing it.
+ */
+function closerForOpenFence(text: string): string {
+  let open: { ch: string; len: number } | null = null;
+  for (const line of text.split("\n")) {
+    const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence === null) continue;
+    const run = fence[1]!;
+    const ch = run[0]!;
+    const info = fence[2] ?? "";
+    if (open === null) {
+      // A backtick in the info string means a BACKTICK line is not a fence at
+      // all — a tilde fence's info string may hold backticks.
+      if (ch === "~" || !info.includes("`")) open = { ch, len: run.length };
+    } else if (ch === open.ch && run.length >= open.len && info.trim() === "") {
+      open = null;
+    }
+  }
+  return open === null ? "" : `\n${open.ch.repeat(open.len)}`;
+}
+
+/** Close whatever `text` leaves open: the fence first (it opened inside the fold), then every fold. */
+function closersFor(text: string): string {
+  return closerForOpenFence(text) + "\n\n</details>".repeat(Math.max(0, openFoldCount(text)));
+}
+
+/**
+ * Cut `text` to `budget` chars, keeping the head — and close any fence and any
+ * fold the cut left open. An unclosed `<details>` makes GitHub route the rest
+ * of the comment into the collapsed block, so the trailer and the publication
+ * marker would vanish behind a fold nobody opened; an unclosed fence does the
+ * same to the marker lines. Every clamp that can cut inside either goes through
+ * here. The closers' length comes out of the budget, so the result never
+ * overshoots it.
  */
 function clampKeepingHead(text: string, budget: number): string {
   if (text.length <= budget) return text;
   const head = text.slice(0, Math.max(0, budget - 1));
-  const open =
-    (head.match(/<details>/g) ?? []).length - (head.match(/<\/details>/g) ?? []).length;
-  if (open <= 0) return `${head}…`;
-  // Close EVERY fold the cut left open, paying their length out of the budget.
-  const closers = Array.from({ length: open }, () => "\n\n</details>").join("");
+  const closers = closersFor(head);
   const room = budget - 1 - closers.length;
-  if (room <= 0) return `${head}…`;
+  if (closers === "" || room <= 0) return `${head}…`;
   return `${head.slice(0, room)}${closers}…`;
 }
 
@@ -227,15 +271,22 @@ function stripFactEcho(
 /**
  * Assemble the overall review body: the engine's own layout, then the two
  * facts it has no vocabulary for — the omitted-findings footer (merge-class
- * cap) and the assembled §7.10 closure section — clamped to REVIEW_BODY_LIMIT
- * (qc2 F-003 / qc3 F-304 — the API never sees an over-limit body).
+ * cap) and the report sections — clamped to `limit` (qc2 F-003 / qc3 F-304 —
+ * the API never sees an over-limit body).
  * `omittedFindings` is the count dropped by the consumer's merge-class cap
  * (B4): the footer tells readers the review is a Top-N subset.
+ *
+ * The report tail is reserved BEFORE the clamp: the clamp keeps the head, so a
+ * tail appended first would be the first thing lost on a long body. The core
+ * is what gets shortened; the tail is only degraded when it cannot fit alone.
+ * `limit` lets the prepared body pass its marker-reserved ceiling, so the two
+ * clamps agree on what the tail may consume.
  */
 export function buildReviewBody(
   output: ReviewOutput,
   omittedFindings = 0,
-  closure?: string,
+  reportParts?: { report: ReportDoc | null; revalidated: string },
+  limit = REVIEW_BODY_LIMIT,
 ): string {
   let rendered = output;
   if (output.incomplete !== undefined) {
@@ -257,10 +308,21 @@ export function buildReviewBody(
   if (rendered.summary_md !== undefined) {
     rendered = { ...rendered, summary_md: truncateSummary(rendered.summary_md) };
   }
-  const sections = [renderReviewMarkdown(rendered)];
+  let core = renderReviewMarkdown(rendered);
+  // The report fields are composed into the engine's layout by ANCHOR, so the
+  // renderer keeps owning the layout and an absent report leaves the string
+  // byte-identical to the pre-report shape.
+  const tail = reportParts === undefined ? "" : buildReportTail(reportParts.report, limit);
+  if (reportParts !== undefined) {
+    core = insertReportFields(core, reportParts.report, reportParts.revalidated);
+  }
+  const sections = [core];
   if (omittedFindings > 0) sections.push(`*(+${omittedFindings} more findings omitted)*`);
-  if (closure) sections.push(closure);
-  return clampKeepingHead(sections.join("\n\n"), REVIEW_BODY_LIMIT);
+  const body = sections.join("\n\n");
+  if (tail === "") return clampKeepingHead(body, limit);
+  // One blank line joins the tail; the tail already leaves room for the core's
+  // cut marker, so this never exceeds `limit`.
+  return `${clampKeepingHead(body, limit - tail.length - 2)}\n\n${tail}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,31 +373,37 @@ export type ClosureCoverage = {
 };
 
 /**
- * Render the §7.10 closure section: one honest coverage line, then at most
- * `CLOSURE_MAX_ROWS` rows (finding / disposition / evidence / thread) plus
- * the overflow count. Deterministic; the caller re-clamps via
- * buildReviewBody's budget.
- *
- * Folded into `<details>`: the section grows every round while it is only read
- * when someone checks whether earlier concerns were fixed. The heading stays
- * INSIDE the fold — the summary line is a label, not a replacement for it. The
- * blank lines around the inner Markdown are required: without them GitHub
- * renders the table as literal text.
+ * The one §7.10 coverage sentence: every selected row lands in exactly one
+ * term here — `assessed`, `invalid-output` (the table's own label for those
+ * rows), or `omitted` — so `assessed + invalid-output + omitted === selected`.
  */
-export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[]): string {
+function closureCoverageLine(coverage: ClosureCoverage): string {
+  return (
+    `Reassessed ${coverage.assessed}/${coverage.selected} open prior finding(s) this round` +
+    ` · ${coverage.invalidOutput} invalid-output · ${coverage.omitted} omitted` +
+    ` · ${coverage.capped} over cap · ${coverage.totalOpen} open` +
+    ` · context coverage: ${coverage.contextCoverage}`
+  );
+}
+
+/**
+ * The ONE prior-findings table (§7.10 columns: finding / disposition /
+ * evidence / thread) plus its over-cap count, capped at `CLOSURE_MAX_ROWS`.
+ * The body's `### Revalidated findings` section is its only renderer.
+ * Leading blank line included: the callers join blocks.
+ */
+function priorFindingLines(rows: ClosureRow[]): string[] {
   const shown = rows.slice(0, CLOSURE_MAX_ROWS);
   const overflow = rows.length - shown.length;
-  const lines: string[] = [
-    "## Prior findings recheck",
-    "",
-    // Every selected row lands in exactly one term here — `assessed`,
-    // `invalid-output` (the closure table's own label for those rows), or
-    // `omitted` — so `assessed + invalid-output + omitted === selected`.
-    `Reassessed ${coverage.assessed}/${coverage.selected} open prior finding(s) this round` +
-      ` · ${coverage.invalidOutput} invalid-output · ${coverage.omitted} omitted` +
-      ` · ${coverage.capped} over cap · ${coverage.totalOpen} open` +
-      ` · context coverage: ${coverage.contextCoverage}`,
-  ];
+  // Row text is model/lifecycle-echoed data: raw HTML can fold everything
+  // after it, and a newline would break the table row. So apply the same
+  // `&`-then-`<` escape a report field gets, escape the pipes the table
+  // grammar owns, and turn a line break into a space (a cell is one line).
+  // Line STRUCTURE is not escaped: every cell is embedded after `| `, so
+  // nothing in it can start a heading, fence or break.
+  const cell = (text: string): string =>
+    text.replace(/\n/g, " ").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replace(/\|/g, "\\|");
+  const lines: string[] = [];
   if (shown.length > 0) {
     lines.push(
       "",
@@ -343,18 +411,212 @@ export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[
       "|---|---|---|---|",
       ...shown.map(
         (row) =>
-          `| ${row.title.replace(/\|/g, "\\|").replace(/\n/g, " ")} ` +
-          `| ${row.disposition} (${row.reason}) ` +
-          `| ${row.evidenceKind ?? "-"} ` +
-          `| ${row.thread} |`,
+          `| ${cell(row.title)} ` +
+          `| ${cell(row.disposition)} (${cell(row.reason)}) ` +
+          `| ${cell(row.evidenceKind ?? "-")} ` +
+          `| ${cell(row.thread)} |`,
       ),
     );
   }
   if (overflow > 0) {
     lines.push("", `*(+${overflow} more prior finding(s) over the ${CLOSURE_MAX_ROWS}-row display cap)*`);
   }
-  const summary = `Prior findings recheck — ${coverage.assessed}/${coverage.selected} reassessed, ${coverage.totalOpen} open`;
-  return `<details>\n<summary>${summary}</summary>\n\n${lines.join("\n")}\n\n</details>`;
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
+// Report sections (mstar.report/v1 side document): the narrative a human
+// report needs around the engine's layout. Inserted by ANCHOR, never by
+// rebuilding the layout — the renderer stays the single owner of the verdict,
+// tally, review narrative and finding blocks.
+// ---------------------------------------------------------------------------
+
+/** The engine's narrative heading — the overview's anchor. */
+const REVIEW_HEADING = "## 📋 Review";
+/** The engine's findings heading — the revalidated table's anchor. */
+const FINDINGS_HEADING = "### Findings";
+
+/**
+ * The body's ONE prior-findings rendering (the template mandates the heading):
+ * the §7.10 coverage line, then the round's rows. `none` when the round had no
+ * prior finding at all, so a first round's body stays clean.
+ */
+export function buildRevalidatedSection(coverage: ClosureCoverage, rows: ClosureRow[]): string {
+  const heading = ["### Revalidated findings", ""];
+  if (rows.length === 0 && coverage.totalOpen === 0) {
+    return [...heading, "none"].join("\n");
+  }
+  return [...heading, closureCoverageLine(coverage), ...priorFindingLines(rows)].join("\n");
+}
+
+/** The collapsible fix-plan block; markdown text must survive the outer fence. */
+function planBlock(planToFix: string | null, budget = Number.POSITIVE_INFINITY): string {
+  if (planToFix === null || planToFix === "none") return "none";
+  // The outer fence must outrun every backtick run inside the plan, or a plan
+  // that documents a fence closes this one early and the rest leaks as markup.
+  let longest = 2;
+  for (const run of planToFix.matchAll(/`+/g)) longest = Math.max(longest, run[0].length);
+  const fence = "`".repeat(longest + 1);
+  const prefix = `<details><summary>Expand fix plan</summary>\n\n${fence}md\n`;
+  const suffix = `\n${fence}\n\n</details>`;
+  const room = budget - prefix.length - suffix.length;
+  // No room for a balanced block: a bare `none` keeps the heading honest and
+  // leaves no fence or fold open.
+  if (room < 1) return "none";
+  // Keep the head and mark the cut. The fence below it closes what is left of
+  // the block, so the cut never leaks into the sections after it.
+  const plan =
+    planToFix.length <= room ? planToFix : `${sliceWithoutSplittingPair(planToFix, room - 1)}…`;
+  return `${prefix}${plan}${suffix}`;
+}
+
+/** Insert `block` after the line that equals `anchor` (first occurrence). */
+function insertAfterHeading(body: string, anchor: string, block: string): string | null {
+  const lines = body.split("\n");
+  const index = lines.indexOf(anchor);
+  if (index < 0) return null;
+  lines.splice(index + 1, 0, "", block);
+  return lines.join("\n");
+}
+
+/** Insert `block` before the line that equals `anchor` (first occurrence). */
+function insertBeforeHeading(body: string, anchor: string, block: string): string | null {
+  const lines = body.split("\n");
+  const index = lines.indexOf(anchor);
+  if (index < 0) return null;
+  lines.splice(index, 0, block, "");
+  return lines.join("\n");
+}
+
+/**
+ * A report line markdown would read as STRUCTURE rather than text: an ATX
+ * heading; a setext underline (the whole line is 1+ `=` or `-`, optionally
+ * followed by spaces — it turns the line above it into a heading) or a
+ * thematic break (any of `-`, `*`, `_` at least three times, optionally
+ * spaced); or a code-fence opener (3+ backticks or tildes), which left
+ * unclosed runs to the end of the comment. The four raw
+ * report fields are model/PR-echoed text, so a spoofed `### Findings` would
+ * otherwise steal the anchor the revalidated table is inserted at, a
+ * `## 📋 Review` would fork the layout, and a stray `~~~` would swallow every
+ * section after it. Up to three leading spaces still count: markdown reads
+ * those as the same structure, so the indent is part of the match (4+ spaces
+ * is a code block, a structure no heading anchor can be forged in).
+ */
+const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|`{3,}|~{3,})/;
+
+/**
+ * Escape the first character of every structure line, so the field stays text:
+ * `### Findings` renders literally and is no longer an insertion anchor.
+ * Raw HTML is the OTHER structure channel: an unclosed `<details>` routes
+ * everything after it on the comment into a collapsed block, so `&` then `<`
+ * are escaped (in that order, so the `&lt;` this produces is not re-escaped)
+ * and no tag can open. `planToFix` is NOT passed through here — it is already
+ * fenced as code.
+ */
+function neutralizeReportText(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .split("\n")
+    .map((line) => {
+      const indent = REPORT_STRUCTURE_LINE.exec(line)?.[1];
+      return indent === undefined ? line : `${indent}\\${line.slice(indent.length)}`;
+    })
+    .join("\n");
+}
+
+/**
+ * Compose the report sections into an engine-rendered review body:
+ *
+ *   `## 📋 Review` → overview → (narrative) → `### Revalidated findings` →
+ *   `### Findings` → `### Linked-issue AC` → `### ✅ Verified` →
+ *   `### 🗑️ Considered & rejected` → `## 🛠️ Plan to fix`
+ *
+ * Anchors are matched on the FIRST line equal to the heading, and every raw
+ * field is neutralized (see `neutralizeReportText`) before insertion so it
+ * cannot forge one. `summary_md` is the exception: the engine renders it
+ * verbatim, so a summary line that is EXACTLY `## 📋 Review` or `### Findings`
+ * is matched instead of the engine's own heading. The sections still land in
+ * the body, a little earlier — accepted next to parsing the model's summary as
+ * markdown here. A body that carries no `## 📋 Review` line is not the engine's
+ * layout: the overview is SKIPPED rather than prepended somewhere the reader
+ * would not expect, and the remaining sections are still appended. A
+ * zero-finding envelope omits `### Findings`; the empty heading is added so the
+ * revalidated table keeps its position and the layout stays fixed. A missing
+ * report writes `none` under every heading — the headings themselves are never
+ * deleted.
+ */
+export function insertReportSections(rendered: string, report: ReportDoc | null, revalidated: string): string {
+  return `${insertReportFields(rendered, report, revalidated)}\n\n${buildReportTail(report)}`;
+}
+
+/**
+ * Compose the report fields INTO the engine layout — the overview and the
+ * revalidated table only. The tail is built separately by `buildReportTail`.
+ */
+function insertReportFields(rendered: string, report: ReportDoc | null, revalidated: string): string {
+  let body = rendered;
+  if (report !== null) {
+    const overview = `**What this PR does**: ${neutralizeReportText(report.overview)}`;
+    // A miss is not reported: this composer is pure (no log sink) and the
+    // anchor is an engine-owned constant pinned with the engine version, so a
+    // miss can only mean that layout changed under us — the overview is
+    // skipped rather than prefixed somewhere the reader would not expect.
+    body = insertAfterHeading(body, REVIEW_HEADING, overview) ?? body;
+  }
+  const withRevalidated = insertBeforeHeading(body, FINDINGS_HEADING, revalidated);
+  if (withRevalidated === null) {
+    // Zero-finding envelope: the renderer omitted the heading, so this IS the
+    // template's self-add case — revalidated table, then the empty heading.
+    return `${body}\n\n${revalidated}\n\n${FINDINGS_HEADING}\n\nnone`;
+  }
+  return withRevalidated;
+}
+
+/**
+ * The report tail: `### Linked-issue AC`, `### ✅ Verified`,
+ * `### 🗑️ Considered & rejected` and `## 🛠️ Plan to fix`.
+ *
+ * `buildReviewBody` reserves this tail BEFORE its body clamp, because the clamp
+ * keeps the head — a tail appended before the clamp is the first thing lost on
+ * a long body, exactly the newest sections the report exists to publish. When
+ * the tail alone does not fit `limit` (less the blank-line separator and the
+ * one-character core cut marker), it degrades in a fixed order:
+ *
+ *   1. truncate the plan block — it is the only section with a fence and a
+ *      fold, so it is the only one that can be cut without leaving markdown
+ *      structure open, and it frees the most bytes; fence and fold stay closed;
+ *   2. drop whole sections, lowest value first: rejected → verified →
+ *      linked-issue AC. The plan (the most actionable part) is kept last.
+ *
+ * Whatever survives is balanced and no longer than `limit`.
+ */
+function buildReportTail(report: ReportDoc | null, limit = Number.POSITIVE_INFINITY): string {
+  const field = (value: string | undefined): string =>
+    value === undefined ? "none" : neutralizeReportText(value);
+  const planHeading = "## 🛠️ Plan to fix";
+  const sections = [
+    `### Linked-issue AC\n\n${field(report?.linkedIssueAc)}`,
+    `### ✅ Verified\n\n${field(report?.verified)}`,
+    `### 🗑️ Considered & rejected\n\n${field(report?.rejected)}`,
+    `${planHeading}\n\n${planBlock(report?.planToFix ?? null)}`,
+  ];
+  // The caller joins the tail with one blank line and keeps one character for
+  // the core's cut marker.
+  let tail = sections.join("\n\n");
+  if (tail.length + 3 <= limit) return tail;
+  const base = sections.slice(0, 3).join("\n\n");
+  // base + "\n\n" + heading + "\n\n" + block + "\n\n" + "…" <= limit.
+  const planBudget = limit - base.length - planHeading.length - 7;
+  sections[3] = `${planHeading}\n\n${planBlock(report?.planToFix ?? null, planBudget)}`;
+  tail = sections.join("\n\n");
+  if (tail.length + 3 <= limit) return tail;
+  for (const index of [2, 1, 0]) {
+    sections[index] = "";
+    tail = sections.filter((text) => text !== "").join("\n\n");
+    if (tail.length + 3 <= limit) return tail;
+  }
+  return "";
 }
 
 // ---------------------------------------------------------------------------
@@ -387,8 +649,20 @@ export function buildPreparedReviewBody(input: {
   omittedFindings: number;
   round: number;
   headSha: string;
-  closure?: string;
   publicationMarker: string;
+  /**
+   * Previous reviewed head this round was diffed against (increment rounds
+   * only). Rendered as ` · since <sha7>` on the header so a reader can tell
+   * an incremental round from a full one at a glance; absent on full rounds,
+   * where the body is byte-identical to the pre-increment shape.
+   */
+  sinceSha?: string;
+  /**
+   * Report sections (mstar.report/v1 side document). `report: null` writes the
+   * headings with `none`; omitted entirely keeps the pre-report body
+   * byte-identical.
+   */
+  reportParts?: { report: ReportDoc | null; revalidated: string };
 }): string {
   const roundMarker = `<!-- mstar-inspector:review:v1 round=${input.round} -->`;
   // English, like every other string this body renders (verdict, tally, the
@@ -396,15 +670,19 @@ export function buildPreparedReviewBody(input: {
   // unreadable to most readers and unlocalized for the rest: the body has no
   // locale input, so the only consistent choice is the one language the rest of
   // it already uses.
-  const header = `Review ${input.round} · commit ${input.headSha.slice(0, 7)}`;
-  const core = stripInspectorMarkerSyntax(
-    buildReviewBody(input.output, input.omittedFindings, input.closure),
-  );
+  const header =
+    `Review ${input.round} · commit ${input.headSha.slice(0, 7)}` +
+    (input.sinceSha === undefined ? "" : ` · since ${input.sinceSha.slice(0, 7)}`);
   // Both markers and the header are reserved before the clamp: two blank-line
   // separators (after the round marker, before the header), the header↔marker
   // newline, and the clamp's own ellipsis fit inside the 8.
   const reserve = roundMarker.length + header.length + input.publicationMarker.length + 8;
   const budget = REVIEW_BODY_LIMIT - reserve;
+  // The inner builder reserves its report tail against this same ceiling, so
+  // the prepared clamp never has to cut the tail the report exists to publish.
+  const core = stripInspectorMarkerSyntax(
+    buildReviewBody(input.output, input.omittedFindings, input.reportParts, budget),
+  );
   return `${roundMarker}\n\n${clampKeepingHead(core, budget)}\n\n${header}\n${input.publicationMarker}`;
 }
 

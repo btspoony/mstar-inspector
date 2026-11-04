@@ -85,6 +85,12 @@ import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
+import {
+  readRecheckCommand,
+  readRecheckStatusCommand,
+  readReportCommand,
+} from "../../src/pipeline/gitops";
 import { sk, gh, AWS_CANARY_KEY } from "../helpers/fake-secrets";
 import {
   SHA,
@@ -127,6 +133,8 @@ const MIGRATIONS_AFTER_0036 = migrationsAfter(36);
 import {
   CHECK_HOOK_TIMEOUT_MS,
   DIFF_PREFETCH_MAX_BYTES,
+  EXEC_TIMEOUT_GIT_MS,
+  GUARD_TIMED_SANDBOX_STEPS,
   INLINE_RESOLVE_MAX_ENTRIES,
   commenterCalls,
   commenterState,
@@ -143,6 +151,8 @@ import {
   makePayload,
   messageAckCalls,
   messageRetryCalls,
+  PR_CONTEXT_EXEC_TIMEOUT_MS,
+  POST_RUNNER_READ_TIMEOUT_MS,
   queueState,
   reset as resetHarness,
   reviewGuardTtlSeconds,
@@ -151,6 +161,7 @@ import {
   testLog,
   testOverrides,
 } from "../helpers/consumer-harness";
+import { PR_CONTEXT_MAX_ISSUES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 
 /** Runner exec call's env (the sandbox fake stores opts as unknown). */
 function runnerExecEnv(): Record<string, string> {
@@ -319,6 +330,8 @@ describe("createReviewConsumer", () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // The production round window (900s) funds the capture (120s worst case)
+    // next to the default run (600s), so the widest flow runs untouched.
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -328,6 +341,9 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
       expect.stringContaining("git apply --numstat '/workspace/pr.diff'"),
+      // The report seat's PR context read (best-effort; `gh` failing here
+      // only drops the narrative sections).
+      expect.stringContaining("gh pr view '42' --repo 'acme/widgets' --json body"),
       expect.stringContaining("base64 -d > '/workspace/review-input.json'"),
       expect.stringContaining(
         "bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'",
@@ -358,14 +374,21 @@ describe("createReviewConsumer", () => {
     expect(sandbox.calls[1]!.opts).toEqual({ timeout: 120_000 });
     // Diff: gh step, GH_TOKEN via exec env only.
     expect(sandbox.calls[2]!.opts).toEqual({ env: { GH_TOKEN: gh("s", "installation_token") }, timeout: 120_000 });
-    // Numstat is a plain git step; the input write carries the document on the
-    // exec STDIN pipe (asserted decoded below), never in its command.
+    // Numstat: a plain git step, git timeout.
     expect(sandbox.calls[3]!.opts).toEqual({ timeout: 120_000 });
-    expect(sandbox.calls[4]!.opts).toMatchObject({ timeout: 120_000, stdin: expect.any(String) });
+    // PR context read: gh step, GH_TOKEN via exec env only, under the capture's
+    // own tighter bound (the narrative never gets a full git window).
+    expect(sandbox.calls[4]!.opts).toEqual({
+      env: { GH_TOKEN: gh("s", "installation_token") },
+      timeout: PR_CONTEXT_EXEC_TIMEOUT_MS,
+    });
+    // Input write carries the document on the exec STDIN pipe (asserted decoded
+    // below), never in its command.
+    expect(sandbox.calls[5]!.opts).toMatchObject({ timeout: 120_000, stdin: expect.any(String) });
     // Runner: cwd = clone dir; harness paths + the model chain via exec env,
     // and the App's key pool via the exec STDIN payload (the only credential
     // channel — the env carries no key).
-    expect(sandbox.calls[5]!.opts).toEqual({
+    expect(sandbox.calls[6]!.opts).toEqual({
       cwd: "/workspace/repo",
       env: {
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
@@ -404,7 +427,8 @@ describe("createReviewConsumer", () => {
     expect(prepared.body).toContain("<!-- mstar-inspector:review:v1 round=1 -->");
     expect(prepared.body).toContain("## ⚠️ Verdict: `needs fixes`");
     expect(prepared.body).toContain("Two issues found in the diff.");
-    expect(prepared.body).toContain("## Prior findings recheck"); // §7.10 closure section
+    // §7.10 prior-findings section: the report body carries exactly one.
+    expect(prepared.body).toContain("### Revalidated findings");
     expect(prepared.body).toMatch(
       /<!-- mstar-inspector:publication:v1 id=[0-9a-f-]+ sha=0123456789abcdef0123456789abcdef01234567 kind=review -->/,
     );
@@ -482,7 +506,7 @@ describe("createReviewConsumer", () => {
     expect(written.reconFacts).toHaveLength(2 + 2_800);
   });
 
-  test("null payload sha → actual sha read from the checkout (no gh pr view)", async () => {
+  test("null payload sha → actual sha read from the checkout, never from a gh read", async () => {
     reset();
     sandbox.resolvedSha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -491,10 +515,11 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment" })));
 
-    // No gh pr view anywhere: the authoritative sha comes from the clone.
-    expect(sandbox.calls.some((c) => c.cmd.includes("gh pr view"))).toBe(false);
+    // The authoritative sha comes from the clone: no gh read runs before the
+    // checkout, and rev-parse is the second command of the round.
     expect(sandbox.calls[0]!.cmd).toContain("git init '/workspace/repo'");
     expect(sandbox.calls[1]!.cmd).toContain("git -C '/workspace/repo' rev-parse HEAD");
+    expect(sandbox.calls.findIndex((c) => c.cmd.includes("gh pr view"))).toBeGreaterThan(1);
     const row = db.raw.query("SELECT * FROM reviews").get() as { head_sha: string };
     expect(row.head_sha).toBe("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
     expect(kvPuts).toEqual([
@@ -1024,7 +1049,7 @@ describe("createReviewConsumer", () => {
     expect(runnerCall.cmd).toContain("--level 'deep'");
     expect(reviewCount(db)).toBe(1);
   });
-  test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + admission TTL 1692; quick/default stay 600_000 (AC-S10-clock)", async () => {
+  test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + admission TTL 2532; quick/default stay 600_000 (AC-S10-clock)", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -1047,8 +1072,11 @@ describe("createReviewConsumer", () => {
     // false-timeout a deep three-phase run into the DLQ (spec d5-budget
     // Problem Statement).
     expect(runnerExecTimeout()).toBe(840_000);
-    // The admission row's TTL follows the same level table (AC-S10-guard).
-    expect(admissionTtlMs).toBe(1692_000);
+    // The admission row's TTL follows the same level table (AC-S10-guard):
+    // deep is 2532s. Pinned as the table's figure, like the runner budgets
+    // below — the arithmetic that produces it is pinned once, by the guard
+    // test.
+    expect(admissionTtlMs).toBe(2_532_000);
     // The quick/default 10-minute table is frozen (spec: 禁止把 quick 全局改成 deep 档预算).
     expect(runnerTimeoutMs("quick")).toBe(600_000);
     expect(runnerTimeoutMs("default")).toBe(600_000);
@@ -1900,7 +1928,7 @@ describe("createReviewConsumer", () => {
     expect(infoLine!.fields.workspace_cap).toBe(WORKSPACE_CONCURRENCY_DEFAULT);
   });
 
-  test("guard-held backoff escalates 60s → 300s → 1200s across attempts (BB-3)", async () => {
+  test("guard-held backoff escalates 60s → 300s → 2040s across attempts (BB-3)", async () => {
     reset();
     const db = await createSeededTestD1();
     await seedInflight(db);
@@ -1908,7 +1936,7 @@ describe("createReviewConsumer", () => {
     for (const [attempts, delaySeconds] of [
       [1, 60],
       [2, 300],
-      [3, 1200],
+      [3, 2040],
     ] as const) {
       queueState.attempts = attempts;
       await consumer(makeBatch(makePayload()));
@@ -1916,12 +1944,12 @@ describe("createReviewConsumer", () => {
     expect(messageRetryCalls).toEqual([
       { attempts: 1, delaySeconds: 60 },
       { attempts: 2, delaySeconds: 300 },
-      { attempts: 3, delaySeconds: 1200 },
+      { attempts: 3, delaySeconds: 2040 },
     ]);
     expect(messageAckCalls).toHaveLength(0);
     expect(sandbox.calls).toHaveLength(0);
   });
-  test("REVIEW_LEVEL=deep guard-held → delayed retries use the deep backoff 90s → 480s → 1200s (AC-S10-guard)", async () => {
+  test("REVIEW_LEVEL=deep guard-held → delayed retries use the deep backoff 90s → 480s → 2040s (AC-S10-guard)", async () => {
     reset();
     const db = await createSeededTestD1();
     await seedInflight(db);
@@ -1933,7 +1961,7 @@ describe("createReviewConsumer", () => {
     for (const [attempts, delaySeconds] of [
       [1, 90],
       [2, 480],
-      [3, 1200],
+      [3, 2040],
     ] as const) {
       queueState.attempts = attempts;
       await consumer(makeBatch(makePayload()));
@@ -1941,7 +1969,7 @@ describe("createReviewConsumer", () => {
     expect(messageRetryCalls).toEqual([
       { attempts: 1, delaySeconds: 90 },
       { attempts: 2, delaySeconds: 480 },
-      { attempts: 3, delaySeconds: 1200 },
+      { attempts: 3, delaySeconds: 2040 },
     ]);
     expect(messageAckCalls).toHaveLength(0);
     expect(sandbox.calls).toHaveLength(0);
@@ -2755,26 +2783,95 @@ describe("createReviewConsumer", () => {
     expect(warnLine!.msg).toContain("expires by TTL");
   });
   test("reviewGuardTtlSeconds covers the full step-budget arithmetic per level (qc3 F-301 pin / AC-S10-guard)", () => {
-    // Exact pin: SIX timed sandbox commands (clone, rev-parse, diff, numstat,
-    // runner-input write, recheck-doc read) × 120s + the LEVEL's runner budget
-    // + the 12s inline-resolution budget + 120s slack for the untimed steps
-    // (token mint, sandbox create, comment post, KV/D1 puts) = 1452s
-    // quick/default, 1692s deep (spec d5-budget L4). Each earlier step
-    // addition (numstat, the input write, the recheck read) went uncounted —
-    // any future step or ceiling change must recompute this helper ON PURPOSE.
-    expect(reviewGuardTtlSeconds("quick")).toBe(1452);
-    expect(reviewGuardTtlSeconds("default")).toBe(1452);
-    expect(reviewGuardTtlSeconds("deep")).toBe(1692);
+    // Exact pin: THIRTEEN timed sandbox commands (clone, rev-parse, compare
+    // status, full diff, increment diff, numstat, runner-input write, report
+    // `gh pr view`, up to 3 report `gh issue view` reads, recheck-doc read,
+    // report-document read) × 120s + the LEVEL's runner budget + the 12s
+    // inline-resolution budget + 120s slack for the untimed steps (token
+    // mint, sandbox create, comment post, KV/D1 puts) = 2292s quick/default,
+    // 2532s deep (spec d5-budget L4). Every earlier step addition (numstat,
+    // the input write, the recheck read, now the increment/report reads) went
+    // uncounted — any future step or ceiling change must recompute this
+    // helper ON PURPOSE.
+    expect(reviewGuardTtlSeconds("quick")).toBe(2292);
+    expect(reviewGuardTtlSeconds("default")).toBe(2292);
+    expect(reviewGuardTtlSeconds("deep")).toBe(2532);
+  });
+
+  test("a maximal round issues exactly the steps the guard TTL bills", async () => {
+    reset();
+    // The widest round the consumer can build: a previously reviewed base (the
+    // compare gate + increment capture), three linked issues, an open prior
+    // finding to recheck (two bounded reads), and a report seat with context.
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.incrementDiffStdout = VALID_DIFF;
+    sandbox.compareStatus = "ahead";
+    sandbox.prBodyExitCode = 0;
+    sandbox.prBodyContent = "Closes #7\nFixes #8\nRefs #9";
+    for (const issueNumber of [7, 8, 9]) {
+      sandbox.issueBodies.set(issueNumber, { title: `Issue ${issueNumber}`, body: "body" });
+    }
+    sandbox.recheckFileContent = recheckDocWith({});
+    sandbox.reportFileContent = JSON.stringify({
+      schema: "mstar.report/v1",
+      headSha: SHA,
+      overview: "overview",
+      linkedIssueAc: "none",
+      verified: "none",
+      rejected: "none",
+      planToFix: "none",
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, {
+      ...testOverrides,
+      // Any previously reviewed head makes the compare gate reachable without
+      // seeding the `reviews` table.
+      findIncrementBase: async () => PRIOR_SHA,
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    const postRunnerCmds = new Set<string>([
+      readRecheckCommand(RECHECK_OUTPUT_PATH),
+      readRecheckStatusCommand(RECHECK_STATUS_PATH),
+      readReportCommand(REPORT_OUTPUT_PATH),
+    ]);
+    const timed = sandbox.calls.filter(
+      (call) => (call.opts as { timeout?: number } | undefined)?.timeout === EXEC_TIMEOUT_GIT_MS,
+    );
+    // The post-runner bounded reads carry their own tighter bound, not the
+    // git window (nor the capture's, which it happens to share numerically).
+    const postRunner = sandbox.calls.filter((call) => postRunnerCmds.has(call.cmd));
+    expect(postRunner).toHaveLength(3);
+    for (const read of postRunner) {
+      expect((read.opts as { timeout?: number } | undefined)?.timeout).toBe(POST_RUNNER_READ_TIMEOUT_MS);
+    }
+    // The four PR-context reads carry the tighter capture bound instead.
+    const captured = sandbox.calls.filter(
+      (call) =>
+        (call.opts as { timeout?: number } | undefined)?.timeout === PR_CONTEXT_EXEC_TIMEOUT_MS &&
+        !postRunnerCmds.has(call.cmd),
+    );
+    // `gh pr view` + one `gh issue view` per linked issue (the cap).
+    expect(captured).toHaveLength(1 + PR_CONTEXT_MAX_ISSUES);
+    // One command per billed window — except `readRecheckDoc`, which races the
+    // document and status reads in ONE Promise.all window (two commands, one
+    // entry). A new sandbox step without its ledger entry breaks this.
+    expect(timed.length + captured.length + postRunner.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 1);
   });
 
   test("guardRetryDelaysSeconds per level — the schedule covers the guard TTL (AC-4)", () => {
-    // quick/default 60/300/1200; deep 90/480/1200. Every entry must stay
+    // quick/default 60/300/2040; deep 90/480/2040. Every entry must stay
     // below the level's guard TTL so no single delay outlives the lock, and
     // the CUMULATIVE sum must EXCEED it so the final attempt can reclaim an
     // expired row instead of being dropped.
-    expect(guardRetryDelaysSeconds("quick")).toEqual([60, 300, 1200]);
-    expect(guardRetryDelaysSeconds("default")).toEqual([60, 300, 1200]);
-    expect(guardRetryDelaysSeconds("deep")).toEqual([90, 480, 1200]);
+    expect(guardRetryDelaysSeconds("quick")).toEqual([60, 300, 2040]);
+    expect(guardRetryDelaysSeconds("default")).toEqual([60, 300, 2040]);
+    expect(guardRetryDelaysSeconds("deep")).toEqual([90, 480, 2040]);
     for (const level of ["quick", "default", "deep"] as const) {
       const delays = guardRetryDelaysSeconds(level);
       const ttl = reviewGuardTtlSeconds(level);

@@ -138,20 +138,33 @@ import type { ShellCommand } from "./shell-command";
 import {
   buildGitOpsCommands,
   CLONE_DIR,
+  compareStatusCommand,
   DIFF_PATH,
+  incrementDiffCommand,
+  issueViewCommand,
+  prBodyCommand,
   readRecheckCommand,
   readRecheckStatusCommand,
+  readReportCommand,
   RUNNER_INPUT_PATH,
   RUNNER_PATH,
   runnerCommand,
   writeJsonCommand,
 } from "./gitops";
 import {
+  PR_CONTEXT_MAX_CHARS,
+  PR_CONTEXT_MAX_ISSUES,
+  REPORT_OUTPUT_PATH,
+  validateReportDoc,
+  type PrContext,
+  type ReportDoc,
+} from "../../packages/shared/src/report-wire";
+import {
   assertSandboxGrant,
-  buildClosureSection,
   buildPreparedDegradedBody,
   buildPreparedReviewBody,
   buildPublicationMarker,
+  buildRevalidatedSection,
   createReviewCommenter,
   filterLineCommentFindings,
   PreparedSendRejected,
@@ -177,7 +190,12 @@ import {
 import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandbox-images";
 // §7.10 Check seam implementation: `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
-import { createCheckBeginLatch, createCheckLifecycle, type CheckBeginLatch } from "./checks";
+import {
+  createCheckBeginLatch,
+  createCheckLifecycle,
+  type CheckBeginLatch,
+  type CheckTerminalOutcome,
+} from "./checks";
 // Review admission (review-concurrency §1.2): one `review_inflight` row is the
 // per-PR lock and the capacity reservation; the cap comes from the pipeline's
 // single runtime-config reader (never a dashboard route import).
@@ -237,7 +255,21 @@ const OMP_AGENT_DIR = "/opt/omp-agent";
 // so a hung gh/git/model call fails deterministically instead of silently
 // eating a container (qc3 F-001).
 /** gh/git steps (clone, rev-parse, diff, numstat, runner-input write) — measured ~2.6s total, 2min each is generous. */
-const EXEC_TIMEOUT_GIT_MS = 120_000;
+export const EXEC_TIMEOUT_GIT_MS = 120_000;
+/**
+ * Bound for the bounded reads issued AFTER the paid runner (ms): the recheck
+ * document, the recheck status and the report document. They are local file
+ * reads — no git-sized window — and they share the round clock with the
+ * capture and the runner, so the PR-context gate reserves their worst case.
+ */
+export const POST_RUNNER_READ_TIMEOUT_MS = 30_000;
+/** Post-runner bounded reads per round — the count the gate reserves. */
+const POST_RUNNER_READ_COUNT = 3;
+/**
+ * Worst case the round clock owes those reads (ms): every one may consume its
+ * whole `POST_RUNNER_READ_TIMEOUT_MS`. 90_000ms at the current count.
+ */
+export const POST_RUNNER_READ_BUDGET_MS = POST_RUNNER_READ_COUNT * POST_RUNNER_READ_TIMEOUT_MS;
 /**
  * In-image runner budget per review level (ms). One Worker deployment = one
  * REVIEW_LEVEL = one timeout table (spec d5-budget § Trigger): quick/default
@@ -290,6 +322,9 @@ export const INLINE_RESOLVE_BUDGET_MS = 12_000;
 /** Per-entry slice (ms) — one §7.5 discover + resolve must fit inside it. */
 export const INLINE_RESOLVE_ENTRY_MS = 6_000;
 
+/** The named causes of a failed PR-context capture (`ConsumerLogFields.report_context`). */
+export type ReportContextFailure = "pr-view" | "pr-view-json" | "issue-view" | "issue-view-json" | "budget";
+
 /** Structured log fields: seven event fields + sandbox id + idempotency key
  * + the d5-budget visibility quartet (level / runner_timeout_ms /
  * elapsed_ms / orchestration — spec d5-budget L5: they ride THIS channel;
@@ -311,8 +346,11 @@ export type ConsumerLogFields = {
    * concurrency reader's degraded-read warn, relayed on this channel.
    * `review_check_budgets_degraded` (same channel, spec §7.10): the check-budget
    * reader's degraded-read warn.
+   * `review_no_increment` (union widened ADDITIVELY): an incremental round whose
+   * `base...head` is genuinely empty — the prior round already covers this head,
+   * so the delivery is acked without a new review body.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_no_increment";
   action: string;
   installation_id: number;
   owner: string;
@@ -444,6 +482,45 @@ export type ConsumerLogFields = {
    * context unavailable; none is published as `no-evidence`.
    */
   diff_capture?: "empty" | "overflow" | "unreadable";
+  /**
+   * Increment-round diagnostics: the compare verdict (`ahead` is the only one
+   * that starts an increment round) when the round reviewed the full diff, and
+   * the base sha on the increment capture-failure line.
+   */
+  increment_status?: string;
+  increment_since?: string;
+  /**
+   * Set when the increment base read itself failed (a D1/schema fault): the
+   * round keeps the full-diff fallback, and this is the only trace of it.
+   */
+  increment_base?: "lookup-failed";
+  /**
+   * Why the increment capture could not be trusted — `empty` (exit 0, nothing
+   * delivered) or `unreadable` (no flag line). Its own field, so a full-diff
+   * capture failure and an increment capture failure never read alike.
+   */
+  increment_capture?: "empty" | "unreadable";
+  /**
+   * Why the report seat's PR-context capture yielded nothing: `pr-view` (the
+   * `gh pr view` exec failed), `pr-view-json` (its reply was not the JSON shape
+   * asked for), `issue-view` (one referenced issue could not be read),
+   * `issue-view-json` (an issue reply was not that shape) or `budget` (the round
+   * no longer had the wall clock the capture costs, so it was skipped). The
+   * issue number rides `report_context_issue`. The sections then degrade to
+   * `none`.
+   */
+  report_context?: ReportContextFailure;
+  report_context_issue?: number;
+  /**
+   * Why the seat's report document yielded no sections (the `none` headings):
+   * one named cause per rejected read, so a missing narrative is attributable
+   * instead of silently absent. `invalid-document` carries the gate's own
+   * reason in `report_doc_error`; `stale-head` carries the head the document
+   * was bound to in `report_doc_head_sha` (a validated sha, never free text).
+   */
+  report_doc?: "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document" | "stale-head";
+  report_doc_error?: string;
+  report_doc_head_sha?: string;
 };
 
 export type ConsumerLog = {
@@ -467,13 +544,35 @@ export const defaultConsumerLog: ConsumerLog = {
 // ---------------------------------------------------------------------------
 
 /**
- * Sandbox commands that can each consume the full `EXEC_TIMEOUT_GIT_MS`
- * (120s): clone / rev-parse / diff / numstat / runner-input write, plus the
- * recheck-doc read `readRecheckDoc` runs AFTER the runner step — the sixth
- * was missing here, so the row could expire while a legal review was still
- * posting (round-8 review).
+ * The 120s windows a maximal round can consume, in execution order. Each entry
+ * is ONE window, not one command: `readRecheckDoc` issues the document and
+ * status reads in a single `Promise.all`, so the pair bills once.
+ *
+ * This list is the TTL's single source of truth (`reviewGuardTtlSeconds` bills
+ * its length) and it is pinned against a real round: consumer.test.ts runs the
+ * maximal round and requires exactly this many bounded commands. The four
+ * PR-context reads run under the tighter `PR_CONTEXT_EXEC_TIMEOUT_MS` (30s)
+ * and the post-runner document/status/report reads under
+ * `POST_RUNNER_READ_TIMEOUT_MS` (also 30s), but all still bill at 120s here —
+ * a deliberate over-count, so the TTL stays conservative. An uncounted step
+ * lets the row expire while a legal review is still posting, so a new one must
+ * fail that test until it is added here.
  */
-const GUARD_TIMED_SANDBOX_STEPS = 6;
+export const GUARD_TIMED_SANDBOX_STEPS: readonly string[] = [
+  "clone",
+  "rev-parse",
+  "compare-status",
+  "full-diff",
+  "increment-diff",
+  "numstat",
+  "pr-context-view",
+  "pr-context-issue-1",
+  "pr-context-issue-2",
+  "pr-context-issue-3",
+  "runner-input-write",
+  "recheck-reads",
+  "report-document-read",
+];
 /** Slack for the untimed steps (token mint, sandbox create, comment post, D1 puts). */
 const GUARD_SLACK_MS = 120_000;
 
@@ -483,15 +582,14 @@ const GUARD_SLACK_MS = 120_000;
  * runner step (runnerTimeoutMs(level) — 600s quick/default, 840s deep), the
  * whole inline-resolution budget (`INLINE_RESOLVE_BUDGET_MS`, which runs
  * last), plus `GUARD_SLACK_MS` — so the row can never expire mid-review and
- * unblock a concurrent duplicate. 1452s quick/default, 1692s deep. Pinned
- * exactly by consumer.test.ts ("reviewGuardTtlSeconds covers the full
- * step-budget arithmetic per level") so a future step addition re-breaks
- * loudly.
+ * unblock a concurrent duplicate. 2292s quick/default, 2532s deep. Pinned
+ * exactly by consumer.test.ts — the per-level arithmetic AND a maximal round's
+ * command count — so a future step addition re-breaks loudly.
  */
 export function reviewGuardTtlSeconds(level: ReviewLevel): number {
   return Math.ceil(
     (runnerTimeoutMs(level) +
-      GUARD_TIMED_SANDBOX_STEPS * EXEC_TIMEOUT_GIT_MS +
+      GUARD_TIMED_SANDBOX_STEPS.length * EXEC_TIMEOUT_GIT_MS +
       INLINE_RESOLVE_BUDGET_MS +
       GUARD_SLACK_MS) /
       1000,
@@ -499,13 +597,23 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
 }
 
 /**
+ * Wall-clock budget of ONE round, measured from the top of `processMessage`:
+ * Cloudflare caps a Queue consumer invocation at 15 minutes
+ * (knowledge: best-practices/cf-queue-consumer-wall-clock), and that cap — not
+ * the admission TTL, which only bounds how long the row may be held — is the
+ * clock a best-effort step must fit inside. The paid runner owns its own
+ * `runnerTimeoutMs(level)` out of the same window.
+ */
+export const ROUND_BUDGET_MS = 900_000;
+
+/**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
- * — the first delivery is attempt 1). quick/default: 60s → 300s → 1200s; deep: 90s → 480s → 1200s.
+ * — the first delivery is attempt 1). quick/default: 60s → 300s → 2040s; deep: 90s → 480s → 2040s.
  *
  * The schedule must COVER the level's guard TTL, and its last entry must be
  * able to reclaim it: every entry stays BELOW the level's guard TTL
- * (1452s / 1692s) so no single delay outlives the lock, while the CUMULATIVE
- * sum (1560s / 1770s) EXCEEDS it — so by the final delayed attempt the
+ * (2292s / 2532s) so no single delay outlives the lock, while the CUMULATIVE
+ * sum (2400s / 2610s) EXCEEDS it — so by the final delayed attempt the
  * in-flight row has expired and the admission's expired-reclaim branch lets
  * this message take the lock instead of being dropped. Without that sum, a
  * legal review (600s+ runner) could hold the PR past the whole backoff and a
@@ -516,9 +624,9 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
  * DLQ).
  */
 const GUARD_RETRY_DELAYS_SECONDS: Record<ReviewLevel, readonly [number, number, number]> = {
-  quick: [60, 300, 1200],
-  default: [60, 300, 1200],
-  deep: [90, 480, 1200],
+  quick: [60, 300, 2040],
+  default: [60, 300, 2040],
+  deep: [90, 480, 2040],
 };
 
 /** Guard-held backoff schedule for the job's review level (spec d5-budget L4). */
@@ -589,8 +697,8 @@ export type AdmissionRefusalFields = Required<Pick<ConsumerLogFields, "system_ca
  *
  * `heldHeadSha` is the live row's sha: a `pr-held` drop is only benign while
  * that review covers THIS message's commit. The cumulative backoff
- * (1560s quick/default, 1770s deep) now EXCEEDS the level's guard TTL
- * (1452s / 1692s), so the final delayed attempt can reclaim the expired row
+ * (2400s quick/default, 2610s deep) now EXCEEDS the level's guard TTL
+ * (2292s / 2532s), so the final delayed attempt can reclaim the expired row
  * and review the new commit. A drop that still happens — a cap/storage
  * refusal, or a row that outlived the schedule — must leave a trace, so the
  * terminal ack records the drop row for a commit the live review never
@@ -754,7 +862,14 @@ export type CheckLifecycleHooks = {
     latch?: CheckBeginLatch;
   }): Promise<CheckHandle | null>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
-    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error";
+    outcome: CheckTerminalOutcome;
+    /**
+     * The reviewed head an EMPTY increment inherits: the Check carries that
+     * head's result against the current gate instead of a free-standing
+     * `neutral`; an unreadable baseline fails closed. Omitted → nothing to
+     * inherit.
+     */
+    inheritedHeadSha?: string;
     /** The operator-configured bound on the terminal `checks.update` (spec §7.10). */
     updateBudgetMs: number }): Promise<void>;
 };
@@ -889,6 +1004,260 @@ async function applyPendingLifecycleJournals(
     if (!applied) return false;
   }
   return true;
+}
+
+/**
+ * Bounded read + validation + redaction of the report seat's document: the
+ * audited fixed-path read (`readReportCommand`) yields `<content>\n<flag>`;
+ * anything other than a flag-0 document that passes `validateReportDoc` and is
+ * bound to `expectedHeadSha` is NO report (the sections render `none`) and
+ * leaves ONE warn naming which cause rejected it. Each narrative field is
+ * redacted before it can reach a public body — the seat's text is model output
+ * like any other, and a prompt-injected credential can hide in a PR description
+ * it quoted.
+ */
+async function readReportDoc(
+  sandbox: ReviewSandbox,
+  secretValues: string[],
+  expectedHeadSha: string,
+  log: ConsumerLog,
+  fields: ConsumerLogFields,
+): Promise<ReportDoc | null> {
+  const read = await boundedRead(sandbox, readReportCommand(), POST_RUNNER_READ_TIMEOUT_MS);
+  if (read.failure !== null) {
+    log.warn(
+      { ...fields, report_doc: read.failure === "overflow" ? "overflow" : "unreadable" },
+      `report document ${read.failure} — sections render none`,
+    );
+    return null;
+  }
+  if (read.text === null || read.text.trim() === "") {
+    log.warn({ ...fields, report_doc: "empty" }, "report document empty — sections render none");
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(read.text);
+  } catch {
+    // No parse-error detail: `JSON.parse` quotes the input, and the input is
+    // seat-authored text that may carry a credential-shaped value.
+    log.warn({ ...fields, report_doc: "invalid-json" }, "report document is not JSON — sections render none");
+    return null;
+  }
+  const redact = (text: string) => redactExactSecrets(redactSecrets(text), secretValues);
+  const gate = validateReportDoc(parsed);
+  if (!gate.ok) {
+    // The shared gate names only the accepted shape, never the seat's own
+    // key/value text; the same shape + exact-value redaction every other log
+    // field gets is applied here too.
+    const error = redact(gate.error);
+    log.warn(
+      { ...fields, report_doc: "invalid-document", report_doc_error: error },
+      `report document failed its gate — sections render none: ${error}`,
+    );
+    return null;
+  }
+  // The fixed path is shared with every earlier run in this container: a
+  // document bound to another head is that run's narrative, not this one's. A
+  // missing/invalid head never reaches here — the gate rejects it first.
+  if (gate.doc.headSha !== expectedHeadSha) {
+    log.warn(
+      {
+        ...fields,
+        report_doc: "stale-head",
+        report_doc_head_sha: gate.doc.headSha,
+      },
+      `report document is bound to head ${gate.doc.headSha}, not the reviewed head ${expectedHeadSha} — sections render none`,
+    );
+    return null;
+  }
+  return {
+    schema: "mstar.report/v1",
+    headSha: gate.doc.headSha,
+    overview: redact(gate.doc.overview),
+    linkedIssueAc: redact(gate.doc.linkedIssueAc),
+    verified: redact(gate.doc.verified),
+    rejected: redact(gate.doc.rejected),
+    planToFix: redact(gate.doc.planToFix),
+  };
+}
+
+/**
+ * The most recent REVIEWED head of this PR, BY THIS APP, whose review was not
+ * an `incomplete` (stopped) run and whose own capture did not fail — the base
+ * an incremental round diffs against. Both exclusions are on purpose: a stopped
+ * round never scanned its scope, and a round whose diff capture failed
+ * published a verdict without evidence. Diffing against either would silently
+ * inherit that gap.
+ *
+ * `app_id` is part of the identity: two Apps can review one installation's PRs,
+ * and `reviews` is keyed per (installation, owner, repo, pr) without it, so an
+ * unfiltered read could hand App B the head App A reviewed and skip exactly the
+ * commits B never saw. Legacy rows (`app_id` NULL) predate per-App attribution
+ * and belong to the retired global App, so no current App can match them.
+ *
+ * One row per reviewed sha, and `reviewed_at` is second-resolution, so `rowid`
+ * breaks same-second ties in insertion order.
+ */
+async function findIncrementBase(db: PipelineEnv["DB"], scope: Scope): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT head_sha FROM reviews
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND verdict <> 'incomplete'
+         AND context_incomplete = 0
+       ORDER BY reviewed_at DESC, rowid DESC
+       LIMIT 1`,
+    )
+    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
+    .first<{ head_sha: string }>();
+  return row?.head_sha ?? null;
+}
+
+/** Closing/mentioning issue refs the report seat may read (finite vocabulary). */
+const ISSUE_REF_RE = /\b(?:closes|closed|fixes|fixed|resolves|resolved|refs?|references?)\s*:?\s*#(\d+)\b/gi;
+
+/**
+ * Extract the issue numbers a PR body claims to close or reference. A finite
+ * keyword table over the body text; duplicates collapse, order is first
+ * appearance, and the list is capped by the caller (`PR_CONTEXT_MAX_ISSUES`).
+ */
+export function extractIssueRefs(prBody: string): number[] {
+  const seen = new Set<number>();
+  for (const match of prBody.matchAll(ISSUE_REF_RE)) {
+    const issueNumber = Number(match[1]);
+    if (Number.isInteger(issueNumber) && issueNumber > 0) seen.add(issueNumber);
+  }
+  return [...seen];
+}
+
+/** Bound untrusted text by characters, marking the cut. */
+function clampContextText(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\n[... truncated ...]`;
+}
+
+/**
+ * Per-call bound for the capture's own `gh` reads (ms). Far below
+ * `EXEC_TIMEOUT_GIT_MS` because the capture is best-effort narrative: its
+ * worst case must fit inside the round NEXT TO the level's runner budget.
+ *
+ * Round arithmetic (`ROUND_BUDGET_MS` = 900_000ms):
+ *   capture worst case (1 + PR_CONTEXT_MAX_ISSUES) × 30_000 = 120_000ms
+ *   quick/default runner                                     = 600_000ms
+ *   post-runner bounded reads (3 × POST_RUNNER_READ_TIMEOUT_MS) =  90_000ms
+ *   gate needs 810_000ms → funded at round start with 90_000ms to spare.
+ * A deep round needs 840_000 + 120_000 + 90_000 = 1_050_000ms, more than the
+ * 900_000ms window, so deep rounds always skip the capture — narrative never
+ * trades away a deep run's window. Changing any term re-derives the gate.
+ */
+export const PR_CONTEXT_EXEC_TIMEOUT_MS = 30_000;
+
+/**
+ * Worst-case cost of the whole capture: the PR read plus every allowed issue
+ * read, each able to consume its full `PR_CONTEXT_EXEC_TIMEOUT_MS` window.
+ * 120_000ms at the current cap — the sum the gate reserves before it runs.
+ */
+export const PR_CONTEXT_WORST_CASE_MS = (1 + PR_CONTEXT_MAX_ISSUES) * PR_CONTEXT_EXEC_TIMEOUT_MS;
+
+/**
+ * Capture the PR context the report seat reads: the PR description, then up
+ * to `PR_CONTEXT_MAX_ISSUES` issues it closes/references. Every value is
+ * clamped — this is attacker-controlled prose that rides into a prompt.
+ *
+ * Bounded by the ROUND's clock: the capture runs before the paid run and each
+ * gh read can consume its whole `PR_CONTEXT_EXEC_TIMEOUT_MS`, so a slow
+ * sandbox could spend the round's window on a narrative. The gate therefore
+ * requires the remainder to cover the worst-case capture, the level's runner
+ * budget AND the post-runner bounded reads that share this round's clock —
+ * the reads must still fit after the capture and the run — and only then
+ * does the remaining time bound how many issue reads start, so the review
+ * itself never carries the cost.
+ *
+ * Any failure (gh missing, API error, non-JSON output, no budget) resolves
+ * `undefined` after ONE warn naming the cause: the report sections then degrade
+ * to `none`, which is a smaller loss than failing a review over its narrative —
+ * but an unattributed gap is indistinguishable from a PR that simply has no
+ * context.
+ */
+async function capturePrContext(
+  sandbox: ReviewSandbox,
+  payload: ReviewJobPayload,
+  token: string,
+  log: ConsumerLog,
+  fields: ConsumerLogFields,
+  level: ReviewLevel,
+  roundDeadlineMs: number,
+): Promise<PrContext | undefined> {
+  const exec = { env: { GH_TOKEN: token }, timeout: PR_CONTEXT_EXEC_TIMEOUT_MS };
+  const warn = (cause: ReportContextFailure, issue?: number): void => {
+    log.warn(
+      { ...fields, report_context: cause, ...(issue === undefined ? {} : { report_context_issue: issue }) },
+      `report context ${cause}${issue === undefined ? "" : ` (issue #${issue})`} — report sections degrade to none`,
+    );
+  };
+  const remainingMs = roundDeadlineMs - Date.now();
+  // The capture is spent BEFORE the paid run, so its bound must leave the
+  // level's own exec budget intact: a capture that fits but eats the runner's
+  // window turns a review into a timeout. The post-runner bounded reads share
+  // that same clock, so their worst case is reserved too — a capture that
+  // consumed the whole remainder would starve them.
+  const captureBudgetMs =
+    PR_CONTEXT_WORST_CASE_MS + runnerTimeoutMs(level) + POST_RUNNER_READ_BUDGET_MS;
+  if (remainingMs < captureBudgetMs) {
+    log.warn(
+      { ...fields, report_context: "budget" },
+      `report context budget — ${remainingMs}ms left of the round, the capture costs up to ${PR_CONTEXT_WORST_CASE_MS}ms, the run still needs its ${runnerTimeoutMs(level)}ms and the post-runner reads ${POST_RUNNER_READ_BUDGET_MS}ms — skipped, report sections degrade to none`,
+    );
+    return undefined;
+  }
+  const prRead = await sandbox
+    .runCommand(prBodyCommand(payload.owner, payload.repo, payload.pr_number), exec)
+    .catch(() => null);
+  if (prRead === null || prRead.exitCode !== 0) {
+    warn("pr-view");
+    return undefined;
+  }
+  let prBody: string;
+  try {
+    const parsed = JSON.parse(prRead.stdout) as { body?: unknown };
+    prBody = typeof parsed.body === "string" ? parsed.body : "";
+  } catch {
+    warn("pr-view-json");
+    return undefined;
+  }
+  const issues: PrContext["issues"] = [];
+  // One gh read may burn its whole window, so the remaining time also bounds
+  // how many issue reads start: never more than the round can still fund.
+  // The runner's own window is already reserved by the gate above.
+  const maxIssueReads = Math.min(
+    PR_CONTEXT_MAX_ISSUES,
+    Math.floor((roundDeadlineMs - Date.now()) / PR_CONTEXT_EXEC_TIMEOUT_MS),
+  );
+  for (const issueNumber of extractIssueRefs(prBody).slice(0, Math.max(0, maxIssueReads))) {
+    const issueRead = await sandbox
+      .runCommand(issueViewCommand(payload.owner, payload.repo, issueNumber), exec)
+      .catch(() => null);
+    if (issueRead === null || issueRead.exitCode !== 0) {
+      warn("issue-view", issueNumber);
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(issueRead.stdout) as { number?: unknown; title?: unknown; body?: unknown };
+      if (typeof parsed.number !== "number" || typeof parsed.title !== "string") {
+        warn("issue-view-json", issueNumber);
+        continue;
+      }
+      issues.push({
+        number: parsed.number,
+        title: clampContextText(parsed.title, PR_CONTEXT_MAX_CHARS),
+        body: clampContextText(typeof parsed.body === "string" ? parsed.body : "", PR_CONTEXT_MAX_CHARS),
+      });
+    } catch {
+      warn("issue-view-json", issueNumber);
+      continue;
+    }
+  }
+  return { prBody: clampContextText(prBody, PR_CONTEXT_MAX_CHARS), issues };
 }
 
 /**
@@ -1561,10 +1930,14 @@ function parseBoundedRead(stdout: string): BoundedRead {
   return { text: out.slice(0, split), failure: null };
 }
 
-async function boundedRead(sandbox: ReviewSandbox, command: ShellCommand): Promise<BoundedRead> {
+async function boundedRead(
+  sandbox: ReviewSandbox,
+  command: ShellCommand,
+  timeoutMs: number,
+): Promise<BoundedRead> {
   let read;
   try {
-    read = await sandbox.runCommand(command, { timeout: EXEC_TIMEOUT_GIT_MS });
+    read = await sandbox.runCommand(command, { timeout: timeoutMs });
   } catch {
     return { text: null, failure: "unreadable" };
   }
@@ -1666,8 +2039,8 @@ async function readRecheckDoc(
   status: RecheckStatus | null;
 }> {
   const [docRead, statusRead] = await Promise.all([
-    boundedRead(sandbox, readRecheckCommand(RECHECK_OUTPUT_PATH)),
-    boundedRead(sandbox, readRecheckStatusCommand()),
+    boundedRead(sandbox, readRecheckCommand(RECHECK_OUTPUT_PATH), POST_RUNNER_READ_TIMEOUT_MS),
+    boundedRead(sandbox, readRecheckStatusCommand(), POST_RUNNER_READ_TIMEOUT_MS),
   ]);
   let doc: RecheckDoc | null = null;
   // A zero-byte payload is the seat writing nothing: absent, not malformed.
@@ -1926,6 +2299,20 @@ type ProcessDeps = {
     repo: string;
     prNumber: number;
   }) => Promise<{ headSha: string | null; headAt: string | null } | null>;
+  /**
+   * The incremental round's base lookup. A seam because the failure path is
+   * the contract under test: the round must survive ANY throw from it with the
+   * full-diff fallback, and injecting that throw through the DB would need the
+   * query text.
+   */
+  findIncrementBase: (db: PipelineEnv["DB"], scope: Scope) => Promise<string | null>;
+  /**
+   * The round's wall-clock budget (ms), measured from the top of
+   * `processMessage`. Production is `ROUND_BUDGET_MS` (the queue consumer cap);
+   * the seam exists so a test can shrink the round to a budget where a step
+   * must be skipped instead of waiting for real time to pass.
+   */
+  roundBudgetMs: number;
 };
 
 /**
@@ -2653,7 +3040,14 @@ async function newerCommitHasJob(
 type ConsumerOverrides = Partial<
   Pick<
     ProcessDeps,
-    "store" | "failureStore" | "createAppCommenter" | "getSandbox" | "checks" | "selectPrHead"
+    | "store"
+    | "failureStore"
+    | "createAppCommenter"
+    | "getSandbox"
+    | "checks"
+    | "selectPrHead"
+    | "findIncrementBase"
+    | "roundBudgetMs"
   >
 >;
 
@@ -2695,6 +3089,8 @@ export function createReviewConsumer(
     createAppCommenter: overrides.createAppCommenter ?? ((cred) => createReviewCommenter(cred, { db: env.DB })),
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
     selectPrHead: overrides.selectPrHead ?? appsStore.selectPrHead,
+    findIncrementBase: overrides.findIncrementBase ?? findIncrementBase,
+    roundBudgetMs: overrides.roundBudgetMs ?? ROUND_BUDGET_MS,
     log,
     background,
   };
@@ -2755,6 +3151,11 @@ async function processMessage(
   deps: ProcessDeps,
   attempts = 1,
 ): Promise<ProcessOutcome> {
+  // The round's wall clock starts HERE: every best-effort step that can spend a
+  // sandbox window (the PR-context capture) is measured against this instant and
+  // `deps.roundBudgetMs`, so it can never eat the window the paid run and its
+  // publication need.
+  const roundStartedAt = Date.now();
   // Unique per attempt: a destroyed sandbox's id is never
   // reused — attach-after-destroy behavior is unknown, uniqueness wins.
   const sandboxId = `review-${crypto.randomUUID()}`;
@@ -2819,7 +3220,8 @@ async function processMessage(
   let sendAttempt: { publicationId: string } | null = null;
   const terminalizeCheck = async (
     publicationId: string | null,
-    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error",
+    outcome: CheckTerminalOutcome,
+    inheritedHeadSha?: string,
   ): Promise<void> => {
     if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
     checkTerminalized = true;
@@ -2838,6 +3240,7 @@ async function processMessage(
         handle: checkHandle,
         publicationId,
         outcome,
+        ...(inheritedHeadSha === undefined ? {} : { inheritedHeadSha }),
         updateBudgetMs: budgets.updateMs,
       });
       const attemptId = checkHandle.attemptId;
@@ -3172,9 +3575,6 @@ async function processMessage(
       prNumber: payload.pr_number,
       cloneDir: CLONE_DIR,
       diffPath: DIFF_PATH,
-      runnerPath: RUNNER_PATH,
-      level,
-      inputPath: RUNNER_INPUT_PATH,
     });
 
     // 2. Clone the PR head branch. Git transport auth via scoped extraheader
@@ -3367,6 +3767,45 @@ async function processMessage(
       deps.log.warn(fields, `lifecycle target capture failed — context-unavailable: ${detail}`);
     }
 
+    // Incremental round selection: when this PR has a previously REVIEWED head,
+    // ask GitHub whether it is an ancestor of this one. Only `ahead` is an
+    // honest increment (base...head is then exactly the work since the last
+    // review); `behind`/`diverged`/`identical`/a 404 after a force-push or any
+    // non-zero exit keep the FULL diff. A failed base read degrades the same
+    // way, but it is warned: a silent fallback would disable incremental
+    // rounds forever with no trace.
+    let incrementBase: string | null = null;
+    try {
+      incrementBase = await deps.findIncrementBase(deps.env.DB, lifecycleScope);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        { ...fields, increment_base: "lookup-failed" },
+        `increment base lookup failed — reviewing the full diff: ${detail}`,
+      );
+    }
+    let sinceSha: string | null = null;
+    if (incrementBase !== null && incrementBase !== headSha) {
+      try {
+        const compare = await sandbox.runCommand(
+          compareStatusCommand(payload.owner, payload.repo, incrementBase, headSha),
+          { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS },
+        );
+        const status = compare.stdout.trim();
+        if (compare.exitCode === 0 && status === "ahead") {
+          sinceSha = incrementBase;
+        } else {
+          deps.log.info(
+            { ...fields, increment_status: compare.exitCode === 0 ? status : `exit ${compare.exitCode}` },
+            "incremental base not an ancestor of this head — reviewing the full diff",
+          );
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.info({ ...fields, increment_status: "unavailable" }, `compare status unavailable — full diff: ${detail}`);
+      }
+    }
+
     // Diff (GH_TOKEN via exec env only — never in the command). The command
     // writes the file for numstat AND streams a BOUNDED copy back: that stdout
     // is the WORKER-CONTROLLED §7.3 trusted capture the evidence catalog
@@ -3382,12 +3821,49 @@ async function processMessage(
     // An empty `fit` payload is NOT decided here: `gh pr diff` also writes
     // nothing for a PR with no changes, and only the numstat of the same round
     // can tell the two apart (see step 6).
+    // An incremental round captures the FULL diff here as well: the prior
+    // findings live in files the increment may not touch, so their evidence
+    // catalog can only be proven against the whole PR diff. The increment
+    // capture below feeds the numstat partition ONLY.
     const diff = await sandbox.runCommand(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
     if (diff.exitCode !== 0) {
       throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
     }
     const diffRead = parseBoundedRead(diff.stdout);
     const diffText = diffRead.text ?? "";
+
+    // Increment capture (numstat partition only): base...head replaces the
+    // file AFTER the full diff text is already in memory, so the evidence
+    // catalog above keeps proving prior findings against the whole PR.
+    // Failure discipline is the diff text's own — a non-zero exit throws, an
+    // unreadable/empty capture marks the round context-incomplete. Never a
+    // silent fall back to the full diff: the `since` fact would then be a lie.
+    // An empty bounded read is NOT decided here: as with the full diff, only
+    // the same round's numstat tells a genuinely unchanged increment (empty
+    // file) from a capture that delivered nothing. Until that read, an empty
+    // capture counts as a failure — the conservative side, which also keeps the
+    // recheck input unbuilt exactly as before.
+    let incrementEmpty = false;
+    if (sinceSha !== null) {
+      const increment = await sandbox.runCommand(
+        incrementDiffCommand(payload.owner, payload.repo, sinceSha, headSha, DIFF_PATH),
+        { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS },
+      );
+      if (increment.exitCode !== 0) {
+        throw new Error(`increment diff failed: exit ${increment.exitCode}, stdout ${increment.stdout.length}B`);
+      }
+      const incrementRead = parseBoundedRead(increment.stdout);
+      if (incrementRead.failure === "unreadable") {
+        captureFailed = true;
+        deps.log.warn(
+          { ...fields, increment_capture: "unreadable", increment_since: sinceSha },
+          `increment diff capture unreadable — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+        );
+      } else if (incrementRead.failure === null && incrementRead.text === "") {
+        incrementEmpty = true;
+        captureFailed = true;
+      }
+    }
 
     // Trusted evidence catalog (§7.3) for the selected targets, pinned to
     // the authoritative checkout SHA. A target the captured diff cannot prove
@@ -3543,7 +4019,9 @@ async function processMessage(
 
     // 6. Numstat of the PR diff — `git apply --numstat` reads the unified
     // diff without applying it. The lines ("<add>\t<del>\t<path>") are the
-    // runner's seat-partition universe (reconFacts convention).
+    // runner's seat-partition universe (reconFacts convention). On an
+    // incremental round the file holds base...head, so the seats partition the
+    // work done since the last review instead of the whole PR.
     const numstat = await sandbox.runCommand(cmds.numstat, { timeout: EXEC_TIMEOUT_GIT_MS });
     if (numstat.exitCode !== 0) {
       throw new Error(`numstat failed: exit ${numstat.exitCode}, stdout ${numstat.stdout.length}B`);
@@ -3552,6 +4030,31 @@ async function processMessage(
       .split("\n")
       .map((line) => line.trimEnd())
       .filter((line) => line !== "");
+
+    // An ELIGIBLE base plus two empty reads of the SAME increment file means
+    // `base...head` has no changes: the prior round already covers this head's
+    // content, so there is nothing to review. A verdict over an empty file
+    // universe would be an assertion about nothing — and a `context-incomplete`
+    // flag would wrongly exclude this head as a future increment base — so the
+    // round acks instead: no publication, no review row. The Check carries the
+    // REVIEWED head's result against the current gate (an empty commit must
+    // never launder a failing baseline into a neutral required check). Empty
+    // stdout with a NON-empty numstat is the capture failure right below, which
+    // keeps its context-incomplete accounting.
+    if (sinceSha !== null && incrementEmpty && numstatLines.length === 0) {
+      deps.log.info(
+        { ...fields, event: "review_no_increment", increment_since: sinceSha },
+        `no increment to review — ${sinceSha.slice(0, 7)}..${headSha.slice(0, 7)} is empty and the last reviewed head already covers this content; acking without a new review`,
+      );
+      await terminalizeCheck(null, "skipped", sinceSha);
+      return { kind: "ok" };
+    }
+    if (sinceSha !== null && incrementEmpty) {
+      deps.log.warn(
+        { ...fields, increment_capture: "empty", increment_since: sinceSha },
+        `increment diff capture empty — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+      );
+    }
 
     // A non-delivered diff capture is ambiguous, and only THIS round's
     // numstat — the diff FILE `git apply` read, not the bounded stdout — can
@@ -3582,10 +4085,12 @@ async function processMessage(
     // AUTHORITATIVE checkout sha is used so the ArtifactStore.put target
     // cross-check agrees with the idempotency key — plus the numstat
     // universe. base64-transported so the JSON never touches shell quoting;
-    // worktreePath = the clone (the seats' read cwd).
+    // worktreePath = the clone (the seats' read cwd). An incremental round
+    // adds `since <base>` so the seats know their universe is a delta.
     const reconFacts = [
       `${payload.owner}/${payload.repo}#${payload.pr_number}`,
       `head ${headSha}`,
+      ...(sinceSha !== null ? [`since ${sinceSha}`] : []),
       ...numstatLines,
     ];
     // The App's per-role model overrides ride as an OPTIONAL
@@ -3602,6 +4107,23 @@ async function processMessage(
     // registry data) — the in-image synthesizer's base (it cannot import the
     // contract: the runner module graph stays inside packages/runner/src +
     // packages/shared/src, tests/review/runtime-boundary).
+    // PR context for the report seat (best-effort): the description plus the
+    // issues it closes/references, read through gh with the same exec env the
+    // diff uses. Bounded by the round's own clock (each read can burn its whole
+    // PR_CONTEXT_EXEC_TIMEOUT_MS window) and gated so the level's runner budget
+    // AND the post-runner bounded reads survive the capture; any failure or a
+    // budget skip resolves undefined (with one named warn) so the published
+    // report sections degrade to `none` — a narrative gap never fails a review.
+    const prContext = await capturePrContext(
+      sandbox,
+      payload,
+      token,
+      deps.log,
+      fields,
+      level,
+      roundStartedAt + deps.roundBudgetMs,
+    );
+
     const runnerInput = {
       worktreePath: CLONE_DIR,
       reconFacts,
@@ -3614,6 +4136,9 @@ async function processMessage(
       // exist — a first round with an empty lifecycle serializes
       // byte-identically to the pre-recheck payload.
       ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
+      // The report seat's untrusted input. Absent when gh could not answer,
+      // so no report is attempted and the sections render `none`.
+      ...(prContext !== undefined ? { prContext } : {}),
     };
     // The document rides the exec stdin pipe: as an argv string it became one
     // argument, and a recheck round above ~98 KiB breaches Linux's 128 KiB cap.
@@ -3648,11 +4173,15 @@ async function processMessage(
     secretValues = sessionSecretValues(runnerEnv, credentials.keyValues, token);
     // §7.8: with a recheck input the runner gains `--recheck-out` — the seat
     // writes its validated document to the audited fixed path before the
-    // envelope reaches stdout.
-    const runnerCmd =
-      recheckInput !== undefined
-        ? runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, RECHECK_OUTPUT_PATH)
-        : cmds.runner;
+    // envelope reaches stdout. `--report-out` rides whenever the report seat
+    // has context to work with.
+    const runnerCmd = runnerCommand(
+      RUNNER_PATH,
+      level,
+      RUNNER_INPUT_PATH,
+      recheckInput !== undefined ? RECHECK_OUTPUT_PATH : undefined,
+      prContext !== undefined ? REPORT_OUTPUT_PATH : undefined,
+    );
     const run = await sandbox.runCommand(runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,
@@ -3691,6 +4220,13 @@ async function processMessage(
     const recheckDoc = recheck?.doc ?? null;
     const rejectedRowIds = recheck?.rejected ?? new Set<string>();
     const anonymousRejectedRows = recheck?.anonymousRejectedRows ?? 0;
+
+    // The report document (mstar.report/v1) rides the SAME audited bounded read
+    // and the SAME fail-closed rule: the Worker validates it against its own
+    // gate and falls back to `none` headings, or null when the seat wrote
+    // nothing. Read only when the runner was actually given `--report-out`.
+    const report: ReportDoc | null =
+      prContext !== undefined ? await readReportDoc(sandbox, secretValues, headSha, deps.log, fields) : null;
 
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
@@ -3926,8 +4462,8 @@ async function processMessage(
         thread: target.associationIds.some((id) => queuedAssociations.has(id)) ? "not yet resolved" : "-",
       };
     });
-    const closure = buildClosureSection(coverage, closureRows);
-
+    // The §7.10 facts (coverage line, display cap, thread state) render ONCE,
+    // in the body's revalidated section — there is no second rendering.
     // 12. §7.7 step 7 — calculate round/target from the App's current single
     // comment (pre-staging read), assemble the FINAL body, and stage the
     // COMPLETE private payload BEFORE any GitHub mutation. Staging failure
@@ -3946,8 +4482,13 @@ async function processMessage(
       omittedFindings: capped.omitted,
       round,
       headSha,
-      closure,
       publicationMarker,
+      ...(sinceSha !== null ? { sinceSha } : {}),
+      // The revalidated table is rendered mechanically from the closure rows
+      // and carries the round's full prior-findings set; the report may be null
+      // (no prContext / seat failure), in which case every heading still
+      // renders with `none`.
+      reportParts: { report, revalidated: buildRevalidatedSection(coverage, closureRows) },
     });
     const bodySha256 = await sha256Hex(preparedBody);
 
@@ -4036,6 +4577,11 @@ async function processMessage(
         appId: payload.appRef.appId,
         model: chainHeadSelector(effectiveModelChain(appCfg).chain),
         provider: null,
+        // A stale-context round (its pending lifecycle journal failed to
+        // apply OR its capture failed) still publishes, but its row must
+        // never be an incremental base: the flag rides the staged artifact
+        // so the put that writes it (here or on recovery) persists it.
+        contextIncomplete: staleContext,
       },
       lifecycle: lifecycleRound,
       lineIntents,

@@ -324,6 +324,30 @@ describe("createArtifactStore().put", () => {
     expect(withProvider.provider).toBe("openrouter");
   });
 
+  test("contextIncomplete: absent keeps 0, `true` persists 1 (a capture-failed round is not a base)", async () => {
+    const db = createSeededTestD1();
+    const store = createArtifactStore(db);
+
+    await store.put(reviewDoc());
+    await store.put(
+      reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "c".repeat(40) }), contextIncomplete: true }),
+    );
+
+    const healthy = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(SHA) as {
+      context_incomplete: number;
+    };
+    expect(healthy.context_incomplete).toBe(0);
+    const failed = db.raw
+      .query("SELECT context_incomplete FROM reviews WHERE head_sha = ?")
+      .get("c".repeat(40)) as { context_incomplete: number };
+    expect(failed.context_incomplete).toBe(1);
+    // The row's own publishable facts are untouched by the flag.
+    const envelope = db.raw
+      .query("SELECT envelope FROM reviews WHERE head_sha = ?")
+      .get("c".repeat(40)) as { envelope: string };
+    expect(JSON.parse(envelope.envelope)).toEqual(payload());
+  });
+
   test("an appId with no github_apps row is FK-rejected with zero rows written", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);

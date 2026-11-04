@@ -794,7 +794,10 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     // Both rows are attempted-and-bad; no row is claimed twice, none omitted.
     expect(prepared.body).toContain("Reassessed 0/2 open prior finding(s)");
     expect(prepared.body).toContain("2 invalid-output · 0 omitted");
-    const tableRows = prepared.body.split("\n").filter((l) => l.startsWith("| Old null deref"));
+    // Count inside the prior-findings section only: it is the body's ONE table
+    // of those rows, and this case is about its per-row attribution.
+    const priorSection = prepared.body.slice(prepared.body.indexOf("### Revalidated findings"));
+    const tableRows = priorSection.split("\n").filter((l) => l.startsWith("| Old null deref"));
     expect(tableRows).toHaveLength(2);
     expect(tableRows.every((l) => l.includes("| unverifiable (invalid-output) "))).toBe(true);
     // `rejected` reports what was attributed (2), not what was claimed (5).

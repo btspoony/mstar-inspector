@@ -42,7 +42,7 @@
  *     exact agent names; absent/empty map = today's options byte-for-byte.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, jest, mock, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
@@ -52,9 +52,16 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, validateMstarReviewV1 } from "@mstar-harness/engine";
 
-import type { AgentRuntime, ReviewLevel } from "../../packages/shared/src/runtime";
+import type {
+  AgentRuntime,
+  AgentRuntimeRunInput,
+  ReviewLevel,
+  ReviewRunResult,
+} from "../../packages/shared/src/runtime";
 import type { SupervisedSeat } from "../../packages/runner/src/runtime-omp";
 import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
+import { REPORT_OUTPUT_SCHEMA } from "../../packages/runner/src/report";
+import type { ReportDoc } from "../../packages/shared/src/report-wire";
 import { RECHECK_STATUS_ERROR_MAX_CHARS, type RecheckDoc, type RecheckInput } from "../../packages/shared/src/recheck-wire";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
@@ -205,6 +212,9 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
     return {
       session: {
         getAgentId: mock(() => PARENT_SESSION_ID),
+        // The session manager this session was created with — the identity a
+        // seat's ToolSession must NOT share with the deep parent's stream.
+        sessionManager: options.sessionManager,
         dispose: mock(async () => {
           disposeCalls += 1;
         }),
@@ -476,7 +486,7 @@ function deepEnvelope(): unknown {
         line_start: 4,
       },
     ],
-    target: { owner: "acme", repo: "widgets", pr: 7 },
+    target: { owner: "acme", repo: "widgets", pr: 7, head_sha: HEAD_SHA },
   };
 }
 
@@ -508,10 +518,13 @@ function toolOnlyTurn(errorMessage?: string): unknown {
   };
 }
 
+/** The reviewed head every run input below declares (`head <sha>` recon fact). */
+const HEAD_SHA = "abc1234567890abcdef1234567890abcdef12";
+
 /** reconFacts with numstat lines spanning two top-level dirs. */
 const TWO_CLUSTER_FACTS = [
   "acme/widgets#7",
-  "head abc1234567890abcdef1234567890abcdef12",
+  `head ${HEAD_SHA}`,
   "10\t2\tsrc/a.ts",
   "5\t0\tsrc/b.ts",
   "8\t1\tlib/c.ts",
@@ -1901,17 +1914,23 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
   });
 
   test("a partially-failed install cleans the seat files from the clone (qc1 F-002)", async () => {
-    const rolePath = join(PLUGIN_ROOT_FIXTURE, "agents", "fullstack-dev.md");
-    const original = readFileSync(rolePath, "utf8");
-    rmSync(rolePath);
+    // A per-test CLONE of the shared fixture: this case DELETES a role file, and
+    // the shared root must stay intact for every other suite that imports it.
+    const pluginRoot = mkdtempSync(join(tmpdir(), "mstar-harness-partial-"));
+    cpSync(PLUGIN_ROOT_FIXTURE, pluginRoot, { recursive: true });
+    const previousRoot = process.env.HARNESS_PLUGIN_ROOT;
+    process.env.HARNESS_PLUGIN_ROOT = pluginRoot;
     try {
+      rmSync(join(pluginRoot, "agents", "fullstack-dev.md"));
       // code-reviewer.md lands first, then the missing fullstack-dev.md
       // fails the install — cleanup must still remove what was written.
       await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(
         /missing the deep seat role agents\/fullstack-dev\.md/,
       );
     } finally {
-      writeFileSync(rolePath, original);
+      if (previousRoot === undefined) delete process.env.HARNESS_PLUGIN_ROOT;
+      else process.env.HARNESS_PLUGIN_ROOT = previousRoot;
+      rmSync(pluginRoot, { recursive: true, force: true });
     }
     expect(existsSync(join(TEST_WORKTREE, ".omp", "agents"))).toBe(false);
     expect(existsSync(join(TEST_WORKTREE, ".omp"))).toBe(false);
@@ -2169,73 +2188,74 @@ describe("ompAgentRuntime.runReview — per-review agentDir threading (AL-23-1; 
   });
 });
 
+/** Recheck fixtures shared with the report-seat suite (both dispatch the same seat definition). */
+const RECHECK_SHA = "0123456789abcdef0123456789abcdef01234567";
+
+/** Minimal trusted-catalog recheck input (shape mirrors the T1 fixtures). */
+function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
+  return {
+    schema: "mstar.recheck-input/v1",
+    headSha: RECHECK_SHA,
+    targets: [
+      {
+        rowId: "row-1",
+        findingId: "f-1",
+        original: {
+          title: "Unbounded recursion",
+          body: "The reaper recurses without a depth bound.",
+          filePath: "src/reaper.ts",
+          lineStart: 8,
+          lineEnd: 10,
+          mergeClass: "must-fix",
+          category: "logic",
+          fingerprintHint: "fp-reaper",
+        },
+        firstSeenSha: RECHECK_SHA,
+        lastAssessment: null,
+        associationIds: ["assoc-1"],
+      },
+    ],
+    evidence: [
+      {
+        id: "slice-1",
+        headSha: RECHECK_SHA,
+        baseSha: "b000000000000000000000000000000000000000",
+        path: "src/reaper.ts",
+        oldPath: null,
+        kind: "hunk",
+        oldStart: 8,
+        oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
+        newStart: 8,
+        newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
+        addedNewLines: [9],
+        oldBlobOid: "oid-old",
+        headBlobOid: "oid-head",
+        absentAtHead: false,
+        complete: true,
+      },
+    ],
+    discussion: { items: [], issueCoverage: "complete", issueDigest: "d", capturedMs: 1, threads: [] },
+    ...overrides,
+  };
+}
+
+/** A document validateRecheckDoc accepts against `recheckInput()`. */
+function validRecheckDoc(): RecheckDoc {
+  return {
+    schema: "mstar.recheck/v1",
+    headSha: RECHECK_SHA,
+    results: [
+      { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+    ],
+  };
+}
+
+/** A stale document — validateRecheckDoc rejects it as a whole. */
+function staleRecheckDoc(): RecheckDoc {
+  return { ...validRecheckDoc(), headSha: "ffffffffffffffffffffffffffffffffffffffff" };
+}
+
 describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
-  const RECHECK_SHA = "0123456789abcdef0123456789abcdef01234567";
-
-  /** Minimal trusted-catalog recheck input (shape mirrors the T1 fixtures). */
-  function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
-    return {
-      schema: "mstar.recheck-input/v1",
-      headSha: RECHECK_SHA,
-      targets: [
-        {
-          rowId: "row-1",
-          findingId: "f-1",
-          original: {
-            title: "Unbounded recursion",
-            body: "The reaper recurses without a depth bound.",
-            filePath: "src/reaper.ts",
-            lineStart: 8,
-            lineEnd: 10,
-            mergeClass: "must-fix",
-            category: "logic",
-            fingerprintHint: "fp-reaper",
-          },
-          firstSeenSha: RECHECK_SHA,
-          lastAssessment: null,
-          associationIds: ["assoc-1"],
-        },
-      ],
-      evidence: [
-        {
-          id: "slice-1",
-          headSha: RECHECK_SHA,
-          baseSha: "b000000000000000000000000000000000000000",
-          path: "src/reaper.ts",
-          oldPath: null,
-          kind: "hunk",
-          oldStart: 8,
-          oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
-          newStart: 8,
-          newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
-          addedNewLines: [9],
-          oldBlobOid: "oid-old",
-          headBlobOid: "oid-head",
-          absentAtHead: false,
-          complete: true,
-        },
-      ],
-      discussion: { items: [], issueCoverage: "complete", issueDigest: "d", capturedMs: 1, threads: [] },
-      ...overrides,
-    };
-  }
-
-  /** A document validateRecheckDoc accepts against `recheckInput()`. */
-  function validRecheckDoc(): RecheckDoc {
-    return {
-      schema: "mstar.recheck/v1",
-      headSha: RECHECK_SHA,
-      results: [
-        { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
-      ],
-    };
-  }
-
-  /** A stale document — validateRecheckDoc rejects it as a whole. */
-  function staleRecheckDoc(): RecheckDoc {
-    return { ...validRecheckDoc(), headSha: "ffffffffffffffffffffffffffffffffffffffff" };
-  }
-
   beforeEach(() => {
     // Fresh far-future anchor per test: budget-equivalent to the unset state
     // (full 180s cap) AND immune to anchor state leaked from other test
@@ -2637,6 +2657,229 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     // Cleanup still removed every installed definition (both sessions settled).
     expect(existsSync(join(TEST_WORKTREE, ".omp", "agents"))).toBe(false);
   });
+});
+
+describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
+  // The seat's yield: narrative keys only. `headSha` is the runner's to bind,
+  // so every expectation below is the seat's document PLUS the envelope head.
+  const REPORT = {
+    schema: "mstar.report/v1" as const,
+    overview: "Adds an expiry guard.",
+    linkedIssueAc: "none",
+    verified: "none",
+    rejected: "none",
+    planToFix: "none",
+  };
+  const BOUND_REPORT: ReportDoc = { ...REPORT, headSha: HEAD_SHA };
+  const PR_CONTEXT = {
+    prBody: "Closes #7",
+    issues: [{ number: 7, title: "Guard", body: "- reject expired tokens" }],
+  };
+
+  test("quick/default: a report seat runs SERIALLY after the settled review and its document rides the result", async () => {
+    // Dispatch order: review seat, then the report seat (never concurrent —
+    // the report cites the settled envelope).
+    seatResults = [{ data: seatPayload() }, { data: REPORT }];
+    const result = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      prContext: PR_CONTEXT,
+    });
+
+    // The head is the envelope's, never the seat's.
+    expect(result.report).toEqual(BOUND_REPORT);
+    // The review itself is unchanged by the report: the seat's finding still
+    // synthesized the published envelope.
+    expect(result.envelope.verdict).toBe("blocked");
+    expect(subagentRequests).toHaveLength(2);
+    const request = subagentRequests[1]!;
+    expect(request.outputSchema).toBe(REPORT_OUTPUT_SCHEMA);
+    expect(request.schemaMode).toBe("strict");
+    // The report seat sees the settled envelope and the untrusted PR context.
+    const assignment = request.assignment as string;
+    // The settled envelope rides verbatim (its verdict comes from synthesis).
+    expect(assignment).toContain('"schema":"mstar.review/v1"');
+    expect(assignment).toContain('"verdict":"blocked"');
+    expect(assignment).toContain("Closes #7");
+    expect(assignment).toContain("reject expired tokens");
+    expect(assignment).toContain("mstar.report/v1");
+    expect(request.model).toEqual([...BASE_INPUT.modelSelectors]);
+    // That session is the fan-out HOST, and the report seat is one more
+    // structured child of it — no seat prompts the host directly. One-off
+    // read of the mocked ToolSession's identity (the proxy type erases it).
+    const hostSessionManager = (request.session as { sessionManager: unknown }).sessionManager;
+    expect(hostSessionManager).toBe(createdOptions[0]!.sessionManager);
+  });
+
+  test("without prContext no report seat is dispatched and the result is null", async () => {
+    seatResults = [{ data: seatPayload() }];
+    const result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+    expect(result.report).toBeNull();
+    expect(subagentRequests).toHaveLength(1);
+  });
+
+  test("a failed report seat resolves null — the review is untouched", async () => {
+    seatResults = [{ data: seatPayload() }, { error: "model unavailable" }];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", prContext: PR_CONTEXT });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(result.report).toBeNull();
+    expect(result.envelope.schema).toBe("mstar.review/v1");
+    // The review itself is unaffected: same synthesized verdict as a run
+    // without a report seat.
+    expect(result.envelope.verdict).toBe("blocked");
+  });
+
+  test("a report document that fails its own gate resolves null", async () => {
+    seatResults = [
+      { data: seatPayload() },
+      { data: { ...REPORT, overview: "   " } },
+    ];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", prContext: PR_CONTEXT });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(result.report).toBeNull();
+  });
+
+  test("deep: the report seat runs on its OWN session after the parent turn and the recheck seat settled", async () => {
+    parentYields = [deepEnvelope()];
+    seatResults = [{ data: REPORT }];
+    const result = await ompAgentRuntime.runReview({ ...DEEP_INPUT, prContext: PR_CONTEXT });
+
+    // The settled review still lands, with the bound narrative beside it.
+    expect(result.envelope.schema).toBe("mstar.review/v1");
+    expect(result.envelope.verdict).toBe("needs fixes");
+    expect(result.report).toEqual(BOUND_REPORT);
+    expect(subagentRequests).toHaveLength(1);
+
+    // TWO sessions: the deep parent's prompt/yield stream and a DEDICATED
+    // report session. The seat's ToolSession is the latter — never the parent's.
+    expect(createdOptions).toHaveLength(2);
+    // One-off read of the mocked ToolSession's identity (the proxy type erases it).
+    const seatSessionManager = (subagentRequests[0]!.session as { sessionManager: unknown }).sessionManager;
+    expect(seatSessionManager).toBe(createdOptions[1]!.sessionManager);
+    expect(seatSessionManager).not.toBe(createdOptions[0]!.sessionManager);
+    // The report session carries the quick/default isolation shape.
+    expect(createdOptions[1]!.toolNames).toEqual(["read", "grep", "glob"]);
+    expect(createdOptions[1]!.requireYieldTool).toBe(false);
+    // Teardown disposed the report session with the parent.
+    expect(disposeCalls).toBe(2);
+    expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(false);
+  });
+
+  for (const [name, input] of [
+    ["quick/default", { ...BASE_INPUT, level: "quick" as const }],
+    ["deep", DEEP_INPUT],
+  ] as const) {
+    test(`${name}: a caller abort after the report seat starts resolves null, never throws`, async () => {
+      // The seat parks until its OWN signal fires, so the abort lands while the
+      // seat is in flight — the caller-teardown contract, not the pre-abort one.
+      if (input.level === "deep") parentYields = [deepEnvelope()];
+      const dispatch = deferred();
+      seatDispatchQueue = input.level === "deep" ? [dispatch.resolve] : [() => {}, dispatch.resolve];
+      seatResults =
+        input.level === "deep" ? [{ awaitAbort: true }] : [{ data: seatPayload() }, { awaitAbort: true }];
+      const controller = new AbortController();
+      const errors: string[] = [];
+      const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        errors.push(args.join(" "));
+      });
+      let result: ReviewRunResult;
+      try {
+        const run = ompAgentRuntime.runReview({ ...input, prContext: PR_CONTEXT, signal: controller.signal });
+        await dispatch.promise;
+        controller.abort();
+        result = await run;
+      } finally {
+        spy.mockRestore();
+      }
+      expect(result.report).toBeNull();
+      // The review itself is untouched: the envelope still resolves.
+      expect(result.envelope.schema).toBe("mstar.review/v1");
+      expect(errors.filter((line) => line.includes("report_seat_aborted"))).toHaveLength(1);
+    });
+  }
+
+  test("a seat definition missing at dispatch degrades to no report — never a failed review", async () => {
+    // The install keeps the definition in place for the whole run; if it is
+    // gone when the report seat is reached, the seat is optional narrative and
+    // the settled review must still land. Per-test clone: this test deletes the
+    // definition mid-run, and the shared worktree fixture must stay intact.
+    const clone = mkdtempSync(join(tmpdir(), "omp-review-missing-seat-"));
+    const reviewDispatch = deferred();
+    holdSeats = true;
+    seatDispatchQueue = [reviewDispatch.resolve];
+    seatResults = [{ data: seatPayload() }, { data: REPORT }];
+    const errors: string[] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.join(" "));
+    });
+    let result: ReviewRunResult;
+    try {
+      const run = ompAgentRuntime.runReview({
+        ...BASE_INPUT,
+        level: "quick",
+        worktreePath: clone,
+        prContext: PR_CONTEXT,
+      });
+      await reviewDispatch.promise;
+      rmSync(join(clone, ".omp", "agents", "mstar-review-seat.md"));
+      seatReleases.shift()!();
+      result = await run;
+    } finally {
+      spy.mockRestore();
+      rmSync(clone, { recursive: true, force: true });
+    }
+    expect(result.report).toBeNull();
+    expect(result.envelope.schema).toBe("mstar.review/v1");
+    expect(errors.filter((line) => line.includes('"reason":"seat-definition-missing"'))).toHaveLength(1);
+    // Only the review seat reached the SDK: no dispatch without a definition.
+    expect(subagentRequests).toHaveLength(1);
+  });
+
+  // Round-4: the seat definition must exist BEFORE the session is created —
+  // omp discovers agents per session, so an install that lands after creation
+  // is invisible to it. A deep report round WITHOUT a recheck used to install
+  // nothing while still dispatching the report seat.
+  for (const [tier, input] of [
+    ["quick", { ...BASE_INPUT, level: "quick" as const }],
+    ["default", BASE_INPUT],
+    ["deep", DEEP_INPUT],
+  ] as const) {
+    for (const [name, over, wantsRecheck, wantsReport] of [
+      ["recheck only", { recheck: recheckInput() }, true, false],
+      ["report only", { prContext: PR_CONTEXT }, false, true],
+      ["recheck + report", { recheck: recheckInput(), prContext: PR_CONTEXT }, true, true],
+    ] as ReadonlyArray<readonly [string, Partial<AgentRuntimeRunInput>, boolean, boolean]>) {
+      test(`${tier}: ${name} installs the seat definition before the session exists`, async () => {
+        if (tier === "deep") parentYields = [deepEnvelope()];
+        // Dispatch order: the recheck child first (it is created before the
+        // review work), then the level's review seats, then the report seat.
+        const seatCount = tier === "deep" ? 0 : tier === "quick" ? 1 : 2;
+        seatResults = [
+          ...(wantsRecheck ? [{ data: validRecheckDoc() }] : []),
+          ...Array.from({ length: seatCount }, () => ({ data: seatPayload() })),
+          ...(wantsReport ? [{ data: REPORT }] : []),
+        ];
+
+        const result = await ompAgentRuntime.runReview({ ...input, ...over });
+
+        expect(installedAgentFiles).toContain("mstar-review-seat.md");
+        expect(result.report).toEqual(wantsReport ? BOUND_REPORT : null);
+        // The cleanup set is static, so the added install is undone with the
+        // rest — a leftover definition would leak into the caller's clone.
+        expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(false);
+      });
+    }
+  }
 });
 
 /**

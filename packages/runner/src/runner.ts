@@ -49,6 +49,16 @@
  *     No flag writes nothing — absent flag/file leaves legacy behavior
  *     byte-identical. MSTAR_RECHECK_STATUS_PATH redirects the status target
  *     for tests only: no test may write the path a real runner uses;
+ *   - optional `--report-out <path>`: the OPTIONAL report side document —
+ *     written only when the runtime produced a report, BEFORE the envelope
+ *     reaches stdout. Unlike the recheck document it feeds narrative only, so
+ *     a write failure is a structured `report_write_failed` warn and the
+ *     validated envelope still publishes (exit 0); the sections render `none`.
+ *     The side-channel targets this run uses (each `--*-out` path, plus the
+ *     status path when a recheck flag was given) are REMOVED before the runtime
+ *     starts: the paths are fixed, so a retry or a re-delivered job would
+ *     otherwise see an earlier attempt's document where a skipped/failed seat
+ *     wrote nothing. A removal failure exits 1 as well;
  *   - exit codes: 0 success, 1 runtime/I-O failure, 2 usage error. There is
  *     no summary-degrade path: any seat/parse/validation failure exits 1 and
  *     the consumer must not post or persist.
@@ -97,12 +107,15 @@ import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
 import { writePerReviewModelsYaml } from "./models-synthesis";
 import { decodeCredentialPayload } from "../../shared/src/credential-payload";
 import { RECHECK_STATUS_PATH, type RecheckInput, type RecheckStatus } from "../../shared/src/recheck-wire";
+import { type PrContext } from "../../shared/src/report-wire";
 
 const USAGE =
-  `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> [--recheck-out <path>] ` +
+  `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> ` +
+  "[--recheck-out <path>] [--report-out <path>] " +
   "(input JSON: { capabilityHosts: [{ id, catalogProviderId, apiKeyEnv, baseUrl, api, auth, models }], " +
   "worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string>, " +
-  "customProviders?: [{ provider_id, base_url, api, model_ids }], recheck?: mstar.recheck-input/v1 document })";
+  "customProviders?: [{ provider_id, base_url, api, model_ids }], recheck?: mstar.recheck-input/v1 document, " +
+  "prContext?: { prBody: string, issues: [{ number, title, body }] } })";
 
 /** Validated shape of the --input JSON file. */
 type RunnerInputJson = {
@@ -113,13 +126,21 @@ type RunnerInputJson = {
   customProviders?: CustomProviderDeclaration[];
   /** Optional typed recheck input — passed through to the runtime. */
   recheck?: RecheckInput;
+  /** Optional PR context for the report seat — passed through to the runtime. */
+  prContext?: PrContext;
 };
 
 /** Parse CLI flags. Throws (usage) on missing/unknown flags or missing values. */
-function parseArgs(argv: string[]): { level: string; inputPath: string; recheckOutPath?: string } {
+function parseArgs(argv: string[]): {
+  level: string;
+  inputPath: string;
+  recheckOutPath?: string;
+  reportOutPath?: string;
+} {
   let level: string | undefined;
   let inputPath: string | undefined;
   let recheckOutPath: string | undefined;
+  let reportOutPath: string | undefined;
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index];
     const value = argv[index + 1];
@@ -129,6 +150,8 @@ function parseArgs(argv: string[]): { level: string; inputPath: string; recheckO
       inputPath = value;
     } else if (flag === "--recheck-out" && value !== undefined && recheckOutPath === undefined) {
       recheckOutPath = value;
+    } else if (flag === "--report-out" && value !== undefined && reportOutPath === undefined) {
+      reportOutPath = value;
     } else {
       throw new Error(USAGE);
     }
@@ -136,7 +159,7 @@ function parseArgs(argv: string[]): { level: string; inputPath: string; recheckO
   if (level === undefined || inputPath === undefined) {
     throw new Error(USAGE);
   }
-  return { level, inputPath, recheckOutPath };
+  return { level, inputPath, recheckOutPath, reportOutPath };
 }
 
 /** Validate the untrusted --input JSON with small type guards (no schema dep here). */
@@ -315,6 +338,36 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
       throw new Error("input JSON field `recheck`.discussion must be an object");
     }
     input.recheck = doc as RecheckInput;
+  }
+  if (record.prContext !== undefined) {
+    // Shape validation ONLY, mirroring the recheck guard: the consumer builds
+    // this from bounded `gh` reads, and the runner's own report gate
+    // (`validateReportDoc`) covers the OUTPUT. Absent = no report seat.
+    const context = record.prContext;
+    if (context === null || typeof context !== "object" || Array.isArray(context)) {
+      throw new Error("input JSON field `prContext` must be an object when present");
+    }
+    const prContext = context as Record<string, unknown>;
+    if (typeof prContext.prBody !== "string") {
+      throw new Error("input JSON field `prContext`.prBody must be a string");
+    }
+    if (!Array.isArray(prContext.issues)) {
+      throw new Error("input JSON field `prContext`.issues must be an array");
+    }
+    const issues = prContext.issues.map((entry, index) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new Error(`input JSON field \`prContext\`.issues[${index}] must be an object`);
+      }
+      const issue = entry as Record<string, unknown>;
+      if (typeof issue.number !== "number" || !Number.isInteger(issue.number) || issue.number <= 0) {
+        throw new Error(`input JSON field \`prContext\`.issues[${index}].number must be a positive integer`);
+      }
+      if (typeof issue.title !== "string" || typeof issue.body !== "string") {
+        throw new Error(`input JSON field \`prContext\`.issues[${index}].title/.body must be strings`);
+      }
+      return { number: issue.number, title: issue.title, body: issue.body };
+    });
+    input.prContext = { prBody: prContext.prBody, issues };
   }
   return input;
 }
@@ -536,8 +589,9 @@ export async function main(
   let level: string;
   let inputPath: string;
   let recheckOutPath: string | undefined;
+  let reportOutPath: string | undefined;
   try {
-    ({ level, inputPath, recheckOutPath } = parseArgs(argv));
+    ({ level, inputPath, recheckOutPath, reportOutPath } = parseArgs(argv));
   } catch (error) {
     console.error((error as Error).message);
     return 2;
@@ -548,6 +602,25 @@ export async function main(
       `review: unknown level ${JSON.stringify(level)} (expected one of: ${REVIEW_LEVELS.join(", ")})`,
     );
     return 2;
+  }
+  // The side-channel paths are FIXED, so every attempt (a retry, a
+  // re-delivered job, a duplicate run) shares them. A document left there by an
+  // earlier attempt would otherwise be read back as this round's when the seat
+  // that owned it skips or fails and writes nothing. Remove them BEFORE the
+  // runtime starts, so absence is the only state a failed seat can leave. Only
+  // a requested channel is cleared: a flag-less legacy run must not touch the
+  // files of the fixed paths it never writes. A removal failure is a genuine
+  // I-O failure — exit 1 with no stdout, the same discipline as the write path.
+  const stale: string[] = [];
+  if (recheckOutPath !== undefined) stale.push(recheckOutPath, statusPath);
+  if (reportOutPath !== undefined) stale.push(reportOutPath);
+  for (const path of stale) {
+    try {
+      rmSync(path, { force: true });
+    } catch (error) {
+      console.error(`review: cannot remove stale side-channel file ${path}: ${(error as Error).message}`);
+      return 1;
+    }
   }
   // spec §7.8: anchor the ABSOLUTE outer review deadline once
   // per process — the recheck seat's budget derives from it, so the seat can
@@ -624,6 +697,9 @@ export async function main(
         // Optional typed recheck input: included ONLY when
         // present — same byte-identical legacy rule as modelOverrides.
         ...(json.recheck !== undefined ? { recheck: json.recheck } : {}),
+        // Optional PR context: the report seat's untrusted input. Absent =
+        // no report seat runs, so the runtime input stays byte-identical.
+        ...(json.prContext !== undefined ? { prContext: json.prContext } : {}),
         // The synthesized per-review models dir (present
         // on EVERY run — there is no baked models.yml to fall back to), and the
         // in-memory credential store the sessions must use.
@@ -636,7 +712,7 @@ export async function main(
     }
 
     try {
-      const { envelope, recheck, recheckStatus } = await runtime.runReview(input);
+      const { envelope, recheck, recheckStatus, report } = await runtime.runReview(input);
       // The optional --recheck-out file is written only when a
       // recheck result exists, and BEFORE the envelope reaches stdout — a
       // write failure is a genuine I-O failure (exit 1, no stdout), not a
@@ -652,6 +728,24 @@ export async function main(
           // non-zero run.
           console.error(`review: cannot write recheck output ${recheckOutPath}: ${(error as Error).message}`);
           return 1;
+        }
+      }
+      // The optional --report-out file is written only when a report exists,
+      // and BEFORE the envelope reaches stdout. The report is OPTIONAL
+      // narrative: a write failure is logged and swallowed, so the validated
+      // envelope still publishes (exit 0) and the Worker renders `none` —
+      // never a failed review over a side document.
+      if (reportOutPath !== undefined && report !== null) {
+        try {
+          writeFileSync(reportOutPath, JSON.stringify(report));
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "report_write_failed",
+              path: reportOutPath,
+              reason: (error as Error).message,
+            }),
+          );
         }
       }
       // The STATUS is written AFTER the document succeeds (and whenever no

@@ -32,6 +32,7 @@
 
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import { RECHECK_FILE_MAX_BYTES, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
+import { REPORT_FILE_MAX_BYTES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 export type GitOpsInput = {
@@ -40,11 +41,6 @@ export type GitOpsInput = {
   prNumber: number;
   cloneDir: string;
   diffPath: string;
-  runnerPath: string;
-  /** Review tier for the runner CLI `--level` (port-validated upstream). */
-  level: ReviewLevel;
-  /** In-image path of the runner `--input` JSON file (reconFacts carrier). */
-  inputPath: string;
 };
 
 export type GitOpsCommands = {
@@ -56,8 +52,6 @@ export type GitOpsCommands = {
   diff: ShellCommand;
   /** Numstat of the PR diff — the runner's seat-partition universe. */
   numstat: ShellCommand;
-  /** Run the in-image review runner (`--level`/`--input` reconFacts JSON). */
-  runner: ShellCommand;
 };
 
 /**
@@ -111,8 +105,8 @@ const IN_IMAGE_PATH_RE = /^\/[A-Za-z0-9._/-]+$/;
  * `<content>\n1\n` (a byte exists BEYOND the bound). A missing/unreadable file
  * fails the `head` chain (non-zero exit, empty stdout). The path is
  * allowlisted and single-quoted HERE so every caller inherits the same guard
- * (diff capture, recheck document/status); `maxBytes` is always an in-repo
- * constant, never payload-derived.
+ * (diff capture, recheck document/status, report); `maxBytes` is always an
+ * in-repo constant, never payload-derived.
  */
 export function boundedFileReadCommand(path: string, maxBytes: number): ShellCommand {
   assertShellSafe(path, IN_IMAGE_PATH_RE, "bounded read path");
@@ -120,6 +114,11 @@ export function boundedFileReadCommand(path: string, maxBytes: number): ShellCom
     `head -c '${maxBytes}' '${path}' && printf '\\n' && ` +
       `tail -c '+${maxBytes + 1}' '${path}' | head -c '1' | wc -c`,
   );
+}
+
+/** A commit sha interpolated into a command path segment — hex only. */
+function assertSha(value: string, label: string): void {
+  assertShellSafe(value, /^[0-9a-f]{7,64}$/, label)
 }
 
 /**
@@ -188,6 +187,47 @@ export function numstatCommand(diffPath: string): ShellCommand {
 }
 
 /**
+ * GitHub's verdict on a base...head comparison (`ahead` | `behind` |
+ * `diverged` | `identical`). Only `ahead` makes an incremental round honest:
+ * the previous head is then an ancestor of this one, so base...head is exactly
+ * the work done since the last review. Any other status (or a non-zero exit —
+ * a 404 after a force-push) keeps the full-diff path.
+ */
+export function compareStatusCommand(owner: string, repo: string, baseSha: string, headSha: string): ShellCommand {
+  assertOwnerRepo(owner, repo);
+  assertSha(baseSha, "base sha");
+  assertSha(headSha, "head sha");
+  return shellCommand(
+    `gh api 'repos/${owner}/${repo}/compare/${baseSha}...${headSha}' --jq '.status'`,
+  );
+}
+
+/**
+ * Capture the INCREMENT diff (`base...head`) with the SAME bounded transport as
+ * `diffCommand`: the diff media type lands in `diffPath` for numstat, then the
+ * first DIFF_PREFETCH_MAX_BYTES bytes stream back, then the overflow probe.
+ * `base...head` is GitHub's three-dot form (compared against the merge base),
+ * which is what `compare` reports as `ahead` — the two steps agree by
+ * construction.
+ */
+export function incrementDiffCommand(
+  owner: string,
+  repo: string,
+  baseSha: string,
+  headSha: string,
+  diffPath: string,
+): ShellCommand {
+  assertOwnerRepo(owner, repo);
+  assertSha(baseSha, "base sha");
+  assertSha(headSha, "head sha");
+  return shellCommand(
+    `gh api -H 'Accept: application/vnd.github.v3.diff' 'repos/${owner}/${repo}/compare/${baseSha}...${headSha}' > '${diffPath}' && ` +
+      `head -c '${DIFF_PREFETCH_MAX_BYTES}' '${diffPath}' && printf '\\n' && ` +
+      `tail -c '+${DIFF_PREFETCH_MAX_BYTES + 1}' '${diffPath}' | head -c '1' | wc -c`,
+  );
+}
+
+/**
  * Write a JSON document to an in-image path (the runner `--input` file). The
  * payload arrives on the exec STDIN pipe base64-encoded (the caller passes it
  * as `runCommand(..., { stdin })`); `base64 -d` decodes it in-container, so
@@ -209,17 +249,21 @@ export function writeJsonCommand(path: string): ShellCommand {
  * `--level` is the review tier, `--input` the reconFacts JSON file. stdout
  * carries ONLY the validated mstar.review/v1 envelope; exit 0 = success
  * (there is no summary-degrade mode on this path). `recheckOutPath` is the
- * optional `--recheck-out` target — passed through verbatim when
- * provided (the consumer reads that file back through readRecheckCommand).
+ * optional `--recheck-out` target and `reportOutPath` the optional
+ * `--report-out` target — each passed through verbatim when provided (the
+ * consumer reads those files back through the same bounded read).
  */
 export function runnerCommand(
   runnerPath: string,
   level: ReviewLevel,
   inputPath: string,
   recheckOutPath?: string,
+  reportOutPath?: string,
 ): ShellCommand {
-  const base = `bun run '${runnerPath}' --level '${level}' --input '${inputPath}'`;
-  return shellCommand(recheckOutPath !== undefined ? `${base} --recheck-out '${recheckOutPath}'` : base);
+  let command = `bun run '${runnerPath}' --level '${level}' --input '${inputPath}'`;
+  if (recheckOutPath !== undefined) command += ` --recheck-out '${recheckOutPath}'`;
+  if (reportOutPath !== undefined) command += ` --report-out '${reportOutPath}'`;
+  return shellCommand(command);
 }
 
 /**
@@ -233,7 +277,7 @@ export function runnerCommand(
  * constant the runner flag wrote (RECHECK_OUTPUT_PATH).
  */
 export function readRecheckCommand(path: string): ShellCommand {
-  return boundedFileReadCommand(path, RECHECK_FILE_MAX_BYTES);
+  return boundedFileReadCommand(path, RECHECK_FILE_MAX_BYTES)
 }
 
 /**
@@ -249,13 +293,44 @@ export function readRecheckStatusCommand(path: string = RECHECK_STATUS_PATH): Sh
   return readRecheckCommand(path);
 }
 
-/** Main-flow commands in execution order (clone → sha → diff → numstat → runner). */
+/**
+ * Bounded read of the runner's `--report-out` document (mstar.report/v1) —
+ * the same transport and the same fail-closed rule as the recheck read: the
+ * Worker validates the seat's narrative against its own gate
+ * (`validateReportDoc`) and renders `none` headings when it cannot.
+ */
+export function readReportCommand(path: string = REPORT_OUTPUT_PATH): ShellCommand {
+  return boundedFileReadCommand(path, REPORT_FILE_MAX_BYTES);
+}
+
+/** Main-flow commands in execution order (clone → sha → diff → numstat). */
 export function buildGitOpsCommands(input: GitOpsInput): GitOpsCommands {
   return {
     clone: cloneCommand(input.owner, input.repo, input.prNumber, input.cloneDir),
     checkedOutSha: checkedOutShaCommand(input.cloneDir),
     diff: diffCommand(input.owner, input.repo, input.prNumber, input.diffPath),
     numstat: numstatCommand(input.diffPath),
-    runner: runnerCommand(input.runnerPath, input.level, input.inputPath),
   };
+}
+
+/**
+ * `gh pr view --json body` — the PR description for the report seat. Reads
+ * through the gh JSON surface so the body never needs HTML/format parsing.
+ */
+export function prBodyCommand(owner: string, repo: string, prNumber: number): ShellCommand {
+  assertOwnerRepo(owner, repo);
+  assertPrNumber(prNumber);
+  return shellCommand(`gh pr view '${prNumber}' --repo '${owner}/${repo}' --json body`);
+}
+
+/**
+ * `gh issue view <n> --json number,title,body` — one linked issue for the
+ * report seat. `n` comes from the consumer's CLOSED keyword extraction over
+ * the PR body (an integer, never free text), and carries the same numeric
+ * guard as every other interpolated number here.
+ */
+export function issueViewCommand(owner: string, repo: string, issueNumber: number): ShellCommand {
+  assertOwnerRepo(owner, repo);
+  assertPrNumber(issueNumber);
+  return shellCommand(`gh issue view '${issueNumber}' --repo '${owner}/${repo}' --json number,title,body`);
 }

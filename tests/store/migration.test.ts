@@ -2051,3 +2051,38 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
     );
   });
 });
+
+describe("migrations/0046_reviews_context_incomplete.sql", () => {
+  /** The shipped chain before the column: every migration below 0046. */
+  function createPre0046Db(): TestD1 {
+    const db = createTestD1();
+    for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
+      (migration) => migrationNumber(migration) < 46,
+    )) {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  test("an existing row reads as 0 (a pre-column round stays an incremental base)", () => {
+    const db = createPre0046Db();
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
+         VALUES ('r1', 123, 'acme', 'widgets', 42, ?, 'needs fixes', 'old')`,
+      )
+      .run("a".repeat(40));
+
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0046_reviews_context_incomplete.sql"), "utf8"));
+
+    const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE id = 'r1'").get() as {
+      context_incomplete: number;
+    };
+    expect(row.context_incomplete).toBe(0);
+    const column = (
+      db.raw.query("PRAGMA table_info(reviews)").all() as Array<{ name: string; notnull: number; dflt_value: string }>
+    ).find((c) => c.name === "context_incomplete")!;
+    expect(column.notnull).toBe(1);
+    expect(column.dflt_value).toBe("0");
+  });
+});

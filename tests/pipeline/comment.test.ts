@@ -28,13 +28,16 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { renderReviewMarkdown } from "@mstar-harness/engine";
+import type { ReportDoc } from "../../packages/shared/src/report-wire";
 import {
-  buildClosureSection,
   buildDegradedBody,
   buildPreparedDegradedBody,
   buildPreparedReviewBody,
   buildPublicationMarker,
+  buildRevalidatedSection,
   buildReviewBody,
+  insertReportSections,
   CLOSURE_MAX_ROWS,
   createReviewCommenter,
   DEGRADED_EXCERPT_LIMIT,
@@ -86,6 +89,56 @@ describe("truncateSummary", () => {
     expect(truncated.startsWith("x".repeat(SUMMARY_MD_LIMIT - 1))).toBe(true);
     expect(truncated.endsWith("…")).toBe(true);
   });
+
+  test("a cut inside an unclosed fence closes it, so the rest of the body is not code", () => {
+    const narrative = `Intro.\n\n\`\`\`ts\n${"const x = 1;\n".repeat(900)}\`\`\`\n\nTail.`;
+    const truncated = truncateSummary(narrative);
+    const fenceLines = truncated.split("\n").filter((line) => /^ {0,3}`{3,}/.test(line));
+    expect(truncated.length).toBe(SUMMARY_MD_LIMIT);
+    expect(truncated.endsWith("…")).toBe(true);
+    // Opening fence plus the closer the cut appends — an odd count would render
+    // everything after the summary as code.
+    expect(fenceLines).toHaveLength(2);
+  });
+
+  test("a cut inside a fence inside a fold closes the fence before the fold", () => {
+    const narrative = `<details>\n<summary>Plan</summary>\n\n\`\`\`md\n${"step\n".repeat(3000)}\`\`\`\n</details>`;
+    const truncated = truncateSummary(narrative);
+    expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
+    // The fence opened inside the fold, so it has to close first.
+    expect(truncated.endsWith("```\n\n</details>…")).toBe(true);
+    expect((truncated.match(/<details>/g) ?? []).length).toBe((truncated.match(/<\/details>/g) ?? []).length);
+  });
+
+  test("a cut inside a tilde fence inside a fold closes the fence before the fold", () => {
+    const narrative = `<details>\n<summary>Plan</summary>\n\n~~~md\n${"step\n".repeat(3000)}~~~\n</details>`;
+    const truncated = truncateSummary(narrative);
+    expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
+    // A tilde fence closes with tildes: a backticked closer would leave the
+    // block open and hide the fold that answers it.
+    expect(truncated.endsWith("~~~\n\n</details>…")).toBe(true);
+    expect((truncated.match(/<details>/g) ?? []).length).toBe((truncated.match(/<\/details>/g) ?? []).length);
+  });
+
+  test("a narrative without a fence or fold is byte-identical", () => {
+    const narrative = "Two issues found.\n\n- **auth**: expiry\n- 100% covered\n";
+    expect(truncateSummary(narrative)).toBe(narrative);
+  });
+
+  test("an unclosed fence under the budget is closed too", () => {
+    // No cut means no ellipsis, but the fence still has to end before the body continues.
+    expect(truncateSummary("Intro\n```\ncmd")).toBe("Intro\n```\ncmd\n```");
+  });
+
+  test("the closer counts against the budget even when the narrative alone fits", () => {
+    // At the limit with an open fence: the passthrough would overshoot by the
+    // closer's own length, so the head has to give up that much.
+    const narrative = `\`\`\`\n${"x".repeat(SUMMARY_MD_LIMIT - 4)}`;
+    expect(narrative).toHaveLength(SUMMARY_MD_LIMIT);
+    const truncated = truncateSummary(narrative);
+    expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
+    expect(truncated).toContain("\n```");
+  });
 });
 
 describe("buildReviewBody", () => {
@@ -106,6 +159,19 @@ describe("buildReviewBody", () => {
     expect(body).toContain("- **Location**: `src/auth.ts:21`");
     expect(body).toContain("- **Category**: logic");
     expect(body).toContain("- **Merge class**: should-fix");
+  });
+
+  test("a summary cut inside a fence keeps the findings outside the code block", () => {
+    const body = buildReviewBody({
+      ...output,
+      summary_md: `Intro.\n\n\`\`\`ts\n${"const x = 1;\n".repeat(900)}`,
+    });
+    const findingsAt = body.indexOf("### Findings");
+    expect(findingsAt).toBeGreaterThan(-1);
+    // The fence has to be balanced before the findings: an open one would
+    // render them, and the rest of the review, as code.
+    const fenceLines = body.slice(0, findingsAt).split("\n").filter((line) => /^ {0,3}`{3,}/.test(line));
+    expect(fenceLines).toHaveLength(2);
   });
 
   test("nothing is duplicated: verdict, score and each finding title appear exactly once", () => {
@@ -314,20 +380,13 @@ describe("buildReviewBody", () => {
   test("a narrative over the summary budget is cut, so the tail survives the body clamp", () => {
     // The runner fits its coverage notes to SUMMARY_MD_LIMIT and relies on this
     // publisher keeping the head from there; without the cut the body clamp —
-    // which also keeps the head — would be what removes the closure.
-    const closure = "## Prior findings recheck\n\nReassessed 1/1";
-    const body = buildReviewBody(
-      { ...output, summary_md: "x".repeat(REVIEW_BODY_LIMIT * 2) },
-      3,
-      closure,
-    );
+    // which also keeps the head — would be what removes the footer.
+    const body = buildReviewBody({ ...output, summary_md: "x".repeat(REVIEW_BODY_LIMIT * 2) }, 3);
     expect(body).toContain("more findings omitted");
-    expect(body).toContain(closure);
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
   });
 
   test("an over-long incomplete reason is bounded, so the tail survives the body clamp", () => {
-    const closure = "## Prior findings recheck\n\nReassessed 1/1";
     const body = buildReviewBody(
       {
         ...output,
@@ -335,10 +394,9 @@ describe("buildReviewBody", () => {
         findings: [],
         incomplete: { reason: "z".repeat(REVIEW_BODY_LIMIT * 2), unscanned: ["a.ts"] },
       },
-      0,
-      closure,
+      1,
     );
-    expect(body).toContain(closure);
+    expect(body).toContain("more findings omitted");
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
     expect(body.match(/^cause: /gm)).toHaveLength(1);
   });
@@ -363,12 +421,6 @@ describe("buildReviewBody", () => {
     expect(stored.incomplete!.reason).toBe(raw);
   });
 
-  test("the closure section is appended last", () => {
-    const body = buildReviewBody(output, 10, "## Prior findings recheck\n\nReassessed 1/1");
-    expect(body.endsWith("\n\n## Prior findings recheck\n\nReassessed 1/1")).toBe(true);
-    expect(body.indexOf("more findings omitted")).toBeLessThan(body.indexOf("Prior findings recheck"));
-  });
-
   test("incomplete verdict renders the engine's cause + unscanned pair exactly once", () => {
     const incomplete = { reason: "runner timed out", unscanned: ["tests/a.ts", "src/b.ts"] };
     const body = buildReviewBody({ ...output, verdict: "incomplete", findings: [], incomplete });
@@ -386,64 +438,6 @@ describe("buildReviewBody", () => {
       expect(body).not.toContain("cause:");
       expect(body).not.toContain("unscanned:");
     }
-  });
-});
-
-describe("buildClosureSection", () => {
-  const coverage: ClosureCoverage = {
-    totalOpen: 3,
-    selected: 2,
-    assessed: 1,
-    invalidOutput: 0,
-    omitted: 1,
-    capped: 0,
-    contextCoverage: "complete",
-  };
-  const rows: ClosureRow[] = [
-    {
-      title: "Fractional expiry comparison",
-      disposition: "addressed",
-      reason: "verified-fix",
-      evidenceKind: "diff",
-      thread: "-",
-    },
-  ];
-
-  test("folds into details, keeping the heading and the table inside the fold", () => {
-    const md = buildClosureSection(coverage, rows);
-    expect(
-      md.startsWith("<details>\n<summary>Prior findings recheck — 1/2 reassessed, 3 open</summary>\n\n"),
-    ).toBe(true);
-    expect(md.endsWith("\n\n</details>")).toBe(true);
-    expect(md).toContain("## Prior findings recheck");
-    expect(md).toContain("Reassessed 1/2 open prior finding(s) this round");
-    expect(md).toContain("| finding | disposition | evidence | thread |");
-    expect(md).toContain("| Fractional expiry comparison | addressed (verified-fix) | diff | - |");
-  });
-
-  test("the coverage line publishes every selected row exactly once", () => {
-    // The identity the line promises: assessed + invalid-output + omitted ===
-    // selected. Here 1 assessed + 1 invalid-output + 0 omitted on 2 selected.
-    const md = buildClosureSection({ ...coverage, invalidOutput: 1, omitted: 0 }, rows);
-    expect(md).toContain("Reassessed 1/2 open prior finding(s) this round · 1 invalid-output · 0 omitted");
-  });
-
-  test("empty rows still carry the coverage line inside the fold", () => {
-    const md = buildClosureSection({ ...coverage, selected: 0, assessed: 0 }, []);
-    expect(md.startsWith("<details>")).toBe(true);
-    expect(md).toContain("Reassessed 0/0 open prior finding(s) this round");
-    expect(md).not.toContain("| finding |");
-    expect(md.endsWith("</details>")).toBe(true);
-  });
-
-  test("the over-cap overflow line stays inside the fold, after the table", () => {
-    const many: ClosureRow[] = Array.from({ length: CLOSURE_MAX_ROWS + 2 }, (_, index) => ({
-      ...rows[0]!,
-      title: `Finding ${index}`,
-    }));
-    const md = buildClosureSection({ ...coverage, totalOpen: many.length }, many);
-    expect(md.indexOf("*(+2 more prior finding(s)")).toBeGreaterThan(md.indexOf("| Finding 0 |"));
-    expect(md.indexOf("*(+2 more prior finding(s)")).toBeLessThan(md.lastIndexOf("</details>"));
   });
 });
 
@@ -615,22 +609,515 @@ describe("review comment upsert (T5)", () => {
       expect(lines[lines.length - 2]).toBe("Review 3 · commit 0123456");
       expect(parseReviewRound(body)).toBe(3);
     });
-
-    test("a closure section renders before the publication marker (§7.10)", () => {
-      const body = buildPreparedReviewBody({
-        output,
-        omittedFindings: 0,
-        round: 1,
-        headSha: "abc1234",
-        closure: "## Prior findings recheck\n\nReassessed 1/1",
-        publicationMarker,
-      });
-      expect(body).toContain("## Prior findings recheck");
-      expect(body.indexOf("Prior findings recheck")).toBeLessThan(body.indexOf(publicationMarker));
-    });
   });
 });
+describe("report sections (mstar.report/v1 side document)", () => {
+  const report: ReportDoc = {
+    schema: "mstar.report/v1",
+    headSha: "abc1234",
+    overview: "Adds an expiry guard to the auth path.",
+    linkedIssueAc: "Expiry rejected: met.",
+    verified: "- unit suite → green",
+    rejected: "**Retry loop**: rejected — the diff never touches it.",
+    planToFix: "1. Add the guard.\n2. Rerun the suite.",
+  };
+
+  const coverage: ClosureCoverage = {
+    totalOpen: 3,
+    selected: 2,
+    assessed: 1,
+    invalidOutput: 0,
+    omitted: 1,
+    capped: 1,
+    contextCoverage: "complete",
+  };
+
+  test("buildRevalidatedSection carries the coverage line, the rows and their thread state", () => {
+    const rows: ClosureRow[] = [
+      {
+        title: "A | b",
+        disposition: "addressed",
+        reason: "verified-fix",
+        evidenceKind: "current-code",
+        thread: "not yet resolved",
+      },
+      { title: "C", disposition: "dismissed", reason: "non-fix-dismissal", evidenceKind: null, thread: "-" },
+      { title: "D", disposition: "unverifiable", reason: "no-evidence", evidenceKind: null, thread: "-" },
+    ];
+    const md = buildRevalidatedSection(coverage, rows);
+    expect(md.startsWith("### Revalidated findings\n\nReassessed 1/2 open prior finding(s) this round")).toBe(true);
+    expect(md).toContain("| finding | disposition | evidence | thread |");
+    expect(md).toContain("| A \\| b | addressed (verified-fix) | current-code | not yet resolved |");
+    expect(md).toContain("| C | dismissed (non-fix-dismissal) | - | - |");
+    expect(md).toContain("| D | unverifiable (no-evidence) | - | - |");
+    // The line's identity: assessed + invalid-output + omitted === selected.
+    expect(buildRevalidatedSection({ ...coverage, invalidOutput: 1, omitted: 0 }, rows)).toContain(
+      "Reassessed 1/2 open prior finding(s) this round · 1 invalid-output · 0 omitted",
+    );
+  });
+
+  test("a prior-finding title cannot open an HTML fold around the later sections", () => {
+    const rows: ClosureRow[] = [
+      {
+        title: "<details><summary>prior</summary>",
+        disposition: "unverifiable",
+        reason: "no-evidence",
+        evidenceKind: null,
+        thread: "-",
+      },
+    ];
+    const revalidated = buildRevalidatedSection(coverage, rows);
+    // The row text is escaped like a report field, so the cell stays text and
+    // no tag can fold the rest of the comment.
+    expect(revalidated).toContain("&lt;details>&lt;summary>prior&lt;/summary>");
+    expect(revalidated).not.toContain("<details>");
+
+    const rendered = renderReviewMarkdown({
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      summary_md: "One issue.",
+      findings: [
+        {
+          mergeClass: "should-fix",
+          title: "Fractional expiry",
+          body: "b",
+          file_path: "src/auth.ts",
+          line_start: 21,
+          line_end: 21,
+        },
+      ],
+    });
+    // `planToFix: "none"` keeps the fix-plan fold out, so any raw `<details>`
+    // left in the body would be the injected one.
+    const body = insertReportSections(rendered, { ...report, planToFix: "none" }, revalidated);
+    expect(body).not.toContain("<details");
+    const injected = body.indexOf("&lt;details>");
+    expect(injected).toBeGreaterThan(-1);
+    // Every section that follows the table is still outside the (escaped)
+    // fold text — the escape is in place, not just somewhere in the body.
+    for (const section of [
+      "### Findings",
+      "### Linked-issue AC",
+      "### ✅ Verified",
+      "### 🗑️ Considered & rejected",
+      "## 🛠️ Plan to fix",
+    ]) {
+      expect(body.indexOf(section)).toBeGreaterThan(injected);
+    }
+  });
+
+  test("a dismissed row never claims the defect still stands", () => {
+    const rows: ClosureRow[] = [
+      { title: "C", disposition: "dismissed", reason: "non-fix-dismissal", evidenceKind: null, thread: "-" },
+    ];
+    const revalidated = buildRevalidatedSection(coverage, rows);
+    // The table renders THIS row's words: it may not claim the defect still
+    // stands, because the store closed it as a non-fix dismissal.
+    expect(revalidated).not.toContain("still present");
+    expect(revalidated).toContain("| C | dismissed (non-fix-dismissal) |");
+  });
+
+  test("buildRevalidatedSection marks rows past the display cap", () => {
+    const rows: ClosureRow[] = Array.from({ length: CLOSURE_MAX_ROWS + 2 }, (_, i) => ({
+      title: `finding ${i}`,
+      disposition: "unverifiable" as const,
+      reason: "no-evidence" as const,
+      evidenceKind: null,
+      thread: "-",
+    }));
+    const md = buildRevalidatedSection(coverage, rows);
+    expect(md).toContain(`*(+2 more prior finding(s) over the ${CLOSURE_MAX_ROWS}-row display cap)*`);
+    // The dropped rows are counted, never silently absent.
+    expect(md).not.toContain(`| finding ${CLOSURE_MAX_ROWS} |`);
+  });
+
+  test("buildRevalidatedSection writes `none` when the round had no prior finding", () => {
+    const firstRound: ClosureCoverage = {
+      totalOpen: 0,
+      selected: 0,
+      assessed: 0,
+      invalidOutput: 0,
+      omitted: 0,
+      capped: 0,
+      contextCoverage: "complete",
+    };
+    expect(buildRevalidatedSection(firstRound, [])).toBe("### Revalidated findings\n\nnone");
+  });
+
+  test("rows all over the cap still state the coverage, table or not", () => {
+    const overCap: ClosureCoverage = {
+      totalOpen: 4,
+      selected: 0,
+      assessed: 0,
+      invalidOutput: 0,
+      omitted: 0,
+      capped: 4,
+      contextCoverage: "complete",
+    };
+    const md = buildRevalidatedSection(overCap, []);
+    expect(md).toContain(
+      "Reassessed 0/0 open prior finding(s) this round · 0 invalid-output · 0 omitted · 4 over cap · 4 open",
+    );
+    expect(md).not.toContain("| Prior finding |");
+  });
+
+  test("a body with report parts carries exactly ONE prior-findings table", () => {
+    const rows: ClosureRow[] = [
+      {
+        title: "Fractional expiry comparison",
+        disposition: "addressed",
+        reason: "verified-fix",
+        evidenceKind: "diff",
+        thread: "-",
+      },
+    ];
+    const body = buildReviewBody(
+      { schema: "mstar.review/v1", verdict: "needs fixes", summary_md: "One issue.", findings: [] },
+      0,
+      { report, revalidated: buildRevalidatedSection(coverage, rows) },
+    );
+    // ONE rendering of the rows, the coverage line and the thread state.
+    expect(body.match(/\| finding \| disposition \| evidence \| thread \|/g)).toHaveLength(1);
+    expect(body.match(/Reassessed /g)).toHaveLength(1);
+    expect(body).toContain("| Fractional expiry comparison | addressed (verified-fix) | diff | - |");
+  });
+
+  test("insertReportSections places every section at its template anchor", () => {
+    const rendered = renderReviewMarkdown({
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      summary_md: "Two issues found.",
+      findings: [
+        {
+          mergeClass: "should-fix",
+          title: "Fractional expiry",
+          body: "b",
+          file_path: "src/auth.ts",
+          line_start: 21,
+          line_end: 21,
+        },
+      ],
+    });
+    const body = insertReportSections(rendered, report, "### Revalidated findings\n\nnone");
+    const order = [
+      "## 📋 Review",
+      "**What this PR does**",
+      "Two issues found.",
+      "### Revalidated findings",
+      "### Findings",
+      "#### 🟠 Fractional expiry",
+      "### Linked-issue AC",
+      "### ✅ Verified",
+      "### 🗑️ Considered & rejected",
+      "## 🛠️ Plan to fix",
+    ];
+    const positions = order.map((needle) => body.indexOf(needle));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    // The plan is a collapsible, copyable block.
+    expect(body).toContain(
+      "<details><summary>Expand fix plan</summary>\n\n```md\n1. Add the guard.\n2. Rerun the suite.\n```\n\n</details>",
+    );
+  });
+
+  test("the fix-plan fence outruns the longest backtick run inside the plan", () => {
+    const plan = "Use `a` then ```` a four-backtick block";
+    const body = insertReportSections(
+      renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] }),
+      { ...report, planToFix: plan },
+      "none",
+    );
+    expect(body).toContain("`````md\n" + plan + "\n`````");
+  });
+
+  test("a zero-finding envelope: the revalidated table self-adds the empty `### Findings`", () => {
+    const rendered = renderReviewMarkdown({
+      schema: "mstar.review/v1",
+      verdict: "ship it",
+      findings: [],
+    });
+    expect(rendered).not.toContain("### Findings");
+    const body = insertReportSections(rendered, report, "### Revalidated findings\n\nnone");
+    expect(body).toContain("### Revalidated findings");
+    // Revalidated FIRST, then the added heading — the fixed template order.
+    expect(body.indexOf("### Revalidated findings")).toBeLessThan(body.indexOf("### Findings"));
+    expect(body).toContain("### Linked-issue AC");
+  });
+
+  test("a null report keeps every heading and writes `none` under each", () => {
+    const rendered = renderReviewMarkdown({
+      schema: "mstar.review/v1",
+      verdict: "ship it",
+      findings: [],
+    });
+    const body = insertReportSections(rendered, null, "### Revalidated findings\n\nnone");
+    expect(body).not.toContain("**What this PR does**");
+    expect(body).toContain("### Linked-issue AC\n\nnone");
+    expect(body).toContain("### ✅ Verified\n\nnone");
+    expect(body).toContain("### 🗑️ Considered & rejected\n\nnone");
+    expect(body).toContain("## 🛠️ Plan to fix\n\nnone");
+    expect(body).not.toContain("<details><summary>Expand fix plan");
+  });
+
+  test("a report field cannot forge the findings anchor: `### Findings` stays text", () => {
+    const rendered = renderReviewMarkdown({
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      summary_md: "One issue.",
+      findings: [
+        { mergeClass: "should-fix", title: "Fractional expiry", body: "b", file_path: "src/auth.ts", line_start: 21, line_end: 21 },
+      ],
+    });
+    const body = insertReportSections(
+      rendered,
+      { ...report, overview: "Adds a guard.\n### Findings\n#### 🟠 Injected" },
+      "### Revalidated findings\n\nnone",
+    );
+    // Escaped in place, so the ONLY `### Findings` line is the engine's — the
+    // revalidated table still lands directly above it.
+    expect(body).toContain("\\### Findings");
+    expect(body).toContain("\\#### 🟠 Injected");
+    const headings = body.split("\n").filter((line) => /^#{2,4} /.test(line));
+    expect(headings).toEqual([
+      "## ⚠️ Verdict: `needs fixes`",
+      "## 📋 Review",
+      "### Revalidated findings",
+      "### Findings",
+      "#### 🟠 Fractional expiry",
+      "### Linked-issue AC",
+      "### ✅ Verified",
+      "### 🗑️ Considered & rejected",
+      "## 🛠️ Plan to fix",
+    ]);
+  });
+
+  test("an indented ATX heading is neutralized too — markdown reads up to 3 spaces as the same heading", () => {
+    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
+    const body = insertReportSections(
+      rendered,
+      { ...report, overview: "Adds a guard.\n   ### Findings\n   #### 🟠 Injected" },
+      "### Revalidated findings\n\nnone",
+    );
+    // The indent is kept and only the marker escaped, so the field stays text
+    // and the engine's own headings keep their positions.
+    expect(body).toContain("   \\### Findings");
+    expect(body).toContain("   \\#### 🟠 Injected");
+    const headings = body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line));
+    expect(headings).toEqual([
+      "## ✅ Verdict: `ship it`",
+      "## 📋 Review",
+      "### Revalidated findings",
+      "### Findings",
+      "### Linked-issue AC",
+      "### ✅ Verified",
+      "### 🗑️ Considered & rejected",
+      "## 🛠️ Plan to fix",
+    ]);
+  });
+
+  test("a report field cannot fork the layout: `## 📋 Review` and a `---` fence stay text", () => {
+    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
+    const body = insertReportSections(
+      rendered,
+      { ...report, verified: "## 📋 Review\n---\nsuite green" },
+      "### Revalidated findings\n\nnone",
+    );
+    expect(body).toContain("\\## 📋 Review");
+    expect(body).toContain("\\---");
+    // One review heading only, so the overview's anchor stayed unambiguous.
+    expect(body.split("\n").filter((line) => line === "## 📋 Review")).toHaveLength(1);
+    expect(body).toContain("**What this PR does**: Adds an expiry guard");
+  });
+
+  test("raw HTML in a report field cannot fold the sections after it", () => {
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "review",
+    });
+    // An unclosed `<details>` routes everything after it into a collapsed
+    // block — plan and publication marker included — so the tag must stay text.
+    for (const html of ["<details>fold the tail", "<details open>\nfold the tail"]) {
+      const body = buildPreparedReviewBody({
+        output: { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        omittedFindings: 0,
+        round: 1,
+        headSha: "0123456789abcdef0123456789abcdef01234567",
+        publicationMarker,
+        reportParts: {
+          report: { ...report, verified: `- ${html}`, rejected: "R&D &lt;details&gt;" },
+          revalidated: "### Revalidated findings\n\nnone",
+        },
+      });
+      expect(body).toContain("&lt;details");
+      // The plan block is the body's ONLY fold, and it is closed: nothing the
+      // field said can swallow the sections below it.
+      expect(body.match(/<details/g)).toHaveLength(1);
+      expect(body.match(/<\/details>/g)).toHaveLength(1);
+      expect(body.indexOf("### 🗑️ Considered & rejected")).toBeGreaterThan(body.indexOf("&lt;details"));
+      expect(body.indexOf("## 🛠️ Plan to fix")).toBeGreaterThan(body.indexOf("### 🗑️ Considered & rejected"));
+      expect(body.trimEnd().endsWith(publicationMarker)).toBe(true);
+      // `&` is escaped too, so an entity the field already carried stays
+      // visible text instead of being re-read as markup.
+      expect(body).toContain("R&amp;D &amp;lt;details&amp;gt;");
+    }
+  });
+
+  test("an unclosed code fence in a report field cannot swallow the sections after it", () => {
+    // `~~~` opens a block exactly like backticks: left unclosed it runs to the
+    // end of the comment, the sections and the marker lines after it included.
+    for (const fence of ["~~~", "```"]) {
+      const body = insertReportSections(
+        renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] }),
+        { ...report, verified: `- suite green\n${fence}\ntail`, planToFix: "none" },
+        "### Revalidated findings\n\nnone",
+      );
+      // Escaped in place: the opener stays text and the field is still readable.
+      expect(body).toContain(`\n\\${fence}\ntail\n`);
+      // No line of the body can open a block at all.
+      expect(body.split("\n").filter((line) => /^ {0,3}(`{3,}|~{3,})/.test(line))).toHaveLength(0);
+      const escaped = body.indexOf(`\\${fence}`);
+      for (const section of ["### 🗑️ Considered & rejected", "## 🛠️ Plan to fix"]) {
+        expect(body.indexOf(section)).toBeGreaterThan(escaped);
+      }
+    }
+  });
+
+  test("every thematic-break form is neutralized: `***`, `___` and spaced runs", () => {
+    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
+    for (const rule of ["***", "___", "- - -", "* * *", "_ _ _", "----", "==="]) {
+      const body = insertReportSections(
+        rendered,
+        { ...report, verified: `suite green\n${rule}\ntail` },
+        "### Revalidated findings\n\nnone",
+      );
+      expect(body).toContain(`\\${rule}`);
+    }
+    // A list item and a two-dash run are text, not breaks: they stay untouched.
+    const safe = insertReportSections(
+      rendered,
+      { ...report, verified: "- item\n-- two dashes" },
+      "### Revalidated findings\n\nnone",
+    );
+    expect(safe).toContain("\n- item");
+    expect(safe).toContain("-- two dashes");
+  });
+
+  test("every setext-underline form is neutralized — a lone `=` or `-` shapes the line above too", () => {
+    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
+    for (const underline of ["===", "=", "-------", "-", "  ==="]) {
+      const indent = underline.slice(0, underline.length - underline.trimStart().length);
+      const marker = underline.slice(indent.length);
+      const body = insertReportSections(
+        rendered,
+        { ...report, verified: `suite green\n${underline}\ntail` },
+        "### Revalidated findings\n\nnone",
+      );
+      // Escaped in place, indent kept: the divider stays text, never a heading.
+      expect(body).toContain(`\n${indent}\\${marker}\ntail\n`);
+      expect(body.split("\n").filter((line) => /^ {0,3}[-=]+\s*$/.test(line))).toHaveLength(0);
+      // The sections after the field keep their levels: no line became setext.
+      expect(body.split("\n").filter((line) => /^#{2,4} /.test(line))).toEqual([
+        "## ✅ Verdict: `ship it`",
+        "## 📋 Review",
+        "### Revalidated findings",
+        "### Findings",
+        "### Linked-issue AC",
+        "### ✅ Verified",
+        "### 🗑️ Considered & rejected",
+        "## 🛠️ Plan to fix",
+      ]);
+    }
+  });
+
+  test("an anchor miss skips that section silently, leaving the layout intact", () => {
+    // Not the engine's layout: no `## 📋 Review` line. The renderer is pure —
+    // it returns the body unchanged for that section and logs nothing.
+    const rendered = "## Verdict: something\n\nbody";
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => warns.push(String(message));
+    try {
+      const body = insertReportSections(rendered, report, "### Revalidated findings\n\nnone");
+      // Nothing was prepended, and the fixed tail still landed.
+      expect(body.startsWith("## Verdict: something")).toBe(true);
+      expect(body).not.toContain("**What this PR does**");
+      expect(body).toContain("### Linked-issue AC");
+      expect(warns).toEqual([]);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("a fix plan containing a fence gets a longer outer fence", () => {
+    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
+    const body = insertReportSections(rendered, { ...report, planToFix: "```ts\nx\n```" }, "none");
+    expect(body).toContain("````md");
+    expect(body).toContain("````");
+  });
+
+  test("buildPreparedReviewBody + reportParts: the sections land inside the trusted frame", () => {
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "review",
+    });
+    const body = buildPreparedReviewBody({
+      output: { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+      omittedFindings: 0,
+      round: 1,
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      publicationMarker,
+      reportParts: { report, revalidated: "### Revalidated findings\n\nnone" },
+    });
+    expect(body.startsWith("<!-- mstar-inspector:review:v1 round=1 -->")).toBe(true);
+    expect(body.trimEnd().endsWith(publicationMarker)).toBe(true);
+    expect(body).toContain("**What this PR does**: Adds an expiry guard");
+    expect(body).toContain("### Linked-issue AC");
+  });
+
+  test("buildPreparedReviewBody without reportParts is byte-identical to the pre-report body", () => {
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "review",
+    });
+    const input = {
+      output: { schema: "mstar.review/v1", verdict: "ship it" as const, findings: [] },
+      omittedFindings: 0,
+      round: 1,
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      publicationMarker,
+    } satisfies Parameters<typeof buildPreparedReviewBody>[0];
+    const body = buildPreparedReviewBody(input);
+    expect(body).not.toContain("### Linked-issue AC");
+    expect(body).not.toContain("### Revalidated findings");
+    // `since` absent too: a full round's header is unchanged.
+    expect(body).toContain("Review 1 · commit 0123456\n");
+  });
+
+  test("sinceSha appends the 7-char marker on the header only", () => {
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "review",
+    });
+    const body = buildPreparedReviewBody({
+      output: { schema: "mstar.review/v1", verdict: "ship it" as const, findings: [] },
+      omittedFindings: 0,
+      round: 4,
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      publicationMarker,
+      sinceSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    });
+    expect(body).toContain("Review 4 · commit 0123456 · since bbbbbbb");
+  });
+});
+
 describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
+  /** Lines that open or close a fenced block (the plan's renderer is the only source). */
+  const fenceLines = (text: string): string[] => text.split("\n").filter((line) => /^ {0,3}`{3,}/.test(line));
+
   const output: ReviewOutput = {
     schema: "mstar.review/v1",
     verdict: "blocked",
@@ -657,29 +1144,67 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body).toContain("…");
   });
 
-  test("a cut that lands inside a fold closes it, so the collapse cannot swallow the trailer", () => {
-    const coverage: ClosureCoverage = {
-      totalOpen: 25,
-      selected: 25,
-      assessed: 25,
-      invalidOutput: 0,
-      omitted: 0,
-      capped: 0,
-      contextCoverage: "complete",
+  test("a cut inside the fix plan closes its fence before the fold, header and marker intact", () => {
+    // The plan renders last, so an over-budget body cuts INSIDE its fenced
+    // block: closing only the fold would still let the fence swallow the
+    // trailer. A validated document caps planToFix at 6000 chars, so the plan
+    // has to be inflated directly to reach the cut this clamp must survive.
+    const headSha = "0123456789abcdef0123456789abcdef01234567";
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha,
+      kind: "review",
+    });
+    const report: ReportDoc = {
+      schema: "mstar.report/v1",
+      headSha,
+      overview: "Adds an expiry guard.",
+      linkedIssueAc: "Expiry rejected: met.",
+      verified: "- suite → green",
+      rejected: "none",
+      planToFix: "x".repeat(REVIEW_BODY_LIMIT + 5000),
     };
-    const rows: ClosureRow[] = Array.from({ length: 25 }, (_, index) => ({
-      title: `prior finding ${index}`,
-      disposition: "unverifiable",
-      reason: "no-evidence",
-      evidenceKind: null,
-      thread: "-",
-    }));
-    // Sized so the closure fold opens before the cut and would end after it.
-    const clogged: ReviewOutput = { ...output, summary_md: "x".repeat(REVIEW_BODY_LIMIT - 400) };
-    const body = buildReviewBody(clogged, 0, buildClosureSection(coverage, rows));
+    const reportParts = { report, revalidated: "Reassessed 0/0 open prior finding(s) this round" };
+    const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
+
+    // Both clamp sites: the inner body clamp and the prepared-body clamp.
+    const inner = buildReviewBody(small, 0, reportParts);
+    const prepared = buildPreparedReviewBody({ output: small, omittedFindings: 0, round: 7, headSha, publicationMarker, reportParts });
+    for (const clamped of [inner, prepared]) {
+      expect(clamped.length).toBeLessThan(65536);
+      expect(clamped).toContain("…");
+      // Opening fence plus the closer the clamp appends — an odd count means
+      // the rest of the comment renders as code, marker lines included.
+      expect(fenceLines(clamped)).toHaveLength(2);
+      expect((clamped.match(/<details>/g) ?? []).length).toBe(1);
+      expect((clamped.match(/<\/details>/g) ?? []).length).toBe(1);
+    }
+    expect(prepared).toContain("Review 7 · commit 0123456");
+    expect(prepared.trimEnd().endsWith(publicationMarker)).toBe(true);
+  });
+
+  test("a clamp cut inside a tilde fence closes it", () => {
+    // A finding body renders verbatim, so its tilde fence reaches the clamp
+    // exactly like the fix plan's backticked one.
+    const body = buildReviewBody({
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      findings: [
+        {
+          mergeClass: "must-fix",
+          title: "Tilde fence",
+          file_path: "src/auth.ts",
+          line_start: 1,
+          line_end: 1,
+          body: `~~~\n${"x".repeat(REVIEW_BODY_LIMIT)}`,
+        },
+      ],
+    });
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
-    expect(body).toContain("<details>");
-    expect((body.match(/<details>/g) ?? []).length).toBe((body.match(/<\/details>/g) ?? []).length);
+    expect(body).toContain("…");
+    // Opener plus the closer the cut appends: an odd count means the trailer
+    // and the publication marker render inside the block.
+    expect(body.split("\n").filter((line) => /^ {0,3}~{3,}/.test(line))).toHaveLength(2);
   });
 
   test("within-limit bodies pass through verbatim", () => {
@@ -698,6 +1223,71 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     });
     expect(body).not.toContain("…");
     expect(body).toContain("small");
+  });
+
+  const reportDoc: ReportDoc = {
+    schema: "mstar.report/v1",
+    headSha: "abc1234",
+    overview: "Adds an expiry guard to the auth path.",
+    linkedIssueAc: "Expiry rejected: met.",
+    verified: "- unit suite → green",
+    rejected: "**Retry loop**: rejected — the diff never touches it.",
+    planToFix: "1. Add the guard.\n2. Rerun the suite.",
+  };
+  const reportTailHeadings = [
+    "### Linked-issue AC",
+    "### ✅ Verified",
+    "### 🗑️ Considered & rejected",
+    "## 🛠️ Plan to fix",
+  ];
+
+  test("a body over the limit shortens the core, never the report tail", () => {
+    const long: ReviewOutput = {
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      findings: [
+        {
+          mergeClass: "must-fix",
+          title: "Long finding",
+          file_path: "src/auth.ts",
+          line_start: 1,
+          line_end: 1,
+          body: "x".repeat(REVIEW_BODY_LIMIT),
+        },
+      ],
+    };
+    const body = buildReviewBody(long, 0, {
+      report: reportDoc,
+      revalidated: "### Revalidated findings\n\nnone",
+    });
+    expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
+    expect(body).toContain("…");
+    for (const heading of reportTailHeadings) expect(body).toContain(heading);
+    // The plan is the LAST section, so its closed fold proves the tail survived.
+    expect(body.endsWith("</details>")).toBe(true);
+  });
+
+  test("an oversized plan is truncated before any report section is dropped", () => {
+    const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
+    const body = buildReviewBody(small, 0, {
+      report: { ...reportDoc, planToFix: "x".repeat(REVIEW_BODY_LIMIT * 2) },
+      revalidated: "### Revalidated findings\n\nnone",
+    });
+    expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
+    for (const heading of reportTailHeadings) expect(body).toContain(heading);
+    expect(body).toContain("…");
+    // Fence and fold stay balanced: opener plus closer each, nothing swallowed.
+    expect(fenceLines(body)).toHaveLength(2);
+    expect((body.match(/<details>/g) ?? []).length).toBe(1);
+    expect((body.match(/<\/details>/g) ?? []).length).toBe(1);
+  });
+
+  test("without report parts the body is the pre-report shape, unchanged", () => {
+    const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "ship it", summary_md: "Fine.", findings: [] };
+    expect(buildReviewBody(small, 2)).toBe(
+      `${renderReviewMarkdown(small)}\n\n*(+2 more findings omitted)*`,
+    );
+    expect(buildReviewBody(small)).not.toContain("### Linked-issue AC");
   });
 });
 

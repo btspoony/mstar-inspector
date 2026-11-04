@@ -1427,6 +1427,41 @@ export async function readPublishedReview(
 }
 
 /**
+ * The review an EMPTY increment inherits (spec §7.9): the persisted v1
+ * envelope of the reviewed head this round diffs against, read by the same
+ * per-App identity `findIncrementBase` selected that head with — the scope/SHA
+ * `reviews` row is the projection of the apply, and that head's own Check was
+ * judged from it. `null` when the row, its envelope or its verdict cannot be
+ * read; the caller then fails the check closed instead of inventing a result. A
+ * readable verdict without a tally keeps `scorePct: null`, exactly like a
+ * published payload without a tally. Read-only.
+ */
+export async function readInheritedReview(
+  db: D1Like,
+  input: { scope: Scope; headSha: string },
+): Promise<PublishedReview | null> {
+  const row = await db
+    .prepare(
+      `SELECT envelope FROM reviews
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND head_sha = ?`,
+    )
+    .bind(
+      input.scope.appId,
+      input.scope.installationId,
+      input.scope.owner,
+      input.scope.repo,
+      input.scope.prNumber,
+      input.headSha,
+    )
+    .first<{ envelope: string | null }>();
+  if (row === null || row.envelope === null) return null;
+  const envelope = recordOf(parseJson(row.envelope));
+  if (envelope === null || typeof envelope.verdict !== "string") return null;
+  return { verdict: envelope.verdict, scorePct: tallyScore(envelope) };
+}
+
+/**
  * The envelope THIS publication carried, by exact App/scope/SHA identity (a
  * row of another attempt or another App must never decide this one). `null`
  * means the payload is unreadable, not "no review was published".
