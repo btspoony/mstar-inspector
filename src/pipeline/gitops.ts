@@ -71,6 +71,14 @@ export const DIFF_PATH = "/workspace/pr.diff";
 export const RUNNER_INPUT_PATH = "/workspace/review-input.json";
 export const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
 
+/**
+ * Cap on the PR diff text the Worker materializes (qc3 F-101): 2 MiB. Beyond
+ * it the captured text is treated as unavailable (no evidence slices, base
+ * filter for line comments), never truncated — `diffCommand`'s bounded read is
+ * what enforces it. Lives here because the command carries the bound.
+ */
+export const DIFF_PREFETCH_MAX_BYTES = 2 * 1024 * 1024;
+
 /** GitHub name charset (owner/repo) — matches signed webhook payload reality. */
 const GITHUB_NAME_RE = /^[A-Za-z0-9._-]+$/;
 
@@ -125,11 +133,30 @@ export function checkedOutShaCommand(cloneDir: string): ShellCommand {
   return shellCommand(`git -C '${cloneDir}' rev-parse HEAD`);
 }
 
-/** Write the PR unified diff to diffPath via gh (primary path, falsified). */
+/**
+ * Capture the PR unified diff: `gh pr diff` STREAMS into `diffPath` (the
+ * numstat source) and the Worker reads it back through the same bounded
+ * transport as `readRecheckCommand`. The old shape redirected stdout into the
+ * file and left the exec's stdout EMPTY, so every round captured no diff and
+ * every prior-finding row fell to a fabricated `no-evidence`.
+ *
+ * Output contract (the bytes the consumer parses; the sandbox double mirrors
+ * it): `gh pr diff > diffPath` writes the file, then the first
+ * DIFF_PREFETCH_MAX_BYTES bytes of that file (`head -c` stops the stream at
+ * the bound), a `\n` separator from `printf`, then the overflow probe's byte
+ * count — `wc -c` output, ITSELF newline-terminated. A real run ends
+ * `<diff>\n0\n` (fit) or `<diff-prefix>\n1\n` (a byte exists BEYOND the bound →
+ * the text is unavailable, never truncated). gh's own failure fails the chain
+ * (non-zero exit, no stdout) — no file, no capture.
+ */
 export function diffCommand(owner: string, repo: string, prNumber: number, diffPath: string): ShellCommand {
   assertOwnerRepo(owner, repo);
   assertPrNumber(prNumber);
-  return shellCommand(`gh pr diff '${prNumber}' --repo '${owner}/${repo}' > '${diffPath}'`);
+  return shellCommand(
+    `gh pr diff '${prNumber}' --repo '${owner}/${repo}' > '${diffPath}' && ` +
+      `head -c '${DIFF_PREFETCH_MAX_BYTES}' '${diffPath}' && printf '\\n' && ` +
+      `tail -c '+${DIFF_PREFETCH_MAX_BYTES + 1}' '${diffPath}' | head -c '1' | wc -c`,
+  );
 }
 
 /**

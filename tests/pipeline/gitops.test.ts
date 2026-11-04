@@ -18,6 +18,8 @@ import {
   buildGitOpsCommands,
   checkedOutShaCommand,
   cloneCommand,
+  DIFF_PATH,
+  DIFF_PREFETCH_MAX_BYTES,
   diffCommand,
   numstatCommand,
   readRecheckCommand,
@@ -43,8 +45,15 @@ describe("gitops command builders", () => {
       ),
     );
     expect(checkedOutShaCommand("/workspace/repo")).toBe(shellCommand("git -C '/workspace/repo' rev-parse HEAD"));
+    // The diff is written to the numstat file AND streamed back bounded: the
+    // capture is the exec's stdout, so the file redirect alone (empty stdout)
+    // could never feed the evidence catalog.
     expect(diffCommand("acme", "widgets", 42, "/workspace/pr.diff")).toBe(
-      shellCommand("gh pr diff '42' --repo 'acme/widgets' > '/workspace/pr.diff'"),
+      shellCommand(
+        "gh pr diff '42' --repo 'acme/widgets' > '/workspace/pr.diff' && " +
+          `head -c '${DIFF_PREFETCH_MAX_BYTES}' '/workspace/pr.diff' && printf '\\n' && ` +
+          `tail -c '+${DIFF_PREFETCH_MAX_BYTES + 1}' '/workspace/pr.diff' | head -c '1' | wc -c`,
+      ),
     );
     // the runner consumes the runtime envelope path — --level +
     // --input reconFacts JSON; the diff feeds the numstat partition universe.
@@ -148,6 +157,36 @@ describe("gitops command builders", () => {
     }
   });
 
+  test("diffCommand's bounded read emits content + newline + newline-terminated flag (shell oracle)", async () => {
+    // The redirect half needs gh; the READ half is what the consumer parses, so
+    // it runs here against a real file under a private mkdtemp. Fit keeps the
+    // whole diff and flags 0; one byte past the bound flags 1 — which the
+    // consumer reads as over-size (no slices), never as a small diff.
+    const dir = await mkdtemp(join(tmpdir(), "mstar-diff-read-"));
+    try {
+      // The redirect half needs gh; run the read chain alone (everything after
+      // the `&&`) against a real file.
+      const readChain = diffCommand("acme", "widgets", 42, DIFF_PATH).split(" && ").slice(1).join(" && ");
+      const fit = "diff --git a/src/auth.ts b/src/auth.ts\n@@ -1,2 +1,3 @@\n+a\n b\n";
+      for (const [text, flag, content] of [
+        [fit, "0", fit],
+        ["b".repeat(DIFF_PREFETCH_MAX_BYTES + 1), "1", "b".repeat(DIFF_PREFETCH_MAX_BYTES)],
+      ] as const) {
+        const path = join(dir, `diff-${flag}.patch`);
+        await Bun.write(path, text);
+        const proc = Bun.spawn(["sh", "-c", readChain.replaceAll(DIFF_PATH, path)]);
+        const stdout = await new Response(proc.stdout).text();
+        expect(await proc.exited).toBe(0);
+        expect(stdout.endsWith("\n")).toBe(true);
+        const trimmed = stdout.trimEnd();
+        expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe(flag);
+        expect(trimmed.slice(0, trimmed.lastIndexOf("\n"))).toBe(content);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("runnerCommand appends the optional --recheck-out flag quoted", () => {
     expect(
       runnerCommand("/opt/runner/packages/runner/src/runner.ts", "quick", "/workspace/review-input.json", "/tmp/mstar-recheck.json"),
@@ -173,7 +212,8 @@ describe("gitops command builders", () => {
     expect(cmds.clone).toContain("origin 'https://github.com/my-org.example/repo_name-2.git'");
     expect(cmds.clone).toContain("origin 'pull/7/head'");
     expect(cmds.checkedOutSha).toBe(shellCommand("git -C '/workspace/repo' rev-parse HEAD"));
-    expect(cmds.diff).toBe(shellCommand("gh pr diff '7' --repo 'my-org.example/repo_name-2' > '/workspace/pr.diff'"));
+    expect(cmds.diff).toContain("gh pr diff '7' --repo 'my-org.example/repo_name-2' > '/workspace/pr.diff'");
+    expect(cmds.diff).toContain(`head -c '${DIFF_PREFETCH_MAX_BYTES}' '/workspace/pr.diff'`);
     expect(cmds.numstat).toBe(shellCommand("git apply --numstat '/workspace/pr.diff'"));
     expect(cmds.runner).toBe(
       shellCommand("bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'"),

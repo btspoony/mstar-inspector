@@ -20,6 +20,7 @@ import {
   buildGitOpsCommands,
   CLONE_DIR,
   DIFF_PATH,
+  DIFF_PREFETCH_MAX_BYTES,
   readRecheckCommand,
   readRecheckStatusCommand,
   RUNNER_INPUT_PATH,
@@ -242,6 +243,7 @@ export type FakeSandboxState = {
   resolvedSha: string;
   revParseExitCode: number;
   cloneExitCode: number;
+  /** The diff FILE the production command writes; the double streams it back bounded. */
   diffStdout: string;
   diffExitCode: number;
   numstatStdout: string;
@@ -314,8 +316,22 @@ function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
       return { stdout: "", stderr: "", exitCode: state.cloneExitCode };
     case "checkedOutSha":
       return { stdout: `${state.resolvedSha}\n`, stderr: "", exitCode: state.revParseExitCode };
-    case "diff":
-      return { stdout: state.diffStdout, stderr: "", exitCode: state.diffExitCode };
+    case "diff": {
+      // Production shape (`diffCommand`): gh redirects the diff into the file,
+      // then a BOUNDED read streams it back — first DIFF_PREFETCH_MAX_BYTES
+      // bytes, `\n`, then the `wc -c` overflow flag. `diffStdout` is the FILE
+      // content here, so returning it raw (the defect this replaced) could
+      // never exercise the transport.
+      //
+      // A command with no bounded read is the retired redirect-only shape,
+      // whose stdout is EMPTY by construction: answering it with the file
+      // would hide exactly the regression this double exists to catch.
+      const bytes = Buffer.from(state.diffStdout);
+      const bounded = cmd.includes("head -c '") && cmd.includes("wc -c");
+      const head = bounded ? bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString() : "";
+      const overflow = bounded && bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
+      return { stdout: bounded ? `${head}\n${overflow}\n` : "", stderr: "", exitCode: state.diffExitCode };
+    }
     case "numstat":
       return { stdout: state.numstatStdout, stderr: "", exitCode: state.numstatExitCode };
     case "runner":
