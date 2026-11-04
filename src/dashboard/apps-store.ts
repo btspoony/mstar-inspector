@@ -83,9 +83,8 @@
  *     backstop only), and it writes updated_at (an operator mutation).
  *   - getAllowlist / saveAllowlist (migration 0045) are the owner allowlist
  *     face: the switch is App configuration and the owner set is REPLACED
- *     (delete-then-insert, chunked at the repo's 25-statement batch budget),
- *     never merged; saveAllowlist refuses a soft-deleted or unknown App
- *     before writing (the setAppStatus rule).
+ *     (delete-then-insert in ONE batch), never merged; saveAllowlist refuses
+ *     a soft-deleted or unknown App before writing (the setAppStatus rule).
  *   - getGithubVisibility / saveGithubVisibility (migration 0045) are the
  *     cached App-visibility face: NULL reads as 'unknown', and the writer is
  *     the metadata refresh's anonymous probe — machine-triggered, so like
@@ -321,17 +320,6 @@ export function dedupeOwnerLogins(logins: readonly string[]): string[] {
     return true;
   });
 }
-
-/**
- * Batch width for `saveAllowlist`. The repo's one documented db.batch budget
- * is `LIFECYCLE_APPLY_BATCH_STATEMENTS = 25` (src/store/finding-lifecycle.ts,
- * spec §7.11.1: "at most 25 row-transition statements per db.batch"). The
- * number is RESTATED rather than imported because dashboard modules must not
- * import store code (module boundary above); 25 is a shared budget, not a
- * lifecycle-only constant. Chunking keeps the largest accepted paste
- * (`ALLOWLIST_MAX_OWNERS = 100`) from building a 100-statement batch.
- */
-const ALLOWLIST_BATCH_STATEMENTS = 25;
 
 /** Input for createApp — encrypted payloads are built by the caller. */
 export type CreateAppInput = {
@@ -1050,19 +1038,19 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * Save the App's owner allowlist (migration 0045): the switch plus the
-     * owner set, which is REPLACED — delete-then-insert, so a removal is
-     * written by the same operation that adds. Duplicate logins collapse
-     * case-insensitively (GitHub logins are case-insensitive; the first
-     * spelling is kept), because SQLite's (app_id, owner_login) key is
+     * owner set, which is REPLACED — delete-then-insert in ONE batch, so a
+     * removal is written by the same operation that adds. Duplicate logins
+     * collapse case-insensitively (GitHub logins are case-insensitive; the
+     * first spelling is kept), because SQLite's (app_id, owner_login) key is
      * case-sensitive; an empty set is legal and, with the switch on, refuses
      * every owner (fail closed).
      * Refuses a soft-deleted or unknown App BEFORE writing (the setAppStatus
-     * rule) and writes updated_at (an operator mutation). The statements run
-     * in ALLOWLIST_BATCH_STATEMENTS-wide batches (the DELETE first, the switch
-     * UPDATE last); every statement repeats the `deleted_at IS NULL`
-     * predicate, so a delete landing mid-way writes nothing at all (no orphan
-     * owner rows) and the UPDATE's change count reports `false` instead of a
-     * save that never took effect.
+     * rule) and writes updated_at (an operator mutation). Returns whether the
+     * App row was still live when the batch ran: every batch statement — the
+     * DELETE, each INSERT and the UPDATE — repeats the `deleted_at IS NULL`
+     * predicate, so a delete landing between the pre-read and the batch writes
+     * nothing at all (no orphan owner rows) and the UPDATE's change count
+     * reports `false` instead of a save that never took effect.
      */
     async saveAllowlist(id: string, allowlist: AppAllowlist): Promise<boolean> {
       const live = await db
@@ -1075,7 +1063,7 @@ export function createAppsStore(db: AppsStoreD1) {
       // between the pre-read and the batch then writes NO owner rows and does
       // not flip the switch, instead of leaving a deleted App's list behind.
       const liveApp = `EXISTS (SELECT 1 FROM github_apps g WHERE g.id = ? AND g.deleted_at IS NULL)`;
-      const statements = [
+      const results = await db.batch([
         db.prepare(`DELETE FROM app_owner_allowlist WHERE app_id = ? AND ${liveApp}`).bind(id, id),
         ...owners.map((owner) =>
           db
@@ -1091,13 +1079,7 @@ export function createAppsStore(db: AppsStoreD1) {
              WHERE id = ? AND deleted_at IS NULL`,
           )
           .bind(allowlist.enabled ? 1 : 0, id),
-      ];
-      const results: AppsStoreBatchResult[] = [];
-      for (let start = 0; start < statements.length; start += ALLOWLIST_BATCH_STATEMENTS) {
-        results.push(...(await db.batch(statements.slice(start, start + ALLOWLIST_BATCH_STATEMENTS))));
-      }
-      // The switch UPDATE is the final statement overall, so its change count
-      // answers "was the App still live when this save ran?".
+      ]);
       return (results.at(-1)?.meta.changes ?? 0) > 0;
     },
 
