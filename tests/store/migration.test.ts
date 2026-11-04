@@ -17,7 +17,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { createMigratedTestD1, createTestD1 } from "./helpers";
+import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter } from "./helpers";
 import type { TestD1 } from "./helpers";
 import type { D1Like } from "../../src/store/types";
 
@@ -1836,19 +1836,21 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
 });
 
 describe("migrations/0045_reviews_context_incomplete.sql", () => {
-  /** The pre-0044 shape: every migration before the column was added. */
-  function createPre0044Db(): TestD1 {
+  /**
+   * The shape the column upgrade runs against: the 0001/0002 base plus every
+   * directory-derived migration BELOW 0045 — 0044 included, so the test never
+   * reconstructs a schema that never shipped.
+   */
+  function createPre0045Db(): TestD1 {
     const db = createTestD1();
-    for (const name of readdirSync(MIGRATIONS_DIR)
-      .filter((name) => name.endsWith(".sql") && name >= "0003" && name < "0044")
-      .sort()) {
+    for (const name of migrationsAfter(2).filter((name) => migrationNumber(name) < 45)) {
       db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
     }
     return db;
   }
 
   test("an existing row reads as 0 (a pre-column round stays an incremental base)", () => {
-    const db = createPre0044Db();
+    const db = createPre0045Db();
     db.raw
       .prepare(
         `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
