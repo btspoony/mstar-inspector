@@ -385,6 +385,12 @@ function closureCoverageLine(coverage: ClosureCoverage): string {
 function priorFindingLines(rows: ClosureRow[]): string[] {
   const shown = rows.slice(0, CLOSURE_MAX_ROWS);
   const overflow = rows.length - shown.length;
+  // Row text is model/lifecycle-echoed data, so it carries the SAME two
+  // structure channels as a report field: raw HTML can fold everything after
+  // it, and a newline would break the table row. Neutralize first (the `<`/`&`
+  // escape the report fields get), then escape the pipes the table grammar
+  // owns; a line break becomes a space because a cell is one line.
+  const cell = (text: string): string => neutralizeReportText(text.replace(/\n/g, " ")).replace(/\|/g, "\\|");
   const lines: string[] = [];
   if (shown.length > 0) {
     lines.push(
@@ -393,10 +399,10 @@ function priorFindingLines(rows: ClosureRow[]): string[] {
       "|---|---|---|---|",
       ...shown.map(
         (row) =>
-          `| ${row.title.replace(/\|/g, "\\|").replace(/\n/g, " ")} ` +
-          `| ${row.disposition} (${row.reason}) ` +
-          `| ${row.evidenceKind ?? "-"} ` +
-          `| ${row.thread} |`,
+          `| ${cell(row.title)} ` +
+          `| ${cell(row.disposition)} (${cell(row.reason)}) ` +
+          `| ${cell(row.evidenceKind ?? "-")} ` +
+          `| ${cell(row.thread)} |`,
       ),
     );
   }

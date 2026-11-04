@@ -7,6 +7,12 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the runner now clears the fixed side-channel files (`--recheck-out`,
+# `--report-out` and the recheck status) BEFORE the runtime starts. Those paths
+# are shared by every attempt, so a retry or re-delivered job would otherwise
+# read an earlier attempt's document as this round's when the seat that owned
+# it skips or fails and writes nothing — the same head, so head-binding cannot
+# catch it. A stale image keeps publishing the previous narrative.
 # rebuild: the report seat's prompt now renders its character budgets from the
 # shared `REPORT_FIELD_MAX_CHARS` the validator enforces, so a budget change
 # cannot ask the seat for a document the gate then rejects whole. A stale image
