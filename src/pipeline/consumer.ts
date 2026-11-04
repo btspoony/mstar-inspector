@@ -536,9 +536,11 @@ export const defaultConsumerLog: ConsumerLog = {
  *
  * This list is the TTL's single source of truth (`reviewGuardTtlSeconds` bills
  * its length) and it is pinned against a real round: consumer.test.ts runs the
- * maximal round and requires exactly this many `EXEC_TIMEOUT_GIT_MS` commands.
- * An uncounted step lets the row expire while a legal review is still posting,
- * so a new one must fail that test until it is added here.
+ * maximal round and requires exactly this many bounded commands. The four
+ * PR-context reads run under the tighter `PR_CONTEXT_EXEC_TIMEOUT_MS` (30s)
+ * but still bill at 120s here — a deliberate over-count, so the TTL stays
+ * conservative. An uncounted step lets the row expire while a legal review is
+ * still posting, so a new one must fail that test until it is added here.
  */
 export const GUARD_TIMED_SANDBOX_STEPS: readonly string[] = [
   "clone",
@@ -1112,22 +1114,39 @@ function clampContextText(text: string, maxChars: number): string {
 }
 
 /**
- * Worst-case cost of the whole capture: the PR read plus every allowed issue
- * read, each able to consume its full `EXEC_TIMEOUT_GIT_MS` window.
+ * Per-call bound for the capture's own `gh` reads (ms). Far below
+ * `EXEC_TIMEOUT_GIT_MS` because the capture is best-effort narrative: its
+ * worst case must fit inside the round NEXT TO the level's runner budget.
+ *
+ * Round arithmetic (`ROUND_BUDGET_MS` = 900_000ms):
+ *   capture worst case (1 + PR_CONTEXT_MAX_ISSUES) × 30_000 = 120_000ms
+ *   quick/default runner                                     = 600_000ms
+ *   gate needs 720_000ms → funded at round start with 180_000ms to spare.
+ * A deep round needs 840_000 + 120_000 = 960_000ms, more than the 900_000ms
+ * window, so deep rounds always skip the capture — narrative never trades
+ * away a deep run's window. Changing either metric re-derives the gate.
  */
-export const PR_CONTEXT_WORST_CASE_MS = (1 + PR_CONTEXT_MAX_ISSUES) * EXEC_TIMEOUT_GIT_MS;
+export const PR_CONTEXT_EXEC_TIMEOUT_MS = 30_000;
+
+/**
+ * Worst-case cost of the whole capture: the PR read plus every allowed issue
+ * read, each able to consume its full `PR_CONTEXT_EXEC_TIMEOUT_MS` window.
+ * 120_000ms at the current cap — the sum the gate reserves before it runs.
+ */
+export const PR_CONTEXT_WORST_CASE_MS = (1 + PR_CONTEXT_MAX_ISSUES) * PR_CONTEXT_EXEC_TIMEOUT_MS;
 
 /**
  * Capture the PR context the report seat reads: the PR description, then up
  * to `PR_CONTEXT_MAX_ISSUES` issues it closes/references. Every value is
  * clamped — this is attacker-controlled prose that rides into a prompt.
  *
- * Bounded by the ROUND's clock: the capture runs before the paid run, and each
- * gh read can consume its whole `EXEC_TIMEOUT_GIT_MS`, so a slow sandbox could
- * spend the round's window on a narrative. The gate therefore requires the
- * remainder to cover the worst-case capture AND the level's runner budget — the
- * run must still fit after the capture — and only then does the remaining time
- * bound how many issue reads start, so the review itself never carries the cost.
+ * Bounded by the ROUND's clock: the capture runs before the paid run and each
+ * gh read can consume its whole `PR_CONTEXT_EXEC_TIMEOUT_MS`, so a slow
+ * sandbox could spend the round's window on a narrative. The gate therefore
+ * requires the remainder to cover the worst-case capture AND the level's
+ * runner budget — the run must still fit after the capture — and only then
+ * does the remaining time bound how many issue reads start, so the review
+ * itself never carries the cost.
  *
  * Any failure (gh missing, API error, non-JSON output, no budget) resolves
  * `undefined` after ONE warn naming the cause: the report sections then degrade
@@ -1144,7 +1163,7 @@ async function capturePrContext(
   level: ReviewLevel,
   roundDeadlineMs: number,
 ): Promise<PrContext | undefined> {
-  const exec = { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS };
+  const exec = { env: { GH_TOKEN: token }, timeout: PR_CONTEXT_EXEC_TIMEOUT_MS };
   const warn = (cause: ReportContextFailure, issue?: number): void => {
     log.warn(
       { ...fields, report_context: cause, ...(issue === undefined ? {} : { report_context_issue: issue }) },
@@ -1181,9 +1200,10 @@ async function capturePrContext(
   const issues: PrContext["issues"] = [];
   // One gh read may burn its whole window, so the remaining time also bounds
   // how many issue reads start: never more than the round can still fund.
+  // The runner's own window is already reserved by the gate above.
   const maxIssueReads = Math.min(
     PR_CONTEXT_MAX_ISSUES,
-    Math.floor((roundDeadlineMs - Date.now()) / EXEC_TIMEOUT_GIT_MS),
+    Math.floor((roundDeadlineMs - Date.now()) / PR_CONTEXT_EXEC_TIMEOUT_MS),
   );
   for (const issueNumber of extractIssueRefs(prBody).slice(0, Math.max(0, maxIssueReads))) {
     const issueRead = await sandbox

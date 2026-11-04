@@ -130,7 +130,6 @@ import {
   EXEC_TIMEOUT_GIT_MS,
   GUARD_TIMED_SANDBOX_STEPS,
   INLINE_RESOLVE_MAX_ENTRIES,
-  captureFundedOverrides,
   commenterCalls,
   commenterState,
   createReviewConsumer,
@@ -146,6 +145,7 @@ import {
   makePayload,
   messageAckCalls,
   messageRetryCalls,
+  PR_CONTEXT_EXEC_TIMEOUT_MS,
   queueState,
   reset as resetHarness,
   reviewGuardTtlSeconds,
@@ -154,6 +154,7 @@ import {
   testLog,
   testOverrides,
 } from "../helpers/consumer-harness";
+import { PR_CONTEXT_MAX_ISSUES } from "../../packages/shared/src/report-wire";
 
 /** Runner exec call's env (the sandbox fake stores opts as unknown). */
 function runnerExecEnv(): Record<string, string> {
@@ -322,9 +323,9 @@ describe("createReviewConsumer", () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Funded round clock: the production window cannot pay for the capture AND
-    // the run, so the widest flow is exercised through the injectable budget.
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, captureFundedOverrides);
+    // The production round window (900s) funds the capture (120s worst case)
+    // next to the default run (600s), so the widest flow runs untouched.
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
@@ -368,8 +369,12 @@ describe("createReviewConsumer", () => {
     expect(sandbox.calls[2]!.opts).toEqual({ env: { GH_TOKEN: gh("s", "installation_token") }, timeout: 120_000 });
     // Numstat: a plain git step, git timeout.
     expect(sandbox.calls[3]!.opts).toEqual({ timeout: 120_000 });
-    // PR context read: gh step, GH_TOKEN via exec env only.
-    expect(sandbox.calls[4]!.opts).toEqual({ env: { GH_TOKEN: gh("s", "installation_token") }, timeout: 120_000 });
+    // PR context read: gh step, GH_TOKEN via exec env only, under the capture's
+    // own tighter bound (the narrative never gets a full git window).
+    expect(sandbox.calls[4]!.opts).toEqual({
+      env: { GH_TOKEN: gh("s", "installation_token") },
+      timeout: PR_CONTEXT_EXEC_TIMEOUT_MS,
+    });
     // Input write carries the document on the exec STDIN pipe (asserted decoded
     // below), never in its command.
     expect(sandbox.calls[5]!.opts).toMatchObject({ timeout: 120_000, stdin: expect.any(String) });
@@ -499,7 +504,7 @@ describe("createReviewConsumer", () => {
     sandbox.resolvedSha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, captureFundedOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment" })));
 
@@ -2815,7 +2820,7 @@ describe("createReviewConsumer", () => {
     await seedOpenTarget(db);
     await seedAssociation(db, "PRRT_thread1");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, {
-      ...captureFundedOverrides,
+      ...testOverrides,
       // Any previously reviewed head makes the compare gate reachable without
       // seeding the `reviews` table.
       findIncrementBase: async () => PRIOR_SHA,
@@ -2826,10 +2831,16 @@ describe("createReviewConsumer", () => {
     const timed = sandbox.calls.filter(
       (call) => (call.opts as { timeout?: number } | undefined)?.timeout === EXEC_TIMEOUT_GIT_MS,
     );
+    // The four PR-context reads carry the tighter capture bound instead.
+    const captured = sandbox.calls.filter(
+      (call) => (call.opts as { timeout?: number } | undefined)?.timeout === PR_CONTEXT_EXEC_TIMEOUT_MS,
+    );
+    // `gh pr view` + one `gh issue view` per linked issue (the cap).
+    expect(captured).toHaveLength(1 + PR_CONTEXT_MAX_ISSUES);
     // One command per billed window — except `readRecheckDoc`, which races the
     // document and status reads in ONE Promise.all window (two commands, one
     // entry). A new sandbox step without its ledger entry breaks this.
-    expect(timed.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 1);
+    expect(timed.length + captured.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 1);
   });
 
   test("guardRetryDelaysSeconds per level — the schedule covers the guard TTL (AC-4)", () => {
