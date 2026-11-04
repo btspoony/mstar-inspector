@@ -24,6 +24,7 @@
  */
 import { Webhooks } from "@octokit/webhooks";
 import { z } from "zod";
+import { normalizeRfc3339 } from "../contracts/rfc3339";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { ReviewTriggerMode } from "../dashboard/apps-store";
 import type { HandlerLog } from "./handlers";
@@ -619,6 +620,10 @@ function classifyPullRequest(parsed: unknown, mode: ReviewTriggerMode, log?: Han
   const repo = repository?.name;
   const prNumber = pull_request?.number ?? result.data.number;
   const headSha = pull_request?.head?.sha ?? null;
+  // The commit's ordering stamp (`ReviewJobPayload.head_at`): the same
+  // normalized spelling the ledger stores, so the consumer compares queue
+  // message and D1 row as plain strings. Junk/absent → the field is omitted.
+  const headAt = normalizeRfc3339(pull_request?.updated_at);
   // Malformed-payload reject BEFORE the mode gate: reject stays reserved for
   // malformed payloads in EVERY mode (spec §2.1 — exactly as today).
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
@@ -645,6 +650,7 @@ function classifyPullRequest(parsed: unknown, mode: ReviewTriggerMode, log?: Han
       repo,
       pr_number: prNumber,
       head_sha: headSha,
+      ...(headAt === undefined ? {} : { head_at: headAt }),
       action,
       triggered_by: "pull_request",
     },
@@ -736,14 +742,6 @@ function classifyIssueComment(parsed: unknown, log: HandlerLog | undefined, appS
 }
 
 /**
- * RFC 3339 (what GitHub stamps) — the ledger's `last_seen_at` input. A value
- * that fails this is treated as ABSENT by the caller rather than handed to
- * SQLite's `datetime()`, which silently returns NULL for junk and would let
- * the store's "no timestamp" fallback masquerade as a real clock.
- */
-const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-
-/**
  * The per-App PR ledger record for one `pull_request` delivery (migration
  * 0039) — the fields the dashboard reads, never a classification. `null` when
  * the payload cannot supply the ledger's identity (owner / repo / number) or
@@ -782,9 +780,11 @@ export function pullRequestRecord(parsed: unknown): {
     title: pull_request?.title ?? null,
     state,
     headSha: pull_request?.head?.sha ?? null,
-    // Only a well-formed stamp rides through; junk degrades to "no stamp",
-    // which the store resolves to now EXPLICITLY.
-    updatedAt: RFC3339.test(pull_request?.updated_at ?? "") ? (pull_request?.updated_at ?? null) : null,
+    // Only a well-formed stamp rides through, rewritten to the SAME UTC
+    // spelling the payload's `head_at` carries (the consumer compares the two
+    // as text); junk degrades to "no stamp", which the store resolves to now
+    // EXPLICITLY.
+    updatedAt: normalizeRfc3339(pull_request?.updated_at) ?? null,
   };
 }
 

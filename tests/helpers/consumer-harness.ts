@@ -69,15 +69,29 @@ export const {
 export const { lines: logLines, log: testLog } = createTestLog();
 
 // --- helpers ----------------------------------------------------------------
-/** Per-case KV behaviour: the stored completion marker, and a failing write. */
-export const kvState: { getValue: string | null; putError: Error | undefined } = {
+/**
+ * Per-case KV behaviour: the answer for keys absent from `entries` (the
+ * completion marker), per-key claims (what the worker wrote for ONE commit),
+ * and a failing read/write.
+ */
+export const kvState: {
+  getValue: string | null;
+  getError: Error | undefined;
+  entries: Map<string, string>;
+  putError: Error | undefined;
+} = {
   getValue: null,
+  getError: undefined,
+  entries: new Map(),
   putError: undefined,
 };
 /** Every KV write, in order (the idempotency/completion contract). */
 export const kvPuts: Array<{ key: string; value: string; options?: unknown }> = [];
 const kv = {
-  get: mock(async (_key: string) => kvState.getValue),
+  get: mock(async (key: string) => {
+    if (kvState.getError !== undefined) throw kvState.getError;
+    return kvState.entries.get(key) ?? kvState.getValue;
+  }),
   put: mock(async (key: string, value: string, options?: unknown) => {
     kvPuts.push({ key, value, options });
     if (kvState.putError !== undefined) throw kvState.putError;
@@ -148,6 +162,8 @@ export function reset(): void {
   logLines.length = 0;
   kvPuts.length = 0;
   kvState.getValue = null;
+  kvState.getError = undefined;
+  kvState.entries.clear();
   kvState.putError = undefined;
   queueState.attempts = 1;
   messageRetryCalls.length = 0;

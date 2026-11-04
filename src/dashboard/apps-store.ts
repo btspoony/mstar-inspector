@@ -107,6 +107,7 @@
  *     caller-visible errors, never swallowed.
  */
 import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
+import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
 
@@ -451,6 +452,15 @@ export type UpsertPullRequestInput = {
   /**
    * The payload's `pull_request.updated_at` (ISO 8601), so ordering follows
    * GitHub's clock rather than our arrival clock. Omitted/null → now.
+   * It is ALSO the `head_at` delivery watermark (migration 0044): the stamp
+   * the ledger keeps for the most recent stamped delivery of this PR — NOT
+   * the arrival time of `headSha`, which a delivery naming the same sha still
+   * moves.
+   *
+   * Omitted/null/malformed → now. Any admitted RFC 3339 spelling (a numeric
+   * offset included) is rewritten to UTC ISO-8601 inside the write, because
+   * the column is ordered LEXICALLY and a `+02:00` row would sort wrongly
+   * against the stored `Z` values.
    */
   updatedAt?: string | null;
 };
@@ -1084,19 +1094,37 @@ export function createAppsStore(db: AppsStoreD1) {
      * narrowed to same-second ties. `>` would merely invert which arrival wins
      * and would break a legitimate in-order close→reopen, so this layer accepts
      * the tie; any later delivery for the PR rewrites the row with a new stamp.
+     *
+     * `head_sha` / `head_at` (migration 0044). `head_at` is the ledger's
+     * DELIVERY watermark — the `pull_request.updated_at` of the most recent
+     * stamped delivery for this PR — not the arrival time of the stored sha,
+     * so a delivery naming the same sha still moves it. `head_sha` itself
+     * never rewinds:
+     *   - a delivery that names a sha with no usable stamp
+     *     (`excluded.head_at IS NULL`) only fills a still-unknown sha
+     *     (`COALESCE(head_sha, excluded.head_sha)`) and leaves `head_at`
+     *     untouched — an out-of-order arrival cannot rewind either column;
+     *   - a stamped delivery at least as new as the stored one (or an UNKNOWN
+     *     stored one, `head_at IS NULL`) advances both;
+     *   - an older stamp → both untouched.
      */
     async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
-      // The caller validates the timestamp (`pullRequestRecord` only passes an
-      // RFC 3339 stamp), so this branch is the EXPLICIT "no usable stamp"
-      // fallback: arrival time is the only clock left.
-      const seenAt = input.updatedAt === undefined || input.updatedAt === null
-        ? null
-        : input.updatedAt;
+      // The canonical UTC ISO-8601 spelling (`new Date(v).toISOString()`) is a
+      // PRECONDITION of the column, which is ordered lexically — a numeric
+      // offset would sort wrongly against the stored `Z` values. Enforced here
+      // rather than documented for the caller: a second writer cannot store an
+      // unorderable spelling. `null` is the EXPLICIT "no usable stamp"
+      // fallback, where arrival time is the only clock left.
+      const seenAt = normalizeRfc3339(input.updatedAt) ?? null;
+      // The pair below holds at the write: no sha, no stamp — otherwise a
+      // delivery that carries a stamp but no sha would move the PR's delivery
+      // watermark on behalf of a commit it never named.
+      const headAt = input.headSha === undefined || input.headSha === null ? null : seenAt;
       await db
         .prepare(
           `INSERT INTO pull_requests
-             (id, app_id, owner, repo, pr_number, title, state, head_sha, last_seen_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?), datetime('now')))
+             (id, app_id, owner, repo, pr_number, title, state, head_sha, head_at, last_seen_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?), datetime('now')))
            ON CONFLICT (app_id, owner, repo, pr_number) DO UPDATE SET
              title = COALESCE(excluded.title, title),
              state = CASE
@@ -1104,7 +1132,16 @@ export function createAppsStore(db: AppsStoreD1) {
                WHEN excluded.last_seen_at >= pull_requests.last_seen_at THEN excluded.state
                ELSE pull_requests.state
              END,
-             head_sha = COALESCE(excluded.head_sha, head_sha),
+             head_sha = CASE
+               WHEN excluded.head_at IS NULL THEN COALESCE(head_sha, excluded.head_sha)
+               WHEN head_at IS NULL OR excluded.head_at >= head_at THEN excluded.head_sha
+               ELSE head_sha
+             END,
+             head_at = CASE
+               WHEN excluded.head_at IS NULL THEN head_at
+               WHEN head_at IS NULL OR excluded.head_at >= head_at THEN excluded.head_at
+               ELSE head_at
+             END,
              last_seen_at = MAX(last_seen_at, excluded.last_seen_at)`,
         )
         .bind(
@@ -1116,9 +1153,38 @@ export function createAppsStore(db: AppsStoreD1) {
           input.title ?? null,
           input.state,
           input.headSha ?? null,
+          headAt,
           seenAt,
         )
         .run();
+    },
+
+    /**
+     * The PR's head watermark — `head_sha` plus the ledger's DELIVERY stamp
+     * (migration 0044: the `pull_request.updated_at` of the most recent
+     * stamped delivery, not the sha's arrival time) — as ONE strongly
+     * consistent point read on the ledger's own UNIQUE key. The queue consumer
+     * reads it to decide whether a delivery it just dequeued has already been
+     * overtaken by a newer commit.
+     *
+     * Missing row → `null` (an unknown PR is never a reason to skip), and the
+     * two fields are reported as the row holds them — a `null` stamp is
+     * "unknown", not "now".
+     */
+    async selectPrHead(input: {
+      appId: string;
+      owner: string;
+      repo: string;
+      prNumber: number;
+    }): Promise<{ headSha: string | null; headAt: string | null } | null> {
+      const row = await db
+        .prepare(
+          `SELECT head_sha, head_at FROM pull_requests
+           WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+        )
+        .bind(input.appId, input.owner, input.repo, input.prNumber)
+        .first<{ head_sha: string | null; head_at: string | null }>();
+      return row === null ? null : { headSha: row.head_sha, headAt: row.head_at };
     },
 
     /**

@@ -1,0 +1,33 @@
+-- 0044_pull_request_head_at.sql — the ledger's delivery watermark.
+--
+-- `pull_requests` (0039) stores the newest known `head_sha` per PR, but not
+-- WHEN the PR last heard from GitHub. A queued `synchronize` delivery could
+-- therefore be compared with the ledger only by sha: a delivery whose sha
+-- already differs is indistinguishable from one that is merely older, so the
+-- consumer either reviews an already-superseded commit or never reviews the
+-- newest one.
+--
+-- `head_at` is the `pull_request.updated_at` of the most recent STAMPED
+-- delivery for this PR, rewritten to the canonical UTC ISO-8601 spelling
+-- (`new Date(v).toISOString()`) on BOTH the job payload and this ledger — a
+-- numeric-offset stamp does not sort correctly as text against `Z`, so the
+-- one spelling is what makes text order equal time order and the pair
+-- comparable as text. It is NOT the arrival time of the stored `head_sha`: a
+-- delivery naming the same sha still moves it, and only a delivery that
+-- carries a usable stamp AND names a sha writes it (a stamp with no sha dates
+-- no commit).
+--
+-- `head_sha` never rewinds: a stamped delivery writes it only when its stamp
+-- is at least as new as the stored one, and a delivery with no usable stamp
+-- only fills a still-unknown sha. Such a stamp-less delivery never touches
+-- `head_at`, so an out-of-order arrival cannot rewind the watermark either.
+--
+-- NULL = unknown (a row written before this migration, or a delivery that
+-- carried no usable `updated_at`). An unknown stamp is never a reason to
+-- skip a delivery: the consumer's skip rule requires a readable `head_at` on
+-- both sides and fails open otherwise.
+--
+-- Append-only on the production DB: one `ALTER TABLE ... ADD COLUMN` on the
+-- table 0039 created, no data rewrite. Forward-only (SQLite has no down).
+
+ALTER TABLE pull_requests ADD COLUMN head_at TEXT;

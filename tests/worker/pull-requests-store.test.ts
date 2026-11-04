@@ -37,8 +37,15 @@ describe("upsertPullRequest", () => {
   test("insert then re-delivery keeps ONE row on the (app, owner, repo, number) key", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(PR);
-    await createAppsStore(db).upsertPullRequest({ ...PR, headSha: "sha-2" });
+    // Stamped deliveries order themselves; the point of this test is the
+    // UNIQUE key and the advance. A stamp-less re-delivery cannot be ordered,
+    // so it deliberately keeps the stored sha (migration 0044).
+    await createAppsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-01-01T00:00:00.000Z" });
+    await createAppsStore(db).upsertPullRequest({
+      ...PR,
+      headSha: "sha-2",
+      updatedAt: "2026-01-01T00:05:00.000Z",
+    });
     const rows = db.raw.prepare("SELECT * FROM pull_requests WHERE app_id = ?").all(APP_ID) as Array<{
       head_sha: string;
       title: string;
@@ -58,7 +65,11 @@ describe("upsertPullRequest", () => {
       .prepare("SELECT first_seen_at, last_seen_at FROM pull_requests WHERE app_id = ?")
       .get(APP_ID) as { first_seen_at: string; last_seen_at: string };
     expect(row.first_seen_at).toBe("2020-01-01 00:00:00");
-    expect(row.last_seen_at).not.toBe("2020-01-01 00:00:00");
+    // Strictly later than the stale pin: a NULL or garbage write is not an
+    // advance, and `MAX(last_seen_at, excluded.last_seen_at)` is what the
+    // column means.
+    expect(row.last_seen_at).not.toBeNull();
+    expect(row.last_seen_at > "2020-01-01 00:00:00").toBe(true);
   });
 
   test("an omitted title / head_sha keeps the stored value; state overwrites while non-terminal", async () => {

@@ -456,6 +456,63 @@ describe("classifyEvent — every_push default reproduces current classification
   });
 });
 
+describe("classifyEvent — head_at (the commit's ordering stamp)", () => {
+  test("a synchronize delivery with a valid updated_at carries it normalized", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("synchronize", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "test-author" }, updated_at: "2026-03-01T10:00:00Z" },
+      }),
+    );
+    expect(outcome.kind).toBe("job");
+    if (outcome.kind === "job") {
+      expect(outcome.payload.head_at).toBe("2026-03-01T10:00:00.000Z");
+    }
+  });
+
+  test("a numeric offset is rewritten to UTC, so the text sorts as time does", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("synchronize", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "test-author" }, updated_at: "2026-03-01T12:00:00+02:00" },
+      }),
+    );
+    expect(outcome.kind).toBe("job");
+    if (outcome.kind === "job") {
+      expect(outcome.payload.head_at).toBe("2026-03-01T10:00:00.000Z");
+    }
+  });
+
+  test("a junk updated_at omits head_at instead of degrading to a clock", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("synchronize", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "test-author" }, updated_at: "not-a-timestamp" },
+      }),
+    );
+    expect(outcome.kind).toBe("job");
+    if (outcome.kind === "job") {
+      expect("head_at" in outcome.payload).toBe(false);
+    }
+  });
+
+  test("an absent updated_at omits head_at", () => {
+    const outcome = classifyEvent("pull_request", pullRequestBody("opened"));
+    expect(outcome.kind).toBe("job");
+    if (outcome.kind === "job") {
+      expect("head_at" in outcome.payload).toBe(false);
+    }
+  });
+
+  test("an issue_comment job carries no head_at (no commit involved)", () => {
+    const outcome = classifyEvent("issue_comment", issueCommentBody(), undefined, EVERY_PUSH);
+    expect(outcome.kind).toBe("job");
+    if (outcome.kind === "job") {
+      expect("head_at" in outcome.payload).toBe(false);
+    }
+  });
+});
+
 describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
   test("issue_comment.created with a bot mention on a PR by the author yields a job with null head_sha", () => {
     const outcome = classifyEvent("issue_comment", issueCommentBody(), undefined, EVERY_PUSH);

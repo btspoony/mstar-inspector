@@ -47,7 +47,7 @@ import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { acquireInflight } from "../../src/store/inflight-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
-import { idemKey } from "../../src/contracts/idem";
+import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
 import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
 import { REDACTED } from "../../src/pipeline/redact";
 import type { PipelineEnv } from "../../src/pipeline/consumer";
@@ -76,6 +76,7 @@ import {
   setCheckCreateState,
 } from "../../src/store/review-checks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
+import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
@@ -233,6 +234,26 @@ async function seedInflight(
     },
   );
   expect(result).toEqual({ ok: true });
+}
+
+/**
+ * Seed the PR ledger's head watermark through the REAL store (migration
+ * 0039/0044): the state a later `synchronize` delivery has already left
+ * behind when an earlier one is dequeued.
+ */
+async function seedPrHead(
+  db: TestD1,
+  head: { headSha: string; headAt: string | null },
+): Promise<void> {
+  await createAppsStore(db).upsertPullRequest({
+    appId: TEST_APP_ID,
+    owner: "acme",
+    repo: "widgets",
+    prNumber: 42,
+    state: "open",
+    headSha: head.headSha,
+    updatedAt: head.headAt,
+  });
 }
 
 /** The real D1 double with one statement family throwing (fail-closed probes). */
@@ -472,11 +493,18 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload())); // resolves — acked, never DLQed
 
-    // No real-review side effects: no overall post, no reviews row, NO KV
-    // done-state (a later webhook for the same sha legitimately re-runs).
+    // No real-review side effects: no overall post, no reviews row, no KV
+    // done-state. The worker's "1" claim is stamped `degraded` instead — a
+    // degraded notice is not a review, so a redelivery must enqueue again.
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
-    expect(kvPuts).toHaveLength(0);
+    expect(kvPuts).toEqual([
+      {
+        key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+        value: "degraded",
+        options: { expirationTtl: IDEMPOTENCY_SECONDS },
+      },
+    ]);
     // Degraded comment posted with the parse error + the RAW stdout (the
     // commenter side is the redaction/truncation choke point).
     const degrades = commenterCalls.filter((c) => c.op === "post-prepared-degraded");
@@ -739,6 +767,55 @@ describe("createReviewConsumer", () => {
 
     const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("review_failures insert failed"));
     expect(warn).toBeDefined();
+  });
+
+  test("the final delivery stamps the key failed so the commit stops counting as queued", async () => {
+    reset();
+    sandbox.runnerExitCode = 1;
+    queueState.attempts = 4; // 1 initial delivery + max_retries 3 → the next stop is the DLQ
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+
+    // The stale "1" the worker claimed is overwritten: that commit was never
+    // reviewed, so a redelivery must enqueue again instead of being skipped.
+    expect(kvPuts).toEqual([
+      {
+        key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+        value: "failed",
+        options: { expirationTtl: IDEMPOTENCY_SECONDS },
+      },
+    ]);
+  });
+
+  test("a delivery the queue will retry leaves the enqueue claim alone", async () => {
+    reset();
+    sandbox.runnerExitCode = 1;
+    queueState.attempts = 3; // a retry still follows
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    // The throw IS the retry signal: processMessage rethrows and the handler
+    // never acks, so the queue redelivers this message — and the "1" claim
+    // keeps proving the job is still in flight.
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+
+    expect(messageAckCalls).toHaveLength(0);
+    expect(kvPuts.some((p) => p.value === "failed")).toBe(false);
+  });
+
+  test("a failing failed-claim KV write never masks the rethrow", async () => {
+    reset();
+    sandbox.runnerExitCode = 1;
+    queueState.attempts = 4;
+    kvState.putError = new Error("kv down");
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+
+    expect(logLines.some((l) => l.level === "warn" && l.msg.includes("failed-claim KV write failed"))).toBe(true);
   });
 
   test("in-flight legacy-shape payload (absent appRef) → structured channel + healthy batch sibling completes (F-001)", async () => {
@@ -1749,28 +1826,28 @@ describe("createReviewConsumer", () => {
     expect(infoLine!.fields.workspace_cap).toBe(16);
   });
 
-  test("guard-held backoff escalates 60s → 120s → 240s across attempts (BB-3)", async () => {
+  test("guard-held backoff escalates 60s → 300s → 1200s across attempts (BB-3)", async () => {
     reset();
     const db = await createSeededTestD1();
     await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
     for (const [attempts, delaySeconds] of [
       [1, 60],
-      [2, 120],
-      [3, 240],
+      [2, 300],
+      [3, 1200],
     ] as const) {
       queueState.attempts = attempts;
       await consumer(makeBatch(makePayload()));
     }
     expect(messageRetryCalls).toEqual([
       { attempts: 1, delaySeconds: 60 },
-      { attempts: 2, delaySeconds: 120 },
-      { attempts: 3, delaySeconds: 240 },
+      { attempts: 2, delaySeconds: 300 },
+      { attempts: 3, delaySeconds: 1200 },
     ]);
     expect(messageAckCalls).toHaveLength(0);
     expect(sandbox.calls).toHaveLength(0);
   });
-  test("REVIEW_LEVEL=deep guard-held → delayed retries use the deep backoff 180s → 360s → 720s (AC-S10-guard)", async () => {
+  test("REVIEW_LEVEL=deep guard-held → delayed retries use the deep backoff 90s → 480s → 1200s (AC-S10-guard)", async () => {
     reset();
     const db = await createSeededTestD1();
     await seedInflight(db);
@@ -1780,17 +1857,17 @@ describe("createReviewConsumer", () => {
       testOverrides,
     );
     for (const [attempts, delaySeconds] of [
-      [1, 180],
-      [2, 360],
-      [3, 720],
+      [1, 90],
+      [2, 480],
+      [3, 1200],
     ] as const) {
       queueState.attempts = attempts;
       await consumer(makeBatch(makePayload()));
     }
     expect(messageRetryCalls).toEqual([
-      { attempts: 1, delaySeconds: 180 },
-      { attempts: 2, delaySeconds: 360 },
-      { attempts: 3, delaySeconds: 720 },
+      { attempts: 1, delaySeconds: 90 },
+      { attempts: 2, delaySeconds: 480 },
+      { attempts: 3, delaySeconds: 1200 },
     ]);
     expect(messageAckCalls).toHaveLength(0);
     expect(sandbox.calls).toHaveLength(0);
@@ -1818,11 +1895,309 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(0);
   });
 
+  // --- supersede skip (migration 0044; acceptance AC-1..AC-3, AC-6, AC-7) ---
+  const OLD_AT = "2026-01-01T00:00:00.000Z";
+  const NEW_AT = "2026-01-01T00:05:00.000Z";
+  const NEW_SHA = "1111111111111111111111111111111111111111";
+  // The worker's enqueue claim for one commit (value "1" = queued, not done),
+  // built through the contract helper from the SAME payload fixture the
+  // deliveries use: a fixture drift can then never unmatch the claim and make
+  // the "must review" cases vacuous.
+  const ENQUEUED_KEY = (sha: string): string => {
+    const { installation_id, owner, repo, pr_number } = makePayload();
+    return idemKey({ installation_id, owner, repo, pr_number, head_sha: sha });
+  };
+
+  test("a delivery the ledger has overtaken is acked as superseded with zero containers (AC-1)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    // The advancing delivery enqueued its own job — the KV claim the worker
+    // writes after a successful send is the skip's proof.
+    kvState.entries.set(ENQUEUED_KEY(NEW_SHA), "1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    // Acked with no retry, no DLQ and no failure row: the newer delivery is
+    // the one that reviews.
+    expect(messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(sandbox.calls).toHaveLength(0);
+    expect(commenterCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(0);
+    // The skip runs BEFORE admission: no per-PR lock, no capacity reservation
+    // and no metered usage row for a delivery that does nothing.
+    expect(inflightRows(db)).toHaveLength(0);
+    expect(usageRows(db)).toHaveLength(0);
+    const line = logLines.find((l) => l.fields.reason === "superseded");
+    expect(line).toBeDefined();
+    expect(line!.level).toBe("info");
+    // The skip is findable by the documented `event=` grep (the paused
+    // sibling's precedent), not only by the reason shared with refusals.
+    expect(line!.fields.event).toBe("review_superseded");
+    expect(line!.fields.superseded_by_head_at).toBe(NEW_AT);
+    // No sandbox id on the skip line — nothing was created.
+    expect(line!.fields.sandbox_id).toBeUndefined();
+    // The ack stamps its own claim so the worker never re-enqueues a sha a
+    // newer commit already replaced.
+    expect(kvPuts).toContainEqual({
+      key: ENQUEUED_KEY(SHA),
+      value: "superseded",
+      options: { expirationTtl: IDEMPOTENCY_SECONDS },
+    });
+  });
+
+  test("a newer ledger commit with NO queued job is reviewed, not skipped (open mode / ignored delivery)", async () => {
+    // The ledger advances on deliveries that enqueue nothing (`synchronize` in
+    // `open` mode, a paused App, a failed send). Skipping on the ledger alone
+    // would drop the PR's only review, so the missing KV claim keeps this
+    // delivery alive.
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(reviewCount(db)).toBe(1);
+    expect(sandbox.calls.length).toBeGreaterThan(0);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  test("an unknown ledger stamp fails open even with a queued job for another sha", async () => {
+    // A pre-0044 row holds a sha but no stamp, and two readable stamps are
+    // what order deliveries — the missing one must review, never skip.
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: null });
+    kvState.entries.set(ENQUEUED_KEY(NEW_SHA), "1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  test("a newer commit whose job was dropped, failed, paused, degraded or superseded is reviewed, not skipped", async () => {
+    // `dropped` (the guard's terminal ack), `failed` (the final delivery is
+    // heading to the DLQ), `paused` (the App is paused), `degraded` (the run
+    // ended in a degraded notice) and `superseded` (that newer commit was
+    // itself replaced) all name a commit that was never reviewed: the key is
+    // still there, but it no longer proves a review will ever happen.
+    for (const claim of ["dropped", "failed", "paused", "degraded", "superseded"] as const) {
+      reset();
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      const db = await createSeededTestD1();
+      await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+      kvState.entries.set(ENQUEUED_KEY(NEW_SHA), claim);
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+      expect(reviewCount(db)).toBe(1);
+      expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+    }
+  });
+
+  test("a completed review of the newer commit is proof — the delivery is skipped", async () => {
+    // `done` means this consumer already reviewed that commit, so no second
+    // job is needed: the ledger stamp plus the done claim are the whole proof.
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    kvState.entries.set(ENQUEUED_KEY(NEW_SHA), "done");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(reviewCount(db)).toBe(0);
+    expect(sandbox.calls).toHaveLength(0);
+    expect(messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
+  });
+
+  test("a supersede skip never erases an already-reviewed sha's done claim", async () => {
+    // Force-push A → B → A → B: A was reviewed (`done`) and is now obsolete
+    // again. Skipping A's redelivery must not stamp `superseded` over that
+    // proof — the next redelivery would re-review (and re-pay for) A.
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    kvState.entries.set(ENQUEUED_KEY(SHA), "done");
+    kvState.entries.set(ENQUEUED_KEY(NEW_SHA), "1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    // The skip still happened; only the claim is left alone.
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
+    expect(reviewCount(db)).toBe(0);
+    expect(kvPuts.some((p) => p.value === "superseded")).toBe(false);
+    expect(kvState.entries.get(ENQUEUED_KEY(SHA))).toBe("done");
+  });
+
+  test("a force-push back to a superseded sha reviews it — the claim is not a tombstone (A → B → A)", async () => {
+    // A was skipped once (its claim reads `superseded`), then B was pushed and
+    // now A is the head again. The ledger's head IS A, so the skip's
+    // "different commit" term cannot fire, and the stale claim must not stop
+    // the review either: the ledger comparison is the whole decision.
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: SHA, headAt: NEW_AT });
+    kvState.entries.set(ENQUEUED_KEY(SHA), "superseded");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  test("a KV fault on the skip's proof read reviews normally and says so once", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    kvState.getError = new Error("kv down");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(reviewCount(db)).toBe(1);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+    expect(logLines.filter((l) => l.level === "warn" && l.msg.includes("supersede KV read failed"))).toHaveLength(1);
+  });
+
+  test("the ledger's own sha is never skipped, whatever the stamps say (AC-2)", async () => {
+    // Same commit on both sides: this delivery IS the newest one, so no stamp
+    // ordering can make it a leftover — only the sha term holds it back. The
+    // third pair (ledger newer) isolates exactly that term: the stamp test
+    // alone would skip it. A queued claim for the ledger's own commit is
+    // seeded so the proof cannot be the term that saves it.
+    for (const [ledgerAt, payloadAt] of [
+      [OLD_AT, OLD_AT],
+      [OLD_AT, NEW_AT],
+      [NEW_AT, OLD_AT],
+    ] as const) {
+      reset();
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      const db = await createSeededTestD1();
+      await seedPrHead(db, { headSha: SHA, headAt: ledgerAt });
+      kvState.entries.set(ENQUEUED_KEY(SHA), "1");
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: payloadAt })));
+
+      expect(sandbox.calls.length).toBeGreaterThan(0);
+      expect(reviewCount(db)).toBe(1);
+      expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+    }
+  });
+
+  test("a different sha at the ledger's own stamp is reviewed, not skipped (AC-3)", async () => {
+    // `>` and not `>=`: a delivery stamped at the same instant as the ledger's
+    // head is not a leftover, so relaxing the comparison would lose it. The
+    // newer commit's own claim is seeded so only the stamp term holds it back.
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    kvState.entries.set(ENQUEUED_KEY(NEW_SHA), "1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: NEW_AT })));
+
+    expect(sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  test("an older ledger stamp never blocks a newer payload stamp (AC-3)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The ledger's head is a different commit stamped BEFORE this delivery,
+    // and it owns a queued job: only the stamp ordering can save the delivery.
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: OLD_AT });
+    kvState.entries.set(ENQUEUED_KEY(NEW_SHA), "1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: NEW_AT })));
+
+    expect(sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  test("an unreadable ledger never skips the delivery (AC-7)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: dbFailingOn(db, "FROM pull_requests") as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+    // The fail-open read leaves a warn line so the fault is still visible.
+    expect(logLines.some((l) => l.level === "warn" && l.msg.includes("fail-open"))).toBe(true);
+  });
+
+  test("an absent ledger row never skips the delivery (AC-7)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  test("a job without a payload stamp takes today's path untouched (AC-6)", async () => {
+    // `issue_comment` jobs and every pre-deploy message carry no `head_at`;
+    // the ledger holding a newer commit must not change their behavior.
+    for (const payload of [
+      makePayload({ head_sha: SHA, triggered_by: "issue_comment", action: "created" }),
+      makePayload({ head_sha: SHA }),
+    ]) {
+      reset();
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      const db = await createSeededTestD1();
+      await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(payload));
+
+      expect(reviewCount(db)).toBe(1);
+      expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+    }
+  });
+
   test("a distinct sha held through the whole backoff records ONE drop row (W-1 / round-8)", async () => {
     // The live review covers the sha it acquired for. A push for a NEW commit
-    // that exhausts the 420s backoff against a longer review is never reviewed
-    // by it, so the drop must reach the failure sweep — a warn line alone
-    // leaves the commit with no trace at all.
+    // that exhausts the whole backoff against a longer review is never
+    // reviewed by it, so the drop must reach the failure sweep — a warn line
+    // alone leaves the commit with no trace at all.
     reset();
     queueState.attempts = 4;
     const db = await createSeededTestD1();
@@ -1842,6 +2217,51 @@ describe("createReviewConsumer", () => {
     // Both shas are named: the skipped commit and the one the review holds.
     expect(dropped).toContain(newer);
     expect(dropped).toContain(SHA);
+    // The abandoned job stops being the supersede skip's proof for that commit.
+    expect(kvPuts).toContainEqual({
+      key: ENQUEUED_KEY(newer),
+      value: "dropped",
+      options: { expirationTtl: IDEMPOTENCY_SECONDS },
+    });
+  });
+
+  test("a terminal guard-held drop never downgrades an already-reviewed sha's done claim", async () => {
+    // `done` proves this consumer already reviewed that commit. The guard's
+    // terminal ack for a DIFFERENT sha must leave it alone — overwriting it
+    // with `dropped` would let a redelivery re-review a reviewed commit.
+    reset();
+    queueState.attempts = 4;
+    const db = await createSeededTestD1();
+    await seedInflight(db); // holds SHA
+    const newer = "3333333333333333333333333333333333333333";
+    kvState.entries.set(ENQUEUED_KEY(newer), "done");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: newer })));
+
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    // The drop is still traced — only the claim is left untouched.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(kvPuts).toHaveLength(0);
+    expect(kvState.entries.get(ENQUEUED_KEY(newer))).toBe("done");
+  });
+
+  test("an unreadable claim skips the drop write and keeps the enqueue claim", async () => {
+    // A read fault must not turn into a blind overwrite: `putAbandonClaim`
+    // returns without writing, so the claim stays as it was ("1", today's
+    // behavior), which the skip then accepts and the drop row above traces.
+    reset();
+    queueState.attempts = 4;
+    const db = await createSeededTestD1();
+    await seedInflight(db); // holds SHA
+    kvState.getError = new Error("kv down");
+    const newer = "4444444444444444444444444444444444444444";
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: newer })));
+
+    expect(kvPuts.some((p) => p.value === "dropped")).toBe(false);
+    expect(failureRows(db)).toHaveLength(1);
   });
 
   test("the terminal drop row needs two non-empty, different shas (round-11)", async () => {
@@ -2273,17 +2693,21 @@ describe("createReviewConsumer", () => {
     expect(reviewGuardTtlSeconds("deep")).toBe(1692);
   });
 
-  test("guardRetryDelaysSeconds per level — every delay below that level's guard TTL (AC-S10-guard)", () => {
-    // quick/default keep the frozen 60/120/240 table; deep stretches to
-    // 180/360/720. Every entry must stay below the level's guard TTL so the
-    // held guard can never expire mid-backoff into a duplicate race.
-    expect(guardRetryDelaysSeconds("quick")).toEqual([60, 120, 240]);
-    expect(guardRetryDelaysSeconds("default")).toEqual([60, 120, 240]);
-    expect(guardRetryDelaysSeconds("deep")).toEqual([180, 360, 720]);
+  test("guardRetryDelaysSeconds per level — the schedule covers the guard TTL (AC-4)", () => {
+    // quick/default 60/300/1200; deep 90/480/1200. Every entry must stay
+    // below the level's guard TTL so no single delay outlives the lock, and
+    // the CUMULATIVE sum must EXCEED it so the final attempt can reclaim an
+    // expired row instead of being dropped.
+    expect(guardRetryDelaysSeconds("quick")).toEqual([60, 300, 1200]);
+    expect(guardRetryDelaysSeconds("default")).toEqual([60, 300, 1200]);
+    expect(guardRetryDelaysSeconds("deep")).toEqual([90, 480, 1200]);
     for (const level of ["quick", "default", "deep"] as const) {
-      for (const delay of guardRetryDelaysSeconds(level)) {
-        expect(delay).toBeLessThan(reviewGuardTtlSeconds(level));
+      const delays = guardRetryDelaysSeconds(level);
+      const ttl = reviewGuardTtlSeconds(level);
+      for (const delay of delays) {
+        expect(delay).toBeLessThan(ttl);
       }
+      expect(delays.reduce((sum, delay) => sum + delay, 0)).toBeGreaterThan(ttl);
     }
   });
 });

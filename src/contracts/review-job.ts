@@ -25,6 +25,20 @@ export type ReviewJobPayload = {
   repo: string;
   pr_number: number;
   head_sha: string | null;
+  /**
+   * The PR's `pull_request.updated_at` for the delivery that produced this
+   * job, normalized to UTC ISO-8601 (`…Z`) so it compares as text against the
+   * ledger's `pull_requests.head_at`. It has exactly two uses, both in the
+   * supersede comparison: the payload stamp is the left operand and the
+   * ledger's watermark the right one (skip only when the ledger holds a
+   * strictly newer stamp AND that newer commit owns a queued job — its
+   * idempotency claim). Nothing sorts the queue by it.
+   *
+   * Optional: absent for every `issue_comment` job (no commit stamp) and for a
+   * `pull_request` delivery whose stamp was missing or malformed, exactly as
+   * for messages enqueued before this field existed.
+   */
+  head_at?: string;
   action: string;
   triggered_by: "pull_request" | "issue_comment";
   appRef: { appId: string };

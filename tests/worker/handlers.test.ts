@@ -138,6 +138,52 @@ describe("handleReviewJob — enqueue once", () => {
   });
 });
 
+describe("handleReviewJob — a key that proves no review happened", () => {
+  test("dropped / failed / paused / degraded / superseded values re-enqueue the commit and refresh the claim", async () => {
+    // `dropped` = the guard gave the job up for good; `failed` = the final
+    // delivery is heading to the DLQ; `paused` = the App is paused; `degraded`
+    // = the run ended in a degraded notice; `superseded` = a newer commit
+    // overtook this sha when it was acked, so THIS sha was never reviewed.
+    // None is "already enqueued", so the redelivery must enqueue again rather
+    // than be KV-skipped — a force-push back to the sha (A → B → A) depends on
+    // it, since the skip that wrote the claim no longer fires (the ledger's
+    // head is that sha again).
+    const key = idemKey({ installation_id: 12345, owner: "acme", repo: "inspector", pr_number: 42, head_sha: HEAD_SHA });
+    for (const value of ["dropped", "failed", "paused", "degraded", "superseded"] as const) {
+      const { kv, store } = makeKvStub();
+      store.set(key, { value });
+      const { queue, sent } = makeQueueStub();
+      const log = makeLog();
+
+      const outcome = await handleReviewJob(prPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
+
+      expect(outcome).toEqual({ kind: "enqueued" });
+      expect(sent).toHaveLength(1);
+      expect(store.get(key)?.value).toBe("1");
+    }
+  });
+});
+
+describe("handleReviewJob — a key that still covers the commit", () => {
+  test("a done value skips the redelivery", async () => {
+    // `done` = this consumer already posted the review, so a redelivery is
+    // pure duplicate cost. `superseded` is deliberately NOT here — see above.
+    const key = idemKey({ installation_id: 12345, owner: "acme", repo: "inspector", pr_number: 42, head_sha: HEAD_SHA });
+    const value = "done";
+    const { kv, store } = makeKvStub();
+    store.set(key, { value });
+    const { queue, sent } = makeQueueStub();
+    const log = makeLog();
+
+    const outcome = await handleReviewJob(prPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
+
+    expect(outcome).toEqual({ kind: "skipped", reason: "idempotency hit" });
+    expect(sent).toHaveLength(0);
+    // A skip never rewrites the claim.
+    expect(store.get(key)?.value).toBe(value);
+  });
+});
+
 describe("handleReviewJob — null head_sha (product lock)", () => {
   test("null head_sha enqueues and never writes a KV key", async () => {
     const { kv, store } = makeKvStub();
