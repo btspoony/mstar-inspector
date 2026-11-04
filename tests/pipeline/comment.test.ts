@@ -653,8 +653,46 @@ describe("report sections (mstar.report/v1 side document)", () => {
     const md = buildRevalidatedSection(rows);
     expect(md.startsWith("### Revalidated findings\n\n| Prior finding | State | Evidence |")).toBe(true);
     expect(md).toContain("| A \\| b | fixed | current-code |");
-    expect(md).toContain("| C | still present | non-fix-dismissal |");
+    expect(md).toContain("| C | dismissed (non-fix-dismissal) | non-fix-dismissal |");
     expect(md).toContain("| D | not verifiable | no-evidence |");
+  });
+
+  test("a dismissed row reads the same in the revalidated and closure tables", () => {
+    const rows: ClosureRow[] = [
+      { title: "C", disposition: "dismissed", reason: "non-fix-dismissal", evidenceKind: null, thread: "-" },
+    ];
+    const revalidated = buildRevalidatedSection(rows);
+    const closure = buildClosureSection(
+      {
+        totalOpen: 1,
+        selected: 1,
+        assessed: 1,
+        invalidOutput: 0,
+        omitted: 0,
+        capped: 0,
+        contextCoverage: "complete",
+      },
+      rows,
+    );
+    // Neither table may claim the defect still stands: the store closed it as
+    // a non-fix dismissal, and the closure table says exactly that.
+    expect(revalidated).not.toContain("still present");
+    expect(closure).toContain("| C | dismissed (non-fix-dismissal)");
+    expect(revalidated).toContain("| C | dismissed (non-fix-dismissal) |");
+  });
+
+  test("buildRevalidatedSection marks rows past the display cap, like the closure table", () => {
+    const rows: ClosureRow[] = Array.from({ length: CLOSURE_MAX_ROWS + 2 }, (_, i) => ({
+      title: `finding ${i}`,
+      disposition: "unverifiable" as const,
+      reason: "no-evidence" as const,
+      evidenceKind: null,
+      thread: "-",
+    }));
+    const md = buildRevalidatedSection(rows);
+    expect(md).toContain(`*(+2 more prior finding(s) over the ${CLOSURE_MAX_ROWS}-row display cap)*`);
+    // The dropped rows are counted, never silently absent.
+    expect(md).not.toContain(`| finding ${CLOSURE_MAX_ROWS} |`);
   });
 
   test("buildRevalidatedSection with no rows writes `none` under the heading", () => {
@@ -697,6 +735,16 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(body).toContain(
       "<details><summary>Expand fix plan</summary>\n\n```md\n1. Add the guard.\n2. Rerun the suite.\n```\n\n</details>",
     );
+  });
+
+  test("the fix-plan fence outruns the longest backtick run inside the plan", () => {
+    const plan = "Use `a` then ```` a four-backtick block";
+    const body = insertReportSections(
+      renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] }),
+      { ...report, planToFix: plan },
+      "none",
+    );
+    expect(body).toContain("`````md\n" + plan + "\n`````");
   });
 
   test("a zero-finding envelope: the revalidated table self-adds the empty `### Findings`", () => {
