@@ -266,7 +266,10 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        github_visibility: "unknown",
       },
+      check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+      allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
       model_roles: {},
@@ -311,7 +314,10 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        github_visibility: "unknown",
       },
+      check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+      allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
       model_roles: {},
@@ -354,7 +360,10 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        github_visibility: "unknown",
       },
+      check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+      allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
       model_roles: {},
@@ -384,6 +393,61 @@ describe("members/apps/settings parsers", () => {
       const manage = parseSettings({ ...base, app: { ...base.app, review_trigger_mode: mode } });
       expect(manage && manage.can_manage && manage.app.review_trigger_mode).toBe(mode);
     }
+  });
+
+  test("parseSettings requires the review gate, allowlist and visibility on the manage face; malformed values fail the parse", () => {
+    const base = {
+      can_manage: true,
+      workspace_id: "ws_0123456789abcdefghijkl",
+      app: {
+        github_slug: "demo",
+        id: "app-demo",
+        github_app_id: 1,
+        status: "active",
+        review_enabled: true,
+        created_by: "mallory",
+        last_webhook_at: null,
+        sandbox_image_id: "omp",
+        review_trigger_mode: "every_push",
+        github_visibility: "public",
+      },
+      check_gate: { min_score: 90, pass_verdicts: ["ship it", "needs fixes"] },
+      allowlist: { enabled: true, owners: ["acme"] },
+      keys: [],
+      model_chain: null,
+      model_roles: {},
+      model_chains: [],
+      custom_providers: [],
+      installations: [],
+      deliveries: [],
+      configured_providers: [],
+      provider_catalog: [],
+      model_role_ids: [],
+      custom_provider_api_ids: [],
+      sandbox_images: [{ id: "omp", enabled: true }],
+    };
+    const ok = parseSettings(base);
+    expect(ok && ok.can_manage && ok.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it", "needs fixes"] });
+    expect(ok && ok.can_manage && ok.allowlist).toEqual({ enabled: true, owners: ["acme"] });
+    expect(ok && ok.can_manage && ok.app.github_visibility).toBe("public");
+    // Each new field is REQUIRED on the manage face.
+    const { check_gate: _noGate, ...withoutGate } = base;
+    expect(parseSettings(withoutGate)).toBeNull();
+    const { allowlist: _noAllowlist, ...withoutAllowlist } = base;
+    expect(parseSettings(withoutAllowlist)).toBeNull();
+    const { github_visibility: _noVisibility, ...withoutVisibility } = base.app;
+    expect(parseSettings({ ...base, app: withoutVisibility })).toBeNull();
+    // Malformed values never reach a control.
+    for (const minScore of [101, -1, 8.5, "80"]) {
+      expect(parseSettings({ ...base, check_gate: { ...base.check_gate, min_score: minScore } })).toBeNull();
+    }
+    expect(parseSettings({ ...base, check_gate: { ...base.check_gate, pass_verdicts: "ship it" } })).toBeNull();
+    expect(parseSettings({ ...base, allowlist: { ...base.allowlist, enabled: "yes" } })).toBeNull();
+    expect(parseSettings({ ...base, allowlist: { ...base.allowlist, owners: [7] } })).toBeNull();
+    expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "hidden" } })).toBeNull();
+    // A never-probed App reads as 'unknown' and a failed read as null — both parse.
+    expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "unknown" } })).not.toBeNull();
+    expect(parseSettings({ ...base, app: { ...base.app, github_visibility: null } })).not.toBeNull();
   });
 
   test("parseSettings (identity-only face) requires the D4 identity set — created_at joins the required keys", () => {
@@ -434,7 +498,10 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        github_visibility: "unknown",
       },
+      check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+      allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
       model_roles: {},
@@ -663,7 +730,10 @@ describe("provider catalog rows + add selection", () => {
       last_webhook_at: null,
       sandbox_image_id: "omp",
       review_trigger_mode: "every_push",
+      github_visibility: "unknown",
     },
+    check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+    allowlist: { enabled: false, owners: [] },
     keys: [],
     model_chain: null,
     model_roles: {},

@@ -22,6 +22,10 @@
  */
 import { Hono, type Context, type Handler } from "hono";
 import { getCookie } from "hono/cookie";
+// The review gate's verdict vocabulary — the same engine constant apps-store
+// validates saveCheckGate against, so the route's 400 and the store's
+// backstop can never drift.
+import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
 import { deploymentModeOf, type DeploymentMode, type Env } from "../worker/env";
 import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser, logOAuthFailure } from "./oauth";
 import {
@@ -2850,6 +2854,11 @@ const SETTINGS_400_KEYS = {
   templateMaterializeMax: "settings.error.templateMaterializeMax",
   runtimeHarnessUnknown: "settings.error.runtimeHarnessUnknown",
   triggerModeUnknown: "settings.error.triggerModeUnknown",
+  /** Review gate + owner allowlist (migration 0045). */
+  checkScoreInvalid: "settings.error.checkScoreInvalid",
+  checkVerdictUnknown: "settings.error.checkVerdictUnknown",
+  allowlistToggleInvalid: "settings.error.allowlistToggleInvalid",
+  fieldDuplicated: "settings.error.fieldDuplicated",
   unknownOperation: "settings.error.unknownOperation",
   githubMetadataRefreshFailed: "settings.error.githubMetadataRefreshFailed",
   /** Workspace review-concurrency cap (iteration spec §2.3). */
@@ -3148,6 +3157,16 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const installations = await apps.listInstallations(app.id);
     const deliveries = await apps.listRecentDeliveries(app.id, 10);
     const deliverySummary = await apps.deliverySummary(app.id);
+    // Migration 0045 configuration: the review gate, the owner allowlist and
+    // the cached GitHub visibility, read from the row this route has already
+    // resolved (the manager face cannot be built without the first two — a
+    // null means a concurrent delete, which the route's catch answers 500).
+    const checkGate = await apps.getCheckGate(app.id);
+    const allowlist = await apps.getAllowlist(app.id);
+    const githubVisibility = await apps.getGithubVisibility(app.id);
+    if (checkGate === null || allowlist === null) {
+      throw new Error(`app settings row ${app.id} vanished while reading its review gate`);
+    }
     const base = {
       // The stable workspace id the App belongs to (server-resolved scope,
       // never the request's path segment): with `app.id` it composes the
@@ -3168,6 +3187,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // by the column's CHECK enum, so the wire value is always one of
         // open | every_push | manual.
         review_trigger_mode: app.review_trigger_mode,
+        // Cached GitHub App visibility (migration 0045): null only when the
+        // row could not be read; 'unknown' = never probed / probe could not
+        // answer, which the SPA treats as "cannot prove private".
+        github_visibility: githubVisibility,
         // The cached public GitHub profile (migration 0019) —
         // every field nullable (NULL = never synced / absent upstream, the
         // old-row degradation) and present on BOTH faces (AC3: the
@@ -3322,6 +3345,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // (spec § Technical interfaces): the manage face's selector
       // choices — enabled registry entries only, as { id, enabled } rows.
       sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
+      // Migration 0045: the review gate (the Check's pass condition) and the
+      // owner allowlist (switch + accepted logins) — manager face only.
+      check_gate: { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+      allowlist: { enabled: allowlist.enabled, owners: [...allowlist.owners] },
     });
   } catch (err) {
     logSettingsFailure("api_render", gate.app.id, err);
@@ -4142,6 +4169,74 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.github_app_id, `Saved the ${image.id} runtime harness for ${appDisplayName(gate.app)}.`);
+  }
+  if (op === "save-check-gate") {
+    // The App's review gate (migration 0045): the score floor plus the set of
+    // verdicts that satisfy it. Both bounds are checked HERE — an invalid
+    // submission is a keyed 400 with zero writes (saveCheckGate re-validates
+    // as the backstop and the DDL CHECK is the last line for the score). An
+    // empty verdict set is legal and fails closed: no review can pass.
+    const rawScore = typeof form.min_score === "string" ? form.min_score.trim() : "";
+    if (!/^\d+$/.test(rawScore) || Number(rawScore) > 100) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.checkScoreInvalid);
+    }
+    // Repeated `pass_verdicts` fields are the shape this op expects (the SPA
+    // posts one per checked box); parseBody({ all: true }) aggregates them.
+    const rawVerdicts = form.pass_verdicts;
+    const submitted = rawVerdicts === undefined ? [] : Array.isArray(rawVerdicts) ? rawVerdicts : [rawVerdicts];
+    const unknownVerdict = submitted.find(
+      (entry) => typeof entry !== "string" || !PR_VERDICTS.includes(entry as PrVerdict),
+    );
+    if (unknownVerdict !== undefined) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.checkVerdictUnknown, {
+        verdict: typeof unknownVerdict === "string" ? unknownVerdict : "",
+        verdicts: PR_VERDICTS.join(", "),
+      });
+    }
+    const minScore = Number(rawScore);
+    const passVerdicts = submitted as PrVerdict[];
+    try {
+      await createAppsStore(gate.db).saveCheckGate(gate.app.id, { minScore, passVerdicts });
+    } catch (err) {
+      logSettingsFailure("save_check_gate", gate.app.id, err);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(
+      c,
+      gate.app.github_app_id,
+      `Saved the review gate for ${appDisplayName(gate.app)} — passes at ${minScore}+ points on: ${passVerdicts.join(", ") || "no verdicts"}.`,
+    );
+  }
+  if (op === "save-allowlist") {
+    // The App's owner allowlist (migration 0045): the switch plus the accepted
+    // owner logins, REPLACED as a set on every save (saveAllowlist
+    // delete-then-inserts in one batch), so removing an owner is the same
+    // submission as adding one. Enabled with an empty list refuses every
+    // owner — fail closed, and the SPA warns before save.
+    if (Array.isArray(form.owners)) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.fieldDuplicated, { field: "owners" });
+    }
+    const enabled = typeof form.enabled === "string" ? form.enabled : "";
+    if (enabled !== "1" && enabled !== "0") {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.allowlistToggleInvalid);
+    }
+    const ownerText = typeof form.owners === "string" ? form.owners : "";
+    // One login per line: blank lines are noise, duplicates collapse, the
+    // operator's order is kept.
+    const owners = [...new Set(ownerText.split("\n").map((line) => line.trim()).filter((line) => line !== ""))];
+    try {
+      await createAppsStore(gate.db).saveAllowlist(gate.app.id, { enabled: enabled === "1", owners });
+    } catch (err) {
+      logSettingsFailure("save_allowlist", gate.app.id, err);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(
+      c,
+      gate.app.github_app_id,
+      enabled === "1"
+        ? `Saved the owner allowlist for ${appDisplayName(gate.app)} — ${owners.length} ${owners.length === 1 ? "owner" : "owners"} accepted; every other owner is refused.`
+        : `Saved the owner allowlist for ${appDisplayName(gate.app)} — switched off; every owner is reviewed as before.`,
+    );
   }
   // Review fold-in: an unknown op is a validation failure like any
   // other — 400 with the reason.

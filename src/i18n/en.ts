@@ -607,6 +607,12 @@ export const en = {
         "This App already has the maximum of {limit} custom providers — remove one before materializing another (updating an existing declaration is always allowed). Nothing was stored.",
       runtimeHarnessUnknown: "Unknown or disabled runtime harness — nothing was stored.",
       triggerModeUnknown: "{mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
+      checkScoreInvalid: "The review gate score must be a whole number from 0 to 100. Nothing was stored.",
+      checkVerdictUnknown:
+        "{verdict} is not a review verdict — use one of: {verdicts}. Nothing was stored.",
+      allowlistToggleInvalid: "The owner allowlist switch must be on or off. Nothing was stored.",
+      fieldDuplicated:
+        "The {field} field was submitted more than once — resubmit the form with one value. Nothing was saved.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",

@@ -74,7 +74,10 @@ const detailPayload = (): SettingsManagePayload => ({
     last_webhook_at: null,
     sandbox_image_id: "omp",
     review_trigger_mode: "every_push",
+    github_visibility: "unknown",
   },
+  check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+  allowlist: { enabled: false, owners: [] },
   keys: [],
   model_chain: null,
   model_roles: {},
@@ -1979,6 +1982,7 @@ describe("GitHub App identity card", () => {
       github_html_url: null,
       github_avatar_url: null,
       github_metadata_synced_at: null,
+      github_visibility: "unknown",
       ...overrides,
     };
   }
