@@ -386,6 +386,13 @@ export type SettingsIdentityAppMeta = {
 export type GithubVisibility = "public" | "private" | "unknown";
 
 /**
+ * The review gate's verdict vocabulary, mirroring the engine `PR_VERDICTS`
+ * tuple the server validates against (`@mstar-harness/engine` is Node-only,
+ * so the browser bundle cannot import it). Keep the two in step.
+ */
+export const PR_VERDICTS = ["ship it", "needs fixes", "blocked", "incomplete"] as const;
+
+/**
  * The per-App review gate (migration 0045): the Check concludes `success`
  * only when the published verdict is one of `pass_verdicts` AND the tally
  * score is at least `min_score`. `pass_verdicts` is the engine `PR_VERDICTS`

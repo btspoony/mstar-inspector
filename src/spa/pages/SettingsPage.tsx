@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
-import { APP_VERSION } from "../../version";
 import {
   Button,
   CardContent,
@@ -32,6 +31,7 @@ import {
 } from "@design-system";
 import { AppAvatar } from "../components/AppAvatar";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
+import { GitHubMark } from "./LoginPage";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { fetchJson, postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
@@ -51,12 +51,14 @@ import {
   modelChainTabs,
   parseConcurrencySettings,
   parseStoredConcurrency,
+  PR_VERDICTS,
   removeChanged,
   REVIEW_TRIGGER_MODES,
   seatRoleValues,
   seatSelectValue,
   splitModelChain,
   type ChainTab,
+  type AllowlistSettings,
   type ConcurrencySettings,
   type ModelOptionGroup,
   type ReviewTriggerMode,
@@ -79,9 +81,8 @@ export type PendingAction =
  * a pure-ish presentational component — the data load, the page notice
  * channel, and the loading/error faces live on the AppDetailPage shell,
  * which threads the parsed payload, the model groups, the reload
- * callback, and the banner notice down here. The version footer stays
- * part of the settings tab; page wayfinding (the back link) moved to
- * the AppDetailPage shell.
+ * callback, and the banner notice down here. Page wayfinding (the back link)
+ * moved to the AppDetailPage shell.
  */
 function verifyReasonMessage(locale: SpaBoot["locale"], reason: string): string {
   if (reason === "invalid_key") return t(locale, "settings.verify.invalid_key");
@@ -193,7 +194,9 @@ export function SettingsView({
    * reads (POST success alone is not completion there); every other caller
    * renders the plain OpNotice and ignores it.
    */
-  async function submitSettings(fields: Record<string, string>): Promise<OpNotice & { reloaded: boolean }> {
+  async function submitSettings(
+    fields: Record<string, string> | URLSearchParams,
+  ): Promise<OpNotice & { reloaded: boolean }> {
     let status: number;
     let body: string;
     // The catch guards only the POST — a background reload never rejects:
@@ -345,16 +348,6 @@ export function SettingsView({
 
   const confirmCopy = pendingConfirmCopy(locale, appDisplayName(app), pending);
 
-  // Version footer: the deployment's current release from the
-  // generated src/version.ts surface — the same `vX.Y.Z` form as the
-  // /healthz field and release tags, so dashboard, health endpoint and
-  // tag reconcile by eye. Static build-time value.
-  const versionFooter = (
-    <p className="text-sm text-muted-foreground">
-      {t(locale, "settings.footer.version", { version: `v${APP_VERSION}` })}
-    </p>
-  );
-
   // Identity-only non-manager face: the payload carries the D4 identity
   // set ONLY (no ops stores, no `installations[]`), so the tab renders the
   // GitHub identity section and nothing else — no slug row (the AppDetailPage
@@ -372,7 +365,6 @@ export function SettingsView({
             canManage={false}
           />
         </div>
-        {versionFooter}
       </div>
     );
   }
@@ -383,9 +375,10 @@ export function SettingsView({
           by hairlines instead of one framed card per section. Sections are
           direct siblings so FlowSection's first/last edge trimming applies.
           Order and membership are the plan's: identity, runtime & harness,
-          configuration (providers, chains), seats, and the destructive ops
-          zone. The installations / deliveries face lives on its own 已安装 tab
-          (AppDetailPage). Every field, action and data flow is unchanged. */}
+          review gate, configuration (providers, chains), seats, and the
+          destructive ops zone. The installations / deliveries face lives on
+          its own 已安装 tab (AppDetailPage). Every field, action and data flow
+          is unchanged. */}
       <div className="flex flex-col">
         <AppInfoSection
           locale={locale}
@@ -401,6 +394,8 @@ export function SettingsView({
           onSettings={submitSettings}
           onTriggerMode={runTriggerMode}
         />
+
+        <ReviewGateSection locale={locale} payload={payload} onSettings={submitSettings} />
 
         <ProvidersSection
           locale={locale}
@@ -460,7 +455,6 @@ export function SettingsView({
           ) : null}
         </DialogContent>
       </Dialog>
-      {versionFooter}
     </div>
   );
 }
@@ -802,6 +796,247 @@ export function InstallationsSection({
           </ul>
         )}
       </div>
+    </FlowSection>
+  );
+}
+
+/**
+ * The Installed tab's first block: the shareable GitHub installation entry
+ * point. The href is derived from the cached GitHub slug; an App whose
+ * metadata has not synced yet has no slug, so the block explains that instead
+ * of rendering a dead link (`installations/new` needs a slug).
+ */
+export function AppInstallSection({
+  locale,
+  app,
+}: {
+  locale: SpaBoot["locale"];
+  app: SettingsManagePayload["app"];
+}) {
+  const slug = app.github_slug;
+  const name = appDisplayName(app);
+  const href = slug ? `https://github.com/apps/${encodeURIComponent(slug)}/installations/new` : null;
+  return (
+    <FlowSection title={t(locale, "settings.install")} subtitle={slug ? t(locale, "settings.installCopy") : undefined}>
+      <div className="flex items-start gap-4">
+        <GitHubMark className="size-10 shrink-0 text-(--text-muted)" />
+        <div className="flex min-w-0 flex-col gap-1">
+          <p className="font-semibold">{name}</p>
+          {href ? (
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex w-fit items-center gap-1.5 text-sm text-primary hover:underline"
+              aria-label={t(locale, "settings.installLinkAria", { name })}
+            >
+              {t(locale, "settings.installLink")}
+              <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            </a>
+          ) : (
+            <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
+          )}
+        </div>
+      </div>
+    </FlowSection>
+  );
+}
+
+/**
+ * The Installed tab's second block: the owner allowlist (it sits above the
+ * installation table and below the install link — owners arrive through
+ * installations). The caller hides it entirely for a private App, where the
+ * server ignores any stored rows. The switch and the logins save together:
+ * `enabled` rides as exactly one `"1"` / `"0"` field and `owners` as one
+ * newline-separated text field the server splits, trims and de-duplicates.
+ */
+export function AllowlistSection({
+  locale,
+  appId,
+  allowlist,
+  onReload,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  allowlist: AllowlistSettings;
+  onReload: (options?: { background?: boolean }) => Promise<boolean>;
+}) {
+  const [enabled, setEnabled] = useState(allowlist.enabled);
+  const [owners, setOwners] = useState(allowlist.owners.join("\n"));
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+  // Server-state mirror: the deps compare by content, so an unrelated
+  // background reload (same stored values) never discards unsaved typing,
+  // while this save's reload — or a failed one — resyncs from the row.
+  const storedOwners = allowlist.owners.join("\n");
+  useEffect(() => {
+    setEnabled(allowlist.enabled);
+    setOwners(storedOwners);
+  }, [allowlist.enabled, storedOwners]);
+
+  const listed = owners
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+
+  async function save(): Promise<void> {
+    setBusy(true);
+    try {
+      setNotice(
+        await postPinnedOutcome(
+          `${apiBase()}/apps/${encodeURIComponent(appId)}/settings`,
+          { op: "save-allowlist", enabled: enabled ? "1" : "0", owners },
+          locale,
+          () => onReload({ background: true }),
+        ),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <FlowSection title={t(locale, "settings.allowlist")} subtitle={t(locale, "settings.allowlistCopy")}>
+      <form
+        className="flex flex-col gap-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save();
+        }}
+      >
+        {/* The switch: a native binary control bound to its label — the house
+            primitives carry no switch, and a bespoke widget would duplicate
+            keyboard and state handling the platform already gets right. */}
+        <label className="flex w-fit items-center gap-2 text-sm font-medium">
+          <input
+            type="checkbox"
+            className="size-4 accent-(--tone-accent-solid)"
+            checked={enabled}
+            disabled={busy}
+            onChange={(event) => setEnabled(event.target.checked)}
+          />
+          {t(locale, "settings.allowlistEnable")}
+        </label>
+        {enabled ? (
+          <label className="flex flex-col gap-1.5 text-sm font-medium">
+            {t(locale, "settings.allowlistOwners")}
+            <textarea
+              className="min-h-28 w-full rounded-sm border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring disabled:pointer-events-none disabled:opacity-50"
+              value={owners}
+              disabled={busy}
+              onChange={(event) => setOwners(event.target.value)}
+            />
+          </label>
+        ) : null}
+        {enabled && listed.length === 0 ? (
+          <p role="status" className="text-sm text-(--tone-warn-fg)">
+            {t(locale, "settings.allowlistFailClosed")}
+          </p>
+        ) : null}
+        <div>
+          <Button type="submit" disabled={busy}>
+            {t(locale, "settings.allowlistSave")}
+          </Button>
+        </div>
+        <NoticeRegion notice={notice} />
+      </form>
+    </FlowSection>
+  );
+}
+
+/**
+ * The Settings tab's review gate (migration 0045): the score floor plus the
+ * verdicts that satisfy it — the App's Check pass condition. `pass_verdicts`
+ * rides as one repeated field per checked box (the shape the server
+ * aggregates); an empty selection is legal and fails closed, so no review can
+ * pass. Both bounds are re-validated server-side.
+ */
+export function ReviewGateSection({
+  locale,
+  payload,
+  onSettings,
+}: {
+  locale: SpaBoot["locale"];
+  payload: SettingsManagePayload;
+  onSettings: (fields: Record<string, string> | URLSearchParams) => Promise<OpNotice>;
+}) {
+  const gate = payload.check_gate;
+  const [score, setScore] = useState(String(gate.min_score));
+  const [verdicts, setVerdicts] = useState<string[]>([...gate.pass_verdicts]);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+  // Content-compared mirror, same discipline as the allowlist's: unrelated
+  // reloads keep unsaved edits; a landed save resyncs from the stored row.
+  const storedVerdicts = gate.pass_verdicts.join(",");
+  useEffect(() => {
+    setScore(String(gate.min_score));
+    setVerdicts([...gate.pass_verdicts]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gate.min_score, storedVerdicts]);
+
+  function toggle(verdict: string): void {
+    setVerdicts((current) =>
+      current.includes(verdict) ? current.filter((entry) => entry !== verdict) : [...current, verdict],
+    );
+  }
+
+  async function save(): Promise<void> {
+    const fields = new URLSearchParams({ op: "save-check-gate", min_score: score.trim() });
+    // One field per checked box, in the canonical vocabulary order.
+    for (const verdict of PR_VERDICTS) {
+      if (verdicts.includes(verdict)) fields.append("pass_verdicts", verdict);
+    }
+    setBusy(true);
+    try {
+      setNotice(await onSettings(fields));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <FlowSection title={t(locale, "settings.reviewGate")} subtitle={t(locale, "settings.reviewGateCopy")}>
+      <form
+        className="flex flex-col gap-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save();
+        }}
+      >
+        <label className="flex w-fit flex-col gap-1.5 text-sm font-medium">
+          {t(locale, "settings.reviewGateScore")}
+          <Input
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            value={score}
+            disabled={busy}
+            onChange={(event) => setScore(event.target.value)}
+          />
+        </label>
+        <fieldset className="flex flex-col gap-2">
+          <legend className="text-sm font-medium">{t(locale, "settings.reviewGateVerdicts")}</legend>
+          {PR_VERDICTS.map((verdict) => (
+            <label key={verdict} className="flex w-fit items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="size-4 accent-(--tone-accent-solid)"
+                checked={verdicts.includes(verdict)}
+                disabled={busy}
+                onChange={() => toggle(verdict)}
+              />
+              {verdict}
+            </label>
+          ))}
+        </fieldset>
+        <div>
+          <Button type="submit" disabled={busy}>
+            {t(locale, "settings.reviewGateSave")}
+          </Button>
+        </div>
+        <NoticeRegion notice={notice} />
+      </form>
     </FlowSection>
   );
 }

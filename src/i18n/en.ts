@@ -772,6 +772,27 @@ export const en = {
     // bypassing the 24h TTL; the success notice confirms the cache reloaded.
     appInfoRefresh: "Refresh from GitHub",
     appInfoRefreshDone: "Identity refreshed from GitHub.",
+    // Installed tab: the shareable GitHub installation entry point.
+    install: "Install",
+    installCopy: "Share this link with any GitHub account to install the App.",
+    installLink: "Open the installation page",
+    installLinkAria: "Install {name} on GitHub in a new tab",
+    installNoSlug:
+      "This App has no GitHub slug yet, so there is no installation link. Refresh the GitHub identity, then share the link.",
+    // Installed tab: the owner allowlist (migration 0045).
+    allowlist: "Owner allowlist",
+    allowlistCopy: "With the switch on, only these repository owners are reviewed.",
+    allowlistEnable: "Restrict reviews to allowlisted owners",
+    allowlistOwners: "Allowed owners (one GitHub login per line)",
+    allowlistFailClosed:
+      "The switch is on and the list is empty: every delivery is refused, so no review will run.",
+    allowlistSave: "Save allowlist",
+    // Settings tab: the review gate the Check reports (migration 0045).
+    reviewGate: "Review gate",
+    reviewGateCopy: "The Check passes only when the verdict is one of these and the score meets the floor.",
+    reviewGateScore: "Minimum score (0–100)",
+    reviewGateVerdicts: "Verdicts that pass",
+    reviewGateSave: "Save review gate",
     /**
      * Deployment version footer. `{version}` carries the
      * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the

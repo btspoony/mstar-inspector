@@ -649,6 +649,25 @@ export const zhCN: Dictionary = {
     // 成功提示确认缓存已重载。
     appInfoRefresh: "从 GitHub 刷新",
     appInfoRefreshDone: "已从 GitHub 刷新身份。",
+    // 已安装标签页：可分享的 GitHub 安装入口。
+    install: "安装",
+    installCopy: "把此链接交给任意 GitHub 账号，即可在该账号上安装此 App。",
+    installLink: "打开安装页面",
+    installLinkAria: "在新标签页中于 GitHub 安装 {name}",
+    installNoSlug: "此 App 尚无 GitHub slug，因此没有安装链接。请先刷新 GitHub 身份，再分享链接。",
+    // 已安装标签页：仓库所有者允许名单（迁移 0045）。
+    allowlist: "所有者允许名单",
+    allowlistCopy: "开关打开时，仅审查这些仓库所有者发起的交付。",
+    allowlistEnable: "仅审查允许名单中的所有者",
+    allowlistOwners: "允许的所有者（每行一个 GitHub 登录名）",
+    allowlistFailClosed: "开关已打开但名单为空：所有交付都会被拒绝，不会有任何审查运行。",
+    allowlistSave: "保存允许名单",
+    // 设置标签页：Check 所报告的审查门禁（迁移 0045）。
+    reviewGate: "审查门禁",
+    reviewGateCopy: "仅当结论属于以下之一且分数达到下限时，Check 才通过。",
+    reviewGateScore: "最低分数（0–100）",
+    reviewGateVerdicts: "可通过的结论",
+    reviewGateSave: "保存审查门禁",
     // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
     // 与 /healthz 字段及 release tag 同形。
     footer: {

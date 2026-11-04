@@ -16,7 +16,6 @@ import { type Element as DomElement } from "happy-dom";
 import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { t, type DictionaryKey } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
-import { APP_VERSION } from "../../src/version";
 import { PROVIDER_CATALOG, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
 import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta, type SettingsManagePayload } from "../../src/spa/pages/data";
 import {
@@ -1896,29 +1895,6 @@ describe("settings header typography", () => {
     // render carries the FULL settings tab body, so the old page heading and
     // every card behind it are observed at once.
     expect(shell).not.toContain("text-lg");
-  });
-});
-
-describe("version footer", () => {
-  test("the settings page footer renders the generated version surface via the dictionary", () => {
-    const source = readSettingsSource();
-    // The display reads the generated single-writer surface (src/version.ts) —
-    // never a second hardcoded version string in the SPA.
-    expect(source).toContain('import { APP_VERSION } from "../../version";');
-    // Rendered value is the v-prefixed form, same shape as the /healthz field
-    // and release tags, interpolated through the bilingual footer key.
-    expect(source).toContain('{t(locale, "settings.footer.version", { version: `v${APP_VERSION}` })}');
-    // Footer slot is the page's small-print paragraph carrying the version
-    // copy; its tone is the page's own face, not a test oracle.
-    expect(source).toContain('<p className="text-sm');
-  });
-
-  test("the footer copy is dictionary-backed in both locales and carries the deployed version", () => {
-    const shown = `v${APP_VERSION}`;
-    expect(t("en", "settings.footer.version", { version: shown })).toBe(`Version ${shown}`);
-    expect(t("zh_CN", "settings.footer.version", { version: shown })).toBe(`版本 ${shown}`);
-    expect(t("en", "settings.footer.version", { version: shown })).toContain(shown);
-    expect(t("zh_CN", "settings.footer.version", { version: shown })).toContain(shown);
   });
 });
 
