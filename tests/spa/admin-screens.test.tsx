@@ -497,7 +497,7 @@ describe("Runtime screen", () => {
     await surface.type("#check-terminalize-budget", "12000");
     await surface.type("#check-update-budget", "7000");
     // The second form's submit button is the budget save.
-    const budgetForm = surface.container.querySelectorAll("form")[1]!;
+    const budgetForm = surface.container.querySelector("#check-terminalize-budget")!.closest("form")!;
     await surface.click(budgetForm.querySelector('button[type="submit"]'));
 
     expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
@@ -511,6 +511,31 @@ describe("Runtime screen", () => {
       (surface.container.querySelector("#check-terminalize-budget") as unknown as HTMLInputElement).value,
     ).toBe("12000");
     expect(surface.text()).toContain("Saved.");
+    await surface.close();
+  });
+
+  test("a refused budget pair reports the server's relation text inside the budget card", async () => {
+    // The store owns the terminalize>update rule; the card surfaces its text
+    // next to the fields that produced it, not as a page-wide banner.
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? new Response(
+            JSON.stringify({
+              error: "the terminalize timeout must be greater than the check update budget",
+            }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          )
+        : json(RUNTIME),
+    );
+    await surface.type("#check-terminalize-budget", "4000");
+    await surface.type("#check-update-budget", "5000");
+    const budgetForm = surface.container.querySelector("#check-terminalize-budget")!.closest("form")!;
+    await surface.click(budgetForm.querySelector('button[type="submit"]'));
+
+    expect(surface.text()).toContain("Could not change the check budgets.");
+    expect(surface.text()).toContain("the terminalize timeout must be greater than the check update budget");
+    // The rejected write never replaced the stored pair.
+    expect(surface.text()).toContain("Effective on the next review: terminalize 10000 ms, update 5000 ms.");
     await surface.close();
   });
 });

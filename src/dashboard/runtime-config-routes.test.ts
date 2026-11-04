@@ -436,6 +436,8 @@ describe("PATCH /_internal_admin/api/runtime checkBudgets", () => {
       JSON.stringify({ checkBudgets: { terminalizeMs: 10_000, updateMs: 15_001 } }),
       JSON.stringify({ checkBudgets: { terminalizeMs: "10000", updateMs: 5_000 } }),
       JSON.stringify({ checkBudgets: { terminalizeMs: 10_000 } }),
+      // Relation rule: the inline wait must exceed the bounded send.
+      JSON.stringify({ checkBudgets: { terminalizeMs: 1_000, updateMs: 1_000 } }),
       JSON.stringify({ checkBudgets: null }),
     ]) {
       const res = await runtimeApi(db, { method: "PATCH", body });

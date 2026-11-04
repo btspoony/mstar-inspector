@@ -2861,14 +2861,20 @@ async function processMessage(
               sandbox_id: sandboxId,
               attempt_id: attemptId,
             },
-            "check terminalize hook exceeded its budget (left to the invocation context)",
+            deps.background === undefined
+              ? "check terminalize hook exceeded its budget (detached; no invocation context to finish it)"
+              : "check terminalize hook exceeded its budget (left to the invocation context)",
           );
         },
       );
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(
-        { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+        {
+          ...(baseFields ?? payloadIdentityFields(payload)),
+          sandbox_id: sandboxId,
+          attempt_id: checkHandle?.attemptId,
+        },
         `check terminalize hook failed (isolated): ${detail}`,
       );
     }
@@ -3061,12 +3067,6 @@ async function processMessage(
     const concurrency = await readReviewConcurrency(deps.env.DB, workspaceId, {
       // ConsumerLog is contravariant against the reader's log: adapt on this
       // side instead of widening the reader — its fields ride this channel.
-      warn: (readerFields, msg) => deps.log.warn({ ...admissionFields, ...readerFields }, msg),
-    });
-    // §7.10 Check budgets: ONE read per message, beside the admission caps and
-    // after the level, so the begin hook and every terminal path share the same
-    // operator-configured pair.
-    checkBudgets = await readCheckBudgets(deps.env.DB, {
       warn: (readerFields, msg) => deps.log.warn({ ...admissionFields, ...readerFields }, msg),
     });
     const inflightKey: InflightKey = {
@@ -3480,6 +3480,13 @@ async function processMessage(
     // fully operational; hook failure is isolated and cannot prevent the
     // review (step 5).
     if (deps.checks !== undefined) {
+      // §7.10 Check budgets: ONE read per message, taken only once this
+      // message can actually produce a Check — a refused or duplicate delivery
+      // never pays for it. Every terminal path below shares this pair.
+      checkBudgets = await readCheckBudgets(deps.env.DB, {
+        warn: (readerFields, msg) =>
+          deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
+      });
       // One latch per `begin` call, created HERE and never stored anywhere: a
       // later message cannot clear or reuse it, so a detached begin from this
       // message stays abandoned for its whole lifetime (QC1-001 replacement

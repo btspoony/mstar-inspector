@@ -522,6 +522,15 @@ export async function setCheckBudgets(
       `check update budget must be an integer in ${CHECK_UPDATE_MIN}..${CHECK_UPDATE_MAX}`,
     );
   }
+  // The inline wait must contain the send it bounds. The refusal states the
+  // RELATION only — echoing the other stored value would disclose a number the
+  // caller did not supply.
+  if (value.terminalizeMs <= value.updateMs) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      "the terminalize timeout must be greater than the check update budget",
+    );
+  }
   const now = new Date().toISOString();
   await db.batch([
     db

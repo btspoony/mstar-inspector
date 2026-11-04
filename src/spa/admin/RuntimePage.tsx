@@ -24,7 +24,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [terminalizeDraft, setTerminalizeDraft] = useState<string | null>(null);
   const [updateDraft, setUpdateDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
+  // the terminalize/update relation included — reads as that field's error
+  // instead of a page-wide banner.
+  const [notice, setNotice] = useState<{
+    kind: "success" | "error";
+    message: string;
+    source: "concurrency" | "checkBudgets";
+  } | null>(null);
 
   async function onSubmit(
     event: FormEvent<HTMLFormElement>,
@@ -46,7 +53,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       // flag that made the field start empty.
       update((data) => ({ ...data, concurrency: saved, degraded: false }));
       setDraft(null);
-      setNotice({ kind: "success", message: t(locale, "admin.runtime.concurrencySaved") });
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.concurrencySaved"),
+        source: "concurrency",
+      });
     } catch (error) {
       // Generic message primary, the server's own refusal text as secondary detail.
       const generic = t(locale, "admin.runtime.concurrencyFailed");
@@ -56,6 +67,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           error instanceof AdminWriteError
             ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
             : generic,
+        source: "concurrency",
       });
     } finally {
       setBusy(false);
@@ -86,7 +98,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       update((data) => ({ ...data, checkBudgets: saved }));
       setTerminalizeDraft(null);
       setUpdateDraft(null);
-      setNotice({ kind: "success", message: t(locale, "admin.runtime.checkSaved") });
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.checkSaved"),
+        source: "checkBudgets",
+      });
     } catch (error) {
       const generic = t(locale, "admin.runtime.checkFailed");
       setNotice({
@@ -95,6 +111,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           error instanceof AdminWriteError
             ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
             : generic,
+        source: "checkBudgets",
       });
     } finally {
       setBusy(false);
@@ -122,7 +139,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const budgets = data.checkBudgets;
           return (
           <div className="flex flex-col gap-4">
-            {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
             <SectionCard tier="secondary">
               <CardHeader>
                 <SectionCardTitle>{t(locale, "admin.runtime.concurrencyTitle")}</SectionCardTitle>
@@ -131,6 +147,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 <p className="text-sm text-muted-foreground">
                   {t(locale, "admin.runtime.concurrencyDescription")}
                 </p>
+                {notice?.source === "concurrency" ? (
+                  <div className="mt-4">
+                    <PageNotice kind={notice.kind} message={notice.message} />
+                  </div>
+                ) : null}
                 {data.degraded ? (
                   // The stored cap could not be trusted, so `data.concurrency` is
                   // the conservative fallback: showing it as the current value
@@ -186,6 +207,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 <p className="text-sm text-muted-foreground">
                   {t(locale, "admin.runtime.checkDescription")}
                 </p>
+                {notice?.source === "checkBudgets" ? (
+                  <div className="mt-4">
+                    <PageNotice kind={notice.kind} message={notice.message} />
+                  </div>
+                ) : null}
                 {budgets.degraded ? (
                   // Both numbers are the documented defaults, not the stored
                   // setting: the form starts empty so a save cannot pin them.

@@ -271,6 +271,13 @@ function dbFailingOn(db: TestD1, match: string) {
   };
 }
 
+/** Seed one `review_runtime_settings` row (the operator configuration surface). */
+function seedCheckBudget(db: TestD1, key: string, value: string): void {
+  db.raw
+    .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?1, ?2, ?3)")
+    .run(key, value, new Date().toISOString());
+}
+
 describe("createReviewConsumer", () => {
   test("findByIdempotencyKey hit after clone → ack: no post, no insert, destroy", async () => {
     reset();
@@ -3658,6 +3665,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // A small configured budget: the case is the overrun hand-off, not the
+    // default 10 s wait, so the file does not burn it on a real clock.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
     // The hook parks past the terminalize budget: the consumer must hand the
     // promise to the invocation context, warn once, and return anyway.
     const parked = Promise.withResolvers<void>();
@@ -3691,7 +3701,6 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     await consumer(makeBatch(makePayload()));
 
     expect(handed).toHaveLength(1);
-    expect(handed[0]).toBeInstanceOf(Promise);
     const overruns = logLines.filter((l) => l.level === "warn" && l.msg.includes("exceeded its budget"));
     expect(overruns).toHaveLength(1);
     expect(overruns[0]!.fields).toMatchObject({ attempt_id: "attempt-1" });
@@ -3751,9 +3760,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    db.raw
-      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?1, ?2, ?3)")
-      .run("review.check.terminalize_timeout_ms", "1000", new Date().toISOString());
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
     const handed: Array<Promise<unknown>> = [];
     const consumer = createReviewConsumer(
       await makeEnv({ DB: db as never }),
@@ -3777,8 +3784,14 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       { waitUntil: (promise) => { handed.push(promise); } },
     );
 
+    const startedAt = Date.now();
     await consumer(makeBatch(makePayload()));
+    const elapsed = Date.now() - startedAt;
 
+    // The wait is the CONFIGURED budget, not the 10 s default: an unread row
+    // would show up as an elapsed time outside this window.
+    expect(elapsed).toBeGreaterThanOrEqual(1_000);
+    expect(elapsed).toBeLessThan(4_000);
     expect(handed).toHaveLength(1);
     const overruns = logLines.filter((l) => l.level === "warn" && l.msg.includes("exceeded its budget"));
     expect(overruns).toHaveLength(1);

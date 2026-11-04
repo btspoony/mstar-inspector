@@ -543,6 +543,23 @@ describe("check budgets", () => {
     expect(auditRows(db)).toEqual([]);
   });
 
+  test("a pair whose wait does not exceed the send budget is refused with the relation only", async () => {
+    const db = fixture();
+    for (const pair of [
+      { terminalizeMs: 5_000, updateMs: 5_000 },
+      { terminalizeMs: 4_000, updateMs: 5_000 },
+    ]) {
+      const error = await setCheckBudgets(db, pair, ACTOR).catch((thrown: unknown) => thrown);
+      expect(error).toBeInstanceOf(RuntimeConfigError);
+      // The refusal states the RELATION, never the other stored value.
+      expect((error as Error).message).toBe(
+        "the terminalize timeout must be greater than the check update budget",
+      );
+    }
+    expect(storedBudgetsRaw(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+
   test("an accepted pair lands both rows with one audit row, and reads back", async () => {
     const db = fixture();
     expect(await setCheckBudgets(db, { terminalizeMs: 12_000, updateMs: 7_000 }, ACTOR)).toEqual({

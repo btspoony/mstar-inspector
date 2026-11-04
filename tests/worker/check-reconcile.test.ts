@@ -2681,7 +2681,7 @@ describe("configured Check update budget (spec §7.10)", () => {
     };
   }
 
-  test("the operator-configured value reaches the credential lane, one read per run", async () => {
+  test("the operator-configured value reaches the credential lane", async () => {
     const db = seededDb();
     db.raw
       .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?1, ?2, ?3)")
