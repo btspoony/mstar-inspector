@@ -2366,12 +2366,18 @@ row expires.
   400, never clamped; lowering the system cap below an existing workspace value
   needs no workspace write — `min` applies the system value from the next
   message on.
+- Migration `0043` rewrites every stored workspace value above `32` (legal
+  under the previous `1..64` range) down to `32` when it applies. This is a
+  one-time, customer-visible lowering of an existing setting, performed at
+  deploy time; the tenant's card shows the clamped value afterwards.
 - Every accepted write lands with its `platform_audit_events` row (actor
   included) in one D1 batch; a refused write changes no row and audits
   nothing.
-- Each Worker reads **its own** D1, so a cap is set per environment; these
-  caps are business quotas, and neither can exceed the deploy-time queue
-  ceiling (§ Queue consumer concurrency).
+- Each Worker reads **its own** D1, so a cap is set per environment. These are
+  business quotas: the workspace cap can never exceed the system quota, and the
+  system quota may exceed the deploy-time queue ceiling (§ Queue consumer
+  concurrency) — in that case the platform delivers at most the ceiling, so the
+  quota is the bound that first applies only below it.
 - A read failure, or a stored value the reader cannot trust, answers the
   conservative cap **1** (serial) and logs ONE `review_concurrency_degraded`
   warn carrying `workspace_id` and `effective` — the gate degrades to serial,

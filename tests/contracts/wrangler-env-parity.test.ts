@@ -27,7 +27,6 @@ import {
   QUEUE_CONCURRENCY_CEILING,
   SYSTEM_CONCURRENCY_MAX,
   WORKSPACE_CONCURRENCY_MAX,
-  isConcurrencyValue,
 } from "../../src/dashboard/runtime-config-store";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -295,15 +294,13 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
    * unreachable at admission. Asserted through the predicate the writes and
    * reads actually run, so the bound is behaviour rather than a re-statement of
    * the constant that defines it. */
-  test("the accepted cap ranges end at their maxima, and the queue ceiling stays deployable", () => {
+  test("the system quota may exceed the queue ceiling, and never falls below it", () => {
     // The system quota may name more than the queue can saturate (256 vs 250):
     // the difference is a documented, intentional gap, never a config drift.
+    // The accepted ranges themselves are driven through the real write
+    // predicates in runtime-config-store.test.ts, not re-stated here.
     expect(SYSTEM_CONCURRENCY_MAX).toBeGreaterThanOrEqual(QUEUE_CONCURRENCY_CEILING);
-    expect(isConcurrencyValue(SYSTEM_CONCURRENCY_MAX, SYSTEM_CONCURRENCY_MAX)).toBe(true);
-    expect(isConcurrencyValue(SYSTEM_CONCURRENCY_MAX + 1, SYSTEM_CONCURRENCY_MAX)).toBe(false);
-    expect(isConcurrencyValue(WORKSPACE_CONCURRENCY_MAX, WORKSPACE_CONCURRENCY_MAX)).toBe(true);
-    expect(isConcurrencyValue(WORKSPACE_CONCURRENCY_MAX + 1, WORKSPACE_CONCURRENCY_MAX)).toBe(false);
-    expect(isConcurrencyValue(0, SYSTEM_CONCURRENCY_MAX)).toBe(false);
+    expect(WORKSPACE_CONCURRENCY_MAX).toBeLessThanOrEqual(SYSTEM_CONCURRENCY_MAX);
   });
 
   /** A second/unregistered container entry must fail the lock, not hide behind

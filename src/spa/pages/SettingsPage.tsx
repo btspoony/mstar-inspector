@@ -1148,7 +1148,9 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         // `degraded` is NOT cleared here: it reports that some stored level could
         // not be read, and a workspace write does not repair an unreadable system
         // row — which is precisely the level that keeps reviews serial.
-        setLoaded((previous) => previous && { ...previous, concurrency: stored });
+        // `aboveLimit` IS cleared: the write predicate admitted this value
+        // against the cap in force, so the stored value is no longer above it.
+        setLoaded((previous) => previous && { ...previous, concurrency: stored, aboveLimit: false });
         setDraft(null);
       }
       setConcurrencyNotice(outcome);

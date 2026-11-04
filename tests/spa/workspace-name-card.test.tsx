@@ -389,6 +389,12 @@ describe("workspace name card", () => {
         },
       ]);
       expect(container.textContent).toContain(t("en", "workspace.concurrencySaved"));
+      // The accepted write proves the stored value is no longer above the cap
+      // in force: the warning is gone and an untouched Save is enabled again.
+      expect(container.textContent).not.toContain(
+        t("en", "workspace.concurrencyStoredAboveSystem", { stored: 3 }),
+      );
+      expect(save.disabled).toBe(false);
 
       await act(async () => root.unmount());
     } finally {

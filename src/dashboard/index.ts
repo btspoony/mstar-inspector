@@ -2329,7 +2329,9 @@ const workspaceConcurrencyReadRoute = async (c: DashboardContext) => {
     degraded: caps.degraded,
     // Only the fact that the stored value is above what currently applies:
     // the system number itself is platform data and stays out of this face.
-    aboveLimit: caps.workspace > Math.min(caps.system, WORKSPACE_CONCURRENCY_MAX),
+    // The read path already rejects a workspace value above its own maximum
+    // (degraded → 1), so the system cap is the only bound left to compare.
+    aboveLimit: caps.workspace > caps.system,
   });
 };
 
