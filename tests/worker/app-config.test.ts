@@ -58,7 +58,7 @@ import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../.
 import { composeModelOptions, findFailingSelector } from "../../src/dashboard/model-membership";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
 import { createSecretbox } from "../../src/dashboard/secretbox";
-import { ALLOWLIST_MAX_OWNERS } from "../../src/dashboard/index";
+import { ALLOWLIST_MAX_OWNERS } from "../../src/dashboard/apps-store";
 import { PROVIDERS } from "../../src/pipeline/provider-catalog";
 import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../packages/runner/src/runtime-omp";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";

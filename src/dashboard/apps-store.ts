@@ -84,7 +84,8 @@
  *   - getAllowlist / saveAllowlist (migration 0045) are the owner allowlist
  *     face: the switch is App configuration and the owner set is REPLACED
  *     (delete-then-insert in ONE batch), never merged; saveAllowlist refuses
- *     a soft-deleted or unknown App before writing (the setAppStatus rule).
+ *     a deduped set past ALLOWLIST_MAX_OWNERS and a soft-deleted or unknown
+ *     App before writing (the setAppStatus rule).
  *   - getGithubVisibility / saveGithubVisibility (migration 0045) are the
  *     cached App-visibility face: NULL reads as 'unknown', and the writer is
  *     the metadata refresh's anonymous probe — machine-triggered, so like
@@ -308,6 +309,15 @@ export type AppAllowlist = {
   enabled: boolean;
   owners: readonly string[];
 };
+
+/**
+ * The owner allowlist's accepted size: the whole set is replaced inside ONE D1
+ * batch, so an unbounded paste would build an arbitrarily large batch. 100
+ * covers every realistic shared install. Enforced by `saveAllowlist` (the
+ * layer that states the batch-size invariant) and, for the operator-facing
+ * 400, by the settings route.
+ */
+export const ALLOWLIST_MAX_OWNERS = 100;
 
 /**
  * Collapse the allowlist owner set: GitHub logins are case-insensitive, so
@@ -1050,7 +1060,10 @@ export function createAppsStore(db: AppsStoreD1) {
      * case-sensitive; an empty set is legal and, with the switch on, refuses
      * every owner (fail closed).
      * Refuses a soft-deleted or unknown App BEFORE writing (the setAppStatus
-     * rule) and writes updated_at (an operator mutation). Returns whether the
+     * rule) and writes updated_at (an operator mutation). Refuses a collapsed
+     * set larger than ALLOWLIST_MAX_OWNERS, also before any read: this method
+     * is where the one-batch bound is documented, so it enforces it for direct
+     * callers too. Returns whether the
      * App row was still live when the batch ran: every batch statement — the
      * DELETE, each INSERT and the UPDATE — repeats the `deleted_at IS NULL`
      * predicate, so a delete landing between the pre-read and the batch writes
@@ -1058,12 +1071,19 @@ export function createAppsStore(db: AppsStoreD1) {
      * reports `false` instead of a save that never took effect.
      */
     async saveAllowlist(id: string, allowlist: AppAllowlist): Promise<boolean> {
+      // Collapse first: the INSERT count is the deduped set, so duplicates
+      // must not consume the budget.
+      const owners = dedupeOwnerLogins(allowlist.owners);
+      if (owners.length > ALLOWLIST_MAX_OWNERS) {
+        throw new Error(
+          `apps-store: owner allowlist holds ${owners.length} logins, above ALLOWLIST_MAX_OWNERS (${ALLOWLIST_MAX_OWNERS}) — zero rows written`,
+        );
+      }
       const live = await db
         .prepare(`SELECT id FROM github_apps WHERE id = ? AND deleted_at IS NULL`)
         .bind(id)
         .first<{ id: string }>();
       if (!live) return false;
-      const owners = dedupeOwnerLogins(allowlist.owners);
       // Every statement repeats the liveness predicate: a soft delete landing
       // between the pre-read and the batch then writes NO owner rows and does
       // not flip the switch, instead of leaving a deleted App's list behind.

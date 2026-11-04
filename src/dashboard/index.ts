@@ -62,6 +62,7 @@ import {
 } from "./manifest";
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";
 import {
+  ALLOWLIST_MAX_OWNERS,
   createAppsStore,
   dedupeOwnerLogins,
   REVIEW_TRIGGER_MODES,
@@ -2796,13 +2797,6 @@ function settingsRemoveResponse(
   }
   return c.json({ changed, message }, 200);
 }
-
-/**
- * The owner allowlist's accepted size (the `save-allowlist` route): the whole
- * set is replaced inside ONE D1 batch, so an unbounded paste would build an
- * arbitrarily large batch. 100 covers every realistic shared install.
- */
-export const ALLOWLIST_MAX_OWNERS = 100;
 
 /**
  * (audit UI-45-03): machine-readable 400 keys for the settings

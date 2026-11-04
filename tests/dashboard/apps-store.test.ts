@@ -12,7 +12,8 @@
  *     score and an off-vocabulary verdict leave the stored gate untouched;
  *   - saveAllowlist REPLACES the owner set in one batch (a removal is written
  *     by the same operation that adds), collapses duplicates and keeps an
- *     empty set meaningful;
+ *     empty set meaningful; a deduped set past ALLOWLIST_MAX_OWNERS throws
+ *     before any read;
  *   - both writers refuse an unknown or soft-deleted App with no rows written;
  *   - visibility round-trips and reads `unknown` for a never-probed row.
  *
@@ -21,7 +22,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { ALLOWLIST_MAX_OWNERS, createAppsStore } from "../../src/dashboard/apps-store";
 import type { D1Like } from "../../src/store/types";
 import type { TestD1 } from "../store/helpers";
 
@@ -162,6 +163,31 @@ describe("owner allowlist (migration 0045)", () => {
     expect(await store.saveAllowlist("unknown-app", { enabled: true, owners: ["acme"] })).toBe(false);
     const rows = db.raw.query("SELECT COUNT(*) AS n FROM app_owner_allowlist").get() as { n: number };
     expect(rows.n).toBe(0);
+  });
+
+  test("refuses an over-cap owner set before any read or write", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, "app-allow-cap", { githubAppId: 5104 });
+    const store = createAppsStore(db);
+    const oversized = Array.from({ length: ALLOWLIST_MAX_OWNERS + 1 }, (_, index) => `owner-${index}`);
+
+    // Thrown, not `false`: the caller asked for more than the method's
+    // one-batch contract carries. It runs BEFORE the liveness pre-read, so an
+    // unknown App throws the same error instead of reporting `false`.
+    await expect(store.saveAllowlist("app-allow-cap", { enabled: true, owners: oversized })).rejects.toThrow(
+      /ALLOWLIST_MAX_OWNERS/,
+    );
+    await expect(store.saveAllowlist("unknown-app", { enabled: true, owners: oversized })).rejects.toThrow(
+      /ALLOWLIST_MAX_OWNERS/,
+    );
+    expect(await store.getAllowlist("app-allow-cap")).toEqual({ enabled: false, owners: [] });
+
+    // Duplicates collapse first, so they never consume the batch budget.
+    const atCap = oversized.slice(0, ALLOWLIST_MAX_OWNERS);
+    expect(await store.saveAllowlist("app-allow-cap", { enabled: true, owners: [...atCap, ...atCap] })).toBe(true);
+    const stored = await store.getAllowlist("app-allow-cap");
+    expect(stored?.enabled).toBe(true);
+    expect(stored?.owners).toHaveLength(ALLOWLIST_MAX_OWNERS);
   });
 
   test("a soft-delete landing after the pre-read reports false and writes nothing at all", async () => {
