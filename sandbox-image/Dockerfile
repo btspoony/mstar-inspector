@@ -7,9 +7,13 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the runner's pinned engine moves to 4.2.0 (`packages/runner/package.json`
+# and its lockfile are image inputs, so the container must be rebuilt with them).
+# rebuild: the image's CLI pin and harness clone ref move to 4.2.0
+# (`sandbox-image/cli-global/**` and the pinned ref are image inputs too).
 # rebuild: the runner stopped requiring a seat summary — the review body is the
 # engine's own layout now instead of a consumer rebuild of it, so the two halves
-# of that change (the 4.1.6 pin above and the no-longer-required output field)
+# of that change (the 4.1.6 harness pin and the no-longer-required output field)
 # must ship together.
 # rebuild: the runner hands the SDK a callable extension-roots accessor — the
 # pinned SDK reads a getter and calls it as a method, which killed every seat
@@ -149,7 +153,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref c5937bc2b0117cbdad7d0461d37338faefa98bca (tag v4.1.6, bumped 2026-11-03).
+# mstar-harness plugin, pinned ref dac1c781bad900f938d7a752222b9f139dc42222 (tag v4.2.0, bumped 2026-11-04).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -160,7 +164,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin c5937bc2b0117cbdad7d0461d37338faefa98bca \
+    && git -C /opt/mstar-harness fetch --depth 1 origin dac1c781bad900f938d7a752222b9f139dc42222 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && git -C /opt/mstar-harness rev-parse HEAD > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git

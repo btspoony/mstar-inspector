@@ -105,7 +105,7 @@ export type SandboxImagePins = {
  * the Dockerfile's `ref`/`tag` pair, the engine manifest and the lock rows to
  * this value.
  */
-export const HARNESS_VERSION = "4.1.6";
+export const HARNESS_VERSION = "4.2.0";
 
 /** The `omp` image's build pins — the single declaration of its versioned inputs. */
 export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
@@ -115,7 +115,7 @@ export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
   bunVersion: "1.4.0",
   ghVersion: "2.98.0",
   harnessVersion: HARNESS_VERSION,
-  harnessRef: "c5937bc2b0117cbdad7d0461d37338faefa98bca",
+  harnessRef: "dac1c781bad900f938d7a752222b9f139dc42222",
   harnessCliVersion: HARNESS_VERSION,
 });
 
