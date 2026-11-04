@@ -983,11 +983,12 @@ describe("runner entry — --report-out channel", () => {
     expect(Object.keys(runInputs[0]!)).not.toContain("prContext");
   });
 
-  test("--report-out write failure → exit 1, stdout empty, stderr diagnostic", async () => {
+  test("--report-out write failure → structured warn, envelope still printed, exit 0", async () => {
     fakeEnvelope = ENVELOPE;
     fakeReport = REPORT_DOC;
     // A path under a missing parent clears cleanly and then fails the WRITE
-    // (ENOENT), which is the I-O failure under test.
+    // (ENOENT). The report is narrative only: losing it degrades the sections
+    // to `none`, it never fails a review that already settled.
     const outDir = mkdtempSync(join(tmpdir(), "report-out-"));
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, prContext: PR_CONTEXT });
     const { code, stdout, stderr } = await runCli([
@@ -999,9 +1000,13 @@ describe("runner entry — --report-out channel", () => {
       join(outDir, "missing", "report.json"),
     ]);
 
-    expect(code).toBe(1);
-    expect(stdout).toBe("");
-    expect(stderr).toContain("cannot write report output");
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    const warn = stderr
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((line) => line.event === "report_write_failed");
+    expect(warn?.reason).toContain("ENOENT");
   });
 
   test("a malformed prContext is a usage-level input error (exit 1, no run)", async () => {

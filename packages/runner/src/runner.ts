@@ -49,9 +49,11 @@
  *     No flag writes nothing — absent flag/file leaves legacy behavior
  *     byte-identical. MSTAR_RECHECK_STATUS_PATH redirects the status target
  *     for tests only: no test may write the path a real runner uses;
- *   - optional `--report-out <path>`: the same rule for the report side
- *     document — written only when the runtime produced a report, BEFORE the
- *     envelope reaches stdout, and a write failure exits 1 with no stdout.
+ *   - optional `--report-out <path>`: the OPTIONAL report side document —
+ *     written only when the runtime produced a report, BEFORE the envelope
+ *     reaches stdout. Unlike the recheck document it feeds narrative only, so
+ *     a write failure is a structured `report_write_failed` warn and the
+ *     validated envelope still publishes (exit 0); the sections render `none`.
  *     The side-channel targets this run uses (each `--*-out` path, plus the
  *     status path when a recheck flag was given) are REMOVED before the runtime
  *     starts: the paths are fixed, so a retry or a re-delivered job would
@@ -729,15 +731,21 @@ export async function main(
         }
       }
       // The optional --report-out file is written only when a report exists,
-      // and BEFORE the envelope reaches stdout — the same I-O rule as the
-      // recheck document: a write failure is exit 1 with no stdout, never a
-      // silent lie about a file the Worker will read back.
+      // and BEFORE the envelope reaches stdout. The report is OPTIONAL
+      // narrative: a write failure is logged and swallowed, so the validated
+      // envelope still publishes (exit 0) and the Worker renders `none` —
+      // never a failed review over a side document.
       if (reportOutPath !== undefined && report !== null) {
         try {
           writeFileSync(reportOutPath, JSON.stringify(report));
         } catch (error) {
-          console.error(`review: cannot write report output ${reportOutPath}: ${(error as Error).message}`);
-          return 1;
+          console.error(
+            JSON.stringify({
+              event: "report_write_failed",
+              path: reportOutPath,
+              reason: (error as Error).message,
+            }),
+          );
         }
       }
       // The STATUS is written AFTER the document succeeds (and whenever no
