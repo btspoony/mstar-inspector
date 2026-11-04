@@ -22,9 +22,10 @@
  *   - `container.exec(argv, { cwd, env, stdin })` runs ONE process — no
  *     implicit shell, no session state (0.12's `enableDefaultSession: false`
  *     becomes the platform default). `env` is per-call and does not inherit
- *     image `ENV` lines except `PATH`. `stdin` is the credential channel:
- *     `"pipe"` hands back the child's `WritableStream`, which the adapter
- *     writes once and CLOSES (the close is the EOF a reader waits for).
+ *     image `ENV` lines except `PATH`. `stdin` is the payload channel for the
+ *     credentials AND the runner-input document (`"pipe"`): it hands back the
+ *     child's `WritableStream`, which the adapter writes once and CLOSES (the
+ *     close is the EOF a reader waits for).
  *
  * Command-string boundary (scanner CWE-78 / qc2 F-001): 1.0 has no string-form
  * shell runner, so the validated shell string is wrapped ONCE below into the
@@ -76,7 +77,7 @@ export const MAX_EXEC_STDIN_BYTES = 2 * 1024 * 1024;
 export const MAX_EXEC_COMMAND_BYTES = 96 * 1024;
 
 /** Per-variable env bound, well below the same per-argument limit. */
-const MAX_EXEC_ENV_VALUE_BYTES = 8 * 1024;
+export const MAX_EXEC_ENV_VALUE_BYTES = 8 * 1024;
 
 /**
  * A shell command cleared for the sandbox sink (CWE-78 boundary). Branded so
@@ -138,10 +139,11 @@ const utf8Encoder = new TextEncoder();
  * Write one payload into the child's stdin and CLOSE it.
  *
  * Closing is what sends **EOF**: a reader that consumes stdin to the end (the
- * in-image runner reads its credential payload that way) would otherwise wait
- * until the exec bound fires — which reads as a timeout instead of an input
- * bug. The write is awaited, so the stream's own backpressure governs and a
- * payload larger than the pipe buffer cannot outrun the child.
+ * in-image runner reads its credential payload and its runner-input document
+ * that way) would otherwise wait until the exec bound fires — which reads as a
+ * timeout instead of an input bug. The write is awaited, so the stream's own
+ * backpressure governs and a payload larger than the pipe buffer cannot
+ * outrun the child.
  *
  * Errors are REDACTED: the writer's own error is discarded rather than
  * interpolated, so the payload can never surface in a diagnostic.
@@ -238,6 +240,15 @@ export class SandboxV1 extends DurableObject {
         throw new Error(`exec env ${name} is ${valueBytes} bytes, above the ${MAX_EXEC_ENV_VALUE_BYTES}-byte bound`);
       }
     }
+    // Every bound — including the stdin payload — runs BEFORE the container
+    // starts: a payload that can never be delivered must not start one. The
+    // encode still happens before `exec`, which is where it is written.
+    const stdinPayload = opts?.stdin === undefined ? undefined : utf8Encoder.encode(opts.stdin);
+    if (stdinPayload !== undefined && stdinPayload.byteLength > MAX_EXEC_STDIN_BYTES) {
+      throw new Error(
+        `the exec stdin payload is ${stdinPayload.byteLength} bytes, above the ${MAX_EXEC_STDIN_BYTES}-byte bound`,
+      );
+    }
     await this.ensureRunning();
     // Clamp before converting: a zero/negative value must never reach the argv
     // as a zero or negative duration (GNU `timeout 0` DISABLES the bound), and a
@@ -245,11 +256,6 @@ export class SandboxV1 extends DurableObject {
     const requestedMs = opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS;
     const timeoutMs = Number.isFinite(requestedMs) ? Math.max(1, requestedMs) : DEFAULT_EXEC_TIMEOUT_MS;
     const timeoutSeconds = timeoutMs / 1000;
-    // Fail closed BEFORE a process exists: an oversized payload never starts.
-    const stdinPayload = opts?.stdin === undefined ? undefined : utf8Encoder.encode(opts.stdin);
-    if (stdinPayload !== undefined && stdinPayload.byteLength > MAX_EXEC_STDIN_BYTES) {
-      throw new Error(`the exec stdin payload exceeds the ${MAX_EXEC_STDIN_BYTES}-byte bound`);
-    }
     const process = await this.container.exec(
       ["timeout", "--kill-after=5", String(timeoutSeconds), "/bin/sh", "-lc", command],
       {
