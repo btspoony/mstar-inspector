@@ -116,17 +116,22 @@ function openFoldCount(text: string): number {
   return (text.match(/<details>/g) ?? []).length - (text.match(/<\/details>/g) ?? []).length;
 }
 
-/** Close every fold `text` leaves open. */
-function closeOpenFolds(text: string): string {
-  return `${text}${"\n\n</details>".repeat(Math.max(0, openFoldCount(text)))}`;
-}
-
-/** Truncate summary_md to the body budget (char-based; GitHub counts chars). */
+/**
+ * Truncate summary_md to the body budget (char-based; GitHub counts chars).
+ * A narrative may carry its own fence or `<details>`; left open, the rest of
+ * the body renders inside it, so the cut closes both and pays for them.
+ */
 export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): string {
-  const cut = md.length <= limit ? md : `${md.slice(0, limit - 1)}…`;
-  // A narrative may carry its own `<details>`; a cut inside one would swallow
-  // the rest of the body.
-  return closeOpenFolds(cut);
+  if (md.length <= limit) return `${md}${closersFor(md)}`;
+  // Shortening the head can drop the opener a closer answered, so re-derive
+  // the closers on each shorter head until head + closers + "…" fits.
+  let head = md.slice(0, limit - 1);
+  for (;;) {
+    const closers = closersFor(head);
+    const next = head.slice(0, Math.max(0, limit - 1 - closers.length));
+    if (next === head) return `${head}${closers}…`;
+    head = next;
+  }
 }
 
 
@@ -212,6 +217,11 @@ function closerForOpenFence(text: string): string {
   return open === 0 ? "" : `\n${"`".repeat(open)}`;
 }
 
+/** Close whatever `text` leaves open: the fence first (it opened inside the fold), then every fold. */
+function closersFor(text: string): string {
+  return closerForOpenFence(text) + "\n\n</details>".repeat(Math.max(0, openFoldCount(text)));
+}
+
 /**
  * Cut `text` to `budget` chars, keeping the head — and close any fence and any
  * fold the cut left open. An unclosed `<details>` makes GitHub route the rest
@@ -224,8 +234,7 @@ function closerForOpenFence(text: string): string {
 function clampKeepingHead(text: string, budget: number): string {
   if (text.length <= budget) return text;
   const head = text.slice(0, Math.max(0, budget - 1));
-  // The fence opens INSIDE the fold, so it closes first.
-  const closers = closerForOpenFence(head) + "\n\n</details>".repeat(Math.max(0, openFoldCount(head)));
+  const closers = closersFor(head);
   const room = budget - 1 - closers.length;
   if (closers === "" || room <= 0) return `${head}…`;
   return `${head.slice(0, room)}${closers}…`;
