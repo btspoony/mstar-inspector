@@ -436,7 +436,7 @@ describe("incremental review rounds", () => {
     expect(storedContextIncomplete(db)).toBe(1);
   });
 
-  test("an empty increment FILE (empty capture and empty numstat) is nothing to review: ack, no publication, no context-incomplete, Check skipped", async () => {
+  test("an empty increment FILE (empty capture and empty numstat) is nothing to review: ack, no publication, no context-incomplete, Check inherits the reviewed head", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     sandbox.diffStdout = VALID_DIFF;
@@ -449,7 +449,7 @@ describe("incremental review rounds", () => {
     sandbox.numstatStdout = "";
     const db = await createSeededTestD1();
     seedReview(db, PREVIOUS_SHA);
-    const terminalized: Array<{ publicationId: string | null; outcome: string }> = [];
+    const terminalized: Array<{ publicationId: string | null; outcome: string; inheritedHeadSha?: string }> = [];
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
       checks: {
@@ -466,8 +466,12 @@ describe("incremental review rounds", () => {
           headSha: SHA,
           lease: { holder: "h", epoch: 1, untilMs: 1 },
         })),
-        terminalize: mock(async (input: { publicationId: string | null; outcome: string }) => {
-          terminalized.push({ publicationId: input.publicationId, outcome: input.outcome });
+        terminalize: mock(async (input: { publicationId: string | null; outcome: string; inheritedHeadSha?: string }) => {
+          terminalized.push({
+            publicationId: input.publicationId,
+            outcome: input.outcome,
+            inheritedHeadSha: input.inheritedHeadSha,
+          });
         }),
       },
     });
@@ -487,8 +491,9 @@ describe("incremental review rounds", () => {
     const noIncrement = logLines.filter((l) => l.fields.event === "review_no_increment");
     expect(noIncrement).toHaveLength(1);
     expect(noIncrement[0]!.fields.increment_since).toBe(PREVIOUS_SHA);
-    // The Check ends non-failing — never a failure over a round with nothing to do.
-    expect(terminalized).toEqual([{ publicationId: null, outcome: "skipped" }]);
+    // The Check is told WHICH reviewed head it inherits — the conclusion then
+    // comes from that head's row, never from a free-standing skip.
+    expect(terminalized).toEqual([{ publicationId: null, outcome: "skipped", inheritedHeadSha: PREVIOUS_SHA }]);
   });
 
   test("an over-size increment stdout copy is not a capture failure — numstat still reads the file", async () => {

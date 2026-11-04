@@ -26,7 +26,10 @@ category: Added
   sandbox cannot spend the review's window on narrative. The capture gate reserves the level's own runner
   budget as well, so a capture that fits but would starve the paid run is skipped too. An eligible increment
   base whose `base...head` is genuinely empty is nothing to review: the delivery is acked with one structured
-  line, no review body and no `context_incomplete` row, and its Check ends neutral rather than failed. The
+  line, no review body and no `context_incomplete` row, and its Check inherits the reviewed head's gate result
+  against the current gate (`success`/`failure`, naming that head and its verdict/score) instead of ending in a
+  free-standing `neutral` — an empty commit cannot replace the reviewed head's failing required check; only an
+  unreadable baseline result leaves it `neutral`. The
   report document's byte bound is derived from its per-field character budgets, so a document that honours
   every budget can never be rejected.
 
@@ -48,5 +51,7 @@ category: Added
   审查的 head 才能界定增量；当本轮剩余的墙钟时间不足以支付 PR 上下文抓取成本时，该步骤直接跳过并打一条具名
   日志，慢沙箱因此无法把审查窗口耗在叙述上。抓取门禁同时预留本档位 runner 自己的预算，因此“装得下抓取却会
   挤掉付费运行”的情况同样跳过。若合法增量基线的 `base...head` 确实为空，则视为无可审查内容：本次投递打一条
-  结构化日志后直接 ack，不发布新评论、不写 `context_incomplete` 行，Check 以 neutral 结束而非失败。报告文档
+  结构化日志后直接 ack，不发布新评论、不写 `context_incomplete` 行，其 Check 继承被审查 head 的 gate 结果
+  （按当前 gate 得出 `success`/`failure`，并写明该 head 及其 verdict/score），而不是以独立的 `neutral` 结束——
+  空提交无法替换被审查 head 那个失败的必需检查；只有基线结果不可读时才保持 `neutral`。报告文档
   的字节上限由各字段的字符预算推导而来，任何满足预算的文档都不可能被字节门拒绝。

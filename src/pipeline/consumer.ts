@@ -863,6 +863,12 @@ export type CheckLifecycleHooks = {
   }): Promise<CheckHandle | null>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
     outcome: CheckTerminalOutcome;
+    /**
+     * The reviewed head an EMPTY increment inherits: the Check carries that
+     * head's result against the current gate instead of a free-standing
+     * `neutral`. Omitted → nothing to inherit.
+     */
+    inheritedHeadSha?: string;
     /** The operator-configured bound on the terminal `checks.update` (spec §7.10). */
     updateBudgetMs: number }): Promise<void>;
 };
@@ -3214,6 +3220,7 @@ async function processMessage(
   const terminalizeCheck = async (
     publicationId: string | null,
     outcome: CheckTerminalOutcome,
+    inheritedHeadSha?: string,
   ): Promise<void> => {
     if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
     checkTerminalized = true;
@@ -3232,6 +3239,7 @@ async function processMessage(
         handle: checkHandle,
         publicationId,
         outcome,
+        ...(inheritedHeadSha === undefined ? {} : { inheritedHeadSha }),
         updateBudgetMs: budgets.updateMs,
       });
       const attemptId = checkHandle.attemptId;
@@ -4027,15 +4035,17 @@ async function processMessage(
     // content, so there is nothing to review. A verdict over an empty file
     // universe would be an assertion about nothing — and a `context-incomplete`
     // flag would wrongly exclude this head as a future increment base — so the
-    // round acks instead: no publication, no review row, and the Check ends
-    // non-failing. Empty stdout with a NON-empty numstat is the capture failure
-    // right below, which keeps its context-incomplete accounting.
+    // round acks instead: no publication, no review row. The Check carries the
+    // REVIEWED head's result against the current gate (an empty commit must
+    // never launder a failing baseline into a neutral required check). Empty
+    // stdout with a NON-empty numstat is the capture failure right below, which
+    // keeps its context-incomplete accounting.
     if (sinceSha !== null && incrementEmpty && numstatLines.length === 0) {
       deps.log.info(
         { ...fields, event: "review_no_increment", increment_since: sinceSha },
         `no increment to review — ${sinceSha.slice(0, 7)}..${headSha.slice(0, 7)} is empty and the last reviewed head already covers this content; acking without a new review`,
       );
-      await terminalizeCheck(null, "skipped");
+      await terminalizeCheck(null, "skipped", sinceSha);
       return { kind: "ok" };
     }
     if (sinceSha !== null && incrementEmpty) {

@@ -39,7 +39,11 @@
  *     when the review satisfies the App's configured gate (score floor plus
  *     passing verdicts); a missed gate, an unreadable review, a degraded
  *     publication and every unconfirmed or failed execution are `failure`.
- *     `neutral` is never produced.
+ *     An EMPTY increment has no review of its own, so it INHERITS the reviewed
+ *     head's result judged against the current gate — the same
+ *     success/failure rule — and concludes `neutral` ONLY when that baseline
+ *     result cannot be read. A skipped round may therefore never replace a
+ *     failing required Check for the same content with `neutral`.
  */
 
 import type { D1Like } from "../store/types";
@@ -49,6 +53,7 @@ import {
   CHECK_NAME,
   claimAttempt,
   deferCheckRecovery,
+  readInheritedReview,
   readPublicationProof,
   readPublishedReview,
   recordCheckObservation,
@@ -827,6 +832,20 @@ export const CHECK_SUMMARIES = {
   exhausted: "Finalization could not be confirmed. Manual inspection may be required.",
   /** Nothing to review: an eligible increment base with an empty `base...head`. */
   skipped: "No new changes since the last reviewed head; nothing to review for this head.",
+  /**
+   * An empty increment INHERITS the reviewed head's result (it has no review
+   * of its own to judge): the summary names both heads and the inherited
+   * verdict/score, and never claims an approval of this head.
+   */
+  inheritedGateMet: (head7: string, base7: string, verdict: string, score: number, gate: ReviewGate) =>
+    `No new changes at ${head7} (since ${base7}); the review gate result of ${base7} is inherited: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
+  inheritedGateMissed: (head7: string, base7: string, verdict: string, score: number, gate: ReviewGate) =>
+    `No new changes at ${head7} (since ${base7}); the review gate of ${base7} was missed: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
+  inheritedGateUnreadable: (head7: string, base7: string, reason: string) =>
+    `No new changes at ${head7} (since ${base7}); the review gate for ${base7} could not be evaluated — ${reason}.`,
+  /** The reviewed head itself has no readable result: there is nothing to inherit. */
+  inheritedUnreadable: (head7: string, base7: string) =>
+    `No new changes at ${head7} (since ${base7}); the reviewed head ${base7} has no readable review result, so no gate result could be inherited.`,
 } as const;
 
 /** The allowed-verdict list for a public summary — bounded even if a stored gate were malformed. */
@@ -858,7 +877,8 @@ export type CheckTerminalOutcome =
  * | degraded send rejected, no earlier unknown send                | failure |
  * | any send with unconfirmed result, or expired attempt w/o proof | failure |
  * | recovery exhausted                                             | proof-derived, else failure |
- * | nothing to review (`skipped`, no send possible)                | neutral |
+ * | empty increment: inherits the reviewed head's gate result      | success/failure |
+ * | empty increment with no readable baseline result               | neutral |
  *
  * Proof precedence (normal over degraded within the exact scope/SHA) lives in
  * `readPublicationProof`, which the caller uses to obtain `proof`; this
@@ -869,17 +889,25 @@ export type CheckTerminalOutcome =
  * and never falls back to the scope/SHA row); `null` or a null score is
  * UNREADABLE, never a pass. `gate` is the stored App gate; `null` is unreadable
  * CONFIGURATION and fails closed — there is no permissive default to fall back
- * to. `neutral` is unreachable: a degraded publication cannot prove the gate
- * was met (clarify C3).
+ * to. `neutral` is produced ONLY when there is no result to inherit at all
+ * (`inherited` set and the baseline review unreadable), because a degraded
+ * publication cannot prove the gate was met (clarify C3) and an empty
+ * increment must never launder a failing baseline into `neutral`.
  */
 export function decideConclusion(input: {
   proof: PublicationProof | null;
   outcome: CheckTerminalOutcome;
   gate: ReviewGate | null;
   review: PublishedReview | null;
+  /**
+   * Set for an EMPTY increment (`outcome: "skipped"`): the head under check
+   * and the reviewed head whose result it inherits. `gate` and `review` are
+   * then that head's row and the App's CURRENT gate.
+   */
+  inherited?: { headSha: string; reviewedHeadSha: string };
   reason?: string;
 }): CheckConclusion {
-  const { proof, outcome, gate, review } = input;
+  const { proof, outcome, gate, review, inherited } = input;
   if (proof !== null) {
     if (proof.kind === "degraded") {
       return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degraded };
@@ -904,8 +932,48 @@ export function decideConclusion(input: {
           summary: CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate),
         };
   }
-  // A round with nothing to review never had a send to lose: it is not an
-  // execution failure, so its own neutral conclusion is the honest one.
+  // An empty increment has no send of its own to lose, but its content IS the
+  // reviewed head's: the Check carries THAT head's result judged against the
+  // App's CURRENT gate. `neutral` only when the baseline result itself cannot
+  // be read — otherwise an empty commit could replace a failing required check
+  // with a neutral one. A non-passing verdict, an unreadable gate row and an
+  // unreadable score all fail closed, exactly as that head's own round did.
+  if (inherited !== undefined) {
+    const head7 = inherited.headSha.slice(0, 7);
+    const base7 = inherited.reviewedHeadSha.slice(0, 7);
+    if (review === null) {
+      return { desired: "neutral", title: CHECK_NAME, summary: CHECK_SUMMARIES.inheritedUnreadable(head7, base7) };
+    }
+    if (gate === null) {
+      return {
+        desired: "failure",
+        title: CHECK_NAME,
+        summary: CHECK_SUMMARIES.inheritedGateUnreadable(head7, base7, "the App's gate configuration could not be read"),
+      };
+    }
+    if (review.scorePct === null) {
+      return {
+        desired: "failure",
+        title: CHECK_NAME,
+        summary: CHECK_SUMMARIES.inheritedGateUnreadable(head7, base7, "the inherited review carries no readable score"),
+      };
+    }
+    const met = review.scorePct >= gate.minScore && gate.passVerdicts.includes(review.verdict);
+    return met
+      ? {
+          desired: "success",
+          title: CHECK_NAME,
+          summary: CHECK_SUMMARIES.inheritedGateMet(head7, base7, review.verdict, review.scorePct, gate),
+        }
+      : {
+          desired: "failure",
+          title: CHECK_NAME,
+          summary: CHECK_SUMMARIES.inheritedGateMissed(head7, base7, review.verdict, review.scorePct, gate),
+        };
+  }
+  // A round with nothing to review and no inheritable baseline never had a
+  // send to lose: it is not an execution failure, so its own neutral conclusion
+  // is the honest one.
   if (outcome === "skipped") {
     return { desired: "neutral", title: CHECK_NAME, summary: CHECK_SUMMARIES.skipped };
   }
@@ -1025,6 +1093,14 @@ export type CheckLifecycle = {
     handle: CheckLifecycleHandle;
     publicationId: string | null;
     outcome: CheckTerminalOutcome;
+    /**
+     * The reviewed head an EMPTY increment inherits (its `base...head` is
+     * empty): the Check then carries THAT head's persisted result judged
+     * against the current gate, so a skipped round can never replace a failing
+     * baseline Check with `neutral`. Omitted → no result to inherit (`neutral`
+     * for `skipped`).
+     */
+    inheritedHeadSha?: string;
     /**
      * The operator-configured bound on the one terminal `checks.update`
      * (`review.check.update_timeout_ms`). Omitted → the adapter's own fallback,
@@ -1239,33 +1315,47 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // The APPLIED review follows that SAME proof publication: RL-12 lets a
       // second attempt share the head SHA, so the scope/SHA `reviews` row may
       // be an earlier attempt's result and must not decide this one. The gate
-      // and the review are consulted ONLY inside `decideConclusion`'s proof
-      // branch, so without a proof both reads are skipped rather than issued
-      // and discarded; a review payload without a readable tally stays
-      // unreadable, never a pass, and an unreadable gate row fails closed the
-      // same way.
+      // and the review are consulted ONLY inside `decideConclusion`'s branches,
+      // so without a proof and without an inherited head both reads are skipped
+      // rather than issued and discarded; a review payload without a readable
+      // tally stays unreadable, never a pass, and an unreadable gate row fails
+      // closed the same way. An EMPTY increment reads the reviewed head's
+      // `reviews` row instead — the head whose content this round covers.
       const proof = await readPublicationProof(deps.db, {
         scope: handle.scope,
         headSha: handle.headSha,
         publicationId: input.publicationId ?? undefined,
       });
       const gateAndReview: readonly [ReviewGate | null, PublishedReview | null] =
-        proof === null
-          ? [null, null]
-          : await Promise.all([
+        proof !== null
+          ? await Promise.all([
               deps.getCheckGate(handle.scope),
               readPublishedReview(deps.db, {
                 scope: handle.scope,
                 headSha: handle.headSha,
                 publicationId: proof.publicationId,
               }),
-            ]);
+            ])
+          : input.inheritedHeadSha === undefined
+            ? [null, null]
+            : await Promise.all([
+                deps.getCheckGate(handle.scope),
+                readInheritedReview(deps.db, {
+                  scope: handle.scope,
+                  headSha: input.inheritedHeadSha,
+                }),
+              ]);
       const [gate, review] = gateAndReview;
+      const inherited =
+        input.inheritedHeadSha === undefined
+          ? undefined
+          : { headSha: handle.headSha, reviewedHeadSha: input.inheritedHeadSha };
       const conclusion = decideConclusion({
         proof,
         outcome: input.outcome,
         gate,
         review,
+        inherited,
       });
       // Freeze the boundary title/summary and the proof link BEFORE any remote
       // update, fenced on the CURRENT lease with a clock sampled for THIS write
