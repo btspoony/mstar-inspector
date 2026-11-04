@@ -188,6 +188,12 @@ import {
   type InflightRefusal,
 } from "../store/inflight-store";
 import { readReviewConcurrency } from "./concurrency-reader";
+import {
+  CHECK_TERMINALIZE_DEFAULT,
+  CHECK_UPDATE_DEFAULT,
+  readCheckBudgets,
+  type CheckBudgets,
+} from "./check-budgets-reader";
 
 export type PipelineEnv = {
   DB: D1Database;
@@ -311,8 +317,10 @@ export type ConsumerLogFields = {
    * `review_concurrency_degraded` (the review-concurrency cutover, 2026-11 —
    * union widened ADDITIVELY): the
    * concurrency reader's degraded-read warn, relayed on this channel.
+   * `review_check_budgets_degraded` (same channel, spec §7.10): the check-budget
+   * reader's degraded-read warn.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded";
   action: string;
   installation_id: number;
   owner: string;
@@ -744,7 +752,9 @@ export type CheckLifecycleHooks = {
     latch?: CheckBeginLatch;
   }): Promise<CheckHandle | null>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
-    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error" }): Promise<void>;
+    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error";
+    /** The operator-configured bound on the terminal `checks.update` (spec §7.10). */
+    updateBudgetMs: number }): Promise<void>;
 };
 
 /**
@@ -760,14 +770,6 @@ export const CHECK_EXECUTION_WINDOW_MS = 900_000;
  * lifecycle must honour, and the two hook-timeout cases pin it by value.
  */
 export const CHECK_HOOK_TIMEOUT_MS = 2_000;
-
-/**
- * Terminalize-hook budget (spec §7.10): the review has reached a terminal
- * outcome (a pre-publication failure included), so nothing waits on the check
- * any more — it may spend up to 10 s inline, and an overrun is handed to the
- * invocation context instead of being dropped.
- */
-export const CHECK_TERMINALIZE_TIMEOUT_MS = 10_000;
 
 /**
  * §7.3 catalog budget: "Diff capture plus catalog is bounded to 256 KiB; at
@@ -791,11 +793,11 @@ const RECHECK_INPUT_SCHEMA = "mstar.recheck-input/v1";
  * on its own, but `onBudgetElapsed` fires at the instant this invocation gives
  * up on it, which is what lets the lifecycle stop attaching a run on behalf of
  * a caller that is no longer waiting. `budgetMs` is REQUIRED — the two cases
- * differ by an order of magnitude (`CHECK_HOOK_TIMEOUT_MS` for begin,
- * `CHECK_TERMINALIZE_TIMEOUT_MS` for terminalize) and neither may silently
- * inherit the other's bound. The consumer never waits past it; a rejection
- * that lands after the timeout is contained by the caller's hand-off, not
- * left as an unhandled rejection.
+ * differ by an order of magnitude (`CHECK_HOOK_TIMEOUT_MS` for begin, the
+ * operator-configured `review.check.terminalize_timeout_ms` for terminalize)
+ * and neither may silently inherit the other's bound. The consumer never waits
+ * past it; a rejection that lands after the timeout is contained by the
+ * caller's hand-off, not left as an unhandled rejection.
  */
 async function withHookTimeout<T>(
   promise: Promise<T>,
@@ -2797,6 +2799,11 @@ async function processMessage(
   // isolated warns, and a hook timeout resolves without blocking the path.
   let checkHandle: CheckHandle | null = null;
   let checkTerminalized = false;
+  // §7.10 Check budgets, filled by the ONE per-message runtime read (after the
+  // level resolves, before the begin hook). Every terminal path runs after that
+  // read; a path that somehow reached one without it is still bounded by the
+  // store's documented defaults rather than waiting forever.
+  let checkBudgets: CheckBudgets | null = null;
   // Set the moment the prepared publication send is ATTEMPTED: a throw after
   // this point is post-send uncertainty (publication-unknown), never a
   // clean pre-publication failure.
@@ -2807,11 +2814,23 @@ async function processMessage(
   ): Promise<void> => {
     if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
     checkTerminalized = true;
+    // The per-message read always precedes every terminal path; the fallback
+    // keeps a future caller bounded by the store's documented defaults.
+    const budgets = checkBudgets ?? {
+      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+      updateMs: CHECK_UPDATE_DEFAULT,
+      degraded: false,
+    };
     // Set when the consumer stops waiting on the hook: only past that point is
     // a later rejection detached, so only then does the sink report it.
     let abandoned = false;
     try {
-      const terminalize = deps.checks.terminalize({ handle: checkHandle, publicationId, outcome });
+      const terminalize = deps.checks.terminalize({
+        handle: checkHandle,
+        publicationId,
+        outcome,
+        updateBudgetMs: budgets.updateMs,
+      });
       const attemptId = checkHandle.attemptId;
       // The invocation owns the promise: if the budget below expires, the hook
       // still finishes after this consumer returns. A rejection landing after
@@ -2833,7 +2852,7 @@ async function processMessage(
       await withHookTimeout(
         terminalize,
         undefined as void,
-        CHECK_TERMINALIZE_TIMEOUT_MS,
+        budgets.terminalizeMs,
         () => {
           abandoned = true;
           deps.log.warn(
@@ -3042,6 +3061,12 @@ async function processMessage(
     const concurrency = await readReviewConcurrency(deps.env.DB, workspaceId, {
       // ConsumerLog is contravariant against the reader's log: adapt on this
       // side instead of widening the reader — its fields ride this channel.
+      warn: (readerFields, msg) => deps.log.warn({ ...admissionFields, ...readerFields }, msg),
+    });
+    // §7.10 Check budgets: ONE read per message, beside the admission caps and
+    // after the level, so the begin hook and every terminal path share the same
+    // operator-configured pair.
+    checkBudgets = await readCheckBudgets(deps.env.DB, {
       warn: (readerFields, msg) => deps.log.warn({ ...admissionFields, ...readerFields }, msg),
     });
     const inflightKey: InflightKey = {

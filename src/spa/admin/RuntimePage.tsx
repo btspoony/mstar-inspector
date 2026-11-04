@@ -14,13 +14,15 @@ import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { PageNotice } from "../pages/PageNotice";
 import { concurrencySubmitBlocked } from "../pages/data";
-import { AdminWriteError, readRuntime, setSystemConcurrency, useLoaded } from "./api";
+import { AdminWriteError, readRuntime, setCheckBudgets, setSystemConcurrency, useLoaded, type CheckBudgetConfig } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
 export function RuntimePage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readRuntime);
   /** Only what the operator typed is local; the display falls back to the stored value. */
   const [draft, setDraft] = useState<string | null>(null);
+  const [terminalizeDraft, setTerminalizeDraft] = useState<string | null>(null);
+  const [updateDraft, setUpdateDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
 
@@ -48,6 +50,45 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     } catch (error) {
       // Generic message primary, the server's own refusal text as secondary detail.
       const generic = t(locale, "admin.runtime.concurrencyFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSaveBudgets(
+    event: FormEvent<HTMLFormElement>,
+    stored: CheckBudgetConfig,
+  ): Promise<void> {
+    event.preventDefault();
+    if (busy) return; // in-flight guard — no double submit
+    if (
+      concurrencySubmitBlocked(stored.degraded, terminalizeDraft) ||
+      concurrencySubmitBlocked(stored.degraded, updateDraft)
+    ) {
+      return;
+    }
+    // Same browser-side parsing as the concurrency field: the server's range
+    // gate is the only validator.
+    const terminalizeMs = Number((terminalizeDraft ?? String(stored.terminalizeMs)).trim());
+    const updateMs = Number((updateDraft ?? String(stored.updateMs)).trim());
+    setBusy(true);
+    setNotice(null);
+    try {
+      const saved = await setCheckBudgets({ terminalizeMs, updateMs }, stored);
+      // A 2xx rewrote both rows, so the card reads as trusted again.
+      update((data) => ({ ...data, checkBudgets: saved }));
+      setTerminalizeDraft(null);
+      setUpdateDraft(null);
+      setNotice({ kind: "success", message: t(locale, "admin.runtime.checkSaved") });
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.checkFailed");
       setNotice({
         kind: "error",
         message:
@@ -126,6 +167,82 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 {data.degraded ? null : (
                   <p className="mt-2 text-xs text-muted-foreground">
                     {t(locale, "admin.runtime.concurrencyCurrent", { value: data.concurrency })}
+                  </p>
+                )}
+              </CardContent>
+            </SectionCard>
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.checkTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.checkDescription")}
+                </p>
+                {data.checkBudgets.degraded ? (
+                  // Both numbers are the documented defaults, not the stored
+                  // setting: the form starts empty so a save cannot pin them.
+                  <div className="mt-4">
+                    <PageNotice kind="warn" message={t(locale, "admin.runtime.checkUnreadable")} />
+                  </div>
+                ) : null}
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => void onSaveBudgets(event, data.checkBudgets)}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="check-terminalize-budget">
+                      {t(locale, "admin.runtime.terminalizeLabel")}
+                    </label>
+                    <Input
+                      id="check-terminalize-budget"
+                      type="number"
+                      min={data.checkBudgets.terminalizeMin}
+                      max={data.checkBudgets.terminalizeMax}
+                      className="w-32"
+                      autoComplete="off"
+                      required
+                      value={
+                        terminalizeDraft ??
+                        (data.checkBudgets.degraded ? "" : String(data.checkBudgets.terminalizeMs))
+                      }
+                      onChange={(event) => setTerminalizeDraft(event.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="check-update-budget">
+                      {t(locale, "admin.runtime.updateLabel")}
+                    </label>
+                    <Input
+                      id="check-update-budget"
+                      type="number"
+                      min={data.checkBudgets.updateMin}
+                      max={data.checkBudgets.updateMax}
+                      className="w-32"
+                      autoComplete="off"
+                      required
+                      value={
+                        updateDraft ??
+                        (data.checkBudgets.degraded ? "" : String(data.checkBudgets.updateMs))
+                      }
+                      onChange={(event) => setUpdateDraft(event.target.value)}
+                    />
+                  </div>
+                  <Button type="submit" disabled={busy}>
+                    {t(locale, "admin.runtime.checkSave")}
+                  </Button>
+                  {data.checkBudgets.degraded ? (
+                    <Button type="button" variant="secondary" onClick={reload}>
+                      {t(locale, "common.retry")}
+                    </Button>
+                  ) : null}
+                </form>
+                {data.checkBudgets.degraded ? null : (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {t(locale, "admin.runtime.checkCurrent", {
+                      terminalize: data.checkBudgets.terminalizeMs,
+                      update: data.checkBudgets.updateMs,
+                    })}
                   </p>
                 )}
               </CardContent>

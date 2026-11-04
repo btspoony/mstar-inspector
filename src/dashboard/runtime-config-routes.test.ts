@@ -134,6 +134,25 @@ function seedSystemCap(db: TestD1, value: number): void {
   );
 }
 
+/** The documented absent-row check budgets as the operator API reports them. */
+const DEFAULT_CHECK_BUDGETS = {
+  terminalizeMs: 10_000,
+  updateMs: 5_000,
+  terminalizeMin: 1_000,
+  terminalizeMax: 30_000,
+  updateMin: 500,
+  updateMax: 15_000,
+  degraded: false,
+};
+
+/** Both stored budget rows, raw, keyed by PK. */
+function storedBudgets(db: TestD1): Record<string, string> {
+  const rows = db.raw
+    .prepare("SELECT key, value FROM review_runtime_settings ORDER BY key")
+    .all() as Array<{ key: string; value: string }>;
+  return Object.fromEntries(rows.map((row) => [row.key, row.value]));
+}
+
 async function putConcurrency(
   db: TestD1,
   ref: string,
@@ -242,6 +261,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       min: 1,
       max: 256,
       degraded: true,
+      checkBudgets: DEFAULT_CHECK_BUDGETS,
     });
   });
 
@@ -331,6 +351,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       min: 1,
       max: 256,
       degraded: false,
+      checkBudgets: DEFAULT_CHECK_BUDGETS,
     });
     await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ concurrency: 5 }) });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
@@ -338,6 +359,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       min: 1,
       max: 256,
       degraded: false,
+      checkBudgets: DEFAULT_CHECK_BUDGETS,
     });
   });
 
@@ -372,6 +394,67 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       expect(await res.json()).toHaveProperty("error");
     }
     expect(storedSystem(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("PATCH /_internal_admin/api/runtime checkBudgets", () => {
+  test("writes both rows with one audit row and reports the stored pair", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ checkBudgets: { terminalizeMs: 12_000, updateMs: 7_000 } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ checkBudgets: { terminalizeMs: 12_000, updateMs: 7_000 } });
+    expect(storedBudgets(db)).toEqual({
+      "review.check.terminalize_timeout_ms": "12000",
+      "review.check.update_timeout_ms": "7000",
+    });
+    expect(auditRows(db)).toEqual([
+      {
+        action: "runtime.check_budgets.set",
+        actor_login: OPERATOR,
+        target_type: "runtime",
+        target_id: "review.check.budgets",
+      },
+    ]);
+    const read = (await (await runtimeApi(db, { method: "GET" })).json()) as {
+      checkBudgets: Record<string, unknown>;
+    };
+    expect(read.checkBudgets).toEqual({
+      ...DEFAULT_CHECK_BUDGETS,
+      terminalizeMs: 12_000,
+      updateMs: 7_000,
+    });
+  });
+
+  test("an out-of-range or malformed pair is a 400 that writes nothing", async () => {
+    const { db } = fixture();
+    for (const body of [
+      JSON.stringify({ checkBudgets: { terminalizeMs: 999, updateMs: 5_000 } }),
+      JSON.stringify({ checkBudgets: { terminalizeMs: 10_000, updateMs: 15_001 } }),
+      JSON.stringify({ checkBudgets: { terminalizeMs: "10000", updateMs: 5_000 } }),
+      JSON.stringify({ checkBudgets: { terminalizeMs: 10_000 } }),
+      JSON.stringify({ checkBudgets: null }),
+    ]) {
+      const res = await runtimeApi(db, { method: "PATCH", body });
+      expect(res.status, body).toBe(400);
+      expect(await res.json()).toHaveProperty("error");
+    }
+    expect(storedBudgets(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a body carrying both parameters is refused so neither half is written", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ concurrency: 8, checkBudgets: { terminalizeMs: 10_000, updateMs: 5_000 } }),
+    });
+    expect(res.status).toBe(400);
+    expect(storedSystem(db)).toBeNull();
+    expect(storedBudgets(db)).toEqual({});
     expect(auditRows(db)).toEqual([]);
   });
 });

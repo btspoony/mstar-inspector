@@ -33,6 +33,14 @@
  * nobody stored. The structured warn belongs
  * to the consumer that has a logger (the pipeline reader), not here.
  *
+ * Check budgets (spec §7.10) are the same table, global rather than
+ * per-workspace: `review.check.terminalize_timeout_ms` (the consumer's wait on
+ * the terminalize hook) and `review.check.update_timeout_ms` (the bound on the
+ * one `checks.update`). Their defaults live here as ABSENT-ROW defaults, in the
+ * one range predicate the writes and the degraded read share: an untrusted
+ * stored value answers the default with `degraded: true` and never throws,
+ * because a Check never blocks or delays the review.
+ *
  * Write discipline: the system value is an integer in 1..SYSTEM_CONCURRENCY_MAX
  * (the platform-wide quota; Cloudflare Queues delivers at most 250 of it at
  * once); the workspace value is an integer in 1..WORKSPACE_CONCURRENCY_MAX.
@@ -65,29 +73,46 @@ export const SYSTEM_CONCURRENCY_MAX = 256;
 /** Upper bound of the workspace value: the per-workspace maximum. */
 export const WORKSPACE_CONCURRENCY_MAX = 32;
 
-/** Integer 1..max — the one predicate every write and every read re-parses with. */
+/** PK of the terminalize-hook budget row (spec §7.10). */
+export const CHECK_TERMINALIZE_KEY = "review.check.terminalize_timeout_ms";
+/** PK of the bounded `checks.update` budget row (spec §7.10). */
+export const CHECK_UPDATE_KEY = "review.check.update_timeout_ms";
+/** Absent terminalize row: the 10 s inline budget §7.10 states. */
+export const CHECK_TERMINALIZE_DEFAULT = 10_000;
+/** Absent update row: the 5 s bound on the one terminal `checks.update`. */
+export const CHECK_UPDATE_DEFAULT = 5_000;
+/** Range of a stored terminalize budget. */
+export const CHECK_TERMINALIZE_MIN = 1_000;
+export const CHECK_TERMINALIZE_MAX = 30_000;
+/** Range of a stored update budget. */
+export const CHECK_UPDATE_MIN = 500;
+export const CHECK_UPDATE_MAX = 15_000;
+/** The audit ledger's target id for the pair (one operator save, one row). */
+const CHECK_BUDGETS_TARGET = "review.check.budgets";
+
+/** Integer in min..max — the one predicate every write and every read re-parses with. */
+function isIntegerIn(value: unknown, min: number, max: number): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
+}
+
+/** Integer 1..max — the concurrency predicate. */
 export function isConcurrencyValue(value: unknown, max: number): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isInteger(value) &&
-    value >= CONCURRENCY_MIN &&
-    value <= max
-  );
+  return isIntegerIn(value, CONCURRENCY_MIN, max);
 }
 
 /**
- * Parse one stored value. `undefined` = the row/column is ABSENT, so the
- * caller's default applies; `NaN` = the value is present but not a trusted
- * 1..max integer, which no reader may treat as a default. Only a number or a
- * string counts: D1's declared column types do not constrain what a row
- * actually carries, so any other runtime value is untrusted, never something
- * `Number()` may coerce into a cap (`["16"]` → 16, `true` → 1).
+ * Parse one stored value in min..max. `undefined` = the row/column is ABSENT,
+ * so the caller's default applies; `NaN` = the value is present but not a
+ * trusted in-range integer, which no reader may treat as a default. Only a
+ * number or a string counts: D1's declared column types do not constrain what
+ * a row actually carries, so any other runtime value is untrusted, never
+ * something `Number()` may coerce into a value (`["16"]` → 16, `true` → 1).
  */
-function parseStored(value: unknown, max: number): number | undefined {
+function parseInRange(value: unknown, min: number, max: number): number | undefined {
   if (value === null || value === undefined) return undefined;
   if (typeof value !== "string" && typeof value !== "number") return Number.NaN;
   const parsed = typeof value === "number" ? value : Number(value);
-  return isConcurrencyValue(parsed, max) ? parsed : Number.NaN;
+  return isIntegerIn(parsed, min, max) ? parsed : Number.NaN;
 }
 
 /**
@@ -168,7 +193,7 @@ export async function getSystemConcurrency(db: DashboardD1): Promise<Concurrency
       .bind(SYSTEM_CONCURRENCY_KEY)
       .first<RuntimeSettingRow>();
     return resolveRow(row, SYSTEM_CONCURRENCY_DEFAULT, (value) =>
-      parseStored(value, SYSTEM_CONCURRENCY_MAX),
+      parseInRange(value, CONCURRENCY_MIN, SYSTEM_CONCURRENCY_MAX),
     );
   } catch {
     return { concurrency: CONCURRENCY_MIN, degraded: true };
@@ -239,7 +264,7 @@ export async function getEffectiveConcurrency(
     if (row.system_value === undefined || row.workspace_value === undefined) {
       return degradedConcurrency();
     }
-    const storedSystem = parseStored(row.system_value, SYSTEM_CONCURRENCY_MAX);
+    const storedSystem = parseInRange(row.system_value, CONCURRENCY_MIN, SYSTEM_CONCURRENCY_MAX);
     const storedWorkspace = parseWorkspaceStored(row.workspace_value);
     if (Number.isNaN(storedSystem) || Number.isNaN(storedWorkspace)) {
       return degradedConcurrency();
@@ -253,19 +278,19 @@ export async function getEffectiveConcurrency(
 }
 
 /**
- * One stored concurrency value as SQL, under the audit ledger's trust rule: a
- * canonical 1..max numeric value is that integer, anything else is
- * `untrusted`. One fragment, so the system row and the workspace column cannot
- * drift apart on what "trusted" means.
+ * One stored integer as SQL, under the audit ledger's trust rule: a canonical
+ * min..max numeric value is that integer, anything else is `untrusted`. One
+ * fragment, so the concurrency rows and the check-budget rows cannot drift
+ * apart on what "trusted" means.
  *
- * It is deliberately stricter than `parseStored`, which accepts any string
+ * It is deliberately stricter than `parseInRange`, which accepts any string
  * `Number()` turns into an in-range integer (`'8.0'`, `'1e1'`, `'+8'`): those
- * read as caps but are ledgered as `before: null`. `shortcut: a non-canonical
+ * read as values but are ledgered as `before: null`. `shortcut: a non-canonical
  * numeric text is readable but not auditable, upgrade if a non-canonical
  * writer ever exists`.
  */
-const trustedConcurrencySql = (value: string, untrusted: string, max: number) => `CASE
-      WHEN ${value} NOT GLOB '*[^0-9]*' AND CAST(${value} AS INTEGER) BETWEEN ${CONCURRENCY_MIN} AND ${max}
+const trustedIntSql = (value: string, untrusted: string, min: number, max: number) => `CASE
+      WHEN ${value} NOT GLOB '*[^0-9]*' AND CAST(${value} AS INTEGER) BETWEEN ${min} AND ${max}
       THEN CAST(${value} AS INTEGER) ELSE ${untrusted} END`;
 
 /**
@@ -273,7 +298,11 @@ const trustedConcurrencySql = (value: string, untrusted: string, max: number) =>
  * canonical-digits rule.
  */
 const storedSystemCapSql = (keyParam: string, untrusted: string) =>
-  `(SELECT ${trustedConcurrencySql("value", untrusted, SYSTEM_CONCURRENCY_MAX)} FROM review_runtime_settings WHERE key = ${keyParam})`;
+  `(SELECT ${trustedIntSql("value", untrusted, CONCURRENCY_MIN, SYSTEM_CONCURRENCY_MAX)} FROM review_runtime_settings WHERE key = ${keyParam})`;
+
+/** One stored check budget as SQL — the audit `before` value. */
+const storedBudgetSql = (keyParam: string, untrusted: string, min: number, max: number) =>
+  `(SELECT ${trustedIntSql("value", untrusted, min, max)} FROM review_runtime_settings WHERE key = ${keyParam})`;
 
 /**
  * Audit row + `review_runtime_settings` upsert, in that order, in ONE batch.
@@ -395,4 +424,121 @@ export class UnknownWorkspaceError extends RuntimeConfigError {
     super("unknown_workspace", `no workspace ${workspaceId}`);
     this.name = "UnknownWorkspaceError";
   }
+}
+
+/**
+ * The two §7.10 check budgets and whether the stored rows could be trusted.
+ * `degraded: true` means at least one stored value was untrusted or the read
+ * failed, so BOTH answers are the documented defaults.
+ */
+export type CheckBudgets = { terminalizeMs: number; updateMs: number; degraded: boolean };
+
+/** The pair an accepted write carries. */
+export type CheckBudgetValues = { terminalizeMs: number; updateMs: number };
+
+/** The untrusted/failed-read answer: the documented defaults, flagged. */
+function degradedCheckBudgets(): CheckBudgets {
+  return {
+    terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+    updateMs: CHECK_UPDATE_DEFAULT,
+    degraded: true,
+  };
+}
+
+/**
+ * Both check budgets in ONE statement (one read per decision point). Only an
+ * absent row is the default; a present value the parse cannot trust, a
+ * malformed result row or a read failure answers the defaults with
+ * `degraded: true` and never throws — a Check never blocks or delays the
+ * review, so there is no conservative fallback smaller than the default worth
+ * inventing.
+ */
+export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
+  try {
+    const row = await db
+      .prepare(
+        `SELECT (SELECT value FROM review_runtime_settings WHERE key = ?1) AS terminalize_value,
+                (SELECT value FROM review_runtime_settings WHERE key = ?2) AS update_value`,
+      )
+      .bind(CHECK_TERMINALIZE_KEY, CHECK_UPDATE_KEY)
+      .first<{ terminalize_value?: unknown; update_value?: unknown }>();
+    // This query always yields exactly one row; no row means the answer itself
+    // is untrustworthy, and a missing field is malformed rather than absent.
+    if (row === null) return degradedCheckBudgets();
+    if (row.terminalize_value === undefined || row.update_value === undefined) {
+      return degradedCheckBudgets();
+    }
+    const terminalize = parseInRange(
+      row.terminalize_value,
+      CHECK_TERMINALIZE_MIN,
+      CHECK_TERMINALIZE_MAX,
+    );
+    const update = parseInRange(row.update_value, CHECK_UPDATE_MIN, CHECK_UPDATE_MAX);
+    if (Number.isNaN(terminalize) || Number.isNaN(update)) return degradedCheckBudgets();
+    return {
+      terminalizeMs: terminalize ?? CHECK_TERMINALIZE_DEFAULT,
+      updateMs: update ?? CHECK_UPDATE_DEFAULT,
+      degraded: false,
+    };
+  } catch {
+    return degradedCheckBudgets();
+  }
+}
+
+/**
+ * One operator save, one audit row: `before` carries each stored value under
+ * the readers' trust rule (a corrupt row is `null`), `after` the accepted pair.
+ * The two upserts share this batch, so a refused write appends nothing.
+ */
+const CHECK_BUDGETS_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'runtime.check_budgets.set', 'runtime', '${CHECK_BUDGETS_TARGET}',
+          json_object('before', json_object(
+                      'terminalizeMs', ${storedBudgetSql("?6", "NULL", CHECK_TERMINALIZE_MIN, CHECK_TERMINALIZE_MAX)},
+                      'updateMs', ${storedBudgetSql("?7", "NULL", CHECK_UPDATE_MIN, CHECK_UPDATE_MAX)}),
+                      'after', json_object('terminalizeMs', ?3, 'updateMs', ?4)),
+          ?5)`;
+
+/**
+ * Write both check budgets. A value outside its own range refuses the whole
+ * write (`invalid_value`) with no row and no audit entry; an accepted pair is
+ * audited with the actor in ONE batch and returned.
+ */
+export async function setCheckBudgets(
+  db: DashboardD1,
+  value: CheckBudgetValues,
+  actor: string,
+): Promise<CheckBudgetValues> {
+  if (!isIntegerIn(value.terminalizeMs, CHECK_TERMINALIZE_MIN, CHECK_TERMINALIZE_MAX)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `terminalize timeout must be an integer in ${CHECK_TERMINALIZE_MIN}..${CHECK_TERMINALIZE_MAX}`,
+    );
+  }
+  if (!isIntegerIn(value.updateMs, CHECK_UPDATE_MIN, CHECK_UPDATE_MAX)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `check update budget must be an integer in ${CHECK_UPDATE_MIN}..${CHECK_UPDATE_MAX}`,
+    );
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(CHECK_BUDGETS_AUDIT_SQL)
+      .bind(
+        crypto.randomUUID(),
+        actor,
+        value.terminalizeMs,
+        value.updateMs,
+        now,
+        CHECK_TERMINALIZE_KEY,
+        CHECK_UPDATE_KEY,
+      ),
+    db
+      .prepare(SYSTEM_UPSERT_SQL)
+      .bind(CHECK_TERMINALIZE_KEY, String(value.terminalizeMs), now, actor),
+    db.prepare(SYSTEM_UPSERT_SQL).bind(CHECK_UPDATE_KEY, String(value.updateMs), now, actor),
+  ]);
+  return value;
 }

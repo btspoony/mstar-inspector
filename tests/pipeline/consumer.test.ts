@@ -3587,8 +3587,16 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // The operator-configured update budget must reach the lifecycle seam.
+    db.raw
+      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?1, ?2, ?3)")
+      .run("review.check.update_timeout_ms", "7000", new Date().toISOString());
     const beginCalls: unknown[] = [];
-    const terminalizeCalls: Array<{ publicationId: string | null; outcome: string }> = [];
+    const terminalizeCalls: Array<{
+      publicationId: string | null;
+      outcome: string;
+      updateBudgetMs: number;
+    }> = [];
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
       checks: {
@@ -3602,8 +3610,12 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
             lease: { holder: "h", epoch: 1, untilMs: 1 },
           };
         }),
-        terminalize: mock(async (input: { publicationId: string | null; outcome: string }) => {
-          terminalizeCalls.push({ publicationId: input.publicationId, outcome: input.outcome });
+        terminalize: mock(async (input: { publicationId: string | null; outcome: string; updateBudgetMs: number }) => {
+          terminalizeCalls.push({
+            publicationId: input.publicationId,
+            outcome: input.outcome,
+            updateBudgetMs: input.updateBudgetMs,
+          });
           throw new Error("hook boom"); // isolated — never breaks the pipeline
         }),
       },
@@ -3632,6 +3644,8 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(terminalizeCalls).toHaveLength(1);
     expect(terminalizeCalls[0]!.outcome).toBe("publication-unknown");
     expect(terminalizeCalls[0]!.publicationId).toBeTruthy();
+    // Read once per message from `review_runtime_settings`, not a constant.
+    expect(terminalizeCalls[0]!.updateBudgetMs).toBe(7_000);
     const pub = db.raw.query("SELECT phase, proof_json FROM review_publications").get() as { phase: string; proof_json: string | null };
     expect(pub.phase).toBe("applied");
     expect(pub.proof_json).not.toBeNull();
@@ -3731,6 +3745,44 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
     expect(completed).toEqual(["publication-unknown"]);
     expect(logLines.filter((l) => l.level === "warn" && l.msg.includes("exceeded its budget"))).toHaveLength(0);
+  }, 10_000);
+
+  test("check terminalize: the configured budget bounds the consumer's wait", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?1, ?2, ?3)")
+      .run("review.check.terminalize_timeout_ms", "1000", new Date().toISOString());
+    const handed: Array<Promise<unknown>> = [];
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: db as never }),
+      testLog,
+      {
+        ...testOverrides,
+        checks: {
+          begin: mock(async () => ({
+            attemptId: "attempt-3",
+            scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+            githubAppId: 424242,
+            headSha: SHA,
+            lease: { holder: "h", epoch: 1, untilMs: 1 },
+          })),
+          // Parks forever: only the configured 1 s budget can end the wait.
+          terminalize: mock(async () => {
+            await Promise.withResolvers<void>().promise;
+          }),
+        },
+      },
+      { waitUntil: (promise) => { handed.push(promise); } },
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(handed).toHaveLength(1);
+    const overruns = logLines.filter((l) => l.level === "warn" && l.msg.includes("exceeded its budget"));
+    expect(overruns).toHaveLength(1);
+    expect(reviewCount(db)).toBe(1); // the publication still landed
   }, 10_000);
 
   test("catch-path Check classification: send-throw → publication-unknown with the id; claim-fail → pre-publication-failure", async () => {

@@ -111,14 +111,40 @@ export async function readFlags(): Promise<FlagRow[]> {
   return list(body.flags, "flags").map((row) => ({ key: text(row, "key"), enabled: bool(row, "enabled") }));
 }
 
-/** The system review-concurrency parameters (iteration spec §1.1). */
+/** The §7.10 Check budgets as the operator API reports them. */
+export type CheckBudgetConfig = {
+  terminalizeMs: number;
+  updateMs: number;
+  terminalizeMin: number;
+  terminalizeMax: number;
+  updateMin: number;
+  updateMax: number;
+  /** A stored budget could not be read: both numbers are the documented defaults. */
+  degraded: boolean;
+};
+
+/** The runtime parameters (iteration spec §1.1, spec §7.10). */
 export type RuntimeConfig = {
   concurrency: number;
   min: number;
   max: number;
   /** The stored cap could not be read: `concurrency` is the conservative fallback. */
   degraded: boolean;
+  checkBudgets: CheckBudgetConfig;
 };
+
+function parseCheckBudgets(row: Json): CheckBudgetConfig {
+  const budgets = map(row.checkBudgets, "runtime checkBudgets");
+  return {
+    terminalizeMs: num(budgets, "terminalizeMs"),
+    updateMs: num(budgets, "updateMs"),
+    terminalizeMin: num(budgets, "terminalizeMin"),
+    terminalizeMax: num(budgets, "terminalizeMax"),
+    updateMin: num(budgets, "updateMin"),
+    updateMax: num(budgets, "updateMax"),
+    degraded: bool(budgets, "degraded"),
+  };
+}
 
 export async function readRuntime(): Promise<RuntimeConfig> {
   const body = map(await fetchJson(`${BASE}/runtime`), "runtime response");
@@ -127,6 +153,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     min: num(body, "min"),
     max: num(body, "max"),
     degraded: bool(body, "degraded"),
+    checkBudgets: parseCheckBudgets(body),
   };
 }
 
@@ -143,6 +170,34 @@ function storedConcurrency(answer: unknown): number | null {
  */
 export async function setSystemConcurrency(concurrency: number): Promise<number> {
   return storedConcurrency(await write("PATCH", "/runtime", { concurrency })) ?? concurrency;
+}
+
+/**
+ * Save both Check budgets, answering the pair the server stored. The range
+ * fields ride the loaded config, not the echo (the echo is the stored pair
+ * only); a 2xx with an unreadable body still landed, so the request value
+ * stands in — the same rule as `setSystemConcurrency`.
+ */
+export async function setCheckBudgets(
+  value: { terminalizeMs: number; updateMs: number },
+  stored: CheckBudgetConfig,
+): Promise<CheckBudgetConfig> {
+  const answer = await write("PATCH", "/runtime", { checkBudgets: value });
+  if (typeof answer === "object" && answer !== null && "checkBudgets" in answer) {
+    const saved = answer.checkBudgets;
+    if (
+      typeof saved === "object" &&
+      saved !== null &&
+      "terminalizeMs" in saved &&
+      "updateMs" in saved
+    ) {
+      const { terminalizeMs, updateMs } = saved;
+      if (typeof terminalizeMs === "number" && typeof updateMs === "number") {
+        return { ...stored, terminalizeMs, updateMs, degraded: false };
+      }
+    }
+  }
+  return { ...stored, ...value, degraded: false };
 }
 
 export async function readWorkspaces(): Promise<WorkspaceRow[]> {
