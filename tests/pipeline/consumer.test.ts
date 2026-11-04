@@ -389,7 +389,8 @@ describe("createReviewConsumer", () => {
     expect(prepared.body).toContain("<!-- mstar-inspector:review:v1 round=1 -->");
     expect(prepared.body).toContain("## ⚠️ Verdict: `needs fixes`");
     expect(prepared.body).toContain("Two issues found in the diff.");
-    expect(prepared.body).toContain("## Prior findings recheck"); // §7.10 closure section
+    // §7.10 prior-findings section: the report body carries exactly one.
+    expect(prepared.body).toContain("### Revalidated findings");
     expect(prepared.body).toMatch(
       /<!-- mstar-inspector:publication:v1 id=[0-9a-f-]+ sha=0123456789abcdef0123456789abcdef01234567 kind=review -->/,
     );

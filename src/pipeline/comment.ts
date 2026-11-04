@@ -232,6 +232,11 @@ function stripFactEcho(
  * (qc2 F-003 / qc3 F-304 — the API never sees an over-limit body).
  * `omittedFindings` is the count dropped by the consumer's merge-class cap
  * (B4): the footer tells readers the review is a Top-N subset.
+ *
+ * `closure` is the folded §7.10 section, rendered ONLY for a body without
+ * report parts. A report body carries the same rows, coverage line and thread
+ * state once, in-body, in `reportParts.revalidated` — appending the fold too
+ * would publish two prior-findings tables that can disagree.
  */
 export function buildReviewBody(
   output: ReviewOutput,
@@ -268,7 +273,7 @@ export function buildReviewBody(
   }
   const sections = [core];
   if (omittedFindings > 0) sections.push(`*(+${omittedFindings} more findings omitted)*`);
-  if (closure) sections.push(closure);
+  if (closure && reportParts === undefined) sections.push(closure);
   return clampKeepingHead(sections.join("\n\n"), REVIEW_BODY_LIMIT);
 }
 
@@ -320,31 +325,30 @@ export type ClosureCoverage = {
 };
 
 /**
- * Render the §7.10 closure section: one honest coverage line, then at most
- * `CLOSURE_MAX_ROWS` rows (finding / disposition / evidence / thread) plus
- * the overflow count. Deterministic; the caller re-clamps via
- * buildReviewBody's budget.
- *
- * Folded into `<details>`: the section grows every round while it is only read
- * when someone checks whether earlier concerns were fixed. The heading stays
- * INSIDE the fold — the summary line is a label, not a replacement for it. The
- * blank lines around the inner Markdown are required: without them GitHub
- * renders the table as literal text.
+ * The one §7.10 coverage sentence: every selected row lands in exactly one
+ * term here — `assessed`, `invalid-output` (the table's own label for those
+ * rows), or `omitted` — so `assessed + invalid-output + omitted === selected`.
  */
-export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[]): string {
+function closureCoverageLine(coverage: ClosureCoverage): string {
+  return (
+    `Reassessed ${coverage.assessed}/${coverage.selected} open prior finding(s) this round` +
+    ` · ${coverage.invalidOutput} invalid-output · ${coverage.omitted} omitted` +
+    ` · ${coverage.capped} over cap · ${coverage.totalOpen} open` +
+    ` · context coverage: ${coverage.contextCoverage}`
+  );
+}
+
+/**
+ * The ONE prior-findings table (§7.10 columns: finding / disposition /
+ * evidence / thread) plus its over-cap count, capped at `CLOSURE_MAX_ROWS`.
+ * Both the in-body `### Revalidated findings` section and the legacy folded
+ * closure render through this, so the two paths can never disagree on the
+ * words a row carries. Leading blank line included: the callers join blocks.
+ */
+function priorFindingLines(rows: ClosureRow[]): string[] {
   const shown = rows.slice(0, CLOSURE_MAX_ROWS);
   const overflow = rows.length - shown.length;
-  const lines: string[] = [
-    "## Prior findings recheck",
-    "",
-    // Every selected row lands in exactly one term here — `assessed`,
-    // `invalid-output` (the closure table's own label for those rows), or
-    // `omitted` — so `assessed + invalid-output + omitted === selected`.
-    `Reassessed ${coverage.assessed}/${coverage.selected} open prior finding(s) this round` +
-      ` · ${coverage.invalidOutput} invalid-output · ${coverage.omitted} omitted` +
-      ` · ${coverage.capped} over cap · ${coverage.totalOpen} open` +
-      ` · context coverage: ${coverage.contextCoverage}`,
-  ];
+  const lines: string[] = [];
   if (shown.length > 0) {
     lines.push(
       "",
@@ -362,6 +366,25 @@ export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[
   if (overflow > 0) {
     lines.push("", `*(+${overflow} more prior finding(s) over the ${CLOSURE_MAX_ROWS}-row display cap)*`);
   }
+  return lines;
+}
+
+/**
+ * Render the §7.10 closure section: one honest coverage line, then the
+ * prior-findings table plus the overflow count. Deterministic; the caller
+ * re-clamps via buildReviewBody's budget.
+ *
+ * Folded into `<details>`: the section grows every round while it is only read
+ * when someone checks whether earlier concerns were fixed. The heading stays
+ * INSIDE the fold — the summary line is a label, not a replacement for the
+ * heading. The blank lines around the inner Markdown are required: without them
+ * GitHub renders the table as literal text.
+ *
+ * Used ONLY by a body without report parts; a report body renders the same
+ * rows once, in-body, through `buildRevalidatedSection`.
+ */
+export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[]): string {
+  const lines: string[] = ["## Prior findings recheck", "", closureCoverageLine(coverage), ...priorFindingLines(rows)];
   const summary = `Prior findings recheck — ${coverage.assessed}/${coverage.selected} reassessed, ${coverage.totalOpen} open`;
   return `<details>\n<summary>${summary}</summary>\n\n${lines.join("\n")}\n\n</details>`;
 }
@@ -379,37 +402,17 @@ const REVIEW_HEADING = "## 📋 Review";
 const FINDINGS_HEADING = "### Findings";
 
 /**
- * The revalidation table, derived MECHANICALLY from the round's closure rows
- * (one renderer for the states, no second model pass): an addressed concern is
- * `fixed`, a dismissed one still stands (`still present`), everything else is
- * `not verifiable`. `none` when the round rechecked nothing.
+ * The body's ONE prior-findings rendering (the template mandates the heading):
+ * the §7.10 coverage line, then the round's rows — the SAME table renderer the
+ * legacy folded closure uses, so the two can never disagree. `none` when the
+ * round had no prior finding at all, so a first round's body stays clean.
  */
-export function buildRevalidatedSection(rows: ClosureRow[]): string {
-  const lines = ["### Revalidated findings", ""];
-  if (rows.length === 0) {
-    lines.push("none");
-    return lines.join("\n");
+export function buildRevalidatedSection(coverage: ClosureCoverage, rows: ClosureRow[]): string {
+  const heading = ["### Revalidated findings", ""];
+  if (rows.length === 0 && coverage.totalOpen === 0) {
+    return [...heading, "none"].join("\n");
   }
-  lines.push("| Prior finding | State | Evidence |", "|---|---|---|");
-  const shown = rows.slice(0, CLOSURE_MAX_ROWS);
-  for (const row of shown) {
-    const title = row.title.replace(/\|/g, "\\|").replace(/\n/g, " ");
-    // `dismissed` keeps the closure table's vocabulary: the same row renders
-    // there as `dismissed (non-fix-dismissal)`, and calling it `still present`
-    // would contradict a row the store already closed.
-    const state =
-      row.disposition === "addressed"
-        ? "fixed"
-        : row.disposition === "dismissed"
-          ? `dismissed (${row.reason})`
-          : "not verifiable";
-    lines.push(`| ${title} | ${state} | ${row.evidenceKind ?? row.reason} |`);
-  }
-  const overflow = rows.length - shown.length;
-  if (overflow > 0) {
-    lines.push("", `*(+${overflow} more prior finding(s) over the ${CLOSURE_MAX_ROWS}-row display cap)*`);
-  }
-  return lines.join("\n");
+  return [...heading, closureCoverageLine(coverage), ...priorFindingLines(rows)].join("\n");
 }
 
 /** The collapsible fix-plan block; markdown text must survive the outer fence. */
@@ -475,14 +478,19 @@ function neutralizeReportText(text: string): string {
  *   `### Findings` → `### Linked-issue AC` → `### ✅ Verified` →
  *   `### 🗑️ Considered & rejected` → `## 🛠️ Plan to fix`
  *
- * Anchors are matched on exact heading lines, and every raw field is neutralized
- * (see `neutralizeReportText`) before insertion so it cannot forge one. A body
- * that carries no `## 📋 Review` line is not the engine's layout: the overview is
- * SKIPPED rather than prepended somewhere the reader would not expect, and the
- * remaining sections are still appended. A zero-finding envelope omits
- * `### Findings`; the empty heading is added so the revalidated table keeps its
- * position and the layout stays fixed. A missing report writes `none` under
- * every heading — the headings themselves are never deleted.
+ * Anchors are matched on the FIRST line equal to the heading, and every raw
+ * field is neutralized (see `neutralizeReportText`) before insertion so it
+ * cannot forge one. `summary_md` is the exception: the engine renders it
+ * verbatim, so a summary line that is EXACTLY `## 📋 Review` or `### Findings`
+ * is matched instead of the engine's own heading. The sections still land in
+ * the body, a little earlier — accepted next to parsing the model's summary as
+ * markdown here. A body that carries no `## 📋 Review` line is not the engine's
+ * layout: the overview is SKIPPED rather than prepended somewhere the reader
+ * would not expect, and the remaining sections are still appended. A
+ * zero-finding envelope omits `### Findings`; the empty heading is added so the
+ * revalidated table keeps its position and the layout stays fixed. A missing
+ * report writes `none` under every heading — the headings themselves are never
+ * deleted.
  */
 export function insertReportSections(rendered: string, report: ReportDoc | null, revalidated: string): string {
   let body = rendered;

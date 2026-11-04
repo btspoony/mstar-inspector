@@ -10,8 +10,12 @@
  * against THIS module before any of it reaches a public body.
  *
  * Contract shape (both directions):
- *   - The seat yields exactly `{schema, overview, linkedIssueAc, verified,
- *     rejected, planToFix}` — no extra keys, every value a string.
+ *   - The FILE carries exactly `{schema, headSha, overview, linkedIssueAc,
+ *     verified, rejected, planToFix}` — no extra keys, every value a string.
+ *     The seat yields the six narrative keys only: `headSha` is bound by the
+ *     runner from the engine-owned envelope (`target.head_sha`), never from a
+ *     model field, so a document left in the container by an earlier run can
+ *     never speak for the current review.
  *   - Every field is REQUIRED and must be non-blank; the template's "write
  *     `none`, never delete the heading" rule is the seat's, not the
  *     validator's: an empty field is a lost document, never an empty section.
@@ -36,6 +40,12 @@ export type PrContext = {
 /** The narrative sections, in template order. */
 export type ReportDoc = {
   schema: "mstar.report/v1";
+  /**
+   * The reviewed head, written by the runner from the envelope's
+   * `target.head_sha`. The consumer rejects a document bound to another head:
+   * the path is fixed, so a skipped seat leaves the PREVIOUS run's file there.
+   */
+  headSha: string;
   /** 2–3 sentences on what the PR does. */
   overview: string;
   /** Per-criterion met/unmet/cut notes for the linked issues. */
@@ -74,6 +84,13 @@ export const PR_CONTEXT_MAX_CHARS = 4_000;
 
 const FIELDS = ["overview", "linkedIssueAc", "verified", "rejected", "planToFix"] as const;
 
+/**
+ * A git object name, the same shape the runner's `head <sha>` recon fact
+ * accepts (`runtime-omp.ts` `HEAD_FACT_RE`). Short shas are legitimate
+ * (`7`), full ones are `40`/`64`.
+ */
+const HEAD_SHA_RE = /^[0-9a-f]{7,64}$/;
+
 /** No Node Buffer in this module — it is imported by the Worker. */
 const UTF8 = new TextEncoder();
 
@@ -92,7 +109,7 @@ export function validateReportDoc(value: unknown): ReportGateResult {
   }
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();
-  const expected = [...FIELDS, "schema"].sort();
+  const expected = [...FIELDS, "headSha", "schema"].sort();
   // Every reason below names only the shape this module REQUIRES. The received
   // keys and values are seat-authored text (a model echoing a PR body), and the
   // callers log these reasons, so echoing them would put attacker-controlled
@@ -103,7 +120,14 @@ export function validateReportDoc(value: unknown): ReportGateResult {
   if (record["schema"] !== "mstar.report/v1") {
     return { ok: false, error: `schema must be "mstar.report/v1"` };
   }
-  const doc = { schema: "mstar.report/v1" } as ReportDoc;
+  // Shape only — WHETHER this is the reviewed head is the consumer's check
+  // (it holds the authoritative checked-out sha). A value that is not a git
+  // object name can never match one, so it fails here with its own reason.
+  const headSha = record["headSha"];
+  if (typeof headSha !== "string" || !HEAD_SHA_RE.test(headSha)) {
+    return { ok: false, error: "headSha must be 7-64 lowercase hex characters" };
+  }
+  const doc = { schema: "mstar.report/v1", headSha } as ReportDoc;
   for (const field of FIELDS) {
     const raw = record[field];
     if (typeof raw !== "string") {

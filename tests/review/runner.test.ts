@@ -874,6 +874,9 @@ describe("runner entry — --recheck-out channel", () => {
 describe("runner entry — --report-out channel", () => {
   const REPORT_DOC = {
     schema: "mstar.report/v1",
+    // The runtime binds the reviewed head before it returns the document; the
+    // runner writes it verbatim, so the file is already head-bound.
+    headSha: "0123456789abcdef0123456789abcdef01234567",
     overview: "Adds an expiry guard.",
     linkedIssueAc: "none",
     verified: "none",

@@ -2,10 +2,11 @@
  * mstar.report/v1 wire validation — the fail-closed gate between the report
  * seat's model output and a public review body.
  *
- * The contract under test: exactly the six document keys, every value a
- * non-blank string, each value inside its own character budget. Anything else
- * rejects the WHOLE document, so the caller renders `none` headings instead of
- * publishing a half-filled report.
+ * The contract under test: exactly the seven document keys, every value a
+ * non-blank string (the head a 7–64 char git object name), each narrative value
+ * inside its own character budget. Anything else rejects the WHOLE document, so
+ * the caller renders `none` headings instead of publishing a half-filled
+ * report.
  */
 import { describe, expect, test } from "bun:test";
 
@@ -18,6 +19,7 @@ import {
 
 const DOC: ReportDoc = {
   schema: "mstar.report/v1",
+  headSha: "0123456789abcdef0123456789abcdef01234567",
   overview: "Adds an expiry guard.",
   linkedIssueAc: "Expiry rejected: met.",
   verified: "- suite → green",
@@ -55,15 +57,31 @@ describe("validateReportDoc", () => {
     expect(gate.error).toContain("schema must be");
   });
 
-  test("rejects a missing key and an unknown key (exactly six keys)", () => {
+  test("rejects a missing key and an unknown key (exactly seven keys)", () => {
     const { rejected: _omit, ...missing } = DOC;
     const missingGate = validateReportDoc(missing);
     expect(missingGate.ok).toBe(false);
     if (missingGate.ok) throw new Error("expected failure");
     expect(missingGate.error).toContain("keys must be exactly");
 
+    const { headSha: _unbound, ...headless } = DOC;
+    expect(validateReportDoc(headless).ok).toBe(false);
+
     const extraGate = validateReportDoc({ ...DOC, extra: "x", note: "y" });
     expect(extraGate.ok).toBe(false);
+  });
+
+  test("headSha must be a 7-64 char git object name", () => {
+    // The extremes are legitimate (abbreviated and full sha-256 names).
+    expect(validateReportDoc({ ...DOC, headSha: "a".repeat(7) }).ok).toBe(true);
+    expect(validateReportDoc({ ...DOC, headSha: "a".repeat(64) }).ok).toBe(true);
+    for (const headSha of ["a".repeat(6), "a".repeat(65), "z".repeat(40), "ABCDEF0", "", "   "]) {
+      const gate = validateReportDoc({ ...DOC, headSha });
+      expect(gate.ok).toBe(false);
+      if (gate.ok) throw new Error("expected failure");
+      expect(gate.error).toContain("headSha");
+    }
+    expect(validateReportDoc({ ...DOC, headSha: 7 }).ok).toBe(false);
   });
 
   test("reasons never echo seat-authored keys or values", () => {
@@ -80,6 +98,11 @@ describe("validateReportDoc", () => {
     expect(schema.ok).toBe(false);
     if (schema.ok) throw new Error("expected failure");
     expect(schema.error).not.toContain(hostile);
+
+    const head = validateReportDoc({ ...DOC, headSha: hostile });
+    expect(head.ok).toBe(false);
+    if (head.ok) throw new Error("expected failure");
+    expect(head.error).not.toContain(hostile);
   });
 
   for (const field of ["overview", "linkedIssueAc", "verified", "rejected", "planToFix"] as const) {

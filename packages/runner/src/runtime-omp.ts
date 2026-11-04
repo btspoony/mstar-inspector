@@ -1550,6 +1550,9 @@ function runTeardownSignal(controller: AbortController, input: AgentRuntimeRunIn
  * Absent `prContext` = legacy input: no seat, `null` — byte-identical behavior.
  * `signal` is the run's teardown signal, so a torn-down run stops the seat
  * instead of waiting out its own timer.
+ *
+ * The document is bound to `envelope.target.head_sha` — the one head the
+ * review was synthesized for, never a value the seat could choose.
  */
 async function runReportSeatFor(
   input: AgentRuntimeRunInput,
@@ -1559,19 +1562,29 @@ async function runReportSeatFor(
   signal: AbortSignal,
 ): Promise<ReportDoc | null> {
   if (input.prContext === undefined) return null;
+  const headSha = envelope.target?.head_sha;
+  if (headSha === undefined) {
+    // An unbound report would be indistinguishable from the previous run's
+    // file at the fixed path, so no head means no report — never a guess.
+    console.error(JSON.stringify({ event: "report_skipped", reason: "head-sha-missing" }));
+    return null;
+  }
   // omp resolves the seat from the clone's `.omp/agents/`: dispatching without
   // the definition fails inside the SDK and surfaces as an anonymous seat
-  // failure — indistinguishable from "report unavailable". Every path that
-  // reaches here installs the definition, so its absence is a bug of ours and
-  // must name itself.
-  if (!existsSync(join(input.worktreePath, ".omp", "agents", SEAT_AGENT_FILE))) {
-    throw new Error(
-      `report seat dispatched without ${SEAT_AGENT_FILE} installed at ${join(input.worktreePath, ".omp", "agents")}`,
+  // failure. The report is OPTIONAL narrative — a missing definition degrades
+  // to `report: null` (sections render `none`) and names itself loudly; it must
+  // never fail a review that already settled.
+  const agentsDir = join(input.worktreePath, ".omp", "agents");
+  if (!existsSync(join(agentsDir, SEAT_AGENT_FILE))) {
+    console.error(
+      JSON.stringify({ event: "report_skipped", reason: "seat-definition-missing", agents_dir: agentsDir }),
     );
+    return null;
   }
   return runReportSeat({
     session,
     envelopeJson: JSON.stringify(envelope),
+    headSha,
     revalidated: revalidatedNotes(input.recheck, recheckDoc),
     prContext: input.prContext,
     model: seatModelChain(input),

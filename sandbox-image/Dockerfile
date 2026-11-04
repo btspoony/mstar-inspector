@@ -7,6 +7,13 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the report document is now bound to the reviewed head — the runner
+# writes `headSha` from the envelope's `target.head_sha` and the Worker refuses
+# a document bound to another head, so a file left at the fixed path by an
+# earlier run can never publish its narrative under this review. A stale image
+# writes an unbound document that the Worker renders as `none`. The report seat
+# also degrades to no report when its definition is missing or the envelope
+# carries no head, instead of failing a review that already settled.
 # rebuild: the runner stopped requiring a seat summary — the review body is the
 # engine's own layout now instead of a consumer rebuild of it, so the two halves
 # of that change (the 4.1.6 pin above and the no-longer-required output field)

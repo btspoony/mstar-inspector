@@ -8,6 +8,7 @@
  * mock and drives only the pure pieces.
  */
 import { describe, expect, test } from "bun:test";
+import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 
 import {
   REPORT_OUTPUT_SCHEMA,
@@ -24,18 +25,32 @@ const PR_CONTEXT: PrContext = {
 };
 
 describe("REPORT_OUTPUT_SCHEMA", () => {
-  test("is the exact six-key document, every field a string, no extras", () => {
-    expect(REPORT_OUTPUT_SCHEMA).toMatchObject({
-      type: "object",
-      additionalProperties: false,
-      required: ["schema", "overview", "linkedIssueAc", "verified", "rejected", "planToFix"],
-    });
-    const properties = REPORT_OUTPUT_SCHEMA.properties;
-    expect(properties.schema).toEqual({ type: "string", enum: ["mstar.report/v1"] });
-    for (const field of ["overview", "linkedIssueAc", "verified", "rejected", "planToFix"] as const) {
-      expect(properties[field]).toEqual({ type: "string" });
+  const { validator, error } = buildOutputValidator(REPORT_OUTPUT_SCHEMA);
+  const NARRATIVE = {
+    schema: "mstar.report/v1",
+    overview: "Adds an expiry guard.",
+    linkedIssueAc: "none",
+    verified: "none",
+    rejected: "none",
+    planToFix: "none",
+  };
+  const validate = (value: unknown): boolean => {
+    if (validator === undefined) throw new Error(`report schema produced no validator: ${error ?? "unconstrained"}`);
+    return validator.validate(value).success;
+  };
+
+  test("accepts the six narrative keys the seat writes, and nothing else", () => {
+    expect(validate(NARRATIVE)).toBe(true);
+    // The head is the runner's to bind: a seat that yields one is refused
+    // rather than trusted (the document's key set is closed).
+    expect(validate({ ...NARRATIVE, headSha: "a".repeat(40) })).toBe(false);
+    expect(validate({ ...NARRATIVE, extra: "x" })).toBe(false);
+    for (const field of ["schema", "overview", "linkedIssueAc", "verified", "rejected", "planToFix"] as const) {
+      const { [field]: _omit, ...missing } = NARRATIVE;
+      expect(validate(missing)).toBe(false);
     }
-    expect(Object.keys(properties)).toHaveLength(6);
+    expect(validate({ ...NARRATIVE, overview: 7 })).toBe(false);
+    expect(validate({ ...NARRATIVE, schema: "mstar.review/v1" })).toBe(false);
   });
 });
 
@@ -141,6 +156,7 @@ describe("runReportSeat", () => {
       const doc = await runReportSeat({
         session,
         envelopeJson: '{"schema":"mstar.review/v1"}',
+        headSha: "a".repeat(40),
         revalidated: "none",
         prContext: PR_CONTEXT,
         model: [],
