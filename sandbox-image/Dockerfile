@@ -80,6 +80,12 @@
 # report gate no longer echoes the seat's own keys/values in its rejection
 # reason. A stale image runs the seat to its full timer after teardown and logs
 # seat-authored text into the structured report diagnostics.
+# rebuild: the report file's byte bound is now DERIVED from the per-field
+# character budgets (6 bytes × 16,500 chars + 256 bytes of envelope), so a
+# maximal document the budgets allow can no longer be rejected by the byte gate.
+# A stale image still enforces the retired 64 KiB bound: its runner rejects the
+# document and writes nothing, so the Worker renders `none` for a report the
+# current shared gate accepts.
 # rebuild: the shared seat definition is installed for EVERY dispatch that needs
 # it — the recheck seat and the report seat, which runs on the PR context alone.
 # A deep report round without a recheck used to install nothing yet dispatch the

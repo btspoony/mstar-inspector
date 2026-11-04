@@ -15,6 +15,9 @@ import {
   SHA,
   TARGET_ORIGINAL,
   TARGET_ROW_ID,
+  TEST_APP_ID,
+  TEST_INSTALLATION_ID,
+  TEST_OTHER_APP_ID,
   TEST_OWNER,
   TEST_PR_NUMBER,
   TEST_REPO,
@@ -24,6 +27,7 @@ import {
   recheckDocWith,
   seedAssociation,
   seedOpenTarget,
+  seedOtherApp,
   seedPriorPublication,
 } from "../helpers/consumer-fixtures";
 import {
@@ -32,6 +36,7 @@ import {
   incrementDiffCommand,
   issueViewCommand,
   numstatCommand,
+  prBodyCommand,
   DIFF_PATH,
 } from "../../src/pipeline/gitops";
 import {
@@ -43,6 +48,7 @@ import {
   makeBatch,
   makeEnv,
   makePayload,
+  PR_CONTEXT_WORST_CASE_MS,
   reset,
   sandbox,
   testLog,
@@ -71,6 +77,9 @@ const compareIssued = (): boolean => sandbox.calls.some((call) => call.cmd.start
 
 /**
  * One reviewed row for this PR at `headSha` (the increment base candidate).
+ * The identity DEFAULTS to the canonical one `makePayload()` reviews with, so a
+ * negative case can differ in exactly one field and still prove the read's
+ * filter (not an identity mismatch) is what excluded the row.
  * `reviewedAt` is the ONE format the column carries in production — SQLite's
  * `datetime('now')`, i.e. `YYYY-MM-DD HH:MM:SS` — because base selection
  * ORDERS BY this text.
@@ -82,14 +91,62 @@ function seedReview(
     verdict = "needs fixes",
     contextIncomplete = false,
     reviewedAt = "2026-01-01 00:00:00",
-  }: { verdict?: string; contextIncomplete?: boolean; reviewedAt?: string } = {},
+    appId = TEST_APP_ID,
+    installationId = TEST_INSTALLATION_ID,
+    owner = TEST_OWNER,
+    repo = TEST_REPO,
+    prNumber = TEST_PR_NUMBER,
+  }: {
+    verdict?: string;
+    contextIncomplete?: boolean;
+    reviewedAt?: string;
+    appId?: string;
+    installationId?: number;
+    owner?: string;
+    repo?: string;
+    prNumber?: number;
+  } = {},
 ): void {
   db.raw
     .prepare(
       `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, context_incomplete, reviewed_at)
-       VALUES (?, 123, 'acme', 'widgets', 42, ?, ?, NULL, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(crypto.randomUUID(), headSha, verdict, contextIncomplete ? 1 : 0, reviewedAt);
+    .run(
+      crypto.randomUUID(),
+      installationId,
+      owner,
+      repo,
+      prNumber,
+      headSha,
+      verdict,
+      appId,
+      contextIncomplete ? 1 : 0,
+      reviewedAt,
+    );
+}
+
+/** The identity every message under test reviews for — what `seedReview` defaults to. */
+const ROUND_IDENTITY: {
+  appId: string;
+  installationId: number;
+  owner: string;
+  repo: string;
+  prNumber: number;
+} = {
+  appId: TEST_APP_ID,
+  installationId: TEST_INSTALLATION_ID,
+  owner: TEST_OWNER,
+  repo: TEST_REPO,
+  prNumber: TEST_PR_NUMBER,
+};
+
+/** The stored `context_incomplete` flag for `headSha` (default: this round's head). */
+function storedContextIncomplete(db: TestD1, headSha: string = SHA): number {
+  const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(headSha) as {
+    context_incomplete: number;
+  };
+  return row.context_incomplete;
 }
 
 /** The written runner input JSON (the one `base64 -d >` write of the round). */
@@ -228,6 +285,63 @@ describe("incremental review rounds", () => {
     expect(runnerInput().reconFacts).toContain(`since ${newestEligible}`);
   });
 
+  test("another App's newer head is never this App's base, even on one installation", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.compareStatus = "ahead";
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.incrementDiffStdout = VALID_DIFF;
+    const otherAppHead = "a".repeat(40);
+    const db = await createSeededTestD1();
+    seedOtherApp(db);
+    // Same installation, owner, repo and PR — only the App differs, and the
+    // foreign row is NEWER, so an unfiltered base read would hand this round
+    // that App's head and skip the commits THIS App never reviewed.
+    seedReview(db, PREVIOUS_SHA, { reviewedAt: "2026-01-01 00:00:00" });
+    seedReview(db, otherAppHead, { appId: TEST_OTHER_APP_ID, reviewedAt: "2026-01-02 00:00:00" });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // Non-vacuity: both rows carry the identity this round reviews for, so
+    // `app_id` is the only field that can explain the exclusion.
+    const rows = db.raw
+      .query(
+        "SELECT app_id, installation_id, owner, repo, pr_number FROM reviews WHERE head_sha IN (?, ?) ORDER BY reviewed_at",
+      )
+      .all(PREVIOUS_SHA, otherAppHead) as Array<Record<string, string | number>>;
+    expect(rows).toEqual([
+      {
+        app_id: ROUND_IDENTITY.appId,
+        installation_id: ROUND_IDENTITY.installationId,
+        owner: ROUND_IDENTITY.owner,
+        repo: ROUND_IDENTITY.repo,
+        pr_number: ROUND_IDENTITY.prNumber,
+      },
+      {
+        app_id: TEST_OTHER_APP_ID,
+        installation_id: ROUND_IDENTITY.installationId,
+        owner: ROUND_IDENTITY.owner,
+        repo: ROUND_IDENTITY.repo,
+        pr_number: ROUND_IDENTITY.prNumber,
+      },
+    ]);
+    expect(sandbox.calls.some((c) => c.cmd === compareCommand(PREVIOUS_SHA))).toBe(true);
+    expect(sandbox.calls.some((c) => c.cmd === compareCommand(otherAppHead))).toBe(false);
+    expect(runnerInput().reconFacts).toContain(`since ${PREVIOUS_SHA}`);
+  });
+
+  test("the seeded identity IS the payload's identity (no negative case can pass vacuously)", () => {
+    const payload = makePayload();
+    expect(ROUND_IDENTITY).toEqual({
+      appId: payload.appRef.appId,
+      installationId: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      prNumber: payload.pr_number,
+    });
+  });
+
   test("no previous review (first round): no compare at all", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -270,10 +384,7 @@ describe("incremental review rounds", () => {
     await consumer(makeBatch(makePayload()));
 
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
-    const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(SHA) as {
-      context_incomplete: number;
-    };
-    expect(row.context_incomplete).toBe(1);
+    expect(storedContextIncomplete(db)).toBe(1);
   });
 
   test("a healthy round stores context_incomplete = 0", async () => {
@@ -285,10 +396,7 @@ describe("incremental review rounds", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(SHA) as {
-      context_incomplete: number;
-    };
-    expect(row.context_incomplete).toBe(0);
+    expect(storedContextIncomplete(db)).toBe(0);
   });
 
   test("an empty increment capture marks the round context-incomplete instead of a silent full diff", async () => {
@@ -313,10 +421,7 @@ describe("incremental review rounds", () => {
     expect(capture).toHaveLength(1);
     expect(capture[0]!.fields.increment_capture).toBe("empty");
     expect(capture[0]!.fields.diff_capture).toBeUndefined();
-    const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(SHA) as {
-      context_incomplete: number;
-    };
-    expect(row.context_incomplete).toBe(1);
+    expect(storedContextIncomplete(db)).toBe(1);
   });
 
   test("an over-size increment stdout copy is not a capture failure — numstat still reads the file", async () => {
@@ -343,10 +448,7 @@ describe("incremental review rounds", () => {
       "3\t1\tsrc/auth.ts",
     ]);
     expect(logLines.some((l) => l.fields.diff_capture !== undefined)).toBe(false);
-    const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(SHA) as {
-      context_incomplete: number;
-    };
-    expect(row.context_incomplete).toBe(0);
+    expect(storedContextIncomplete(db)).toBe(0);
   });
 
   test("a round whose capture failed is not an increment base either", async () => {
@@ -513,6 +615,65 @@ describe("incremental review rounds", () => {
   // The PR-context capture is best-effort, but its failures are named: an
   // unattributed `none` section is indistinguishable from a PR with nothing to
   // say, and the report seat simply never runs.
+  test("a round without the budget for the capture skips it, says so once, and still publishes", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    // gh WOULD answer; the round's clock is what forbids the read.
+    sandbox.prBodyExitCode = 0;
+    sandbox.prBodyContent = "Closes #7";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      // Half the capture's worst case: the round cannot fund it.
+      roundBudgetMs: PR_CONTEXT_WORST_CASE_MS / 2,
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // Not one gh read started: the skip precedes the first exec, so a slow
+    // sandbox cannot spend the window the paid run and its post need.
+    expect(sandbox.calls.some((c) => c.cmd === prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER))).toBe(false);
+    const warns = logLines.filter((l) => l.level === "warn" && l.fields.report_context !== undefined);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.fields.report_context).toBe("budget");
+    expect(warns[0]!.msg).toContain(`${PR_CONTEXT_WORST_CASE_MS}ms`);
+    // Never a failed review: the report degrades to `none` and the body lands.
+    expect(preparedBody()).toContain("### Linked-issue AC\n\nnone");
+    expect(sandbox.calls.some((c) => c.cmd.includes("--report-out"))).toBe(false);
+  });
+
+  test("the remaining round time bounds the issue lookups the capture starts", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.prBodyExitCode = 0;
+    // Four distinct refs; only the bounded number may be read.
+    sandbox.prBodyContent = "Closes #1, fixes #2, resolves #3, references #4";
+    for (const number of [1, 2, 3, 4]) {
+      sandbox.issueBodies.set(number, { title: `issue ${number}`, body: "none" });
+    }
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, {
+      ...testOverrides,
+      // Just over the worst case, so the gate admits the capture and the
+      // remaining time is what caps the lookups.
+      roundBudgetMs: PR_CONTEXT_WORST_CASE_MS + 60_000,
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(
+      sandbox.calls.some((c) => c.cmd === prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER)),
+    ).toBe(true);
+    const issueReads = sandbox.calls.filter((call) =>
+      [1, 2, 3, 4].some((number) => call.cmd === issueView(number)),
+    );
+    expect(issueReads).toHaveLength(PR_CONTEXT_MAX_ISSUES);
+    const context = runnerInput().prContext as { issues: Array<{ number: number }> };
+    expect(context.issues.map((issue) => issue.number)).toEqual([1, 2, 3]);
+  });
+
   test("a `gh pr view` failure warns once with its cause, then renders `none`", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);

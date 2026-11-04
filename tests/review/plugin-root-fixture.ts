@@ -11,7 +11,7 @@
  * The env var name must match `HARNESS_ROOT_ENV` in packages/runner/src/runtime-omp.ts.
  */
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,6 +20,11 @@ const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
 
 /** Absolute path of the temp fixture plugin root. */
 export const PLUGIN_ROOT_FIXTURE = mkdtempSync(join(tmpdir(), "mstar-harness-"));
+
+// Every suite that imports this module shares ONE temp root, so it cannot be
+// removed from a single file's `afterAll` — that would delete it from under the
+// next importing file. Remove it once the process is done with it instead.
+process.once("exit", () => rmSync(PLUGIN_ROOT_FIXTURE, { recursive: true, force: true }));
 
 // Mirror the real layout only as far as the assertions need: the session unit
 // tests assert `skills/mstar-audit` exists on disk and that the SDK mock's

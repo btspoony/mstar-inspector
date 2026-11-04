@@ -16,6 +16,7 @@ import {
   validateReportDoc,
   type ReportDoc,
 } from "../../packages/shared/src/report-wire";
+import { readReportCommand } from "../../src/pipeline/gitops";
 
 const DOC: ReportDoc = {
   schema: "mstar.report/v1",
@@ -136,33 +137,38 @@ describe("validateReportDoc", () => {
     expect(validateReportDoc(maximal).ok).toBe(true);
   });
 
-  test("rejects a document over the BYTE bound, and accepts one just under it", () => {
-    // The field budgets count CHARACTERS; escaped text (here `\u0001`) costs
-    // six UTF-8 bytes per character once serialized, so a document can pass
-    // every field budget and still not fit the file the reader bounds.
+  test("the file bound provably covers every document the field budgets allow", () => {
+    const maxChars = (Object.values(REPORT_FIELD_MAX_CHARS) as number[]).reduce((a, b) => a + b, 0);
+    // JSON escapes a control character (or a lone surrogate) to `\uXXXX` — six
+    // bytes per UTF-16 unit is the most one budgeted character can serialize to.
+    expect(REPORT_FILE_MAX_BYTES).toBeGreaterThanOrEqual(6 * maxChars);
+  });
+
+  test("a maximal-budget multibyte document passes the byte bound, worst-case escapes included", () => {
     const fields = Object.keys(REPORT_FIELD_MAX_CHARS) as Array<keyof typeof REPORT_FIELD_MAX_CHARS>;
-    const withControls = (count: number): ReportDoc => {
-      const doc: ReportDoc = { ...DOC };
-      let left = count;
-      for (const field of fields) {
-        const take = Math.min(left, REPORT_FIELD_MAX_CHARS[field]);
-        doc[field] = "\u0001".repeat(take) + "x".repeat(REPORT_FIELD_MAX_CHARS[field] - take);
-        left -= take;
-      }
-      if (left !== 0) throw new Error("byte-bound fixture does not fit the field budgets");
-      return doc;
-    };
-    const bytes = (doc: ReportDoc) => new TextEncoder().encode(JSON.stringify(doc)).byteLength;
-    const baseline = bytes(withControls(0));
-    // Each control character replaces an "x": +5 serialized bytes.
-    const justUnder = withControls(Math.floor((REPORT_FILE_MAX_BYTES - 1 - baseline) / 5));
-    const justOver = withControls(Math.ceil((REPORT_FILE_MAX_BYTES + 1 - baseline) / 5));
-    expect(bytes(justUnder)).toBeLessThan(REPORT_FILE_MAX_BYTES);
-    expect(bytes(justOver)).toBeGreaterThan(REPORT_FILE_MAX_BYTES);
-    expect(validateReportDoc(justUnder).ok).toBe(true);
-    const gate = validateReportDoc(justOver);
-    expect(gate.ok).toBe(false);
-    if (gate.ok) throw new Error("expected failure");
-    expect(gate.error).toContain("byte");
+    // Two maximal documents: 4-byte characters ("𝄞" = 2 UTF-16 units, the most
+    // a plain multibyte document can spend) and a control character, which JSON
+    // escapes to six bytes per unit — the true worst case.
+    const multibyte: ReportDoc = { ...DOC };
+    const escaped: ReportDoc = { ...DOC };
+    for (const field of fields) {
+      // Budgets count UTF-16 units, and "𝄞" is a surrogate PAIR: half the
+      // repeats fill the same budget at four UTF-8 bytes per unit pair.
+      multibyte[field] = "\u{1D11E}".repeat(Math.floor(REPORT_FIELD_MAX_CHARS[field] / 2));
+      escaped[field] = "\u0001".repeat(REPORT_FIELD_MAX_CHARS[field]);
+    }
+    expect(validateReportDoc(multibyte).ok).toBe(true);
+    // The escaped document honours EVERY advertised per-field budget, yet it is
+    // over the retired 64 KiB bound — that bound could reject a
+    // validator-compliant report and silently render `none`.
+    expect(new TextEncoder().encode(JSON.stringify(escaped)).byteLength).toBeGreaterThan(65_536);
+    expect(validateReportDoc(escaped).ok).toBe(true);
+  });
+
+  test("the bounded read the consumer runs carries THIS byte bound", () => {
+    // The reader and the gate take one constant; a re-typed number in either
+    // command builder would drift silently.
+    const bound = /head -c '(\d+)'/.exec(readReportCommand());
+    expect(Number(bound?.[1])).toBe(REPORT_FILE_MAX_BYTES);
   });
 });

@@ -304,7 +304,7 @@ export const INLINE_RESOLVE_BUDGET_MS = 12_000;
 export const INLINE_RESOLVE_ENTRY_MS = 6_000;
 
 /** The named causes of a failed PR-context capture (`ConsumerLogFields.report_context`). */
-export type ReportContextFailure = "pr-view" | "pr-view-json" | "issue-view" | "issue-view-json";
+export type ReportContextFailure = "pr-view" | "pr-view-json" | "issue-view" | "issue-view-json" | "budget";
 
 /** Structured log fields: seven event fields + sandbox id + idempotency key
  * + the d5-budget visibility quartet (level / runner_timeout_ms /
@@ -481,9 +481,11 @@ export type ConsumerLogFields = {
   /**
    * Why the report seat's PR-context capture yielded nothing: `pr-view` (the
    * `gh pr view` exec failed), `pr-view-json` (its reply was not the JSON shape
-   * asked for), `issue-view` (one referenced issue could not be read) or
-   * `issue-view-json` (an issue reply was not that shape). The issue number
-   * rides `report_context_issue`. The sections then degrade to `none`.
+   * asked for), `issue-view` (one referenced issue could not be read),
+   * `issue-view-json` (an issue reply was not that shape) or `budget` (the round
+   * no longer had the wall clock the capture costs, so it was skipped). The
+   * issue number rides `report_context_issue`. The sections then degrade to
+   * `none`.
    */
   report_context?: ReportContextFailure;
   report_context_issue?: number;
@@ -567,6 +569,16 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
       1000,
   );
 }
+
+/**
+ * Wall-clock budget of ONE round, measured from the top of `processMessage`:
+ * Cloudflare caps a Queue consumer invocation at 15 minutes
+ * (knowledge: best-practices/cf-queue-consumer-wall-clock), and that cap — not
+ * the admission TTL, which only bounds how long the row may be held — is the
+ * clock a best-effort step must fit inside. The paid runner owns its own
+ * `runnerTimeoutMs(level)` out of the same window.
+ */
+export const ROUND_BUDGET_MS = 900_000;
 
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
@@ -1038,28 +1050,33 @@ async function readReportDoc(
 }
 
 /**
- * The most recent REVIEWED head of this PR whose review was not an
- * `incomplete` (stopped) run and whose own capture did not fail — the base an
- * incremental round diffs against. Both exclusions are on purpose: a stopped
+ * The most recent REVIEWED head of this PR, BY THIS APP, whose review was not
+ * an `incomplete` (stopped) run and whose own capture did not fail — the base
+ * an incremental round diffs against. Both exclusions are on purpose: a stopped
  * round never scanned its scope, and a round whose diff capture failed
  * published a verdict without evidence. Diffing against either would silently
  * inherit that gap.
  *
- * `reviews` is keyed per (installation, owner, repo, pr) with one row per
- * reviewed sha, and `reviewed_at` is second-resolution, so `rowid` breaks
- * same-second ties in insertion order.
+ * `app_id` is part of the identity: two Apps can review one installation's PRs,
+ * and `reviews` is keyed per (installation, owner, repo, pr) without it, so an
+ * unfiltered read could hand App B the head App A reviewed and skip exactly the
+ * commits B never saw. Legacy rows (`app_id` NULL) predate per-App attribution
+ * and belong to the retired global App, so no current App can match them.
+ *
+ * One row per reviewed sha, and `reviewed_at` is second-resolution, so `rowid`
+ * breaks same-second ties in insertion order.
  */
 async function findIncrementBase(db: PipelineEnv["DB"], scope: Scope): Promise<string | null> {
   const row = await db
     .prepare(
       `SELECT head_sha FROM reviews
-       WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND verdict <> 'incomplete'
          AND context_incomplete = 0
        ORDER BY reviewed_at DESC, rowid DESC
        LIMIT 1`,
     )
-    .bind(scope.installationId, scope.owner, scope.repo, scope.prNumber)
+    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
     .first<{ head_sha: string }>();
   return row?.head_sha ?? null;
 }
@@ -1087,14 +1104,28 @@ function clampContextText(text: string, maxChars: number): string {
 }
 
 /**
+ * Worst-case cost of the whole capture: the PR read plus every allowed issue
+ * read, each able to consume its full `EXEC_TIMEOUT_GIT_MS` window.
+ */
+export const PR_CONTEXT_WORST_CASE_MS = (1 + PR_CONTEXT_MAX_ISSUES) * EXEC_TIMEOUT_GIT_MS;
+
+/**
  * Capture the PR context the report seat reads: the PR description, then up
  * to `PR_CONTEXT_MAX_ISSUES` issues it closes/references. Every value is
  * clamped — this is attacker-controlled prose that rides into a prompt.
  *
- * Any failure (gh missing, API error, non-JSON output) resolves `undefined`
- * after ONE warn naming the cause: the report sections then degrade to `none`,
- * which is a smaller loss than failing a review over its narrative — but an
- * unattributed gap is indistinguishable from a PR that simply has no context.
+ * Bounded by the ROUND's clock: the capture runs before the paid run, and each
+ * gh read can consume its whole `EXEC_TIMEOUT_GIT_MS`, so a slow sandbox could
+ * spend the round's window on a narrative. When the remainder cannot cover the
+ * worst-case capture the step is skipped with ONE log line, and otherwise the
+ * remaining time bounds how many issue reads start — so the review itself never
+ * carries the cost.
+ *
+ * Any failure (gh missing, API error, non-JSON output, no budget) resolves
+ * `undefined` after ONE warn naming the cause: the report sections then degrade
+ * to `none`, which is a smaller loss than failing a review over its narrative —
+ * but an unattributed gap is indistinguishable from a PR that simply has no
+ * context.
  */
 async function capturePrContext(
   sandbox: ReviewSandbox,
@@ -1102,6 +1133,7 @@ async function capturePrContext(
   token: string,
   log: ConsumerLog,
   fields: ConsumerLogFields,
+  roundDeadlineMs: number,
 ): Promise<PrContext | undefined> {
   const exec = { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS };
   const warn = (cause: ReportContextFailure, issue?: number): void => {
@@ -1110,6 +1142,14 @@ async function capturePrContext(
       `report context ${cause}${issue === undefined ? "" : ` (issue #${issue})`} — report sections degrade to none`,
     );
   };
+  const remainingMs = roundDeadlineMs - Date.now();
+  if (remainingMs < PR_CONTEXT_WORST_CASE_MS) {
+    log.warn(
+      { ...fields, report_context: "budget" },
+      `report context budget — ${remainingMs}ms left of the round, the capture costs up to ${PR_CONTEXT_WORST_CASE_MS}ms — skipped, report sections degrade to none`,
+    );
+    return undefined;
+  }
   const prRead = await sandbox
     .runCommand(prBodyCommand(payload.owner, payload.repo, payload.pr_number), exec)
     .catch(() => null);
@@ -1126,7 +1166,13 @@ async function capturePrContext(
     return undefined;
   }
   const issues: PrContext["issues"] = [];
-  for (const issueNumber of extractIssueRefs(prBody).slice(0, PR_CONTEXT_MAX_ISSUES)) {
+  // One gh read may burn its whole window, so the remaining time also bounds
+  // how many issue reads start: never more than the round can still fund.
+  const maxIssueReads = Math.min(
+    PR_CONTEXT_MAX_ISSUES,
+    Math.floor((roundDeadlineMs - Date.now()) / EXEC_TIMEOUT_GIT_MS),
+  );
+  for (const issueNumber of extractIssueRefs(prBody).slice(0, Math.max(0, maxIssueReads))) {
     const issueRead = await sandbox
       .runCommand(issueViewCommand(payload.owner, payload.repo, issueNumber), exec)
       .catch(() => null);
@@ -2195,6 +2241,13 @@ type ProcessDeps = {
    * query text.
    */
   findIncrementBase: (db: PipelineEnv["DB"], scope: Scope) => Promise<string | null>;
+  /**
+   * The round's wall-clock budget (ms), measured from the top of
+   * `processMessage`. Production is `ROUND_BUDGET_MS` (the queue consumer cap);
+   * the seam exists so a test can shrink the round to a budget where a step
+   * must be skipped instead of waiting for real time to pass.
+   */
+  roundBudgetMs: number;
 };
 
 /**
@@ -2922,7 +2975,14 @@ async function newerCommitHasJob(
 type ConsumerOverrides = Partial<
   Pick<
     ProcessDeps,
-    "store" | "failureStore" | "createAppCommenter" | "getSandbox" | "checks" | "selectPrHead" | "findIncrementBase"
+    | "store"
+    | "failureStore"
+    | "createAppCommenter"
+    | "getSandbox"
+    | "checks"
+    | "selectPrHead"
+    | "findIncrementBase"
+    | "roundBudgetMs"
   >
 >;
 
@@ -2965,6 +3025,7 @@ export function createReviewConsumer(
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
     selectPrHead: overrides.selectPrHead ?? appsStore.selectPrHead,
     findIncrementBase: overrides.findIncrementBase ?? findIncrementBase,
+    roundBudgetMs: overrides.roundBudgetMs ?? ROUND_BUDGET_MS,
     log,
     background,
   };
@@ -3025,6 +3086,11 @@ async function processMessage(
   deps: ProcessDeps,
   attempts = 1,
 ): Promise<ProcessOutcome> {
+  // The round's wall clock starts HERE: every best-effort step that can spend a
+  // sandbox window (the PR-context capture) is measured against this instant and
+  // `deps.roundBudgetMs`, so it can never eat the window the paid run and its
+  // publication need.
+  const roundStartedAt = Date.now();
   // Unique per attempt: a destroyed sandbox's id is never
   // reused — attach-after-destroy behavior is unknown, uniqueness wins.
   const sandboxId = `review-${crypto.randomUUID()}`;
@@ -3943,10 +4009,18 @@ async function processMessage(
     // packages/shared/src, tests/review/runtime-boundary).
     // PR context for the report seat (best-effort): the description plus the
     // issues it closes/references, read through gh with the same exec env the
-    // diff uses. Any failure resolves undefined (with one named warn) and the
-    // published report sections degrade to `none` — a narrative gap never
-    // fails a review.
-    const prContext = await capturePrContext(sandbox, payload, token, deps.log, fields);
+    // diff uses. Bounded by the round's own clock (each read can burn a whole
+    // 120s window), and any failure or a budget skip resolves undefined (with
+    // one named warn) so the published report sections degrade to `none` — a
+    // narrative gap never fails a review.
+    const prContext = await capturePrContext(
+      sandbox,
+      payload,
+      token,
+      deps.log,
+      fields,
+      roundStartedAt + deps.roundBudgetMs,
+    );
 
     const runnerInput = {
       worktreePath: CLONE_DIR,

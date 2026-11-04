@@ -65,6 +65,8 @@ export const {
   EXEC_TIMEOUT_GIT_MS,
   INLINE_RESOLVE_MAX_ENTRIES,
   CHECK_HOOK_TIMEOUT_MS,
+  ROUND_BUDGET_MS,
+  PR_CONTEXT_WORST_CASE_MS,
 } = await import("../../src/pipeline/consumer");
 
 // The diff bound lives with the command that enforces it (gitops), not on the

@@ -42,7 +42,7 @@
  *     exact agent names; absent/empty map = today's options byte-for-byte.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, jest, mock, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
@@ -1914,17 +1914,23 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
   });
 
   test("a partially-failed install cleans the seat files from the clone (qc1 F-002)", async () => {
-    const rolePath = join(PLUGIN_ROOT_FIXTURE, "agents", "fullstack-dev.md");
-    const original = readFileSync(rolePath, "utf8");
-    rmSync(rolePath);
+    // A per-test CLONE of the shared fixture: this case DELETES a role file, and
+    // the shared root must stay intact for every other suite that imports it.
+    const pluginRoot = mkdtempSync(join(tmpdir(), "mstar-harness-partial-"));
+    cpSync(PLUGIN_ROOT_FIXTURE, pluginRoot, { recursive: true });
+    const previousRoot = process.env.HARNESS_PLUGIN_ROOT;
+    process.env.HARNESS_PLUGIN_ROOT = pluginRoot;
     try {
+      rmSync(join(pluginRoot, "agents", "fullstack-dev.md"));
       // code-reviewer.md lands first, then the missing fullstack-dev.md
       // fails the install — cleanup must still remove what was written.
       await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(
         /missing the deep seat role agents\/fullstack-dev\.md/,
       );
     } finally {
-      writeFileSync(rolePath, original);
+      if (previousRoot === undefined) delete process.env.HARNESS_PLUGIN_ROOT;
+      else process.env.HARNESS_PLUGIN_ROOT = previousRoot;
+      rmSync(pluginRoot, { recursive: true, force: true });
     }
     expect(existsSync(join(TEST_WORKTREE, ".omp", "agents"))).toBe(false);
     expect(existsSync(join(TEST_WORKTREE, ".omp"))).toBe(false);

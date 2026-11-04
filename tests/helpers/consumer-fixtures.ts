@@ -79,6 +79,24 @@ const TEST_APP_WEBHOOK_SECRET_ENC = await createSecretbox(TEST_KEY).encryptSecre
 );
 
 /**
+ * A SECOND App row (`reviews.app_id`'s FK needs a real one) whose id no test
+ * payload carries: the cross-App increment-base cases attribute a review to it
+ * and prove the read stays inside the reviewing App.
+ */
+export const TEST_OTHER_APP_ID = "99999999-8888-7777-6666-555555555555";
+
+export function seedOtherApp(db: TestD1): void {
+  db.raw
+    .prepare(
+      `INSERT INTO github_apps
+         (id, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, 434343, 'consumer-test-other-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+    )
+    .run(TEST_OTHER_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC);
+}
+
+/**
  * Fully-migrated D1 with the default App row seeded — the consumer's
  * per-App credential resolution needs a real active row on every message
  * (appRef is required, the env-App branch is retired).

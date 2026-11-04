@@ -21,9 +21,12 @@
  *     validator's: an empty field is a lost document, never an empty section.
  *   - Each field carries its own character budget; an over-budget field fails
  *     the whole document instead of being silently truncated mid-sentence.
- *   - The serialized document must also fit `REPORT_FILE_MAX_BYTES`: the
- *     character budgets alone cannot bound BYTES, and a document the reader
- *     would discard as overflow must fail here with its reason instead.
+ *   - The serialized document must also fit `REPORT_FILE_MAX_BYTES`, which is
+ *     DERIVED from those character budgets at JSON's worst-case escape cost, so
+ *     the two bounds agree by construction: every document the validator
+ *     accepts also fits the file the reader bounds. The check still runs so an
+ *     over-bound document fails with its reason instead of being lost to an
+ *     opaque read overflow.
  *
  * Dependency-free (like `recheck-wire.ts`): the Worker, the runner and the
  * tests all import this module.
@@ -61,14 +64,6 @@ export type ReportDoc = {
 /** Fixed in-image path the runner writes the report to (`--report-out`). */
 export const REPORT_OUTPUT_PATH = "/tmp/mstar-report.json";
 
-/**
- * Byte bound of the report file read (and of the runner's write, enforced by
- * the same bounded-read protocol the recheck documents use). The per-field
- * budgets below keep a valid document far under it; the bound exists so a
- * runaway seat cannot stream unbounded text into the Worker.
- */
-export const REPORT_FILE_MAX_BYTES = 65_536;
-
 /** Per-field character budgets — a document over any of them is rejected. */
 export const REPORT_FIELD_MAX_CHARS = {
   overview: 1_500,
@@ -77,6 +72,39 @@ export const REPORT_FIELD_MAX_CHARS = {
   rejected: 3_000,
   planToFix: 6_000,
 } as const;
+
+/** Every field's budget summed: 16,500 characters for a fully budgeted document. */
+const REPORT_TOTAL_FIELD_CHARS = Object.values(REPORT_FIELD_MAX_CHARS).reduce(
+  (total, chars) => total + chars,
+  0,
+);
+
+/**
+ * Worst-case serialized cost of ONE character: every field is a JSON string,
+ * and JSON escapes a control character (or a lone surrogate) to `\uXXXX` —
+ * six ASCII bytes per UTF-16 unit. No in-budget document can cost more.
+ */
+const REPORT_MAX_BYTES_PER_CHAR = 6;
+
+/**
+ * Keys, quotes, separators, the schema tag and a 64-character `headSha` —
+ * ~180 bytes for the exact key set, so this is provable slack.
+ */
+const REPORT_JSON_HEADROOM_BYTES = 256;
+
+/**
+ * Byte bound of the report file read (and of the runner's write, enforced by
+ * the same bounded-read protocol the recheck documents use).
+ *
+ * DERIVED from the field budgets, never a round number: a document that
+ * honours every per-field character budget serializes to at most
+ * `6 × 16,500 + 256` = 99,256 bytes, so this bound PROVABLY accepts every
+ * document `validateReportDoc` accepts, while still stopping a runaway seat
+ * from streaming unbounded text into the Worker. `readReportCommand` and the
+ * gate below take THIS constant, so the reader and the gate cannot drift.
+ */
+export const REPORT_FILE_MAX_BYTES =
+  REPORT_MAX_BYTES_PER_CHAR * REPORT_TOTAL_FIELD_CHARS + REPORT_JSON_HEADROOM_BYTES;
 
 /** The consumer's prContext bounds (see `capturePrContext`). */
 export const PR_CONTEXT_MAX_ISSUES = 3;
@@ -144,12 +172,12 @@ export function validateReportDoc(value: unknown): ReportGateResult {
     }
     doc[field] = raw;
   }
-  // The reader bounds the FILE in BYTES; the budgets above bound CHARACTERS,
-  // and escaped text (control characters, lone surrogates) costs six UTF-8
-  // bytes per character once serialized. Measuring the serialized document is
-  // the only way a per-field-valid document can outgrow the read, so reject it
-  // HERE where the reason is still reportable instead of losing it to an
-  // opaque overflow.
+  // The read bounds the FILE in bytes; the budgets above bound CHARACTERS, and
+  // `REPORT_FILE_MAX_BYTES` is derived from them at JSON's worst-case escape
+  // cost, so an in-budget document can never outgrow the read. The check stays
+  // as the gate's half of that contract: if the two constants ever drift, the
+  // document fails HERE with a reportable reason instead of disappearing into
+  // an opaque read overflow.
   const bytes = UTF8.encode(JSON.stringify(doc)).byteLength;
   if (bytes > REPORT_FILE_MAX_BYTES) {
     return {
