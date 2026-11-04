@@ -1023,7 +1023,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(ledgerState(db, appRow.id)).toEqual({ deliveries: 0, pullRequests: 0, lastWebhookAt: null });
   });
 
-  test("a cached private App still applies the stored allowlist — visibility only hides the Settings control", async () => {
+  test("a cached private App still applies the stored allowlist — visibility only adds the private-App note", async () => {
     // Admission never reads `github_visibility`, so a stale or genuine
     // `private` cache must not leave the gate inert.
     const db = createMigratedD1();

@@ -24,10 +24,12 @@
 --                        the existing metadata refresh. NULL = never probed,
 --                        which the store reads as 'unknown'. Delivery
 --                        admission never reads this column — the owner
---                        allowlist applies whatever the visibility — it only
---                        decides whether the dashboard renders the allowlist
---                        control. It exists so the settings page can stop
---                        offering a control to a private App.
+--                        allowlist applies whatever the visibility. The
+--                        dashboard renders the allowlist control for every
+--                        cached value and only adds a note under it for
+--                        'private': admission enforces the stored list on such
+--                        an App too, so hiding the control would leave a live
+--                        filter unmanageable.
 --
 -- `app_owner_allowlist` holds the owner logins the App will accept review work
 -- from — one row per (app, login). `created_at` is the datetime('now')
