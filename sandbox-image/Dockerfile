@@ -61,6 +61,11 @@
 # its `since <base>` reconFact assume a runner that understands a delta
 # universe. A stale image writes no report document at all, so every narrative
 # section publishes `none` while the round looks successful.
+# rebuild: the report validator now rejects a document that is over the read's
+# BYTE bound (character budgets alone cannot bound UTF-8 bytes) with an explicit
+# reason, and the report seat honours a caller signal aborted before the call
+# instead of running to its own timeout. A stale image accepts the over-byte
+# document, writes it, and loses it to the Worker's overflow read.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and

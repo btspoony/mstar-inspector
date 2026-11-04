@@ -17,6 +17,9 @@
  *     validator's: an empty field is a lost document, never an empty section.
  *   - Each field carries its own character budget; an over-budget field fails
  *     the whole document instead of being silently truncated mid-sentence.
+ *   - The serialized document must also fit `REPORT_FILE_MAX_BYTES`: the
+ *     character budgets alone cannot bound BYTES, and a document the reader
+ *     would discard as overflow must fail here with its reason instead.
  *
  * Dependency-free (like `recheck-wire.ts`): the Worker, the runner and the
  * tests all import this module.
@@ -71,6 +74,9 @@ export const PR_CONTEXT_MAX_CHARS = 4_000;
 
 const FIELDS = ["overview", "linkedIssueAc", "verified", "rejected", "planToFix"] as const;
 
+/** No Node Buffer in this module — it is imported by the Worker. */
+const UTF8 = new TextEncoder();
+
 export type ReportGateResult = { ok: true; doc: ReportDoc } | { ok: false; error: string };
 
 /**
@@ -109,6 +115,19 @@ export function validateReportDoc(value: unknown): ReportGateResult {
       };
     }
     doc[field] = raw;
+  }
+  // The reader bounds the FILE in BYTES; the budgets above bound CHARACTERS,
+  // and escaped text (control characters, lone surrogates) costs six UTF-8
+  // bytes per character once serialized. Measuring the serialized document is
+  // the only way a per-field-valid document can outgrow the read, so reject it
+  // HERE where the reason is still reportable instead of losing it to an
+  // opaque overflow.
+  const bytes = UTF8.encode(JSON.stringify(doc)).byteLength;
+  if (bytes > REPORT_FILE_MAX_BYTES) {
+    return {
+      ok: false,
+      error: `document is ${bytes} bytes, over the ${REPORT_FILE_MAX_BYTES}-byte file bound`,
+    };
   }
   return { ok: true, doc };
 }

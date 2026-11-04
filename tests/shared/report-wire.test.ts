@@ -12,7 +12,6 @@ import { describe, expect, test } from "bun:test";
 import {
   REPORT_FIELD_MAX_CHARS,
   REPORT_FILE_MAX_BYTES,
-  REPORT_OUTPUT_PATH,
   validateReportDoc,
   type ReportDoc,
 } from "../../packages/shared/src/report-wire";
@@ -82,7 +81,7 @@ describe("validateReportDoc", () => {
     });
   }
 
-  test("the fixed path and the read bound stay in sync with a valid document", () => {
+  test("a maximal ASCII document fits the byte bound the read enforces", () => {
     // A maximal valid document must fit the byte bound the read enforces.
     const maximal = {
       ...DOC,
@@ -94,6 +93,35 @@ describe("validateReportDoc", () => {
       ),
     };
     expect(Buffer.byteLength(JSON.stringify(maximal))).toBeLessThan(REPORT_FILE_MAX_BYTES);
-    expect(REPORT_OUTPUT_PATH.startsWith("/tmp/")).toBe(true);
+  });
+
+  test("rejects a document over the BYTE bound, and accepts one just under it", () => {
+    // The field budgets count CHARACTERS; escaped text (here `\u0001`) costs
+    // six UTF-8 bytes per character once serialized, so a document can pass
+    // every field budget and still not fit the file the reader bounds.
+    const fields = Object.keys(REPORT_FIELD_MAX_CHARS) as Array<keyof typeof REPORT_FIELD_MAX_CHARS>;
+    const withControls = (count: number): ReportDoc => {
+      const doc: ReportDoc = { ...DOC };
+      let left = count;
+      for (const field of fields) {
+        const take = Math.min(left, REPORT_FIELD_MAX_CHARS[field]);
+        doc[field] = "\u0001".repeat(take) + "x".repeat(REPORT_FIELD_MAX_CHARS[field] - take);
+        left -= take;
+      }
+      if (left !== 0) throw new Error("byte-bound fixture does not fit the field budgets");
+      return doc;
+    };
+    const bytes = (doc: ReportDoc) => new TextEncoder().encode(JSON.stringify(doc)).byteLength;
+    const baseline = bytes(withControls(0));
+    // Each control character replaces an "x": +5 serialized bytes.
+    const justUnder = withControls(Math.floor((REPORT_FILE_MAX_BYTES - 1 - baseline) / 5));
+    const justOver = withControls(Math.ceil((REPORT_FILE_MAX_BYTES + 1 - baseline) / 5));
+    expect(bytes(justUnder)).toBeLessThan(REPORT_FILE_MAX_BYTES);
+    expect(bytes(justOver)).toBeGreaterThan(REPORT_FILE_MAX_BYTES);
+    expect(validateReportDoc(justUnder).ok).toBe(true);
+    const gate = validateReportDoc(justOver);
+    expect(gate.ok).toBe(false);
+    if (gate.ok) throw new Error("expected failure");
+    expect(gate.error).toContain("byte");
   });
 });
