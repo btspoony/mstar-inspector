@@ -3757,46 +3757,49 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
   }, 10_000);
 
   test("check terminalize: the configured budget bounds the consumer's wait", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
-    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
-    const handed: Array<Promise<unknown>> = [];
-    const consumer = createReviewConsumer(
-      await makeEnv({ DB: db as never }),
-      testLog,
-      {
-        ...testOverrides,
-        checks: {
-          begin: mock(async () => ({
-            attemptId: "attempt-3",
-            scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
-            githubAppId: 424242,
-            headSha: SHA,
-            lease: { holder: "h", epoch: 1, untilMs: 1 },
-          })),
-          // Parks forever: only the configured 1 s budget can end the wait.
-          terminalize: mock(async () => {
-            await Promise.withResolvers<void>().promise;
-          }),
+    // Two DIFFERENT configured budgets, each measured against its own window:
+    // a hard-coded constant (or the 10 s default) lands outside BOTH, so the
+    // pair discriminates "reads the setting" from "happens to be about 1 s".
+    for (const configured of [1_000, 1_600]) {
+      reset();
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      const db = await createSeededTestD1();
+      seedCheckBudget(db, "review.check.terminalize_timeout_ms", String(configured));
+      const handed: Array<Promise<unknown>> = [];
+      const consumer = createReviewConsumer(
+        await makeEnv({ DB: db as never }),
+        testLog,
+        {
+          ...testOverrides,
+          checks: {
+            begin: mock(async () => ({
+              attemptId: "attempt-3",
+              scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+              githubAppId: 424242,
+              headSha: SHA,
+              lease: { holder: "h", epoch: 1, untilMs: 1 },
+            })),
+            // Parks forever: only the configured budget can end the wait.
+            terminalize: mock(async () => {
+              await Promise.withResolvers<void>().promise;
+            }),
+          },
         },
-      },
-      { waitUntil: (promise) => { handed.push(promise); } },
-    );
+        { waitUntil: (promise) => { handed.push(promise); } },
+      );
 
-    const startedAt = Date.now();
-    await consumer(makeBatch(makePayload()));
-    const elapsed = Date.now() - startedAt;
+      const startedAt = Date.now();
+      await consumer(makeBatch(makePayload()));
+      const elapsed = Date.now() - startedAt;
 
-    // The wait is the CONFIGURED budget, not the 10 s default: an unread row
-    // would show up as an elapsed time outside this window.
-    expect(elapsed).toBeGreaterThanOrEqual(1_000);
-    expect(elapsed).toBeLessThan(4_000);
-    expect(handed).toHaveLength(1);
-    const overruns = logLines.filter((l) => l.level === "warn" && l.msg.includes("exceeded its budget"));
-    expect(overruns).toHaveLength(1);
-    expect(reviewCount(db)).toBe(1); // the publication still landed
-  }, 10_000);
+      expect(elapsed, `configured ${configured}ms`).toBeGreaterThanOrEqual(configured);
+      expect(elapsed, `configured ${configured}ms`).toBeLessThan(configured + 600);
+      expect(handed).toHaveLength(1);
+      const overruns = logLines.filter((l) => l.level === "warn" && l.msg.includes("exceeded its budget"));
+      expect(overruns).toHaveLength(1);
+      expect(reviewCount(db)).toBe(1); // the publication still landed
+    }
+  }, 20_000);
 
   test("catch-path Check classification: send-throw → publication-unknown with the id; claim-fail → pre-publication-failure", async () => {
     // (a) A throw AT the prepared send is post-attempt uncertainty: the hook
