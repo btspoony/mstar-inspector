@@ -64,7 +64,11 @@ describe("upsertPullRequest", () => {
       .prepare("SELECT first_seen_at, last_seen_at FROM pull_requests WHERE app_id = ?")
       .get(APP_ID) as { first_seen_at: string; last_seen_at: string };
     expect(row.first_seen_at).toBe("2020-01-01 00:00:00");
-    expect(row.last_seen_at).not.toBe("2020-01-01 00:00:00");
+    // Strictly later than the stale pin: a NULL or garbage write is not an
+    // advance, and `MAX(last_seen_at, excluded.last_seen_at)` is what the
+    // column means.
+    expect(row.last_seen_at).not.toBeNull();
+    expect(row.last_seen_at > "2020-01-01 00:00:00").toBe(true);
   });
 
   test("an omitted title / head_sha keeps the stored value; state overwrites while non-terminal", async () => {

@@ -145,15 +145,27 @@ describe("pull_request delivery → PR ledger", () => {
     const appId = await seedApp(db, "every_push");
     // `datetime('not-a-timestamp')` yields NULL, which used to be hidden by a
     // COALESCE inside the SQL. The caller now filters it, so the store takes
-    // its OWN explicit "no usable stamp" branch and the column is never NULL.
+    // its OWN explicit "no usable stamp" branch and `last_seen_at` is never
+    // NULL.
+    const sent: Array<Record<string, unknown>> = [];
+    const env = makeEnv(db);
+    env.REVIEW_QUEUE = { send: mock(async (body: Record<string, unknown>) => { sent.push(body); }) } as never;
     await deliver(
       appId,
       { ...PR_PAYLOAD, pull_request: { ...PR_PAYLOAD.pull_request, updated_at: "not-a-timestamp" } },
-      makeEnv(db),
+      env,
     );
     const row = ledger(db, appId)[0]!;
     expect(row.last_seen_at).not.toBeNull();
-    expect(row.last_seen_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    // The leg the consumer's fail-open rule rides on: a junk stamp must NOT
+    // become a readable watermark, or the skip could accept it and ack the
+    // PR's only review. `head_sha` is present on this delivery, so a non-NULL
+    // `head_at` could only come from a fallback that invented a clock.
+    expect(row.head_sha).toBe("abc123");
+    expect(row.head_at).toBeNull();
+    // Same field on the queued job: omitted, never degraded to a clock.
+    expect(sent).toHaveLength(1);
+    expect("head_at" in sent[0]!).toBe(false);
   });
 
   test("last_seen_at comes from the payload's updated_at", async () => {
