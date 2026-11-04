@@ -7,7 +7,15 @@
 -- least `check_min_score`. Both values are App configuration, so a change
 -- takes effect on the next Check without a deploy.
 --
---   check_min_score      INTEGER NOT NULL DEFAULT 80 — the score floor.
+--   check_min_score      INTEGER NOT NULL DEFAULT 80 — the score floor. The
+--                        CHECK keeps it inside 0..100 AND equal to its own
+--                        INTEGER cast, so a fractional value inside that range
+--                        (80.5) is refused too: the gate compares a tally
+--                        score against this floor, and a non-integer floor is
+--                        not a configuration the engine's scores can meet.
+--                        INTEGER affinity also converts a whole-number REAL
+--                        (90.0) to the integer 90, so only the fractional case
+--                        is refused.
 --   check_pass_verdicts  TEXT NOT NULL DEFAULT '["ship it"]' — a JSON array of
 --                        the engine `PR_VERDICTS` spellings; the store rejects
 --                        an off-vocabulary value before the write. The DDL
@@ -44,7 +52,7 @@
 -- defaults with no backfill) plus one new table. Forward-only (SQLite has no
 -- down).
 
-ALTER TABLE github_apps ADD COLUMN check_min_score INTEGER NOT NULL DEFAULT 80 CHECK(check_min_score BETWEEN 0 AND 100);
+ALTER TABLE github_apps ADD COLUMN check_min_score INTEGER NOT NULL DEFAULT 80 CHECK(check_min_score BETWEEN 0 AND 100 AND check_min_score = CAST(check_min_score AS INTEGER));
 ALTER TABLE github_apps ADD COLUMN check_pass_verdicts TEXT NOT NULL DEFAULT '["ship it"]' CHECK(json_valid(check_pass_verdicts));
 ALTER TABLE github_apps ADD COLUMN allowlist_enabled INTEGER NOT NULL DEFAULT 0 CHECK(allowlist_enabled IN (0, 1));
 ALTER TABLE github_apps ADD COLUMN github_visibility TEXT CHECK(github_visibility IN ('public','private','unknown'));

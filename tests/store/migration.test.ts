@@ -2000,6 +2000,18 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
       .query("SELECT check_min_score FROM github_apps WHERE id = 'legacy-app'")
       .get() as { check_min_score: number };
     expect(floorRow.check_min_score).toBe(0);
+    // A fractional score sits INSIDE 0..100, so only the CHECK's own INTEGER
+    // cast equality refuses it; without that clause it would be stored.
+    expect(() =>
+      db.raw.prepare("UPDATE github_apps SET check_min_score = 80.5 WHERE id = 'legacy-app'").run(),
+    ).toThrow();
+    // ...and the INTEGER affinity still normalizes a whole-number value, so the
+    // tightening refuses fractions only.
+    db.raw.prepare("UPDATE github_apps SET check_min_score = '90.0' WHERE id = 'legacy-app'").run();
+    const wholeRow = db.raw
+      .query("SELECT check_min_score, typeof(check_min_score) AS kind FROM github_apps WHERE id = 'legacy-app'")
+      .get() as { check_min_score: number; kind: string };
+    expect(wholeRow).toEqual({ check_min_score: 90, kind: "integer" });
     expect(() =>
       db.raw.prepare("UPDATE github_apps SET github_visibility = 'secret' WHERE id = 'legacy-app'").run(),
     ).toThrow();
