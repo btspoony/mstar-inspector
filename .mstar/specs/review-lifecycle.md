@@ -518,7 +518,7 @@ export type CheckLifecycleHooks = {
 };
 ```
 
-The M8 slice declares this seam using only §7.7 types (`Scope`, `Lease`); it never imports a §7.9 type, so M8 is deliverable without M7. The M7 slice owns the implementation and maps these fields onto its own `CheckIdentity`/`CheckAttempt` rows. Hook exceptions/timeouts are caught by the consumer; the handle is invocation-local, not ambient mutable singleton state. Each inline hook has ≤2 requests / 2 seconds total, and no publication path waits for hook retries; durable recovery owns longer adoption work. A same-SHA ignored job may signal recovery but never creates a new Check or discards existing pending work.
+The M8 slice declares this seam using only §7.7 types (`Scope`, `Lease`); it never imports a §7.9 type, so M8 is deliverable without M7. The M7 slice owns the implementation and maps these fields onto its own `CheckIdentity`/`CheckAttempt` rows. Hook exceptions/timeouts are caught by the consumer; the handle is invocation-local, not ambient mutable singleton state. The begin hook has ≤2 requests / 2 seconds of consumer wait. The terminalize hook runs after publication: it sends at most one `checks.update` and may wait ≤10 seconds inline, and its promise is handed to the invocation context so an overrun still finishes out of band. No publication path waits for hook retries; durable recovery owns longer adoption work. A same-SHA ignored job may signal recovery but never creates a new Check or discards existing pending work.
 
 ### 7.11 Independent bounded recovery
 

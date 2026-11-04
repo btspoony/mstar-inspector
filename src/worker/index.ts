@@ -609,9 +609,12 @@ export default {
   // cannot resolve it, so a
   // static import would break the fetch-path tests (platform-specific
   // module exception to the static-import rule).
-  async queue(batch: MessageBatch<ReviewJobPayload>, env: Env & PipelineEnv): Promise<void> {
+  async queue(batch: MessageBatch<ReviewJobPayload>, env: Env & PipelineEnv, ctx: ExecutionContext): Promise<void> {
     const { createReviewConsumer } = await import("../pipeline/consumer");
-    await createReviewConsumer(env)(batch);
+    // The invocation context owns the detached Check terminalization: the
+    // consumer hands it the promise, so an overrun still finishes after the
+    // handler returns instead of being reclaimed with the isolate.
+    await createReviewConsumer(env, undefined, {}, { waitUntil: (promise) => ctx.waitUntil(promise) })(batch);
   },
   // Cron wiring (AL-6): the trailing-24h `review_failures` sweep,
   // composed (spec review-lifecycle §7.11) with the M8 recovery
