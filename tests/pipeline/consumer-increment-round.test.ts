@@ -34,18 +34,23 @@ import {
   testOverrides,
 } from "../helpers/consumer-harness";
 import { validateReportDoc } from "../../packages/shared/src/report-wire";
+import { createArtifactStore } from "../../src/store/artifact-store";
 import type { TestD1 } from "../store/helpers";
 
 const PREVIOUS_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 /** One reviewed row for this PR at `headSha` (the increment base candidate). */
-function seedReview(db: TestD1, headSha: string, verdict = "needs fixes"): void {
+function seedReview(
+  db: TestD1,
+  headSha: string,
+  { verdict = "needs fixes", contextIncomplete = false }: { verdict?: string; contextIncomplete?: boolean } = {},
+): void {
   db.raw
     .prepare(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id)
-       VALUES (?, 123, 'acme', 'widgets', 42, ?, ?, NULL)`,
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, context_incomplete)
+       VALUES (?, 123, 'acme', 'widgets', 42, ?, ?, NULL, ?)`,
     )
-    .run(crypto.randomUUID(), headSha, verdict);
+    .run(crypto.randomUUID(), headSha, verdict, contextIncomplete ? 1 : 0);
 }
 
 /** The written runner input JSON (the one `base64 -d >` write of the round). */
@@ -134,7 +139,7 @@ describe("incremental review rounds", () => {
     const db = await createSeededTestD1();
     // A stopped round reviewed PREVIOUS_SHA; diffing against it would inherit
     // the scope it never scanned, so it is not a base at all.
-    seedReview(db, PREVIOUS_SHA, "incomplete");
+    seedReview(db, PREVIOUS_SHA, { verdict: "incomplete" });
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -170,6 +175,125 @@ describe("incremental review rounds", () => {
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/increment diff failed/);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(sandbox.writtenInputJson).toBeUndefined();
+  });
+
+  test("a capture-failed round still publishes, and its row is never an incremental base", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Exit 0 with nothing to read: `gh pr diff` always emits a header for a
+    // real PR, so this is a capture FAILURE — the round publishes anyway.
+    sandbox.diffStdout = "";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(SHA) as {
+      context_incomplete: number;
+    };
+    expect(row.context_incomplete).toBe(1);
+  });
+
+  test("a healthy round stores context_incomplete = 0", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(SHA) as {
+      context_incomplete: number;
+    };
+    expect(row.context_incomplete).toBe(0);
+  });
+
+  test("an empty increment capture marks the round context-incomplete instead of a silent full diff", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    // `ahead` (the default) turns the round incremental, but the base...head
+    // capture comes back empty at exit 0 — the same capture failure the full
+    // diff's empty read is, and it must reach the stored row.
+    sandbox.incrementDiffStdout = "";
+    const db = await createSeededTestD1();
+    seedReview(db, PREVIOUS_SHA);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(logLines.some((l) => l.fields.increment_since === PREVIOUS_SHA)).toBe(true);
+    const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(SHA) as {
+      context_incomplete: number;
+    };
+    expect(row.context_incomplete).toBe(1);
+  });
+
+  test("a round whose capture failed is not an increment base either", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    const db = await createSeededTestD1();
+    // This row published a verdict, but its own diff capture failed — diffing
+    // against it would inherit scope that was never scanned.
+    seedReview(db, PREVIOUS_SHA, { contextIncomplete: true });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandbox.calls.some((c) => c.cmd.includes("/compare/"))).toBe(false);
+    expect(runnerInput().reconFacts).not.toContain(`since ${PREVIOUS_SHA}`);
+  });
+
+  test("a previous row at THIS head short-circuits before the compare", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    const db = await createSeededTestD1();
+    // The base read answers with the head being reviewed, so `base...head`
+    // would be empty and the compare must not run. The same row would hit the
+    // dedup read first, so that read is stubbed to miss — the guard is what
+    // this case is about.
+    seedReview(db, SHA);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      store: { ...createArtifactStore(db), findByIdempotencyKey: async () => null },
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandbox.calls.some((c) => c.cmd.includes("/compare/"))).toBe(false);
+    expect(runnerInput().reconFacts).not.toContain(`since ${SHA}`);
+  });
+
+  test("an unreadable base read keeps the full-diff round instead of failing it", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    const db = await createSeededTestD1();
+    seedReview(db, PREVIOUS_SHA);
+    // Fail ONLY the increment-base read: a D1 hiccup must degrade to "no
+    // increment", never fail a review over its own bookkeeping.
+    const failingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "prepare") {
+          return (query: string) => {
+            if (query.includes("SELECT head_sha FROM reviews")) throw new Error("base read boom");
+            return (target as typeof db).prepare(query);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: failingDb as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandbox.calls.some((c) => c.cmd.includes("/compare/"))).toBe(false);
+    expect(runnerInput().reconFacts).not.toContain(`since ${PREVIOUS_SHA}`);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
   });
 
   test("the recheck catalog is still built from the FULL diff on an increment round", async () => {

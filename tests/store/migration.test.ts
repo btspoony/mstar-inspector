@@ -1834,3 +1834,38 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     expect((db.raw.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
   });
 });
+
+describe("migrations/0045_reviews_context_incomplete.sql", () => {
+  /** The pre-0044 shape: every migration before the column was added. */
+  function createPre0044Db(): TestD1 {
+    const db = createTestD1();
+    for (const name of readdirSync(MIGRATIONS_DIR)
+      .filter((name) => name.endsWith(".sql") && name >= "0003" && name < "0044")
+      .sort()) {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  test("an existing row reads as 0 (a pre-column round stays an incremental base)", () => {
+    const db = createPre0044Db();
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
+         VALUES ('r1', 123, 'acme', 'widgets', 42, ?, 'needs fixes', 'old')`,
+      )
+      .run("a".repeat(40));
+
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0045_reviews_context_incomplete.sql"), "utf8"));
+
+    const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE id = 'r1'").get() as {
+      context_incomplete: number;
+    };
+    expect(row.context_incomplete).toBe(0);
+    const column = (
+      db.raw.query("PRAGMA table_info(reviews)").all() as Array<{ name: string; notnull: number; dflt_value: string }>
+    ).find((c) => c.name === "context_incomplete")!;
+    expect(column.notnull).toBe(1);
+    expect(column.dflt_value).toBe("0");
+  });
+});

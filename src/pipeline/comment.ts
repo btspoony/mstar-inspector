@@ -427,15 +427,37 @@ function insertBeforeHeading(body: string, anchor: string, block: string): strin
 }
 
 /**
+ * A report line markdown would read as STRUCTURE rather than text: an ATX
+ * heading, or a setext underline / thematic break (`---`, `===` turn the line
+ * above them into a heading). The four raw report fields are model/PR-echoed
+ * text, so a spoofed `### Findings` would otherwise steal the anchor the
+ * revalidated table is inserted at and a `## 📋 Review` would fork the layout.
+ */
+const REPORT_STRUCTURE_LINE = /^(?:#{1,6}\s|-{3,}\s*$|={3,}\s*$)/;
+
+/**
+ * Escape the first character of every structure line, so the field stays text:
+ * `### Findings` renders literally and is no longer an insertion anchor.
+ * `planToFix` is NOT passed through here — it is already fenced as code.
+ */
+function neutralizeReportText(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => (REPORT_STRUCTURE_LINE.test(line) ? `\\${line}` : line))
+    .join("\n");
+}
+
+/**
  * Compose the report sections into an engine-rendered review body:
  *
  *   `## 📋 Review` → overview → (narrative) → `### Revalidated findings` →
  *   `### Findings` → `### Linked-issue AC` → `### ✅ Verified` →
  *   `### 🗑️ Considered & rejected` → `## 🛠️ Plan to fix`
  *
- * Anchors are matched on exact heading lines. A body that carries no
- * `## 📋 Review` line is not the engine's layout: the overview is SKIPPED (one
- * warn) rather than prepended somewhere the reader would not expect, and the
+ * Anchors are matched on exact heading lines, and every raw field is neutralized
+ * (see `neutralizeReportText`) before insertion so it cannot forge one. A body
+ * that carries no `## 📋 Review` line is not the engine's layout: the overview is
+ * SKIPPED rather than prepended somewhere the reader would not expect, and the
  * remaining sections are still appended. A zero-finding envelope omits
  * `### Findings`; the empty heading is added so the revalidated table keeps its
  * position and the layout stays fixed. A missing report writes `none` under
@@ -444,15 +466,10 @@ function insertBeforeHeading(body: string, anchor: string, block: string): strin
 export function insertReportSections(rendered: string, report: ReportDoc | null, revalidated: string): string {
   let body = rendered;
   if (report !== null) {
-    const overview = `**What this PR does**: ${report.overview}`;
-    const withOverview = insertAfterHeading(body, REVIEW_HEADING, overview);
-    if (withOverview === null) {
-      console.warn(
-        JSON.stringify({ event: "report_section_skipped", section: "overview", anchor: REVIEW_HEADING }),
-      );
-    } else {
-      body = withOverview;
-    }
+    const overview = `**What this PR does**: ${neutralizeReportText(report.overview)}`;
+    // A miss is not reported from here: this function is pure, and the caller
+    // owns logging.
+    body = insertAfterHeading(body, REVIEW_HEADING, overview) ?? body;
   }
   const withRevalidated = insertBeforeHeading(body, FINDINGS_HEADING, revalidated);
   if (withRevalidated === null) {
@@ -462,18 +479,20 @@ export function insertReportSections(rendered: string, report: ReportDoc | null,
   } else {
     body = withRevalidated;
   }
+  const field = (value: string | undefined): string =>
+    value === undefined ? "none" : neutralizeReportText(value);
   const tail = [
     "### Linked-issue AC",
     "",
-    report?.linkedIssueAc ?? "none",
+    field(report?.linkedIssueAc),
     "",
     "### ✅ Verified",
     "",
-    report?.verified ?? "none",
+    field(report?.verified),
     "",
     "### 🗑️ Considered & rejected",
     "",
-    report?.rejected ?? "none",
+    field(report?.rejected),
     "",
     "## 🛠️ Plan to fix",
     "",
