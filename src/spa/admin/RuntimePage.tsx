@@ -114,7 +114,13 @@ export function RuntimePage({ locale }: { locale: Locale }) {
         onRetry={reload}
         locale={locale}
       >
-        {(data) => (
+        {(data) => {
+          // `null` = the server does not report the Check budgets (an older
+          // Worker behind a newer SPA bundle): the budget card is absent, the
+          // concurrency card is exactly as before, and nothing renders a bare
+          // `undefined`.
+          const budgets = data.checkBudgets;
+          return (
           <div className="flex flex-col gap-4">
             {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
             <SectionCard tier="secondary">
@@ -171,6 +177,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 )}
               </CardContent>
             </SectionCard>
+            {budgets === null ? null : (
             <SectionCard tier="secondary">
               <CardHeader>
                 <SectionCardTitle>{t(locale, "admin.runtime.checkTitle")}</SectionCardTitle>
@@ -179,7 +186,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 <p className="text-sm text-muted-foreground">
                   {t(locale, "admin.runtime.checkDescription")}
                 </p>
-                {data.checkBudgets.degraded ? (
+                {budgets.degraded ? (
                   // Both numbers are the documented defaults, not the stored
                   // setting: the form starts empty so a save cannot pin them.
                   <div className="mt-4">
@@ -188,7 +195,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 ) : null}
                 <form
                   className="mt-4 flex flex-wrap items-end gap-2"
-                  onSubmit={(event) => void onSaveBudgets(event, data.checkBudgets)}
+                  onSubmit={(event) => void onSaveBudgets(event, budgets)}
                 >
                   <div className="flex flex-col gap-1.5">
                     <label className="text-sm font-medium" htmlFor="check-terminalize-budget">
@@ -197,14 +204,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     <Input
                       id="check-terminalize-budget"
                       type="number"
-                      min={data.checkBudgets.terminalizeMin}
-                      max={data.checkBudgets.terminalizeMax}
+                      min={budgets.terminalizeMin}
+                      max={budgets.terminalizeMax}
                       className="w-32"
                       autoComplete="off"
                       required
                       value={
                         terminalizeDraft ??
-                        (data.checkBudgets.degraded ? "" : String(data.checkBudgets.terminalizeMs))
+                        (budgets.degraded ? "" : String(budgets.terminalizeMs))
                       }
                       onChange={(event) => setTerminalizeDraft(event.target.value)}
                     />
@@ -216,14 +223,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     <Input
                       id="check-update-budget"
                       type="number"
-                      min={data.checkBudgets.updateMin}
-                      max={data.checkBudgets.updateMax}
+                      min={budgets.updateMin}
+                      max={budgets.updateMax}
                       className="w-32"
                       autoComplete="off"
                       required
                       value={
                         updateDraft ??
-                        (data.checkBudgets.degraded ? "" : String(data.checkBudgets.updateMs))
+                        (budgets.degraded ? "" : String(budgets.updateMs))
                       }
                       onChange={(event) => setUpdateDraft(event.target.value)}
                     />
@@ -231,24 +238,26 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   <Button type="submit" disabled={busy}>
                     {t(locale, "admin.runtime.checkSave")}
                   </Button>
-                  {data.checkBudgets.degraded ? (
+                  {budgets.degraded ? (
                     <Button type="button" variant="secondary" onClick={reload}>
                       {t(locale, "common.retry")}
                     </Button>
                   ) : null}
                 </form>
-                {data.checkBudgets.degraded ? null : (
+                {budgets.degraded ? null : (
                   <p className="mt-2 text-xs text-muted-foreground">
                     {t(locale, "admin.runtime.checkCurrent", {
-                      terminalize: data.checkBudgets.terminalizeMs,
-                      update: data.checkBudgets.updateMs,
+                      terminalize: budgets.terminalizeMs,
+                      update: budgets.updateMs,
                     })}
                   </p>
                 )}
               </CardContent>
             </SectionCard>
+            )}
           </div>
-        )}
+          );
+        }}
       </Screen>
     </section>
   );

@@ -466,6 +466,18 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("an older server without checkBudgets still renders the concurrency card", async () => {
+    // A previously deployed Worker behind this bundle: the field is absent, so
+    // the budget card is hidden and the concurrency card is untouched.
+    const surface = await runtimeScreen(() =>
+      json({ concurrency: 24, min: 1, max: 256, degraded: false }),
+    );
+    expect(surface.text()).toContain("Effective on the next review: 24.");
+    expect(surface.container.querySelector("#check-terminalize-budget")).toBeNull();
+    expect(surface.container.querySelector("#system-concurrency")).not.toBeNull();
+    await surface.close();
+  });
+
   test("a zh_CN render shows the page's dictionary copy", async () => {
     const surface = await runtimeScreen(() => json(RUNTIME), "zh_CN");
     expect(surface.text()).toContain("运行时参数");

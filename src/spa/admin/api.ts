@@ -130,11 +130,19 @@ export type RuntimeConfig = {
   max: number;
   /** The stored cap could not be read: `concurrency` is the conservative fallback. */
   degraded: boolean;
-  checkBudgets: CheckBudgetConfig;
+  /**
+   * The Check-budget surface; `null` when the server does not report it (an
+   * older Worker behind a newer SPA bundle). The page then renders the
+   * concurrency card exactly as before and hides the budget card — a missing
+   * field is absence, not an unreadable setting.
+   */
+  checkBudgets: CheckBudgetConfig | null;
 };
 
-function parseCheckBudgets(row: Json): CheckBudgetConfig {
-  const budgets = map(row.checkBudgets, "runtime checkBudgets");
+function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
+  const raw = row.checkBudgets;
+  if (raw === undefined) return null;
+  const budgets = map(raw, "runtime checkBudgets");
   return {
     terminalizeMs: num(budgets, "terminalizeMs"),
     updateMs: num(budgets, "updateMs"),
