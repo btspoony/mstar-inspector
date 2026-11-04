@@ -22,6 +22,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent";
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 
 import {
+  REPORT_FIELD_MAX_CHARS,
   validateReportDoc,
   type PrContext,
   type ReportDoc,
@@ -54,6 +55,15 @@ export const REPORT_OUTPUT_SCHEMA = {
 
 /** Tail of the run's allowance kept clear for the envelope's own tail work. */
 const REPORT_TAIL_MARGIN_MS = 20_000;
+
+/**
+ * The per-field budgets the seat is told to stay inside, rendered from the ONE
+ * constant `validateReportDoc` enforces — a prompt that re-typed the numbers
+ * could silently ask for documents the validator then rejects whole.
+ */
+const REPORT_FIELD_BUDGETS = Object.entries(REPORT_FIELD_MAX_CHARS)
+  .map(([field, max]) => `${field} ${max}`)
+  .join(", ");
 
 /**
  * The report seat's assignment: the envelope (what the review found), the
@@ -106,9 +116,8 @@ export function reportAssignment(input: {
     "- `planToFix`: an ordered markdown fix plan (steps, files touched,",
     "  verification gates) for the findings that remain; \"none\" when there is",
     "  nothing to fix.",
-    "- Stay inside the character budgets: overview 1500, linkedIssueAc 3000,",
-    "  verified 3000, rejected 3000, planToFix 6000. An over-budget document",
-    "  is rejected whole.",
+    `- Stay inside the character budgets: ${REPORT_FIELD_BUDGETS}. An`,
+    "  over-budget document is rejected whole.",
   ].join("\n");
 }
 
