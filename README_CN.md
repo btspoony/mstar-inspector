@@ -129,12 +129,15 @@ Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.revie
   验证的、属于 Inspector 自己的 review thread——不授予任何模型、push、merge 或代码写入权限。
   `checks: write` 仅为 advisory review Check Run 存在。
 - **Advisory Check runs**：符合条件的审查会在被审 commit 上先出现一个进行中的 Check Run
-  （名为 `mstar-inspector review`），随后终态化为 `success`、`neutral` 或 `failure`。`success` 的含义是
-  审查**已发布**——它**绝不是**批准、merge 门禁或 `REQUEST_CHANGES` 等价物，App 也从不请求这些。
-  结论由持久化的发布证据决定，而非代码路径：确认正常发布 → 无论 engine verdict 一律 `success`；确认
-  降级发布 → `neutral`；执行失败或发布未确认 → `failure`。Check 失败从不阻塞或拖延审查本身。summary
-  会说明属于哪种情况，且不设置 `details_url`。分支保护始终**由用户控制**——本 App 不配置、不要求、
-  也不推荐任何 required status check。
+  （名为 `mstar-inspector review`），随后终态化为 `success` 或 `failure`。`success` 的含义是审查
+  **已发布且满足该 App 的审查门禁**——其 verdict 属于 App 的通过 verdict 集合，且 tally 分数不低于
+  App 的分数下限。门禁是该 App 在 Settings 页上的逐 App 配置；默认值为 verdict `ship it` 与下限 80，
+  因此从未改过该设置的 App 只把分数 ≥ 80 的 `ship it` 审查判为通过。确认的降级发布、发布未确认、
+  执行失败，或已发布但未达门禁的审查，均为 `failure`。结论**绝不是**批准、merge 门禁或
+  `REQUEST_CHANGES` 等价物，App 也从不请求这些。结论由持久化的发布证据加上已应用的 review 决定，
+  而非代码路径。Check 失败从不阻塞或拖延审查本身。summary 会说明属于哪种情况——因门禁失败时会
+  写明 verdict、分数、下限与允许的 verdict 集合——且不设置 `details_url`。分支保护始终**由用户控制**
+  ——本 App 不配置、不要求、也不推荐任何 required status check。
 - **同名 Check 可能出现两次运行**：本地 attempt fencing 不是外部 exactly-once（RL-12）。若一次创建
   attempt 未被确认——响应丢失，或 refusal 在请求发出后才落地——该 attempt 由 recovery **只读**结算：
   采纳并终态化，绝不创建第二个 run。`external_id` 是关联字段，不是服务端幂等键，因此**同一 commit

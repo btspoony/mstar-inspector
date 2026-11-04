@@ -1325,15 +1325,24 @@ and mirrored in `.env.example`:
 | Metadata | read | required by GitHub |
 | Pull requests | **write** | the review and its line comments |
 | Issues | **write** | the single overall-comment upsert |
-| Checks | **write** | advisory review Check Runs — execution status only (`mstar-inspector review` on the reviewed commit). Never an approval or a merge gate. |
+| Checks | **write** | advisory review Check Runs — the App's review-gate signal (`mstar-inspector review` on the reviewed commit). Never an approval or a merge gate. |
 
-**What the Check means.** A `success` conclusion records that the review **was
-published** — for every engine verdict. It is not an approval, not a merge
-gate, and never a `REQUEST_CHANGES` equivalent; the app requests neither
-event. A confirmed degraded publication is `neutral`; an execution failure or
-an unconfirmed publication is `failure`. Conclusions are decided from persisted
-publication proof, not from the code path, and a Check failure never blocks or
-delays the review. The run carries no `details_url`.
+**What the Check means.** A review's Check terminalizes to `success` or
+`failure`; `neutral` survives only in historical rows and is never produced. A
+`success` conclusion records that the review **was published and met the App's
+review gate** — the applied review's verdict is one of the App's passing
+verdicts and its tally score is at least the App's floor. The gate is per-App
+configuration in the review gate section of that App's settings page
+(`/dashboard/apps/<appId>/settings`): the defaults are the verdict `ship it`
+and a floor of 80, and a change applies to the next Check with no deploy. A
+confirmed degraded publication, an unconfirmed publication, an execution
+failure, or a published review that misses the gate is `failure`. It is not an
+approval, not a merge gate, and never a `REQUEST_CHANGES` equivalent; the app
+requests neither event. Conclusions are decided from persisted publication
+proof and the applied review, not from the code path, and a Check failure never
+blocks or delays the review. The summary names the verdict, score, floor and
+allowed verdicts whenever the gate was the deciding factor, and the run carries
+no `details_url`.
 
 **Branch protection is user-controlled.** The app never configures, requires or
 recommends a required status check. Whether any Check gates a merge is entirely
@@ -2507,9 +2516,10 @@ It never re-runs a paid review:
   resetting to `not-sent` would mint a second run for the same head.
 - **Conclusions come from persisted proof.** An attempt whose
   `desired = in_progress` expires at its execution deadline and is then
-  terminalized from the publication journal (`success` with matching proof,
-  `neutral` for a confirmed degraded publication, `failure` otherwise) —
-  `in_progress` is never passed to the completion API.
+  terminalized from the publication journal (`success` only when the applied
+  review meets the App's review gate, `failure` for a missed gate or a
+  confirmed degraded publication) — `in_progress` is never passed to the
+  completion API.
 - **Intent before send, observation after validation.** The frozen conclusion is
   persisted before the remote update, and the observed state advances only for a
   response that matches the persisted identity, `completed` status and intended
