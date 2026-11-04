@@ -1895,18 +1895,5 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
       .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.concurrency.system'")
       .get() as { value: string };
     expect(system.value).toBe("64");
-
-    // The bulk change is ledgered per affected workspace, so support can answer
-    // "why is this workspace 32?" after a rollback.
-    const audited = db.raw
-      .prepare(
-        `SELECT target_id, detail_json FROM platform_audit_events
-          WHERE action = 'workspace.concurrency.clamp' ORDER BY target_id`,
-      )
-      .all() as Array<{ target_id: string; detail_json: string }>;
-    expect(audited).toEqual([
-      { target_id: "ws_33", detail_json: JSON.stringify({ before: 33, after: WORKSPACE_CONCURRENCY_MAX }) },
-      { target_id: "ws_40", detail_json: JSON.stringify({ before: 40, after: WORKSPACE_CONCURRENCY_MAX }) },
-    ]);
   });
 });

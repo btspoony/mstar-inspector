@@ -1619,8 +1619,6 @@ describe("createReviewConsumer", () => {
       // 0031 completes the current set: the consumer meters every started
       // execution into usage_events.
       "0031_plans_usage.sql",
-      // 0033 adds the platform audit ledger; 0043 writes one clamp row into it.
-      "0033_platform_admin.sql",
       // 0036 renames the seeded route-key column, as the deploy does.
       "0036_app_identity.sql",
       // Every migration after 0036, derived from the directory (0039–0041

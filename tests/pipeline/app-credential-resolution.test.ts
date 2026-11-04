@@ -103,8 +103,6 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0024_provider_multi_key.sql",
     // 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
-    // 0033: the platform audit ledger; 0043 writes one clamp row into it.
-    "0033_platform_admin.sql",
     "0036_app_identity.sql",
     // Every later migration, derived from the directory (0040–… included):
     // the consumer's per-message admission reads the runtime caps and writes

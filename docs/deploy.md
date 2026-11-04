@@ -2374,7 +2374,17 @@ row expires.
 - Migration `0043` rewrites every stored workspace value above `32` (legal
   under the previous `1..64` range) down to `32` when it applies. This is a
   one-time, customer-visible lowering of an existing setting, performed at
-  deploy time; the tenant's card shows the clamped value afterwards.
+  deploy time; the tenant's card shows the clamped value afterwards. The
+  previous values are NOT recoverable from the database, so record them before
+  the deploy applies the migration:
+
+  ```sql
+  SELECT id, max_concurrent_reviews FROM workspaces
+   WHERE max_concurrent_reviews > 32 ORDER BY id;
+  ```
+
+  Keep that output with the deploy evidence — it is the answer to a later
+  "why is this workspace's cap 32?" question.
 - Every accepted write lands with its `platform_audit_events` row (actor
   included) in one D1 batch; a refused write changes no row and audits
   nothing.
