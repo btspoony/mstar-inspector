@@ -212,6 +212,9 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
     return {
       session: {
         getAgentId: mock(() => PARENT_SESSION_ID),
+        // The session manager this session was created with — the identity a
+        // seat's ToolSession must NOT share with the deep parent's stream.
+        sessionManager: options.sessionManager,
         dispose: mock(async () => {
           disposeCalls += 1;
         }),
@@ -2695,6 +2698,11 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     expect(assignment).toContain("reject expired tokens");
     expect(assignment).toContain("mstar.report/v1");
     expect(request.model).toEqual([...BASE_INPUT.modelSelectors]);
+    // That session is the fan-out HOST, and the report seat is one more
+    // structured child of it — no seat prompts the host directly. One-off
+    // read of the mocked ToolSession's identity (the proxy type erases it).
+    const hostSessionManager = (request.session as { sessionManager: unknown }).sessionManager;
+    expect(hostSessionManager).toBe(createdOptions[0]!.sessionManager);
   });
 
   test("without prContext no report seat is dispatched and the result is null", async () => {
@@ -2735,14 +2743,30 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     expect(result.report).toBeNull();
   });
 
-  test("deep: the report seat runs after the parent turn and the recheck seat both settled", async () => {
+  test("deep: the report seat runs on its OWN session after the parent turn and the recheck seat settled", async () => {
     parentYields = [deepEnvelope()];
     seatResults = [{ data: REPORT }];
     const result = await ompAgentRuntime.runReview({ ...DEEP_INPUT, prContext: PR_CONTEXT });
+
+    // The settled review still lands, with the bound narrative beside it.
+    expect(result.envelope.schema).toBe("mstar.review/v1");
+    expect(result.envelope.verdict).toBe("needs fixes");
     expect(result.report).toEqual(BOUND_REPORT);
     expect(subagentRequests).toHaveLength(1);
-    // The deep parent's own session is the seat's session.
-    expect((subagentRequests[0]!.session as { cwd: unknown }).cwd).toBe(TEST_WORKTREE);
+
+    // TWO sessions: the deep parent's prompt/yield stream and a DEDICATED
+    // report session. The seat's ToolSession is the latter — never the parent's.
+    expect(createdOptions).toHaveLength(2);
+    // One-off read of the mocked ToolSession's identity (the proxy type erases it).
+    const seatSessionManager = (subagentRequests[0]!.session as { sessionManager: unknown }).sessionManager;
+    expect(seatSessionManager).toBe(createdOptions[1]!.sessionManager);
+    expect(seatSessionManager).not.toBe(createdOptions[0]!.sessionManager);
+    // The report session carries the quick/default isolation shape.
+    expect(createdOptions[1]!.toolNames).toEqual(["read", "grep", "glob"]);
+    expect(createdOptions[1]!.requireYieldTool).toBe(false);
+    // Teardown disposed the report session with the parent.
+    expect(disposeCalls).toBe(2);
+    expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(false);
   });
 
   for (const [name, input] of [
@@ -2781,7 +2805,9 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
   test("a seat definition missing at dispatch degrades to no report — never a failed review", async () => {
     // The install keeps the definition in place for the whole run; if it is
     // gone when the report seat is reached, the seat is optional narrative and
-    // the settled review must still land.
+    // the settled review must still land. Per-test clone: this test deletes the
+    // definition mid-run, and the shared worktree fixture must stay intact.
+    const clone = mkdtempSync(join(tmpdir(), "omp-review-missing-seat-"));
     const reviewDispatch = deferred();
     holdSeats = true;
     seatDispatchQueue = [reviewDispatch.resolve];
@@ -2792,13 +2818,19 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     });
     let result: ReviewRunResult;
     try {
-      const run = ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", prContext: PR_CONTEXT });
+      const run = ompAgentRuntime.runReview({
+        ...BASE_INPUT,
+        level: "quick",
+        worktreePath: clone,
+        prContext: PR_CONTEXT,
+      });
       await reviewDispatch.promise;
-      rmSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"));
+      rmSync(join(clone, ".omp", "agents", "mstar-review-seat.md"));
       seatReleases.shift()!();
       result = await run;
     } finally {
       spy.mockRestore();
+      rmSync(clone, { recursive: true, force: true });
     }
     expect(result.report).toBeNull();
     expect(result.envelope.schema).toBe("mstar.review/v1");

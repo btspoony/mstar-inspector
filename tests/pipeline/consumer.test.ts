@@ -1056,7 +1056,8 @@ describe("createReviewConsumer", () => {
     // Problem Statement).
     expect(runnerExecTimeout()).toBe(840_000);
     // The admission row's TTL follows the same level table (AC-S10-guard).
-    expect(admissionTtlMs).toBe(2532_000);
+    // The seconds figure is pinned ONCE, by that guard test; this reads it.
+    expect(admissionTtlMs).toBe(reviewGuardTtlSeconds("deep") * 1000);
     // The quick/default 10-minute table is frozen (spec: 禁止把 quick 全局改成 deep 档预算).
     expect(runnerTimeoutMs("quick")).toBe(600_000);
     expect(runnerTimeoutMs("default")).toBe(600_000);

@@ -48,6 +48,12 @@
  *      second prompt/yield stream on the deep parent). Its result is
  *      validated with validateRecheckDoc and rides ReviewRunResult.recheck;
  *      any failure resolves null without touching the envelope.
+ *   7. report (mstar.report/v1): when the input carries a `prContext`, a
+ *      serial report seat runs AFTER the review settled — quick/default as one
+ *      more structured child of the fan-out host, deep on a DEDICATED session
+ *      (the parent's prompt/yield stream is the envelope's, never a seat's).
+ *      Optional narrative: any failure resolves `report: null` without
+ *      touching the envelope.
  *
  * Failure contract: ANY seat/parse/validation failure throws — the caller
  * never receives an M1-shaped fake success and nothing is posted or stored.
@@ -1204,12 +1210,13 @@ const DEEP_NO_YIELD_CAUSE = "deep parent turn produced no structured yield (msta
  * read-only recheck AgentSession/ToolSession runs `runRecheckSeat`
  * concurrently from the beginning of model work — never a second prompt/
  * yield stream on the deep parent's session (its listener captures terminal
- * yields). The shared mstar-review-seat definition is installed before
- * concurrent work — the recheck seat and the report seat both dispatch
- * against it — and removed with the deep role files after both sessions
- * settle; an unfinished seat is aborted when the parent turn settles
- * (success OR failure), and the seat itself never throws — a failure
- * resolves `recheck: null` without touching the envelope.
+ * yields). The report seat gets a DEDICATED session of the same shape, for the
+ * same reason — its child must never ride the parent's stream. The shared
+ * mstar-review-seat definition is installed before concurrent work — the
+ * recheck seat and the report seat both dispatch against it — and removed with
+ * the deep role files after all sessions settle; an unfinished seat is aborted
+ * when the parent turn settles (success OR failure), and the seat itself never
+ * throws — a failure resolves `recheck: null` without touching the envelope.
  */
 async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult> {
   const pluginRoot = resolveHarnessRoot();
@@ -1228,6 +1235,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
     : DEEP_SEAT_ROLE_FILES;
   let session: AgentSession | undefined;
   let recheckSession: AgentSession | undefined;
+  let reportSession: AgentSession | undefined;
   // The run's teardown signal: aborted the moment teardown begins, so a report
   // seat still in flight stops with the run (its own timer stays the bound
   // while the run lives). A caller-supplied abort joins it.
@@ -1255,24 +1263,28 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       const parentSession = created.session;
       session = parentSession;
 
-      // The dedicated recheck session: same quick/default
+      // One dedicated session per seat that prompts: the quick/default
       // isolation set — read/grep/glob only, no `task` tool, no yield
-      // schema — its own in-memory session manager.
+      // schema — its own in-memory session manager. The deep parent's session
+      // carries the envelope's single prompt/yield stream, so no seat rides it.
+      const createSeatSession = async (): Promise<AgentSession> =>
+        (
+          await createAgentSession(
+            buildSessionOptions({
+              cwd,
+              pluginRoot,
+              skills,
+              modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
+              fallbackChain: [...input.modelSelectors],
+              agentDir: input.agentDir,
+              authStorage: input.authStorage,
+            }),
+          )
+        ).session;
       const recheckController = new AbortController();
       let recheckWork: Promise<RecheckSeatResult> | null = null;
       if (input.recheck !== undefined) {
-        const recheckCreated = await createAgentSession(
-          buildSessionOptions({
-            cwd,
-            pluginRoot,
-            skills,
-            modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
-            fallbackChain: [...input.modelSelectors],
-            agentDir: input.agentDir,
-            authStorage: input.authStorage,
-          }),
-        );
-        const liveRecheckSession = recheckCreated.session;
+        const liveRecheckSession = await createSeatSession();
         recheckSession = liveRecheckSession;
         recheckWork = runRecheckSeat({
           session: asToolSession(liveRecheckSession, cwd),
@@ -1495,14 +1507,25 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
       // The narrative report runs after BOTH the parent turn and the recheck
-      // seat settled (it cites their results), on the parent session.
-      const report = await runReportSeatFor(
-        input,
-        asToolSession(parentSession, cwd),
-        envelope,
-        settled?.doc ?? null,
-        runTeardownSignal(teardown, input),
-      );
+      // seat settled (it cites their results), on its OWN session: the parent's
+      // prompt/yield stream is the envelope's, never a seat's.
+      let report: ReportDoc | null = null;
+      if (input.prContext !== undefined) {
+        try {
+          reportSession = await createSeatSession();
+          report = await runReportSeatFor(
+            input,
+            asToolSession(reportSession, cwd),
+            envelope,
+            settled?.doc ?? null,
+            runTeardownSignal(teardown, input),
+          );
+        } catch (error) {
+          // Optional narrative: a seat session that cannot be created must
+          // never fail a review that already settled.
+          console.error(JSON.stringify({ event: "report_skipped", reason: "session-failed" }), error);
+        }
+      }
       return {
         envelope,
         recheck: settled?.doc ?? null,
@@ -1514,9 +1537,9 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
     // Signal before the sessions settle: on the caller-abort path a report seat
     // may still be in flight, and it must stop with the run it belongs to.
     teardown.abort();
-    // Teardown order: both sessions settle BEFORE the agent-file cleanup
+    // Teardown order: every session settles BEFORE the agent-file cleanup
     // (never concurrent agent-file writes/cleanup, spec §7.8).
-    for (const live of [session, recheckSession]) {
+    for (const live of [session, recheckSession, reportSession]) {
       if (live) {
         try {
           await live.dispose();
@@ -1872,7 +1895,9 @@ export const ompAgentRuntime: AgentRuntime = {
       // never compete with a seat for the run's model budget, and it can only
       // describe findings that already exist. A null report (no prContext, a
       // failed seat, an invalid document) degrades the sections to `none` —
-      // never a failed review.
+      // never a failed review. This session is the fan-out HOST (no seat
+      // prompts it directly — every seat is a structured child of it, and every
+      // sibling settled above), so the report seat shares it as one more child.
       const report = await runReportSeatFor(
         input,
         toolSession,
