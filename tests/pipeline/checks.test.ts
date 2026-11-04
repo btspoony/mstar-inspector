@@ -36,6 +36,7 @@ import {
   CHECK_NAME,
   CHECK_RECOVERY_LEASE_MS,
   rollbackCheckCreateDispatch,
+  readPublishedReview,
   setCheckCreateState,
   setCheckDesired,
   type CheckAttempt,
@@ -1191,6 +1192,49 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       expect(decided.desired).toBe("failure");
       expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadable(sha7, gate));
     }
+  });
+
+  test("an unreadable proof payload is the gate-unreadable failure, never an earlier passing row", async () => {
+    // RL-12: an earlier attempt for the same head SHA already wrote a passing
+    // `reviews` row. This attempt's proof payload carries no artifact envelope,
+    // so the review it published is UNREADABLE — and an unreadable proof must
+    // never be backfilled from the projection of another attempt's apply.
+    const db = await seededDb();
+    const unreadable = proof("review");
+    db.raw
+      .prepare(
+        `INSERT INTO reviews
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, verdict, envelope, reviewed_at)
+         VALUES ('earlier-attempt', ?, ?, ?, ?, ?, ?, 'ship it', '{"tally":{"scorePct":96}}', datetime('now'))`,
+      )
+      .run(APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA);
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{"version":1,"artifact":null}', ?, ?)`,
+      )
+      .run(
+        unreadable.publicationId, APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo,
+        SCOPE.prNumber, SHA, T0, T0,
+      );
+
+    const read = await readPublishedReview(db, {
+      scope: SCOPE,
+      headSha: SHA,
+      publicationId: unreadable.publicationId,
+    });
+    expect(read).toBeNull();
+    // Without a proof id the projection is still the gate input — the read the
+    // publication-level read must not substitute for it.
+    expect(await readPublishedReview(db, { scope: SCOPE, headSha: SHA })).toEqual({
+      verdict: "ship it",
+      scorePct: 96,
+    });
+
+    const decided = decideConclusion({ proof: unreadable, outcome: "expired", gate, review: read });
+    expect(decided.desired).toBe("failure");
+    expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadable(sha7, gate));
   });
 
   test("a confirmed DEGRADED publication is failure for every outcome (neutral is unreachable)", () => {

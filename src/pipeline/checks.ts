@@ -810,9 +810,9 @@ export type CheckTerminalOutcome =
  * function trusts what it is handed and reads `kind` alone. A `null` proof is
  * UNPROVEN — which is not the same as "not published", and is why an unknown
  * outcome must conclude `failure` rather than guess. `review` is the review
- * THIS proof publication carried (`readPublishedReview` prefers its payload and
- * only falls back to the scope/SHA row); `null` or a null score is UNREADABLE,
- * never a pass. `gate` is the stored App gate; `null` is unreadable
+ * THIS proof publication carried (`readPublishedReview` reads that publication
+ * and never falls back to the scope/SHA row); `null` or a null score is
+ * UNREADABLE, never a pass. `gate` is the stored App gate; `null` is unreadable
  * CONFIGURATION and fails closed — there is no permissive default to fall back
  * to. `neutral` is unreachable: a degraded publication cannot prove the gate
  * was met (clarify C3).

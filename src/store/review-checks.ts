@@ -1397,32 +1397,32 @@ export { readPublicationProof } from "./finding-lifecycle";
 
 /**
  * The review a Check is judged by (spec §7.9 gate read): the envelope the
- * attempt itself PUBLISHED, preferred over the scope/SHA `reviews` row.
- * `reviews` is a projection of the local apply — first write wins, and it can
- * lag a confirmed publication (apply still due, or failed) or belong to an
- * earlier attempt for the same head SHA, which RL-12 allows. It also carries no
- * proof identity, so it must never override the envelope the proof's
- * publication actually carried: `review_publications.payload_json` →
- * `artifact.payload`.
+ * attempt itself PUBLISHED.
  *
- * `publicationId` is the proof's publication id. Absent, or its payload
- * unreadable (missing row, bad JSON, no artifact envelope, no verdict), the
- * scope/SHA row decides — the pre-existing behaviour. A readable payload whose
- * tally is missing keeps its verdict with `scorePct: null` (unreadable gate
- * input, never a fallback to another attempt's score). Missing row → `null`.
- * Read-only: it never mutates or fabricates an outcome.
+ * `publicationId` is the proof's publication id. Supplied, it ALONE decides:
+ * that payload is the envelope this attempt published, and an unreadable
+ * payload → `null` (the gate-unreadable failure) — never a fallback to the
+ * scope/SHA `reviews` row. `reviews` is a projection of the local apply: first
+ * write wins, it can lag a confirmed publication (apply still due, or failed)
+ * or belong to an earlier attempt for the same head SHA, which RL-12 allows,
+ * and it carries no proof identity, so it must never decide an attempt that
+ * published something else. Callers without a proof id read the row.
+ *
+ * A readable payload whose tally is missing keeps its verdict with
+ * `scorePct: null` (unreadable gate input, never a fallback to another
+ * attempt's score). Missing row → `null`. Read-only: it never mutates or
+ * fabricates an outcome.
  */
 export async function readPublishedReview(
   db: D1Like,
   input: { scope: Scope; headSha: string; publicationId?: string },
 ): Promise<PublishedReview | null> {
   if (input.publicationId !== undefined) {
-    const published = await readPublicationReview(db, {
+    return readPublicationReview(db, {
       scope: input.scope,
       headSha: input.headSha,
       publicationId: input.publicationId,
     });
-    if (published !== null) return published;
   }
   const row = await db
     .prepare(
