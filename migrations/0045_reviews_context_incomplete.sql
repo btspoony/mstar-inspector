@@ -2,11 +2,13 @@
 -- scope it claims to have reviewed.
 --
 -- `verdict <> 'incomplete'` was the only base filter for an incremental round.
--- A round whose full-diff capture failed (empty bounded read at exit 0, or
--- unreadable) still publishes and still writes its `reviews` row, so the next
--- round would diff against it and silently inherit scope that was never
--- scanned. The fact belongs on the row: `context_incomplete = 1` makes the
--- round a non-base for `findIncrementBase`.
+-- A round that could not fully scan its scope still publishes and still writes
+-- its `reviews` row: the diff capture was empty / unreadable / over the byte
+-- bound, an increment diff came back empty, or the lifecycle-target or
+-- discussion capture failed. The next round would diff against it and silently
+-- inherit scope that was never scanned. The fact belongs on the row:
+-- `context_incomplete = 1` makes the round a non-base for
+-- `findIncrementBase`.
 --
 -- `NOT NULL DEFAULT 0` keeps every existing row a usable base (they were
 -- captured under the pre-column rules) and lets a put that does not carry the
