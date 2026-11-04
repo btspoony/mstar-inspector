@@ -62,7 +62,6 @@ import type { CommenterCall } from "../helpers/review-commenter";
 import { PreparedSendRejected } from "../../src/pipeline/comment";
 import {
   CHECK_SUMMARIES,
-  DEFAULT_REVIEW_GATE,
   createCheckLifecycle,
   createChecksAdapter,
   type CheckRunPayload,
@@ -107,6 +106,9 @@ import {
   ADDRESSED_QUOTE,
   recheckDocWith,
 } from "../helpers/consumer-fixtures";
+
+/** The review gate the seeded test App carries (migration 0045's DDL default). */
+const GATE = { minScore: 80, passVerdicts: ["ship it"] } as const;
 
 /**
  * The migrations after the 0036 identity rewrite, in wrangler's apply order.
@@ -4241,7 +4243,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(update.status).toBe("completed");
     expect(update.conclusion).toBe("success");
     expect(update.title).toBe(CHECK_NAME);
-    expect(update.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, DEFAULT_REVIEW_GATE));
+    expect(update.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
 
     // Order: the create lands after the authoritative-SHA step and before the
     // model work; the terminal update lands after the publication was posted.
@@ -4514,7 +4516,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
-    expect(update.summary).toBe(CHECK_SUMMARIES.gateUnreadable(SHA.slice(0, 7), DEFAULT_REVIEW_GATE));
+    expect(update.summary).toBe(CHECK_SUMMARIES.gateUnreadable(SHA.slice(0, 7), GATE));
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("failure");
     expect(row.observed).toBe("failure");
@@ -4790,7 +4792,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRows(db)).toHaveLength(1);
     expect(row.check_run_id).not.toBeNull();
     expect(row.desired).toBe("success");
-    expect(row.desired_summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, DEFAULT_REVIEW_GATE));
+    expect(row.desired_summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
     expect(row.desired_title).toBe(CHECK_NAME);
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();

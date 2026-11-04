@@ -688,9 +688,10 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
   test("a persistent gate/review read failure still terminalizes the attempt (QC3-F-001)", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    // The gate and the APPLIED review are the two reads a corrupt
-    // `check_pass_verdicts` or a failing D1 keeps failing. Both are UNREADABLE
-    // inputs here, never a reason to skip the terminal conclusion: an attempt
+    // The gate and the APPLIED review are the two reads a failing D1 keeps
+    // failing; after migration 0045 a corrupt `check_pass_verdicts` no longer
+    // throws either — `getCheckGate` reports it as null, the same UNREADABLE
+    // input. Neither is a reason to skip the terminal conclusion: an attempt
     // that only retried would never conclude its Check.
     const degraded = withFailingReads(db, /check_pass_verdicts|FROM reviews/);
     const fetchStub = stubFetch();

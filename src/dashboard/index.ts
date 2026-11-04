@@ -3168,7 +3168,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
     // Migration 0045 configuration: the review gate, the owner allowlist and
     // the cached GitHub visibility, read from the row this route has already
     // resolved (the manager face cannot be built without the first two — a
-    // null means a concurrent delete, which the route's catch answers 500).
+    // null here means a concurrent delete OR an unreadable stored gate, and a
+    // settings page must not render a gate it cannot read: the route's catch
+    // answers 500, the honest surface).
     const checkGate = await apps.getCheckGate(app.id);
     const allowlist = await apps.getAllowlist(app.id);
     const githubVisibility = await apps.getGithubVisibility(app.id);
@@ -4190,8 +4192,10 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     }
     // Repeated `pass_verdicts` fields are the shape this op expects (the SPA
     // posts one per checked box); parseBody({ all: true }) aggregates them.
+    // Duplicates collapse, so the stored set (and the notice below) is a SET.
     const rawVerdicts = form.pass_verdicts;
-    const submitted = rawVerdicts === undefined ? [] : Array.isArray(rawVerdicts) ? rawVerdicts : [rawVerdicts];
+    const fields = rawVerdicts === undefined ? [] : Array.isArray(rawVerdicts) ? rawVerdicts : [rawVerdicts];
+    const submitted = [...new Set(fields)];
     const unknownVerdict = submitted.find(
       (entry) => typeof entry !== "string" || !PR_VERDICTS.includes(entry as PrVerdict),
     );

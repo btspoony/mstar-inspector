@@ -17,7 +17,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { createMigratedTestD1, createTestD1 } from "./helpers";
+import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter } from "./helpers";
 import {
   WORKSPACE_CONCURRENCY_MAX,
   getEffectiveConcurrency,
@@ -1940,9 +1940,8 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
   /** A DB shaped like production at 0044: every earlier file, applied in order. */
   function preGateDb(): TestD1 {
     const db = createTestD1();
-    for (const name of readdirSync(MIGRATIONS_DIR)
-      .filter((name) => name.endsWith(".sql") && name >= "0003_dashboard_users.sql" && name < GATE_MIGRATION)
-      .sort()) {
+    const gate = migrationNumber(GATE_MIGRATION);
+    for (const name of migrationsAfter(2).filter((migration) => migrationNumber(migration) < gate)) {
       db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
     }
     return db;

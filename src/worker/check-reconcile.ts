@@ -79,7 +79,6 @@ import type { CheckOwnership, Lease, PublicationProof, PublishedReview } from ".
 import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
-  DEFAULT_REVIEW_GATE,
   decideConclusion,
   isRequestNotDispatched,
   type ChecksAdapter,
@@ -766,8 +765,9 @@ async function reconcileCheckAttempt(
   //    or paid re-review.
   const proof = await readProof(db, owned);
   // The gate decision needs the App's stored gate and the APPLIED review by
-  // the same exact scope/SHA. A missing row or tallies-free review is
-  // unreadable, so it can never be corrected into a success (spec §7.9).
+  // the same exact scope/SHA. A missing or corrupt gate row, or a
+  // tallies-free review, is unreadable, so it can never be corrected into a
+  // success (spec §7.9).
   // Both reads are guarded like the proof read above: a persistent read
   // failure must still leave the row a persisted terminal conclusion, never a
   // throw that keeps re-selecting the same due attempt forever.
@@ -1141,15 +1141,17 @@ async function readProof(db: D1Like, owned: CheckOwnership): Promise<Publication
 }
 
 /**
- * The App's gate, or the DDL default when the read is unreadable — the same
- * fallback the consumer lane uses for its `null`. A read failure is never a
- * reason to abandon the row: the conclusion below still gets persisted.
+ * The App's gate, or `null` when it cannot be read (unknown row, corrupt
+ * stored verdicts, or a failed read) — the same "unreadable" meaning the
+ * consumer lane gets, so a review proof concludes `failure`. A read failure is
+ * never a reason to abandon the row: the conclusion below still gets
+ * persisted.
  */
-async function readRecoveryGate(db: D1Like, appId: string): Promise<ReviewGate> {
+async function readRecoveryGate(db: D1Like, appId: string): Promise<ReviewGate | null> {
   try {
-    return (await createAppsStore(db).getCheckGate(appId)) ?? DEFAULT_REVIEW_GATE;
+    return await createAppsStore(db).getCheckGate(appId);
   } catch {
-    return DEFAULT_REVIEW_GATE;
+    return null;
   }
 }
 
@@ -1172,12 +1174,14 @@ async function readRecoveryReview(db: D1Like, owned: CheckOwnership): Promise<Pu
  * publication only succeeds when the applied review meets it — regardless of
  * how the attempt expired; an expired attempt with no proof is the honest
  * unconfirmed `failure`. An intent the consumer already persisted is preserved
- * verbatim unless a proof-derived correction applies.
+ * verbatim unless a proof-derived correction applies. `gate` is the App's
+ * stored gate; `null` means it could not be read, so a proof-derived
+ * conclusion fails closed instead of assuming a default.
  */
 function terminalConclusion(
   owned: CheckOwnership,
   proof: PublicationProof | null,
-  gate: ReviewGate,
+  gate: ReviewGate | null,
   review: PublishedReview | null,
 ): CheckConclusion {
   if (proof !== null) return decideConclusion({ proof, outcome: "expired", gate, review });

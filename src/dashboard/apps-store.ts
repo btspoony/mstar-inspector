@@ -275,28 +275,21 @@ export type CheckGate = {
 };
 
 /**
- * Migration 0045's DDL default for `check_pass_verdicts` (`'["ship it"]'`).
- * Duplicated rather than imported from the pipeline's `DEFAULT_REVIEW_GATE`:
- * the dashboard may not import pipeline/review code (architect decision Q2).
+ * The stored verdict array, or `null` when the stored value is unreadable
+ * (bad JSON, not an array, or off-vocabulary). `null` is unreadable
+ * CONFIGURATION, never "the default": the Check lanes read the gate on every
+ * terminalization and must fail closed on a row they cannot read.
  */
-const DDL_DEFAULT_PASS_VERDICTS: readonly PrVerdict[] = ["ship it"];
-
-/**
- * The stored verdict array, or the DDL default when the stored value is
- * unreadable (bad JSON, not an array, or off-vocabulary). The Check lanes read
- * the gate on every terminalization, so a corrupt row is unreadable
- * configuration rather than a crash.
- */
-function storedPassVerdicts(raw: string): readonly PrVerdict[] {
+function storedPassVerdicts(raw: string): readonly PrVerdict[] | null {
   try {
     const parsed: unknown = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.every((entry) => PR_VERDICTS.includes(entry as PrVerdict))) {
       return parsed as PrVerdict[];
     }
   } catch {
-    // fall through to the DDL default
+    // unreadable — reported as null below
   }
-  return DDL_DEFAULT_PASS_VERDICTS;
+  return null;
 }
 
 /**
@@ -869,9 +862,10 @@ export function createAppsStore(db: AppsStoreD1) {
     /**
      * The App's review gate (migration 0045). Unknown id → null (the
      * getSandboxImageId convention). No tenant join: the gate is a
-     * configuration value. The stored verdict array is written only through
-     * saveCheckGate, so it is already vocabulary-validated; a corrupt stored
-     * value reads as the DDL default instead of throwing.
+     * configuration value. A stored verdict array that is unparseable,
+     * off-vocabulary or not an array also reads as null — the same
+     * "unreadable" meaning, so every consumer fails closed instead of
+     * inventing a permissive default.
      */
     async getCheckGate(appId: string): Promise<CheckGate | null> {
       const row = await db
@@ -879,31 +873,34 @@ export function createAppsStore(db: AppsStoreD1) {
         .bind(appId)
         .first<{ check_min_score: number; check_pass_verdicts: string }>();
       if (!row) return null;
-      return {
-        minScore: row.check_min_score,
-        passVerdicts: storedPassVerdicts(row.check_pass_verdicts),
-      };
+      const passVerdicts = storedPassVerdicts(row.check_pass_verdicts);
+      if (passVerdicts === null) return null;
+      return { minScore: row.check_min_score, passVerdicts };
     },
 
     /**
      * The App's owner allowlist (migration 0045): the switch plus the owner
-     * logins in login order. Unknown id → null. Two statements, not a batch:
-     * both read the committed state of one D1 database, and the owner set is
-     * only ever replaced inside one batch by saveAllowlist.
+     * logins in login order. Unknown id → null. ONE statement, so the switch
+     * and the owner set come from the same snapshot — a save landing between
+     * two reads could otherwise admit against a switch that no longer
+     * applies to the list it was read with.
      */
     async getAllowlist(appId: string): Promise<AppAllowlist | null> {
-      const row = await db
-        .prepare(`SELECT allowlist_enabled FROM github_apps WHERE id = ?`)
+      const rows = await db
+        .prepare(
+          `SELECT g.allowlist_enabled AS enabled, a.owner_login
+             FROM github_apps g
+             LEFT JOIN app_owner_allowlist a ON a.app_id = g.id
+            WHERE g.id = ?
+            ORDER BY a.owner_login`,
+        )
         .bind(appId)
-        .first<{ allowlist_enabled: number }>();
-      if (!row) return null;
-      const owners = await db
-        .prepare(`SELECT owner_login FROM app_owner_allowlist WHERE app_id = ? ORDER BY owner_login`)
-        .bind(appId)
-        .all<{ owner_login: string }>();
+        .all<{ enabled: number; owner_login: string | null }>();
+      const [first] = rows.results;
+      if (first === undefined) return null;
       return {
-        enabled: row.allowlist_enabled !== 0,
-        owners: owners.results.map((entry) => entry.owner_login),
+        enabled: first.enabled !== 0,
+        owners: rows.results.flatMap((row) => (row.owner_login === null ? [] : [row.owner_login])),
       };
     },
 

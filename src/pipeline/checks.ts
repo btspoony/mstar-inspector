@@ -754,14 +754,8 @@ function safeDetail(error: unknown): string {
 export type ReviewGate = { minScore: number; passVerdicts: readonly string[] };
 
 /**
- * The gate used when the App row cannot be read. It mirrors migration 0045's
- * DDL default, so a missing row behaves like a freshly created App.
- * shortcut: duplicates the DDL default; upgrade by exporting it from the store
- * if a third consumer appears.
+ * Frozen summaries, exactly as spec §7.9's matrix spells them.
  */
-export const DEFAULT_REVIEW_GATE: ReviewGate = { minScore: 80, passVerdicts: ["ship it"] };
-
-/** Frozen summaries, exactly as spec §7.9's matrix spells them. */
 export const CHECK_SUMMARIES = {
   gateMet: (sha7: string, round: number, verdict: string, score: number, gate: ReviewGate) =>
     `Review gate met for ${sha7} (round ${round}): verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
@@ -769,6 +763,12 @@ export const CHECK_SUMMARIES = {
     `Review gate missed for ${sha7}: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
   gateUnreadable: (sha7: string, gate: ReviewGate) =>
     `Review gate could not be evaluated for ${sha7}: no published review with a readable tally (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
+  /**
+   * The App's own gate row is unreadable, so there is no floor or allowed
+   * list to name — the failure must not invent one.
+   */
+  gateUnreadableConfig: (sha7: string) =>
+    `Review gate could not be evaluated for ${sha7}: the App's gate configuration could not be read.`,
   degraded: "Review output was invalid; a degraded summary comment was published.",
   prePublicationFailure: (reason: string) =>
     `Review execution failed before publication: ${reason}. No review was published.`,
@@ -797,6 +797,7 @@ export type CheckTerminalOutcome =
  * |---------------------------------------------------------------|---------|
  * | confirmed normal publication that MEETS the App review gate    | success |
  * | confirmed normal publication that misses the gate              | failure |
+ * | confirmed normal publication with an unreadable App gate       | failure |
  * | confirmed normal publication with an unreadable review/tally   | failure |
  * | confirmed degraded publication                                 | failure |
  * | definitive failure before any publication send                 | failure |
@@ -810,13 +811,15 @@ export type CheckTerminalOutcome =
  * UNPROVEN — which is not the same as "not published", and is why an unknown
  * outcome must conclude `failure` rather than guess. `review` is the applied
  * review read by exact scope/SHA; `null` or a null score is UNREADABLE, never
- * a pass. `neutral` is unreachable: a degraded publication cannot prove the
- * gate was met (clarify C3).
+ * a pass. `gate` is the stored App gate; `null` is unreadable CONFIGURATION
+ * and fails closed — there is no permissive default to fall back to.
+ * `neutral` is unreachable: a degraded publication cannot prove the gate was
+ * met (clarify C3).
  */
 export function decideConclusion(input: {
   proof: PublicationProof | null;
   outcome: CheckTerminalOutcome;
-  gate: ReviewGate;
+  gate: ReviewGate | null;
   review: PublishedReview | null;
   reason?: string;
 }): CheckConclusion {
@@ -826,6 +829,9 @@ export function decideConclusion(input: {
       return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degraded };
     }
     const sha7 = proof.headSha.slice(0, 7);
+    if (gate === null) {
+      return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.gateUnreadableConfig(sha7) };
+    }
     if (review === null || review.scorePct === null) {
       return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.gateUnreadable(sha7, gate) };
     }
@@ -882,8 +888,9 @@ export type CheckLifecycleDeps = {
   getAdapter(scope: Scope): ChecksAdapter | null;
   /**
    * The App's review gate (spec §7.9), read through the caller's store helper
-   * (`getCheckGate`). `null` = the App row is unreadable; the lifecycle then
-   * uses `DEFAULT_REVIEW_GATE`, whose values are the DDL default.
+   * (`getCheckGate`). `null` = the gate is unreadable (unknown App row, bad
+   * JSON, off-vocabulary or non-array verdicts); a review proof then
+   * concludes `failure` — there is no permissive default.
    */
   getCheckGate(scope: Scope): Promise<ReviewGate | null>;
   /** The transaction clock (spec §7.0) — re-read immediately before each fenced write. */
@@ -1163,7 +1170,8 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // publication id preferred. `null` is UNPROVEN — never "not published" —
       // which is why an unconfirmed send must conclude `failure`, not success.
       // The gate and the APPLIED review are read by the same exact scope/SHA;
-      // a review row without a readable tally stays unreadable, never a pass.
+      // a review row without a readable tally stays unreadable, never a pass,
+      // and an unreadable gate row fails closed the same way.
       const [proof, gate, review] = await Promise.all([
         readPublicationProof(deps.db, {
           scope: handle.scope,
@@ -1176,7 +1184,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       const conclusion = decideConclusion({
         proof,
         outcome: input.outcome,
-        gate: gate ?? DEFAULT_REVIEW_GATE,
+        gate,
         review,
       });
       // Freeze the boundary title/summary and the proof link BEFORE any remote

@@ -48,7 +48,6 @@ import {
 import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
-  DEFAULT_REVIEW_GATE,
   createChecksAdapter,
   decideConclusion,
   remoteBelongsTo,
@@ -184,10 +183,13 @@ function adapterFor(db: TestD1, octokit: ChecksOctokit | null) {
   return createChecksAdapter({ db, nowMs: () => CLOCK, getOctokit: async () => octokit });
 }
 
+/** The gate the seeded test App carries (migration 0045's DDL default). */
+const GATE: ReviewGate = { minScore: 80, passVerdicts: ["ship it"] };
+
 const SUCCESS: CheckConclusion = {
   desired: "success",
   title: CHECK_NAME,
-  summary: CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 90, DEFAULT_REVIEW_GATE),
+  summary: CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 90, GATE),
 };
 
 describe("beginCheck — the create contract", () => {
@@ -1139,17 +1141,22 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     "local-error",
   ] as const;
 
-  test("a normal publication whose review meets the gate is success at and above the floor", () => {
-    for (const score of [80, 100]) {
-      const decided = decideConclusion({
-        proof: normal,
-        outcome: "publication-unknown",
-        gate,
-        review: review("ship it", score),
-      });
-      expect(decided.desired).toBe("success");
-      expect(decided.summary).toBe(CHECK_SUMMARIES.gateMet(sha7, normal.round, "ship it", score, gate));
-      expect(decided.title).toBe(CHECK_NAME);
+  test("a confirmed normal publication decides from proof: success when the gate is met, whatever the terminal outcome", () => {
+    // A proven publication is never demoted by how the attempt ended — a
+    // `publication-unknown`/`expired` outcome with a durable proof still reads
+    // the gate and succeeds when it is met.
+    for (const outcome of ["publication-unknown", "expired"] as const) {
+      for (const score of [80, 100]) {
+        const decided = decideConclusion({
+          proof: normal,
+          outcome,
+          gate,
+          review: review("ship it", score),
+        });
+        expect(decided.desired).toBe("success");
+        expect(decided.summary).toBe(CHECK_SUMMARIES.gateMet(sha7, normal.round, "ship it", score, gate));
+        expect(decided.title).toBe(CHECK_NAME);
+      }
     }
   });
 
@@ -1224,18 +1231,15 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     expect(decided.summary).toBe("Finalization could not be confirmed. Manual inspection may be required.");
   });
 
-  test("the default gate is the migration default: score floor 80, pass verdict ship it", () => {
-    expect(DEFAULT_REVIEW_GATE).toEqual({ minScore: 80, passVerdicts: ["ship it"] });
-    const decide = (scorePct: number, verdict = "ship it") =>
-      decideConclusion({
-        proof: normal,
-        outcome: "expired",
-        gate: DEFAULT_REVIEW_GATE,
-        review: review(verdict, scorePct),
-      });
-    expect(decide(79).desired).toBe("failure");
-    expect(decide(80).desired).toBe("success");
-    expect(decide(100, "needs fixes").desired).toBe("failure");
+  test("an unreadable App gate is failure — no floor, no allowed list, never a default", () => {
+    for (const applied of [null, review("ship it", 100)]) {
+      const decided = decideConclusion({ proof: normal, outcome: "expired", gate: null, review: applied });
+      expect(decided.desired).toBe("failure");
+      expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadableConfig(sha7));
+      // A gate that could not be read must not be described as if it were.
+      expect(decided.summary).not.toContain("floor");
+      expect(decided.summary).not.toContain("allowed:");
+    }
   });
 
   test("a non-default gate is honored (any passing verdict at a lower floor)", () => {
@@ -1245,11 +1249,12 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     expect(decided.summary).toBe(CHECK_SUMMARIES.gateMet(sha7, normal.round, "needs fixes", 60, loose));
   });
 
-  test("every summary is bounded and free of verdict/approval language", () => {
+  test("every summary is bounded and carries no review-approval verbs", () => {
     for (const decided of [
       decideConclusion({ proof: normal, outcome: "publication-unknown", gate, review: review("ship it", 96) }),
       decideConclusion({ proof: normal, outcome: "expired", gate, review: review("needs fixes", 40) }),
       decideConclusion({ proof: normal, outcome: "expired", gate, review: null }),
+      decideConclusion({ proof: normal, outcome: "expired", gate: null, review: review("ship it", 96) }),
       decideConclusion({ proof: degraded, outcome: "publication-unknown", gate, review: null }),
       decideConclusion({ proof: null, outcome: "pre-publication-failure", gate, review: null, reason: "x".repeat(9_000) }),
       decideConclusion({ proof: null, outcome: "publication-unknown", gate, review: null }),

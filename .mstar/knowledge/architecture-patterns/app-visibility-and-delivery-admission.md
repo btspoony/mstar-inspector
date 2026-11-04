@@ -26,6 +26,13 @@ public App and `404` for a private one. Probe it that way:
 - `404` -> `private`
 - anything else, or a timeout -> keep the previously stored value
 
+A `404` is ambiguous: it is also what a missing or renamed slug returns, so a
+stale cached slug can read as `private`. The probe runs only after a successful
+profile fetch, on the slug that fetch resolved (or the already cached one when
+the payload carries none) — never on its own, which is what keeps that case
+rare. An uncertain answer (any other status, or a timeout) keeps the previously
+stored value rather than guessing.
+
 The probe must not send the App JWT or installation token; authenticating it
 would make a private App answer `200` and erase the distinction.
 

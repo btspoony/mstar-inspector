@@ -5,7 +5,8 @@
  *
  * Pinned here:
  *   - the DDL defaults are what an App reads before any save (80 / `ship it`
- *     / gate-relevant verdicts, allowlist off, visibility `unknown`);
+ *     / gate-relevant verdicts, allowlist off, visibility `unknown`), and an
+ *     unreadable stored verdict array reads as `null`, never that default;
  *   - saveCheckGate validates BEFORE writing — a non-integer or out-of-range
  *     score and an off-vocabulary verdict leave the stored gate untouched;
  *   - saveAllowlist REPLACES the owner set in one batch (a removal is written
@@ -80,18 +81,18 @@ describe("review gate (migration 0045)", () => {
     expect(await store.getCheckGate("app-invalid")).toEqual({ minScore: 80, passVerdicts: ["ship it"] });
   });
 
-  test("a corrupt stored gate reads the DDL default instead of throwing", async () => {
+  test("a corrupt stored gate reads as null — unreadable configuration, never a default", async () => {
     const db = createMigratedTestD1();
     seedApp(db, "app-corrupt", { githubAppId: 5004 });
     const store = createAppsStore(db);
 
     // Off-vocabulary array and valid-but-not-an-array are equally unreadable:
-    // the score column is still served, only the verdict set falls back.
+    // no gate is served at all, so every Check lane fails closed.
     for (const stored of ["{not json", '"ship it"', '["lgtm"]']) {
       db.raw
         .prepare(`UPDATE github_apps SET check_min_score = 55, check_pass_verdicts = ? WHERE id = 'app-corrupt'`)
         .run(stored);
-      expect(await store.getCheckGate("app-corrupt")).toEqual({ minScore: 55, passVerdicts: ["ship it"] });
+      expect(await store.getCheckGate("app-corrupt")).toBeNull();
     }
   });
 

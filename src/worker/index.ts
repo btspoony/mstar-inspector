@@ -402,19 +402,17 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // Owner allowlist admission (migration 0045, AC5–AC7): after classification,
   // BEFORE any ledger write. A non-private App whose switch is on reviews only
   // the repository owners it lists; the login comes off the classifier's own
-  // single parse (a payload without one — an install event, a malformed body —
-  // cannot be judged, so it proceeds). `private` ignores any stored rows: the
-  // list exists for the public App's shared installs. Unknown / NULL cannot
-  // prove private, so it applies the list. A refusal is a 200 (GitHub must not
-  // retry) with no `webhook_deliveries` row, no `pull_requests` row, no
-  // `last_webhook_at` touch and no enqueue. The switch rides the row this route
-  // already read, so only an enabled App pays for the owner-set read; a failed
-  // read logs and proceeds (the gate cannot be applied). The owner login is
-  // parsed only when those two cheap row checks say the gate applies.
-  const ownerLogin = row.allowlist_enabled !== 0 && row.github_visibility !== "private"
-    ? webhookRepositoryOwnerLogin(classified)
-    : null;
-  if (ownerLogin !== null) {
+  // single parse. That parse is pure, so it always runs — a payload without
+  // one (an install event, a malformed body) cannot be judged, so it proceeds.
+  // `private` ignores any stored rows: the list exists for the public App's
+  // shared installs. Unknown / NULL cannot prove private, so it applies the
+  // list. The switch and the owner set come from ONE `getAllowlist` snapshot —
+  // the row's own `allowlist_enabled` is never consulted for this decision. A
+  // refusal is a 200 (GitHub must not retry) with no `webhook_deliveries` row,
+  // no `pull_requests` row, no `last_webhook_at` touch and no enqueue. A failed
+  // read logs and proceeds (the gate cannot be applied).
+  const ownerLogin = webhookRepositoryOwnerLogin(classified);
+  if (row.github_visibility !== "private" && ownerLogin !== null) {
     try {
       const allowlist = await appsStore.getAllowlist(row.id);
       // GitHub logins are case-insensitive; the stored list keeps the

@@ -508,10 +508,10 @@ describe("fetchAppVisibility (anonymous GET /apps/{slug})", () => {
     expect(await fetchAppVisibility("acme-inspector")).toBe("public");
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("https://api.github.com/apps/acme-inspector");
-    const headers = calls[0]!.init!.headers as Record<string, string>;
+    const headers = new Headers(calls[0]!.init!.headers);
     // Anonymous on purpose: the probe never mints or sends an App JWT.
-    expect(headers.Authorization).toBeUndefined();
-    expect(headers.Accept).toBe("application/vnd.github+json");
+    expect(headers.get("authorization")).toBeNull();
+    expect(headers.get("accept")).toBe("application/vnd.github+json");
     expect(timeoutMs).toBe(3_000);
   });
 

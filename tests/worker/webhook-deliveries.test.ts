@@ -984,6 +984,29 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(ledgerState(db, appRow.id).lastWebhookAt).not.toBeNull();
   });
 
+  test("allowlist ON + a payload with no readable repository owner: proceeds, enqueues and records", async () => {
+    // An unreadable owner cannot be judged, so the gate does not apply. An
+    // empty login is the reachable shape: a missing `repository.owner` block
+    // is a 400 in the classifier, long before admission. The stored list is
+    // EMPTY (it would refuse every readable owner), so only the
+    // unreadable-owner path can admit this delivery.
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: [] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({ ...PR_PAYLOAD, repository: { name: "test-repo", owner: { login: "" } } });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(deliveriesFor(db, appRow.id)).toEqual([
+      { event_name: "pull_request", outcome: "ok", status_code: null },
+    ]);
+  });
+
   test("allowlist ON + unlisted owner (visibility unknown): 200, zero enqueue, all three untouched", async () => {
     // The fixture row's github_visibility is NULL = never probed = unknown,
     // which cannot prove private, so the stored list applies.
@@ -1058,8 +1081,8 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
-    // The switch stays on, the owner table disappears: getAllowlist's second
-    // statement throws while the row still reads allowlist_enabled = 1.
+    // The switch stays on, but the owner table disappears: the single gate
+    // SELECT cannot run, so the read throws and the gate cannot be applied.
     db.raw.exec("DROP TABLE app_owner_allowlist");
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
