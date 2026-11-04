@@ -1008,6 +1008,31 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(ledgerState(db, appRow.id)).toEqual({ deliveries: 0, pullRequests: 0, lastWebhookAt: null });
   });
 
+  test("a rejected delivery keeps its classifier status: the allowlist never masks a malformed payload", async () => {
+    // The payload still states an unlisted repository owner, so admission COULD
+    // judge it — but the classifier already refused it (no installation id), and
+    // that 400 is the answer GitHub must see. The gate is skipped for rejects,
+    // never turned into its own 200 `ignored`.
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({ ...PR_PAYLOAD, installation: null });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe("pull_request payload missing required fields");
+    expect(sent).toHaveLength(0);
+    // The reject lands its diagnostics row like any other classified delivery.
+    expect(deliveriesFor(db, appRow.id)).toEqual([
+      { event_name: "pull_request", outcome: "rejected", status_code: 400 },
+    ]);
+    expect(ledgerState(db, appRow.id).pullRequests).toBe(0);
+    expect(ledgerState(db, appRow.id).lastWebhookAt).toBeNull();
+  });
+
   test("allowlist ON + empty list: every owner is refused", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });

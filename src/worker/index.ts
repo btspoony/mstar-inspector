@@ -405,9 +405,13 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // BEFORE any ledger write, and ONLY for the two review-triggering events
   // (`pull_request`, `issue_comment`) — the events this route can enqueue a
   // review for. Every other event, `installation` bookkeeping included, is
-  // never gated: it has no review to admit or refuse. An App whose switch is on
-  // reviews only the repository owners it lists; the login comes off the
-  // classifier's own single parse, so the up-to-1 MB body is never re-parsed.
+  // never gated: it has no review to admit or refuse. A `reject` is never
+  // gated either: the classifier already refused the delivery (malformed
+  // payload, bad signature) and its status is the answer GitHub must see, so
+  // the gate must not mask a 400/401 with the allowlist's 200 or 500.
+  // An App whose switch is on reviews only the repository owners it lists;
+  // the login comes off the classifier's own single parse, so the up-to-1 MB
+  // body is never re-parsed.
   // That parse is pure and a review-triggering payload without a repository
   // owner cannot be judged, so such a delivery proceeds. The cached
   // `github_visibility` is NOT part of this decision: `private` only hides the
@@ -419,7 +423,8 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // allowlist that cannot be read — a thrown read, or a null on a row that was
   // read moments earlier — is fail-CLOSED: 500 with those same zero writes, so
   // an unapplied gate never admits a delivery.
-  const reviewTriggering = eventName === "pull_request" || eventName === "issue_comment";
+  const reviewTriggering =
+    outcome.kind !== "reject" && (eventName === "pull_request" || eventName === "issue_comment");
   const ownerLogin = reviewTriggering ? webhookRepositoryOwnerLogin(classified) : null;
   if (ownerLogin !== null) {
     let allowlist: AppAllowlist | null;
