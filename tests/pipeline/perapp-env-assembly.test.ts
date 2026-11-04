@@ -339,16 +339,17 @@ function runnerPools(): Array<Record<string, string[]> | undefined> {
 
 /**
  * The DECODED runner input JSON payloads, in write order (one per
- * `printf … | base64 -d > '/workspace/review-input.json'` step — the runner
- * exec command references the same path but carries no base64 payload).
+ * `base64 -d > '/workspace/review-input.json'` step — the document arrives on
+ * that exec's STDIN pipe, so the runner exec command references the same path
+ * but carries no base64 payload).
  */
 function runnerInputs(): Array<Record<string, unknown>> {
   return sandboxCalls
     .filter((c) => c.cmd.includes("base64 -d > '/workspace/review-input.json'"))
     .map((c) => {
-      const payload = /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d/.exec(c.cmd)?.[1];
-      if (!payload) throw new Error(`runner-input write command without a base64 payload: ${c.cmd}`);
-      return JSON.parse(atob(payload)) as Record<string, unknown>;
+      const stdin = (c.opts as { stdin?: string } | undefined)?.stdin;
+      if (stdin === undefined) throw new Error("runner-input write arrived without a stdin payload");
+      return JSON.parse(atob(stdin)) as Record<string, unknown>;
     });
 }
 

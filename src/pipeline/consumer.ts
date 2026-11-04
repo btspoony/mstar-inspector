@@ -3502,10 +3502,12 @@ async function processMessage(
       // byte-identically to the pre-recheck payload.
       ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
     };
-    const writeInput = await sandbox.runCommand(
-      writeJsonCommand(RUNNER_INPUT_PATH, toBase64Utf8(JSON.stringify(runnerInput))),
-      { timeout: EXEC_TIMEOUT_GIT_MS },
-    );
+    // The document rides the exec stdin pipe: as an argv string it became one
+    // argument, and a recheck round above ~98 KiB breaches Linux's 128 KiB cap.
+    const writeInput = await sandbox.runCommand(writeJsonCommand(RUNNER_INPUT_PATH), {
+      stdin: toBase64Utf8(JSON.stringify(runnerInput)),
+      timeout: EXEC_TIMEOUT_GIT_MS,
+    });
     if (writeInput.exitCode !== 0) {
       throw new Error(`runner input write failed: exit ${writeInput.exitCode}`);
     }

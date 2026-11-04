@@ -58,8 +58,8 @@ describe("gitops command builders", () => {
     // the runner consumes the runtime envelope path — --level +
     // --input reconFacts JSON; the diff feeds the numstat partition universe.
     expect(numstatCommand("/workspace/pr.diff")).toBe(shellCommand("git apply --numstat '/workspace/pr.diff'"));
-    expect(writeJsonCommand("/workspace/review-input.json", "eyJhIjoxfQ==")).toBe(
-      shellCommand("printf '%s' 'eyJhIjoxfQ==' | base64 -d > '/workspace/review-input.json'"),
+    expect(writeJsonCommand("/workspace/review-input.json")).toBe(
+      shellCommand("base64 -d > '/workspace/review-input.json'"),
     );
     expect(runnerCommand("/opt/runner/packages/runner/src/runner.ts", "default", "/workspace/review-input.json")).toBe(
       shellCommand("bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'"),
@@ -69,11 +69,17 @@ describe("gitops command builders", () => {
     );
   });
 
-  test("writeJsonCommand rejects non-base64 content before any shell string is built", () => {
-    expect(() => writeJsonCommand("/workspace/review-input.json", "a'; rm -rf / #")).toThrow(
-      /unsafe base64 content/,
-    );
-    expect(() => writeJsonCommand("/workspace/review-input.json", "ey Jh")).toThrow(/unsafe base64 content/);
+  test("writeJsonCommand rejects an unallowlisted path before any shell string is built", () => {
+    for (const evil of [
+      "relative/review-input.json",
+      "/workspace/../etc/review-input.json",
+      "/workspace/x; rm -rf / #",
+      "/workspace/a b",
+      "/workspace/recheck'",
+      "",
+    ]) {
+      expect(() => writeJsonCommand(evil)).toThrow(/unsafe write path/);
+    }
   });
 
   test("readRecheckCommand bounds the read at 262,144 bytes and probes for overflow", () => {
