@@ -10,6 +10,7 @@
 import { useState, type FormEvent } from "react";
 import { Button, CardContent, CardHeader, Input } from "@design-system";
 import { t, type Locale } from "../../i18n";
+import { APP_VERSION } from "../../version";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { PageNotice } from "../pages/PageNotice";
@@ -133,6 +134,12 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           </div>
         )}
       </Screen>
+      {/* The deployment's release, from the generated src/version.ts surface:
+          the same `vX.Y.Z` form as /healthz and the release tags. Build-time
+          constant, so it renders in every read state. */}
+      <p className="text-xs text-muted-foreground">
+        {t(locale, "admin.runtime.version", { version: `v${APP_VERSION}` })}
+      </p>
     </section>
   );
 }

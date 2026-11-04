@@ -793,14 +793,6 @@ export const en = {
     reviewGateScore: "Minimum score (0–100)",
     reviewGateVerdicts: "Verdicts that pass",
     reviewGateSave: "Save review gate",
-    /**
-     * Deployment version footer. `{version}` carries the
-     * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the
-     * /healthz field and release tags.
-     */
-    footer: {
-      version: "Version {version}",
-    },
   },
   manifest: {
     title: "Create GitHub App",
@@ -945,6 +937,12 @@ export const en = {
       /** The stored cap could not be read — the numbers are a fallback, not the stored setting. */
       concurrencyUnreadable:
         "The stored system concurrency could not be read, so every workspace is running one review at a time. Entering a value in range saves a new one, and retrying the read re-checks the stored row.",
+      /**
+       * Deployment version footer. `{version}` carries the
+       * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the
+       * /healthz field and release tags.
+       */
+      version: "Version {version}",
     },
     /** Workspaces page. */
     workspaces: {

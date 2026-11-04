@@ -425,7 +425,6 @@ describe("installed tab configuration surface (static SSR)", () => {
   test("no release version string renders anywhere on the page", () => {
     for (const markup of [renderDetail(managePayload, true), renderDetail(identityPayload, false)]) {
       expect(markup).not.toContain(`v${APP_VERSION}`);
-      expect(markup).not.toContain(t("en", "settings.footer.version", { version: "v" }));
     }
   });
 });
