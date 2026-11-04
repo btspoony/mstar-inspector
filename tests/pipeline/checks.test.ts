@@ -1225,47 +1225,13 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       publicationId: unreadable.publicationId,
     });
     expect(read).toBeNull();
-    // Without a proof id the projection is still the gate input — the read the
-    // publication-level read must not substitute for it.
-    expect(await readPublishedReview(db, { scope: SCOPE, headSha: SHA })).toEqual({
-      verdict: "ship it",
-      scorePct: 96,
-    });
+    // Without a proof id there is no review to judge at all: `null`, never the
+    // projection — the set row above stays unread by this call.
+    expect(await readPublishedReview(db, { scope: SCOPE, headSha: SHA })).toBeNull();
 
     const decided = decideConclusion({ proof: unreadable, outcome: "expired", gate, review: read });
     expect(decided.desired).toBe("failure");
     expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadable(sha7, gate));
-  });
-
-  test("the scope/SHA projection is App-scoped: another App's row never decides this one", async () => {
-    // 0001 keys `reviews` WITHOUT the App, so this projection has to filter on
-    // `app_id` itself. Two Apps' rows for one scope cannot coexist (that same
-    // UNIQUE owns the identity), so the fixture is the OTHER App's row: this
-    // App's read is `null` — never another App's verdict — while the row still
-    // answers for the App it is attributed to.
-    const db = await seededDb();
-    const otherAppId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-    db.raw
-      .prepare(
-        `INSERT INTO github_apps
-           (id, github_app_id, name, private_key_enc, webhook_secret_enc,
-            created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, 'checks-test-other', 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
-      )
-      .run(otherAppId, GITHUB_APP_ID + 1);
-    db.raw
-      .prepare(
-        `INSERT INTO reviews
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, verdict, envelope, reviewed_at)
-         VALUES ('other-app-review', ?, ?, ?, ?, ?, ?, 'needs fixes', '{"tally":{"scorePct":12}}', datetime('now'))`,
-      )
-      .run(otherAppId, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA);
-
-    expect(await readPublishedReview(db, { scope: SCOPE, headSha: SHA })).toBeNull();
-    expect(await readPublishedReview(db, { scope: { ...SCOPE, appId: otherAppId }, headSha: SHA })).toEqual({
-      verdict: "needs fixes",
-      scorePct: 12,
-    });
   });
 
   test("a confirmed DEGRADED publication is failure for every outcome (neutral is unreachable)", () => {

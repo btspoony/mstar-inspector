@@ -1399,16 +1399,15 @@ export { readPublicationProof } from "./finding-lifecycle";
  * The review a Check is judged by (spec §7.9 gate read): the envelope the
  * attempt itself PUBLISHED.
  *
- * `publicationId` is the proof's publication id. Supplied, it ALONE decides:
- * that payload is the envelope this attempt published, and an unreadable
- * payload → `null` (the gate-unreadable failure) — never a fallback to the
- * scope/SHA `reviews` row. `reviews` is a projection of the local apply: first
- * write wins, it can lag a confirmed publication (apply still due, or failed)
- * or belong to an earlier attempt for the same head SHA, which RL-12 allows,
- * and it carries no proof identity, so it must never decide an attempt that
- * published something else. Callers without a proof id read the row — always by
- * exact App: 0001 keys `reviews` without the App, so a row attributed to
- * another App (or to none) is no gate input for this one.
+ * `publicationId` is the proof's publication id, and it ALONE decides: that
+ * payload is the envelope this attempt published, and an unreadable payload →
+ * `null` (the gate-unreadable failure) — never a fallback to the scope/SHA
+ * `reviews` row. `reviews` is a projection of the local apply: first write
+ * wins, it can lag a confirmed publication (apply still due, or failed) or
+ * belong to an earlier attempt for the same head SHA, which RL-12 allows, and
+ * it carries no proof identity, so it must never decide an attempt that
+ * published something else. Without a publication id there is no review to
+ * judge at all: `null`, never the projected row.
  *
  * A readable payload whose tally is missing keeps its verdict with
  * `scorePct: null` (unreadable gate input, never a fallback to another
@@ -1419,29 +1418,12 @@ export async function readPublishedReview(
   db: D1Like,
   input: { scope: Scope; headSha: string; publicationId?: string },
 ): Promise<PublishedReview | null> {
-  if (input.publicationId !== undefined) {
-    return readPublicationReview(db, {
-      scope: input.scope,
-      headSha: input.headSha,
-      publicationId: input.publicationId,
-    });
-  }
-  const row = await db
-    .prepare(
-      `SELECT verdict, envelope FROM reviews
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?`,
-    )
-    .bind(
-      input.scope.appId,
-      input.scope.installationId,
-      input.scope.owner,
-      input.scope.repo,
-      input.scope.prNumber,
-      input.headSha,
-    )
-    .first<{ verdict: string; envelope: string | null }>();
-  if (row === null) return null;
-  return { verdict: row.verdict, scorePct: tallyScore(parseJson(row.envelope)) };
+  if (input.publicationId === undefined) return null;
+  return readPublicationReview(db, {
+    scope: input.scope,
+    headSha: input.headSha,
+    publicationId: input.publicationId,
+  });
 }
 
 /**

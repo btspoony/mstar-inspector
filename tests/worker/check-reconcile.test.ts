@@ -642,8 +642,10 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     const db = seededDb();
     const { attempt } = await claim(db);
     const proof = proofFor(attempt.identity, "review");
-    seedPublication(db, SCOPE, SHA, proof);
-    seedReview(db, SCOPE, SHA, "ship it", 85);
+    // The gate reads the review THIS publication carried, never the scope/SHA
+    // `reviews` projection (see `readPublishedReview`), so the envelope lives in
+    // the publication payload.
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, {
@@ -737,18 +739,18 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
   test("a persistent gate/review read failure still terminalizes the attempt (QC3-F-001)", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    // Seed a CONFIRMED publication proof plus the applied review, so the
-    // decision actually reaches the gate: without them the lane concludes from
-    // the absent proof alone and never issues the two reads this case is about.
+    // Seed a CONFIRMED publication proof plus a readable review envelope inside
+    // it, so the decision actually reaches the gate: without them the lane
+    // concludes from the absent proof alone and never issues the two reads this
+    // case is about.
     const proof = proofFor(attempt.identity);
-    seedPublication(db, SCOPE, SHA, proof);
-    seedReview(db, SCOPE, SHA, "ship it", 96);
-    // The gate and the APPLIED review are the two reads a failing D1 keeps
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 96));
+    // The gate and the review payload are the two reads a failing D1 keeps
     // failing; after migration 0045 a corrupt `check_pass_verdicts` no longer
     // throws either — `getCheckGate` reports it as null, the same UNREADABLE
     // input. Neither is a reason to skip the terminal conclusion: an attempt
     // that only retried would never conclude its Check.
-    const degraded = withFailingReads(db, /check_pass_verdicts|FROM reviews/);
+    const degraded = withFailingReads(db, /check_pass_verdicts|SELECT payload_json FROM review_publications/);
     const fetchStub = stubFetch();
     const pushed: CheckConclusion[] = [];
     try {
@@ -793,8 +795,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       ),
     ).toBe(true);
     const proof = proofFor(attempt.identity, "review");
-    seedPublication(db, SCOPE, SHA, proof);
-    seedReview(db, SCOPE, SHA, "ship it", 92);
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 92));
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, {
