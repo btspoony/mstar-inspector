@@ -24,6 +24,7 @@ import {
 import {
   commenterCalls,
   createReviewConsumer,
+  DIFF_PREFETCH_MAX_BYTES,
   logLines,
   makeBatch,
   makeEnv,
@@ -231,6 +232,35 @@ describe("incremental review rounds", () => {
     expect(row.context_incomplete).toBe(1);
   });
 
+  test("an over-size increment stdout copy is not a capture failure — numstat still reads the file", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    // Only the stdout COPY is byte-bounded; the increment command redirects the
+    // whole base...head diff into the file, and numstat reads THAT. Overflow is
+    // therefore the documented over-size path, not an empty capture: the round
+    // stays complete and the `since` fact keeps riding the input.
+    sandbox.incrementDiffStdout = "x".repeat(DIFF_PREFETCH_MAX_BYTES + 1);
+    sandbox.numstatStdout = "3\t1\tsrc/auth.ts\n";
+    const db = await createSeededTestD1();
+    seedReview(db, PREVIOUS_SHA);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(runnerInput().reconFacts).toEqual([
+      "acme/widgets#42",
+      `head ${SHA}`,
+      `since ${PREVIOUS_SHA}`,
+      "3\t1\tsrc/auth.ts",
+    ]);
+    expect(logLines.some((l) => l.fields.diff_capture !== undefined)).toBe(false);
+    const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(SHA) as {
+      context_incomplete: number;
+    };
+    expect(row.context_incomplete).toBe(0);
+  });
+
   test("a round whose capture failed is not an increment base either", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -394,14 +424,42 @@ describe("incremental review rounds", () => {
       planToFix: "none",
     });
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
     const body = preparedBody();
     expect(body).toContain("### Linked-issue AC\n\nnone");
     expect(sandbox.calls.some((c) => c.cmd.includes("--report-out"))).toBe(true);
+    // The lost document is attributable: the gate's own reason is on the line.
+    const warn = logLines.find((l) => l.fields.report_doc === "invalid-document");
+    expect(warn?.fields.report_doc_error).toContain("overview");
   });
+
+  for (const [cause, arrange] of [
+    ["unreadable", () => { sandbox.reportFileExitCode = 1; }],
+    ["overflow", () => { sandbox.reportFileOverflow = "1"; }],
+    ["empty", () => { sandbox.reportFileContent = ""; }],
+    ["invalid-json", () => { sandbox.reportFileContent = "{ not json"; }],
+  ] as const) {
+    test(`a ${cause} report read warns once and renders \`none\``, async () => {
+      reset();
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      sandbox.diffStdout = VALID_DIFF;
+      // gh answers, so the runner gets --report-out and the read runs at all.
+      sandbox.prBodyExitCode = 0;
+      sandbox.prBodyContent = "no issues referenced";
+      arrange();
+      const db = await createSeededTestD1();
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(makePayload()));
+
+      const warns = logLines.filter((l) => l.level === "warn" && l.fields.report_doc === cause);
+      expect(warns).toHaveLength(1);
+      expect(preparedBody()).toContain("### Linked-issue AC\n\nnone");
+    });
+  }
 
   test("the report document validates against the shared gate, not a consumer-local copy", () => {
     // One authority: the module the runner validates with is the module the
