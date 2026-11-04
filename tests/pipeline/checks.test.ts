@@ -1265,6 +1265,8 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       expect(decided.summary.length).toBeLessThanOrEqual(2_000);
       expect(decided.desired).not.toBe("in_progress");
       expect(decided.desired).not.toBe("neutral");
+      // D3/RL-10: never an approval, never a merge gate.
+      expect(decided.summary).not.toMatch(/approve|approved|request changes|merge gate required|blocking/i);
       expect(decided.summary).not.toMatch(/APPROVE|REQUEST_CHANGES/);
     }
   });
