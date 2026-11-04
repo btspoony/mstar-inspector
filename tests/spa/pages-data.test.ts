@@ -33,6 +33,7 @@ import {
   type ProviderKeyRow,
 } from "../../src/spa/pages/data";
 import { DEFAULT_CHAIN_NAME as STORE_DEFAULT_CHAIN_NAME } from "../../src/dashboard/app-config-store";
+import { PR_VERDICTS as ENGINE_PR_VERDICTS } from "@mstar-harness/engine";
 
 describe("workspace role guard", () => {
   test("owner and admin manage members; a plain member only reads the list", () => {
@@ -1012,5 +1013,13 @@ describe("invite grammar + page copy", () => {
       expect(zh.length).toBeGreaterThan(0);
       expect(zh).not.toBe(en);
     }
+  });
+});
+
+describe("review gate verdict mirror", () => {
+  // The browser bundle cannot import the Node-only engine, so the SPA restates
+  // the vocabulary; this pins the copy to the engine tuple, in order.
+  test("the SPA PR_VERDICTS mirror equals the engine tuple, in order", () => {
+    expect([...SPA_PR_VERDICTS]).toEqual([...ENGINE_PR_VERDICTS]);
   });
 });
