@@ -35,6 +35,7 @@ import {
   pullRequestRecord,
   WEBHOOK_BODY_LIMIT,
   webhookRepositoryFullName,
+  webhookRepositoryOwnerLogin,
   type WebhookOutcome,
 } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
@@ -245,11 +246,18 @@ app.route("/dashboard", dashboardApp);
  * never affected). The retired legacy face recorded nothing (AL-20-1:
  * legacy 不落行 — it was the fallback path with no dashboard consumer).
  *
- * Order of the verified, non-reject path: classify → delivery record → PR
- * ledger (0039) → `last_webhook_at` touch → `ignore` return → install
- * bookkeeping (the `installation` branch records and returns; the job path
- * records and proceeds) → pause gate → global flag gate → enqueue. The reject
- * return sits between the delivery record and the PR ledger.
+ * Order of the verified, non-reject path: classify → owner-allowlist admission
+ * → delivery record → PR ledger (0039) → `last_webhook_at` touch → `ignore`
+ * return → install bookkeeping (the `installation` branch records and returns;
+ * the job path records and proceeds) → pause gate → global flag gate → enqueue.
+ * The reject return sits between the delivery record and the PR ledger.
+ *
+ * Owner allowlist admission (migration 0045): a non-private App with the switch
+ * on and an owner set that excludes the delivery's `repository.owner.login`
+ * answers 200 and returns there — before the delivery row, the PR ledger, the
+ * `last_webhook_at` touch and the enqueue, so a refused delivery leaves no
+ * trace. An unreadable owner or a failed allowlist read proceeds (the gate
+ * cannot be applied); a `private` App ignores stored rows entirely.
  */
 app.post("/webhook/:workspaceId/:appId", async (c) => {
   // Body-size cap checked BEFORE buffering the body (B6). Two gates: the
@@ -389,6 +397,44 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       `${webhookRef} row_id=${row.id}`,
       "per-App webhook ignored an issue_comment mention — github_slug is not synced yet; open the App's settings page to sync it",
     );
+  }
+
+  // Owner allowlist admission (migration 0045, AC5–AC7): after classification,
+  // BEFORE any ledger write. A non-private App whose switch is on reviews only
+  // the repository owners it lists; the login comes off the classifier's own
+  // single parse (a payload without one — an install event, a malformed body —
+  // cannot be judged, so it proceeds). `private` ignores any stored rows: the
+  // list exists for the public App's shared installs. Unknown / NULL cannot
+  // prove private, so it applies the list. A refusal is a 200 (GitHub must not
+  // retry) with no `webhook_deliveries` row, no `pull_requests` row, no
+  // `last_webhook_at` touch and no enqueue. The switch rides the row this route
+  // already read, so only an enabled App pays for the owner-set read; a failed
+  // read logs and proceeds (the gate cannot be applied).
+  const ownerLogin = webhookRepositoryOwnerLogin(classified);
+  if (ownerLogin !== null && row.allowlist_enabled !== 0 && row.github_visibility !== "private") {
+    try {
+      const allowlist = await appsStore.getAllowlist(row.id);
+      // GitHub logins are case-insensitive; the stored list keeps the
+      // operator's case, so fold both sides (the users.ts login-list rule).
+      if (
+        allowlist?.enabled === true &&
+        !allowlist.owners.some((owner) => owner.toLowerCase() === ownerLogin.toLowerCase())
+      ) {
+        webhookWarn(
+          "owner_not_allowlisted",
+          `${webhookRef} row_id=${row.id} owner=${ownerLogin}`,
+          "per-App webhook skipped a delivery from a repository owner outside the allowlist — zero writes, 200 so GitHub stops retrying",
+        );
+        return c.text("ignored", 200);
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      webhookWarn(
+        "owner_allowlist_read_failed",
+        detail,
+        "owner allowlist read failed — delivery proceeds (gate cannot be applied); webhook response unaffected",
+      );
+    }
   }
 
   // AL-20-1: best-effort delivery recording — the R2 diagnostics

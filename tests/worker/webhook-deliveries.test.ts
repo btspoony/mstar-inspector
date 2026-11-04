@@ -33,7 +33,7 @@ import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore, DELIVERY_OUTCOMES } from "../../src/dashboard/apps-store";
 import type { DeliveryOutcome } from "../../src/dashboard/apps-store";
-import { createMigratedTestD1, createTestD1, migrationsAfter } from "../store/helpers";
+import { createMigratedTestD1, createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -618,7 +618,10 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     action: "opened",
     number: 42,
     installation: { id: 123 },
-    pull_request: { number: 42, head: { sha: "abc123" }, user: { login: "alice" } },
+    // `state` is what the PR ledger (0039) records; without it a delivery
+    // writes no `pull_requests` row and "the refusal wrote nothing" would be
+    // untestable.
+    pull_request: { number: 42, state: "open", head: { sha: "abc123" }, user: { login: "alice" } },
     repository: { name: "test-repo", owner: { login: "test-owner" } },
   };
 
@@ -922,6 +925,166 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(sent).toHaveLength(0);
     const count = db.raw.query("SELECT COUNT(*) AS n FROM webhook_deliveries").get() as { n: number };
     expect(count.n).toBe(0);
+  });
+
+  /**
+   * The three surfaces a refused delivery must leave untouched: the delivery
+   * row, the PR ledger and the App's `last_webhook_at` stamp (AC5/C7).
+   */
+  function ledgerState(db: TestD1, appId: string) {
+    const deliveries = db.raw
+      .query("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE app_id = ?")
+      .get(appId) as { n: number };
+    const pullRequests = db.raw
+      .query("SELECT COUNT(*) AS n FROM pull_requests WHERE app_id = ?")
+      .get(appId) as { n: number };
+    const app = db.raw
+      .query("SELECT last_webhook_at FROM github_apps WHERE id = ?")
+      .get(appId) as { last_webhook_at: string | null };
+    return { deliveries: deliveries.n, pullRequests: pullRequests.n, lastWebhookAt: app.last_webhook_at };
+  }
+
+  test("allowlist OFF: an unlisted owner behaves exactly as today — the delivery proceeds and writes all three", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: false, owners: ["someone-else"] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(deliveriesFor(db, appRow.id)).toEqual([
+      { event_name: "pull_request", outcome: "ok", status_code: null },
+    ]);
+    expect(ledgerState(db, appRow.id)).toMatchObject({ pullRequests: 1 });
+    expect(ledgerState(db, appRow.id).lastWebhookAt).not.toBeNull();
+  });
+
+  test("allowlist ON + listed owner: the delivery proceeds and writes all three", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(deliveriesFor(db, appRow.id)).toEqual([
+      { event_name: "pull_request", outcome: "ok", status_code: null },
+    ]);
+    expect(ledgerState(db, appRow.id)).toMatchObject({ pullRequests: 1 });
+    expect(ledgerState(db, appRow.id).lastWebhookAt).not.toBeNull();
+  });
+
+  test("allowlist ON + unlisted owner (visibility unknown): 200, zero enqueue, all three untouched", async () => {
+    // The fixture row's github_visibility is NULL = never probed = unknown,
+    // which cannot prove private, so the stored list applies.
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(ledgerState(db, appRow.id)).toEqual({ deliveries: 0, pullRequests: 0, lastWebhookAt: null });
+  });
+
+  test("allowlist ON + empty list: every owner is refused", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: [] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(ledgerState(db, appRow.id)).toEqual({ deliveries: 0, pullRequests: 0, lastWebhookAt: null });
+  });
+
+  test("private App ignores stored allowlist rows even with the switch on", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const apps = createAppsStore(db);
+    await apps.saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
+    await apps.saveGithubVisibility(appRow.id, "private");
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(deliveriesFor(db, appRow.id)).toEqual([
+      { event_name: "pull_request", outcome: "ok", status_code: null },
+    ]);
+  });
+
+  test("the owner match is case-insensitive (GitHub logins are)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // The payload's owner is `test-owner`; the operator typed `Test-Owner`.
+    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["Test-Owner"] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+  });
+
+  test("a failed allowlist read logs and the delivery proceeds (the gate cannot be applied)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
+    // The switch stays on, the owner table disappears: getAllowlist's second
+    // statement throws while the row still reads allowlist_enabled = 1.
+    db.raw.exec("DROP TABLE app_owner_allowlist");
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(ledgerState(db, appRow.id).deliveries).toBe(1);
+    const line = warn.mock.calls
+      .map((call) => String(call[0]))
+      .find((s) => s.includes("owner_allowlist_read_failed"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string };
+    expect(fields.event).toBe("owner_allowlist_read_failed");
   });
 });
 
