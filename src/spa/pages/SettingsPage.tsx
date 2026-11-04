@@ -1176,35 +1176,39 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
               message={t(locale, "workspace.concurrencyUnreadable", { max: loaded.max })}
             />
           ) : null}
-          <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium" htmlFor="workspace-concurrency">
-                {t(locale, "workspace.concurrencyLabel")}
-              </label>
-              <Input
-                id="workspace-concurrency"
-                type="number"
-                min={loaded.min}
-                max={loaded.max}
-                className="w-32"
-                autoComplete="off"
-                required
-                value={draft ?? (loaded.degraded ? "" : String(loaded.concurrency))}
-                onChange={(event) => setDraft(event.target.value)}
-              />
-              <span className="text-xs text-muted-foreground">
-                {t(locale, "workspace.concurrencyRange", { max: loaded.max })}
-              </span>
-            </div>
-            <Button type="submit" disabled={busy}>
-              {t(locale, "workspace.concurrencySave")}
-            </Button>
-            {loaded.degraded ? (
-              <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
-                {t(locale, "common.retry")}
+          {/* The range line sits outside the row: inside the stack, `items-end`
+              would align the button to the hint instead of the input. */}
+          <div className="flex flex-col gap-1.5">
+            <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium" htmlFor="workspace-concurrency">
+                  {t(locale, "workspace.concurrencyLabel")}
+                </label>
+                <Input
+                  id="workspace-concurrency"
+                  type="number"
+                  min={loaded.min}
+                  max={loaded.max}
+                  className="w-32"
+                  autoComplete="off"
+                  required
+                  value={draft ?? (loaded.degraded ? "" : String(loaded.concurrency))}
+                  onChange={(event) => setDraft(event.target.value)}
+                />
+              </div>
+              <Button type="submit" disabled={busy}>
+                {t(locale, "workspace.concurrencySave")}
               </Button>
-            ) : null}
-          </form>
+              {loaded.degraded ? (
+                <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
+                  {t(locale, "common.retry")}
+                </Button>
+              ) : null}
+            </form>
+            <span className="text-xs text-muted-foreground">
+              {t(locale, "workspace.concurrencyRange", { max: loaded.max })}
+            </span>
+          </div>
         </div>
       )}
       <NoticeRegion notice={concurrencyNotice} />
