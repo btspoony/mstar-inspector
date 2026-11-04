@@ -307,7 +307,7 @@ async function execInImageReview(
     }),
     "utf8",
   ).toString("base64");
-  const writeInput = await sandbox.runCommand(writeJsonCommand(INPUT_PATH, inputB64));
+  const writeInput = await sandbox.runCommand(writeJsonCommand(INPUT_PATH), { stdin: inputB64 });
   if (writeInput.exitCode !== 0) {
     return {
       ok: false,

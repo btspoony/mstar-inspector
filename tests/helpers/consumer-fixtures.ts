@@ -229,16 +229,11 @@ const DIFF_READ = boundedFileReadCommand(DIFF_PATH, DIFF_PREFETCH_MAX_BYTES);
 const RECHECK_DOC_READ = readRecheckCommand(RECHECK_OUTPUT_PATH);
 const RECHECK_STATUS_READ = readRecheckStatusCommand(RECHECK_STATUS_PATH);
 /**
- * The input write is the one command with a per-round payload; its fixed head
- * and tail come from the builder itself, so only the base64 body is asserted
- * by shape.
+ * The input write carries no per-round payload in its command any more: the
+ * document travels the exec STDIN pipe, so the command is fixed and comes
+ * from the production builder.
  */
-const WRITE_INPUT_PLACEHOLDER = "QUJD"; // base64("ABC")
-const WRITE_INPUT_PROBE = writeJsonCommand(RUNNER_INPUT_PATH, WRITE_INPUT_PLACEHOLDER);
-const WRITE_INPUT_HEAD = WRITE_INPUT_PROBE.slice(0, WRITE_INPUT_PROBE.indexOf(WRITE_INPUT_PLACEHOLDER));
-const WRITE_INPUT_TAIL = WRITE_INPUT_PROBE.slice(
-  WRITE_INPUT_PROBE.indexOf(WRITE_INPUT_PLACEHOLDER) + WRITE_INPUT_PLACEHOLDER.length,
-);
+const WRITE_INPUT_PROBE = writeJsonCommand(RUNNER_INPUT_PATH);
 
 export type FakeSandboxState = {
   calls: Array<{ cmd: string; opts?: unknown }>;
@@ -325,7 +320,7 @@ export function resetFakeSandboxState(state: FakeSandboxState): void {
 type ExecResult = { stdout: string; stderr: string; exitCode: number };
 
 /** The declared command set; an unlisted command is a test failure, not a pass. */
-function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
+function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): ExecResult {
   switch (state.gitOps.get(cmd)) {
     case "clone":
       return { stdout: "", stderr: "", exitCode: state.cloneExitCode };
@@ -365,9 +360,12 @@ function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
     default:
       break;
   }
-  if (cmd.startsWith(WRITE_INPUT_HEAD) && cmd.endsWith(WRITE_INPUT_TAIL)) {
-    const payload = cmd.slice(WRITE_INPUT_HEAD.length, cmd.length - WRITE_INPUT_TAIL.length);
-    state.writtenInputJson = Buffer.from(payload, "base64").toString("utf8");
+  if (cmd === WRITE_INPUT_PROBE) {
+    const stdin = (opts as { stdin?: string } | undefined)?.stdin;
+    if (stdin === undefined) {
+      throw new Error("fake sandbox: runner-input write arrived without a stdin payload");
+    }
+    state.writtenInputJson = Buffer.from(stdin, "base64").toString("utf8");
     return { stdout: "", stderr: "", exitCode: state.writeInputExitCode };
   }
   if (cmd === RECHECK_DOC_READ) {
@@ -405,7 +403,7 @@ export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxSt
         gate.markReached();
         await gate.released;
       }
-      return answerCommand(cmd, state);
+      return answerCommand(cmd, opts, state);
     }),
     destroy: mock(async () => {
       state.destroyCalls += 1;

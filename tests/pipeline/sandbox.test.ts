@@ -199,7 +199,7 @@ function makeContainer(): FakeContainer {
 // no matter which test file's registration a shared process saw first.
 import "../helpers/cloudflare-workers-mock";
 
-const { SandboxV1, getSandbox, DEFAULT_EXEC_TIMEOUT_MS, MAX_EXEC_STDIN_BYTES, shellCommand } =
+const { SandboxV1, getSandbox, DEFAULT_EXEC_TIMEOUT_MS, MAX_EXEC_COMMAND_BYTES, MAX_EXEC_STDIN_BYTES, shellCommand } =
   await import("../../src/pipeline/sandbox");
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
 
@@ -491,6 +491,36 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
 
     expect(message).toContain(`exceeds the ${MAX_EXEC_STDIN_BYTES}-byte`);
     expect(message).not.toContain("seee");
+    expect(execCalls).toEqual([]);
+  });
+
+  test("a command or env value past the per-argument bound fails closed BEFORE any process starts — and the error carries no text", async () => {
+    reset();
+    const { sandbox } = makeDo();
+    const command = "z".repeat(MAX_EXEC_COMMAND_BYTES + 1); // one byte past the cap
+
+    let message = "";
+    try {
+      await sandbox.runCommand(shellCommand(command));
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toBe(
+      `exec command is ${MAX_EXEC_COMMAND_BYTES + 1} bytes, above the ${MAX_EXEC_COMMAND_BYTES}-byte bound`,
+    );
+    expect(message).not.toContain("zzz");
+    expect(execCalls).toEqual([]);
+
+    reset();
+    try {
+      await sandbox.runCommand(shellCommand("echo hi"), { env: { BIG: "e".repeat(8 * 1024 + 1) } });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toBe("exec env BIG is 8193 bytes, above the 8192-byte bound");
+    expect(message).not.toContain("eee");
     expect(execCalls).toEqual([]);
   });
 

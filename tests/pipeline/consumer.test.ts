@@ -342,9 +342,10 @@ describe("createReviewConsumer", () => {
     expect(sandbox.calls[1]!.opts).toEqual({ timeout: 120_000 });
     // Diff: gh step, GH_TOKEN via exec env only.
     expect(sandbox.calls[2]!.opts).toEqual({ env: { GH_TOKEN: gh("s", "installation_token") }, timeout: 120_000 });
-    // Numstat + input write: plain git/shell steps, git timeout.
+    // Numstat is a plain git step; the input write carries the document on the
+    // exec STDIN pipe (asserted decoded below), never in its command.
     expect(sandbox.calls[3]!.opts).toEqual({ timeout: 120_000 });
-    expect(sandbox.calls[4]!.opts).toEqual({ timeout: 120_000 });
+    expect(sandbox.calls[4]!.opts).toMatchObject({ timeout: 120_000, stdin: expect.any(String) });
     // Runner: cwd = clone dir; harness paths + the model chain via exec env,
     // and the App's key pool via the exec STDIN payload (the only credential
     // channel — the env carries no key).

@@ -67,6 +67,17 @@ export const DEFAULT_EXEC_TIMEOUT_MS = 600_000;
 export const MAX_EXEC_STDIN_BYTES = 2 * 1024 * 1024;
 
 /**
+ * Upper bound on the ONE `exec` argument that carries the shell command.
+ * Linux caps a single argument at `MAX_ARG_STRLEN` = 128 KiB; this leaves
+ * headroom and fails where the diagnosis is readable, before `execve` returns
+ * E2BIG.
+ */
+export const MAX_EXEC_COMMAND_BYTES = 96 * 1024;
+
+/** Per-variable env bound, well below the same per-argument limit. */
+const MAX_EXEC_ENV_VALUE_BYTES = 8 * 1024;
+
+/**
  * A shell command cleared for the sandbox sink (CWE-78 boundary). Branded so
  * a raw `string` is a type error at `ReviewSandbox.runCommand`: only the
  * pipeline/gitops.ts builders (allowlist + fail-closed before any shell
@@ -204,15 +215,28 @@ export class SandboxV1 extends DurableObject {
    * caller's exact bound (`{ timeout: 250 }` → `0.25`). Exit code 124 = the
    * bound fired.
    *
-   * `stdin` is the credential channel: when present it is written into the
-   * child's stdin pipe and the stream is closed (EOF). Nothing about it appears
-   * in `argv`, `env` or the return value, and an oversized payload fails closed
-   * before a process exists.
+   * `stdin` is the payload channel (credentials, the runner input document):
+   * when present it is written into the child's stdin pipe and the stream is
+   * closed (EOF). Nothing about it appears in `argv`, `env` or the return
+   * value, and an oversized payload — like an oversized argument — fails
+   * closed before a process exists.
    */
   async runCommand(
     command: ShellCommand,
     opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string },
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    // Linux caps ONE argv string at MAX_ARG_STRLEN (128 KiB); these bounds leave
+    // headroom and fail before `execve` can report E2BIG. No value is echoed.
+    const commandBytes = utf8Encoder.encode(command).byteLength;
+    if (commandBytes > MAX_EXEC_COMMAND_BYTES) {
+      throw new Error(`exec command is ${commandBytes} bytes, above the ${MAX_EXEC_COMMAND_BYTES}-byte bound`);
+    }
+    for (const [name, value] of Object.entries(opts?.env ?? {})) {
+      const valueBytes = utf8Encoder.encode(value).byteLength;
+      if (valueBytes > MAX_EXEC_ENV_VALUE_BYTES) {
+        throw new Error(`exec env ${name} is ${valueBytes} bytes, above the ${MAX_EXEC_ENV_VALUE_BYTES}-byte bound`);
+      }
+    }
     await this.ensureRunning();
     // Clamp before converting: a zero/negative value must never reach the argv
     // as a zero or negative duration (GNU `timeout 0` DISABLES the bound), and a

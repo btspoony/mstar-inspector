@@ -189,13 +189,19 @@ export function numstatCommand(diffPath: string): ShellCommand {
 
 /**
  * Write a JSON document to an in-image path (the runner `--input` file). The
- * caller base64-encodes the content; `base64 -d` decodes it in-container, so
+ * payload arrives on the exec STDIN pipe base64-encoded (the caller passes it
+ * as `runCommand(..., { stdin })`); `base64 -d` decodes it in-container, so
  * arbitrary JSON (quotes, unicode, tabs, newlines) never touches shell
- * interpolation. The base64 payload itself is allowlist-validated.
+ * interpolation — and the document never becomes an exec ARGUMENT, which Linux
+ * caps at 128 KiB (E2BIG above it).
  */
-export function writeJsonCommand(path: string, contentBase64: string): ShellCommand {
-  assertShellSafe(contentBase64, /^[A-Za-z0-9+/]+={0,2}$/, "base64 content");
-  return shellCommand(`printf '%s' '${contentBase64}' | base64 -d > '${path}'`);
+export function writeJsonCommand(path: string): ShellCommand {
+  assertShellSafe(path, IN_IMAGE_PATH_RE, "write path");
+  // The charset admits `.`; a `..` segment would still escape the path.
+  if (path.includes("..")) {
+    throw new Error(`unsafe write path for shell interpolation: ${JSON.stringify(path)}`);
+  }
+  return shellCommand(`base64 -d > '${path}'`);
 }
 
 /**
