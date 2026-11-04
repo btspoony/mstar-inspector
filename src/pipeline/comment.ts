@@ -783,6 +783,13 @@ export type ReviewCommenterOptions = {
    * on it and no token or client is exposed through it.
    */
   authSeam?: AuthSeam;
+  /**
+   * The operator-configured bound on the one terminal `checks.update`
+   * (`review.check.update_timeout_ms`). Omitted → the adapter's documented
+   * absent-row default. The scheduled Check recovery lane reads it once per
+   * run and passes it down here; the consumer passes it per message instead.
+   */
+  checksUpdateBudgetMs?: number;
 };
 
 /** One `createAppAuth` construction, as observed through `authSeam`. */
@@ -1778,6 +1785,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
         // the §7.5 thread surface uses.
         nowMs: options.nowMs ?? (() => Date.now()),
         getOctokit: async ({ scope }) => getChecksOctokit(scope),
+        updateBudgetMs: options.checksUpdateBudgetMs,
       })
     : null;
 

@@ -85,6 +85,7 @@ import {
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
+import { getCheckBudgets } from "../dashboard/runtime-config-store";
 import { sha256Hex } from "../pipeline/review-threads";
 import type { ReconcileTransport } from "./lifecycle-reconcile";
 
@@ -191,6 +192,12 @@ export type CheckCredentialFactory = (input: {
   scope: Scope;
   now: () => number;
   transport: CheckTransport;
+  /**
+   * The operator-configured `review.check.update_timeout_ms`, read ONCE per
+   * reconcile run and threaded down. Omitted → the adapter's documented
+   * default (injected factories and tests may ignore it).
+   */
+  updateBudgetMs?: number;
 }) => Promise<CheckCredentialResolution>;
 
 export type CheckReconcileDeps = {
@@ -245,7 +252,7 @@ async function checkRoutingRow(db: D1Like, appId: string, installationId: number
  * exists — but the flag rides the resolution because §7.6 forbids a paused App
  * from producing a NEW Check. The lane, not this factory, owns that gate.
  */
-export const productionCheckCredentials: CheckCredentialFactory = async ({ db, env, scope, now, transport }) => {
+export const productionCheckCredentials: CheckCredentialFactory = async ({ db, env, scope, now, transport, updateBudgetMs }) => {
   const row = await checkRoutingRow(db, scope.appId, scope.installationId);
   if (row === null) return { kind: "unavailable", reason: "missing" };
   if (row.deleted_at !== null) return { kind: "unavailable", reason: "deleted" };
@@ -267,7 +274,7 @@ export const productionCheckCredentials: CheckCredentialFactory = async ({ db, e
     // run's bounded transport.
     const commenter: ReviewCommenter = createReviewCommenter(
       { APP_ID: String(row.github_app_id), PRIVATE_KEY: pem },
-      { db, nowMs: now, fetchImpl: transport.fetchImpl },
+      { db, nowMs: now, fetchImpl: transport.fetchImpl, checksUpdateBudgetMs: updateBudgetMs },
     );
     const identity = (await commenter.getAppIdentity?.()) ?? null;
     if (identity === null || identity.githubAppId !== row.github_app_id) {
@@ -440,6 +447,20 @@ export async function reconcileReviewChecks(
       return summary;
     }
     const now = deps.now ?? (() => Date.now());
+    // §7.10 Check budgets: ONE read per run (never per App, never per row), so
+    // the lane's inherent 5 s request cap is tightened by whatever the operator
+    // configured. A degraded read answers the documented defaults and logs one
+    // line — it must never throw or abort the reconciliation.
+    const checkBudgets = await getCheckBudgets(db);
+    if (checkBudgets.degraded) {
+      log.warn(
+        {
+          event: "ops_check_reconcile_budgets_degraded",
+          detail: "check budgets unreadable — using the documented defaults",
+        },
+        "check reconcile budgets degraded",
+      );
+    }
     const budget: RunBudget = {
       spent: 0,
       deadline: now() + CHECK_RECONCILE_RUN_BUDGET_MS,
@@ -459,7 +480,7 @@ export async function reconcileReviewChecks(
     //    is skipped with no probe and no write, so an identity-mismatch pair
     //    stops occupying the bounded due batch and stops paying a remote probe
     //    on every cron pass.
-    await reenableHealthyAppChecks(env, db, now, budget, credentials, transport, log);
+    await reenableHealthyAppChecks(env, db, now, budget, credentials, transport, log, checkBudgets.updateMs);
 
     // 1. Due attempts, ONE bound nowMs at every predicate position.
     const rows = await listCheckReconcileBatch(db, now(), CHECK_MAX_ATTEMPTS, CHECK_RECONCILE_LIMIT);
@@ -469,7 +490,7 @@ export async function reconcileReviewChecks(
       budget.refused = false;
       budget.rowActive = true;
       try {
-        await reconcileCheckAttempt(env, db, now, budget, transport, credentials, credentialCache, row, log, summary);
+        await reconcileCheckAttempt(env, db, now, budget, transport, credentials, credentialCache, row, log, summary, checkBudgets.updateMs);
       } catch (error) {
         summary.errors += 1;
         log.warn(
@@ -533,6 +554,7 @@ async function reenableHealthyAppChecks(
   credentials: CheckCredentialFactory,
   transport: CheckTransport,
   log: CheckReconcileLog,
+  updateBudgetMs: number | undefined,
 ): Promise<void> {
   const { results: suspended } = await db
     // shortcut: tenant-bypass — bounded reconciliation scan selecting ids only;
@@ -588,7 +610,7 @@ async function reenableHealthyAppChecks(
   // loop against a still-broken pair. The probe is admission-gated (F-004).
   const confirmed: { appId: string; installationId: number }[] = [];
   for (const pair of resumable) {
-    const probe = await reenableProbe(db, env, pair, now, budget, transport, credentials);
+    const probe = await reenableProbe(db, env, pair, now, budget, transport, credentials, updateBudgetMs);
     if (probe.kind === "resume") confirmed.push(pair);
     else if (probe.kind === "resuspend") {
       const reason = checkSuspensionReason(
@@ -649,6 +671,7 @@ async function reenableProbe(
   budget: RunBudget,
   transport: CheckTransport,
   credentials: CheckCredentialFactory,
+  updateBudgetMs: number | undefined,
 ): Promise<
   | { kind: "resume" }
   | { kind: "unchanged" }
@@ -681,6 +704,7 @@ async function reenableProbe(
       scope: { appId: pair.appId, installationId: pair.installationId, owner: "", repo: "", prNumber: 0 },
       now,
       transport,
+      updateBudgetMs,
     });
     // A pre-dispatch refusal is a deferral, never a credential verdict.
     if (budget.refused) return { kind: "refused" };
@@ -726,13 +750,14 @@ async function reconcileCheckAttempt(
   row: CheckAttempt,
   log: CheckReconcileLog,
   summary: CheckReconcileSummary,
+  updateBudgetMs: number | undefined,
 ): Promise<void> {
   const attemptId = row.identity.attemptId;
   const scope = row.identity.scope;
 
   // The pair's credential path first: a pair that cannot be used must be
   // suspended, not claimed (no ownership is taken for work that cannot run).
-  const resolved = await credentialsForPair(db, env, scope, now, budget, transport, credentials, credentialCache, log, summary);
+  const resolved = await credentialsForPair(db, env, scope, now, budget, transport, credentials, credentialCache, log, summary, updateBudgetMs);
   if (resolved.kind !== "ok") return;
 
   // 1. Reacquire: a conditional UPDATE repeating the SELECTOR'S FULL
@@ -1061,6 +1086,7 @@ async function credentialsForPair(
   cache: Map<string, Promise<CheckCredentialResolution>>,
   log: CheckReconcileLog,
   summary: CheckReconcileSummary,
+  updateBudgetMs: number | undefined,
 ): Promise<CheckCredentialResolution> {
   const key = `${scope.appId}:${scope.installationId}`;
   const cached = cache.get(key);
@@ -1074,7 +1100,7 @@ async function credentialsForPair(
   let refusedDuringProbe = false;
   const resolution = (async () => {
     try {
-      const settled = await credentials({ db, env, scope, now, transport });
+      const settled = await credentials({ db, env, scope, now, transport, updateBudgetMs });
       if (settled.kind === "unavailable" && budget.refused) refusedDuringProbe = true;
       return settled;
     } catch (error) {
