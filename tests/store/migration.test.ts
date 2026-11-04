@@ -19,7 +19,6 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createMigratedTestD1, createTestD1 } from "./helpers";
 import {
-  SYSTEM_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_MAX,
   getEffectiveConcurrency,
 } from "../../src/dashboard/runtime-config-store";
@@ -1858,6 +1857,14 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
     ] as const) {
       insert.run(id, cap);
     }
+    // The system row is deliberately outside the clamp's WHERE: its old
+    // maximum (64) fits inside the new one (256).
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.concurrency.system', '64', '2026-11-04T00:00:00.000Z', 'migration-test')`,
+      )
+      .run();
 
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0043_workspace_concurrency_bound.sql"), "utf8"));
 
@@ -1877,10 +1884,29 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
     // The migration's product promise: a formerly-64 value reads as an
     // ordinary, non-degraded cap after the clamp.
     expect(await getEffectiveConcurrency(db, "ws_40")).toEqual({
-      system: SYSTEM_CONCURRENCY_DEFAULT,
+      system: 64,
       workspace: WORKSPACE_CONCURRENCY_MAX,
       effective: WORKSPACE_CONCURRENCY_MAX,
       degraded: false,
     });
+
+    // The system row is untouched by the clamp.
+    const system = db.raw
+      .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.concurrency.system'")
+      .get() as { value: string };
+    expect(system.value).toBe("64");
+
+    // The bulk change is ledgered per affected workspace, so support can answer
+    // "why is this workspace 32?" after a rollback.
+    const audited = db.raw
+      .prepare(
+        `SELECT target_id, detail_json FROM platform_audit_events
+          WHERE action = 'workspace.concurrency.clamp' ORDER BY target_id`,
+      )
+      .all() as Array<{ target_id: string; detail_json: string }>;
+    expect(audited).toEqual([
+      { target_id: "ws_33", detail_json: JSON.stringify({ before: 33, after: WORKSPACE_CONCURRENCY_MAX }) },
+      { target_id: "ws_40", detail_json: JSON.stringify({ before: 40, after: WORKSPACE_CONCURRENCY_MAX }) },
+    ]);
   });
 });

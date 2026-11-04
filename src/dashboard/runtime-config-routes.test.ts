@@ -225,25 +225,35 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
     expect(storedWorkspace(db)).toBe(20);
   });
 
-  test("an unreadable stored cap surfaces degraded on both read faces, not a normal number", async () => {
-    // The faces must not present the conservative fallback as this workspace's
-    // setting: `degraded` is what lets them render a warning instead.
+  test("a corrupt platform row degrades the admin face but not the tenant's own value", async () => {
+    // The tenant face never reads the platform row: a value it cannot see or
+    // repair must not blank a workspace whose own column is readable.
     const { db } = fixture();
     seed(db, "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
       "review.concurrency.system", "not-a-number", new Date().toISOString());
     expect(await (await getConcurrency(db, "ws-acme", "dana")).json()).toEqual({
-      // One statement answers both levels, so an untrusted system value
-      // degrades the pair together: the face never reports a mixed or torn
-      // pair as if the workspace had stored 32 alongside a serial system cap.
-      concurrency: 1,
+      concurrency: 32,
       min: 1,
       max: 32,
-      degraded: true,
+      degraded: false,
     });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
       concurrency: 1,
       min: 1,
       max: 256,
+      degraded: true,
+    });
+  });
+
+  test("a corrupt workspace column degrades the tenant read, not a normal number", async () => {
+    // The face must not present the conservative fallback as this workspace's
+    // setting: `degraded` is what lets it render the warning instead.
+    const { db } = fixture();
+    seed(db, "UPDATE workspaces SET max_concurrent_reviews = 'abc' WHERE id = ?", "ws-acme");
+    expect(await (await getConcurrency(db, "ws-acme", "dana")).json()).toEqual({
+      concurrency: 1,
+      min: 1,
+      max: 32,
       degraded: true,
     });
   });

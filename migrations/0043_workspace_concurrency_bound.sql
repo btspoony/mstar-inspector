@@ -18,4 +18,19 @@
 --
 -- Append-only on the production DB: one UPDATE, no schema change.
 
+-- Record one ledger row per affected workspace BEFORE the clamp, so support can
+-- answer "why is this workspace 32?" after the fact. The deploy has no user
+-- actor, so the login is a fixed migration identity.
+INSERT INTO platform_audit_events
+  (id, actor_login, action, target_type, target_id, detail_json, created_at)
+SELECT lower(hex(randomblob(16))),
+       'migration',
+       'workspace.concurrency.clamp',
+       'workspace',
+       id,
+       json_object('before', max_concurrent_reviews, 'after', 32),
+       strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  FROM workspaces
+ WHERE max_concurrent_reviews > 32;
+
 UPDATE workspaces SET max_concurrent_reviews = 32 WHERE max_concurrent_reviews > 32;

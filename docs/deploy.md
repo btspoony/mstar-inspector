@@ -2312,8 +2312,7 @@ all (wrangler's config schema). Each attempt's unique sandbox id starts its
 `max_instances` cap no longer exists — see the `containers` comment in
 `wrangler.jsonc`), so `250` is the widest blast radius the account should ever
 accept — it is also Cloudflare Queues' hard limit on concurrent consumer
-invocations. `tests/contracts/wrangler-env-parity.test.ts` locks the config to
-the platform's 250 limit. The system quota's own maximum is `256`
+invocations. The system quota's own maximum is `256`
 (`SYSTEM_CONCURRENCY_MAX`), deliberately above the ceiling: a quota above it is
 a valid business setting that the platform simply cannot saturate, and the
 ceiling still bounds the real blast radius. Remember the platform's 15 min queue-consumer wall-clock
@@ -2324,9 +2323,9 @@ Observation checklist after a concurrency change:
 
 - [ ] Both blocks carry the same ceiling — the `max_concurrency` literal `250`
       and `max_batch_size: 1` at the top level and inside `env.production`.
-      A ceiling change moves both literals AND the `250` pin in
-      `tests/contracts/wrangler-env-parity.test.ts`; the accepted runtime ranges
-      are driven through their write predicates in
+      A ceiling change moves both literals together (the parity test's
+      set-equality fails if they drift apart); the accepted runtime ranges are
+      driven through their write predicates in
       `src/dashboard/runtime-config-store.test.ts`.
 - [ ] Throughput moved the way the runtime caps predict: raising the D1 caps
       changes the admitted rate on the **next** message; raising only the
@@ -2360,10 +2359,9 @@ row expires.
   saturated — at most `250` reviews run concurrently. The workspace maximum
   (`WORKSPACE_CONCURRENCY_MAX`) is a tenant bound, so no workspace can ask for
   more than `32` no matter how high the system quota goes.
-  `tests/contracts/wrangler-env-parity.test.ts` pins the config to
-  `wrangler.jsonc`'s `250` literal;
-  `src/dashboard/runtime-config-store.test.ts`
-  drives the accepted ranges through the real write predicates.
+  `wrangler.jsonc` owns the two `250` literals, and
+  `src/dashboard/runtime-config-store.test.ts` drives the accepted ranges
+  through the real write predicates.
 - The tenant face never renders or returns the system value: its settings read
   answers `{ concurrency, min, max, degraded }`, its write range is `1..32`, and
   a workspace write is never compared with the system quota — that comparison

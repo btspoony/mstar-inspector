@@ -185,7 +185,7 @@ import {
   CONCURRENCY_MIN,
   RuntimeConfigError,
   WORKSPACE_CONCURRENCY_MAX,
-  getEffectiveConcurrency,
+  getWorkspaceConcurrency,
   isConcurrencyValue,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
@@ -2318,11 +2318,12 @@ const workspaceConcurrencyGate = async (c: DashboardContext) => {
 const workspaceConcurrencyReadRoute = async (c: DashboardContext) => {
   const gate = await workspaceConcurrencyGate(c);
   if (!gate.ok) return gate.response;
-  // ONE statement answers both levels, so the pair can never be torn by a
-  // concurrent system-cap change — and the store stays the only parse path.
-  const caps = await getEffectiveConcurrency(gate.member.db, gate.member.scope.workspaceId);
+  // The tenant face reads its own column only: a corrupt platform row must not
+  // blank a workspace whose value is perfectly readable — the tenant can neither
+  // see nor repair that row. Admission still applies min(system, workspace).
+  const caps = await getWorkspaceConcurrency(gate.member.db, gate.member.scope.workspaceId);
   return c.json({
-    concurrency: caps.workspace,
+    concurrency: caps.concurrency,
     min: CONCURRENCY_MIN,
     max: WORKSPACE_CONCURRENCY_MAX,
     degraded: caps.degraded,

@@ -138,14 +138,43 @@ type RuntimeSettingRow = { value?: unknown };
 
 /**
  * The system cap on its own: an absent row reads as the default, anything
- * untrusted as 1 with `degraded: true`.
+ * untrusted as 1 with `degraded: true`, and a read failure answers the same
+ * conservative pair (the module's read contract).
  */
 export async function getSystemConcurrency(db: DashboardD1): Promise<ConcurrencyRead> {
-  const row = await db
-    .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
-    .bind(SYSTEM_CONCURRENCY_KEY)
-    .first<RuntimeSettingRow>();
-  return resolveRow(row, SYSTEM_CONCURRENCY_DEFAULT, SYSTEM_CONCURRENCY_MAX);
+  try {
+    const row = await db
+      .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
+      .bind(SYSTEM_CONCURRENCY_KEY)
+      .first<RuntimeSettingRow>();
+    return resolveRow(row, SYSTEM_CONCURRENCY_DEFAULT, SYSTEM_CONCURRENCY_MAX);
+  } catch {
+    return { concurrency: CONCURRENCY_MIN, degraded: true };
+  }
+}
+
+/**
+ * The workspace cap on its own — the tenant face's read. It never touches the
+ * system row: a corrupt platform value must not blank a workspace whose own
+ * column is perfectly readable (the tenant cannot see or repair that row).
+ * An absent column is the default; an untrusted one or a read failure answers
+ * 1 with `degraded: true`.
+ */
+export async function getWorkspaceConcurrency(
+  db: DashboardD1,
+  workspaceId: string,
+): Promise<ConcurrencyRead> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT max_concurrent_reviews AS value FROM workspaces WHERE id = ? AND deleted_at IS NULL",
+      )
+      .bind(workspaceId)
+      .first<RuntimeSettingRow>();
+    return resolveRow(row, WORKSPACE_CONCURRENCY_DEFAULT, WORKSPACE_CONCURRENCY_MAX);
+  } catch {
+    return { concurrency: CONCURRENCY_MIN, degraded: true };
+  }
 }
 
 /**
@@ -202,20 +231,24 @@ export async function getEffectiveConcurrency(
 }
 
 /**
- * One stored concurrency value as SQL, under the trust rule every write
- * predicate and every `before` ledger entry shares: a canonical 1..max numeric
- * value is that integer, anything else is `untrusted`. One fragment, so the
- * system row and the workspace column cannot drift apart on what "trusted"
- * means.
+ * One stored concurrency value as SQL, under the audit ledger's trust rule: a
+ * canonical 1..max numeric value is that integer, anything else is
+ * `untrusted`. One fragment, so the system row and the workspace column cannot
+ * drift apart on what "trusted" means.
+ *
+ * It is deliberately stricter than `parseStored`, which accepts any string
+ * `Number()` turns into an in-range integer (`'8.0'`, `'1e1'`, `'+8'`): those
+ * read as caps but are ledgered as `before: null`. `shortcut: a non-canonical
+ * numeric text is readable but not auditable, upgrade if a non-canonical
+ * writer ever exists`.
  */
 const trustedConcurrencySql = (value: string, untrusted: string, max: number) => `CASE
       WHEN ${value} NOT GLOB '*[^0-9]*' AND CAST(${value} AS INTEGER) BETWEEN ${CONCURRENCY_MIN} AND ${max}
       THEN CAST(${value} AS INTEGER) ELSE ${untrusted} END`;
 
 /**
- * The stored system cap as SQL. (Stricter than `parseStored` on stray
- * whitespace: `shortcut: a hand-edited " 8" is read as 8 but refuses writes,
- * upgrade if a non-canonical writer ever exists`.)
+ * The stored system cap as SQL — the audit `before` value, under the ledger's
+ * canonical-digits rule.
  */
 const storedSystemCapSql = (keyParam: string, untrusted: string) =>
   `(SELECT ${trustedConcurrencySql("value", untrusted, SYSTEM_CONCURRENCY_MAX)} FROM review_runtime_settings WHERE key = ${keyParam})`;
