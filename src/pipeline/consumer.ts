@@ -82,11 +82,11 @@ import {
   IDEM_DEGRADED,
   IDEM_DONE,
   IDEM_DROPPED,
-  IDEM_ENQUEUED,
   IDEM_FAILED,
   IDEM_PAUSED,
   IDEM_SUPERSEDED,
   isReviewClaim,
+  putAbandonClaim,
   type IdempotencyKey,
 } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
@@ -652,12 +652,11 @@ async function handleGuardHeld(
   // The newer commit's enqueue claim is the supersede skip's ONLY proof, so a
   // job dropped here for good must stop being proof: overwrite its key with
   // "dropped" (the same TTL the worker claim used), the value both readers
-  // treat as "not reviewed". Never downgrade `done` though — a sha this
-  // consumer already reviewed stays proof, or the redelivery would re-review
-  // a reviewed commit. So read first and write only over absent/`1`; a read
-  // fault skips the write (the claim stays "1", today's behavior). Best-effort
-  // — a KV fault only leaves a stale "1", which the skip then accepts and
-  // `review_failures` traces (the drop row below).
+  // treat as "not reviewed". `putAbandonClaim` never downgrades `done` — a sha
+  // this consumer already reviewed stays proof, or the redelivery would
+  // re-review a reviewed commit. Best-effort — a KV fault only leaves a stale
+  // "1", which the skip then accepts and `review_failures` traces (the drop
+  // row below).
   if (headSha !== "") {
     const claimKey = idemKey({
       installation_id: message.body.installation_id,
@@ -667,10 +666,7 @@ async function handleGuardHeld(
       head_sha: headSha,
     });
     try {
-      const current = await deps.env.IDEMPOTENCY_KV.get(claimKey);
-      if (current === null || current === IDEM_ENQUEUED) {
-        await deps.env.IDEMPOTENCY_KV.put(claimKey, IDEM_DROPPED, { expirationTtl: IDEMPOTENCY_SECONDS });
-      }
+      await putAbandonClaim(deps.env.IDEMPOTENCY_KV, claimKey, IDEM_DROPPED, IDEMPOTENCY_SECONDS);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(fields, `dropped-claim KV update failed (the skip may still treat this commit as queued): ${detail}`);
@@ -2816,10 +2812,12 @@ async function processMessage(
       // A pause is an answer about the REVIEW, not about the commit: the
       // worker's "1" claim must stop proving a review is coming, or both
       // readers (the supersede skip and the worker's pre-check) would accept
-      // it forever. Best-effort — a KV fault only leaves the stale "1".
+      // it forever. `putAbandonClaim` never downgrades a completed review.
+      // Best-effort — a KV fault only leaves the stale "1".
       if (payload.head_sha) {
         try {
-          await deps.env.IDEMPOTENCY_KV.put(
+          await putAbandonClaim(
+            deps.env.IDEMPOTENCY_KV,
             idemKey({
               installation_id: payload.installation_id,
               owner: payload.owner,
@@ -2828,7 +2826,7 @@ async function processMessage(
               head_sha: payload.head_sha,
             }),
             IDEM_PAUSED,
-            { expirationTtl: IDEMPOTENCY_SECONDS },
+            IDEMPOTENCY_SECONDS,
           );
         } catch (err) {
           const detail = err instanceof Error ? err.message : String(err);
@@ -2893,10 +2891,12 @@ async function processMessage(
         // a force-push can make this sha the head again (A → B → A), and the
         // worker's pre-check re-enqueues any `superseded` claim for exactly
         // that reason — this delivery's ledger comparison is what decides it
-        // was a leftover, not the claim. Best-effort — a KV fault only leaves
-        // the stale "1" and never changes this outcome.
+        // was a leftover, not the claim. `putAbandonClaim` never downgrades a
+        // completed review. Best-effort — a KV fault only leaves the stale "1"
+        // and never changes this outcome.
         try {
-          await deps.env.IDEMPOTENCY_KV.put(
+          await putAbandonClaim(
+            deps.env.IDEMPOTENCY_KV,
             idemKey({
               installation_id: payload.installation_id,
               owner: payload.owner,
@@ -2905,7 +2905,7 @@ async function processMessage(
               head_sha: payloadHeadSha,
             }),
             IDEM_SUPERSEDED,
-            { expirationTtl: IDEMPOTENCY_SECONDS },
+            IDEMPOTENCY_SECONDS,
           );
         } catch (err) {
           const detail = err instanceof Error ? err.message : String(err);
@@ -3603,7 +3603,8 @@ async function processMessage(
       // Best-effort — a KV fault only leaves the stale claim behind.
       if (payload.head_sha) {
         try {
-          await deps.env.IDEMPOTENCY_KV.put(
+          await putAbandonClaim(
+            deps.env.IDEMPOTENCY_KV,
             idemKey({
               installation_id: payload.installation_id,
               owner: payload.owner,
@@ -3612,7 +3613,7 @@ async function processMessage(
               head_sha: payload.head_sha,
             }),
             IDEM_DEGRADED,
-            { expirationTtl: IDEMPOTENCY_SECONDS },
+            IDEMPOTENCY_SECONDS,
           );
         } catch (err) {
           const detail = err instanceof Error ? err.message : String(err);
@@ -4272,12 +4273,14 @@ async function processMessage(
     // DLQ), so the commit will never be reviewed: overwrite its idempotency
     // key with "failed" (the worker's claim TTL) so neither the worker's
     // pre-check nor the supersede skip keeps treating the stale "1" as proof.
-    // Keyed off the PAYLOAD sha — the same sha the worker claimed. Best-effort:
-    // a KV fault only leaves "1" behind, which the failure row above traces,
-    // and it never masks the rethrow.
+    // Keyed off the PAYLOAD sha — the same sha the worker claimed.
+    // `putAbandonClaim` never downgrades a completed review. Best-effort: a KV
+    // fault only leaves "1" behind, which the failure row above traces, and it
+    // never masks the rethrow.
     if (attempts >= QUEUE_MAX_ATTEMPTS && payload.head_sha) {
       try {
-        await deps.env.IDEMPOTENCY_KV.put(
+        await putAbandonClaim(
+          deps.env.IDEMPOTENCY_KV,
           idemKey({
             installation_id: payload.installation_id,
             owner: payload.owner,
@@ -4286,7 +4289,7 @@ async function processMessage(
             head_sha: payload.head_sha,
           }),
           IDEM_FAILED,
-          { expirationTtl: IDEMPOTENCY_SECONDS },
+          IDEMPOTENCY_SECONDS,
         );
       } catch (kvErr) {
         const kvDetail = kvErr instanceof Error ? kvErr.message : String(kvErr);

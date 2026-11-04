@@ -2024,6 +2024,27 @@ describe("createReviewConsumer", () => {
     expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
   });
 
+  test("a supersede skip never erases an already-reviewed sha's done claim", async () => {
+    // Force-push A → B → A → B: A was reviewed (`done`) and is now obsolete
+    // again. Skipping A's redelivery must not stamp `superseded` over that
+    // proof — the next redelivery would re-review (and re-pay for) A.
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    kvState.entries.set(ENQUEUED_KEY(SHA), "done");
+    kvState.entries.set(ENQUEUED_KEY(NEW_SHA), "1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    // The skip still happened; only the claim is left alone.
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
+    expect(reviewCount(db)).toBe(0);
+    expect(kvPuts.some((p) => p.value === "superseded")).toBe(false);
+    expect(kvState.entries.get(ENQUEUED_KEY(SHA))).toBe("done");
+  });
+
   test("a force-push back to a superseded sha reviews it — the claim is not a tombstone (A → B → A)", async () => {
     // A was skipped once (its claim reads `superseded`), then B was pushed and
     // now A is the head again. The ledger's head IS A, so the skip's
@@ -2226,9 +2247,9 @@ describe("createReviewConsumer", () => {
   });
 
   test("an unreadable claim skips the drop write and keeps the enqueue claim", async () => {
-    // A read fault must not turn into a blind overwrite: the claim stays as it
-    // was ("1", today's behavior), which the skip then accepts and the drop
-    // row above traces.
+    // A read fault must not turn into a blind overwrite: `putAbandonClaim`
+    // returns without writing, so the claim stays as it was ("1", today's
+    // behavior), which the skip then accepts and the drop row above traces.
     reset();
     queueState.attempts = 4;
     const db = await createSeededTestD1();
@@ -2240,7 +2261,7 @@ describe("createReviewConsumer", () => {
     await consumer(makeBatch(makePayload({ head_sha: newer })));
 
     expect(kvPuts.some((p) => p.value === "dropped")).toBe(false);
-    expect(logLines.some((l) => l.level === "warn" && l.msg.includes("dropped-claim KV update failed"))).toBe(true);
+    expect(failureRows(db)).toHaveLength(1);
   });
 
   test("the terminal drop row needs two non-empty, different shas (round-11)", async () => {

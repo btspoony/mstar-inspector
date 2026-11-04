@@ -2,6 +2,8 @@
  * Idempotency key format + TTL — single source of truth (compass contracts B).
  * 04/05/06 MUST import from here; no second `idem:` literal or magic 86400.
  */
+import type { KVNamespace } from "@cloudflare/workers-types";
+
 export type IdempotencyKey = {
   installation_id: number;
   owner: string;
@@ -43,6 +45,39 @@ export const IDEM_FAILED = "failed";
 export const IDEM_PAUSED = "paused";
 export const IDEM_DEGRADED = "degraded";
 export const IDEM_SUPERSEDED = "superseded";
+
+/** Every claim that names a commit which was NOT reviewed. */
+export type AbandonClaim =
+  | typeof IDEM_DROPPED
+  | typeof IDEM_FAILED
+  | typeof IDEM_PAUSED
+  | typeof IDEM_DEGRADED
+  | typeof IDEM_SUPERSEDED;
+
+/**
+ * Write an abandon claim without ever downgrading a completed review: `done`
+ * outranks every abandon outcome because it is the durable proof that a commit
+ * was reviewed, and erasing it re-reviews (and re-pays for) that commit.
+ *
+ * Reads first and writes only over a non-`done` claim. A read fault skips the
+ * write entirely, leaving the existing claim as it was — callers warn about
+ * their own write failure, so this never throws on the read.
+ */
+export async function putAbandonClaim(
+  kv: KVNamespace,
+  key: string,
+  value: AbandonClaim,
+  ttlSeconds: number,
+): Promise<void> {
+  let current: string | null;
+  try {
+    current = await kv.get(key);
+  } catch {
+    return;
+  }
+  if (current === IDEM_DONE) return;
+  await kv.put(key, value, { expirationTtl: ttlSeconds });
+}
 
 /**
  * The worker's enqueue pre-check: true only for a claim that a review of this
