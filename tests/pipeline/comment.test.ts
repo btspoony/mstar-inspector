@@ -718,6 +718,56 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(md).toContain("| D | unverifiable (no-evidence) | - | - |");
   });
 
+  test("a prior-finding title cannot open an HTML fold around the later sections", () => {
+    const rows: ClosureRow[] = [
+      {
+        title: "<details><summary>prior</summary>",
+        disposition: "unverifiable",
+        reason: "no-evidence",
+        evidenceKind: null,
+        thread: "-",
+      },
+    ];
+    const revalidated = buildRevalidatedSection(coverage, rows);
+    // The row text is escaped like a report field, so the cell stays text and
+    // no tag can fold the rest of the comment.
+    expect(revalidated).toContain("&lt;details>&lt;summary>prior&lt;/summary>");
+    expect(revalidated).not.toContain("<details>");
+
+    const rendered = renderReviewMarkdown({
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      summary_md: "One issue.",
+      findings: [
+        {
+          mergeClass: "should-fix",
+          title: "Fractional expiry",
+          body: "b",
+          file_path: "src/auth.ts",
+          line_start: 21,
+          line_end: 21,
+        },
+      ],
+    });
+    // `planToFix: "none"` keeps the fix-plan fold out, so any raw `<details>`
+    // left in the body would be the injected one.
+    const body = insertReportSections(rendered, { ...report, planToFix: "none" }, revalidated);
+    expect(body).not.toContain("<details");
+    const injected = body.indexOf("&lt;details>");
+    expect(injected).toBeGreaterThan(-1);
+    // Every section that follows the table is still outside the (escaped)
+    // fold text — the escape is in place, not just somewhere in the body.
+    for (const section of [
+      "### Findings",
+      "### Linked-issue AC",
+      "### ✅ Verified",
+      "### 🗑️ Considered & rejected",
+      "## 🛠️ Plan to fix",
+    ]) {
+      expect(body.indexOf(section)).toBeGreaterThan(injected);
+    }
+  });
+
   test("a dismissed row reads the same in the revalidated and closure tables", () => {
     const rows: ClosureRow[] = [
       { title: "C", disposition: "dismissed", reason: "non-fix-dismissal", evidenceKind: null, thread: "-" },

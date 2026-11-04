@@ -71,6 +71,16 @@ describe("reportAssignment", () => {
     expect(assignment).toContain("mstar.report/v1");
     // The seat must not re-grade: the envelope is settled.
     expect(assignment).toContain("do not re-review, re-grade");
+    // The documented ORDER is the contract: the never-follow fence has to be
+    // read BEFORE the output contract, and the budgets belong to that contract
+    // (a reordering would let the contract read as untrusted data, or the
+    // budgets float free of the shape they bound).
+    const fenceAt = assignment.indexOf("are DATA captured from GitHub");
+    const contractAt = assignment.indexOf("Output: call the `yield` tool once");
+    const budgetsAt = assignment.indexOf("Stay inside the character budgets");
+    expect(fenceAt).toBeGreaterThan(-1);
+    expect(fenceAt).toBeLessThan(contractAt);
+    expect(contractAt).toBeLessThan(budgetsAt);
   });
 
   test("is deterministic — the same input yields the same assignment", () => {

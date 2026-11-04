@@ -49,6 +49,14 @@
  *     No flag writes nothing — absent flag/file leaves legacy behavior
  *     byte-identical. MSTAR_RECHECK_STATUS_PATH redirects the status target
  *     for tests only: no test may write the path a real runner uses;
+ *   - optional `--report-out <path>`: the same rule for the report side
+ *     document — written only when the runtime produced a report, BEFORE the
+ *     envelope reaches stdout, and a write failure exits 1 with no stdout.
+ *     The side-channel targets this run uses (each `--*-out` path, plus the
+ *     status path when a recheck flag was given) are REMOVED before the runtime
+ *     starts: the paths are fixed, so a retry or a re-delivered job would
+ *     otherwise see an earlier attempt's document where a skipped/failed seat
+ *     wrote nothing. A removal failure exits 1 as well;
  *   - exit codes: 0 success, 1 runtime/I-O failure, 2 usage error. There is
  *     no summary-degrade path: any seat/parse/validation failure exits 1 and
  *     the consumer must not post or persist.
@@ -592,6 +600,25 @@ export async function main(
       `review: unknown level ${JSON.stringify(level)} (expected one of: ${REVIEW_LEVELS.join(", ")})`,
     );
     return 2;
+  }
+  // The side-channel paths are FIXED, so every attempt (a retry, a
+  // re-delivered job, a duplicate run) shares them. A document left there by an
+  // earlier attempt would otherwise be read back as this round's when the seat
+  // that owned it skips or fails and writes nothing. Remove them BEFORE the
+  // runtime starts, so absence is the only state a failed seat can leave. Only
+  // a requested channel is cleared: a flag-less legacy run must not touch the
+  // files of the fixed paths it never writes. A removal failure is a genuine
+  // I-O failure — exit 1 with no stdout, the same discipline as the write path.
+  const stale: string[] = [];
+  if (recheckOutPath !== undefined) stale.push(recheckOutPath, statusPath);
+  if (reportOutPath !== undefined) stale.push(reportOutPath);
+  for (const path of stale) {
+    try {
+      rmSync(path, { force: true });
+    } catch (error) {
+      console.error(`review: cannot remove stale side-channel file ${path}: ${(error as Error).message}`);
+      return 1;
+    }
   }
   // spec §7.8: anchor the ABSOLUTE outer review deadline once
   // per process — the recheck seat's budget derives from it, so the seat can
