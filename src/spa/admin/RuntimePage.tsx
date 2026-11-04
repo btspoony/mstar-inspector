@@ -14,15 +14,24 @@ import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { PageNotice } from "../pages/PageNotice";
 import { concurrencySubmitBlocked } from "../pages/data";
-import { AdminWriteError, readRuntime, setSystemConcurrency, useLoaded } from "./api";
+import { AdminWriteError, readRuntime, setCheckBudgets, setSystemConcurrency, useLoaded, type CheckBudgetConfig } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
 export function RuntimePage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readRuntime);
   /** Only what the operator typed is local; the display falls back to the stored value. */
   const [draft, setDraft] = useState<string | null>(null);
+  const [terminalizeDraft, setTerminalizeDraft] = useState<string | null>(null);
+  const [updateDraft, setUpdateDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
+  // the terminalize/update relation included — reads as that field's error
+  // instead of a page-wide banner.
+  const [notice, setNotice] = useState<{
+    kind: "success" | "error";
+    message: string;
+    source: "concurrency" | "checkBudgets";
+  } | null>(null);
 
   async function onSubmit(
     event: FormEvent<HTMLFormElement>,
@@ -44,7 +53,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       // flag that made the field start empty.
       update((data) => ({ ...data, concurrency: saved, degraded: false }));
       setDraft(null);
-      setNotice({ kind: "success", message: t(locale, "admin.runtime.concurrencySaved") });
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.concurrencySaved"),
+        source: "concurrency",
+      });
     } catch (error) {
       // Generic message primary, the server's own refusal text as secondary detail.
       const generic = t(locale, "admin.runtime.concurrencyFailed");
@@ -54,6 +67,51 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           error instanceof AdminWriteError
             ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
             : generic,
+        source: "concurrency",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSaveBudgets(
+    event: FormEvent<HTMLFormElement>,
+    stored: CheckBudgetConfig,
+  ): Promise<void> {
+    event.preventDefault();
+    if (busy) return; // in-flight guard — no double submit
+    if (
+      concurrencySubmitBlocked(stored.degraded, terminalizeDraft) ||
+      concurrencySubmitBlocked(stored.degraded, updateDraft)
+    ) {
+      return;
+    }
+    // Same browser-side parsing as the concurrency field: the server's range
+    // gate is the only validator.
+    const terminalizeMs = Number((terminalizeDraft ?? String(stored.terminalizeMs)).trim());
+    const updateMs = Number((updateDraft ?? String(stored.updateMs)).trim());
+    setBusy(true);
+    setNotice(null);
+    try {
+      const saved = await setCheckBudgets({ terminalizeMs, updateMs }, stored);
+      // A 2xx rewrote both rows, so the card reads as trusted again.
+      update((data) => ({ ...data, checkBudgets: saved }));
+      setTerminalizeDraft(null);
+      setUpdateDraft(null);
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.checkSaved"),
+        source: "checkBudgets",
+      });
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.checkFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+        source: "checkBudgets",
       });
     } finally {
       setBusy(false);
@@ -73,9 +131,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
         onRetry={reload}
         locale={locale}
       >
-        {(data) => (
+        {(data) => {
+          // `null` = the server does not report the Check budgets (an older
+          // Worker behind a newer SPA bundle): the budget card is absent, the
+          // concurrency card is exactly as before, and nothing renders a bare
+          // `undefined`.
+          const budgets = data.checkBudgets;
+          return (
           <div className="flex flex-col gap-4">
-            {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
             <SectionCard tier="secondary">
               <CardHeader>
                 <SectionCardTitle>{t(locale, "admin.runtime.concurrencyTitle")}</SectionCardTitle>
@@ -84,6 +147,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 <p className="text-sm text-muted-foreground">
                   {t(locale, "admin.runtime.concurrencyDescription")}
                 </p>
+                {notice?.source === "concurrency" ? (
+                  <div className="mt-4">
+                    <PageNotice kind={notice.kind} message={notice.message} />
+                  </div>
+                ) : null}
                 {data.degraded ? (
                   // The stored cap could not be trusted, so `data.concurrency` is
                   // the conservative fallback: showing it as the current value
@@ -130,8 +198,92 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 )}
               </CardContent>
             </SectionCard>
+            {budgets === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.checkTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.checkDescription")}
+                </p>
+                {notice?.source === "checkBudgets" ? (
+                  <div className="mt-4">
+                    <PageNotice kind={notice.kind} message={notice.message} />
+                  </div>
+                ) : null}
+                {budgets.degraded ? (
+                  // Both numbers are the documented defaults, not the stored
+                  // setting: the form starts empty so a save cannot pin them.
+                  <div className="mt-4">
+                    <PageNotice kind="warn" message={t(locale, "admin.runtime.checkUnreadable")} />
+                  </div>
+                ) : null}
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => void onSaveBudgets(event, budgets)}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="check-terminalize-budget">
+                      {t(locale, "admin.runtime.terminalizeLabel")}
+                    </label>
+                    <Input
+                      id="check-terminalize-budget"
+                      type="number"
+                      min={budgets.terminalizeMin}
+                      max={budgets.terminalizeMax}
+                      className="w-32"
+                      autoComplete="off"
+                      required
+                      value={
+                        terminalizeDraft ??
+                        (budgets.degraded ? "" : String(budgets.terminalizeMs))
+                      }
+                      onChange={(event) => setTerminalizeDraft(event.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="check-update-budget">
+                      {t(locale, "admin.runtime.updateLabel")}
+                    </label>
+                    <Input
+                      id="check-update-budget"
+                      type="number"
+                      min={budgets.updateMin}
+                      max={budgets.updateMax}
+                      className="w-32"
+                      autoComplete="off"
+                      required
+                      value={
+                        updateDraft ??
+                        (budgets.degraded ? "" : String(budgets.updateMs))
+                      }
+                      onChange={(event) => setUpdateDraft(event.target.value)}
+                    />
+                  </div>
+                  <Button type="submit" disabled={busy}>
+                    {t(locale, "admin.runtime.checkSave")}
+                  </Button>
+                  {budgets.degraded ? (
+                    <Button type="button" variant="secondary" onClick={reload}>
+                      {t(locale, "common.retry")}
+                    </Button>
+                  ) : null}
+                </form>
+                {budgets.degraded ? null : (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {t(locale, "admin.runtime.checkCurrent", {
+                      terminalize: budgets.terminalizeMs,
+                      update: budgets.updateMs,
+                    })}
+                  </p>
+                )}
+              </CardContent>
+            </SectionCard>
+            )}
           </div>
-        )}
+          );
+        }}
       </Screen>
     </section>
   );

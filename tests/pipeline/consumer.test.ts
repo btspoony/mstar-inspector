@@ -271,6 +271,13 @@ function dbFailingOn(db: TestD1, match: string) {
   };
 }
 
+/** Seed one `review_runtime_settings` row (the operator configuration surface). */
+function seedCheckBudget(db: TestD1, key: string, value: string): void {
+  db.raw
+    .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?1, ?2, ?3)")
+    .run(key, value, new Date().toISOString());
+}
+
 describe("createReviewConsumer", () => {
   test("findByIdempotencyKey hit after clone → ack: no post, no insert, destroy", async () => {
     reset();
@@ -3615,8 +3622,16 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // The operator-configured update budget must reach the lifecycle seam.
+    db.raw
+      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?1, ?2, ?3)")
+      .run("review.check.update_timeout_ms", "7000", new Date().toISOString());
     const beginCalls: unknown[] = [];
-    const terminalizeCalls: Array<{ publicationId: string | null; outcome: string }> = [];
+    const terminalizeCalls: Array<{
+      publicationId: string | null;
+      outcome: string;
+      updateBudgetMs: number;
+    }> = [];
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
       checks: {
@@ -3630,8 +3645,12 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
             lease: { holder: "h", epoch: 1, untilMs: 1 },
           };
         }),
-        terminalize: mock(async (input: { publicationId: string | null; outcome: string }) => {
-          terminalizeCalls.push({ publicationId: input.publicationId, outcome: input.outcome });
+        terminalize: mock(async (input: { publicationId: string | null; outcome: string; updateBudgetMs: number }) => {
+          terminalizeCalls.push({
+            publicationId: input.publicationId,
+            outcome: input.outcome,
+            updateBudgetMs: input.updateBudgetMs,
+          });
           throw new Error("hook boom"); // isolated — never breaks the pipeline
         }),
       },
@@ -3660,6 +3679,8 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(terminalizeCalls).toHaveLength(1);
     expect(terminalizeCalls[0]!.outcome).toBe("publication-unknown");
     expect(terminalizeCalls[0]!.publicationId).toBeTruthy();
+    // Read once per message from `review_runtime_settings`, not a constant.
+    expect(terminalizeCalls[0]!.updateBudgetMs).toBe(7_000);
     const pub = db.raw.query("SELECT phase, proof_json FROM review_publications").get() as { phase: string; proof_json: string | null };
     expect(pub.phase).toBe("applied");
     expect(pub.proof_json).not.toBeNull();
@@ -3667,6 +3688,146 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(hookWarn).toBeDefined();
     expect(reviewCount(db)).toBe(1);
   });
+
+  test("check terminalize: the invocation context receives the promise, and an overrun is left to it with ONE warn", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // A small configured budget: the case is the overrun hand-off, not the
+    // default 10 s wait, so the file does not burn it on a real clock.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
+    // The hook parks past the terminalize budget: the consumer must hand the
+    // promise to the invocation context, warn once, and return anyway.
+    const parked = Promise.withResolvers<void>();
+    const handed: Array<Promise<unknown>> = [];
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: db as never }),
+      testLog,
+      {
+        ...testOverrides,
+        checks: {
+          begin: mock(async () => ({
+            attemptId: "attempt-1",
+            scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+            githubAppId: 424242,
+            headSha: SHA,
+            lease: { holder: "h", epoch: 1, untilMs: 1 },
+          })),
+          terminalize: mock(async () => {
+            await parked.promise;
+          }),
+        },
+      },
+      {
+        waitUntil: (promise) => {
+          handed.push(promise);
+        },
+      },
+    );
+
+    // Returns on the budget, not on the hook: an overrun never blocks the review.
+    await consumer(makeBatch(makePayload()));
+
+    expect(handed).toHaveLength(1);
+    const overruns = logLines.filter((l) => l.level === "warn" && l.msg.includes("exceeded its budget"));
+    expect(overruns).toHaveLength(1);
+    expect(overruns[0]!.fields).toMatchObject({ attempt_id: "attempt-1" });
+    expect(reviewCount(db)).toBe(1); // the publication still landed
+
+    // A rejection landing after the budget has no inline waiter left: the
+    // hand-off reports it as one warn and keeps the promise non-throwing.
+    parked.reject(new Error("detached boom"));
+    await handed[0]; // settles through the context, never unhandled
+    const detached = logLines.filter((l) => l.level === "warn" && l.msg.includes("failed after its budget (detached)"));
+    expect(detached).toHaveLength(1);
+    expect(detached[0]!.fields).toMatchObject({ attempt_id: "attempt-1" });
+    expect(detached[0]!.msg).toContain("detached boom");
+  }, 20_000);
+
+  test("check terminalize: the budget is terminalize-only — a hook slower than the begin budget still completes inline", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const completed: string[] = [];
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: db as never }),
+      testLog,
+      {
+        ...testOverrides,
+        checks: {
+          begin: mock(async () => ({
+            attemptId: "attempt-2",
+            scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+            githubAppId: 424242,
+            headSha: SHA,
+            lease: { holder: "h", epoch: 1, untilMs: 1 },
+          })),
+          // Slower than CHECK_HOOK_TIMEOUT_MS, well inside the terminalize
+          // budget: the old 2 s bound abandoned it, so nothing was recorded.
+          // Real timers on purpose — the case is the consumer's own budget
+          // race (a fake clock cannot drive withHookTimeout's setTimeout
+          // across the real async pipeline), and it costs 2 s once.
+          terminalize: mock(async (input: { publicationId: string | null; outcome: string }) => {
+            const delay = Promise.withResolvers<void>();
+            setTimeout(delay.resolve, CHECK_HOOK_TIMEOUT_MS + 50);
+            await delay.promise;
+            completed.push(input.outcome);
+          }),
+        },
+      },
+      { waitUntil: () => {} },
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(completed).toEqual(["publication-unknown"]);
+    expect(logLines.filter((l) => l.level === "warn" && l.msg.includes("exceeded its budget"))).toHaveLength(0);
+  }, 10_000);
+
+  test("check terminalize: the configured budget bounds the consumer's wait", async () => {
+    // Two DIFFERENT configured budgets, each measured against its own window:
+    // a hard-coded constant (or the 10 s default) lands outside BOTH, so the
+    // pair discriminates "reads the setting" from "happens to be about 1 s".
+    for (const configured of [1_000, 1_600]) {
+      reset();
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      const db = await createSeededTestD1();
+      seedCheckBudget(db, "review.check.terminalize_timeout_ms", String(configured));
+      const handed: Array<Promise<unknown>> = [];
+      const consumer = createReviewConsumer(
+        await makeEnv({ DB: db as never }),
+        testLog,
+        {
+          ...testOverrides,
+          checks: {
+            begin: mock(async () => ({
+              attemptId: "attempt-3",
+              scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+              githubAppId: 424242,
+              headSha: SHA,
+              lease: { holder: "h", epoch: 1, untilMs: 1 },
+            })),
+            // Parks forever: only the configured budget can end the wait.
+            terminalize: mock(async () => {
+              await Promise.withResolvers<void>().promise;
+            }),
+          },
+        },
+        { waitUntil: (promise) => { handed.push(promise); } },
+      );
+
+      const startedAt = Date.now();
+      await consumer(makeBatch(makePayload()));
+      const elapsed = Date.now() - startedAt;
+
+      expect(elapsed, `configured ${configured}ms`).toBeGreaterThanOrEqual(configured);
+      expect(elapsed, `configured ${configured}ms`).toBeLessThan(configured + 600);
+      expect(handed).toHaveLength(1);
+      const overruns = logLines.filter((l) => l.level === "warn" && l.msg.includes("exceeded its budget"));
+      expect(overruns).toHaveLength(1);
+      expect(reviewCount(db)).toBe(1); // the publication still landed
+    }
+  }, 20_000);
 
   test("catch-path Check classification: send-throw → publication-unknown with the id; claim-fail → pre-publication-failure", async () => {
     // (a) A throw AT the prepared send is post-attempt uncertainty: the hook
@@ -4654,7 +4815,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(current.terminal_ms).not.toBeNull();
   });
 
-  test("check lifecycle: a hung terminal hook cannot hold the published review past the 2s bound", async () => {
+  test("check lifecycle: a hung terminal hook cannot hold the published review past its 10s terminalize bound", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -4671,12 +4832,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     });
     const startedAt = Date.now();
 
-    expect(CHECK_HOOK_TIMEOUT_MS).toBe(2_000); // §7.10's normative bound
+    // §7.10 (amended): the terminalize hook owns its own 10 s budget — the
+    // begin hook keeps CHECK_HOOK_TIMEOUT_MS below. The bound is pinned by
+    // value (module constants cannot be statically imported here: the
+    // workerd shim must load first).
+    const TERMINALIZE_BUDGET_MS = 10_000;
     await consumer(makeBatch(makePayload()));
 
     const elapsed = Date.now() - startedAt;
-    expect(elapsed).toBeGreaterThanOrEqual(CHECK_HOOK_TIMEOUT_MS - 50);
-    expect(elapsed).toBeLessThan(CHECK_HOOK_TIMEOUT_MS + 1_500);
+    expect(elapsed).toBeGreaterThanOrEqual(TERMINALIZE_BUDGET_MS - 50);
+    expect(elapsed).toBeLessThan(TERMINALIZE_BUDGET_MS + 1_500);
     expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(publicationRow(db).phase).toBe("applied");
@@ -4685,7 +4850,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.desired).toBe("in_progress");
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
-  });
+  }, 20_000);
 
   test("check lifecycle: a late BEGIN hook cannot hold the review past the 2s bound and creates nothing", async () => {
     reset();

@@ -439,7 +439,11 @@ The review tier `REVIEW_LEVEL` (`quick`/`default`/`deep`) is unset and
 configured nowhere, and the same `keep_vars` limitation applies to it: a
 `REVIEW_LEVEL` set on the production Worker from the dashboard is wiped by the
 next `wrangler deploy --env production`, so it cannot be relied on until it is
-declared in `env.production.vars` and redeployed. Neither review control is a
+declared in `env.production.vars` and redeployed. That deployment-wide variable
+is the current build only: the tier belongs to the App (`AGENTS.md`
+§ Configuration surfaces), and moving it onto the App settings surface is
+tracked as a critical issue in the harness issue store. Do not introduce a new
+deployment-wide tunable in the meantime. Neither review control is a
 plain var: per-App `github_apps.review_enabled` (dashboard Pause/Resume) gates
 one App, and the `review_global` server flag gates the enqueue face for every
 App. Both live in D1, unaffected by that limitation (`.env.example`).

@@ -49,6 +49,7 @@ import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
   createChecksAdapter,
+  createCheckLifecycle,
   decideConclusion,
   remoteBelongsTo,
   toCheckRemote,
@@ -1023,6 +1024,61 @@ describe("completeCheck — the terminal send", () => {
       // An unavailable terminalization never marks the remote observed.
       expect((await rowOf(db, attempt)).observed).toBe("unknown");
     }
+  });
+
+  test("check update budget: a timed-out update is unavailable and the lifecycle releases the lease", async () => {
+    const db = await seededDb();
+    const BUDGET_MS = 20;
+    const adapter = createChecksAdapter({
+      db,
+      nowMs: () => CLOCK,
+      getOctokit: async () => fakeChecks({ update: () => new Promise<CheckRunPayload>(() => {}) }).octokit,
+      updateBudgetMs: BUDGET_MS,
+    });
+
+    // Layer 1 — the adapter: a send that never answers is an unproven REQUEST
+    // (1), never a success claim, and it returns at the injected budget.
+    const first = await claimedAttempt(db);
+    await attachedRun(db, first.attempt, first.lease, 4242);
+    expect(await setCheckDesired(db, first.attempt.identity.attemptId, first.lease, SUCCESS, null, T0)).toBe(true);
+    const startedAt = Date.now();
+    const timedOut = await adapter.completeCheck({
+      identity: first.attempt.identity,
+      lease: first.lease,
+      checkRunId: 4242,
+      conclusion: SUCCESS,
+    });
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(timedOut.kind).toBe("unavailable");
+    if (timedOut.kind === "unavailable") {
+      expect(timedOut.requests).toBe(1);
+      expect(timedOut.reason).toMatch(/check update/);
+    }
+
+    // Layer 2 — the lifecycle: the same timed-out send reaches terminalize as
+    // `requests: 1`, so the attempt is released through the EXISTING
+    // deferCheckRecovery path (no new release code lives in the adapter).
+    const otherSha = "89abcdef0123456789abcdef0123456789abcdef";
+    const second = await claimedAttempt(db, { headSha: otherSha });
+    await attachedRun(db, second.attempt, second.lease, 4343);
+    const lifecycle = createCheckLifecycle({ db, nowMs: () => CLOCK, getAdapter: () => adapter });
+    await lifecycle.terminalize({
+      handle: {
+        attemptId: second.attempt.identity.attemptId,
+        scope: SCOPE,
+        githubAppId: GITHUB_APP_ID,
+        headSha: otherSha,
+        lease: second.lease,
+      },
+      publicationId: null,
+      outcome: "publication-unknown",
+    });
+    const released = await rowOf(db, second.attempt);
+    expect(released.recovery_state).toBe("remote-unconfirmed");
+    expect(released.holder).toBeNull();
+    expect(released.lease_until_ms).toBeNull();
+    expect(released.attempts).toBe(1);
+    expect(released.next_attempt_ms).toBe(T0 + 60_000);
   });
 });
 

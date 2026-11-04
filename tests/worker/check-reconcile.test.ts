@@ -72,6 +72,7 @@ import { defaultReconcileLog } from "../../src/worker/lifecycle-reconcile";
 import { defaultSweepLog } from "../../src/worker/sweep";
 import worker from "../../src/worker/index";
 import { sha256Hex } from "../../src/pipeline/review-threads";
+import { CHECK_UPDATE_DEFAULT } from "../../src/dashboard/runtime-config-store";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const APP = "11111111-2222-3333-4444-555555555555";
@@ -2661,5 +2662,64 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
     const row = await rawRow(db, id);
     expect(row.recovery_state).toBe("done");
     expect(row.observed).toBe("failure");
+  });
+});
+
+describe("configured Check update budget (spec §7.10)", () => {
+  /**
+   * The budget is read ONCE per run and handed to the credential lane, which
+   * forwards it into the Checks adapter. Capturing at that seam pins the two
+   * halves this lane owns: the store read and the threading (the adapter's own
+   * honoring of `updateBudgetMs` is `tests/pipeline/checks.test.ts`'s case).
+   */
+  function capturingCredentials(db: TestD1, seen: Array<number | undefined>): CheckCredentialFactory {
+    return async (input) => {
+      seen.push(input.updateBudgetMs);
+      return input.scope.appId === SCOPE.appId
+        ? { kind: "ok", paused: false, adapter: scriptedAdapter(db, agreeingScript(), input.transport) }
+        : { kind: "unavailable", reason: "missing" };
+    };
+  }
+
+  test("the operator-configured value reaches the credential lane", async () => {
+    const db = seededDb();
+    db.raw
+      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?1, ?2, ?3)")
+      .run("review.check.update_timeout_ms", "700", new Date().toISOString());
+    await claim(db);
+    const seen: Array<number | undefined> = [];
+    await run(db, { now: () => T0, credentials: capturingCredentials(db, seen) });
+    expect(seen).toEqual([700]);
+  });
+
+  test("an absent row answers the documented default", async () => {
+    const db = seededDb();
+    await claim(db);
+    const seen: Array<number | undefined> = [];
+    await run(db, { now: () => T0, credentials: capturingCredentials(db, seen) });
+    expect(seen).toEqual([CHECK_UPDATE_DEFAULT]);
+  });
+
+  test("a degraded read uses the defaults and logs exactly one warn", async () => {
+    const db = seededDb();
+    db.raw
+      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?1, ?2, ?3)")
+      .run("review.check.update_timeout_ms", "not-a-number", new Date().toISOString());
+    await claim(db);
+    const seen: Array<number | undefined> = [];
+    const warns: string[] = [];
+    const credentials = capturingCredentials(db, seen);
+    const summary = await run(db, {
+      now: () => T0,
+      credentials,
+      log: {
+        warn: (fields) => { warns.push(fields.event); },
+        info: () => {},
+      },
+    });
+    expect(seen).toEqual([CHECK_UPDATE_DEFAULT]);
+    expect(warns.filter((event) => event === "ops_check_reconcile_budgets_degraded")).toHaveLength(1);
+    // A degraded settings read never fails the pass.
+    expect(summary.errors).toBe(0);
   });
 });

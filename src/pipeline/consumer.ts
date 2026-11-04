@@ -189,6 +189,12 @@ import {
   type InflightRefusal,
 } from "../store/inflight-store";
 import { readReviewConcurrency } from "./concurrency-reader";
+import {
+  CHECK_TERMINALIZE_DEFAULT,
+  CHECK_UPDATE_DEFAULT,
+  readCheckBudgets,
+  type CheckBudgets,
+} from "./check-budgets-reader";
 
 export type PipelineEnv = {
   DB: D1Database;
@@ -303,8 +309,10 @@ export type ConsumerLogFields = {
    * `review_concurrency_degraded` (the review-concurrency cutover, 2026-11 —
    * union widened ADDITIVELY): the
    * concurrency reader's degraded-read warn, relayed on this channel.
+   * `review_check_budgets_degraded` (same channel, spec §7.10): the check-budget
+   * reader's degraded-read warn.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded";
   action: string;
   installation_id: number;
   owner: string;
@@ -315,6 +323,8 @@ export type ConsumerLogFields = {
   /** github_apps.id the job resolves to (per-App jobs only). */
   app_id?: string;
   idempotency_key?: string;
+  /** review_check_attempts.attempt_id — the Check attempt a line is about. */
+  attempt_id?: string;
   /**
    * The metered ledger identity (`usage_events.review_id`) and its workspace.
    * Carried on the usage-write failure lines so a dropped attempt can be
@@ -709,11 +719,22 @@ async function handleGuardHeld(
 // (`createCheckLifecycle`) and `createReviewConsumer` injects it; the dependency stays
 // optional, and a hooks object that cannot reach a Checks surface still
 // produces no row and no remote run. Hook exceptions/timeouts are caught by
-// the consumer (≤2 requests / 2 seconds per inline hook is the hook's own
-// budget — no publication path waits for hook retries).
+// the consumer (the begin hook gets ≤2 requests / 2 seconds of consumer wait;
+// the terminalize hook runs after the review reaches a terminal outcome — a
+// pre-publication failure included — and may wait ≤10 seconds, with
+// its promise handed to the invocation context — no publication path waits for
+// hook retries).
 // ---------------------------------------------------------------------------
 
 export type CheckHandle = { attemptId: string; scope: Scope; githubAppId: number; headSha: string; lease: Lease };
+
+/**
+ * The invocation's lifetime hook: the queue handler passes
+ * `ctx.waitUntil` so a terminalize promise that outlives the consumer still
+ * finishes. A rejection it sees after the consumer's budget elapsed is
+ * reported from the hand-off as a warn, never left as an unhandled rejection.
+ */
+export type CheckBackgroundSink = { waitUntil(promise: Promise<unknown>): void };
 
 export type CheckLifecycleHooks = {
   begin(input: {
@@ -733,7 +754,9 @@ export type CheckLifecycleHooks = {
     latch?: CheckBeginLatch;
   }): Promise<CheckHandle | null>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
-    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error" }): Promise<void>;
+    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error";
+    /** The operator-configured bound on the terminal `checks.update` (spec §7.10). */
+    updateBudgetMs: number }): Promise<void>;
 };
 
 /**
@@ -744,8 +767,8 @@ export type CheckLifecycleHooks = {
 export const CHECK_EXECUTION_WINDOW_MS = 900_000;
 
 /**
- * Inline hook budget guard (spec §7.10: "Each inline hook has ≤2 requests /
- * 2 seconds total"). Exported because it is the containment bound the Check
+ * Begin-hook budget (spec §7.10: "The begin hook has ≤2 requests / 2 seconds
+ * of consumer wait"). Exported because it is the containment bound the Check
  * lifecycle must honour, and the two hook-timeout cases pin it by value.
  */
 export const CHECK_HOOK_TIMEOUT_MS = 2_000;
@@ -765,23 +788,31 @@ const RECHECK_INPUT_MAX_BYTES = 512 * 1024;
 const RECHECK_INPUT_SCHEMA = "mstar.recheck-input/v1";
 
 /**
- * Await a promise with the §7.10 inline-hook budget as a hard consumer-side
+ * Await a promise with the relevant §7.10 hook budget as a hard consumer-side
  * bound. The bound is on the CONSUMER's wait, not on the hook's work: a hook
  * that settles late keeps running detached — this guard creates no AbortSignal
  * (the locked seam exposes none), so a late create can still complete durably
  * on its own, but `onBudgetElapsed` fires at the instant this invocation gives
  * up on it, which is what lets the lifecycle stop attaching a run on behalf of
- * a caller that is no longer waiting. The consumer never waits past
- * `CHECK_HOOK_TIMEOUT_MS`, and a rejection that lands after the timeout is
- * swallowed rather than surfacing unhandled.
+ * a caller that is no longer waiting. `budgetMs` is REQUIRED — the two cases
+ * differ by an order of magnitude (`CHECK_HOOK_TIMEOUT_MS` for begin, the
+ * operator-configured `review.check.terminalize_timeout_ms` for terminalize)
+ * and neither may silently inherit the other's bound. The consumer never waits
+ * past it; a rejection that lands after the timeout is contained by the
+ * caller's hand-off, not left as an unhandled rejection.
  */
-async function withHookTimeout<T>(promise: Promise<T>, fallback: T, onBudgetElapsed?: () => void): Promise<T> {
+async function withHookTimeout<T>(
+  promise: Promise<T>,
+  fallback: T,
+  budgetMs: number,
+  onBudgetElapsed?: () => void,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<T>((resolve) => {
     timer = setTimeout(() => {
       onBudgetElapsed?.();
       resolve(fallback);
-    }, CHECK_HOOK_TIMEOUT_MS);
+    }, budgetMs);
   });
   // A hook rejecting AFTER its timeout won the race must not surface as an
   // unhandled rejection — the failure is already treated as the fallback.
@@ -1876,6 +1907,13 @@ type ProcessDeps = {
    */
   checks?: CheckLifecycleHooks;
   /**
+   * The invocation's lifetime hook (`ctx.waitUntil` in the queue handler):
+   * the terminalize promise is handed to it, so a hook that outlives the
+   * consumer still finishes instead of dying with the isolate. Absent in
+   * tests that do not watch the detached promise.
+   */
+  background?: CheckBackgroundSink;
+  /**
    * The PR head watermark read (migration 0044) — `createAppsStore(env.DB)
    * .selectPrHead` in production, built ONCE per consumer (and injectable in
    * tests), never per message. The supersede decision needs one point read per
@@ -2635,6 +2673,7 @@ export function createReviewConsumer(
   env: PipelineEnv,
   log: ConsumerLog = defaultConsumerLog,
   overrides: ConsumerOverrides = {},
+  background?: CheckBackgroundSink,
 ): (batch: MessageBatch<ReviewJobPayload>) => Promise<void> {
   // The per-App commenter cache (lock L4) is also the Check lane's
   // credential route: the lifecycle resolves THIS message's App adapter from
@@ -2656,6 +2695,7 @@ export function createReviewConsumer(
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
     selectPrHead: overrides.selectPrHead ?? appsStore.selectPrHead,
     log,
+    background,
   };
   // §7.10 Check seam: production always supplies the
   // lifecycle; an override replaces it wholesale. An App whose commenter
@@ -2764,6 +2804,11 @@ async function processMessage(
   // isolated warns, and a hook timeout resolves without blocking the path.
   let checkHandle: CheckHandle | null = null;
   let checkTerminalized = false;
+  // §7.10 Check budgets, filled by the ONE per-message runtime read (after the
+  // level resolves, before the begin hook). Every terminal path runs after that
+  // read; a path that somehow reached one without it is still bounded by the
+  // store's documented defaults rather than waiting forever.
+  let checkBudgets: CheckBudgets | null = null;
   // Set the moment the prepared publication send is ATTEMPTED: a throw after
   // this point is post-send uncertainty (publication-unknown), never a
   // clean pre-publication failure.
@@ -2774,12 +2819,67 @@ async function processMessage(
   ): Promise<void> => {
     if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
     checkTerminalized = true;
+    // The per-message read always precedes every terminal path; the fallback
+    // keeps a future caller bounded by the store's documented defaults.
+    const budgets = checkBudgets ?? {
+      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+      updateMs: CHECK_UPDATE_DEFAULT,
+      degraded: false,
+    };
+    // Set when the consumer stops waiting on the hook: only past that point is
+    // a later rejection detached, so only then does the sink report it.
+    let abandoned = false;
     try {
-      await withHookTimeout(deps.checks.terminalize({ handle: checkHandle, publicationId, outcome }), undefined as void);
+      const terminalize = deps.checks.terminalize({
+        handle: checkHandle,
+        publicationId,
+        outcome,
+        updateBudgetMs: budgets.updateMs,
+      });
+      const attemptId = checkHandle.attemptId;
+      // The invocation owns the promise: if the budget below expires, the hook
+      // still finishes after this consumer returns. A rejection landing after
+      // that point has no inline waiter left to report it.
+      deps.background?.waitUntil(
+        terminalize.catch((err: unknown) => {
+          if (!abandoned) return; // the inline await below already reports it
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(
+            {
+              ...(baseFields ?? payloadIdentityFields(payload)),
+              sandbox_id: sandboxId,
+              attempt_id: attemptId,
+            },
+            `check terminalize hook failed after its budget (detached): ${detail}`,
+          );
+        }),
+      );
+      await withHookTimeout(
+        terminalize,
+        undefined as void,
+        budgets.terminalizeMs,
+        () => {
+          abandoned = true;
+          deps.log.warn(
+            {
+              ...(baseFields ?? payloadIdentityFields(payload)),
+              sandbox_id: sandboxId,
+              attempt_id: attemptId,
+            },
+            deps.background === undefined
+              ? "check terminalize hook exceeded its budget (detached; no invocation context to finish it)"
+              : "check terminalize hook exceeded its budget (left to the invocation context)",
+          );
+        },
+      );
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(
-        { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+        {
+          ...(baseFields ?? payloadIdentityFields(payload)),
+          sandbox_id: sandboxId,
+          attempt_id: checkHandle?.attemptId,
+        },
         `check terminalize hook failed (isolated): ${detail}`,
       );
     }
@@ -3395,6 +3495,13 @@ async function processMessage(
     // fully operational; hook failure is isolated and cannot prevent the
     // review (step 5).
     if (deps.checks !== undefined) {
+      // §7.10 Check budgets: ONE read per message, taken only once this
+      // message can actually produce a Check — a refused or duplicate delivery
+      // never pays for it. Every terminal path below shares this pair.
+      checkBudgets = await readCheckBudgets(deps.env.DB, {
+        warn: (readerFields, msg) =>
+          deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
+      });
       // One latch per `begin` call, created HERE and never stored anywhere: a
       // later message cannot clear or reuse it, so a detached begin from this
       // message stays abandoned for its whole lifetime (QC1-001 replacement
@@ -3412,6 +3519,8 @@ async function processMessage(
             latch: beginLatch,
           }),
           null,
+          // The begin hook keeps §7.10's 2 s: it runs before model work.
+          CHECK_HOOK_TIMEOUT_MS,
           // The consumer gave up waiting: a lifecycle that reads this call's
           // latch stops attaching state on behalf of this abandoned invocation
           // and leaves the created run with a terminal obligation (§7.10's

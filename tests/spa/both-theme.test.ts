@@ -376,7 +376,22 @@ const ADMIN_GRANTS = [
 
 /** The console's read stub: one payload per endpoint the console calls. */
 const adminApi = (url: string): unknown => {
-  if (url.includes("/runtime")) return { concurrency: 24, min: 1, max: 256, degraded: false };
+  if (url.includes("/runtime"))
+    return {
+      concurrency: 24,
+      min: 1,
+      max: 256,
+      degraded: false,
+      checkBudgets: {
+        terminalizeMs: 10_000,
+        updateMs: 5_000,
+        terminalizeMin: 1_000,
+        terminalizeMax: 30_000,
+        updateMin: 500,
+        updateMax: 15_000,
+        degraded: false,
+      },
+    };
   if (url.includes("/workspaces")) return { workspaces: ADMIN_WORKSPACES };
   if (url.includes("/users")) return { users: ADMIN_USERS };
   if (url.includes("/support-grants")) return { grants: ADMIN_GRANTS };
