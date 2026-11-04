@@ -710,7 +710,8 @@ async function handleGuardHeld(
 // optional, and a hooks object that cannot reach a Checks surface still
 // produces no row and no remote run. Hook exceptions/timeouts are caught by
 // the consumer (the begin hook gets ≤2 requests / 2 seconds of consumer wait;
-// the terminalize hook runs after publication and may wait ≤10 seconds, with
+// the terminalize hook runs after the review reaches a terminal outcome — a
+// pre-publication failure included — and may wait ≤10 seconds, with
 // its promise handed to the invocation context — no publication path waits for
 // hook retries).
 // ---------------------------------------------------------------------------
@@ -720,7 +721,8 @@ export type CheckHandle = { attemptId: string; scope: Scope; githubAppId: number
 /**
  * The invocation's lifetime hook: the queue handler passes
  * `ctx.waitUntil` so a terminalize promise that outlives the consumer still
- * finishes (and its late rejection is swallowed at the hand-off).
+ * finishes. A rejection it sees after the consumer's budget elapsed is
+ * reported from the hand-off as a warn, never left as an unhandled rejection.
  */
 export type CheckBackgroundSink = { waitUntil(promise: Promise<unknown>): void };
 
@@ -760,9 +762,10 @@ export const CHECK_EXECUTION_WINDOW_MS = 900_000;
 export const CHECK_HOOK_TIMEOUT_MS = 2_000;
 
 /**
- * Terminalize-hook budget (spec §7.10): the review has already published, so
- * nothing waits on the check any more — it may spend up to 10 s inline, and an
- * overrun is handed to the invocation context instead of being dropped.
+ * Terminalize-hook budget (spec §7.10): the review has reached a terminal
+ * outcome (a pre-publication failure included), so nothing waits on the check
+ * any more — it may spend up to 10 s inline, and an overrun is handed to the
+ * invocation context instead of being dropped.
  */
 export const CHECK_TERMINALIZE_TIMEOUT_MS = 10_000;
 
@@ -787,16 +790,18 @@ const RECHECK_INPUT_SCHEMA = "mstar.recheck-input/v1";
  * (the locked seam exposes none), so a late create can still complete durably
  * on its own, but `onBudgetElapsed` fires at the instant this invocation gives
  * up on it, which is what lets the lifecycle stop attaching a run on behalf of
- * a caller that is no longer waiting. The consumer never waits past `budgetMs`
- * — `CHECK_HOOK_TIMEOUT_MS` for begin, `CHECK_TERMINALIZE_TIMEOUT_MS` for
- * terminalize — and a rejection that lands after the timeout is swallowed
- * rather than surfacing unhandled.
+ * a caller that is no longer waiting. `budgetMs` is REQUIRED — the two cases
+ * differ by an order of magnitude (`CHECK_HOOK_TIMEOUT_MS` for begin,
+ * `CHECK_TERMINALIZE_TIMEOUT_MS` for terminalize) and neither may silently
+ * inherit the other's bound. The consumer never waits past it; a rejection
+ * that lands after the timeout is contained by the caller's hand-off, not
+ * left as an unhandled rejection.
  */
 async function withHookTimeout<T>(
   promise: Promise<T>,
   fallback: T,
+  budgetMs: number,
   onBudgetElapsed?: () => void,
-  budgetMs: number = CHECK_HOOK_TIMEOUT_MS,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<T>((resolve) => {
@@ -2802,26 +2807,44 @@ async function processMessage(
   ): Promise<void> => {
     if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
     checkTerminalized = true;
+    // Set when the consumer stops waiting on the hook: only past that point is
+    // a later rejection detached, so only then does the sink report it.
+    let abandoned = false;
     try {
       const terminalize = deps.checks.terminalize({ handle: checkHandle, publicationId, outcome });
+      const attemptId = checkHandle.attemptId;
       // The invocation owns the promise: if the budget below expires, the hook
-      // still finishes after this consumer returns, and a late rejection is
-      // swallowed at the hand-off rather than surfacing unhandled.
-      deps.background?.waitUntil(terminalize.catch(() => {}));
-      await withHookTimeout(
-        terminalize,
-        undefined as void,
-        () => {
+      // still finishes after this consumer returns. A rejection landing after
+      // that point has no inline waiter left to report it.
+      deps.background?.waitUntil(
+        terminalize.catch((err: unknown) => {
+          if (!abandoned) return; // the inline await below already reports it
+          const detail = err instanceof Error ? err.message : String(err);
           deps.log.warn(
             {
               ...(baseFields ?? payloadIdentityFields(payload)),
               sandbox_id: sandboxId,
-              attempt_id: checkHandle?.attemptId,
+              attempt_id: attemptId,
+            },
+            `check terminalize hook failed after its budget (detached): ${detail}`,
+          );
+        }),
+      );
+      await withHookTimeout(
+        terminalize,
+        undefined as void,
+        CHECK_TERMINALIZE_TIMEOUT_MS,
+        () => {
+          abandoned = true;
+          deps.log.warn(
+            {
+              ...(baseFields ?? payloadIdentityFields(payload)),
+              sandbox_id: sandboxId,
+              attempt_id: attemptId,
             },
             "check terminalize hook exceeded its budget (left to the invocation context)",
           );
         },
-        CHECK_TERMINALIZE_TIMEOUT_MS,
       );
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -3449,6 +3472,8 @@ async function processMessage(
             latch: beginLatch,
           }),
           null,
+          // The begin hook keeps §7.10's 2 s: it runs before model work.
+          CHECK_HOOK_TIMEOUT_MS,
           // The consumer gave up waiting: a lifecycle that reads this call's
           // latch stops attaching state on behalf of this abandoned invocation
           // and leaves the created run with a terminal obligation (§7.10's
@@ -3457,8 +3482,6 @@ async function processMessage(
           () => {
             beginLatch.abandon();
           },
-          // The begin hook keeps §7.10's 2 s: it runs before model work.
-          CHECK_HOOK_TIMEOUT_MS,
         );
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);

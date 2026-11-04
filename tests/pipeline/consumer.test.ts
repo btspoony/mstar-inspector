@@ -3683,8 +3683,14 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(overruns[0]!.fields).toMatchObject({ attempt_id: "attempt-1" });
     expect(reviewCount(db)).toBe(1); // the publication still landed
 
-    parked.resolve();
-    await handed[0]; // the detached promise settles through the context
+    // A rejection landing after the budget has no inline waiter left: the
+    // hand-off reports it as one warn and keeps the promise non-throwing.
+    parked.reject(new Error("detached boom"));
+    await handed[0]; // settles through the context, never unhandled
+    const detached = logLines.filter((l) => l.level === "warn" && l.msg.includes("failed after its budget (detached)"));
+    expect(detached).toHaveLength(1);
+    expect(detached[0]!.fields).toMatchObject({ attempt_id: "attempt-1" });
+    expect(detached[0]!.msg).toContain("detached boom");
   }, 20_000);
 
   test("check terminalize: the budget is terminalize-only — a hook slower than the begin budget still completes inline", async () => {
