@@ -1986,7 +1986,20 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
     expect(byName.allowlist_enabled).toMatchObject({ type: "INTEGER", notnull: 1 });
     expect(byName.github_visibility).toMatchObject({ type: "TEXT", notnull: 0 });
 
-    expect(() => db.raw.prepare("UPDATE github_apps SET check_min_score = 101 WHERE id = 'legacy-app'").run()).toThrow();
+    // The score CHECK is two-sided: both directions reject, and 0 is the
+    // accepted floor of `BETWEEN 0 AND 100`.
+    for (const outOfRange of [101, -1]) {
+      expect(() =>
+        db.raw
+          .prepare("UPDATE github_apps SET check_min_score = ? WHERE id = 'legacy-app'")
+          .run(outOfRange),
+      ).toThrow();
+    }
+    db.raw.prepare("UPDATE github_apps SET check_min_score = 0 WHERE id = 'legacy-app'").run();
+    const floorRow = db.raw
+      .query("SELECT check_min_score FROM github_apps WHERE id = 'legacy-app'")
+      .get() as { check_min_score: number };
+    expect(floorRow.check_min_score).toBe(0);
     expect(() =>
       db.raw.prepare("UPDATE github_apps SET github_visibility = 'secret' WHERE id = 'legacy-app'").run(),
     ).toThrow();
