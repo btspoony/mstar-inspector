@@ -13,7 +13,7 @@
 # (`sandbox-image/cli-global/**` and the pinned ref are image inputs too).
 # rebuild: the runner stopped requiring a seat summary — the review body is the
 # engine's own layout now instead of a consumer rebuild of it, so the two halves
-# of that change (the 4.1.6 pin above and the no-longer-required output field)
+# of that change (the 4.1.6 harness pin and the no-longer-required output field)
 # must ship together.
 # rebuild: the runner hands the SDK a callable extension-roots accessor — the
 # pinned SDK reads a getter and calls it as a method, which killed every seat
