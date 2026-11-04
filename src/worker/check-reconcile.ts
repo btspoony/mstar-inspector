@@ -66,6 +66,7 @@ import {
   listReenableableCheckPairs,
   markCheckLocalError,
   readPublicationProof,
+  readPublishedReview,
   recordCheckObservation,
   reenableChecksForApps,
   releaseCheckClaim,
@@ -74,16 +75,18 @@ import {
   suspendCheckForPause,
   suspendCheckRecovery,
 } from "../store/review-checks";
-import type { CheckOwnership, Lease, PublicationProof } from "../store/review-checks";
+import type { CheckOwnership, Lease, PublicationProof, PublishedReview } from "../store/review-checks";
 import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
   decideConclusion,
   isRequestNotDispatched,
   type ChecksAdapter,
+  type ReviewGate,
 } from "../pipeline/checks";
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
+import { createAppsStore } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { getCheckBudgets } from "../dashboard/runtime-config-store";
 import { sha256Hex } from "../pipeline/review-threads";
@@ -786,7 +789,17 @@ async function reconcileCheckAttempt(
   //    lane only ever READS what that lane persisted — never a send, replay
   //    or paid re-review.
   const proof = await readProof(db, owned);
-  const conclusion = terminalConclusion(owned, proof);
+  // The gate decision needs the App's stored gate and the review THIS proof
+  // published. A missing or corrupt gate row, or a tallies-free review, is
+  // unreadable, so it can never be corrected into a success (spec §7.9).
+  // Both reads are guarded like the proof read above: a persistent read
+  // failure must still leave the row a persisted terminal conclusion, never a
+  // throw that keeps re-selecting the same due attempt forever.
+  const [gate, review] = await Promise.all([
+    readRecoveryGate(db, scope.appId),
+    readRecoveryReview(db, owned, proof?.publicationId ?? null),
+  ]);
+  const conclusion = terminalConclusion(owned, proof, gate, review);
 
   // Intent BEFORE any remote update: the persisted row is the only source the
   // send reads, so the frozen text cannot be swapped after this point.
@@ -1156,15 +1169,62 @@ async function readProof(db: D1Like, owned: CheckOwnership): Promise<Publication
 }
 
 /**
- * The terminal conclusion for a due attempt (spec §7.9 matrix): a persisted
- * publication proof decides `success`/`neutral` regardless of how the attempt
- * expired; an expired attempt with no proof is the honest unconfirmed
- * `failure`. An intent the consumer already persisted is preserved verbatim —
- * this lane only ever corrects it upward, on proof.
+ * The App's gate, or `null` when it cannot be read (unknown row, corrupt
+ * stored verdicts, or a failed read) — the same "unreadable" meaning the
+ * consumer lane gets, so a review proof concludes `failure`. A read failure is
+ * never a reason to abandon the row: the conclusion below still gets
+ * persisted.
  */
-function terminalConclusion(owned: CheckOwnership, proof: PublicationProof | null): CheckConclusion {
-  if (proof !== null) return decideConclusion({ proof, outcome: "expired" });
-  if (owned.desired === "in_progress") return decideConclusion({ proof: null, outcome: "expired" });
+async function readRecoveryGate(db: D1Like, appId: string): Promise<ReviewGate | null> {
+  try {
+    return await createAppsStore(db).getCheckGate(appId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The review THIS proof publication carried — the same preference the proof
+ * read makes, so the Check is judged by the envelope the attempt published
+ * rather than by the scope/SHA `reviews` projection, which can lag the apply
+ * or belong to an earlier attempt for the same head SHA. A read failure is
+ * UNREADABLE (`null`), which `decideConclusion` already treats as a failure —
+ * never a pass, and never a throw out of the lane.
+ */
+async function readRecoveryReview(
+  db: D1Like,
+  owned: CheckOwnership,
+  publicationId: string | null,
+): Promise<PublishedReview | null> {
+  try {
+    return await readPublishedReview(db, {
+      scope: owned.identity.scope,
+      headSha: owned.identity.headSha,
+      ...(publicationId === null ? {} : { publicationId }),
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The terminal conclusion for a due attempt (spec §7.9 matrix): a persisted
+ * publication proof decides the conclusion against the App gate — a normal
+ * publication only succeeds when the applied review meets it — regardless of
+ * how the attempt expired; an expired attempt with no proof is the honest
+ * unconfirmed `failure`. An intent the consumer already persisted is preserved
+ * verbatim unless a proof-derived correction applies. `gate` is the App's
+ * stored gate; `null` means it could not be read, so a proof-derived
+ * conclusion fails closed instead of assuming a default.
+ */
+function terminalConclusion(
+  owned: CheckOwnership,
+  proof: PublicationProof | null,
+  gate: ReviewGate | null,
+  review: PublishedReview | null,
+): CheckConclusion {
+  if (proof !== null) return decideConclusion({ proof, outcome: "expired", gate, review });
+  if (owned.desired === "in_progress") return decideConclusion({ proof: null, outcome: "expired", gate, review });
   return {
     desired: owned.desired,
     title: owned.desiredTitle ?? CHECK_NAME,

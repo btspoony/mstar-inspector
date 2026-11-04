@@ -789,6 +789,36 @@ export function pullRequestRecord(parsed: unknown): {
 }
 
 /**
+ * The delivery's SENDING repository owner login — the allowlist's admission
+ * key (migration 0045). `repository.owner.login` is the only source: unlike
+ * `webhookRepositoryFullName` there is no `full_name` fallback, because this
+ * value is COMPARED against the App's stored owner list, never displayed.
+ * `null` when the document carries no readable login (an install / bypass
+ * event, or a malformed owner block) — the caller then cannot apply the gate
+ * and proceeds.
+ *
+ * Takes the ALREADY PARSED body (the one `classifyEvent` read), like
+ * `webhookRepositoryFullName`: the admission check must not re-parse up to
+ * 1 MB. `min(1)` on the login: "" is not a login, so it reads as unreadable
+ * rather than as a value no allowlist could ever list.
+ */
+export function webhookRepositoryOwnerLogin(parsed: unknown): string | null {
+  if (parsed === null) return null;
+  const result = z
+    .object({
+      repository: z
+        .object({
+          owner: z.object({ login: z.string().min(1) }).nullish().catch(null),
+        })
+        .nullish()
+        .catch(null),
+    })
+    .safeParse(parsed);
+  if (!result.success) return null;
+  return result.data.repository?.owner?.login ?? null;
+}
+
+/**
  * The delivery's SOURCE repository (`owner/name`) — the diagnostics face's
  * "which repo did this delivery come from?" answer, which the delivery row
  * could not give before migration 0043. `repository.full_name` wins when

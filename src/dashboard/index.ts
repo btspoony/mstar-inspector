@@ -22,6 +22,10 @@
  */
 import { Hono, type Context, type Handler } from "hono";
 import { getCookie } from "hono/cookie";
+// The review gate's verdict vocabulary — the same engine constant apps-store
+// validates saveCheckGate against, so the route's 400 and the store's
+// backstop can never drift.
+import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
 import { deploymentModeOf, type DeploymentMode, type Env } from "../worker/env";
 import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser, logOAuthFailure } from "./oauth";
 import {
@@ -58,7 +62,9 @@ import {
 } from "./manifest";
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";
 import {
+  ALLOWLIST_MAX_OWNERS,
   createAppsStore,
+  dedupeOwnerLogins,
   REVIEW_TRIGGER_MODES,
   type DeliverySummary,
   type GithubAppRow,
@@ -111,7 +117,7 @@ import {
   listPendingInvites,
   revokeInvite,
 } from "./invite-store";
-import { fetchAppMetadata, isGithubMetadataStale } from "./github-app-metadata";
+import { fetchAppMetadata, fetchAppVisibility, isGithubMetadataStale } from "./github-app-metadata";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
   CLOUDFLARE_ACCOUNT_ID_PATTERN,
@@ -1700,10 +1706,10 @@ type AdminGate =
     }
   | { ok: false; response: Response };
 
-// GitHub login syntax (qc1/qc2 F-003): letters, digits, hyphens — 1–39
-// chars. Anything else can never match a real GitHub login and would sit in
-// the table as a dead row nobody can claim.
-const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9-]{1,39}$/;
+// GitHub login syntax (qc1/qc2 F-003): letters, digits, single hyphens — 1–39
+// chars, never starting or ending with a hyphen and never two in a row (the
+// grammar GitHub itself enforces, so every accepted entry is claimable).
+const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 
 /** Invitations live for 7 days — long enough to survive a weekend sign-up. */
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -2850,6 +2856,13 @@ const SETTINGS_400_KEYS = {
   templateMaterializeMax: "settings.error.templateMaterializeMax",
   runtimeHarnessUnknown: "settings.error.runtimeHarnessUnknown",
   triggerModeUnknown: "settings.error.triggerModeUnknown",
+  /** Review gate + owner allowlist (migration 0045). */
+  checkScoreInvalid: "settings.error.checkScoreInvalid",
+  checkVerdictUnknown: "settings.error.checkVerdictUnknown",
+  allowlistToggleInvalid: "settings.error.allowlistToggleInvalid",
+  allowlistTooManyOwners: "settings.error.allowlistTooManyOwners",
+  allowlistInvalidOwner: "settings.error.allowlistInvalidOwner",
+  fieldDuplicated: "settings.error.fieldDuplicated",
   unknownOperation: "settings.error.unknownOperation",
   githubMetadataRefreshFailed: "settings.error.githubMetadataRefreshFailed",
   /** Workspace review-concurrency cap (iteration spec §2.3). */
@@ -3028,6 +3041,24 @@ async function refreshGithubMetadata(
       logSettingsFailure("github_metadata_attempt", app.id, err);
     }
   };
+  /**
+   * Cache the App's public/private visibility (migration 0045) from the
+   * anonymous probe. It runs ONLY inside a real metadata refresh — the fresh
+   * short-circuit returns before this — so it shares the TTL/`force` bounds
+   * instead of costing one request per settings read. `null` from the probe
+   * is "no answer": the stored value stays. Bookkeeping only, so a store
+   * rejection is logged and swallowed (the markAttempt rule) and can never
+   * turn an already-persisted profile refresh into `failed`.
+   */
+  const probeVisibility = async (slug: string | null): Promise<void> => {
+    if (slug === null) return;
+    try {
+      const visibility = await fetchAppVisibility(slug);
+      if (visibility !== null) await apps.saveGithubVisibility(app.id, visibility);
+    } catch (err) {
+      logSettingsFailure("github_visibility", app.id, err);
+    }
+  };
   try {
     const decryptedPem = await createSecretbox(encryptionKey).decryptSecret(
       app.private_key_enc,
@@ -3045,6 +3076,11 @@ async function refreshGithubMetadata(
       return { status: "failed", row: app };
     }
     await apps.saveGithubMetadata(app.id, result.metadata);
+    // Probe with the slug this refresh just resolved, falling back to the
+    // cached one (saveGithubMetadata COALESCE-preserves it when the payload
+    // has none). Before the re-read so the returned row carries the fresh
+    // visibility.
+    await probeVisibility(result.metadata.githubSlug ?? app.github_slug);
     const row = (await apps.getAppById(app.id)) ?? app;
     // A payload that yields no slug persists the profile but leaves the
     // re-attempt trigger hot; the marker keeps it from looping.
@@ -3125,6 +3161,22 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const installations = await apps.listInstallations(app.id);
     const deliveries = await apps.listRecentDeliveries(app.id, 10);
     const deliverySummary = await apps.deliverySummary(app.id);
+    // Migration 0045 configuration: the review gate, the owner allowlist and
+    // the cached GitHub visibility, read from the row this route has already
+    // resolved. The two nulls do NOT mean the same thing — `getCheckGate` is
+    // null for a deleted row AND for a live row whose stored verdict list is
+    // unreadable, while `getAllowlist` reads the row itself, so its null can
+    // only mean the row is gone. A VANISHED row is the 500 (reading an App's
+    // configuration it no longer has is the honest failure); an unreadable
+    // verdict list is not — the face serves `check_gate: null`, every other
+    // field stays readable, and the SPA renders a read-only notice instead of
+    // controls that could not round-trip.
+    const checkGate = await apps.getCheckGate(app.id);
+    const allowlist = await apps.getAllowlist(app.id);
+    const githubVisibility = await apps.getGithubVisibility(app.id);
+    if (allowlist === null) {
+      throw new Error(`app settings row ${app.id} vanished while reading its review gate configuration`);
+    }
     const base = {
       // The stable workspace id the App belongs to (server-resolved scope,
       // never the request's path segment): with `app.id` it composes the
@@ -3145,6 +3197,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // by the column's CHECK enum, so the wire value is always one of
         // open | every_push | manual.
         review_trigger_mode: app.review_trigger_mode,
+        // Cached GitHub App visibility (migration 0045): null only when the
+        // row could not be read; 'unknown' = never probed / probe could not
+        // answer, which the SPA treats as "cannot prove private".
+        github_visibility: githubVisibility,
         // The cached public GitHub profile (migration 0019) —
         // every field nullable (NULL = never synced / absent upstream, the
         // old-row degradation) and present on BOTH faces (AC3: the
@@ -3299,6 +3355,15 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // (spec § Technical interfaces): the manage face's selector
       // choices — enabled registry entries only, as { id, enabled } rows.
       sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
+      // Migration 0045: the review gate (the Check's pass condition) and the
+      // owner allowlist (switch + accepted logins) — manager face only.
+      // `check_gate: null` = the stored verdict list is unreadable; the SPA
+      // then renders a read-only notice rather than a gate it cannot save.
+      check_gate:
+        checkGate === null
+          ? null
+          : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+      allowlist: { enabled: allowlist.enabled, owners: [...allowlist.owners] },
     });
   } catch (err) {
     logSettingsFailure("api_render", gate.app.id, err);
@@ -4119,6 +4184,142 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.github_app_id, `Saved the ${image.id} runtime harness for ${appDisplayName(gate.app)}.`);
+  }
+  if (op === "save-check-gate") {
+    // The App's review gate (migration 0045): the score floor plus the set of
+    // verdicts that satisfy it. Both bounds are checked HERE — an invalid
+    // submission is a keyed 400 with zero writes (saveCheckGate re-validates
+    // as the backstop and the DDL CHECK is the last line for the score). An
+    // empty verdict set is legal and fails closed: no review can pass.
+    const rawScore = typeof form.min_score === "string" ? form.min_score.trim() : "";
+    if (!/^\d+$/.test(rawScore) || Number(rawScore) > 100) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.checkScoreInvalid);
+    }
+    // Repeated `pass_verdicts` fields are the shape this op expects (the SPA
+    // posts one per checked box); parseBody({ all: true }) aggregates them.
+    // Duplicates collapse, so the stored set (and the notice below) is a SET.
+    const rawVerdicts = form.pass_verdicts;
+    const fields = rawVerdicts === undefined ? [] : Array.isArray(rawVerdicts) ? rawVerdicts : [rawVerdicts];
+    const submitted = [...new Set(fields)];
+    const unknownVerdict = submitted.find(
+      (entry) => typeof entry !== "string" || !PR_VERDICTS.includes(entry as PrVerdict),
+    );
+    if (unknownVerdict !== undefined) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.checkVerdictUnknown, {
+        verdict: typeof unknownVerdict === "string" ? unknownVerdict : "",
+        verdicts: PR_VERDICTS.join(", "),
+      });
+    }
+    const minScore = Number(rawScore);
+    const passVerdicts = submitted as PrVerdict[];
+    try {
+      // `false` = the App row vanished (or was soft-deleted) before this
+      // write: nothing was saved, so the success notice would lie.
+      if (!(await createAppsStore(gate.db).saveCheckGate(gate.app.id, { minScore, passVerdicts }))) {
+        throw new Error(`app ${gate.app.id} vanished before its review gate save`);
+      }
+    } catch (err) {
+      logSettingsFailure("save_check_gate", gate.app.id, err);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(
+      c,
+      gate.app.github_app_id,
+      `Saved the review gate for ${appDisplayName(gate.app)} — passes at ${minScore}+ points on: ${passVerdicts.join(", ") || "no verdicts"}.`,
+    );
+  }
+  if (op === "save-allowlist") {
+    // The App's owner allowlist (migration 0045): the switch plus the accepted
+    // owner logins, REPLACED as a set on every save (saveAllowlist
+    // delete-then-inserts in one batch), so removing an owner is the same
+    // submission as adding one. Enabled with an empty list refuses every
+    // owner — fail closed, and the SPA warns before save.
+    if (Array.isArray(form.owners)) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.fieldDuplicated, { field: "owners" });
+    }
+    const enabled = typeof form.enabled === "string" ? form.enabled : "";
+    if (enabled !== "1" && enabled !== "0") {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.allowlistToggleInvalid);
+    }
+    const ownerText = typeof form.owners === "string" ? form.owners : "";
+    // One login per line: blank lines are noise, duplicates collapse, the
+    // operator's order is kept. GitHub logins are case-insensitive, so case
+    // variants are the SAME owner and collapse to the first spelling.
+    const owners = dedupeOwnerLogins(
+      ownerText.split("\n").map((line) => line.trim()).filter((line) => line !== ""),
+    );
+    // Same GitHub login grammar as the invite route: a login that can never
+    // match a real owner would sit in the table as a dead row that admits
+    // nobody, so the offending entry is named back to the operator.
+    const invalidOwner = owners.find((owner) => !GITHUB_LOGIN_PATTERN.test(owner));
+    if (invalidOwner !== undefined) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.allowlistInvalidOwner, {
+        owner: invalidOwner,
+      });
+    }
+    // The replace is ONE D1 batch, so the accepted size is bounded here (the
+    // trust boundary): an oversized submission is a keyed 400, zero writes.
+    if (owners.length > ALLOWLIST_MAX_OWNERS) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.allowlistTooManyOwners, {
+        limit: ALLOWLIST_MAX_OWNERS,
+      });
+    }
+    const apps = createAppsStore(gate.db);
+    try {
+      // `false` = the App row vanished (or was soft-deleted) before this
+      // write: nothing was saved, so the success notice would lie.
+      if (!(await apps.saveAllowlist(gate.app.id, { enabled: enabled === "1", owners }))) {
+        throw new Error(`app ${gate.app.id} vanished before its owner allowlist save`);
+      }
+    } catch (err) {
+      logSettingsFailure("save_allowlist", gate.app.id, err);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
+    }
+    // Admission applies whenever this switch is on, whatever the cached
+    // visibility; `private` only changes the SPA's private-App note under an
+    // allowlist control it renders regardless. So the copy below reports the
+    // state the save just produced, and it needs the resolved visibility so a
+    // `private` App is told the stored list still applies. A save probes
+    // through the metadata refresh's anonymous probe and caches a public or
+    // private answer. A no-answer (`null`: the probe ran but could not tell)
+    // keeps the stored value, exactly like the refresh path — admission never
+    // reads the column, so a no-answer invalidates nothing. An App with no
+    // slug has nothing to probe either, so it skips both the probe and the
+    // cache write, leaving the cached value standing.
+    // Bookkeeping only: a probe or cache-write failure is logged and never
+    // blocks the save the operator asked for.
+    let visibility = gate.app.github_visibility ?? "unknown";
+    if (enabled === "1" && gate.app.github_slug !== null) {
+      try {
+        const probed = await fetchAppVisibility(gate.app.github_slug);
+        if (probed !== null) {
+          visibility = probed;
+          await apps.saveGithubVisibility(gate.app.id, probed);
+        }
+      } catch (err) {
+        logSettingsFailure("github_visibility", gate.app.id, err);
+      }
+    }
+    if (enabled !== "1") {
+      return settingsPostResponse(
+        c,
+        gate.app.github_app_id,
+        `Saved the owner allowlist for ${appDisplayName(gate.app)} — switched off; every owner is reviewed as before.`,
+      );
+    }
+    // One owner / many owners reads correctly, and a `private` App is told
+    // that its stored list still applies — the Settings control stays visible
+    // for it, so the notice must not claim the control went anywhere.
+    const accepted = `${owners.length} ${owners.length === 1 ? "owner" : "owners"} accepted; every other owner is refused.`;
+    const privateControl =
+      visibility === "private"
+        ? " This App is private, but the stored list still applies to its deliveries — the control stays visible so you can manage it."
+        : "";
+    return settingsPostResponse(
+      c,
+      gate.app.github_app_id,
+      `Saved the owner allowlist for ${appDisplayName(gate.app)} — ${accepted}${privateControl}`,
+    );
   }
   // Review fold-in: an unknown op is a validation failure like any
   // other — 400 with the reason.

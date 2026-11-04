@@ -34,7 +34,10 @@ export async function fetchJson(url: string): Promise<unknown> {
 }
 
 /** POST an existing pinned HTML form path; 4xx stays in-SPA so we can refetch. Body text is returned so JSON verify-key 400s can surface their `reason`. */
-export async function postForm(url: string, body: Record<string, string>): Promise<{ status: number; body: string }> {
+export async function postForm(
+  url: string,
+  body: Record<string, string> | URLSearchParams,
+): Promise<{ status: number; body: string }> {
   const res = await fetch(url, {
     method: "POST",
     credentials: "same-origin",

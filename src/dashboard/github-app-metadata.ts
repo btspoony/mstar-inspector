@@ -29,6 +29,16 @@
  * URL follows the slug), so the columns are a cache refreshed on the 24h TTL,
  * never an identifier.
  *
+ * Visibility probe: whether an App is public is NOT part of `GET /app`, so
+ * the refresh rides a second, anonymous request — `GET
+ * https://api.github.com/apps/{slug}`, no Authorization — whose status is the
+ * whole answer (200 public, 404 private, anything else = no answer: `null`).
+ * A `null` answer is the CALLER's to weigh, and both callers — the metadata
+ * refresh and the allowlist save's forced probe — keep the stored value and
+ * skip the write: admission never reads it, so a no-answer invalidates
+ * nothing. It shares this module because it shares the
+ * refresh's failure discipline and bounds, not because it shares the JWT path.
+ *
  * Failure discipline (AD-531): ZERO retries (the caller's 24h TTL bounds
  * the cost to ≤1 fetch per request; ≤1/App/day once a sync succeeds), a
  * 5s AbortSignal timeout, and a total
@@ -46,8 +56,15 @@ import { normalizePrivateKey } from "./private-key";
 import type { GithubAppMetadataInput } from "./apps-store";
 
 const GITHUB_APP_API_URL = "https://api.github.com/app";
+const GITHUB_APPS_PUBLIC_URL = "https://api.github.com/apps";
 /** Upstream budget (AD-531 lock): 5 seconds, zero retries. */
 const FETCH_TIMEOUT_MS = 5_000;
+/**
+ * Visibility probe budget: an anonymous GET answers from the public App
+ * listing, so a miss is cheap — 3 seconds, zero retries, and any non-answer
+ * is `null`, which neither caller writes: the last stored value stands.
+ */
+const VISIBILITY_TIMEOUT_MS = 3_000;
 /**
  * JWT lifetime — well under GitHub's 10-minute App-JWT cap (no refresh
  * path exists: one fetch, one token, zero retries).
@@ -249,5 +266,48 @@ export async function fetchAppMetadata(
     // Total catch-all (AD-531): normalizePrivateKey throw (OpenSSH format),
     // import/sign errors, network failure, abort timeout — one shape.
     return { ok: false };
+  }
+}
+
+/**
+ * The two states an anonymous `GET /apps/{slug}` can prove. `null` from
+ * {@link fetchAppVisibility} is not a third state — it means "no answer", and
+ * every caller keeps the stored value on it.
+ */
+export type GithubAppVisibilityProbe = "public" | "private";
+
+/**
+ * Probe one App's visibility anonymously — `GET https://api.github.com/apps/{slug}`
+ * with NO Authorization header (the App JWT face accepts only `/app*`; the
+ * public App listing needs no credential at all).
+ *
+ * Mapping (GitHub answers 200 for a public App and 404 for a private one):
+ *   200 → `"public"`, 404 → `"private"`, anything else (5xx, rate limit,
+ *   network failure, 3s timeout) → `null`, which is "no answer" — never
+ *   "private". Every caller keeps the last stored value on it. Never
+ *   throws, zero retries — the metadata refresh that calls it is already
+ *   failure-tolerant and TTL-bounded.
+ */
+export async function fetchAppVisibility(slug: string): Promise<GithubAppVisibilityProbe | null> {
+  try {
+    const res = await fetch(`${GITHUB_APPS_PUBLIC_URL}/${encodeURIComponent(slug)}`, {
+      method: "GET",
+      signal: AbortSignal.timeout(VISIBILITY_TIMEOUT_MS),
+      headers: {
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "mstar-inspector",
+      },
+    });
+    // The payload is irrelevant — only the status carries the fact. Release
+    // the connection in every branch (the failed-body convention above).
+    await res.body?.cancel();
+    if (res.status === 200) return "public";
+    if (res.status === 404) return "private";
+    return null;
+  } catch {
+    // Network failure / timeout / malformed response — one shape: "no
+    // answer", which the caller weighs (keep the stored value, or `unknown`).
+    return null;
   }
 }

@@ -165,6 +165,14 @@ export type CheckConclusion = {
   summary: string;
 };
 
+/**
+ * The applied review outcome the Check gate reads (spec §7.9): the row's
+ * verdict plus the persisted envelope's `tally.scorePct`. `scorePct` is null
+ * when the row carries no readable tally — the caller treats that as an
+ * unreadable gate input, never as a pass.
+ */
+export type PublishedReview = { verdict: string; scorePct: number | null };
+
 /** The §7.9 claim outcome union. */
 export type ClaimAttemptResult =
   | { kind: "claimed"; attempt: CheckAttempt; lease: Lease }
@@ -1386,3 +1394,89 @@ export async function retryCheckRecovery(
  * "not published".
  */
 export { readPublicationProof } from "./finding-lifecycle";
+
+/**
+ * The review a Check is judged by (spec §7.9 gate read): the envelope the
+ * attempt itself PUBLISHED.
+ *
+ * `publicationId` is the proof's publication id, and it ALONE decides: that
+ * payload is the envelope this attempt published, and an unreadable payload →
+ * `null` (the gate-unreadable failure) — never a fallback to the scope/SHA
+ * `reviews` row. `reviews` is a projection of the local apply: first write
+ * wins, it can lag a confirmed publication (apply still due, or failed) or
+ * belong to an earlier attempt for the same head SHA, which RL-12 allows, and
+ * it carries no proof identity, so it must never decide an attempt that
+ * published something else. Without a publication id there is no review to
+ * judge at all: `null`, never the projected row.
+ *
+ * A readable payload whose tally is missing keeps its verdict with
+ * `scorePct: null` (unreadable gate input, never a fallback to another
+ * attempt's score). Missing row → `null`. Read-only: it never mutates or
+ * fabricates an outcome.
+ */
+export async function readPublishedReview(
+  db: D1Like,
+  input: { scope: Scope; headSha: string; publicationId?: string },
+): Promise<PublishedReview | null> {
+  if (input.publicationId === undefined) return null;
+  return readPublicationReview(db, {
+    scope: input.scope,
+    headSha: input.headSha,
+    publicationId: input.publicationId,
+  });
+}
+
+/**
+ * The envelope THIS publication carried, by exact App/scope/SHA identity (a
+ * row of another attempt or another App must never decide this one). `null`
+ * means the payload is unreadable, not "no review was published".
+ */
+async function readPublicationReview(
+  db: D1Like,
+  input: { scope: Scope; headSha: string; publicationId: string },
+): Promise<PublishedReview | null> {
+  const row = await db
+    .prepare(
+      `SELECT payload_json FROM review_publications
+       WHERE id = ? AND app_id = ? AND installation_id = ? AND owner = ? AND repo = ?
+         AND pr_number = ? AND head_sha = ?`,
+    )
+    .bind(
+      input.publicationId,
+      input.scope.appId,
+      input.scope.installationId,
+      input.scope.owner,
+      input.scope.repo,
+      input.scope.prNumber,
+      input.headSha,
+    )
+    .first<{ payload_json: string }>();
+  if (row === null) return null;
+  const artifact = recordOf(recordOf(parseJson(row.payload_json))?.artifact);
+  const envelope = recordOf(artifact?.payload);
+  if (envelope === null || typeof envelope.verdict !== "string") return null;
+  return { verdict: envelope.verdict, scorePct: tallyScore(envelope) };
+}
+
+function parseJson(text: string | null): unknown {
+  if (text === null) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** `envelope.tally.scorePct` when it is an integer inside the schema's 0..100 domain. */
+function tallyScore(envelope: unknown): number | null {
+  const tally = recordOf(recordOf(envelope)?.tally);
+  if (tally === null) return null;
+  const { scorePct } = tally;
+  return typeof scorePct === "number" && Number.isInteger(scorePct) && scorePct >= 0 && scorePct <= 100 ? scorePct : null;
+}

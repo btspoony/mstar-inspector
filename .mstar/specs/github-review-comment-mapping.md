@@ -1,6 +1,6 @@
 # GitHub 审查评论映射（github-review-comment-mapping）
 
-> **状态：** 已锁定仓库级产品契约（v0.3 Phase 1，2026-08-28；2026-09-12 经 review-lifecycle 专项 Review & Edit 显式评审修订：§3 收尾小节、§4 降级时序与发表后副作用、§5 Check Run 授权；2026-09-13（M8）落地对齐：线程 resolve 已实现 → §4；2026-09-14（M7）落地对齐：Check 收口已实现 → §4/§5；2026-10-18 经 review 驱动显式评审修订：§1 词表、§2 event 表与 §3 正文规则纳入第四结论 `incomplete`）。变更需显式评审。  
+> **状态：** 已锁定仓库级产品契约（v0.3 Phase 1，2026-08-28；2026-09-12 经 review-lifecycle 专项 Review & Edit 显式评审修订：§3 收尾小节、§4 降级时序与发表后副作用、§5 Check Run 授权；2026-09-13（M8）落地对齐：线程 resolve 已实现 → §4；2026-09-14（M7）落地对齐：Check 收口已实现 → §4/§5；2026-10-18 经 review 驱动显式评审修订：§1 词表、§2 event 表与 §3 正文规则纳入第四结论 `incomplete`；2026-11-04 修订 §1/§4/§5：Check 结论改由 App 级审查门禁（分数下限 + 通过 verdict 集合）判定）。变更需显式评审。  
 > **跨迭代：** 是 — 云端审查发表到 GitHub 的词表与 event 纪律，后续迭代继续消费。  
 > **SSOT：** 本文件（GitHub 发表面）；审查 JSON 权威形状 = harness `mstar.review/v1`（engine `validateMstarReviewV1` / `synthesizeReview`）。  
 > **历史写入契约：** `.mstar/specs/findings-schema.md`（M1 `ReviewOutput`）— **只读旧行**；v0.3 起 **禁止**作为 persist/发表权威。
@@ -12,7 +12,7 @@
 | verdict | `ship it` \| `needs fixes` \| `blocked` \| `incomplete` | `comment` \| `request_changes` \| `approve` |
 | finding class | `must-fix` \| `should-fix` \| `nit` | `critical` \| `warning` \| `suggestion` \| `info` |
 
-`score_pct` 只作展示，**不得**覆盖 verdict。公式与 tally 键以 engine `computePrTally` 为准，inspector 不另发明。
+`score_pct` 不得改写 verdict；公式与 tally 键以 engine `computePrTally` 为准，inspector 不另发明。它是 App 级 Check 门禁的两个条件之一（分数下限，与通过 verdict 集合共同判定，见 `review-lifecycle.md` §7.9），在评论正文里仍只作展示。
 
 ## 2. GitHub Review `event` 映射（锁定）
 
@@ -52,7 +52,7 @@ v0.3 发表面允许二者之一（architect 锁实现，产品只锁结果）�
 沿 M1 / v0.2 compass（产品正确性，不改）：
 
 1. 非空 `head_sha` 后 `findByIdempotencyKey` 命中 → 不审、不发、不写。
-2. 解析 / `validateMstarReviewV1` 失败 → **降级发表**（v0.7 起的已部署行为；2026-09-12 措辞对齐，非重新引入 retry）：best-effort 发表仅 summary 的降级评论并 ACK；不 insert 正常 review 行、不自动重跑付费 review、不进 DLQ。降级评论不是正常 review，不得作为收尾/resolve 依据。降级发表的结果是**类型化的（posted / not posted）并作为持久证据记录**（`review-lifecycle.md` §7.7/§7.9）——只有确认发表才可作为 Check `neutral` 的依据，发表失败必须如实记为失败而非“已降级”。
+2. 解析 / `validateMstarReviewV1` 失败 → **降级发表**（v0.7 起的已部署行为；2026-09-12 措辞对齐，非重新引入 retry）：best-effort 发表仅 summary 的降级评论并 ACK；不 insert 正常 review 行、不自动重跑付费 review、不进 DLQ。降级评论不是正常 review，不得作为收尾/resolve 依据。降级发表的结果是**类型化的（posted / not posted）并作为持久证据记录**（`review-lifecycle.md` §7.7/§7.9）——确认的降级发表无法证明审查门禁已满足，其 Check 结论为 `failure`（不再有 `neutral`），发表失败同样如实记为失败而非“已降级”。
 3. **先** GitHub 评论，**后** persist。评论失败不落库。
 4. UNIQUE `(installation_id, owner, repo, pr_number, head_sha)` 不得削弱。
 5. 线程 resolve 与 Check 收口都是**审查结果类副作用**：它们不得早于主评论发表成功，也不得因失败而回滚或伪造主评论/持久化结果（自 review-lifecycle 契约起；记录类分离、顺序、身份与失败恢复 → `review-lifecycle.md` RL-9/RL-10 + §7.7/§7.9）。例外有二：**不含任何 verdict / findings / disposition 的执行尝试记录**（attempt class）与**私有 pre-publication 恢复日志**（publication journal：完整 payload，但无 dashboard/insights/报告读出口，不构成“已发表结果”）都允许在发表前写入，用于崩溃恢复与失败/超时 Check 的诚实收口；跳过路径（paused / guard-held / 幂等 ack）不建立任何 check。`reviews` / `findings` / 生命周期行与线程关联只在**取得发表成功证据后**才应用（apply 幂等，重放不重复）。其中**线程 resolve 已于 2026-09-13（M8）实现**：仅对已证明归属（opaque Inspector 关联 + App 认证身份）、HEAD 与会话围栏匹配、且远端确认 `isResolved` 的线程成立；失败/未知保持可见而非声称已 resolve（`review-lifecycle.md` §7.5/§7.11.1）；GitHub 变更只经 Worker 的 purpose-scoped `review-write` 凭据，Sandbox 始终只拿 repository-scoped 只读 `sandbox-read`（§7.6）。**Check 收口已于 2026-09-14（M7）实现**：权限集加入 `checks: write`，seam 注入生产实现；结论由持久证据判定，跳过路径不建立任何 check（§7.9/§7.11.2）。
@@ -61,5 +61,5 @@ v0.3 发表面允许二者之一（architect 锁实现，产品只锁结果）�
 
 - 不把 GitHub `APPROVE` 当 `ship it` 的自动化合并许可。
 - 不发 `REQUEST_CHANGES`。
-- Check Run 由 `review-lifecycle.md`（review-lifecycle 交互裁决 D3；产品范围已评审）授权引入：conclusion 只表执行结果（正常发表=success / 确认降级发表=neutral / 执行失败、更新未确认、本地错误=failure），**结论由持久证据判定**而非代码路径（`review-lifecycle.md` §7.9 结论矩阵），永不映射或替代 `APPROVE` / `REQUEST_CHANGES`，checks 失败不阻塞 review 发表；line comments 已交付（见 §3 与 knowledge `github-pr-review-line-comments.md`）。**Check 已于 2026-09-14（M7）交付**：权限集含 `checks`，生产注入 `CheckLifecycleHooks`，跳过路径（paused / guard-held / 幂等 ack）仍完全不建 Check；同 commit 可能合法出现两个同名 run（RL-12），以最新适用 attempt 为准；不设 `details_url`；分支保护由用户决定。
+- Check Run 由 `review-lifecycle.md`（review-lifecycle 交互裁决 D3；产品范围已评审）授权引入：conclusion 表达 App 配置的审查门禁结果（正常发表 + 已应用 review 的 verdict 属于通过集合且分数 ≥ 下限 = `success`；门禁未达、review/tally 不可读、确认降级发表、更新未确认、本地错误等 = `failure`；不再产生 `neutral`），**结论由持久证据判定**而非代码路径（`review-lifecycle.md` §7.9 结论矩阵），永不映射或替代 `APPROVE` / `REQUEST_CHANGES`，checks 失败不阻塞 review 发表；line comments 已交付（见 §3 与 knowledge `github-pr-review-line-comments.md`）。**Check 已于 2026-09-14（M7）交付**：权限集含 `checks`，生产注入 `CheckLifecycleHooks`，跳过路径（paused / guard-held / 幂等 ack）仍完全不建 Check；同 commit 可能合法出现两个同名 run（RL-12），以最新适用 attempt 为准；不设 `details_url`；分支保护由用户决定。
 - 现网没有部署级审查总闸：2026-08-26 postdeploy 反馈裁决 R2 的「kill-switch ships OFF」已由 2026-10 的彻底删除取代——审查开关只剩 per-App `review_enabled`。

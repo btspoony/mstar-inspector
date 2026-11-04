@@ -2,7 +2,8 @@
  * The settings read path's lazy
  * GitHub-metadata refresh + the response contract. Pinned here:
  *   - first sync (NULL synced_at) → exactly ONE GET https://api.github.com/app
- *     (App-JWT face), the five migration-0019 columns persist via
+ *     (App-JWT face) plus the anonymous `GET /apps/{slug}` visibility probe
+ *     (migration 0045), the five migration-0019 columns persist via
  *     saveGithubMetadata, the response carries the profile, and the
  *     operator-mutation timestamp updated_at is untouched;
  *   - TTL: a synced_at inside 24h serves the cache with ZERO fetches (both
@@ -79,16 +80,30 @@ const GITHUB_PROFILE = {
 /** The App icon: the SHARED derivation (no second copy of the template). */
 const APP_AVATAR_URL = appAvatarUrl(APP_ID);
 
+/** The two upstream URLs one refresh can touch (the icon is derived, never fetched). */
+const GITHUB_APP_URL = "https://api.github.com/app";
+const GITHUB_PUBLIC_APPS_URL = "https://api.github.com/apps/";
+
 /**
- * One refresh = exactly ONE request (`GET /app`): the icon is derived, so any
- * other upstream URL is a failure, not a silent answer.
+ * One refresh = `GET /app` plus, only when the profile yields a slug, the
+ * anonymous `GET /apps/{slug}` visibility probe. `probeStatus` decides the
+ * visibility answer: 404 = private (the default here), 200 = public, anything
+ * else (503) = inconclusive, the "keep the stored value" branch. Any other
+ * upstream URL is a failure, not a silent answer.
  */
-function githubStub(profile: Record<string, unknown>) {
+function githubStub(profile: Record<string, unknown>, probeStatus = 404) {
+  const body = JSON.stringify(profile);
   return (url: string) => {
-    if (url !== "https://api.github.com/app") throw new Error(`unexpected fetch: ${url}`);
-    return new Response(JSON.stringify(profile), { status: 200, headers: { "content-type": "application/json" } });
+    if (url === GITHUB_APP_URL) {
+      return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.startsWith(GITHUB_PUBLIC_APPS_URL)) return new Response(null, { status: probeStatus });
+    throw new Error(`unexpected fetch: ${url}`);
   };
 }
+
+/** The `GET /app` profile fetches — the probe rides the same refresh, so counts are scoped to it. */
+const appProfileCalls = (calls: FetchCall[]) => calls.filter((call) => call.url === GITHUB_APP_URL);
 
 // --- fetch stubbing (tests/worker/entry.test.ts precedent) ---
 
@@ -176,6 +191,7 @@ type CachedColumns = {
   github_avatar_url: string | null;
   github_metadata_synced_at: string | null;
   github_metadata_attempted_at: string | null;
+  github_visibility: string | null;
   github_slug: string | null;
   created_at: string;
   updated_at: string;
@@ -184,7 +200,7 @@ type CachedColumns = {
 const cachedColumns = (db: TestD1, appId: string): CachedColumns =>
   db.raw
     .query(
-      "SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at, github_metadata_attempted_at, github_slug, created_at, updated_at FROM github_apps WHERE id = ?",
+      "SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at, github_metadata_attempted_at, github_visibility, github_slug, created_at, updated_at FROM github_apps WHERE id = ?",
     )
     .get(appId) as CachedColumns;
 
@@ -208,8 +224,10 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app"]);
-    expect(new Headers(calls[0]!.init!.headers).get("authorization")!.startsWith("Bearer ")).toBe(true);
+    // One refresh: the App-JWT profile read, then the anonymous visibility
+    // probe carrying the slug that read just resolved.
+    expect(calls.map((call) => call.url)).toEqual([GITHUB_APP_URL, `${GITHUB_PUBLIC_APPS_URL}acme-inspector`]);
+    expect(new Headers(appProfileCalls(calls)[0]!.init!.headers).get("authorization")!.startsWith("Bearer ")).toBe(true);
 
     const body = (await res.json()) as { app: Record<string, unknown> };
     expect(body.app.github_name).toBe("Acme Inspector");
@@ -217,6 +235,8 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(body.app.github_html_url).toBe("https://github.com/apps/acme-inspector");
     expect(body.app.github_avatar_url).toBe(APP_AVATAR_URL);
     expect(body.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    // The default probe answer (404) is "private", and the refresh caches it.
+    expect(body.app.github_visibility).toBe("private");
 
     // The single store writer persisted exactly the profile columns — and the
     // machine-triggered write never churns the operator timestamp (L5).
@@ -226,6 +246,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(row.github_html_url).toBe("https://github.com/apps/acme-inspector");
     expect(row.github_avatar_url).toBe(APP_AVATAR_URL);
     expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(row.github_visibility).toBe("private");
     expect(row.updated_at).toBe(row.created_at);
 
     // The envelopes never leave the row (Global Constraints).
@@ -274,7 +295,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app"]);
+    expect(appProfileCalls(calls)).toHaveLength(1);
     const body = (await res.json()) as { app: Record<string, unknown> };
     expect(body.app.github_slug).toBe("acme-inspector");
     const row = db.raw.query("SELECT github_slug FROM github_apps WHERE id = ?").get(appId) as {
@@ -292,12 +313,46 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls).toHaveLength(1);
+    expect(appProfileCalls(calls)).toHaveLength(1); // one refresh (the probe rides along)
     const body = (await res.json()) as { app: Record<string, unknown> };
     expect(body.app.github_name).toBe("Renamed Inspector");
     const row = cachedColumns(db, appId);
     expect(row.github_name).toBe("Renamed Inspector");
     expect(row.github_metadata_synced_at).not.toBeNull();
+  });
+
+  test("an inconclusive visibility probe (503) keeps the stored github_visibility", async () => {
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    db.raw.query("UPDATE github_apps SET github_visibility = 'private' WHERE id = ?").run(appId);
+    const { calls } = stubFetch(githubStub(GITHUB_PROFILE, 503));
+
+    const res = await getSettings("mallory", makeEnv(db));
+
+    expect(res.status).toBe(200);
+    // The refresh really ran and really probed: the new profile landed, so a
+    // preserved visibility cannot be a short-circuit that never fetched.
+    expect(appProfileCalls(calls)).toHaveLength(1);
+    expect(calls.map((call) => call.url)).toContain(`${GITHUB_PUBLIC_APPS_URL}acme-inspector`);
+    const body = (await res.json()) as { app: Record<string, unknown> };
+    expect(body.app.github_name).toBe("Acme Inspector");
+    expect(body.app.github_visibility).toBe("private");
+    const row = cachedColumns(db, appId);
+    expect(row.github_name).toBe("Acme Inspector");
+    expect(row.github_visibility).toBe("private");
+  });
+
+  test("a public probe answer (200) is cached as 'public' and served on the manager face", async () => {
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    stubFetch(githubStub(GITHUB_PROFILE, 200));
+
+    const res = await getSettings("mallory", makeEnv(db));
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { app: Record<string, unknown> };
+    expect(body.app.github_visibility).toBe("public");
+    expect(cachedColumns(db, appId).github_visibility).toBe("public");
   });
 
   test("fetch {ok:false} (HTTP 404) → 200 fail-open with the cached (null) columns; synced_at stays NULL", async () => {
@@ -362,7 +417,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app"]);
+    expect(appProfileCalls(calls)).toHaveLength(1);
     expect(cachedColumns(db, appId).github_slug).toBe("acme-inspector");
   });
 
@@ -378,7 +433,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const env = makeEnv(db);
 
     expect((await getSettings("mallory", env)).status).toBe(200);
-    expect(calls).toHaveLength(1); // GET /app only — the icon needs no request
+    expect(calls.map((call) => call.url)).toEqual([GITHUB_APP_URL]); // no slug → no visibility probe
     const row = cachedColumns(db, appId);
     expect(row.github_name).toBe("Acme Inspector");
     expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
@@ -402,7 +457,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await postRefresh("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app"]);
+    expect(appProfileCalls(calls)).toHaveLength(1);
     expect(cachedColumns(db, appId).github_slug).toBe("acme-inspector");
   });
 
@@ -474,9 +529,11 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(viewerBody.app.github_avatar_url).toBe(APP_AVATAR_URL);
     expect(viewerBody.app.github_slug).toBe("acme-inspector");
     expect(viewerBody.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-    // The synced-at cache means the second face triggered NO second fetch:
-    // one refresh = the two requests of the first face.
-    expect(calls).toHaveLength(1);
+    // The synced-at cache means the second face triggered NO second refresh:
+    // the profile read (plus its one visibility probe) belongs to the first
+    // face only.
+    expect(appProfileCalls(calls)).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     // The base-only face still carries no settings zones (pin).
     expect(viewerBody.keys).toBeUndefined();
     expect(viewerBody.provider_catalog).toBeUndefined();
@@ -495,7 +552,7 @@ describe("POST /api/apps/:appId/refresh-metadata — the manager's forced refres
     const res = await postRefresh("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app"]);
+    expect(appProfileCalls(calls)).toHaveLength(1);
     const row = cachedColumns(db, appId);
     expect(row.github_name).toBe("Renamed Inspector");
     expect(row.github_metadata_synced_at).not.toBe(before.github_metadata_synced_at);

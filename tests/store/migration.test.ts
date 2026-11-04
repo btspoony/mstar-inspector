@@ -17,7 +17,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { createMigratedTestD1, createTestD1 } from "./helpers";
+import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter } from "./helpers";
 import {
   WORKSPACE_CONCURRENCY_MAX,
   getEffectiveConcurrency,
@@ -1931,5 +1931,123 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
       .query("SELECT COUNT(*) AS n FROM workspace_concurrency_clamp_0043")
       .get() as { n: number };
     expect(recordedAgain.n).toBe(2);
+  });
+});
+
+describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
+  const GATE_MIGRATION = "0045_review_gate_and_owner_allowlist.sql";
+
+  /** A DB shaped like production at 0044: every earlier file, applied in order. */
+  function preGateDb(): TestD1 {
+    const db = createTestD1();
+    const gate = migrationNumber(GATE_MIGRATION);
+    for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
+      (migration) => migrationNumber(migration) < gate,
+    )) {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  test("existing rows materialize the gate and visibility defaults with no backfill", () => {
+    const db = preGateDb();
+    // A row written before the migration carries no gate configuration.
+    insertGithubAppRow(db, { id: "legacy-app", githubAppId: 9001, name: "legacy-app" });
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, GATE_MIGRATION), "utf8"));
+
+    const row = db.raw
+      .query(
+        `SELECT check_min_score, check_pass_verdicts, allowlist_enabled, github_visibility
+           FROM github_apps WHERE id = 'legacy-app'`,
+      )
+      .get() as {
+      check_min_score: number;
+      check_pass_verdicts: string;
+      allowlist_enabled: number;
+      github_visibility: string | null;
+    };
+    expect(row).toEqual({
+      check_min_score: 80,
+      check_pass_verdicts: '["ship it"]',
+      allowlist_enabled: 0,
+      github_visibility: null,
+    });
+
+    // The columns' own contract: NOT NULL, and a nullable visibility (the
+    // default VALUES themselves are pinned above, row-level).
+    const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+    }>;
+    const byName = Object.fromEntries(cols.map((col) => [col.name, col]));
+    expect(byName.check_min_score).toMatchObject({ type: "INTEGER", notnull: 1 });
+    expect(byName.check_pass_verdicts).toMatchObject({ type: "TEXT", notnull: 1 });
+    expect(byName.allowlist_enabled).toMatchObject({ type: "INTEGER", notnull: 1 });
+    expect(byName.github_visibility).toMatchObject({ type: "TEXT", notnull: 0 });
+
+    // The score CHECK is two-sided: both directions reject, and 0 is the
+    // accepted floor of `BETWEEN 0 AND 100`.
+    for (const outOfRange of [101, -1]) {
+      expect(() =>
+        db.raw
+          .prepare("UPDATE github_apps SET check_min_score = ? WHERE id = 'legacy-app'")
+          .run(outOfRange),
+      ).toThrow();
+    }
+    db.raw.prepare("UPDATE github_apps SET check_min_score = 0 WHERE id = 'legacy-app'").run();
+    const floorRow = db.raw
+      .query("SELECT check_min_score FROM github_apps WHERE id = 'legacy-app'")
+      .get() as { check_min_score: number };
+    expect(floorRow.check_min_score).toBe(0);
+    // A fractional score sits INSIDE 0..100, so only the CHECK's own INTEGER
+    // cast equality refuses it; without that clause it would be stored.
+    expect(() =>
+      db.raw.prepare("UPDATE github_apps SET check_min_score = 80.5 WHERE id = 'legacy-app'").run(),
+    ).toThrow();
+    // ...and the INTEGER affinity still normalizes a whole-number value, so the
+    // tightening refuses fractions only.
+    db.raw.prepare("UPDATE github_apps SET check_min_score = '90.0' WHERE id = 'legacy-app'").run();
+    const wholeRow = db.raw
+      .query("SELECT check_min_score, typeof(check_min_score) AS kind FROM github_apps WHERE id = 'legacy-app'")
+      .get() as { check_min_score: number; kind: string };
+    expect(wholeRow).toEqual({ check_min_score: 90, kind: "integer" });
+    expect(() =>
+      db.raw.prepare("UPDATE github_apps SET github_visibility = 'secret' WHERE id = 'legacy-app'").run(),
+    ).toThrow();
+    db.raw.prepare("UPDATE github_apps SET github_visibility = 'private' WHERE id = 'legacy-app'").run();
+    // JSON well-formedness is enforced; enumeration is not expressible in
+    // DDL, so a well-formed off-vocabulary array is still storable and the
+    // store read path — not the CHECK — rejects it.
+    expect(() =>
+      db.raw.prepare(`UPDATE github_apps SET check_pass_verdicts = '{not json' WHERE id = 'legacy-app'`).run(),
+    ).toThrow();
+    db.raw.prepare(`UPDATE github_apps SET check_pass_verdicts = '["lgtm"]' WHERE id = 'legacy-app'`).run();
+  });
+
+  test("app_owner_allowlist is keyed per (app, owner) and references github_apps", () => {
+    const db = createMigratedTestD1();
+    insertGithubAppRow(db, { id: "allow-app", githubAppId: 9002, name: "allow-app" });
+    const insert = db.raw.prepare(
+      `INSERT INTO app_owner_allowlist (app_id, owner_login, created_at)
+       VALUES (?, ?, datetime('now'))`,
+    );
+    insert.run("allow-app", "acme");
+    expect(() => insert.run("allow-app", "acme")).toThrow();
+    insert.run("allow-app", "beta");
+    // An unknown App is refused by the FK, not silently stored.
+    expect(() => insert.run("ghost-app", "acme")).toThrow();
+
+    const owners = db.raw
+      .query("SELECT owner_login FROM app_owner_allowlist WHERE app_id = 'allow-app' ORDER BY owner_login")
+      .all() as Array<{ owner_login: string }>;
+    expect(owners.map((entry) => entry.owner_login)).toEqual(["acme", "beta"]);
+
+    // No ON DELETE (NO ACTION), the 0006/app-config precedent: the parent →
+    // child direction refuses too, so soft-delete stays the only removal path
+    // and an App can never lose its rows by hard deletion.
+    expect(() => db.raw.prepare("DELETE FROM github_apps WHERE id = 'allow-app'").run()).toThrow(
+      /FOREIGN KEY constraint failed/,
+    );
   });
 });

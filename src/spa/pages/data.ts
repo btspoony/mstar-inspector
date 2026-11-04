@@ -377,6 +377,42 @@ export type SettingsIdentityAppMeta = {
   github_metadata_synced_at: string | null;
 };
 
+/**
+ * Cached GitHub App visibility (migration 0045): the anonymous
+ * `GET /apps/{slug}` probe's last answer. `unknown` = never probed or the
+ * probe could not answer — treated as "cannot prove private", so the
+ * allowlist surface stays visible.
+ */
+export type GithubVisibility = "public" | "private" | "unknown";
+
+/**
+ * The review gate's verdict vocabulary, mirroring the engine `PR_VERDICTS`
+ * tuple the server validates against (`@mstar-harness/engine` is Node-only,
+ * so the browser bundle cannot import it). Keep the two in step.
+ */
+export const PR_VERDICTS = ["ship it", "needs fixes", "blocked", "incomplete"] as const;
+
+/**
+ * The per-App review gate (migration 0045): the Check concludes `success`
+ * only when the published verdict is one of `pass_verdicts` AND the tally
+ * score is at least `min_score`. `pass_verdicts` is the engine `PR_VERDICTS`
+ * vocabulary — the server validates it before any write.
+ */
+export type CheckGateSettings = {
+  min_score: number;
+  pass_verdicts: string[];
+};
+
+/**
+ * The per-App owner allowlist (migration 0045): `enabled` off behaves exactly
+ * as before this App configuration existed; on with an empty `owners` refuses
+ * every owner (fail closed).
+ */
+export type AllowlistSettings = {
+  enabled: boolean;
+  owners: string[];
+};
+
 export type SettingsAppMeta = {
   github_app_id: number;
   status: string;
@@ -408,6 +444,11 @@ export type SettingsAppMeta = {
   github_avatar_url: string | null;
   /** `datetime('now')` UTC string; NULL = never synced. */
   github_metadata_synced_at: string | null;
+  /**
+   * Cached GitHub App visibility (migration 0045). Null = the row could not
+   * be read; the allowlist surface then stays visible (cannot prove private).
+   */
+  github_visibility: GithubVisibility | null;
 };
 
 type SettingsHealth = {
@@ -453,6 +494,14 @@ export type SettingsManagePayload = {
   /** The App's stable workspace id — server-resolved, never a path segment. */
   workspace_id: string;
   app: SettingsAppMeta;
+  /**
+   * The review gate (migration 0045) — the Check's pass condition. `null` =
+   * the stored verdict list is unreadable: the section renders a read-only
+   * notice, since a gate that cannot be read cannot be edited.
+   */
+  check_gate: CheckGateSettings | null;
+  /** The owner allowlist switch + accepted owner logins (migration 0045). */
+  allowlist: AllowlistSettings;
   keys: ProviderKeyRow[];
   model_chain: string | null;
   model_roles: Record<string, string>;
@@ -1472,6 +1521,17 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // off-vocabulary value (DB CHECK makes it impossible from a correct
   // worker) fails the parse instead of rendering a dead selection.
   if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
+  // The review gate and the owner allowlist ride the MANAGER face
+  // (migration 0045): the Check's pass condition and the owner admission
+  // set. A gate whose stored verdict list is unreadable arrives as explicit
+  // `null` (the server's honest degradation), which the section renders as a
+  // read-only notice; any other malformed shape fails the parse instead of
+  // rendering a control that cannot round-trip.
+  if (data.check_gate !== null && !isCheckGateSettings(data.check_gate)) return null;
+  if (!isAllowlistSettings(data.allowlist)) return null;
+  // Cached visibility is nullable (null = the row read failed); any other
+  // value must be on the probe's own vocabulary.
+  if (!isNullableGithubVisibility(data.app.github_visibility)) return null;
   if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
   if (!isProviderKeyRowList(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
@@ -1493,6 +1553,34 @@ function isSandboxImageList(value: unknown): value is Array<{ id: string; enable
     Array.isArray(value) &&
     value.every((row) => isRecord(row) && typeof row.id === "string" && typeof row.enabled === "boolean")
   );
+}
+
+/** One entry of the verdict vocabulary — an off-vocabulary string fails the parse. */
+function isPrVerdict(value: unknown): value is (typeof PR_VERDICTS)[number] {
+  return (PR_VERDICTS as readonly string[]).includes(value as string);
+}
+
+/** The review gate (migration 0045): an integer floor in the DDL's domain + a verdict list on the engine vocabulary. */
+function isCheckGateSettings(value: unknown): value is CheckGateSettings {
+  return (
+    isRecord(value) &&
+    typeof value.min_score === "number" &&
+    Number.isInteger(value.min_score) &&
+    value.min_score >= 0 &&
+    value.min_score <= 100 &&
+    isStringArray(value.pass_verdicts) &&
+    value.pass_verdicts.every(isPrVerdict)
+  );
+}
+
+/** The owner allowlist (migration 0045): the switch + the stored logins. */
+function isAllowlistSettings(value: unknown): value is AllowlistSettings {
+  return isRecord(value) && typeof value.enabled === "boolean" && isStringArray(value.owners);
+}
+
+/** `null` (row unreadable) or a probe vocabulary value; anything else is drift. */
+function isNullableGithubVisibility(value: unknown): value is GithubVisibility | null {
+  return value === null || value === "public" || value === "private" || value === "unknown";
 }
 
 export function parseModels(data: unknown): ModelsPayload | null {
@@ -1563,7 +1651,7 @@ export function splitModelChain(raw: string | null | undefined): string[] {
 }
 
 /** Same GitHub login grammar the invite route enforces. */
-export const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9-]{1,39}$/;
+export const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 
 export function inviteLoginNoticeKey(login: string): "notice.error.enterLogin" | "notice.error.invalidLogin" | null {
   const trimmed = login.trim();

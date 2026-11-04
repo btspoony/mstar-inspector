@@ -21,6 +21,7 @@ import {
   parseInsightsSearch,
   parseMembers,
   parseSettings,
+  PR_VERDICTS as SPA_PR_VERDICTS,
   providerFormKind,
   providerKeyRows,
   removeChanged,
@@ -32,6 +33,7 @@ import {
   type ProviderKeyRow,
 } from "../../src/spa/pages/data";
 import { DEFAULT_CHAIN_NAME as STORE_DEFAULT_CHAIN_NAME } from "../../src/dashboard/app-config-store";
+import { PR_VERDICTS as ENGINE_PR_VERDICTS } from "@mstar-harness/engine";
 
 describe("workspace role guard", () => {
   test("owner and admin manage members; a plain member only reads the list", () => {
@@ -266,7 +268,10 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        github_visibility: "unknown",
       },
+      check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+      allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
       model_roles: {},
@@ -311,7 +316,10 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        github_visibility: "unknown",
       },
+      check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+      allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
       model_roles: {},
@@ -354,7 +362,10 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        github_visibility: "unknown",
       },
+      check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+      allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
       model_roles: {},
@@ -384,6 +395,79 @@ describe("members/apps/settings parsers", () => {
       const manage = parseSettings({ ...base, app: { ...base.app, review_trigger_mode: mode } });
       expect(manage && manage.can_manage && manage.app.review_trigger_mode).toBe(mode);
     }
+  });
+
+  test("parseSettings requires the review gate, allowlist and visibility on the manage face; malformed values fail the parse", () => {
+    const base = {
+      can_manage: true,
+      workspace_id: "ws_0123456789abcdefghijkl",
+      app: {
+        github_slug: "demo",
+        id: "app-demo",
+        github_app_id: 1,
+        status: "active",
+        review_enabled: true,
+        created_by: "mallory",
+        last_webhook_at: null,
+        sandbox_image_id: "omp",
+        review_trigger_mode: "every_push",
+        github_visibility: "public",
+      },
+      check_gate: { min_score: 90, pass_verdicts: ["ship it", "needs fixes"] },
+      allowlist: { enabled: true, owners: ["acme"] },
+      keys: [],
+      model_chain: null,
+      model_roles: {},
+      model_chains: [],
+      custom_providers: [],
+      installations: [],
+      deliveries: [],
+      configured_providers: [],
+      provider_catalog: [],
+      model_role_ids: [],
+      custom_provider_api_ids: [],
+      sandbox_images: [{ id: "omp", enabled: true }],
+    };
+    const ok = parseSettings(base);
+    expect(ok && ok.can_manage && ok.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it", "needs fixes"] });
+    expect(ok && ok.can_manage && ok.allowlist).toEqual({ enabled: true, owners: ["acme"] });
+    expect(ok && ok.can_manage && ok.app.github_visibility).toBe("public");
+    // Each new field is REQUIRED on the manage face.
+    const { check_gate: _noGate, ...withoutGate } = base;
+    expect(parseSettings(withoutGate)).toBeNull();
+    const { allowlist: _noAllowlist, ...withoutAllowlist } = base;
+    expect(parseSettings(withoutAllowlist)).toBeNull();
+    const { github_visibility: _noVisibility, ...withoutVisibility } = base.app;
+    expect(parseSettings({ ...base, app: withoutVisibility })).toBeNull();
+    // Malformed values never reach a control.
+    for (const minScore of [101, -1, 8.5, "80"]) {
+      expect(parseSettings({ ...base, check_gate: { ...base.check_gate, min_score: minScore } })).toBeNull();
+    }
+    expect(parseSettings({ ...base, check_gate: { ...base.check_gate, pass_verdicts: "ship it" } })).toBeNull();
+    // Every entry is checked, not just the array shape: one drifted verdict
+    // fails the parse, so the control never offers a value the store rejects.
+    expect(
+      parseSettings({ ...base, check_gate: { ...base.check_gate, pass_verdicts: ["ship it", "looks fine"] } }),
+    ).toBeNull();
+    // An empty set is a legal stored configuration (nothing passes).
+    expect(parseSettings({ ...base, check_gate: { min_score: 80, pass_verdicts: [] } })).not.toBeNull();
+    // An unreadable stored verdict list arrives as explicit `null` — the
+    // server's honest degradation — and still parses, so the section can
+    // render its read-only notice instead of failing the whole face.
+    const unreadable = parseSettings({ ...base, check_gate: null });
+    expect(unreadable && unreadable.can_manage && unreadable.check_gate).toBeNull();
+    expect(parseSettings({ ...base, allowlist: { ...base.allowlist, enabled: "yes" } })).toBeNull();
+    expect(parseSettings({ ...base, allowlist: { ...base.allowlist, owners: [7] } })).toBeNull();
+    expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "hidden" } })).toBeNull();
+    // Every verdict the SPA renders round-trips through this parse: the
+    // settings control submits exactly these strings back on save.
+    for (const verdict of SPA_PR_VERDICTS) {
+      const parsed = parseSettings({ ...base, check_gate: { min_score: 80, pass_verdicts: [verdict] } });
+      expect(parsed && parsed.can_manage && parsed.check_gate?.pass_verdicts).toEqual([verdict]);
+    }
+    // A never-probed App reads as 'unknown' and a failed read as null — both parse.
+    expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "unknown" } })).not.toBeNull();
+    expect(parseSettings({ ...base, app: { ...base.app, github_visibility: null } })).not.toBeNull();
   });
 
   test("parseSettings (identity-only face) requires the D4 identity set — created_at joins the required keys", () => {
@@ -434,7 +518,10 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        github_visibility: "unknown",
       },
+      check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+      allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
       model_roles: {},
@@ -663,7 +750,10 @@ describe("provider catalog rows + add selection", () => {
       last_webhook_at: null,
       sandbox_image_id: "omp",
       review_trigger_mode: "every_push",
+      github_visibility: "unknown",
     },
+    check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+    allowlist: { enabled: false, owners: [] },
     keys: [],
     model_chain: null,
     model_roles: {},
@@ -935,5 +1025,18 @@ describe("invite grammar + page copy", () => {
       expect(zh.length).toBeGreaterThan(0);
       expect(zh).not.toBe(en);
     }
+  });
+});
+
+describe("review gate verdict mirror", () => {
+  // The browser bundle cannot import the Node-only engine, so the SPA restates
+  // the vocabulary; this pins the copy to the engine tuple, in order.
+  //
+  // DELIBERATE, not incidental: this pin and the `parseSettings` round-trip
+  // (`Every verdict the SPA renders round-trips through this parse`) are the two
+  // guards on that restated copy — the pin catches an engine vocabulary change,
+  // the round-trip proves every offered string is accepted back. Both stay.
+  test("the SPA PR_VERDICTS mirror equals the engine tuple, in order", () => {
+    expect([...SPA_PR_VERDICTS]).toEqual([...ENGINE_PR_VERDICTS]);
   });
 });

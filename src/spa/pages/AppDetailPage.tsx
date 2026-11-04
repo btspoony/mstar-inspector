@@ -3,7 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import { t } from "../../i18n";
 import { PageHeader } from "@/components/PageHeader";
 import { MetricBand, type Metric } from "@/components/MetricBand";
-import { InstallationsSection, SettingsView } from "./SettingsPage";
+import { AllowlistSection, AppInstallSection, InstallationsSection, SettingsView } from "./SettingsPage";
 import { AppInsightsTab } from "./AppInsightsTab";
 import { AppPullRequestsTab } from "./AppPullRequestsTab";
 import { StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from "@design-system";
@@ -101,8 +101,7 @@ export async function loadAppDetail(
  * says `can_manage` — a non-manager never sees the tab at all.
  *
  * Page wayfinding (the back link to the Apps list) is the shell's —
- * rendered as the first element on the error and ok faces; the settings
- * tab body keeps only the version footer.
+ * rendered as the first element on the error and ok faces.
  *
  * Data plane: the shell owns the settings fetch (both faces — the
  * identity-only `can_manage: false` shape parses through the D4 identity
@@ -404,7 +403,25 @@ export function AppDetailView({
         </TabsContent>
         {canManage ? (
           <TabsContent value="installations" forceMount>
-            <InstallationsSection locale={locale} payload={payload} />
+            {/* Installed tab: the shareable install link leads, the owner
+                allowlist follows it (owners arrive through installations),
+                then the installation table and its delivery health. The
+                allowlist renders for EVERY visibility: admission enforces a
+                stored list whatever the App's visibility, so a hidden control
+                would leave a live filter unmanageable. A private App instead
+                carries a line saying the control stays visible for that
+                reason. */}
+            <div className="flex flex-col">
+              <AppInstallSection locale={locale} app={payload.app} />
+              <AllowlistSection
+                locale={locale}
+                appId={appId}
+                allowlist={payload.allowlist}
+                privateApp={payload.app.github_visibility === "private"}
+                onReload={onReload}
+              />
+              <InstallationsSection locale={locale} payload={payload} />
+            </div>
           </TabsContent>
         ) : null}
         {canManage ? (

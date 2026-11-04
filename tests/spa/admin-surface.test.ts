@@ -16,8 +16,14 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import { opsSurface } from "../../src/design-system/tokens";
+import { t } from "../../src/i18n";
+import { RuntimePage } from "../../src/spa/admin/RuntimePage";
+import { SettingsView } from "../../src/spa/pages/SettingsPage";
+import { APP_VERSION } from "../../src/version";
 
 const REPO = new URL("../../", import.meta.url).pathname;
 const ADMIN_HTML_PATH = join(REPO, "src/spa/admin.html");
@@ -171,5 +177,48 @@ describe("the console document's own styles", () => {
         .map(({ rule }) => `src/spa/admin.html:${index + 1}: [${rule}] ${line.trim()}`),
     );
     expect(hits, `admin.html keeps no literal of its own:\n${hits.join("\n")}`).toEqual([]);
+  });
+});
+
+describe("the release version lives on the console only", () => {
+  /** The identity-only App settings face — every member's tenant view. */
+  const TENANT_PAYLOAD = {
+    can_manage: false as const,
+    workspace_id: "ws_0123456789abcdefghijkl",
+    app: {
+      github_app_id: 1,
+      status: "active",
+      review_enabled: true,
+      created_by: "mallory",
+      created_at: "2026-01-01 00:00:00",
+      id: "app-demo",
+      github_name: "Demo",
+      github_slug: "demo",
+      github_description: null,
+      github_html_url: null,
+      github_avatar_url: null,
+      github_metadata_synced_at: null,
+    },
+  };
+
+  test("the runtime screen carries the deployment's version", () => {
+    const markup = renderToStaticMarkup(createElement(RuntimePage, { locale: "en" }));
+    // The build constant plus its localized sentence, so a dropped footer or a
+    // stale key both fail here.
+    expect(markup).toContain(`v${APP_VERSION}`);
+    expect(markup).toContain(t("en", "admin.runtime.version", { version: `v${APP_VERSION}` }));
+  });
+
+  test("no tenant settings render carries it", () => {
+    const markup = renderToStaticMarkup(
+      createElement(SettingsView, {
+        locale: "en",
+        payload: TENANT_PAYLOAD,
+        groups: [],
+        onReload: async () => true,
+      }),
+    );
+    expect(markup).not.toContain(`v${APP_VERSION}`);
+    expect(markup).not.toContain(t("en", "admin.runtime.version", { version: `v${APP_VERSION}` }));
   });
 });

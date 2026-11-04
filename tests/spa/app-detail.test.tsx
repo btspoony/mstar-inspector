@@ -24,6 +24,7 @@ import {
   appInsightsSummaryUrl,
   appStatusPill,
   parseAppDetailSearch,
+  PR_VERDICTS,
   pullRequestRefOf,
   type AppDetailSearch,
   type AppDetailTab,
@@ -35,6 +36,7 @@ import { AppDetailPage, AppDetailView, loadAppDetail } from "../../src/spa/pages
 import { SettingsView } from "../../src/spa/pages/SettingsPage";
 import { apiBase } from "../../src/spa/workspace-base";
 import { AppInsightsTab, InsightsRecordsView, SEVERITY_SLOTS } from "../../src/spa/pages/AppInsightsTab";
+import { APP_VERSION } from "../../src/version";
 import { installDom, withMarkup } from "./dom";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
@@ -71,7 +73,10 @@ const managePayload = {
     last_webhook_at: null,
     sandbox_image_id: "omp",
     review_trigger_mode: "every_push" as const,
+    github_visibility: "unknown" as const,
   },
+  check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+  allowlist: { enabled: false, owners: [] },
   keys: [],
   model_chain: null,
   model_roles: {},
@@ -332,6 +337,112 @@ describe("tab shell rendering (static SSR)", () => {
     // The workspace settings live on /dashboard/<ref>/settings; the App
     // settings tab must not keep a second entry point to them.
     expect(manage).not.toContain(t("en", "workspace.settingsHeading"));
+  });
+});
+
+describe("installed tab configuration surface (static SSR)", () => {
+  test("the install block links to the App's GitHub installation page", () => {
+    const manage = renderDetail(managePayload, true);
+    expect(manage).toContain('href="https://github.com/apps/demo/installations/new"');
+    expect(manage).toContain('target="_blank"');
+    expect(manage).toContain('rel="noopener noreferrer"');
+    // The link's accessible name names the App, not the URL.
+    expect(manage).toContain(t("en", "settings.installLinkAria", { name: "Demo" }));
+    expect(manage).toContain(t("en", "settings.installCopy"));
+  });
+
+  test("a null slug keeps the block with explanations and offers no dead link", () => {
+    const noSlug = renderDetail(
+      { ...managePayload, app: { ...managePayload.app, github_slug: null } },
+      true,
+    );
+    expect(noSlug).not.toContain("installations/new");
+    expect(noSlug).toContain(t("en", "settings.installNoSlug"));
+    // The block itself stays rendered (title + the App name).
+    expect(noSlug).toContain(t("en", "settings.install"));
+  });
+
+  test("a private App still renders the allowlist control, with a line saying why", () => {
+    const priv = renderDetail(
+      { ...managePayload, app: { ...managePayload.app, github_visibility: "private" } },
+      true,
+    );
+    // Admission enforces the stored list for every visibility, so the control
+    // is never hidden — a hidden control would leave a live filter
+    // unmanageable. The private case carries the one-line explanation.
+    expect(priv).toContain(t("en", "settings.allowlist"));
+    expect(priv).toContain(t("en", "settings.allowlistEnable"));
+    expect(priv).toContain(t("en", "settings.allowlistPrivateStillApplies"));
+    // Any other visibility renders the same control without that line.
+    expect(renderDetail(managePayload, true)).toContain(t("en", "settings.allowlist"));
+    expect(renderDetail(managePayload, true)).not.toContain(
+      t("en", "settings.allowlistPrivateStillApplies"),
+    );
+  });
+
+  test("the switch on with an empty list states the fail-closed consequence", () => {
+    const on = renderDetail(
+      { ...managePayload, allowlist: { enabled: true, owners: [] } },
+      true,
+    );
+    expect(on).toContain(t("en", "settings.allowlistFailClosed"));
+    // The logins field exists once the switch is on.
+    expect(on).toContain(t("en", "settings.allowlistOwners"));
+    // Off with the same empty list carries no warning.
+    expect(renderDetail(managePayload, true)).not.toContain(t("en", "settings.allowlistFailClosed"));
+    // On with an owner stored has nothing to warn about.
+    expect(
+      renderDetail({ ...managePayload, allowlist: { enabled: true, owners: ["acme"] } }, true),
+    ).not.toContain(t("en", "settings.allowlistFailClosed"));
+  });
+
+  test("the review gate renders a 0..100 score input and one checkbox per verdict", async () => {
+    const gate = await withMarkup(renderDetail(managePayload, true), (container) => {
+      // The gate's own section, by its resolved heading — the settings panel
+      // mounts every section, so a page-wide input query would read the
+      // allowlist's switch too.
+      const section = [...container.querySelectorAll('[data-slot="flow-section"]')].find(
+        (node) => node.querySelector("h2")?.textContent === t("en", "settings.reviewGate"),
+      );
+      const inputs = [...(section?.querySelectorAll("input") ?? [])];
+      const score = inputs.find((input) => input.getAttribute("type") === "number");
+      // Everything is read INSIDE the callback: the throwaway document is
+      // torn down when it returns, and a live element read afterwards is hollow.
+      return {
+        min: score?.getAttribute("min") ?? "",
+        max: score?.getAttribute("max") ?? "",
+        value: score?.getAttribute("value") ?? "",
+        verdicts: inputs
+          .filter((input) => input.getAttribute("type") === "checkbox")
+          .map((input) => ({
+            label: input.parentElement?.textContent ?? "",
+            checked: (input as HTMLInputElement).checked,
+          })),
+      };
+    });
+    expect(gate.min).toBe("0");
+    expect(gate.max).toBe("100");
+    expect(gate.value).toBe("80");
+    // The vocabulary is the whole engine set, and the payload's stored
+    // verdicts are the checked subset.
+    expect(gate.verdicts.map((box) => box.label)).toEqual([...PR_VERDICTS]);
+    expect(gate.verdicts.filter((box) => box.checked).map((box) => box.label)).toEqual(["ship it"]);
+  });
+
+  test("the review gate with no verdict checked states that no review can pass", () => {
+    const empty = renderDetail(
+      { ...managePayload, check_gate: { min_score: 80, pass_verdicts: [] } },
+      true,
+    );
+    expect(empty).toContain(t("en", "settings.reviewGateFailClosed"));
+    // The stored default passes on "ship it", so it carries no warning.
+    expect(renderDetail(managePayload, true)).not.toContain(t("en", "settings.reviewGateFailClosed"));
+  });
+
+  test("no release version string renders anywhere on the page", () => {
+    for (const markup of [renderDetail(managePayload, true), renderDetail(identityPayload, false)]) {
+      expect(markup).not.toContain(`v${APP_VERSION}`);
+    }
   });
 });
 

@@ -107,6 +107,9 @@ import {
   recheckDocWith,
 } from "../helpers/consumer-fixtures";
 
+/** The review gate the seeded test App carries (migration 0045's DDL default). */
+const GATE = { minScore: 80, passVerdicts: ["ship it"] } as const;
+
 /**
  * The migrations after the 0036 identity rewrite, in wrangler's apply order.
  * Derived from the directory (numeric prefix order, so `1000_*` follows
@@ -4219,6 +4222,22 @@ const SHA2 = "89abcdef89abcdef89abcdef89abcdef89abcdef";
 /** The scope every Check-lifecycle test drives (matches the seeded App row). */
 const CHECK_SCOPE = { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
 
+/**
+ * A review that satisfies the migration-default gate (`ship it`, floor 80) —
+ * the Check success path. `VALID_OUTPUT` (`needs fixes`, no tally) exercises
+ * the missed/unreadable gate instead.
+ */
+const GATED_OUTPUT = {
+  ...VALID_OUTPUT,
+  verdict: "ship it" as const,
+  tally: {
+    verdict: "ship it" as const,
+    scorePct: 85,
+    tally: { mustFix: 0, shouldFix: 1, nit: 0, unverified: 0 },
+    chatHeader: "should-fix: 1 | 85%",
+  },
+};
+
 type ChecksRequest = {
   op: "create" | "update" | "get" | "list";
   params: Record<string, unknown>;
@@ -4367,7 +4386,12 @@ function publicationRow(db: TestD1): { id: string; kind: string; phase: string; 
 /** One production lifecycle over the registry double with the scripted transport. */
 function lifecycleFor(db: TestD1, nowMs: () => number = () => Date.now()) {
   const adapter = checksAdapterFor(db, nowMs);
-  return createCheckLifecycle({ db, nowMs, getAdapter: () => adapter });
+  return createCheckLifecycle({
+    db,
+    nowMs,
+    getAdapter: () => adapter,
+    getCheckGate: (scope) => createAppsStore(db).getCheckGate(scope.appId),
+  });
 }
 
 function beginInput(sha: string, executionDeadlineMs: number) {
@@ -4382,9 +4406,9 @@ function beginInput(sha: string, executionDeadlineMs: number) {
 }
 
 describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
-  test("check lifecycle: a published review creates one in-progress run and terminalizes success from the persisted proof", async () => {
+  test("check lifecycle: a published review creates one in-progress run and terminalizes success when the review meets the App gate", async () => {
     reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
@@ -4408,7 +4432,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(update.status).toBe("completed");
     expect(update.conclusion).toBe("success");
     expect(update.title).toBe(CHECK_NAME);
-    expect(update.summary).toBe(CHECK_SUMMARIES.success(SHA.slice(0, 7), 1));
+    expect(update.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(update.summary).toContain('verdict "ship it"');
+    expect(update.summary).toContain("score 85");
+    expect(update.summary).toContain("floor 80");
 
     // Order: the create lands after the authoritative-SHA step and before the
     // model work; the terminal update lands after the publication was posted.
@@ -4444,7 +4471,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: duplicate delivery takes no second claim and no second remote run", async () => {
     reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
@@ -4565,7 +4592,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(failureRows(db)).toHaveLength(1);
   });
 
-  test("check lifecycle: a confirmed degraded publication concludes neutral on the same attempt", async () => {
+  test("check lifecycle: a confirmed degraded publication concludes failure, never neutral or success", async () => {
     reset();
     sandbox.runnerStdout = "not valid json at all";
     const db = await createSeededTestD1();
@@ -4579,15 +4606,15 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
-    expect(update.conclusion).toBe("neutral");
-    expect(update.summary).toBe(CHECK_SUMMARIES.neutral);
+    expect(update.conclusion).toBe("failure");
+    expect(update.summary).toBe(CHECK_SUMMARIES.degraded);
     const pub = publicationRow(db);
     expect(pub.kind).toBe("degraded");
     expect(pub.phase).toBe("applied");
     const row = checkRowFor(db, SHA);
     expect(checkRows(db)).toHaveLength(1);
-    expect(row.desired).toBe("neutral");
-    expect(row.observed).toBe("neutral");
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
     expect(row.publication_id).toBe(pub.id);
     expect(row.terminal_ms).not.toBeNull();
   });
@@ -4655,12 +4682,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(kvPuts).toHaveLength(1);
   });
 
-  test("check lifecycle: a published review stays success when the local persistence step fails", async () => {
+  test("check lifecycle: a confirmed publication is judged by its own envelope even when the local apply failed", async () => {
     reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // Fail ONLY a batch issued after the publication proof is durable: the
-    // Check must keep reading the PERSISTED proof, not the failed code path.
+    // Fail ONLY a batch issued after the publication proof is durable. The
+    // proof is persisted, the applied `reviews` row is not — the gate must
+    // still read the envelope THIS publication carried (spec §7.9), because
+    // the row is a projection that can lag or hold another attempt's result.
     const failingDb = {
       ...db,
       batch: async (statements: Parameters<typeof db.batch>[0]) => {
@@ -4680,7 +4709,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("success");
-    expect(update.summary).toBe(CHECK_SUMMARIES.success(SHA.slice(0, 7), 1));
+    expect(update.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("success");
     expect(row.observed).toBe("success");
@@ -4907,6 +4936,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = createCheckLifecycle({
       db,
       nowMs: checkClock,
+      getCheckGate: (scope) => createAppsStore(db).getCheckGate(scope.appId),
       getAdapter: () => checksAdapterFor(db, checkClock),
     });
 
@@ -4939,7 +4969,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: an unavailable terminal update keeps the frozen intent and defers honestly", async () => {
     reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
     // The create succeeds, the terminal UPDATE is rejected by GitHub (403).
     checkRequestOverrides.update = () => {
@@ -4959,7 +4989,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRows(db)).toHaveLength(1);
     expect(row.check_run_id).not.toBeNull();
     expect(row.desired).toBe("success");
-    expect(row.desired_summary).toBe(CHECK_SUMMARIES.success(SHA.slice(0, 7), 1));
+    expect(row.desired_summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(row.desired_summary).toContain('verdict "ship it"');
+    expect(row.desired_summary).toContain("score 85");
+    expect(row.desired_summary).toContain("floor 80");
     expect(row.desired_title).toBe(CHECK_NAME);
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
@@ -5084,6 +5117,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = createCheckLifecycle({
       db,
       nowMs: checkClock,
+      getCheckGate: (scope) => createAppsStore(db).getCheckGate(scope.appId),
       getAdapter: () => ({
         beginCheck: async ({ identity, lease }) => {
           await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, checkState.clockMs);
@@ -5132,6 +5166,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = createCheckLifecycle({
       db,
       nowMs: checkClock,
+      getCheckGate: (scope) => createAppsStore(db).getCheckGate(scope.appId),
       getAdapter: () => ({
         beginCheck: async ({ identity, lease }) => {
           await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, checkState.clockMs);
@@ -5172,7 +5207,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a terminalize that cannot obtain its Checks adapter releases to recovery, never blocking publication", async () => {
     reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
     // The App DOES have a Checks surface at `begin` (the run is created and
     // attached), but the surface is resolved per call and is gone by the time
@@ -5319,7 +5354,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a later message cannot un-abandon an earlier detached begin", async () => {
     reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
     // Message A's create is held open past the budget; message B then runs its
     // OWN begin to completion; only THEN does A's create settle.
@@ -5423,7 +5458,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a fast begin in one message cannot cancel a later message's Check", async () => {
     reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {

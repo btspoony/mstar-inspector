@@ -36,6 +36,7 @@ import {
   CHECK_NAME,
   CHECK_RECOVERY_LEASE_MS,
   rollbackCheckCreateDispatch,
+  readPublishedReview,
   setCheckCreateState,
   setCheckDesired,
   type CheckAttempt,
@@ -59,6 +60,7 @@ import {
   type ChecksListParams,
   type ChecksOctokit,
   type ChecksUpdateParams,
+  type ReviewGate,
 } from "../../src/pipeline/checks";
 import { generateKeyPairSync } from "node:crypto";
 import {
@@ -183,10 +185,13 @@ function adapterFor(db: TestD1, octokit: ChecksOctokit | null) {
   return createChecksAdapter({ db, nowMs: () => CLOCK, getOctokit: async () => octokit });
 }
 
+/** The gate the seeded test App carries (migration 0045's DDL default). */
+const GATE: ReviewGate = { minScore: 80, passVerdicts: ["ship it"] };
+
 const SUCCESS: CheckConclusion = {
   desired: "success",
   title: CHECK_NAME,
-  summary: CHECK_SUMMARIES.success(SHA.slice(0, 7), 1),
+  summary: CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 90, GATE),
 };
 
 describe("beginCheck — the create contract", () => {
@@ -1061,7 +1066,7 @@ describe("completeCheck — the terminal send", () => {
     const otherSha = "89abcdef0123456789abcdef0123456789abcdef";
     const second = await claimedAttempt(db, { headSha: otherSha });
     await attachedRun(db, second.attempt, second.lease, 4343);
-    const lifecycle = createCheckLifecycle({ db, nowMs: () => CLOCK, getAdapter: () => adapter });
+    const lifecycle = createCheckLifecycle({ db, nowMs: () => CLOCK, getAdapter: () => adapter, getCheckGate: async () => GATE });
     await lifecycle.terminalize({
       handle: {
         attemptId: second.attempt.identity.attemptId,
@@ -1168,7 +1173,7 @@ describe("fetchCheckRun — the recovery lane's read", () => {
   });
 });
 
-describe("decideConclusion — the §7.9 matrix from persisted proof", () => {
+describe("decideConclusion — the §7.9 gate matrix from persisted proof", () => {
   const proof = (kind: "review" | "degraded"): PublicationProof => ({
     publicationId: crypto.randomUUID(),
     scope: SCOPE,
@@ -1181,6 +1186,9 @@ describe("decideConclusion — the §7.9 matrix from persisted proof", () => {
   });
   const normal = proof("review");
   const degraded = proof("degraded");
+  const gate: ReviewGate = { minScore: 80, passVerdicts: ["ship it"] };
+  const review = (verdict: string, scorePct: number | null) => ({ verdict, scorePct });
+  const sha7 = SHA.slice(0, 7);
 
   const outcomes = [
     "pre-publication-failure",
@@ -1190,25 +1198,126 @@ describe("decideConclusion — the §7.9 matrix from persisted proof", () => {
     "local-error",
   ] as const;
 
-  test("a confirmed NORMAL publication is success for every outcome (side effects never demote it)", () => {
+  test("a confirmed normal publication decides from proof: success when the gate is met, whatever the terminal outcome", () => {
+    // A proven publication is never demoted by how the attempt ended. The
+    // sweep is the WHOLE outcome vocabulary — an unconfirmed or expired
+    // attempt, a pre-publication failure, a rejected degraded send, an
+    // exhausted finalization — because the proof, not the terminal outcome,
+    // decides once a durable normal publication exists.
     for (const outcome of outcomes) {
-      const decided = decideConclusion({ proof: normal, outcome });
-      expect(decided.desired).toBe("success");
-      expect(decided.summary).toBe(`Review published for ${SHA.slice(0, 7)} (round ${normal.round}). Execution completion only; not code approval or a merge gate.`);
-      expect(decided.title).toBe(CHECK_NAME);
+      for (const score of [80, 100]) {
+        const decided = decideConclusion({
+          proof: normal,
+          outcome,
+          gate,
+          review: review("ship it", score),
+        });
+        expect(decided.desired).toBe("success");
+        expect(decided.summary).toBe(CHECK_SUMMARIES.gateMet(sha7, normal.round, "ship it", score, gate));
+        // The wording is pinned independently of the summary builder.
+        expect(decided.summary).toContain('verdict "ship it"');
+        expect(decided.summary).toContain(`score ${score}`);
+        expect(decided.summary).toContain("floor 80");
+        expect(decided.title).toBe(CHECK_NAME);
+      }
     }
   });
 
-  test("a confirmed DEGRADED publication is neutral", () => {
+  test("a score below the floor is failure; the summary names verdict, score, floor and allowed verdicts", () => {
+    const decided = decideConclusion({ proof: normal, outcome: "expired", gate, review: review("ship it", 79) });
+    expect(decided.desired).toBe("failure");
+    expect(decided.summary).toBe(CHECK_SUMMARIES.gateMissed(sha7, "ship it", 79, gate));
+    expect(decided.summary).toContain('"ship it"');
+    expect(decided.summary).toContain("score 79");
+    expect(decided.summary).toContain("floor 80");
+    expect(decided.summary).toContain("allowed: ship it");
+    expect(decided.title).toBe(CHECK_NAME);
+  });
+
+  test("a verdict outside the passing set is failure even at a high score", () => {
+    for (const verdict of ["needs fixes", "blocked", "incomplete"]) {
+      const decided = decideConclusion({ proof: normal, outcome: "expired", gate, review: review(verdict, 95) });
+      expect(decided.desired).toBe("failure");
+      expect(decided.summary).toBe(CHECK_SUMMARIES.gateMissed(sha7, verdict, 95, gate));
+    }
+  });
+
+  test("a missing review row or a missing tally is an unreadable-gate failure, never a pass", () => {
+    for (const missing of [null, review("ship it", null)]) {
+      const decided = decideConclusion({ proof: normal, outcome: "expired", gate, review: missing });
+      expect(decided.desired).toBe("failure");
+      expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadable(sha7, gate));
+    }
+  });
+
+  test("an unreadable proof payload is the gate-unreadable failure, never an earlier passing row", async () => {
+    // RL-12: an earlier attempt for the same head SHA already wrote a passing
+    // `reviews` row. This attempt's proof payload carries no artifact envelope,
+    // so the review it published is UNREADABLE — and an unreadable proof must
+    // never be backfilled from the projection of another attempt's apply.
+    const db = await seededDb();
+    const unreadable = proof("review");
+    db.raw
+      .prepare(
+        `INSERT INTO reviews
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, verdict, envelope, reviewed_at)
+         VALUES ('earlier-attempt', ?, ?, ?, ?, ?, ?, 'ship it', '{"tally":{"scorePct":96}}', datetime('now'))`,
+      )
+      .run(APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA);
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{"version":1,"artifact":null}', ?, ?)`,
+      )
+      .run(
+        unreadable.publicationId, APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo,
+        SCOPE.prNumber, SHA, T0, T0,
+      );
+
+    const read = await readPublishedReview(db, {
+      scope: SCOPE,
+      headSha: SHA,
+      publicationId: unreadable.publicationId,
+    });
+    expect(read).toBeNull();
+    // Without a proof id there is no review to judge at all: `null`, never the
+    // projection — the set row above stays unread by this call.
+    expect(await readPublishedReview(db, { scope: SCOPE, headSha: SHA })).toBeNull();
+
+    const decided = decideConclusion({ proof: unreadable, outcome: "expired", gate, review: read });
+    expect(decided.desired).toBe("failure");
+    expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadable(sha7, gate));
+  });
+
+  test("an EMPTY allowed-verdict set misses every review — a saved [] gates every Check to failure", () => {
+    // The settings route stores an empty submission as `[]` (readable
+    // configuration, never a null gate — see apps-store.test.ts), so no
+    // published verdict can be on the allowed set: every proof-carrying Check
+    // concludes failure.
+    const empty: ReviewGate = { minScore: 0, passVerdicts: [] };
+    for (const verdict of ["ship it", "needs fixes", "blocked", "incomplete"]) {
+      const decided = decideConclusion({ proof: normal, outcome: "expired", gate: empty, review: review(verdict, 100) });
+      expect(decided.desired).toBe("failure");
+    }
+  });
+
+  test("a confirmed DEGRADED publication is failure for every outcome (neutral is unreachable)", () => {
     for (const outcome of outcomes) {
-      const decided = decideConclusion({ proof: degraded, outcome });
-      expect(decided.desired).toBe("neutral");
+      const decided = decideConclusion({ proof: degraded, outcome, gate, review: review("ship it", 100) });
+      expect(decided.desired).toBe("failure");
       expect(decided.summary).toBe("Review output was invalid; a degraded summary comment was published.");
     }
   });
 
   test("no proof + pre-publication failure is failure with the reason in the summary", () => {
-    const decided = decideConclusion({ proof: null, outcome: "pre-publication-failure", reason: "sandbox clone rejected" });
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "pre-publication-failure",
+      gate,
+      review: null,
+      reason: "sandbox clone rejected",
+    });
     expect(decided.desired).toBe("failure");
     expect(decided.summary).toBe(
       "Review execution failed before publication: sandbox clone rejected. No review was published.",
@@ -1216,14 +1325,14 @@ describe("decideConclusion — the §7.9 matrix from persisted proof", () => {
   });
 
   test("no proof + degraded-not-posted is failure with the degraded-notice wording", () => {
-    const decided = decideConclusion({ proof: null, outcome: "degraded-not-posted" });
+    const decided = decideConclusion({ proof: null, outcome: "degraded-not-posted", gate, review: null });
     expect(decided.desired).toBe("failure");
     expect(decided.summary).toBe("Review output was invalid and the degraded notice was not published.");
   });
 
   test("no proof + publication-unknown / expired is the unconfirmed failure", () => {
     for (const outcome of ["publication-unknown", "expired"] as const) {
-      const decided = decideConclusion({ proof: null, outcome });
+      const decided = decideConclusion({ proof: null, outcome, gate, review: null });
       expect(decided.desired).toBe("failure");
       expect(decided.summary).toBe(
         "Review attempt could not be confirmed complete; publication status is unknown.",
@@ -1232,25 +1341,47 @@ describe("decideConclusion — the §7.9 matrix from persisted proof", () => {
   });
 
   test("no proof + local-error is the exhausted finalization wording", () => {
-    const decided = decideConclusion({ proof: null, outcome: "local-error" });
+    const decided = decideConclusion({ proof: null, outcome: "local-error", gate, review: null });
     expect(decided.desired).toBe("failure");
     expect(decided.summary).toBe("Finalization could not be confirmed. Manual inspection may be required.");
   });
 
-  test("every summary is bounded and free of verdict/approval language", () => {
+  test("an unreadable App gate is failure — no floor, no allowed list, never a default", () => {
+    for (const applied of [null, review("ship it", 100)]) {
+      const decided = decideConclusion({ proof: normal, outcome: "expired", gate: null, review: applied });
+      expect(decided.desired).toBe("failure");
+      expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadableConfig(sha7));
+      // A gate that could not be read must not be described as if it were.
+      expect(decided.summary).not.toContain("floor");
+      expect(decided.summary).not.toContain("allowed:");
+    }
+  });
+
+  test("a non-default gate is honored (any passing verdict at a lower floor)", () => {
+    const loose: ReviewGate = { minScore: 50, passVerdicts: ["ship it", "needs fixes"] };
+    const decided = decideConclusion({ proof: normal, outcome: "expired", gate: loose, review: review("needs fixes", 60) });
+    expect(decided.desired).toBe("success");
+    expect(decided.summary).toBe(CHECK_SUMMARIES.gateMet(sha7, normal.round, "needs fixes", 60, loose));
+  });
+
+  test("every summary is bounded and carries no review-approval verbs", () => {
     for (const decided of [
-      decideConclusion({ proof: normal, outcome: "publication-unknown" }),
-      decideConclusion({ proof: degraded, outcome: "publication-unknown" }),
-      decideConclusion({ proof: null, outcome: "pre-publication-failure", reason: "x".repeat(9_000) }),
-      decideConclusion({ proof: null, outcome: "publication-unknown" }),
-      decideConclusion({ proof: null, outcome: "degraded-not-posted" }),
-      decideConclusion({ proof: null, outcome: "expired" }),
-      decideConclusion({ proof: null, outcome: "local-error" }),
+      decideConclusion({ proof: normal, outcome: "publication-unknown", gate, review: review("ship it", 96) }),
+      decideConclusion({ proof: normal, outcome: "expired", gate, review: review("needs fixes", 40) }),
+      decideConclusion({ proof: normal, outcome: "expired", gate, review: null }),
+      decideConclusion({ proof: normal, outcome: "expired", gate: null, review: review("ship it", 96) }),
+      decideConclusion({ proof: degraded, outcome: "publication-unknown", gate, review: null }),
+      decideConclusion({ proof: null, outcome: "pre-publication-failure", gate, review: null, reason: "x".repeat(9_000) }),
+      decideConclusion({ proof: null, outcome: "publication-unknown", gate, review: null }),
+      decideConclusion({ proof: null, outcome: "degraded-not-posted", gate, review: null }),
+      decideConclusion({ proof: null, outcome: "expired", gate, review: null }),
+      decideConclusion({ proof: null, outcome: "local-error", gate, review: null }),
     ]) {
       expect(decided.summary.length).toBeLessThanOrEqual(2_000);
       expect(decided.desired).not.toBe("in_progress");
+      expect(decided.desired).not.toBe("neutral");
       // D3/RL-10: never an approval, never a merge gate.
-      expect(decided.summary).not.toMatch(/approve|approved|request changes|blocking|merge gate required/i);
+      expect(decided.summary).not.toMatch(/approve|approved|request changes|merge gate required|blocking/i);
       expect(decided.summary).not.toMatch(/APPROVE|REQUEST_CHANGES/);
     }
   });
@@ -1259,6 +1390,8 @@ describe("decideConclusion — the §7.9 matrix from persisted proof", () => {
     const decided = decideConclusion({
       proof: null,
       outcome: "pre-publication-failure",
+      gate,
+      review: null,
       reason: `ghp_SECRETVALUE123\nsecond line <script>`,
     });
     expect(decided.summary).not.toContain("ghp_SECRETVALUE123");

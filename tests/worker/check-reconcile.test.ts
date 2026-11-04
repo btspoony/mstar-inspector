@@ -9,8 +9,9 @@
  *     `in_progress` attempt before its EXECUTION deadline, the attempt cap and
  *     suspended rows of an unusable App are all left alone
  *   - an expired `in_progress` attempt becomes a TERMINAL conclusion decided
- *     from persisted proof (normal → success, degraded → neutral, none →
- *     unconfirmed failure); `in_progress` is never handed to `completeCheck`
+ *     from persisted proof AND the App gate (normal meeting the gate → success,
+ *     gate missed/unreadable or degraded → failure, none → unconfirmed
+ *     failure); `in_progress` is never handed to `completeCheck`
  *   - adoption BEFORE create: a possibly-sent create is resolved read-only,
  *     a definitively `not-sent` row creates once, and an unproven/ambiguous
  *     absence never creates
@@ -182,13 +183,14 @@ function seedPublication(
   headSha: string,
   proof: PublicationProof,
   phase = "confirmed",
+  payload: unknown = {},
 ): void {
   db.raw
     .prepare(
       `INSERT INTO review_publications
          (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms, confirmed_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, 1, 'done', ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'done', ?, ?, ?)`,
     )
     .run(
       proof.publicationId,
@@ -200,10 +202,76 @@ function seedPublication(
       headSha,
       proof.kind,
       phase,
+      JSON.stringify(payload),
       JSON.stringify(proof),
       T0 - 20_000,
       T0 - 10_000,
       T0 - 10_000,
+    );
+}
+
+/** An `mstar.review/v1` envelope with the given verdict and tally score. */
+function reviewEnvelope(verdict: string, scorePct: number | null): Record<string, unknown> {
+  return {
+    schema: "mstar.review/v1",
+    verdict,
+    findings: [],
+    ...(scorePct === null
+      ? {}
+      : { tally: { verdict, scorePct, tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 0 }, chatHeader: "h" } }),
+  };
+}
+
+/**
+ * A staged `kind: "review"` publication payload carrying its own envelope —
+ * the second attempt's journal row, distinct from any `reviews` row.
+ */
+function reviewPayload(scope: Scope, headSha: string, verdict: string, scorePct: number): unknown {
+  return {
+    version: 1,
+    scope,
+    headSha,
+    kind: "review",
+    round: 3,
+    targetCommentId: null,
+    body: `## Review\n\n${verdict}`,
+    bodySha256: "a".repeat(64),
+    artifact: {
+      kind: "review",
+      key: {
+        installation_id: scope.installationId,
+        owner: scope.owner,
+        repo: scope.repo,
+        pr_number: scope.prNumber,
+        head_sha: headSha,
+      },
+      schema: "mstar.review/v1",
+      payload: reviewEnvelope(verdict, scorePct),
+      appId: scope.appId,
+      model: null,
+      provider: null,
+    },
+    lifecycle: null,
+    lineIntents: [],
+  };
+}
+
+/** The applied review the gate reads (verdict + envelope tally); `scorePct` null = no tally. */
+function seedReview(db: TestD1, scope: Scope, headSha: string, verdict: string, scorePct: number | null): void {
+  db.raw
+    .prepare(
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, envelope)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      crypto.randomUUID(),
+      scope.installationId,
+      scope.owner,
+      scope.repo,
+      scope.prNumber,
+      headSha,
+      verdict,
+      JSON.stringify(reviewEnvelope(verdict, scorePct)),
     );
 }
 
@@ -389,6 +457,22 @@ function run(db: TestD1, deps: CheckReconcileDeps = {}) {
   return reconcileReviewChecks(asEnv(db), { log: SILENT_LOG, ...deps });
 }
 
+/**
+ * The same database with the SELECTs matching `matcher` throwing, i.e. a
+ * persistent read failure on exactly those statements (everything else —
+ * including the durable writes and `raw` assertions — still works).
+ */
+function withFailingReads(db: TestD1, matcher: RegExp): TestD1 {
+  return {
+    prepare(sql: string) {
+      if (matcher.test(sql)) throw new Error("d1 read failed");
+      return db.prepare(sql);
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+    raw: db.raw,
+  } as TestD1;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -555,11 +639,14 @@ describe("due selection (spec §7.11.2 predicate)", () => {
 // ---------------------------------------------------------------------------
 
 describe("expired attempt → terminal conclusion from persisted proof (spec §7.9)", () => {
-  test("a matching normal publication proof concludes success and marks observed", async () => {
+  test("a normal publication whose applied review meets the gate concludes success and marks observed", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     const proof = proofFor(attempt.identity, "review");
-    seedPublication(db, SCOPE, SHA, proof);
+    // The gate reads the review THIS publication carried, never the scope/SHA
+    // `reviews` projection (see `readPublishedReview`), so the envelope lives in
+    // the publication payload.
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, {
@@ -573,8 +660,10 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
             // and the shipped text is the frozen proof-derived intent.
             expect(conclusion.desired).toBe("success");
             expect(conclusion.title).toBe(CHECK_NAME);
-            expect(conclusion.summary).toContain("Review published for 0123456 (round 3).");
-            expect(conclusion.summary).toContain("not code approval or a merge gate");
+            expect(conclusion.summary).toContain("Review gate met for 0123456 (round 3)");
+            expect(conclusion.summary).toContain('verdict "ship it"');
+            expect(conclusion.summary).toContain("score 85");
+            expect(conclusion.summary).toContain("floor 80");
             return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
           },
         }),
@@ -593,7 +682,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.publication_id).toBe(proof.publicationId);
   });
 
-  test("a confirmed degraded publication concludes neutral, not success", async () => {
+  test("a confirmed degraded publication concludes failure, not neutral", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     seedPublication(db, SCOPE, SHA, proofFor(attempt.identity, "degraded"), "applied");
@@ -606,9 +695,9 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
-            expect(conclusion.desired).toBe("neutral");
+            expect(conclusion.desired).toBe("failure");
             expect(conclusion.summary).toBe("Review output was invalid; a degraded summary comment was published.");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "neutral" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
           },
         }),
       });
@@ -617,8 +706,8 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       fetchStub.restore();
     }
     const row = await rawRow(db, attempt.identity.attemptId);
-    expect(row.desired).toBe("neutral");
-    expect(row.observed).toBe("neutral");
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
   });
 
   test("an expired attempt with NO proof concludes an honest unconfirmed failure", async () => {
@@ -648,6 +737,50 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect((await rawRow(db, attempt.identity.attemptId)).observed).toBe("failure");
   });
 
+  test("a persistent gate/review read failure still terminalizes the attempt (QC3-F-001)", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    // Seed a CONFIRMED publication proof plus a readable review envelope inside
+    // it, so the decision actually reaches the gate: without them the lane
+    // concludes from the absent proof alone and never issues the two reads this
+    // case is about.
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 96));
+    // The gate and the review payload are the two reads a failing D1 keeps
+    // failing; after migration 0045 a corrupt `check_pass_verdicts` no longer
+    // throws either — `getCheckGate` reports it as null, the same UNREADABLE
+    // input. Neither is a reason to skip the terminal conclusion: an attempt
+    // that only retried would never conclude its Check.
+    const degraded = withFailingReads(db, /check_pass_verdicts|SELECT payload_json FROM review_publications/);
+    const fetchStub = stubFetch();
+    const pushed: CheckConclusion[] = [];
+    try {
+      const summary = await run(degraded, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          complete: async (identity, _id, conclusion) => {
+            pushed.push(conclusion);
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+          },
+        }),
+      });
+      expect(summary.errors).toBe(0);
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]?.desired).toBe("failure");
+    expect(pushed[0]?.summary).toBe("Review gate could not be evaluated for 0123456: the App's gate configuration could not be read.");
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
+    expect(row.recovery_state).toBe("done");
+  });
+
   test("a newly discovered proof CORRECTS a persisted unknown failure to success on the same run", async () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db);
@@ -663,7 +796,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       ),
     ).toBe(true);
     const proof = proofFor(attempt.identity, "review");
-    seedPublication(db, SCOPE, SHA, proof);
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 92));
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, {
@@ -687,6 +820,44 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.publication_id).toBe(proof.publicationId);
     // The correction happened on the SAME owned run — no second generation.
     expect(await db.prepare(`SELECT COUNT(*) AS n FROM review_checks`).first<{ n: number }>()).toEqual({ n: 1 });
+  });
+
+  test("the gate reads the attempt's OWN publication, not the scope/SHA reviews row", async () => {
+    // `reviews` holds ONE row per scope/SHA (UNIQUE key, first write wins) and
+    // the journal holds ONE review publication per scope/SHA, so under RL-12 a
+    // later attempt re-uses that publication while the `reviews` projection can
+    // still be the FIRST attempt's result — or not applied at all. The gate
+    // must read the envelope the proof's publication carried; a stale row must
+    // not decide a fresh round.
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const proof = proofFor(attempt.identity, "review");
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 95));
+    seedReview(db, SCOPE, SHA, "blocked", 40);
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          complete: async (identity, _id, conclusion) => {
+            expect(conclusion.desired).toBe("success");
+            expect(conclusion.summary).toContain('verdict "ship it"');
+            expect(conclusion.summary).toContain("score 95");
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
+          },
+        }),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.publication_id).toBe(proof.publicationId);
   });
 
   test("proof from ANOTHER SHA never decides this attempt's conclusion", async () => {

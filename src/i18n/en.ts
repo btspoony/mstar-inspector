@@ -607,6 +607,16 @@ export const en = {
         "This App already has the maximum of {limit} custom providers — remove one before materializing another (updating an existing declaration is always allowed). Nothing was stored.",
       runtimeHarnessUnknown: "Unknown or disabled runtime harness — nothing was stored.",
       triggerModeUnknown: "{mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
+      checkScoreInvalid: "The review gate score must be a whole number from 0 to 100. Nothing was stored.",
+      checkVerdictUnknown:
+        "{verdict} is not a review verdict — use one of: {verdicts}. Nothing was stored.",
+      allowlistToggleInvalid: "The owner allowlist switch must be on or off. Nothing was stored.",
+      allowlistTooManyOwners:
+        "The owner allowlist accepts at most {limit} owners — nothing was stored. Remove some logins and resubmit.",
+      allowlistInvalidOwner:
+        "{owner} is not a valid GitHub login — use 1–39 letters, digits, or hyphens. Nothing was stored.",
+      fieldDuplicated:
+        "The {field} field was submitted more than once — resubmit the form with one value. Nothing was saved.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
@@ -766,14 +776,33 @@ export const en = {
     // bypassing the 24h TTL; the success notice confirms the cache reloaded.
     appInfoRefresh: "Refresh from GitHub",
     appInfoRefreshDone: "Identity refreshed from GitHub.",
-    /**
-     * Deployment version footer. `{version}` carries the
-     * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the
-     * /healthz field and release tags.
-     */
-    footer: {
-      version: "Version {version}",
-    },
+    // Installed tab: the shareable GitHub installation entry point.
+    install: "Install",
+    installCopy: "Share this link with any GitHub account to install the App.",
+    installLink: "Open the installation page",
+    installLinkAria: "Install {name} on GitHub in a new tab",
+    installNoSlug:
+      "This App has no GitHub slug yet, so there is no installation link. Refresh the GitHub identity, then share the link.",
+    // Installed tab: the owner allowlist (migration 0045).
+    allowlist: "Owner allowlist",
+    allowlistCopy: "With the switch on, only these repository owners are reviewed.",
+    allowlistEnable: "Restrict reviews to allowlisted owners",
+    allowlistOwners: "Allowed owners (one GitHub login per line)",
+    allowlistFailClosed:
+      "The switch is on and the list is empty: every delivery is refused, so no review will run.",
+    allowlistPrivateStillApplies:
+      "This App is private, but the stored list still applies to its deliveries — the control stays visible so you can manage it.",
+    allowlistSave: "Save allowlist",
+    // Settings tab: the review gate the Check reports (migration 0045).
+    reviewGate: "Review gate",
+    reviewGateCopy: "The Check passes only when the verdict is one of these and the score meets the floor.",
+    reviewGateScore: "Minimum score (0–100)",
+    reviewGateVerdicts: "Verdicts that pass",
+    reviewGateFailClosed:
+      "No verdict is selected: no review can ever pass, so every Check fails until you pick one.",
+    reviewGateSave: "Save review gate",
+    reviewGateUnreadable:
+      "This App's stored review gate could not be read, so it cannot be edited here. The Check keeps failing closed until the stored configuration is repaired.",
   },
   manifest: {
     title: "Create GitHub App",
@@ -932,6 +961,12 @@ export const en = {
       /** Neither stored budget could be read — the numbers are the documented defaults. */
       checkUnreadable:
         "The stored check budgets could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
+      /**
+       * Deployment version footer. `{version}` carries the
+       * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the
+       * /healthz field and release tags.
+       */
+      version: "Version {version}",
     },
     /** Workspaces page. */
     workspaces: {

@@ -35,10 +35,11 @@ import {
   pullRequestRecord,
   WEBHOOK_BODY_LIMIT,
   webhookRepositoryFullName,
+  webhookRepositoryOwnerLogin,
   type WebhookOutcome,
 } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
-import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
+import { createAppsStore, type AppAllowlist, type DeliveryOutcome } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
 import { adminApp } from "../admin/index";
@@ -245,11 +246,20 @@ app.route("/dashboard", dashboardApp);
  * never affected). The retired legacy face recorded nothing (AL-20-1:
  * legacy 不落行 — it was the fallback path with no dashboard consumer).
  *
- * Order of the verified, non-reject path: classify → delivery record → PR
- * ledger (0039) → `last_webhook_at` touch → `ignore` return → install
- * bookkeeping (the `installation` branch records and returns; the job path
- * records and proceeds) → pause gate → global flag gate → enqueue. The reject
- * return sits between the delivery record and the PR ledger.
+ * Order of the verified, non-reject path: classify → owner-allowlist admission
+ * → delivery record → PR ledger (0039) → `last_webhook_at` touch → `ignore`
+ * return → install bookkeeping (the `installation` branch records and returns;
+ * the job path records and proceeds) → pause gate → global flag gate → enqueue.
+ * The reject return sits between the delivery record and the PR ledger.
+ *
+ * Owner allowlist admission (migration 0045): an App with the switch on and an
+ * owner set that excludes the delivery's `repository.owner.login` answers 200
+ * and returns there — before the delivery row, the PR ledger, the
+ * `last_webhook_at` touch and the enqueue, so a refused delivery leaves no
+ * trace. It applies for EVERY cached visibility (`private` only hides the
+ * Settings control). An unreadable owner proceeds (it cannot be judged); an
+ * unreadable allowlist is fail-closed — 500, same zero writes, so GitHub
+ * retries instead of the delivery slipping past an unapplied gate.
  */
 app.post("/webhook/:workspaceId/:appId", async (c) => {
   // Body-size cap checked BEFORE buffering the body (B6). Two gates: the
@@ -391,13 +401,79 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
   }
 
+  // Owner allowlist admission (migration 0045, AC5–AC7): after classification,
+  // BEFORE any ledger write, and ONLY for the two review-triggering events
+  // (`pull_request`, `issue_comment`) — the events this route can enqueue a
+  // review for. Every other event, `installation` bookkeeping included, is
+  // never gated: it has no review to admit or refuse. A `reject` is never
+  // gated either: the classifier already refused the delivery (malformed
+  // payload, bad signature) and its status is the answer GitHub must see, so
+  // the gate must not mask a 400/401 with the allowlist's 200 or 500.
+  // An App whose switch is on reviews only the repository owners it lists;
+  // the login comes off the classifier's own single parse, so the up-to-1 MB
+  // body is never re-parsed.
+  // That parse is pure and a review-triggering payload without a repository
+  // owner cannot be judged, so such a delivery proceeds. The cached
+  // `github_visibility` is NOT part of this decision: `private` only hides the
+  // Settings control, and a stale cached `private` must never leave the gate
+  // inert. The switch and the owner set come from ONE `getAllowlist` snapshot —
+  // the row's own `allowlist_enabled` is never consulted for this decision. A
+  // refusal is a 200 (GitHub must not retry) with no `webhook_deliveries` row,
+  // no `pull_requests` row, no `last_webhook_at` touch and no enqueue. An
+  // allowlist that cannot be read — a thrown read, or a null on a row that was
+  // read moments earlier — is fail-CLOSED: 500 with those same zero writes, so
+  // an unapplied gate never admits a delivery.
+  const reviewTriggering =
+    outcome.kind !== "reject" && (eventName === "pull_request" || eventName === "issue_comment");
+  const ownerLogin = reviewTriggering ? webhookRepositoryOwnerLogin(classified) : null;
+  if (ownerLogin !== null) {
+    let allowlist: AppAllowlist | null;
+    try {
+      allowlist = await appsStore.getAllowlist(row.id);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      webhookWarn(
+        "owner_allowlist_read_failed",
+        detail,
+        "owner allowlist read failed — delivery refused with 500 so GitHub retries (fail-closed); zero writes, zero enqueue",
+      );
+      return c.text("owner allowlist unreadable", 500);
+    }
+    if (allowlist === null) {
+      // `getAppForWebhook` resolved this row moments ago, so a null here means
+      // it vanished underneath us: the gate's state is unknown, not absent.
+      webhookWarn(
+        "owner_allowlist_row_vanished",
+        `${webhookRef} row_id=${row.id}`,
+        "owner allowlist row vanished after the App lookup — delivery refused with 500 so GitHub retries (fail-closed); zero writes, zero enqueue",
+      );
+      return c.text("owner allowlist unreadable", 500);
+    }
+    // GitHub logins are case-insensitive; the stored list keeps the
+    // operator's case, so fold both sides (the users.ts login-list rule).
+    if (
+      allowlist.enabled &&
+      !allowlist.owners.some((owner) => owner.toLowerCase() === ownerLogin.toLowerCase())
+    ) {
+      webhookWarn(
+        "owner_not_allowlisted",
+        `${webhookRef} row_id=${row.id} owner=${ownerLogin}`,
+        "per-App webhook skipped a delivery from a repository owner outside the allowlist — zero writes, 200 so GitHub stops retrying",
+      );
+      return c.text("ignored", 200);
+    }
+  }
+
   // AL-20-1: best-effort delivery recording — the R2 diagnostics
-  // face ("断线看得见"). ONE row per VERIFIED delivery, written immediately
-  // after classification (before the reject return) so EVERY classified
-  // outcome lands: reject → rejected (status_code = the classifier's
-  // status), ignore → ignored, job + review_enabled=0 or review_global=0 →
-  // paused, job → ok, installation → ignored (verified, but it enqueues
-  // nothing — not a reviewable event).
+  // face ("断线看得见"). ONE row per ADMITTED verified delivery, written
+  // immediately after classification (before the reject return) so every
+  // classified outcome that reaches this line lands: reject → rejected
+  // (status_code = the classifier's status), ignore → ignored, job +
+  // review_enabled=0 or review_global=0 → paused, job → ok, installation →
+  // ignored (verified, but it enqueues nothing — not a reviewable event).
+  // The owner-allowlist refusal above (200 `ignored`) and its unreadable-read
+  // 500 return BEFORE this line, so those verified outcomes land no row by
+  // design — the gate admitted nothing.
   // pre-classify failures (413 / db-guard / 404 /
   // decrypt 500) never reach this line and record nothing (the retired
   // legacy face recorded nothing by design — AL-20-1: legacy 不落行; app_id

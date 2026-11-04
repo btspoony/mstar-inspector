@@ -513,6 +513,13 @@ export const zhCN: Dictionary = {
       templateMaterializeMax: "此 App 已达到 {limit} 个自定义 provider 的上限 — 请先移除一个再物化新模板（更新现有声明不受限制）。未存储任何内容。",
       runtimeHarnessUnknown: "未知或已停用的运行时 harness — 未存储任何内容。",
       triggerModeUnknown: "{mode} 不是有效的审查触发模式 — 可用值为 open、every_push、manual。未存储任何内容。",
+      checkScoreInvalid: "审查门禁分数必须是 0 到 100 之间的整数。未存储任何内容。",
+      checkVerdictUnknown: "{verdict} 不是有效的审查结论 — 可用值为：{verdicts}。未存储任何内容。",
+      allowlistToggleInvalid: "所有者白名单开关必须为开或关。未存储任何内容。",
+      allowlistTooManyOwners: "所有者白名单最多接受 {limit} 个所有者 — 未存储任何内容。请移除部分登录名后重新提交。",
+      allowlistInvalidOwner:
+        "{owner} 不是有效的 GitHub 登录名 — 请使用 1–39 个字母、数字或连字符。未存储任何内容。",
+      fieldDuplicated: "{field} 字段被提交了多次 — 请以单个值重新提交表单。未保存任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
       concurrencyInvalid: "并发数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
@@ -645,11 +652,30 @@ export const zhCN: Dictionary = {
     // 成功提示确认缓存已重载。
     appInfoRefresh: "从 GitHub 刷新",
     appInfoRefreshDone: "已从 GitHub 刷新身份。",
-    // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
-    // 与 /healthz 字段及 release tag 同形。
-    footer: {
-      version: "版本 {version}",
-    },
+    // 已安装标签页：可分享的 GitHub 安装入口。
+    install: "安装",
+    installCopy: "把此链接交给任意 GitHub 账号，即可在该账号上安装此 App。",
+    installLink: "打开安装页面",
+    installLinkAria: "在新标签页中于 GitHub 安装 {name}",
+    installNoSlug: "此 App 尚无 GitHub slug，因此没有安装链接。请先刷新 GitHub 身份，再分享链接。",
+    // 已安装标签页：仓库所有者允许名单（迁移 0045）。
+    allowlist: "所有者允许名单",
+    allowlistCopy: "开关打开时，仅审查这些仓库所有者发起的交付。",
+    allowlistEnable: "仅审查允许名单中的所有者",
+    allowlistOwners: "允许的所有者（每行一个 GitHub 登录名）",
+    allowlistFailClosed: "开关已打开但名单为空：所有交付都会被拒绝，不会有任何审查运行。",
+    allowlistPrivateStillApplies:
+      "此 App 为私有，但已存储的名单仍会作用于其交付 — 控件保持显示，以便你管理名单。",
+    allowlistSave: "保存允许名单",
+    // 设置标签页：Check 所报告的审查门禁（迁移 0045）。
+    reviewGate: "审查门禁",
+    reviewGateCopy: "仅当结论属于以下之一且分数达到下限时，Check 才通过。",
+    reviewGateScore: "最低分数（0–100）",
+    reviewGateVerdicts: "可通过的结论",
+    reviewGateFailClosed: "未选中任何结论：任何审查都无法通过 — 在你选中之前，每个 Check 都会失败。",
+    reviewGateSave: "保存审查门禁",
+    reviewGateUnreadable:
+      "无法读取此 App 已存储的审查门禁，因此无法在此编辑。在存储的配置被修复之前，Check 会持续按失败处理。",
   },
   manifest: {
     title: "创建 GitHub App",
@@ -795,6 +821,9 @@ export const zhCN: Dictionary = {
       /** 两个已存储的预算都无法读取——数字只是文档默认值。 */
       checkUnreadable:
         "无法读取已存储的检查预算，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
+      // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
+      // 与 /healthz 字段及 release tag 同形。
+      version: "版本 {version}",
     },
     /** 工作区页。 */
     workspaces: {

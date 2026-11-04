@@ -1329,15 +1329,24 @@ and mirrored in `.env.example`:
 | Metadata | read | required by GitHub |
 | Pull requests | **write** | the review and its line comments |
 | Issues | **write** | the single overall-comment upsert |
-| Checks | **write** | advisory review Check Runs — execution status only (`mstar-inspector review` on the reviewed commit). Never an approval or a merge gate. |
+| Checks | **write** | advisory review Check Runs — the App's review-gate signal (`mstar-inspector review` on the reviewed commit). Never an approval or a merge gate. |
 
-**What the Check means.** A `success` conclusion records that the review **was
-published** — for every engine verdict. It is not an approval, not a merge
-gate, and never a `REQUEST_CHANGES` equivalent; the app requests neither
-event. A confirmed degraded publication is `neutral`; an execution failure or
-an unconfirmed publication is `failure`. Conclusions are decided from persisted
-publication proof, not from the code path, and a Check failure never blocks or
-delays the review. The run carries no `details_url`.
+**What the Check means.** A review's Check terminalizes to `success` or
+`failure`; `neutral` survives only in historical rows and is never produced. A
+`success` conclusion records that the review **was published and met the App's
+review gate** — the applied review's verdict is one of the App's passing
+verdicts and its tally score is at least the App's floor. The gate is per-App
+configuration in the review gate section of that App's settings page
+(`/dashboard/apps/<appId>/settings`): the defaults are the verdict `ship it`
+and a floor of 80, and a change applies to the next Check with no deploy. A
+confirmed degraded publication, an unconfirmed publication, an execution
+failure, or a published review that misses the gate is `failure`. It is not an
+approval, not a merge gate, and never a `REQUEST_CHANGES` equivalent; the app
+requests neither event. Conclusions are decided from persisted publication
+proof and the applied review, not from the code path, and a Check failure never
+blocks or delays the review. The summary names the verdict, score, floor and
+allowed verdicts whenever the gate was the deciding factor, and the run carries
+no `details_url`.
 
 **Branch protection is user-controlled.** The app never configures, requires or
 recommends a required status check. Whether any Check gates a merge is entirely
@@ -2295,6 +2304,88 @@ Contract:
 [`.mstar/specs/review-trigger-policy.md`](../.mstar/specs/review-trigger-policy.md)
 (§2.1 classification matrix, §3 mention grammar).
 
+### Owner allowlist and App visibility (per App)
+
+An App can restrict review work to a set of repository owners — the
+`allowlist_enabled` switch on `github_apps` plus the `app_owner_allowlist`
+table (migration `0045`), edited per App on the dashboard page's **Installed**
+tab (the owners arrive through that App's installations, so the control sits
+next to them). `0045` is additive: four `ADD COLUMN`s whose NOT NULL columns
+carry defaults — an existing row materializes the allowlist off, the gate at
+80 points on the verdict `ship it` — plus the new table, so the apply needs no
+backfill and no settings visit.
+
+- **Off by default: no owner is filtered.** Every owner is reviewed as before.
+  What the switch does not govern is the read itself: admission reads the
+  allowlist row for every classified delivery that carries a repository owner,
+  on and off alike, so the failed read below applies while the switch is off
+  too — a `500` and a GitHub retry where nothing used to be read at all.
+- **On:** a delivery is admitted only when its `repository.owner.login` is
+  listed, on the `pull_request` trigger and the `issue_comment` mention alike.
+  Logins compare case-insensitively; the stored list keeps the operator's case.
+- **A refused delivery is answered `200` and writes nothing.** "Nothing" is
+  exact: no `webhook_deliveries` row, no PR ledger row, no `last_webhook_at`
+  touch and no enqueued job. `200` is deliberate — a refusal is a policy
+  outcome, not a retryable error, and GitHub redelivers non-2xx responses. The
+  only trace is one structured warn whose `event` is `owner_not_allowlisted`;
+  its `detail` carries `workspace_id=`, `app_id=` and the refused `owner=`.
+  Grep it with `wrangler tail`. Refusals never reach the delivery ledger, so
+  that line is the only evidence a delivery was refused rather than lost.
+- **Enabled with an empty list refuses every owner** (fail closed). The form
+  warns before saving and the save still lands — an empty list is a deliberate,
+  legal state.
+- **Scope:** the gate is per App and applies to that App's own installs. One
+  App's list never changes another App's deliveries.
+- **Visibility never gates admission.** The allowlist applies for every cached
+  `github_visibility` value: `private` only adds a note under the allowlist
+  control, so a stale `private` cache can never leave the gate inert.
+
+**Visibility is probed, not read.** Whether an App is public or private has no
+authenticated API field, so the dashboard probes it anonymously — `GET
+https://api.github.com/apps/{slug}` with no credentials (3-second budget, no
+retries). The probe must stay unauthenticated: an App JWT makes a private App
+answer `200` and erases the distinction.
+
+| Probe answer | Result |
+|---|---|
+| `200` | stored as `public` |
+| `404` | stored as `private` |
+| any other status, or a timeout | keep the stored value, on the metadata-refresh path and on an allowlist enable alike |
+| never probed (NULL column) | reads as `unknown` |
+
+The probe runs during the App's metadata refresh and again whenever the owner
+allowlist is switched on, so an answered probe, not a stale cache, drives the
+note the Settings page shows. An inconclusive answer keeps the previously
+stored value on both paths: admission never reads the cache, so a no-answer
+invalidates nothing. A `404` is ambiguous (a missing
+or renamed slug answers the same), so a stored `private` is a UI hint, never
+proof and never an enforcement switch:
+
+- Every App renders the allowlist control on its Installed tab, whatever the
+  cached visibility; a cached `private` only adds a note under it that the
+  stored list still applies. Admission never reads the cache, so the list is
+  enforced either way.
+- No cached value changes admission: `public`, `private` and `unknown` all
+  enforce the list alike.
+- Caching visibility writes that column only; `updated_at` stays the
+  operator-mutation timestamp.
+
+**Read failures on the admission path fail closed.** A failed allowlist read —
+a thrown store read, or a null on a row that was read moments earlier — refuses
+the delivery with `500` and writes nothing: no `webhook_deliveries` row, no PR
+ledger row, no `last_webhook_at` touch and no enqueue. GitHub then retries the
+delivery. It logs `owner_allowlist_read_failed` or
+`owner_allowlist_row_vanished`; grep them with `wrangler tail`. The direction
+is deliberate:
+
+- the read IS the gate, so "cannot read" must not mean "admit every owner";
+- a degraded D1 costs delayed deliveries (GitHub redelivers 5xx), never
+  silently admitted work;
+- an App row or review row that cannot be read concludes the Check `failure`
+  for the same reason: a pass would assert a review bar that was never
+  evaluated. A `500` GitHub retries and a Check conclusion a human reads are
+  two surfaces of one rule — an unreadable input refuses to pass.
+
 ### Queue consumer concurrency — deploy-time ceiling and runtime caps
 
 Two different numbers bound the consumer, and they are owned in two different
@@ -2511,9 +2602,10 @@ It never re-runs a paid review:
   resetting to `not-sent` would mint a second run for the same head.
 - **Conclusions come from persisted proof.** An attempt whose
   `desired = in_progress` expires at its execution deadline and is then
-  terminalized from the publication journal (`success` with matching proof,
-  `neutral` for a confirmed degraded publication, `failure` otherwise) —
-  `in_progress` is never passed to the completion API.
+  terminalized from the publication journal (`success` only when the applied
+  review meets the App's review gate, `failure` for a missed gate or a
+  confirmed degraded publication) — `in_progress` is never passed to the
+  completion API.
 - **Intent before send, observation after validation.** The frozen conclusion is
   persisted before the remote update, and the observed state advances only for a
   response that matches the persisted identity, `completed` status and intended

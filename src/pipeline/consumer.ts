@@ -1717,7 +1717,8 @@ async function readRecheckDoc(
 
 /**
  * The degraded publication outcome (§7.7 degraded payload). `confirmed` =
- * proof persisted (the Check hook reads it for the neutral conclusion);
+ * proof persisted (the Check hook reads it and concludes `failure` — a
+ * degraded publication cannot prove the review gate was met);
  * `unknown` = a send was attempted but the proof could not be persisted
  * (read-only discovery owns it); `failed` = a definitive no-send
  * (pre-publication failure / lease loss / send rejection).
@@ -2708,6 +2709,9 @@ export function createReviewConsumer(
       db: env.DB,
       nowMs: () => Date.now(),
       getAdapter: (scope) => appCommenters.get(scope.appId)?.commenter.checks ?? null,
+      // The App gate is a stored configuration value, read through the same
+      // per-consumer store as the ledger reads (spec §7.9).
+      getCheckGate: (scope) => appsStore.getCheckGate(scope.appId),
     });
   return async (batch) => {
     for (const message of batch.messages) {
@@ -4350,9 +4354,9 @@ async function processMessage(
     }
 
     // 18. §7.7 step 12 — the Check terminal decision reads the persisted
-    // proof for this publication (the hook derives success/neutral from it;
-    // the inline outcome value is only the honest fallback when the proof
-    // is unreadable).
+    // proof for this publication (a degraded publication derives `failure`
+    // from it, never a pass; the inline outcome value is only the honest
+    // fallback when the proof is unreadable).
     await terminalizeCheck(stagedId, "publication-unknown");
     return { kind: "ok" };
   } catch (err) {

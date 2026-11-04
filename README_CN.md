@@ -118,6 +118,8 @@ Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.revie
 
 - **Per-App 路由**：GitHub 把 webhook 送到 `POST /webhook/:webhookPath`。Worker 解析该 webhook 路径、用该 App
   解密出的 secret 验签，入队一条带 App 身份的审查任务。审查没有其他入口。
+- **所有者允许名单（按 App）**：App 的 dashboard 页面上「已安装」标签页带有一个所有者允许名单开关（即该 App 的 `allowlist_enabled` 设置，由迁移 `0045` 引入）。它**默认关闭**，关闭时不筛选任何所有者——所有所有者都照旧被审查。开启后，该 App 只审查其列出的仓库所有者发来的投递——`pull_request` 触发与 `issue_comment` 提及皆然。来自未列出所有者的投递会得到 `200`，且**不留任何痕迹**：没有 `webhook_deliveries` 行、没有 PR 台账行、不更新 `last_webhook_at`、也不入队任务——唯一的记录是一条结构化的 worker 日志行（event 为 `owner_not_allowlisted`）。开关开启而名单为空时会拒绝所有所有者；页面在保存前会给出警告。该门禁按 App 生效，只作用于该 App 自己的安装，且从不读取缓存的 visibility——`private` 的 App 与其公开时一样强制执行自己的名单。允许名单读取失败则是相反的情形，走 **fail-closed**，且开关并不豁免它：凡携带仓库所有者的投递，无论开关开启还是关闭都会读取允许名单行，因此该投递会得到 `500`，其余写入同样为零（没有 delivery 行、没有 PR 台账行、不更新 `last_webhook_at`、不入队），由 GitHub 重投，而不是让投递越过一个从未生效的门禁。
+- **GitHub App 可见性（visibility）**：App 是公开还是私有并没有 API 字段，因此 dashboard 以匿名方式探测（`GET /apps/{slug}`：`200` 为公开，`404` 为私有；其它任何响应在两条路径上都保留已存的值（元数据刷新与开启允许名单时的强制探测）；从未探测过的 App 读作 `unknown`），并把结果缓存为 `github_visibility`。`404` 也可能是 slug 缺失或改名所致，因此 `private` 只是界面提示，而非执行开关：无论缓存值为何，「已安装」标签页都会显示允许名单控件，缓存为 `private` 时只是多出一行说明，指出已存储的名单仍然生效，而准入从不读取该缓存。保存一个开启的允许名单时，只要该 App 有 slug 就会强制重新探测，因此驱动这行说明的是探测到的答案，而非陈旧缓存（无应答时保留已存值）；而 slug 从未同步成功的 App 无从探测，保留已存的值。允许名单读取失败会以 `500` 拒绝该投递——与 Check 路径在配置不可读时的方向一致。准入顺序、日志与探测结果对照表见 [`docs/deploy.md` § Owner allowlist and App visibility](docs/deploy.md#owner-allowlist-and-app-visibility-per-app)。
 - **Queue → Sandbox**：Cloudflare Queue consumer 在一次性 Sandbox 容器里 clone PR 并运行多席位 agent 会话——见 [Agent 运行时](#agent-运行时)。
 - **用途受限的凭据**：Worker 从单一认证点铸造两份 installation grant，各自限定在一个仓库。Sandbox
   总是拿到 `sandbox-read` grant（`contents: read`、`metadata: read`、`pull_requests: read`——最后一项
@@ -129,12 +131,15 @@ Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.revie
   验证的、属于 Inspector 自己的 review thread——不授予任何模型、push、merge 或代码写入权限。
   `checks: write` 仅为 advisory review Check Run 存在。
 - **Advisory Check runs**：符合条件的审查会在被审 commit 上先出现一个进行中的 Check Run
-  （名为 `mstar-inspector review`），随后终态化为 `success`、`neutral` 或 `failure`。`success` 的含义是
-  审查**已发布**——它**绝不是**批准、merge 门禁或 `REQUEST_CHANGES` 等价物，App 也从不请求这些。
-  结论由持久化的发布证据决定，而非代码路径：确认正常发布 → 无论 engine verdict 一律 `success`；确认
-  降级发布 → `neutral`；执行失败或发布未确认 → `failure`。Check 失败从不阻塞或拖延审查本身。summary
-  会说明属于哪种情况，且不设置 `details_url`。分支保护始终**由用户控制**——本 App 不配置、不要求、
-  也不推荐任何 required status check。
+  （名为 `mstar-inspector review`），随后终态化为 `success` 或 `failure`。`success` 的含义是审查
+  **已发布且满足该 App 的审查门禁**——其 verdict 属于 App 的通过 verdict 集合，且 tally 分数不低于
+  App 的分数下限。门禁是该 App 在 Settings 页上的逐 App 配置；默认值为 verdict `ship it` 与下限 80，
+  因此从未改过该设置的 App 只把分数 ≥ 80 的 `ship it` 审查判为通过。确认的降级发布、发布未确认、
+  执行失败，或已发布但未达门禁的审查，均为 `failure`。结论**绝不是**批准、merge 门禁或
+  `REQUEST_CHANGES` 等价物，App 也从不请求这些。结论由持久化的发布证据加上已应用的 review 决定，
+  而非代码路径。Check 失败从不阻塞或拖延审查本身。summary 会说明属于哪种情况——因门禁失败时会
+  写明 verdict、分数、下限与允许的 verdict 集合——且不设置 `details_url`。分支保护始终**由用户控制**
+  ——本 App 不配置、不要求、也不推荐任何 required status check。
 - **同名 Check 可能出现两次运行**：本地 attempt fencing 不是外部 exactly-once（RL-12）。若一次创建
   attempt 未被确认——响应丢失，或 refusal 在请求发出后才落地——该 attempt 由 recovery **只读**结算：
   采纳并终态化，绝不创建第二个 run。`external_id` 是关联字段，不是服务端幂等键，因此**同一 commit

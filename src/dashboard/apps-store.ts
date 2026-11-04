@@ -15,7 +15,10 @@
  * (src/contracts/sandbox-images.ts — the registry, not pipeline/review code —
  * and src/contracts/failure-stages.ts — the `review_failures` stage
  * partition), which bound the sandbox_image_id value domain and keep the
- * failure-count/history SQL off hand-written stage literals.
+ * failure-count/history SQL off hand-written stage literals. The one engine
+ * symbol pair (`PR_VERDICTS` / `PrVerdict`) is the review gate's verdict
+ * vocabulary: it is imported, never restated, so a gate value the engine
+ * rejects can never be stored (the src/review/schema.ts convention).
  * The `db` parameter is a locally-declared narrow D1 face (types
  * only, zero imports) — a real `D1Database`, the bun:sqlite test double
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
@@ -73,6 +76,20 @@
  *     updated_at. Together with the 0036 NULL-slug staleness rule it bounds
  *     an unsyncable App to one fetch per TTL window instead of one per
  *     settings read.
+ *   - getCheckGate / saveCheckGate (migration 0045) are the review gate
+ *     face: the gate is App configuration, the save refuses a score outside
+ *     0..100 and a verdict outside the engine `PR_VERDICTS` vocabulary before
+ *     any write (the settings route 400s first; the DDL CHECK is the score
+ *     backstop only), and it writes updated_at (an operator mutation).
+ *   - getAllowlist / saveAllowlist (migration 0045) are the owner allowlist
+ *     face: the switch is App configuration and the owner set is REPLACED
+ *     (delete-then-insert in ONE batch), never merged; saveAllowlist refuses
+ *     a deduped set past ALLOWLIST_MAX_OWNERS and a soft-deleted or unknown
+ *     App before writing (the setAppStatus rule).
+ *   - getGithubVisibility / saveGithubVisibility (migration 0045) are the
+ *     cached App-visibility face: NULL reads as 'unknown', and the writer is
+ *     the metadata refresh's anonymous probe — machine-triggered, so like
+ *     saveGithubMetadata it never writes updated_at.
  *   - listInstallations is the install-health read face for the settings
  *     panel: this App's installations, most recently seen
  *     first.
@@ -106,6 +123,7 @@
  *     (app_id, installation_id) pairs, and unknown app references are
  *     caller-visible errors, never swallowed.
  */
+import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
 import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { MUST_FIX_SEVERITY } from "../contracts/finding-severity";
@@ -138,6 +156,36 @@ export type GithubAppRow = {
    * trigger is orthogonal and works in every mode.
    */
   review_trigger_mode: ReviewTriggerMode;
+  /**
+   * Review-gate score floor (migration 0045): a published review concludes
+   * the Check `success` only when its tally score is at least this value.
+   * The DDL CHECK bounds it to 0..100 and seeds 80.
+   */
+  check_min_score: number;
+  /**
+   * Review-gate passing verdicts (migration 0045): the JSON array of engine
+   * `PR_VERDICTS` spellings that satisfy the gate; the DDL default seeds
+   * `["ship it"]`. Written only by saveCheckGate, which validates the
+   * vocabulary before the write — read it through getCheckGate.
+   */
+  check_pass_verdicts: string;
+  /**
+   * Owner allowlist switch (migration 0045): 1 = only allowlisted repository
+   * owners are reviewed, 0 = every owner (today's behavior). Off by default;
+   * on with an empty list refuses every owner.
+   */
+  allowlist_enabled: number;
+  /**
+   * Cached GitHub App visibility (migration 0045): 'public' | 'private' |
+   * 'unknown', written by the anonymous `GET /apps/{slug}` probe. Two callers
+   * probe — the metadata refresh and the allowlist save's forced probe — and
+   * both treat a no-answer the same way: skip the write and keep the stored
+   * value. NULL = never probed; getGithubVisibility reads it as 'unknown'
+   * (cannot prove private). Admission never reads this column: the allowlist
+   * applies whatever the visibility, which only picks the wording of the
+   * allowlist control's private-App note.
+   */
+  github_visibility: GithubVisibility | null;
   /** Last verified (2xx) webhook delivery (migration 0008); NULL = never. */
   last_webhook_at: string | null;
   /**
@@ -209,6 +257,81 @@ export const REVIEW_TRIGGER_MODES: readonly ReviewTriggerMode[] = Object.freeze(
   "every_push",
   "manual",
 ]);
+
+/**
+ * Cached GitHub App visibility (migration 0045, the `github_visibility`
+ * column value domain). `unknown` is also what a NULL column reads as. The
+ * anonymous `GET /apps/{slug}` probe answers public/404 and `null` to a
+ * no-answer; both callers keep the last stored value on `null`.
+ */
+export type GithubVisibility = "public" | "private" | "unknown";
+
+/**
+ * The per-App review gate (migration 0045): a published review concludes the
+ * Check `success` only when its verdict is on `passVerdicts` AND its tally
+ * score is at least `minScore`. `passVerdicts` is engine `PR_VERDICTS`
+ * vocabulary — saveCheckGate refuses anything else before writing.
+ */
+export type CheckGate = {
+  /** Integer score floor, 0..100 inclusive (the DDL CHECK's domain). */
+  minScore: number;
+  /** Verdicts that satisfy the gate; `["ship it"]` until saved otherwise. */
+  passVerdicts: readonly PrVerdict[];
+};
+
+/**
+ * The stored verdict array, or `null` when the stored value is unreadable
+ * (bad JSON, not an array, or off-vocabulary). `null` is unreadable
+ * CONFIGURATION, never "the default": the Check lanes read the gate on every
+ * terminalization and must fail closed on a row they cannot read.
+ */
+function storedPassVerdicts(raw: string): readonly PrVerdict[] | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((entry) => PR_VERDICTS.includes(entry as PrVerdict))) {
+      return parsed as PrVerdict[];
+    }
+  } catch {
+    // unreadable — reported as null below
+  }
+  return null;
+}
+
+/**
+ * The per-App owner allowlist (migration 0045): `enabled` is the switch
+ * (default off — every owner behaves as before) and `owners` the accepted
+ * repository-owner logins. Enabled with an empty list refuses every owner.
+ */
+export type AppAllowlist = {
+  enabled: boolean;
+  owners: readonly string[];
+};
+
+/**
+ * The owner allowlist's accepted size: the whole set is replaced inside ONE D1
+ * batch, so an unbounded paste would build an arbitrarily large batch. 100
+ * covers every realistic shared install. Enforced by `saveAllowlist` (the
+ * layer that states the batch-size invariant) and, for the operator-facing
+ * 400, by the settings route.
+ */
+export const ALLOWLIST_MAX_OWNERS = 100;
+
+/**
+ * Collapse the allowlist owner set: GitHub logins are case-insensitive, so
+ * `Ada` and `ada` are ONE owner and the first submitted spelling is the one
+ * kept. Order is NOT preserved: the table has no sequence column and
+ * `getAllowlist` reads `ORDER BY owner_login`, so the settings form lists the
+ * owners alphabetically however they were submitted.
+ */
+export function dedupeOwnerLogins(logins: readonly string[]): string[] {
+  const seen = new Set<string>();
+  return logins.filter((login) => {
+    const folded = login.toLowerCase();
+    if (seen.has(folded)) return false;
+    seen.add(folded);
+    return true;
+  });
+}
 
 /** Input for createApp — encrypted payloads are built by the caller. */
 export type CreateAppInput = {
@@ -768,6 +891,67 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
+     * The App's review gate (migration 0045). Unknown id → null (the
+     * getSandboxImageId convention). No tenant join: the gate is a
+     * configuration value. A stored verdict array that is unparseable,
+     * off-vocabulary or not an array also reads as null — the same
+     * "unreadable" meaning, so every consumer fails closed instead of
+     * inventing a permissive default.
+     */
+    async getCheckGate(appId: string): Promise<CheckGate | null> {
+      const row = await db
+        .prepare(`SELECT check_min_score, check_pass_verdicts FROM github_apps WHERE id = ?`)
+        .bind(appId)
+        .first<{ check_min_score: number; check_pass_verdicts: string }>();
+      if (!row) return null;
+      const passVerdicts = storedPassVerdicts(row.check_pass_verdicts);
+      if (passVerdicts === null) return null;
+      return { minScore: row.check_min_score, passVerdicts };
+    },
+
+    /**
+     * The App's owner allowlist (migration 0045): the switch plus the owner
+     * logins sorted by `owner_login` (SQLite's BINARY collation). The read is
+     * alphabetical, NOT submission order — there is no sequence column, so the
+     * settings form does not play the list back as it was saved. Unknown id →
+     * null. ONE statement, so the switch and the owner set come from the same
+     * snapshot — a save landing between two reads could otherwise admit against
+     * a switch that no longer applies to the list it was read with.
+     */
+    async getAllowlist(appId: string): Promise<AppAllowlist | null> {
+      const rows = await db
+        .prepare(
+          `SELECT g.allowlist_enabled AS enabled, a.owner_login
+             FROM github_apps g
+             LEFT JOIN app_owner_allowlist a ON a.app_id = g.id
+            WHERE g.id = ?
+            ORDER BY a.owner_login`,
+        )
+        .bind(appId)
+        .all<{ enabled: number; owner_login: string | null }>();
+      const [first] = rows.results;
+      if (first === undefined) return null;
+      return {
+        enabled: first.enabled !== 0,
+        owners: rows.results.flatMap((row) => (row.owner_login === null ? [] : [row.owner_login])),
+      };
+    },
+
+    /**
+     * The cached GitHub App visibility (migration 0045). Unknown id → null;
+     * a never-probed App reads as 'unknown' (the column is NULL), which is
+     * treated as "cannot prove private".
+     */
+    async getGithubVisibility(appId: string): Promise<GithubVisibility | null> {
+      const row = await db
+        .prepare(`SELECT github_visibility FROM github_apps WHERE id = ?`)
+        .bind(appId)
+        .first<{ github_visibility: GithubVisibility | null }>();
+      if (!row) return null;
+      return row.github_visibility ?? "unknown";
+    },
+
+    /**
      * Toggle 'active' | 'disabled'. Refuses soft-deleted rows (returns false,
      * no write) — a deleted app can never be re-activated. Returns whether a
      * row changed (false also covers unknown ids).
@@ -825,6 +1009,122 @@ export function createAppsStore(db: AppsStoreD1) {
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(mode, id)
+        .run();
+      return res.meta.changes > 0;
+    },
+
+    /**
+     * Save the App's review gate (migration 0045). The score must be an
+     * integer in 0..100 and every verdict must be on the engine `PR_VERDICTS`
+     * vocabulary — anything else throws BEFORE any write (the
+     * setReviewTriggerMode backstop; the settings route answers 400 first,
+     * and the DDL CHECK is the last line for the score). The verdict array is
+     * stored as JSON, the form the DDL default uses. Writes the two gate
+     * columns + updated_at (an operator mutation) and refuses soft-deleted
+     * rows exactly like setAppStatus. Returns whether a row changed (false
+     * also covers unknown ids).
+     */
+    async saveCheckGate(id: string, gate: CheckGate): Promise<boolean> {
+      if (!Number.isInteger(gate.minScore) || gate.minScore < 0 || gate.minScore > 100) {
+        throw new Error(
+          `apps-store: check gate min score ${JSON.stringify(gate.minScore)} is outside 0..100 — zero rows written`,
+        );
+      }
+      for (const verdict of gate.passVerdicts) {
+        if (!PR_VERDICTS.includes(verdict)) {
+          throw new Error(
+            `apps-store: check gate verdict ${JSON.stringify(verdict)} is not on PR_VERDICTS (${PR_VERDICTS.join(" | ")}) — zero rows written`,
+          );
+        }
+      }
+      const res = await db
+        .prepare(
+          `UPDATE github_apps
+           SET check_min_score = ?, check_pass_verdicts = ?, updated_at = datetime('now')
+           WHERE id = ? AND deleted_at IS NULL`,
+        )
+        .bind(gate.minScore, JSON.stringify(gate.passVerdicts), id)
+        .run();
+      return res.meta.changes > 0;
+    },
+
+    /**
+     * Save the App's owner allowlist (migration 0045): the switch plus the
+     * owner set, which is REPLACED — delete-then-insert in ONE batch, so a
+     * removal is written by the same operation that adds. Duplicate logins
+     * collapse case-insensitively (GitHub logins are case-insensitive; the
+     * first spelling is kept), because SQLite's (app_id, owner_login) key is
+     * case-sensitive; an empty set is legal and, with the switch on, refuses
+     * every owner (fail closed).
+     * Refuses a soft-deleted or unknown App BEFORE writing (the setAppStatus
+     * rule) and writes updated_at (an operator mutation). Refuses a collapsed
+     * set larger than ALLOWLIST_MAX_OWNERS, also before any read: this method
+     * is where the one-batch bound is documented, so it enforces it for direct
+     * callers too. Returns whether the
+     * App row was still live when the batch ran: every batch statement — the
+     * DELETE, each INSERT and the UPDATE — repeats the `deleted_at IS NULL`
+     * predicate, so a delete landing between the pre-read and the batch writes
+     * nothing at all (no orphan owner rows) and the UPDATE's change count
+     * reports `false` instead of a save that never took effect.
+     */
+    async saveAllowlist(id: string, allowlist: AppAllowlist): Promise<boolean> {
+      // Collapse first: the INSERT count is the deduped set, so duplicates
+      // must not consume the budget.
+      const owners = dedupeOwnerLogins(allowlist.owners);
+      if (owners.length > ALLOWLIST_MAX_OWNERS) {
+        throw new Error(
+          `apps-store: owner allowlist holds ${owners.length} logins, above ALLOWLIST_MAX_OWNERS (${ALLOWLIST_MAX_OWNERS}) — zero rows written`,
+        );
+      }
+      const live = await db
+        .prepare(`SELECT id FROM github_apps WHERE id = ? AND deleted_at IS NULL`)
+        .bind(id)
+        .first<{ id: string }>();
+      if (!live) return false;
+      // Every statement repeats the liveness predicate: a soft delete landing
+      // between the pre-read and the batch then writes NO owner rows and does
+      // not flip the switch, instead of leaving a deleted App's list behind.
+      // ONE batch on purpose: chunking was tried and reverted because a split
+      // replace is not atomic — a failed later chunk leaves a partial owner
+      // set. The statement count (ALLOWLIST_MAX_OWNERS + 2) stays below any
+      // observed D1 batch limit.
+      const liveApp = `EXISTS (SELECT 1 FROM github_apps g WHERE g.id = ? AND g.deleted_at IS NULL)`;
+      const results = await db.batch([
+        db.prepare(`DELETE FROM app_owner_allowlist WHERE app_id = ? AND ${liveApp}`).bind(id, id),
+        ...owners.map((owner) =>
+          db
+            .prepare(
+              `INSERT INTO app_owner_allowlist (app_id, owner_login, created_at)
+               SELECT ?, ?, datetime('now') WHERE ${liveApp}`,
+            )
+            .bind(id, owner, id),
+        ),
+        db
+          .prepare(
+            `UPDATE github_apps SET allowlist_enabled = ?, updated_at = datetime('now')
+             WHERE id = ? AND deleted_at IS NULL`,
+          )
+          .bind(allowlist.enabled ? 1 : 0, id),
+      ]);
+      return (results.at(-1)?.meta.changes ?? 0) > 0;
+    },
+
+    /**
+     * Cache the App's GitHub visibility (migration 0045) from the anonymous
+     * probe (the metadata refresh and the allowlist save both call this).
+     * Writes ONLY github_visibility — deliberately
+     * NOT updated_at, which stays the operator-mutation timestamp (the
+     * saveGithubMetadata convention: this write is machine-triggered).
+     * Refuses soft-deleted rows exactly like setAppStatus. Returns whether a
+     * row changed (false also covers unknown ids).
+     */
+    async saveGithubVisibility(id: string, visibility: GithubVisibility): Promise<boolean> {
+      const res = await db
+        .prepare(
+          `UPDATE github_apps SET github_visibility = ?
+           WHERE id = ? AND deleted_at IS NULL`,
+        )
+        .bind(visibility, id)
         .run();
       return res.meta.changes > 0;
     },

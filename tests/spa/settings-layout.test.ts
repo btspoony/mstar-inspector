@@ -16,7 +16,6 @@ import { type Element as DomElement } from "happy-dom";
 import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { t, type DictionaryKey } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
-import { APP_VERSION } from "../../src/version";
 import { PROVIDER_CATALOG, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
 import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta, type SettingsManagePayload } from "../../src/spa/pages/data";
 import {
@@ -28,6 +27,7 @@ import {
 import {
   AppInfoSection,
   DraftChainPanel,
+  ReviewGateSection,
   draftChainTabLabel,
   githubAppSettingsUrl,
 } from "../../src/spa/pages/SettingsPage";
@@ -74,7 +74,10 @@ const detailPayload = (): SettingsManagePayload => ({
     last_webhook_at: null,
     sandbox_image_id: "omp",
     review_trigger_mode: "every_push",
+    github_visibility: "unknown",
   },
+  check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+  allowlist: { enabled: false, owners: [] },
   keys: [],
   model_chain: null,
   model_roles: {},
@@ -1896,29 +1899,6 @@ describe("settings header typography", () => {
   });
 });
 
-describe("version footer", () => {
-  test("the settings page footer renders the generated version surface via the dictionary", () => {
-    const source = readSettingsSource();
-    // The display reads the generated single-writer surface (src/version.ts) —
-    // never a second hardcoded version string in the SPA.
-    expect(source).toContain('import { APP_VERSION } from "../../version";');
-    // Rendered value is the v-prefixed form, same shape as the /healthz field
-    // and release tags, interpolated through the bilingual footer key.
-    expect(source).toContain('{t(locale, "settings.footer.version", { version: `v${APP_VERSION}` })}');
-    // Footer slot is the page's small-print paragraph carrying the version
-    // copy; its tone is the page's own face, not a test oracle.
-    expect(source).toContain('<p className="text-sm');
-  });
-
-  test("the footer copy is dictionary-backed in both locales and carries the deployed version", () => {
-    const shown = `v${APP_VERSION}`;
-    expect(t("en", "settings.footer.version", { version: shown })).toBe(`Version ${shown}`);
-    expect(t("zh_CN", "settings.footer.version", { version: shown })).toBe(`版本 ${shown}`);
-    expect(t("en", "settings.footer.version", { version: shown })).toContain(shown);
-    expect(t("zh_CN", "settings.footer.version", { version: shown })).toContain(shown);
-  });
-});
-
 describe("provider entry controls", () => {
   test("every provider-flow entry is a labelled dialog trigger; no in-card disclosure is left", () => {
     const source = readSettingsSource();
@@ -1979,6 +1959,7 @@ describe("GitHub App identity card", () => {
       github_html_url: null,
       github_avatar_url: null,
       github_metadata_synced_at: null,
+      github_visibility: "unknown",
       ...overrides,
     };
   }
@@ -2378,5 +2359,34 @@ describe("the tenant support notice renders nothing until the client read", () =
       }),
     );
     expect(markup).toBe("");
+  });
+});
+
+describe("review gate section", () => {
+  test("an unreadable gate renders the read-only notice instead of the controls", () => {
+    const unreadable = renderToStaticMarkup(
+      createElement(ReviewGateSection, {
+        locale: "en",
+        payload: { ...detailPayload(), check_gate: null },
+        onSettings: noopSave,
+      }),
+    );
+    // The copy's apostrophe is HTML-escaped in the markup, so the pin is the
+    // sentence fragment that carries no special characters.
+    expect(t("en", "settings.reviewGateUnreadable")).toContain("stored review gate could not be read");
+    expect(unreadable).toContain("stored review gate could not be read");
+    // No control and no save path — a gate that cannot be read cannot be edited.
+    expect(unreadable).not.toContain(t("en", "settings.reviewGateScore"));
+    expect(unreadable).not.toContain(t("en", "settings.reviewGateSave"));
+
+    const readable = renderToStaticMarkup(
+      createElement(ReviewGateSection, {
+        locale: "en",
+        payload: detailPayload(),
+        onSettings: noopSave,
+      }),
+    );
+    expect(readable).toContain(t("en", "settings.reviewGateSave"));
+    expect(readable).not.toContain("stored review gate could not be read");
   });
 });
