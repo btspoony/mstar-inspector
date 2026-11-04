@@ -2346,14 +2346,14 @@ answer `200` and erases the distinction.
 |---|---|
 | `200` | stored as `public` |
 | `404` | stored as `private` |
-| any other status, or a timeout | keep the stored value on the metadata-refresh path; store `unknown` when the probe is forced by an allowlist enable |
+| any other status, or a timeout | keep the stored value, on the metadata-refresh path and on an allowlist enable alike |
 | never probed (NULL column) | reads as `unknown` |
 
 The probe runs during the App's metadata refresh and again whenever the owner
-allowlist is switched on, so the note the Settings page shows matches the
-App instead of a stale cache. On the refresh path an inconclusive answer keeps
-the previously stored value; the enable path stores `unknown`, because the
-cache it replaces is exactly what may be wrong. A `404` is ambiguous (a missing
+allowlist is switched on, so an answered probe, not a stale cache, drives the
+note the Settings page shows. An inconclusive answer keeps the previously
+stored value on both paths: admission never reads the cache, so a no-answer
+invalidates nothing. A `404` is ambiguous (a missing
 or renamed slug answers the same), so a stored `private` is a UI hint, never
 proof and never an enforcement switch:
 

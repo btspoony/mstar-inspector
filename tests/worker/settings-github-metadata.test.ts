@@ -235,6 +235,8 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(body.app.github_html_url).toBe("https://github.com/apps/acme-inspector");
     expect(body.app.github_avatar_url).toBe(APP_AVATAR_URL);
     expect(body.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    // The default probe answer (404) is "private", and the refresh caches it.
+    expect(body.app.github_visibility).toBe("private");
 
     // The single store writer persisted exactly the profile columns — and the
     // machine-triggered write never churns the operator timestamp (L5).
@@ -244,6 +246,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(row.github_html_url).toBe("https://github.com/apps/acme-inspector");
     expect(row.github_avatar_url).toBe(APP_AVATAR_URL);
     expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(row.github_visibility).toBe("private");
     expect(row.updated_at).toBe(row.created_at);
 
     // The envelopes never leave the row (Global Constraints).
@@ -337,6 +340,19 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const row = cachedColumns(db, appId);
     expect(row.github_name).toBe("Acme Inspector");
     expect(row.github_visibility).toBe("private");
+  });
+
+  test("a public probe answer (200) is cached as 'public' and served on the manager face", async () => {
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    stubFetch(githubStub(GITHUB_PROFILE, 200));
+
+    const res = await getSettings("mallory", makeEnv(db));
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { app: Record<string, unknown> };
+    expect(body.app.github_visibility).toBe("public");
+    expect(cachedColumns(db, appId).github_visibility).toBe("public");
   });
 
   test("fetch {ok:false} (HTTP 404) → 200 fail-open with the cached (null) columns; synced_at stays NULL", async () => {

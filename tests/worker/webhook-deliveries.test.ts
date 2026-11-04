@@ -135,19 +135,36 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
     const row = db.raw.query("SELECT * FROM webhook_deliveries").get() as { id: string; created_at: string };
     expect(row.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 
-    // A NULL in any one of the NOT NULL columns is refused while the rest
-    // stay valid.
-    const base = { app_id: "app-1", outcome: "ok" };
-    for (const column of Object.keys(base)) {
-      const values = { ...base, [column]: null } as typeof base;
+    // A NULL in any one of the NOT NULL columns is refused while the rest stay
+    // valid. The sweep derives its columns from the schema itself, so it covers
+    // every NOT NULL column the table actually has (0011 plus later ALTERs)
+    // instead of a hard-coded pair that can drift from the DDL.
+    const columns = db.raw.query("PRAGMA table_info(webhook_deliveries)").all() as Array<{
+      name: string;
+      notnull: number;
+    }>;
+    const valid: Record<string, string | number | null> = {
+      id: "d-null",
+      app_id: "app-1",
+      event_name: "pull_request",
+      outcome: "ok",
+      status_code: null,
+      created_at: "2026-01-01 00:00:00",
+      repository_full_name: "acme/widgets",
+    };
+    // Every column carries a valid value here, so a refusal below can only
+    // come from the NULL under test.
+    expect(Object.keys(valid).sort()).toEqual(columns.map((column) => column.name).sort());
+    for (const column of columns.filter((entry) => entry.notnull === 1)) {
+      const values = { ...valid, [column.name]: null };
       expect(() =>
         db.raw
           .prepare(
-            `INSERT INTO webhook_deliveries (id, app_id, outcome)
-             VALUES ('d-null', ?, ?)`,
+            `INSERT INTO webhook_deliveries (${columns.map((entry) => entry.name).join(", ")})
+             VALUES (${columns.map(() => "?").join(", ")})`,
           )
-          .run(values.app_id, values.outcome),
-      ).toThrow(/NOT NULL constraint failed/);
+          .run(...columns.map((entry) => values[entry.name]!)),
+      ).toThrow(new RegExp(`NOT NULL constraint failed: webhook_deliveries\\.${column.name}`));
     }
   });
 

@@ -53,8 +53,8 @@ category: Added
   App is public or private has no authenticated API field, so the dashboard
   probes it anonymously — `GET /apps/{slug}` with no credentials, a 3-second
   budget and no retries: `200` stores `public`, `404` stores `private`, and any
-  other answer keeps the stored value on the metadata-refresh path or stores
-  `unknown` when the probe is forced by enabling the allowlist. The cached
+  other answer keeps the stored value, whether the probe ran on the
+  metadata-refresh path or was forced by enabling the allowlist. The cached
   `github_visibility` only adds a note under the allowlist control; `404` also
   answers for a missing or renamed slug, so `private` is a UI hint and never
   gates admission. The control renders for every cached value — including a
@@ -102,8 +102,8 @@ category: Added
   载荷中没有可读所有者（安装事件、畸形 body）无法判定，直接放行。
 - **GitHub App 可见性只做探测与缓存，从不用于强制。** App 是公开还是私有并没有可用的
   认证 API 字段，因此 dashboard 以匿名请求探测——不带凭据的 `GET /apps/{slug}`，
-  3 秒预算、零重试：`200` 记为 `public`，`404` 记为 `private`，其他答案在元数据刷新
-  路径上保留已存值，由开启允许列表强制触发探测时则记为 `unknown`。缓存的
+  3 秒预算、零重试：`200` 记为 `public`，`404` 记为 `private`，其他答案一律保留
+  已存值——无论探测来自元数据刷新路径，还是由开启允许列表强制触发。缓存的
   `github_visibility` 只在允许列表控件下追加一条说明；`404` 对不存在或已改名的 slug
   也同样返回，因此 `private` 只是 UI 提示，绝不参与准入。该控件对每一种缓存值都会渲染
   ——包括私有 App——因为隐藏它会留下一个无法管理的生效过滤器。从未探测过的 App 读取为

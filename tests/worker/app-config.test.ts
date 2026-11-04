@@ -2706,7 +2706,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
       }>
     ).map((row) => row.owner_login);
 
-  /** The cached visibility column — what delivery admission reads. */
+  /** The cached visibility column — the settings notice's wording input, never admission. */
   const visibilityRow = (db: TestD1, appId: string): string | null => {
     const row = db.raw
       .query("SELECT github_visibility FROM github_apps WHERE id = ?")
@@ -3012,8 +3012,9 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     // The 200 stub answer replaced the stale 'private': admission now applies.
     expect(visibilityRow(db, app.id)).toBe("public");
 
-    // An inconclusive probe stores 'unknown' (cannot prove private), never the
-    // stale value it was meant to replace.
+    // An inconclusive probe (503) is a no-answer: the stored value stands,
+    // exactly like the metadata-refresh path — admission never reads it, so
+    // there is nothing to invalidate.
     fetchSpy.mockImplementation((async () => new Response("{}", { status: 503 })) as unknown as typeof fetch);
     const inconclusive = await postForm(SETTINGS, cookie, makeEnv(db), {
       op: "save-allowlist",
@@ -3021,11 +3022,11 @@ describe("review gate + owner allowlist (payload and ops)", () => {
       owners: "ada",
     });
     expect(inconclusive.status).toBe(200);
-    expect(visibilityRow(db, app.id)).toBe("unknown");
+    expect(visibilityRow(db, app.id)).toBe("public");
 
     // An App with no slug has nothing to probe and nothing to invalidate: the
     // save skips both the probe and the cache write, so the stored value
-    // stands instead of being overwritten with a fabricated 'unknown'.
+    // stands instead of being overwritten.
     rawRun(db, "UPDATE github_apps SET github_slug = NULL, github_visibility = 'public' WHERE id = ?", app.id);
     fetchSpy.mockClear();
     const slugless = await postForm(SETTINGS, cookie, makeEnv(db), {

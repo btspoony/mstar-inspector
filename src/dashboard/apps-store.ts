@@ -178,13 +178,12 @@ export type GithubAppRow = {
   /**
    * Cached GitHub App visibility (migration 0045): 'public' | 'private' |
    * 'unknown', written by the anonymous `GET /apps/{slug}` probe. Two callers
-   * probe and they answer a no-answer differently: the metadata refresh
-   * skips the write, keeping the stored value, while the allowlist save's
-   * forced probe stores 'unknown' because its notice reports the state that
-   * save just produced. NULL = never probed; getGithubVisibility reads it as
-   * 'unknown' (cannot prove private). Admission never reads this column: the
-   * allowlist applies whatever the visibility, which only picks the wording
-   * of the allowlist control's private-App note.
+   * probe — the metadata refresh and the allowlist save's forced probe — and
+   * both treat a no-answer the same way: skip the write and keep the stored
+   * value. NULL = never probed; getGithubVisibility reads it as 'unknown'
+   * (cannot prove private). Admission never reads this column: the allowlist
+   * applies whatever the visibility, which only picks the wording of the
+   * allowlist control's private-App note.
    */
   github_visibility: GithubVisibility | null;
   /** Last verified (2xx) webhook delivery (migration 0008); NULL = never. */
@@ -263,9 +262,7 @@ export const REVIEW_TRIGGER_MODES: readonly ReviewTriggerMode[] = Object.freeze(
  * Cached GitHub App visibility (migration 0045, the `github_visibility`
  * column value domain). `unknown` is also what a NULL column reads as. The
  * anonymous `GET /apps/{slug}` probe answers public/404 and `null` to a
- * no-answer; the metadata refresh then keeps the last stored value, while the
- * allowlist save's forced probe stores `unknown` — its copy reports the state
- * that save just produced, not a guess at an earlier one.
+ * no-answer; both callers keep the last stored value on `null`.
  */
 export type GithubVisibility = "public" | "private" | "unknown";
 
@@ -1113,8 +1110,9 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Cache the App's GitHub visibility (migration 0045) from the metadata
-     * refresh's anonymous probe. Writes ONLY github_visibility — deliberately
+     * Cache the App's GitHub visibility (migration 0045) from the anonymous
+     * probe (the metadata refresh and the allowlist save both call this).
+     * Writes ONLY github_visibility — deliberately
      * NOT updated_at, which stays the operator-mutation timestamp (the
      * saveGithubMetadata convention: this write is machine-triggered).
      * Refuses soft-deleted rows exactly like setAppStatus. Returns whether a

@@ -37,8 +37,8 @@ a successful profile fetch, on the slug that fetch resolved (or the already
 cached one when the payload carries none); and whenever the owner allowlist is
 switched ON, so the control the settings page shows matches the App instead of a
 stale cache. An uncertain answer (any other status, or a timeout) keeps the
-previously stored value on the refresh path, while the enable path stores
-`unknown` — the cache it replaces is exactly what may be wrong.
+previously stored value on both paths: admission never reads the column, so a
+no-answer invalidates nothing.
 
 The probe must not send the App JWT or installation token; authenticating it
 would make a private App answer `200` and erase the distinction.

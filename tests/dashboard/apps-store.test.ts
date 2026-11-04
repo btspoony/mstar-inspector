@@ -143,7 +143,12 @@ describe("owner allowlist (migration 0045)", () => {
     expect(await store.saveAllowlist("app-allow", { enabled: true, owners: ["acme", "beta", "acme"] })).toBe(true);
     expect(await store.getAllowlist("app-allow")).toEqual({ enabled: true, owners: ["acme", "beta"] });
 
-    // A removal is written by the same operation that adds: acme disappears.
+    // GitHub logins are case-insensitive, so a case variant is the SAME owner:
+    // it collapses too, and the first submitted spelling is the one kept.
+    expect(await store.saveAllowlist("app-allow", { enabled: true, owners: ["Acme", "acme", "beta"] })).toBe(true);
+    expect(await store.getAllowlist("app-allow")).toEqual({ enabled: true, owners: ["Acme", "beta"] });
+
+    // A removal is written by the same operation that adds: the Acme entry disappears.
     expect(await store.saveAllowlist("app-allow", { enabled: false, owners: ["beta"] })).toBe(true);
     expect(await store.getAllowlist("app-allow")).toEqual({ enabled: false, owners: ["beta"] });
 

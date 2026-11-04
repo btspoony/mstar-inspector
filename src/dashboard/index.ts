@@ -4280,17 +4280,22 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // allowlist control it renders regardless. So the copy below reports the
     // state the save just produced, and it needs the resolved visibility so a
     // `private` App is told the stored list still applies. A save probes
-    // through the metadata refresh's anonymous probe and caches the answer —
-    // `unknown` only when the probe ran and could not answer. An App with no
-    // slug has nothing to probe and nothing to invalidate, so it skips the
-    // probe and the cache write, leaving the cached value standing.
+    // through the metadata refresh's anonymous probe and caches a public or
+    // private answer. A no-answer (`null`: the probe ran but could not tell)
+    // keeps the stored value, exactly like the refresh path — admission never
+    // reads the column, so a no-answer invalidates nothing. An App with no
+    // slug has nothing to probe either, so it skips both the probe and the
+    // cache write, leaving the cached value standing.
     // Bookkeeping only: a probe or cache-write failure is logged and never
     // blocks the save the operator asked for.
     let visibility = gate.app.github_visibility ?? "unknown";
     if (enabled === "1" && gate.app.github_slug !== null) {
       try {
-        visibility = (await fetchAppVisibility(gate.app.github_slug)) ?? "unknown";
-        await apps.saveGithubVisibility(gate.app.id, visibility);
+        const probed = await fetchAppVisibility(gate.app.github_slug);
+        if (probed !== null) {
+          visibility = probed;
+          await apps.saveGithubVisibility(gate.app.id, probed);
+        }
       } catch (err) {
         logSettingsFailure("github_visibility", gate.app.id, err);
       }
