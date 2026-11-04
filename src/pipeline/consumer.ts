@@ -161,7 +161,6 @@ import {
 } from "../../packages/shared/src/report-wire";
 import {
   assertSandboxGrant,
-  buildClosureSection,
   buildPreparedDegradedBody,
   buildPreparedReviewBody,
   buildPublicationMarker,
@@ -481,10 +480,12 @@ export type ConsumerLogFields = {
    * Why the seat's report document yielded no sections (the `none` headings):
    * one named cause per rejected read, so a missing narrative is attributable
    * instead of silently absent. `invalid-document` carries the gate's own
-   * reason in `report_doc_error`.
+   * reason in `report_doc_error`; `stale-head` carries the head the document
+   * was bound to in `report_doc_head_sha` (a validated sha, never free text).
    */
-  report_doc?: "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document";
+  report_doc?: "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document" | "stale-head";
   report_doc_error?: string;
+  report_doc_head_sha?: string;
 };
 
 export type ConsumerLog = {
@@ -939,15 +940,17 @@ async function applyPendingLifecycleJournals(
 /**
  * Bounded read + validation + redaction of the report seat's document: the
  * audited fixed-path read (`readReportCommand`) yields `<content>\n<flag>`;
- * anything other than a flag-0 document that passes `validateReportDoc` is NO
- * report (the sections render `none`) and leaves ONE warn naming which of the
- * four causes rejected it. Each narrative field is redacted before
- * it can reach a public body — the seat's text is model output like any other,
- * and a prompt-injected credential can hide in a PR description it quoted.
+ * anything other than a flag-0 document that passes `validateReportDoc` and is
+ * bound to `expectedHeadSha` is NO report (the sections render `none`) and
+ * leaves ONE warn naming which cause rejected it. Each narrative field is
+ * redacted before it can reach a public body — the seat's text is model output
+ * like any other, and a prompt-injected credential can hide in a PR description
+ * it quoted.
  */
 async function readReportDoc(
   sandbox: ReviewSandbox,
   secretValues: string[],
+  expectedHeadSha: string,
   log: ConsumerLog,
   fields: ConsumerLogFields,
 ): Promise<ReportDoc | null> {
@@ -985,8 +988,23 @@ async function readReportDoc(
     );
     return null;
   }
+  // The fixed path is shared with every earlier run in this container: a
+  // document bound to another head is that run's narrative, not this one's. A
+  // missing/invalid head never reaches here — the gate rejects it first.
+  if (gate.doc.headSha !== expectedHeadSha) {
+    log.warn(
+      {
+        ...fields,
+        report_doc: "stale-head",
+        report_doc_head_sha: gate.doc.headSha,
+      },
+      `report document is bound to head ${gate.doc.headSha}, not the reviewed head ${expectedHeadSha} — sections render none`,
+    );
+    return null;
+  }
   return {
     schema: "mstar.report/v1",
+    headSha: gate.doc.headSha,
     overview: redact(gate.doc.overview),
     linkedIssueAc: redact(gate.doc.linkedIssueAc),
     verified: redact(gate.doc.verified),
@@ -3989,7 +4007,7 @@ async function processMessage(
     // gate and falls back to `none` headings, or null when the seat wrote
     // nothing. Read only when the runner was actually given `--report-out`.
     const report: ReportDoc | null =
-      prContext !== undefined ? await readReportDoc(sandbox, secretValues, deps.log, fields) : null;
+      prContext !== undefined ? await readReportDoc(sandbox, secretValues, headSha, deps.log, fields) : null;
 
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
@@ -4225,8 +4243,9 @@ async function processMessage(
         thread: target.associationIds.some((id) => queuedAssociations.has(id)) ? "not yet resolved" : "-",
       };
     });
-    const closure = buildClosureSection(coverage, closureRows);
-
+    // The §7.10 facts (coverage line, display cap, thread state) render ONCE,
+    // in the body's revalidated section — the folded closure is the no-report
+    // body's layout, not this one's.
     // 12. §7.7 step 7 — calculate round/target from the App's current single
     // comment (pre-staging read), assemble the FINAL body, and stage the
     // COMPLETE private payload BEFORE any GitHub mutation. Staging failure
@@ -4245,13 +4264,13 @@ async function processMessage(
       omittedFindings: capped.omitted,
       round,
       headSha,
-      closure,
       publicationMarker,
       ...(sinceSha !== null ? { sinceSha } : {}),
-      // The revalidated table is rendered mechanically from the closure rows;
-      // the report may be null (no prContext / seat failure), in which case
-      // every heading still renders with `none`.
-      reportParts: { report, revalidated: buildRevalidatedSection(closureRows) },
+      // The revalidated table is rendered mechanically from the closure rows
+      // and carries the round's full prior-findings set; the report may be null
+      // (no prContext / seat failure), in which case every heading still
+      // renders with `none`.
+      reportParts: { report, revalidated: buildRevalidatedSection(coverage, closureRows) },
     });
     const bodySha256 = await sha256Hex(preparedBody);
 

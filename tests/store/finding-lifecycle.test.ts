@@ -1,8 +1,8 @@
 /**
  * Finding lifecycle store tests (spec review-lifecycle
  * §7.1/§7.2/§7.7/§7.11.1) — `src/store/finding-lifecycle.ts` against the
- * bun:sqlite double running the real migration SQL (0001 → 0020 via
- * createMigratedTestD1; DDL single sources).
+ * bun:sqlite double running the real migration SQL (the full chain, in
+ * wrangler's numeric order, via createMigratedTestD1; DDL single sources).
  *
  * Behaviors covered (brief verification list):
  *   - pre-publication staging round-trip; insert conflict returns the

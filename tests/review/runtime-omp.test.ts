@@ -483,7 +483,7 @@ function deepEnvelope(): unknown {
         line_start: 4,
       },
     ],
-    target: { owner: "acme", repo: "widgets", pr: 7 },
+    target: { owner: "acme", repo: "widgets", pr: 7, head_sha: HEAD_SHA },
   };
 }
 
@@ -515,10 +515,13 @@ function toolOnlyTurn(errorMessage?: string): unknown {
   };
 }
 
+/** The reviewed head every run input below declares (`head <sha>` recon fact). */
+const HEAD_SHA = "abc1234567890abcdef1234567890abcdef12";
+
 /** reconFacts with numstat lines spanning two top-level dirs. */
 const TWO_CLUSTER_FACTS = [
   "acme/widgets#7",
-  "head abc1234567890abcdef1234567890abcdef12",
+  `head ${HEAD_SHA}`,
   "10\t2\tsrc/a.ts",
   "5\t0\tsrc/b.ts",
   "8\t1\tlib/c.ts",
@@ -2648,14 +2651,17 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
 });
 
 describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
-  const REPORT: ReportDoc = {
-    schema: "mstar.report/v1",
+  // The seat's yield: narrative keys only. `headSha` is the runner's to bind,
+  // so every expectation below is the seat's document PLUS the envelope head.
+  const REPORT = {
+    schema: "mstar.report/v1" as const,
     overview: "Adds an expiry guard.",
     linkedIssueAc: "none",
     verified: "none",
     rejected: "none",
     planToFix: "none",
   };
+  const BOUND_REPORT: ReportDoc = { ...REPORT, headSha: HEAD_SHA };
   const PR_CONTEXT = {
     prBody: "Closes #7",
     issues: [{ number: 7, title: "Guard", body: "- reject expired tokens" }],
@@ -2671,7 +2677,8 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
       prContext: PR_CONTEXT,
     });
 
-    expect(result.report).toEqual(REPORT);
+    // The head is the envelope's, never the seat's.
+    expect(result.report).toEqual(BOUND_REPORT);
     // The review itself is unchanged by the report: the seat's finding still
     // synthesized the published envelope.
     expect(result.envelope.verdict).toBe("blocked");
@@ -2732,7 +2739,7 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     parentYields = [deepEnvelope()];
     seatResults = [{ data: REPORT }];
     const result = await ompAgentRuntime.runReview({ ...DEEP_INPUT, prContext: PR_CONTEXT });
-    expect(result.report).toEqual(REPORT);
+    expect(result.report).toEqual(BOUND_REPORT);
     expect(subagentRequests).toHaveLength(1);
     // The deep parent's own session is the seat's session.
     expect((subagentRequests[0]!.session as { cwd: unknown }).cwd).toBe(TEST_WORKTREE);
@@ -2771,6 +2778,35 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     });
   }
 
+  test("a seat definition missing at dispatch degrades to no report — never a failed review", async () => {
+    // The install keeps the definition in place for the whole run; if it is
+    // gone when the report seat is reached, the seat is optional narrative and
+    // the settled review must still land.
+    const reviewDispatch = deferred();
+    holdSeats = true;
+    seatDispatchQueue = [reviewDispatch.resolve];
+    seatResults = [{ data: seatPayload() }, { data: REPORT }];
+    const errors: string[] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.join(" "));
+    });
+    let result: ReviewRunResult;
+    try {
+      const run = ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", prContext: PR_CONTEXT });
+      await reviewDispatch.promise;
+      rmSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"));
+      seatReleases.shift()!();
+      result = await run;
+    } finally {
+      spy.mockRestore();
+    }
+    expect(result.report).toBeNull();
+    expect(result.envelope.schema).toBe("mstar.review/v1");
+    expect(errors.filter((line) => line.includes('"reason":"seat-definition-missing"'))).toHaveLength(1);
+    // Only the review seat reached the SDK: no dispatch without a definition.
+    expect(subagentRequests).toHaveLength(1);
+  });
+
   // Round-4: the seat definition must exist BEFORE the session is created —
   // omp discovers agents per session, so an install that lands after creation
   // is invisible to it. A deep report round WITHOUT a recheck used to install
@@ -2799,7 +2835,7 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
         const result = await ompAgentRuntime.runReview({ ...input, ...over });
 
         expect(installedAgentFiles).toContain("mstar-review-seat.md");
-        expect(result.report).toEqual(wantsReport ? REPORT : null);
+        expect(result.report).toEqual(wantsReport ? BOUND_REPORT : null);
         // The cleanup set is static, so the added install is undone with the
         // rest — a leftover definition would leak into the caller's clone.
         expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(false);

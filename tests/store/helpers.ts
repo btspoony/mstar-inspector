@@ -189,7 +189,8 @@ export function createTestD1(): TestD1 {
 
 /**
  * Fully-migrated variant (the full migration list): the same double
- * with the complete migration list applied (0001 → 0009, filename order).
+ * with every `migrations/*.sql` applied in wrangler's numeric order — the
+ * production shape, with no hand-picked subset.
  * Reviews carries the `app_id` column (FK to github_apps), so tests exercising
  * the REAL store.put — whose INSERT binds `app_id` — run against the
  * production-shaped schema, the per-App config tables

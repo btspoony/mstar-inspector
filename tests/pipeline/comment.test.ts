@@ -637,6 +637,7 @@ describe("review comment upsert (T5)", () => {
 describe("report sections (mstar.report/v1 side document)", () => {
   const report: ReportDoc = {
     schema: "mstar.report/v1",
+    headSha: "abc1234",
     overview: "Adds an expiry guard to the auth path.",
     linkedIssueAc: "Expiry rejected: met.",
     verified: "- unit suite → green",
@@ -644,38 +645,44 @@ describe("report sections (mstar.report/v1 side document)", () => {
     planToFix: "1. Add the guard.\n2. Rerun the suite.",
   };
 
-  test("buildRevalidatedSection derives the state MECHANICALLY from the closure rows", () => {
+  const coverage: ClosureCoverage = {
+    totalOpen: 3,
+    selected: 2,
+    assessed: 1,
+    invalidOutput: 0,
+    omitted: 1,
+    capped: 1,
+    contextCoverage: "complete",
+  };
+
+  test("buildRevalidatedSection carries the coverage line, the rows and their thread state", () => {
     const rows: ClosureRow[] = [
-      { title: "A | b", disposition: "addressed", reason: "verified-fix", evidenceKind: "current-code", thread: "-" },
+      {
+        title: "A | b",
+        disposition: "addressed",
+        reason: "verified-fix",
+        evidenceKind: "current-code",
+        thread: "not yet resolved",
+      },
       { title: "C", disposition: "dismissed", reason: "non-fix-dismissal", evidenceKind: null, thread: "-" },
       { title: "D", disposition: "unverifiable", reason: "no-evidence", evidenceKind: null, thread: "-" },
     ];
-    const md = buildRevalidatedSection(rows);
-    expect(md.startsWith("### Revalidated findings\n\n| Prior finding | State | Evidence |")).toBe(true);
-    expect(md).toContain("| A \\| b | fixed | current-code |");
-    expect(md).toContain("| C | dismissed (non-fix-dismissal) | non-fix-dismissal |");
-    expect(md).toContain("| D | not verifiable | no-evidence |");
+    const md = buildRevalidatedSection(coverage, rows);
+    expect(md.startsWith("### Revalidated findings\n\nReassessed 1/2 open prior finding(s) this round")).toBe(true);
+    expect(md).toContain("| finding | disposition | evidence | thread |");
+    expect(md).toContain("| A \\| b | addressed (verified-fix) | current-code | not yet resolved |");
+    expect(md).toContain("| C | dismissed (non-fix-dismissal) | - | - |");
+    expect(md).toContain("| D | unverifiable (no-evidence) | - | - |");
   });
 
   test("a dismissed row reads the same in the revalidated and closure tables", () => {
     const rows: ClosureRow[] = [
       { title: "C", disposition: "dismissed", reason: "non-fix-dismissal", evidenceKind: null, thread: "-" },
     ];
-    const revalidated = buildRevalidatedSection(rows);
-    const closure = buildClosureSection(
-      {
-        totalOpen: 1,
-        selected: 1,
-        assessed: 1,
-        invalidOutput: 0,
-        omitted: 0,
-        capped: 0,
-        contextCoverage: "complete",
-      },
-      rows,
-    );
-    // Neither table may claim the defect still stands: the store closed it as
-    // a non-fix dismissal, and the closure table says exactly that.
+    const revalidated = buildRevalidatedSection(coverage, rows);
+    const closure = buildClosureSection(coverage, rows);
+    // Both paths render THIS row's words: neither may claim the defect still
+    // stands, because the store closed it as a non-fix dismissal.
     expect(revalidated).not.toContain("still present");
     expect(closure).toContain("| C | dismissed (non-fix-dismissal)");
     expect(revalidated).toContain("| C | dismissed (non-fix-dismissal) |");
@@ -689,14 +696,65 @@ describe("report sections (mstar.report/v1 side document)", () => {
       evidenceKind: null,
       thread: "-",
     }));
-    const md = buildRevalidatedSection(rows);
+    const md = buildRevalidatedSection(coverage, rows);
     expect(md).toContain(`*(+2 more prior finding(s) over the ${CLOSURE_MAX_ROWS}-row display cap)*`);
     // The dropped rows are counted, never silently absent.
     expect(md).not.toContain(`| finding ${CLOSURE_MAX_ROWS} |`);
   });
 
-  test("buildRevalidatedSection with no rows writes `none` under the heading", () => {
-    expect(buildRevalidatedSection([])).toBe("### Revalidated findings\n\nnone");
+  test("buildRevalidatedSection writes `none` when the round had no prior finding", () => {
+    const firstRound: ClosureCoverage = {
+      totalOpen: 0,
+      selected: 0,
+      assessed: 0,
+      invalidOutput: 0,
+      omitted: 0,
+      capped: 0,
+      contextCoverage: "complete",
+    };
+    expect(buildRevalidatedSection(firstRound, [])).toBe("### Revalidated findings\n\nnone");
+  });
+
+  test("rows all over the cap still state the coverage, table or not", () => {
+    const overCap: ClosureCoverage = {
+      totalOpen: 4,
+      selected: 0,
+      assessed: 0,
+      invalidOutput: 0,
+      omitted: 0,
+      capped: 4,
+      contextCoverage: "complete",
+    };
+    const md = buildRevalidatedSection(overCap, []);
+    expect(md).toContain(
+      "Reassessed 0/0 open prior finding(s) this round · 0 invalid-output · 0 omitted · 4 over cap · 4 open",
+    );
+    expect(md).not.toContain("| Prior finding |");
+  });
+
+  test("a body with report parts carries exactly ONE prior-findings table", () => {
+    const rows: ClosureRow[] = [
+      {
+        title: "Fractional expiry comparison",
+        disposition: "addressed",
+        reason: "verified-fix",
+        evidenceKind: "diff",
+        thread: "-",
+      },
+    ];
+    const body = buildReviewBody(
+      { schema: "mstar.review/v1", verdict: "needs fixes", summary_md: "One issue.", findings: [] },
+      0,
+      buildClosureSection(coverage, rows),
+      { report, revalidated: buildRevalidatedSection(coverage, rows) },
+    );
+    // The folded closure would be a second, disagreeable rendering of the same
+    // rows: the report body never carries it.
+    expect(body).not.toContain("## Prior findings recheck");
+    expect(body.match(/\| finding \| disposition \| evidence \| thread \|/g)).toHaveLength(1);
+    // …and the §7.10 facts survive the merge, once each.
+    expect(body.match(/Reassessed /g)).toHaveLength(1);
+    expect(body).toContain("| Fractional expiry comparison | addressed (verified-fix) | diff | - |");
   });
 
   test("insertReportSections places every section at its template anchor", () => {

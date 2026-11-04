@@ -33,7 +33,8 @@ import { remainingOuterMs } from "./recheck";
 
 /**
  * Strict shape schema for the report seat's structured yield: exactly the six
- * document keys, every value a string, no extras. Budgets and non-blankness are
+ * NARRATIVE keys it writes (the document's seventh key, `headSha`, is bound by
+ * the runner), every value a string, no extras. Budgets and non-blankness are
  * NOT expressible here — `validateReportDoc` owns them, so the wire contract
  * keeps ONE authority.
  */
@@ -169,6 +170,8 @@ function structuredData(result: Awaited<ReturnType<typeof runStructuredSubagent>
 export async function runReportSeat(input: {
   session: ToolSession;
   envelopeJson: string;
+  /** `envelope.target.head_sha` — the engine-owned binding, never a seat field. */
+  headSha: string;
   revalidated: string;
   prContext: PrContext;
   model: string[];
@@ -231,7 +234,14 @@ export async function runReportSeat(input: {
     clearTimeout(timer);
     external.removeEventListener("abort", forwardAbort);
   }
-  const gate = validateReportDoc(data);
+  // The seat yields the narrative keys only; the head is BOUND here, from the
+  // engine-owned envelope, before the gate sees the document. A model field
+  // named `headSha` is overwritten, so the file can never claim another head.
+  const bound =
+    data !== null && typeof data === "object"
+      ? { ...(data as Record<string, unknown>), headSha: input.headSha }
+      : data;
+  const gate = validateReportDoc(bound);
   if (!gate.ok) {
     // `validateReportDoc` names only the shape it requires, never the received
     // keys/values (seat-authored text), so this line carries no attacker echo.
