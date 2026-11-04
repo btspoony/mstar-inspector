@@ -46,7 +46,7 @@
 
 ALTER TABLE github_apps ADD COLUMN check_min_score INTEGER NOT NULL DEFAULT 80 CHECK(check_min_score BETWEEN 0 AND 100);
 ALTER TABLE github_apps ADD COLUMN check_pass_verdicts TEXT NOT NULL DEFAULT '["ship it"]' CHECK(json_valid(check_pass_verdicts));
-ALTER TABLE github_apps ADD COLUMN allowlist_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE github_apps ADD COLUMN allowlist_enabled INTEGER NOT NULL DEFAULT 0 CHECK(allowlist_enabled IN (0, 1));
 ALTER TABLE github_apps ADD COLUMN github_visibility TEXT CHECK(github_visibility IN ('public','private','unknown'));
 
 CREATE TABLE app_owner_allowlist (
