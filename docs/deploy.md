@@ -2329,6 +2329,9 @@ backfill and no settings visit.
   legal state.
 - **Scope:** the gate is per App and applies to that App's own installs. One
   App's list never changes another App's deliveries.
+- **Visibility never gates admission.** The allowlist applies for every cached
+  `github_visibility` value: `private` only hides the Settings control, so a
+  stale `private` cache can never leave the gate inert.
 
 **Visibility is probed, not read.** Whether an App is public or private has no
 authenticated API field, so the dashboard probes it anonymously — `GET
@@ -2343,33 +2346,37 @@ answer `200` and erases the distinction.
 | any other status, or a timeout | keep the stored value on the metadata-refresh path; store `unknown` when the probe is forced by an allowlist enable |
 | never probed (NULL column) | reads as `unknown` |
 
-The probe runs during the App's metadata refresh and again whenever an enabled
-allowlist is saved — admission trusts the cached value, so a stale `private`
-would leave a freshly enabled gate silently inert. A `404` is ambiguous (a
-missing or renamed slug answers the same), which is why an unreadable answer is
-never upgraded to proof of `private`.
+The probe runs during the App's metadata refresh and again whenever the owner
+allowlist is switched on, so the control the Settings page shows matches the
+App instead of a stale cache. On the refresh path an inconclusive answer keeps
+the previously stored value; the enable path stores `unknown`, because the
+cache it replaces is exactly what may be wrong. A `404` is ambiguous (a missing
+or renamed slug answers the same), so a stored `private` is a UI hint, never
+proof and never an enforcement switch:
 
-- A `private` App **ignores stored allowlist rows entirely**, and its Installed
-  tab renders no allowlist control — a switch there would promise nothing.
-  Making an App private therefore renders its list inert rather than enforcing
-  it.
-- `unknown` cannot prove `private`, so the list applies.
+- A `private` App renders no allowlist control on its Installed tab — it does
+  not disable the gate. Admission never reads the cache, so the stored list
+  stays enforced.
+- No cached value changes admission: `public`, `private` and `unknown` all
+  enforce the list alike.
 - Caching visibility writes that column only; `updated_at` stays the
   operator-mutation timestamp.
 
-**Read failures on the admission path fail open.** A failed allowlist read
-(store error, timeout, missing row) lets the delivery proceed and logs
-`owner_allowlist_read_failed`; the webhook response is unaffected. This is by
-design, and it is not symmetric with the Check path:
+**Read failures on the admission path fail closed.** A failed allowlist read —
+a thrown store read, or a null on a row that was read moments earlier — refuses
+the delivery with `500` and writes nothing: no `webhook_deliveries` row, no PR
+ledger row, no `last_webhook_at` touch and no enqueue. GitHub then retries the
+delivery. It logs `owner_allowlist_read_failed` or
+`owner_allowlist_row_vanished`; grep them with `wrangler tail`. The direction
+is deliberate:
 
-- signature verification and installation identity already ran, so nothing
-  reaches that point without a valid App-signed payload;
-- refusing instead would silently drop real review work whenever D1 is
-  degraded, with no surface that shows the drop;
+- the read IS the gate, so "cannot read" must not mean "admit every owner";
+- a degraded D1 costs delayed deliveries (GitHub redelivers 5xx), never
+  silently admitted work;
 - an App row or review row that cannot be read concludes the Check `failure`
-  (fail closed), because a pass would assert a review bar that was never
-  evaluated. A read failure on an admission gate and a read failure on an
-  evidence gate are not the same event.
+  for the same reason: a pass would assert a review bar that was never
+  evaluated. A `500` GitHub retries and a Check conclusion a human reads are
+  two surfaces of one rule — an unreadable input refuses to pass.
 
 ### Queue consumer concurrency — deploy-time ceiling and runtime caps
 
