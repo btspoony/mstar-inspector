@@ -93,11 +93,15 @@ export function validateReportDoc(value: unknown): ReportGateResult {
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();
   const expected = [...FIELDS, "schema"].sort();
+  // Every reason below names only the shape this module REQUIRES. The received
+  // keys and values are seat-authored text (a model echoing a PR body), and the
+  // callers log these reasons, so echoing them would put attacker-controlled
+  // text into a structured-log field.
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
-    return { ok: false, error: `keys must be exactly {${expected.join(", ")}}, got {${keys.join(", ")}}` };
+    return { ok: false, error: `keys must be exactly {${expected.join(", ")}}` };
   }
   if (record["schema"] !== "mstar.report/v1") {
-    return { ok: false, error: `schema must be "mstar.report/v1", got ${JSON.stringify(record["schema"])}` };
+    return { ok: false, error: `schema must be "mstar.report/v1"` };
   }
   const doc = { schema: "mstar.report/v1" } as ReportDoc;
   for (const field of FIELDS) {

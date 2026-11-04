@@ -929,15 +929,19 @@ async function readReportDoc(
     log.warn({ ...fields, report_doc: "invalid-json" }, "report document is not JSON — sections render none");
     return null;
   }
+  const redact = (text: string) => redactExactSecrets(redactSecrets(text), secretValues);
   const gate = validateReportDoc(parsed);
   if (!gate.ok) {
+    // The shared gate names only the accepted shape, never the seat's own
+    // key/value text; the same shape + exact-value redaction every other log
+    // field gets is applied here too.
+    const error = redact(gate.error);
     log.warn(
-      { ...fields, report_doc: "invalid-document", report_doc_error: gate.error },
-      `report document failed its gate — sections render none: ${gate.error}`,
+      { ...fields, report_doc: "invalid-document", report_doc_error: error },
+      `report document failed its gate — sections render none: ${error}`,
     );
     return null;
   }
-  const redact = (text: string) => redactExactSecrets(redactSecrets(text), secretValues);
   return {
     schema: "mstar.report/v1",
     overview: redact(gate.doc.overview),
@@ -3254,9 +3258,6 @@ async function processMessage(
       prNumber: payload.pr_number,
       cloneDir: CLONE_DIR,
       diffPath: DIFF_PATH,
-      runnerPath: RUNNER_PATH,
-      level,
-      inputPath: RUNNER_INPUT_PATH,
     });
 
     // 2. Clone the PR head branch. Git transport auth via scoped extraheader
