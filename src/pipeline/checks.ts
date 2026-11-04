@@ -212,6 +212,12 @@ export type ChecksDeps = {
    * recovery has not yet bumped the epoch (spec §7.9).
    */
   nowMs: () => number;
+  /**
+   * Optional bound on the terminal update send (default
+   * `REMOTE_UPDATE_BUDGET_MS`). Injectable so tests exercise the timeout
+   * without waiting the production budget out.
+   */
+  updateBudgetMs?: number;
 };
 
 /** The §7.9 adapter surface, bound to one App credential. */
@@ -294,6 +300,36 @@ function sendRequests<T>(promise: Promise<T>): Promise<{ sent: number; outcome: 
     (outcome) => ({ sent: 1, outcome }),
     (failure: unknown) => ({ sent: isRequestNotDispatched(failure) ? 0 : 1, outcome: { failure } }),
   );
+}
+
+/**
+ * The bound on the terminal UPDATE send. A create may take as long as the
+ * transport needs (the row stays `sending` and recovery adopts), but a
+ * finished review must not sit on its lease waiting for an update that never
+ * answers: at the budget the send is reported unavailable so the lifecycle
+ * releases the attempt to recovery (spec §7.10: a Check never delays the
+ * review, and a lease is never held by a caller that can no longer make
+ * progress).
+ */
+const REMOTE_UPDATE_BUDGET_MS = 5_000;
+
+/**
+ * `sendRequests` bounded by a wall-clock budget. A timed-out request may still
+ * have reached GitHub, so it is reported as SENT (`requests: 1`) — recovery
+ * must adopt/retry conservatively instead of assuming nothing landed.
+ */
+async function sendRequestsWithin<T>(
+  promise: Promise<T>,
+  budgetMs: number,
+  label: string,
+): Promise<{ sent: number; outcome: T | { failure: unknown } }> {
+  const { promise: budget, resolve } = Promise.withResolvers<{ sent: number; outcome: { failure: unknown } }>();
+  const timer = setTimeout(() => resolve({ sent: 1, outcome: { failure: new Error(`${label} exceeded ${budgetMs}ms`) } }), budgetMs);
+  try {
+    return await Promise.race([sendRequests(promise), budget]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Adoption walk bounds (spec §7.9: "max 2 pages", per_page 100). */
@@ -534,7 +570,7 @@ async function completeCheckWith(
     return refused("lease expired before the update request");
   }
   const { scope } = identity;
-  const attempted = await sendRequests(
+  const attempted = await sendRequestsWithin(
     client.rest.checks.update({
       owner: scope.owner,
       repo: scope.repo,
@@ -544,6 +580,8 @@ async function completeCheckWith(
       title: frozen.title,
       summary: frozen.summary,
     }),
+    deps.updateBudgetMs ?? REMOTE_UPDATE_BUDGET_MS,
+    "check update",
   );
   if ("failure" in attempted.outcome) {
     return { kind: "unavailable", requests: attempted.sent, reason: surfaceFailure(attempted.outcome.failure, "check update") };
