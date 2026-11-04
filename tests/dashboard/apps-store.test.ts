@@ -5,8 +5,9 @@
  *
  * Pinned here:
  *   - the DDL defaults are what an App reads before any save (80 / `ship it`
- *     / gate-relevant verdicts, allowlist off, visibility `unknown`), and an
- *     unreadable stored verdict array reads as `null`, never that default;
+ *     / gate-relevant verdicts, allowlist off, visibility `unknown`), an
+ *     unreadable stored verdict array reads as `null`, never that default, and
+ *     an EMPTY set is readable configuration no review can pass;
  *   - saveCheckGate validates BEFORE writing — a non-integer or out-of-range
  *     score and an off-vocabulary verdict leave the stored gate untouched;
  *   - saveAllowlist REPLACES the owner set in one batch (a removal is written
@@ -105,6 +106,18 @@ describe("review gate (migration 0045)", () => {
         .run(),
     ).toThrow();
     expect(await store.getCheckGate("app-corrupt")).toBeNull();
+  });
+
+  test("an empty verdict set is readable configuration that no review can pass", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, "app-empty", { githubAppId: 5005 });
+    const store = createAppsStore(db);
+
+    // The settings route accepts an empty submission (every box unchecked), so
+    // `[]` must round-trip as a gate — NOT the `null` an unreadable array reads
+    // as — and stay empty rather than reverting to the DDL default.
+    expect(await store.saveCheckGate("app-empty", { minScore: 0, passVerdicts: [] })).toBe(true);
+    expect(await store.getCheckGate("app-empty")).toEqual({ minScore: 0, passVerdicts: [] });
   });
 
   test("refuses a soft-deleted App with no write", async () => {

@@ -2803,6 +2803,32 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     expect(read.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it"] });
   });
 
+  test("save-check-gate: an empty pass_verdicts saves as [] — not a 400 — and reads back readable", async () => {
+    const { db, app } = await seededWorld();
+    // The SPA posts no `pass_verdicts` when every box is unchecked. An empty
+    // gate is legal and fails closed (no review can pass it), and it is
+    // READABLE configuration — not the null an unparseable array reads as — so
+    // the settings face plays an empty set back instead of a read-only notice.
+    const res = await worker.fetch(
+      new Request(`https://worker.local${SETTINGS}`, {
+        method: "POST",
+        headers: {
+          Cookie: `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: "op=save-check-gate&min_score=90",
+      }),
+      makeEnv(db),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("no verdicts");
+    expect(gateRow(db, app.id)).toMatchObject({ check_min_score: 90, check_pass_verdicts: "[]" });
+    const read = (await (
+      await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db))
+    ).json()) as { check_gate: { min_score: number; pass_verdicts: string[] } | null };
+    expect(read.check_gate).toEqual({ min_score: 90, pass_verdicts: [] });
+  });
+
   test("save-check-gate: out-of-range or non-integer score → keyed 400, zero writes", async () => {
     const { db, app } = await seededWorld();
     rawRun(db, "UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);

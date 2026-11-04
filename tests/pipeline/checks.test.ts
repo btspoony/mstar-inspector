@@ -1234,6 +1234,18 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadable(sha7, gate));
   });
 
+  test("an EMPTY allowed-verdict set misses every review — a saved [] gates every Check to failure", () => {
+    // The settings route stores an empty submission as `[]` (readable
+    // configuration, never a null gate — see apps-store.test.ts), so no
+    // published verdict can be on the allowed set: every proof-carrying Check
+    // concludes failure.
+    const empty: ReviewGate = { minScore: 0, passVerdicts: [] };
+    for (const verdict of ["ship it", "needs fixes", "blocked", "incomplete"]) {
+      const decided = decideConclusion({ proof: normal, outcome: "expired", gate: empty, review: review(verdict, 100) });
+      expect(decided.desired).toBe("failure");
+    }
+  });
+
   test("a confirmed DEGRADED publication is failure for every outcome (neutral is unreachable)", () => {
     for (const outcome of outcomes) {
       const decided = decideConclusion({ proof: degraded, outcome, gate, review: review("ship it", 100) });
