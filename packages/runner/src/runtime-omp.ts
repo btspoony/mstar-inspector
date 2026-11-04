@@ -907,12 +907,15 @@ export function mergeSeatOutputs(outputs: readonly SeatOutput[]): {
   return { findings: [...findings.values()], unverifiedCount: unverified.size };
 }
 
+/** Filename of the shipped seat definition (`./seat-agent.md`) inside the clone's `.omp/agents/`. */
+const SEAT_AGENT_FILE = "mstar-review-seat.md";
+
 /** Install the shipped seat-agent definition into the PR clone (the session cwd) for omp discovery; runReview removes it again when the run ends. */
 async function installSeatAgent(cwd: string): Promise<void> {
   const definition = await readFile(join(import.meta.dir, "seat-agent.md"), "utf8");
   const agentsDir = join(cwd, ".omp", "agents");
   await mkdir(agentsDir, { recursive: true });
-  await writeFile(join(agentsDir, "mstar-review-seat.md"), definition);
+  await writeFile(join(agentsDir, SEAT_AGENT_FILE), definition);
 }
 
 /**
@@ -1202,7 +1205,8 @@ const DEEP_NO_YIELD_CAUSE = "deep parent turn produced no structured yield (msta
  * concurrently from the beginning of model work — never a second prompt/
  * yield stream on the deep parent's session (its listener captures terminal
  * yields). The shared mstar-review-seat definition is installed before
- * concurrent work and removed with the deep role files after both sessions
+ * concurrent work — the recheck seat and the report seat both dispatch
+ * against it — and removed with the deep role files after both sessions
  * settle; an unfinished seat is aborted when the parent turn settles
  * (success OR failure), and the seat itself never throws — a failure
  * resolves `recheck: null` without touching the envelope.
@@ -1214,8 +1218,13 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
   // tool seat cwd resolve against the review tree.
   const cwd = input.worktreePath;
   const wantsRecheck = input.recheck !== undefined;
-  const installedFiles: readonly string[] = wantsRecheck
-    ? ["mstar-review-seat.md", ...DEEP_SEAT_ROLE_FILES]
+  // Two seats dispatch against the shared definition: the recheck seat and the
+  // report seat (which runs on `prContext` alone). Keying the install to the
+  // recheck left a report-only deep round dispatching a seat omp cannot
+  // resolve — a failure that reads as "report unavailable".
+  const wantsSeatAgent = wantsRecheck || input.prContext !== undefined;
+  const installedFiles: readonly string[] = wantsSeatAgent
+    ? [SEAT_AGENT_FILE, ...DEEP_SEAT_ROLE_FILES]
     : DEEP_SEAT_ROLE_FILES;
   let session: AgentSession | undefined;
   let recheckSession: AgentSession | undefined;
@@ -1225,7 +1234,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
   const teardown = new AbortController();
   try {
     await installDeepSeatAgents(cwd, pluginRoot);
-    if (wantsRecheck) await installSeatAgent(cwd);
+    if (wantsSeatAgent) await installSeatAgent(cwd);
     return await withoutGitHubTokenEnv(async () => {
       const created = await createAgentSession(
         deepSessionOptions({
@@ -1550,6 +1559,16 @@ async function runReportSeatFor(
   signal: AbortSignal,
 ): Promise<ReportDoc | null> {
   if (input.prContext === undefined) return null;
+  // omp resolves the seat from the clone's `.omp/agents/`: dispatching without
+  // the definition fails inside the SDK and surfaces as an anonymous seat
+  // failure — indistinguishable from "report unavailable". Every path that
+  // reaches here installs the definition, so its absence is a bug of ours and
+  // must name itself.
+  if (!existsSync(join(input.worktreePath, ".omp", "agents", SEAT_AGENT_FILE))) {
+    throw new Error(
+      `report seat dispatched without ${SEAT_AGENT_FILE} installed at ${join(input.worktreePath, ".omp", "agents")}`,
+    );
+  }
   return runReportSeat({
     session,
     envelopeJson: JSON.stringify(envelope),
@@ -1869,7 +1888,7 @@ export const ompAgentRuntime: AgentRuntime = {
       }
       // Undo the seat-agent install; the clone itself is caller-owned and
       // must survive (rmdir removes the dirs only if we left them empty).
-      await removeInstalledAgents(cwd, ["mstar-review-seat.md"]);
+      await removeInstalledAgents(cwd, [SEAT_AGENT_FILE]);
     }
   },
 };

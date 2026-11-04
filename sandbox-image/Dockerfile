@@ -67,6 +67,11 @@
 # report gate no longer echoes the seat's own keys/values in its rejection
 # reason. A stale image runs the seat to its full timer after teardown and logs
 # seat-authored text into the structured report diagnostics.
+# rebuild: the shared seat definition is installed for EVERY dispatch that needs
+# it — the recheck seat and the report seat, which runs on the PR context alone.
+# A deep report round without a recheck used to install nothing yet dispatch the
+# seat anyway, so the SDK resolved no agent and the seat failed anonymously; the
+# runtime now refuses to dispatch a report seat whose definition is missing.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and
