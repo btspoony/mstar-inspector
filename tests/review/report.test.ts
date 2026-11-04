@@ -13,6 +13,7 @@ import {
   REPORT_OUTPUT_SCHEMA,
   reportAssignment,
   revalidatedNotes,
+  runReportSeat,
 } from "../../packages/runner/src/report";
 import type { PrContext } from "../../packages/shared/src/report-wire";
 import type { RecheckDoc, RecheckInput } from "../../packages/shared/src/recheck-wire";
@@ -111,5 +112,46 @@ describe("revalidatedNotes", () => {
     expect(revalidatedNotes(undefined, null)).toBe("none");
     expect(revalidatedNotes(input, null)).toBe("none");
     expect(revalidatedNotes(input, { schema: "mstar.recheck/v1", headSha: input.headSha, results: [] })).toBe("none");
+  });
+});
+
+describe("runReportSeat", () => {
+  test("honours a signal already aborted before the call instead of starting the seat", async () => {
+    // An `abort` that fired before this call never replays, so the listener
+    // alone cannot see it: without the pre-check the seat would run to its own
+    // timeout on a run that is already gone.
+    let sessionTouched = false;
+    const session = new Proxy(
+      {},
+      {
+        get() {
+          sessionTouched = true;
+          return undefined;
+        },
+      },
+    ) as never;
+    const controller = new AbortController();
+    controller.abort();
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.join(" "));
+    };
+    try {
+      const doc = await runReportSeat({
+        session,
+        envelopeJson: '{"schema":"mstar.review/v1"}',
+        revalidated: "none",
+        prContext: PR_CONTEXT,
+        model: [],
+        level: "quick",
+        signal: controller.signal,
+      });
+      expect(doc).toBeNull();
+    } finally {
+      console.error = originalError;
+    }
+    expect(sessionTouched).toBe(false);
+    expect(errors.filter((line) => line.includes("report_seat_aborted"))).toHaveLength(1);
   });
 });

@@ -176,12 +176,18 @@ export async function runReportSeat(input: {
   /** Optional caller abort (run teardown); the seat's own timer always applies. */
   signal?: AbortSignal;
 }): Promise<ReportDoc | null> {
+  const external = input.signal ?? new AbortController().signal;
+  // An `abort` that already happened never replays its event, so a run torn
+  // down before this call would otherwise start the seat and wait it out.
+  if (external.aborted) {
+    console.error(JSON.stringify({ event: "report_seat_aborted" }));
+    return null;
+  }
   const maxRuntimeMs = remainingOuterMs(Date.now(), input.level) - REPORT_TAIL_MARGIN_MS;
   if (maxRuntimeMs <= 0) {
     console.error(JSON.stringify({ event: "report_skipped", reason: "budget" }));
     return null;
   }
-  const external = input.signal ?? new AbortController().signal;
   // Own controller + timer: aborting THIS seat must not abort the caller's
   // signal, and the caller's abort must still stop the seat.
   const controller = new AbortController();

@@ -232,8 +232,10 @@ describe("gitops command builders", () => {
       ),
     );
     // Same path allowlist as the other reads: no metacharacters, absolute only.
-    expect(() => readReportCommand("/tmp/a b")).toThrow(/unsafe report output path/);
-    expect(() => readReportCommand("relative/report.json")).toThrow(/unsafe report output path/);
+    // The rejection is the shared bounded-read guard's, so the assertion is the
+    // rejection itself, not the label it happens to carry.
+    expect(() => readReportCommand("/tmp/a b")).toThrow(/unsafe/);
+    expect(() => readReportCommand("relative/report.json")).toThrow(/unsafe/);
   });
 
   test("runnerCommand appends --report-out after --recheck-out (both optional, both quoted)", () => {
