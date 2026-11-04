@@ -145,6 +145,41 @@ describe("listPullRequests", () => {
     expect(byNumber.get(132)!.failure_count).toBe(0);
   });
 
+  // One parameterized case, one set of assertions: every attribution-only
+  // stage projects the same way — out of the failure count, kept in the
+  // detail history.
+  for (const [stage, error] of [
+    ["recheck", "skipped: budget: null"],
+    ["usage", "D1_ERROR: no such table"],
+  ] as const) {
+    test(`${stage} attribution rows are not review failures: count 0, but the detail history keeps the row`, async () => {
+      const db = createMigratedTestD1();
+      seedApp(db);
+      await createAppsStore(db).upsertPullRequest(PR);
+      db.raw
+        .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+        .run(APP_ID);
+      // The review itself continued; only this attribution row was written.
+      db.raw
+        .prepare(
+          `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+           VALUES ('f-attribution', 77, 'acme', 'widgets', 131, 'sha-1', ?, ?)`,
+        )
+        .run(stage, error);
+
+      const rows = await createAppsStore(db).listPullRequests(APP_ID);
+      const byNumber = new Map(rows.map((row) => [row.number, row]));
+      expect(byNumber.get(131)!.failure_count).toBe(0);
+      const detail = await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 131);
+      // Still not a REVIEW failure — the attribution row has a surface in the
+      // detail history, and its count stays 0.
+      expect(detail!.pull_request.failure_count).toBe(0);
+      expect(detail!.failures).toEqual([{ stage, error, created_at: expect.any(String) }]);
+      // Still in D1 as attribution — only the failure count drops it.
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 1 });
+    });
+  }
+
   test("a sibling App's reviews and failures never leak into the list", async () => {
     const db = createMigratedTestD1();
     seedApp(db);

@@ -33,6 +33,7 @@
  * artifact-store.ts).
  */
 
+import { PAGING_EXCLUDED_STAGES } from "../contracts/failure-stages";
 import type { D1Like } from "./types";
 
 /**
@@ -44,17 +45,28 @@ import type { D1Like } from "./types";
  * step failed; `pipeline` = worker-side orchestration (level/credential/
  * config resolution, comment post, …); `usage` = the execution's
  * `usage_events` ledger insert failed and the review continued, so the row is
- * the only record of the dropped metered attempt (it carries the `reviewId`).
+ * the only record of the dropped metered attempt (it carries the `reviewId`);
+ * `recheck` = the recheck round produced no usable document or its own status
+ * said `failed` (the round continues with unverifiable rows; the row is the
+ * attribution that survives a lost container stderr).
  */
 export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "parse",
   "runner",
   "sandbox",
   "pipeline",
-  "usage",
+  ...PAGING_EXCLUDED_STAGES,
 ]);
 
-export type FailureStage = "parse" | "runner" | "sandbox" | "pipeline" | "usage";
+export type FailureStage = "parse" | "runner" | "sandbox" | "pipeline" | "usage" | "recheck";
+
+/**
+ * The attribution partition of the vocabulary, re-exported from the
+ * zero-dependency contract so the store and the dashboard interpolate the
+ * SAME list (the dashboard may not import this module — architect decision
+ * Q2 — so the contract is where it is written).
+ */
+export { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 
 /**
  * One failure event to record. `head_sha` is the AUTHORITATIVE checkout sha

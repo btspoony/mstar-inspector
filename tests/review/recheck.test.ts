@@ -8,20 +8,29 @@
  *     results required; evidence object-or-null; closed enum literals);
  *   - recheckAssignment: the input document rides verbatim (original
  *     concern bodies included), discussion labelled UNTRUSTED with its
- *     three-valued coverage, output contract = one yield of the recheck
- *     doc; deterministic;
- *   - recheckBudget: min(180000, deadline - now - 5000), 0 = skip below
- *     30,000ms remaining (boundary: exactly 30,000 stays);
- *   - anchorRecheckDeadline/currentRecheckBudget: the §7.8 outer caps
- *     (quick/default 600,000ms, deep 840,000ms); unset anchor degrades to
- *     the full 180s cap from "now"; re-anchoring overrides.
+ *     three-valued coverage and its model-context caps (quoted from the
+ *     shared constants, never retyped), output contract = one yield of the
+ *     recheck doc; deterministic;
+ *   - recheckBudget: min(the full recheck cap, deadline - now - 5s), 0 = skip
+ *     below the contract's minimum remaining (boundary: exactly the floor
+ *     stays);
+ *   - anchorRecheckDeadline/currentRecheckBudget/resetRecheckAnchor: the
+ *     §7.8 outer caps per tier (the engine's `PR_REVIEW_TIER_BUDGETS` table,
+ *     never a literal here); unset anchor degrades to the full recheck cap
+ *     from "now"; re-anchoring overrides; the reset returns the process to
+ *     that unanchored state;
+ *   - remainingSoftMinutes / remainingOuterMs: the tier's SOFT wall-clock
+ *     clock (negative past the cap, never clamped) versus the outer exec
+ *     guard, both pure views over the same anchor;
+ *   - recheckRoundStatus: an empty round over a non-empty target list is
+ *     failed (all-rows-rejected / empty-result), never clean.
  */
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 
 import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 
-import { anchorRecheckDeadline, currentRecheckBudget, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
-import { RECHECK_MAX_RUNTIME_MS, RECHECK_MIN_REMAINING_MS, type RecheckInput } from "../../packages/shared/src/recheck-wire";
+import { anchorRecheckDeadline, currentRecheckBudget, OUTER_RUNNER_CAP_MS, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget, recheckRoundStatus, remainingOuterMs, remainingSoftMinutes, resetRecheckAnchor } from "../../packages/runner/src/recheck";
+import { MODEL_ITEM_MAX_CHARS, MODEL_MAX_ITEMS, MODEL_TOTAL_MAX_CHARS, RECHECK_MAX_RUNTIME_MS, RECHECK_MIN_REMAINING_MS, type Assessment, type RecheckGateResult, type RecheckInput, type RecheckRowRejection } from "../../packages/shared/src/recheck-wire";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -61,6 +70,7 @@ function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
         oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
         newStart: 8,
         newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
+        addedNewLines: [9],
         oldBlobOid: "oid-old",
         headBlobOid: "oid-head",
         absentAtHead: false,
@@ -184,7 +194,11 @@ describe("recheckAssignment", () => {
   test("states how the discussion arrived: §7.8 caps applied and untrusted text neutralized", () => {
     const assignment = recheckAssignment(recheckInput());
 
-    expect(assignment).toContain("50 items / 1200 chars per item / 8000 total");
+    // The figures are read off the shared constants, so a moved cap can never
+    // leave this assertion pinning a stale number.
+    expect(assignment).toContain(
+      `${MODEL_MAX_ITEMS} items / ${MODEL_ITEM_MAX_CHARS} chars per item / ${MODEL_TOTAL_MAX_CHARS} total`,
+    );
     expect(assignment).toContain("oldest dropped first");
     expect(assignment).toContain("Inspector marker syntax");
     expect(assignment).toContain("[... body truncated ...]");
@@ -204,7 +218,8 @@ describe("recheckAssignment", () => {
     expect(assignment).toContain("verified-fix");
     expect(assignment).toContain("non-fix-dismissal");
     expect(assignment).toContain("unverifiable");
-    expect(assignment).toContain("byte-equal");
+    // The seat must copy the cited catalog lines, not retype them.
+    expect(assignment).toContain("Copy `quote` verbatim");
     // The seat never sees the current findings — it must not invent indexes.
     expect(assignment).toContain("emit []");
   });
@@ -251,53 +266,62 @@ describe("recheckBudget (spec §7.8: min(180000, deadline-now-5000); 0 = skip)",
 });
 
 describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 outer caps)", () => {
-  // NOTE: these tests depend on declaration order — the unset/far-future
-  // probe must run before any test anchors a near deadline (module-global
-  // state, shared across bun test files in one process). All anchors use
-  // now-relative timestamps so a leaked anchor can never be wildly stale
-  // for a later test file, and the LAST test leaves the process in the
-  // neutral far-future state.
-  test("no anchor (or a far-future one) yields the full 180s cap from now", () => {
-    expect(currentRecheckBudget(Date.now())).toBe(180_000);
+  // bun's module registry is process-global, so the anchor is shared across
+  // test files. Every case starts from the UNSET state instead of depending on
+  // another case's leftover anchor or on declaration order.
+  beforeEach(() => {
+    resetRecheckAnchor();
   });
 
-  test("quick/default: 600,000ms outer cap — the seat shares the review deadline", () => {
+  test("no anchor (or a far-future one) yields the full recheck cap from now", () => {
+    expect(currentRecheckBudget(Date.now())).toBe(RECHECK_MAX_RUNTIME_MS);
+  });
+
+  test("quick/default: the tier's outer cap — the seat shares the review deadline", () => {
     const start = Date.now();
+    const cap = OUTER_RUNNER_CAP_MS.quick;
     anchorRecheckDeadline(start, "quick");
-    // Immediately after start the 180s cap dominates.
-    expect(currentRecheckBudget(start)).toBe(180_000);
-    // 420s in: remaining 180s minus the 5s margin.
-    expect(currentRecheckBudget(start + 420_000)).toBe(175_000);
-    // 565s in: exactly the skip floor stays.
-    expect(currentRecheckBudget(start + 565_000)).toBe(30_000);
-    // 566s in: below the floor → skip.
-    expect(currentRecheckBudget(start + 566_000)).toBe(0);
-    // At/past the outer deadline there is nothing left — never a fresh 180s.
-    expect(currentRecheckBudget(start + 600_000)).toBe(0);
-    expect(currentRecheckBudget(start + 700_000)).toBe(0);
+    // Immediately after start the recheck cap dominates.
+    expect(currentRecheckBudget(start)).toBe(RECHECK_MAX_RUNTIME_MS);
+    // Near the outer deadline: whatever remains, minus the 5s start margin.
+    expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - 5_000)).toBe(RECHECK_MIN_REMAINING_MS);
+    // 1ms less: below the floor → skip.
+    expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - 4_999)).toBe(0);
+    // At/past the outer deadline there is nothing left — never a fresh cap.
+    expect(currentRecheckBudget(start + cap)).toBe(0);
+    expect(currentRecheckBudget(start + cap + 100_000)).toBe(0);
   });
 
-  test("deep: 840,000ms outer cap — still budgeted late in the run", () => {
+  test("deep: the taller outer cap — still budgeted late in the run", () => {
     const start = Date.now();
+    const cap = OUTER_RUNNER_CAP_MS.deep;
     anchorRecheckDeadline(start, "deep");
-    expect(currentRecheckBudget(start + 656_000)).toBe(179_000);
-    expect(currentRecheckBudget(start + 795_000)).toBe(40_000);
-    // Below the 30,000ms floor → skip.
-    expect(currentRecheckBudget(start + 810_000)).toBe(0);
-    expect(currentRecheckBudget(start + 840_000)).toBe(0);
+    expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - 5_000)).toBe(RECHECK_MIN_REMAINING_MS);
+    // Late but inside deep's cap the full recheck cap still fits; the SAME
+    // instant under quick's shorter cap has nothing left.
+    const late = start + OUTER_RUNNER_CAP_MS.quick + 1_000;
+    expect(currentRecheckBudget(late)).toBe(RECHECK_MAX_RUNTIME_MS);
+    anchorRecheckDeadline(start, "quick");
+    expect(currentRecheckBudget(late)).toBe(0);
   });
 
-  test("re-anchoring overrides the previous deadline — and the process ends neutral", () => {
+  test("re-anchoring overrides the previous deadline", () => {
     anchorRecheckDeadline(Date.now(), "quick");
     const start = Date.now();
     anchorRecheckDeadline(start, "default");
-    // Under the OLD quick deadline (start_of_test + 600s) this instant would
+    // Under the OLD quick deadline (start_of_test + cap) this instant would
     // already be past — only the override makes a budget available.
-    expect(currentRecheckBudget(start + 500_000)).toBe(95_000);
-    // Leave the process in the far-future neutral state for later files
-    // (budget-equivalent to unset: the full 180s cap from now).
-    anchorRecheckDeadline(Date.now() + 3_600_000, "deep");
-    expect(currentRecheckBudget(Date.now())).toBe(180_000);
+    expect(currentRecheckBudget(start + 500_000)).toBe(
+      Math.min(RECHECK_MAX_RUNTIME_MS, OUTER_RUNNER_CAP_MS.default - 500_000 - 5_000),
+    );
+  });
+
+  test("resetRecheckAnchor returns the process to the unset state", () => {
+    anchorRecheckDeadline(Date.now() - 10 * 60_000, "quick");
+    expect(currentRecheckBudget(Date.now())).toBe(0);
+    resetRecheckAnchor();
+    expect(currentRecheckBudget(Date.now())).toBe(RECHECK_MAX_RUNTIME_MS);
+    expect(remainingSoftMinutes(Date.now())).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
   });
 });
 
@@ -309,6 +333,10 @@ describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
    */
   const QUICK_CAP = PR_REVIEW_TIER_BUDGETS.quick.wallClockMinutes;
   const DEEP_CAP = PR_REVIEW_TIER_BUDGETS.deep.wallClockMinutes;
+
+  beforeEach(() => {
+    resetRecheckAnchor();
+  });
 
   test("derives cap minus elapsed: fractional sub-minute gaps, strictly decreasing", () => {
     const start = 1_000_000;
@@ -365,10 +393,7 @@ describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
     expect(remainingSoftMinutes(start)).toBe(QUICK_CAP);
     expect(remainingSoftMinutes(start, "deep")).toBe(DEEP_CAP);
     expect(remainingSoftMinutes(start, "default")).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
-    // Leave the process on a FRESH clock (anchor == now) for later test files:
-    // bun's module registry is process-global, and an ancient anchor here would
-    // make every later `remainingSoftMinutes(Date.now())` a wild overrun. ONE
-    // captured `now` feeds both the anchor and the read — the derivation is
+    // ONE captured `now` feeds both the anchor and the read — the derivation is
     // exact, so two ambient reads could straddle a millisecond and fail a
     // correct clock.
     const now = Date.now();
@@ -378,23 +403,74 @@ describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
 });
 
 describe("remainingOuterMs (the outer exec guard, as opposed to the soft clock)", () => {
+  beforeEach(() => {
+    resetRecheckAnchor();
+  });
+
   test("counts down to the anchored outer deadline — and is never the soft remainder", () => {
-    // quick's outer guard is the 600,000ms entry of the same frozen §7.8 table
-    // the recheck budget reads.
+    // quick's outer guard is the same frozen §7.8 table entry the recheck
+    // budget reads.
     const start = 5_000_000;
+    const cap = OUTER_RUNNER_CAP_MS.quick;
     anchorRecheckDeadline(start, "quick");
 
-    expect(remainingOuterMs(start, "quick")).toBe(600_000);
-    expect(remainingOuterMs(start + 120_000, "quick")).toBe(remainingOuterMs(start, "quick") - 120_000);
+    expect(remainingOuterMs(start, "quick")).toBe(cap);
+    expect(remainingOuterMs(start + 120_000, "quick")).toBe(cap - 120_000);
     // Past the outer deadline the remainder goes negative — never a fresh cap.
-    expect(remainingOuterMs(start + 700_000, "quick")).toBeLessThan(0);
+    expect(remainingOuterMs(start + cap + 100_000, "quick")).toBeLessThan(0);
     // One anchor, two clocks: the soft figure is the tier's convergence target,
     // this one the outer exec guard a hard cap derives from.
     expect(remainingSoftMinutes(start, "quick") * 60_000).not.toBe(remainingOuterMs(start, "quick"));
+  });
+});
 
-    // Leave the process neutral for later files (bun's module registry is
-    // process-global and this anchor is now ancient).
-    anchorRecheckDeadline(Date.now() + 3_600_000, "deep");
-    expect(currentRecheckBudget(Date.now())).toBe(180_000);
+describe("recheckRoundStatus (a round that delivered nothing is failed, never clean)", () => {
+  const gateOf = (results: Assessment[], rejected: RecheckRowRejection[]): RecheckGateResult & { ok: true } => ({
+    ok: true,
+    doc: { schema: "mstar.recheck/v1", headSha: SHA, results },
+    rejected,
+  });
+
+  test("a valid document with zero results over a non-empty target list → failed/empty-result", () => {
+    expect(recheckRoundStatus(gateOf([], []), 1, SHA)).toEqual({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "empty-result",
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 0,
+      error: null,
+    });
+  });
+
+  test("every submitted row gate-dropped → failed/all-rows-rejected with the named and nameless drops", () => {
+    const status = recheckRoundStatus(
+      gateOf(
+        [],
+        [
+          { rowId: "row-1", index: 0, error: "results[0].disposition is outside the closed enum" },
+          { rowId: null, index: 1, error: "results[1].rowId must be a nonempty string" },
+        ],
+      ),
+      2,
+      SHA,
+    );
+    expect(status).toMatchObject({
+      outcome: "failed",
+      reason: "all-rows-rejected",
+      rejected: 1,
+      rejected_row_ids: ["row-1"],
+      rejected_unnamed: 1,
+    });
+  });
+
+  test("a surviving row keeps the round ok, and an empty target list is not a failure", () => {
+    const survived: Assessment[] = [
+      { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+    ];
+    expect(recheckRoundStatus(gateOf(survived, []), 1, SHA)).toMatchObject({ outcome: "ok", reason: null });
+    // Nothing was sent, so there is no round to blame.
+    expect(recheckRoundStatus(gateOf([], []), 0, SHA)).toMatchObject({ outcome: "ok", reason: null });
   });
 });

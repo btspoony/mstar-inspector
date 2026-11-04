@@ -2381,9 +2381,19 @@ row expires.
   Check recovery reconciler ([§ Check recovery](#check-recovery-7112)),
   each stage in its own try/catch so none can break another. The sweep counts
   `review_failures` rows over the
-  trailing 24h across ALL stages (parse + runner/sandbox/pipeline; the
+  trailing 24h across the infra-failure stages only (parse +
+  runner/sandbox/pipeline; the
   per-attempt rows written by migration 0010 make this table the sufficient failure
-  signal).
+  signal). The attribution stages (`PAGING_EXCLUDED_STAGES` in
+  `src/contracts/failure-stages.ts`) are rows written for a
+  review that kept going — a recheck round that budget-skipped, lost its seat
+  or produced an invalid document, and a `usage_events` insert that failed
+  while the review continued — so the count excludes them. They stay in the
+  table as attribution and never page ops. The same contract supplies the
+  dashboard's own predicates: the per-PR failure COUNT excludes the same two
+  stages, while the per-PR failure HISTORY excludes nothing — every stage
+  stays listed there, so each attribution row keeps a surface. The stage
+  lists are written once.
 - Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
   leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).
   Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,

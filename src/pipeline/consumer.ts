@@ -117,7 +117,9 @@ import {
 } from "../store/finding-lifecycle";
 import {
   ASSESSMENT_TARGET_CAP,
+  isRecheckStatusReason,
   RECHECK_OUTPUT_PATH,
+  RECHECK_STATUS_ERROR_MAX_CHARS,
   validateRecheckDoc,
   type Assessment,
   type Coverage,
@@ -125,13 +127,24 @@ import {
   type EvidenceSlice,
   type RecheckDoc,
   type RecheckInput,
+  type RecheckStatus,
   type RecheckTarget,
   type Scope,
 } from "../../packages/shared/src/recheck-wire";
 import { boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
-import { buildGitOpsCommands, readRecheckCommand, runnerCommand, writeJsonCommand } from "./gitops";
+import {
+  buildGitOpsCommands,
+  CLONE_DIR,
+  DIFF_PATH,
+  readRecheckCommand,
+  readRecheckStatusCommand,
+  RUNNER_INPUT_PATH,
+  RUNNER_PATH,
+  runnerCommand,
+  writeJsonCommand,
+} from "./gitops";
 import {
   assertSandboxGrant,
   buildClosureSection,
@@ -209,11 +222,7 @@ export type PipelineEnv = {
    */
 };
 
-/** In-image paths (Dockerfile v2 / smoke — single source of truth). */
-const CLONE_DIR = "/workspace/repo";
-const DIFF_PATH = "/workspace/pr.diff";
-const RUNNER_INPUT_PATH = "/workspace/review-input.json";
-const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
+/** In-image paths (Dockerfile v2 / smoke — the gitops constants are the SSOT). */
 const HARNESS_ROOT = "/opt/mstar-harness";
 const OMP_AGENT_DIR = "/opt/omp-agent";
 
@@ -396,6 +405,30 @@ export type ConsumerLogFields = {
    */
   degraded_delete_deleted?: number;
   degraded_delete_skipped?: number;
+  /**
+   * S-3 / qc3 F-003: the previous-round fingerprint query
+   * THREW — repeat dedup degraded to first-round semantics (empty set).
+   * Set only on the dedup-failure warn; an empty previous round is silent.
+   */
+  dedup?: "degraded";
+  /**
+   * Recheck round attribution (§7.8): the seat's own status outcome
+   * (`ok` / `skipped` / `failed`, or `absent` when no status document was
+   * written), its reason, the redacted error, the rows the gate rejected and
+   * the rows the document actually assessed. Present on the round's single
+   * accounting line.
+   */
+  recheck_outcome?: RecheckStatus["outcome"] | "absent";
+  recheck_reason?: string | null;
+  recheck_error?: string | null;
+  rejected?: number;
+  /**
+   * Unnamed gate drops the status claimed beyond the rows that could
+   * legitimately have produced them (sent, unanswered, unnamed). Ignored, and
+   * counted here so a seat-authored overcount is visible rather than silent.
+   */
+  rejected_unnamed_ignored?: number;
+  assessed?: number;
 };
 
 export type ConsumerLog = {
@@ -727,6 +760,8 @@ const RECHECK_SLICE_MAX_BYTES = 8 * 1024;
 const RECHECK_SLICES_PER_TARGET = 4;
 /** §7.3 input cap: oversized whole targets are excluded with coverage. */
 const RECHECK_INPUT_MAX_BYTES = 512 * 1024;
+/** The wire schema this consumer serializes (measured and written as one). */
+const RECHECK_INPUT_SCHEMA = "mstar.recheck-input/v1";
 
 /**
  * Await a promise with the §7.10 inline-hook budget as a hard consumer-side
@@ -824,12 +859,22 @@ async function applyPendingLifecycleJournals(
   return true;
 }
 
+/**
+ * One hunk line: `old`/`new` are its own file line numbers (null when the
+ * side has no counterpart), `oldBefore`/`newBefore` the counters BEFORE the
+ * line was consumed, and `text` the line content without the diff marker.
+ * A sub-window of an oversized hunk states its start lines from these
+ * counters, so the arithmetic stays exact against the hunk header.
+ */
+type HunkLine = { old: number | null; new: number | null; oldBefore: number; newBefore: number; text: string };
+
 /** A parsed unified-diff hunk with its old/new line arrays (evidence raw material). */
 type ParsedDiffHunk = {
   oldStart: number;
   oldLines: string[];
   newStart: number;
   newLines: string[];
+  lines: HunkLine[];
 };
 
 type ParsedDiffFile = {
@@ -855,15 +900,30 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
   let hunk: ParsedDiffHunk | null = null;
   let remainingOld = 0;
   let remainingNew = 0;
+  // Running file line numbers for the hunk being read (the header's starts).
+  let oldNo = 0;
+  let newNo = 0;
   for (const line of diffText.split("\n")) {
     if (hunk !== null && (remainingOld > 0 || remainingNew > 0)) {
       const marker = line.charAt(0);
+      const text = line.slice(1);
+      if (marker === " " || marker === "-" || marker === "+") {
+        hunk.lines.push({
+          old: marker === "+" ? null : oldNo,
+          new: marker === "-" ? null : newNo,
+          oldBefore: oldNo,
+          newBefore: newNo,
+          text,
+        });
+      }
       if (marker === " " || marker === "-") {
-        hunk.oldLines.push(line.slice(1));
+        hunk.oldLines.push(text);
+        oldNo += 1;
         remainingOld -= 1;
       }
       if (marker === " " || marker === "+") {
-        hunk.newLines.push(line.slice(1));
+        hunk.newLines.push(text);
+        newNo += 1;
         remainingNew -= 1;
       }
       // "\" ("\ No newline at end of file") consumes neither tally.
@@ -907,10 +967,13 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
         oldLines: [],
         newStart: Number(hunkHeader[3]),
         newLines: [],
+        lines: [],
       };
       current.hunks.push(hunk);
       remainingOld = hunkHeader[2] === undefined ? 1 : Number(hunkHeader[2]);
       remainingNew = hunkHeader[4] === undefined ? 1 : Number(hunkHeader[4]);
+      oldNo = hunk.oldStart;
+      newNo = hunk.newStart;
       if (remainingOld <= 0 && remainingNew <= 0) hunk = null;
     }
   }
@@ -921,52 +984,137 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
  * Build the §7.3 trusted evidence catalog for the selected targets from the
  * worker-captured diff: per target at most `RECHECK_SLICES_PER_TARGET`
  * slices from its file (nearest the original concern's line first), each
- * bounded to 80 lines / 8 KiB per side, whole catalog bounded to 256 KiB —
- * oversized/unsupported slices are EXCLUDED (no eligible slice), never
- * silently truncated. Deleted files yield one `deleted-file` slice proving
- * absence at HEAD (complete when the hunk starts at old line 1). Every
- * slice is pinned to the capture's anchor: `headSha`/`baseSha` both carry
- * the AUTHORITATIVE checkout SHA the diff was captured for (the worker runs
- * one diff per pinned checkout — the per-file old/new blob oids on each
- * slice carry the finer-grained pins). Returns the slices plus the
- * per-target excluded flags (honest coverage).
+ * bounded to 80 lines / 8 KiB per side, whole catalog bounded to 256 KiB.
+ * A hunk that fits becomes ONE slice; an oversized hunk is split into
+ * consecutive ≤80-line windows (nearest the original concern first), so a
+ * finding inside a large hunk still has provable local evidence instead of
+ * losing the whole hunk. A slice still over the per-side line/byte bound is
+ * EXCLUDED (no eligible slice), never silently truncated. Deleted files yield
+ * one `deleted-file` slice proving absence at HEAD (complete when the hunk
+ * starts at old line 1). Every slice is pinned to the capture's anchor:
+ * `headSha`/`baseSha` both carry the AUTHORITATIVE checkout SHA the diff was
+ * captured for (the worker runs one diff per pinned checkout — the per-file
+ * old/new blob oids on each slice carry the finer-grained pins). Returns the
+ * slices plus the per-target excluded flags (honest coverage) — split by WHY
+ * a target got no slice: no eligible slice exists for it (`excludedTargets`)
+ * or its slices exist but the catalog byte budget dropped them
+ * (`catalogBudgetExcluded`) — and, for every provable target, the slice ids
+ * it references — the input builder keeps only those slices, so a row that
+ * never rides the wire leaves no orphan evidence behind.
  */
 function buildEvidenceCatalog(
   diffText: string,
   targets: RecheckTarget[],
   captureSha: string,
-): { slices: EvidenceSlice[]; excludedTargets: Set<string> } {
+): {
+  slices: EvidenceSlice[];
+  excludedTargets: Set<string>;
+  catalogBudgetExcluded: Set<string>;
+  sliceIdsByRowId: Map<string, string[]>;
+} {
   const slices: EvidenceSlice[] = [];
   const excludedTargets = new Set<string>();
+  const catalogBudgetExcluded = new Set<string>();
+  const sliceIdsByRowId = new Map<string, string[]>();
   if (diffText === "") {
     for (const target of targets) excludedTargets.add(target.rowId);
-    return { slices, excludedTargets };
+    return { slices, excludedTargets, catalogBudgetExcluded, sliceIdsByRowId };
   }
   const files = parseUnifiedDiffFiles(diffText);
   let budget = RECHECK_CATALOG_MAX_BYTES;
   const sliceIdByKey = new Map<string, string>();
   const sizeOf = (slice: EvidenceSlice): number => jsonByteLength(slice);
 
-  const addSlice = (file: ParsedDiffFile, hunk: ParsedDiffHunk, kind: EvidenceSlice["kind"]): EvidenceSlice | null => {
-    if (hunk.oldLines.length > RECHECK_SLICE_MAX_LINES || hunk.newLines.length > RECHECK_SLICE_MAX_LINES) return null;
+  /**
+   * One candidate slice body. `oldStart`/`newStart` come straight from the
+   * hunk's own per-line counters, so a window's arithmetic stays exact against
+   * the hunk header (the file lines it names are the lines it carries), and
+   * `addedNewLines` carries the new-side numbers the hunk ADDED — the material
+   * a `current-code` closure must cite at least one of.
+   */
+  type Draft = {
+    file: ParsedDiffFile;
+    kind: EvidenceSlice["kind"];
+    oldStart: number;
+    oldLines: string[];
+    newStart: number;
+    newLines: string[];
+    addedNewLines: number[];
+    complete: boolean;
+  };
+
+  const windowDraft = (file: ParsedDiffFile, hunk: ParsedDiffHunk, from: number, to: number): Draft => {
+    const window = hunk.lines.slice(from, to);
+    return {
+      file,
+      kind: "hunk",
+      oldStart: window[0]!.oldBefore,
+      oldLines: window.flatMap((line) => (line.old === null ? [] : [line.text])),
+      newStart: window[0]!.newBefore,
+      newLines: window.flatMap((line) => (line.new === null ? [] : [line.text])),
+      addedNewLines: window.flatMap((line) => (line.old === null && line.new !== null ? [line.new] : [])),
+      complete: true,
+    };
+  };
+
+  /** A hunk as ONE draft when it fits, else consecutive ≤80-line windows. */
+  const draftsOf = (file: ParsedDiffFile, hunk: ParsedDiffHunk): Draft[] => {
+    const fits =
+      hunk.oldLines.length <= RECHECK_SLICE_MAX_LINES && hunk.newLines.length <= RECHECK_SLICE_MAX_LINES;
+    if (fits) {
+      return [
+        {
+          file,
+          kind: file.deleted ? "deleted-file" : "hunk",
+          oldStart: hunk.oldStart,
+          oldLines: hunk.oldLines,
+          newStart: hunk.newStart,
+          newLines: hunk.newLines,
+          addedNewLines: file.deleted
+            ? []
+            : hunk.lines.flatMap((line) => (line.old === null && line.new !== null ? [line.new] : [])),
+          complete: file.deleted ? hunk.oldStart === 1 : true,
+        },
+      ];
+    }
+    // An oversized DELETED file stays excluded: absence is proven by the whole
+    // file, so a fragment of it would be a weaker claim, not a local one.
+    if (file.deleted) return [];
+    const drafts: Draft[] = [];
+    for (let from = 0; from < hunk.lines.length; from += RECHECK_SLICE_MAX_LINES) {
+      drafts.push(windowDraft(file, hunk, from, Math.min(from + RECHECK_SLICE_MAX_LINES, hunk.lines.length)));
+    }
+    return drafts;
+  };
+
+  /**
+   * One catalog entry, or WHY it could not be added: `size` is a slice that
+   * cannot be trusted within the per-slice bound (no eligible slice exists
+   * for this draft), `catalog` is a well-formed slice the catalog byte budget
+   * no longer fits (a budget exclusion, not a missing proof). The caller's id
+   * arrives FIRST: it is part of the serialized slice, so the bound must see it.
+   */
+  const addSlice = (draft: Draft, id: string): EvidenceSlice | "size" | "catalog" => {
     const slice: EvidenceSlice = {
-      id: "",
+      id,
       headSha: captureSha,
       baseSha: captureSha,
-      path: file.path,
-      oldPath: file.oldPath,
-      kind,
-      oldStart: hunk.oldStart,
-      oldLines: hunk.oldLines,
-      newStart: hunk.newStart,
-      newLines: hunk.newLines,
-      oldBlobOid: file.oldBlobOid,
-      headBlobOid: file.headBlobOid,
-      absentAtHead: file.deleted,
-      complete: kind === "deleted-file" ? hunk.oldStart === 1 : true,
+      path: draft.file.path,
+      oldPath: draft.file.oldPath,
+      kind: draft.kind,
+      oldStart: draft.oldStart,
+      oldLines: draft.oldLines,
+      newStart: draft.newStart,
+      newLines: draft.newLines,
+      addedNewLines: draft.addedNewLines,
+      oldBlobOid: draft.file.oldBlobOid,
+      headBlobOid: draft.file.headBlobOid,
+      absentAtHead: draft.file.deleted,
+      complete: draft.complete,
     };
     const bytes = sizeOf(slice);
-    if (bytes > RECHECK_SLICE_MAX_BYTES || bytes > budget) return null;
+    if (bytes > RECHECK_SLICE_MAX_BYTES) return "size";
+    if (bytes > budget) return "catalog";
     return slice;
   };
 
@@ -982,34 +1130,44 @@ function buildEvidenceCatalog(
       continue;
     }
     const lineAnchor = target.original.lineStart ?? 0;
-    const candidates: { file: ParsedDiffFile; hunk: ParsedDiffHunk }[] = matching.flatMap((file) =>
-      file.hunks.map((hunk) => ({ file, hunk })),
-    );
+    const candidates: Draft[] = matching.flatMap((file) => file.hunks.flatMap((hunk) => draftsOf(file, hunk)));
     candidates.sort(
       (a, b) =>
-        Math.abs(a.hunk.oldStart - lineAnchor) - Math.abs(b.hunk.oldStart - lineAnchor) ||
-        a.hunk.oldStart - b.hunk.oldStart,
+        Math.abs(a.oldStart - lineAnchor) - Math.abs(b.oldStart - lineAnchor) ||
+        a.oldStart - b.oldStart,
     );
     let included = 0;
-    for (const { file, hunk } of candidates) {
+    let catalogDenied = false;
+    const referenced: string[] = [];
+    for (const draft of candidates) {
       if (included >= RECHECK_SLICES_PER_TARGET) break;
-      const key = `${file.path}\u0000${hunk.oldStart}:${hunk.oldLines.length}+${hunk.newStart}:${hunk.newLines.length}`;
-      if (sliceIdByKey.has(key)) {
+      const key = `${draft.file.path}\u0000${draft.oldStart}:${draft.oldLines.length}+${draft.newStart}:${draft.newLines.length}`;
+      const shared = sliceIdByKey.get(key);
+      if (shared !== undefined) {
+        referenced.push(shared);
         included += 1; // the hunk is already in the catalog — targets share slices
         continue;
       }
-      const kind: EvidenceSlice["kind"] = file.deleted ? "deleted-file" : "hunk";
-      const built = addSlice(file, hunk, kind);
-      if (built === null) continue;
-      built.id = `ev-${slices.length + 1}`;
+      const built = addSlice(draft, `ev-${slices.length + 1}`);
+      if (built === "size") continue;
+      if (built === "catalog") {
+        catalogDenied = true;
+        continue;
+      }
       slices.push(built);
       budget -= sizeOf(built);
       sliceIdByKey.set(key, built.id);
+      referenced.push(built.id);
       included += 1;
     }
-    if (included === 0) excludedTargets.add(target.rowId);
+    if (included === 0) {
+      // A row whose slices exist but lost the catalog byte budget is a budget
+      // exclusion, never "no evidence".
+      if (catalogDenied) catalogBudgetExcluded.add(target.rowId);
+      else excludedTargets.add(target.rowId);
+    } else sliceIdsByRowId.set(target.rowId, referenced);
   }
-  return { slices, excludedTargets };
+  return { slices, excludedTargets, catalogBudgetExcluded, sliceIdsByRowId };
 }
 
 /**
@@ -1045,28 +1203,95 @@ type OriginalFindingProjection = RecheckTarget["original"];
  *     forces unverifiable;
  *   - an unavailable prior-journal apply means stale lifecycle state — no
  *     closure is trusted (context-incomplete).
- * Rows the document omitted are accounted as `unverifiable/omitted` for the
- * closure and coverage but are NOT truly assessed — they never enter
- * `lifecycle.assessments`, so `last_assessed_ms` advances only for real
- * assessments (fair-rotation §7.2).
+ * Per-row reason precedence (first match wins): stale context, then catalog
+ * exclusion (`no-evidence` — no slice can prove the row, so it was never
+ * sent), then catalog budget exhaustion (`budget` — its slices exist but the
+ * catalog byte budget dropped them, so it was never sent), then gate
+ * rejection (`invalid-output` — it WAS sent and answered badly), then the
+ * input size budget (`budget`), then a seat skip (`budget`), then a round the
+ * runner CANCELLED by design (`omitted` — stopped, not answered), then
+ * `invalid-output` for an absent document, then `omitted`.
+ *
+ * ATTEMPTED vs never-sent is the accounting split (§7.2 fair rotation): a row
+ * the seat was given — whether the gate kept its answer or dropped it — is
+ * attempted and enters `lifecycle.assessments`, so `last_assessed_ms` advances
+ * and the rotation clock moves. A row that was never sent (size budget,
+ * catalog exclusion, seat skip, no document at all) is NOT attempted: it is
+ * accounted as `omitted` for coverage and leaves `last_assessed_ms` alone.
+ *
+ * ONE round therefore yields THREE coverage terms, and they partition the
+ * selected rows exactly once — `assessed + invalid-output + omitted ===
+ * selected`. `assessedCount` is the rows carrying a real `docResult` (the REAL
+ * seat answers the published coverage line reports); `invalidOutputCount` is
+ * the unanswered rows the closure table labels `invalid-output` (gate-rejected,
+ * or sent into a round whose document was absent); `unansweredCount` is the
+ * rest — never sent, never attempted. `assessments.length` is NOT any of these:
+ * it is the lifecycle clock, which also carries the gate-rejected rows
+ * (attempted, answered badly), so reporting it as "assessed" would claim
+ * reassessments the seat never delivered.
  */
 function reconcileRecheckRound(input: {
   targets: RecheckTarget[];
   doc: RecheckDoc | null;
+  /** The seat's own status document — the reason a round produced no document row. */
+  status: RecheckStatus | null;
   discussion: Discussion;
   output: ReviewOutput;
   /** Stale lifecycle state (failed pending-journal apply or capture): no closure. */
   staleContext: boolean;
+  /** Selected rows the trusted catalog could not prove: never sent, never assessable. */
+  catalogExcluded: ReadonlySet<string>;
+  /** Selected rows whose slices the catalog byte budget dropped: never sent either. */
+  catalogBudgetExcluded: ReadonlySet<string>;
   /** Selected rows excluded from the recheck input by the §7.3 size budget. */
   budgetExcluded: ReadonlySet<string>;
+  /** Rows the gate dropped from an otherwise accepted document (row content errors). */
+  rejectedRowIds: ReadonlySet<string>;
+  /**
+   * Gate-dropped rows that carried no usable rowId, so they name no target.
+   * They are attributed by position among the SENT-and-unanswered rows.
+   */
+  anonymousRejectedRows: number;
 }): {
   assessments: Assessment[];
   outcomeByRowId: Map<string, Assessment>;
   resolutions: { associationId: string; verified: VerifiedResolution }[];
+  /** Rows carrying a real seat answer — the published coverage/tally count. */
   assessedCount: number;
-  omittedCount: number;
+  /**
+   * Unanswered rows whose outcome is `invalid-output` — the same term the
+   * closure table renders for them: gate-rejected rows, rows sent into a round
+   * whose document was absent/invalid, and empty-result rounds. Attempted, so
+   * the lifecycle clock moved, but no answer survived.
+   */
+  invalidOutputCount: number;
+  /**
+   * Unanswered rows that were never attempted (`budget` / `no-evidence` /
+   * `omitted` / `context-incomplete`). Together with the two counts above this
+   * accounts for every selected row exactly once:
+   * `assessed + invalid-output + omitted === selected`.
+   */
+  unansweredCount: number;
+  /**
+   * Unnamed gate drops actually attributed — `min(claimed, pool)`. The caller
+   * logs `anonymousRejectedRows - anonymousRejectedCount` as the ignored excess
+   * of a seat-authored count that outran the rows it could legitimately claim.
+   */
+  anonymousRejectedCount: number;
 } {
-  const { targets, doc, discussion, output, staleContext, budgetExcluded } = input;
+  const {
+    targets,
+    doc,
+    status,
+    discussion,
+    output,
+    staleContext,
+    catalogExcluded,
+    catalogBudgetExcluded,
+    budgetExcluded,
+    rejectedRowIds,
+    anonymousRejectedRows,
+  } = input;
   const outcomeByRowId = new Map<string, Assessment>();
   const assessments: Assessment[] = [];
   const forceUnverifiable = (rowId: string, reason: Assessment["reason"]): Assessment => ({
@@ -1081,20 +1306,93 @@ function reconcileRecheckRound(input: {
   const currentComposites = new Set(
     output.findings.map((f) => computeFindingFingerprint({ ...f, fingerprint_hint: null })),
   );
+  const answeredRowIds = new Set((doc?.results ?? []).map((row) => row.rowId));
+
+  // A gate rejection with no usable rowId names no target, so the only honest
+  // mapping is POSITION among the rows that were sent and left unanswered: the
+  // seat emitted N results we cannot identify, so the first N such rows are
+  // the attempted-and-bad ones. Never-sent rows (catalog exclusion, catalog or
+  // size budget, capture failure) stay out of the pool — dropping one into
+  // `invalid-output` would blame a row the seat never received.
+  //
+  // The status's count is a seat-authored number with no ceiling: a foreign or
+  // broken status may claim more drops than there are rows to blame. It is
+  // therefore CLAMPED to the pool it can legitimately claim (sent, unanswered,
+  // not named by id), never spread past it.
+  const anonymousPool = targets.filter(
+    (target) =>
+      !answeredRowIds.has(target.rowId) &&
+      !rejectedRowIds.has(target.rowId) &&
+      !catalogExcluded.has(target.rowId) &&
+      !catalogBudgetExcluded.has(target.rowId) &&
+      !budgetExcluded.has(target.rowId),
+  );
+  const anonymousRejectedCount = Math.min(anonymousRejectedRows, anonymousPool.length);
+  const anonymouslyRejected = new Set<string>();
+  for (const target of anonymousPool.slice(0, anonymousRejectedCount)) {
+    anonymouslyRejected.add(target.rowId);
+  }
+
+  // An `empty-result` round is the all-rows-rejected case without a gate drop:
+  // the seat returned a valid document with zero results for a non-empty
+  // target list, so every row it SENT came back unusable. Those rows were
+  // ATTEMPTED, never "never ran" — the per-target exclusion branches below
+  // still win, so a catalog/size-budget row stays `no-evidence`/`budget`.
+  const emptyResultRound = status?.reason === "empty-result";
 
   for (const target of targets) {
     const docResult = doc?.results.find((r) => r.rowId === target.rowId) ?? undefined;
+    // Never-sent rows: the catalog could not prove them, the catalog byte
+    // budget dropped their slices, or the §7.3 size budget excluded them.
+    // They keep BOTH their own reason and their own rotation clock — a seat
+    // that never received the row cannot have answered it.
+    const neverSent =
+      catalogExcluded.has(target.rowId) ||
+      catalogBudgetExcluded.has(target.rowId) ||
+      budgetExcluded.has(target.rowId);
+    const rejected =
+      rejectedRowIds.has(target.rowId) ||
+      anonymouslyRejected.has(target.rowId) ||
+      // Only a row that actually rode the wire can be blamed for the empty
+      // result; `neverSent` keeps every excluded row out of the attempt set.
+      (emptyResultRound && docResult === undefined && !neverSent);
     let assessment: Assessment;
     if (staleContext) {
       // Stale lifecycle state (pending-journal apply or capture failed):
       // nothing may close this round, assessed or not.
       assessment = forceUnverifiable(target.rowId, "context-incomplete");
+    } else if (catalogExcluded.has(target.rowId)) {
+      // The trusted catalog could not prove this row from the captured diff,
+      // so it never rode the wire — `no-evidence`, never a blamed seat and
+      // never the size `budget` (the row was unprovable, not oversized).
+      assessment = forceUnverifiable(target.rowId, "no-evidence");
+    } else if (catalogBudgetExcluded.has(target.rowId)) {
+      // Slices for this row exist, but the §7.3 catalog byte budget ran out
+      // before they were added — ALSO never sent, yet a budget exclusion:
+      // `no-evidence` would claim nothing could prove a provable row.
+      assessment = forceUnverifiable(target.rowId, "budget");
+    } else if (rejected) {
+      // The seat answered this row but the gate dropped it (shape / enum /
+      // evidence error) — the row WAS attempted, so it is invalid output,
+      // never "omitted" (never ran) or "budget" (never sent).
+      assessment = forceUnverifiable(target.rowId, "invalid-output");
     } else if (docResult === undefined) {
       // Omitted selected row: no recheck ran for it. Honest conservative
-      // accounting by WHY — invalid/absent document, §7.3 size budget, or
-      // omitted from an otherwise valid document. Never "assessed".
-      const reason: Assessment["reason"] =
-        doc === null ? "invalid-output" : budgetExcluded.has(target.rowId) ? "budget" : "omitted";
+      // accounting by WHY — the §7.3 size budget excluded it from the input
+      // (so it was never sent), the seat's own budget skip, invalid/absent
+      // document, or omitted from an otherwise valid document. Never
+      // "assessed". The size budget wins over `doc === null`: when it excluded
+      // every target nothing was sent, so `invalid-output` would blame a seat
+      // that never ran.
+      const reason: Assessment["reason"] = budgetExcluded.has(target.rowId)
+        ? "budget"
+        : status?.outcome === "skipped"
+          ? status.reason === "aborted"
+            ? "omitted"
+            : "budget"
+          : doc === null
+            ? "invalid-output"
+            : "omitted";
       assessment = forceUnverifiable(target.rowId, reason);
     } else {
       assessment = { ...docResult };
@@ -1130,7 +1428,10 @@ function reconcileRecheckRound(input: {
       }
     }
     outcomeByRowId.set(target.rowId, assessment);
-    if (docResult !== undefined) assessments.push(assessment);
+    // ATTEMPTED rows — answered, or answered and dropped by the gate — are the
+    // ones whose rotation clock moves. A row with no document row was never
+    // accounted by the seat, so it stays un-assessed (§7.2 fair rotation).
+    if (docResult !== undefined || rejected) assessments.push(assessment);
   }
 
   // Resolution eligibility (§7.4/§7.5): addressed verdicts only, with the
@@ -1162,12 +1463,31 @@ function reconcileRecheckRound(input: {
     }
   }
 
+  // Coverage counts REAL seat answers, not the lifecycle clock: a
+  // gate-rejected row advances `last_assessed_ms` but was never assessed.
+  // Every selected row lands in exactly one of these three terms, and the
+  // published line states the identity `assessed + invalid-output + omitted =
+  // selected`. `invalid-output` is the term the closure table renders for the
+  // same rows, so the line and the table cannot disagree.
+  let assessedCount = 0;
+  let invalidOutputCount = 0;
+  for (const target of targets) {
+    if (answeredRowIds.has(target.rowId)) {
+      assessedCount += 1;
+    } else if (outcomeByRowId.get(target.rowId)?.reason === "invalid-output") {
+      invalidOutputCount += 1;
+    }
+  }
   return {
     assessments,
     outcomeByRowId,
     resolutions,
-    assessedCount: assessments.length,
-    omittedCount: targets.length - assessments.length,
+    assessedCount,
+    invalidOutputCount,
+    // Neither a surviving answer nor a gate rejection: `assessments.length` is
+    // the lifecycle clock (attempted rows), so it cannot stand in for this.
+    unansweredCount: targets.length - assessedCount - invalidOutputCount,
+    anonymousRejectedCount,
   };
 }
 
@@ -1192,6 +1512,88 @@ function roundContextCoverage(discussion: Discussion): Coverage {
 }
 
 /**
+ * Payload text of one bounded read command, plus WHY it yielded nothing.
+ * Non-zero exit, a missing flag line, or overflow beyond the byte bound are all
+ * "no payload" to the caller, but they are different D1 causes, so the failure
+ * is named rather than collapsed into a bare null. Shared by the recheck
+ * document and status reads — the transport is identical, only the file
+ * differs.
+ */
+async function boundedRead(
+  sandbox: ReviewSandbox,
+  command: ReturnType<typeof readRecheckCommand>,
+): Promise<{ text: string | null; failure: string | null }> {
+  let read;
+  try {
+    read = await sandbox.runCommand(command, { timeout: EXEC_TIMEOUT_GIT_MS });
+  } catch {
+    return { text: null, failure: "unreadable" };
+  }
+  if (read.exitCode !== 0) return { text: null, failure: "unreadable" };
+  const out = read.stdout.trimEnd();
+  const split = out.lastIndexOf("\n");
+  if (split < 0) return { text: null, failure: "unreadable" };
+  if (out.slice(split + 1).trim() !== "0") return { text: null, failure: "overflow" }; // beyond the byte bound
+  return { text: out.slice(0, split), failure: null };
+}
+
+/**
+ * A seat-authored `reason`/`error` bounded for the D1 failure text and the log
+ * field. Redaction runs FIRST: slicing first would cut a secret that straddles
+ * the cap and persist its surviving fragment. `null` for a non-string field.
+ */
+function boundedStatusText(value: unknown): string | null {
+  return typeof value === "string"
+    ? redactSecrets(value).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS)
+    : null;
+}
+
+/**
+ * The seat's recheck status document (`RecheckStatus`), or null when the file
+ * is absent/unreadable or carries a foreign schema or HEAD. Anything but this
+ * round's own status for this HEAD is no attribution at all — never a
+ * fabricated outcome.
+ */
+function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus | null {
+  if (text === null) return null;
+  try {
+    const value = JSON.parse(text) as Record<string, unknown> | null;
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+    if (value["schema"] !== "mstar.recheck-status/v1" || value["headSha"] !== headSha) return null;
+    const outcome = value["outcome"];
+    if (outcome !== "ok" && outcome !== "skipped" && outcome !== "failed") return null;
+    // `rejected` is DERIVED from the row-id list, never read from the document:
+    // one source survives, so the two faces of the count cannot disagree in a
+    // foreign or hand-rolled status. `rejected_unnamed` has no list to derive
+    // from — it is the count of drops the gate could not name, and it is the
+    // only record of them once the seat has filtered its own document.
+    const rejectedRowIds = Array.isArray(value["rejected_row_ids"])
+      ? value["rejected_row_ids"].filter((id): id is string => typeof id === "string")
+      : [];
+    const rejectedUnnamed = value["rejected_unnamed"];
+    return {
+      schema: "mstar.recheck-status/v1",
+      headSha,
+      outcome,
+      rejected: rejectedRowIds.length,
+      rejected_row_ids: rejectedRowIds,
+      rejected_unnamed:
+        typeof rejectedUnnamed === "number" && Number.isInteger(rejectedUnnamed) && rejectedUnnamed >= 0
+          ? rejectedUnnamed
+          : 0,
+      // `reason` is a CLOSED vocabulary: the per-row accounting below branches
+      // on these exact literals, so an off-vocabulary value would fall through
+      // to the wrong verdict instead of being ignored. Unrecognized → null
+      // (same as absent), never a guessed reason.
+      reason: isRecheckStatusReason(value["reason"]) ? value["reason"] : null,
+      error: boundedStatusText(value["error"]),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Bounded read + validation of the runner's recheck output:
  * the audited fixed-path command (`src/pipeline/gitops.ts`
  * `readRecheckCommand`) emits `<content>\n<overflow-flag>` where the flag is
@@ -1202,25 +1604,80 @@ function roundContextCoverage(discussion: Discussion): Coverage {
  * (non-zero exit, overflow, malformed JSON, failed validation) is NO recheck:
  * the round proceeds with every selected row conservatively omitted, never a
  * fabricated document.
+ *
+ * The SAME transport reads the seat's status document, which is what makes a
+ * round that produced no usable document attributable in D1 without container
+ * stderr. Rows `validateRecheckDoc` dropped come back as `rejected` so the
+ * reconciliation can name them `invalid-output` instead of `omitted` — but the
+ * written document is ALREADY filtered by the seat, so a second validation
+ * pass sees no drops; the status's `rejected_row_ids` is the only surviving
+ * record of them and is therefore the primary source. It is trusted only for
+ * the row IDs this round actually sent. A drop that carried no usable rowId
+ * cannot be named: the status's `rejected_unnamed` count is the record of it,
+ * and the reconciliation attributes those drops by position among the
+ * sent-but-unanswered rows (see `reconcileRecheckRound`). The two sources are
+ * unioned by taking the larger count, since the seat filters its document
+ * before writing it.
  */
-async function readRecheckDoc(sandbox: ReviewSandbox, recheckInput: RecheckInput): Promise<RecheckDoc | null> {
-  let read;
-  try {
-    read = await sandbox.runCommand(readRecheckCommand(RECHECK_OUTPUT_PATH), { timeout: EXEC_TIMEOUT_GIT_MS });
-  } catch {
-    return null;
+async function readRecheckDoc(
+  sandbox: ReviewSandbox,
+  recheckInput: RecheckInput,
+): Promise<{
+  doc: RecheckDoc | null;
+  /** Why `doc` is null (absent read / overflow / validation), null when it survived. */
+  docFailure: string | null;
+  rejected: ReadonlySet<string>;
+  anonymousRejectedRows: number;
+  status: RecheckStatus | null;
+}> {
+  const [docRead, statusRead] = await Promise.all([
+    boundedRead(sandbox, readRecheckCommand(RECHECK_OUTPUT_PATH)),
+    boundedRead(sandbox, readRecheckStatusCommand()),
+  ]);
+  let doc: RecheckDoc | null = null;
+  // A zero-byte payload is the seat writing nothing: absent, not malformed.
+  // Parsing it would throw and report the round as a JSON fault instead.
+  const docText = docRead.text !== null && docRead.text.trim() !== "" ? docRead.text : null;
+  let docFailure: string | null =
+    docRead.failure ?? (docRead.text !== null && docText === null ? "absent" : null);
+  const droppedRowIds = new Set<string>();
+  let anonymousRejectedRows = 0;
+  if (docText !== null) {
+    try {
+      const gate = validateRecheckDoc(JSON.parse(docText), recheckInput);
+      if (gate.ok) {
+        doc = gate.doc;
+        docFailure = null;
+        for (const row of gate.rejected) {
+          if (row.rowId === null) anonymousRejectedRows += 1;
+          else droppedRowIds.add(row.rowId);
+        }
+      } else {
+        docFailure = `invalid-document: ${gate.error}`;
+      }
+    } catch {
+      docFailure = "invalid-document: not JSON";
+    }
   }
-  if (read.exitCode !== 0) return null;
-  const out = read.stdout.trimEnd();
-  const split = out.lastIndexOf("\n");
-  if (split < 0) return null;
-  if (out.slice(split + 1).trim() !== "0") return null; // overflow beyond the byte bound
-  try {
-    const gate = validateRecheckDoc(JSON.parse(out.slice(0, split)), recheckInput);
-    return gate.ok ? gate.doc : null;
-  } catch {
-    return null;
+  const status = parseRecheckStatus(statusRead.text, recheckInput.headSha);
+  const sent = new Set(recheckInput.targets.map((target) => target.rowId));
+  const rejected = new Set(droppedRowIds);
+  // A row the surviving document CARRIES has a real answer, so a status that
+  // also names it (the seat drops, then re-emits it) must not cost it that
+  // answer: `rejected` outranks the answered row in the reconciliation, and a
+  // row listed in both would report `invalid-output` instead of its actual
+  // assessment. Local gate drops need no such filter — a dropped row is by
+  // construction absent from `doc.results`.
+  const answeredRowIds = new Set((doc?.results ?? []).map((row) => row.rowId));
+  for (const rowId of status?.rejected_row_ids ?? []) {
+    if (sent.has(rowId) && !answeredRowIds.has(rowId)) rejected.add(rowId);
   }
+  // The seat writes an ALREADY-FILTERED document, so the local pass above
+  // normally sees no drops at all; the status is the surviving record. Taking
+  // the larger of the two unions them without double-counting a round whose
+  // unfiltered document also reached this pass.
+  const unnamedRejectedRows = Math.max(anonymousRejectedRows, status?.rejected_unnamed ?? 0);
+  return { doc, docFailure, rejected, anonymousRejectedRows: unnamedRejectedRows, status };
 }
 
 /**
@@ -2795,11 +3252,20 @@ async function processMessage(
     const diffText = diff.stdout.length <= DIFF_PREFETCH_MAX_BYTES ? diff.stdout : "";
 
     // Trusted evidence catalog (§7.3) for the selected targets, pinned to
-    // the authoritative checkout SHA.
+    // the authoritative checkout SHA. A target the captured diff cannot prove
+    // is EXCLUDED from the recheck input: without catalog evidence the seat
+    // could only guess, so sending it would invite a misattributed verdict.
     const catalog =
       targets.length > 0
         ? buildEvidenceCatalog(diffText, targets, headSha)
-        : { slices: [] as EvidenceSlice[], excludedTargets: new Set<string>() };
+        : {
+            slices: [] as EvidenceSlice[],
+            excludedTargets: new Set<string>(),
+            catalogBudgetExcluded: new Set<string>(),
+            sliceIdsByRowId: new Map<string, string[]>(),
+          };
+    const catalogExcluded: ReadonlySet<string> = catalog.excludedTargets;
+    const catalogBudgetExcluded: ReadonlySet<string> = catalog.catalogBudgetExcluded;
 
     // Bounded discussion capture (§7.8) for the selected targets' known
     // threads. API failure is unavailable — never empty/complete.
@@ -2838,29 +3304,53 @@ async function processMessage(
     }
 
     // The typed recheck input (§7.3): omitted ENTIRELY when no open rows
-    // exist — the runner input stays byte-identical on a first round.
-    // Oversized whole targets are excluded with coverage (never silently
-    // truncated concerns).
+    // exist — the runner input stays byte-identical on a first round. Only
+    // rows the trusted catalog can prove ride the wire, and only the slices
+    // those rows reference: a never-sent row leaves no orphan evidence, and
+    // no slice it owns consumes the byte budget.
     let recheckInput: RecheckInput | undefined;
     const budgetExcluded = new Set<string>();
     if (targets.length > 0 && !captureFailed) {
+      const candidates = targets.filter(
+        (target) => !catalogExcluded.has(target.rowId) && !catalogBudgetExcluded.has(target.rowId),
+      );
+      // Each row is measured against the evidence of the rows ALREADY
+      // accepted, never against slices a pending row might still bring: a row
+      // that does not fit is dropped and contributes nothing, so a later row
+      // is measured against the set that will really ride — it cannot lose its
+      // place to a row that was itself excluded, and byte accounting is
+      // monotone (adding a row only grows the serialized input), so a row
+      // dropped here cannot fit the final input either.
       const included: RecheckTarget[] = [];
-      let budget = RECHECK_INPUT_MAX_BYTES - jsonByteLength({ headSha, evidence: catalog.slices, discussion });
-      for (const target of targets) {
-        const cost = jsonByteLength(target);
-        if (cost > budget) {
-          budgetExcluded.add(target.rowId); // §7.3: oversized whole target — accounted, never truncated
-          continue;
-        }
-        budget -= cost;
+      const referenced = new Set<string>();
+      let evidence: EvidenceSlice[] = [];
+      for (const target of candidates) {
+        const withRow = new Set([...referenced, ...(catalog.sliceIdsByRowId.get(target.rowId) ?? [])]);
+        const nextEvidence = catalog.slices.filter((slice) => withRow.has(slice.id));
+        // §7.3 cap measured on the SERIALIZED input — schema, headSha,
+        // evidence, discussion, array brackets and separators included — so
+        // the accepted document is exactly what the cap counts.
+        const candidate = {
+          schema: RECHECK_INPUT_SCHEMA,
+          headSha,
+          targets: [...included, target],
+          evidence: nextEvidence,
+          discussion,
+        };
+        // §7.3: an oversized whole target is accounted, never truncated.
+        if (jsonByteLength(candidate) > RECHECK_INPUT_MAX_BYTES) continue;
         included.push(target);
+        evidence = nextEvidence;
+        for (const id of withRow) referenced.add(id);
       }
+      const sentIds = new Set(included.map((target) => target.rowId));
+      for (const target of candidates) if (!sentIds.has(target.rowId)) budgetExcluded.add(target.rowId);
       if (included.length > 0) {
         recheckInput = {
-          schema: "mstar.recheck-input/v1",
+          schema: RECHECK_INPUT_SCHEMA,
           headSha,
           targets: included,
-          evidence: catalog.slices,
+          evidence,
           discussion,
         };
       }
@@ -3015,18 +3505,19 @@ async function processMessage(
     // post/KV/put orchestration is worker-side) are "pipeline" again.
     failureStage = "pipeline";
 
-    // §7.7 step 5 (cont): read the concurrent recheck seat's document
-    // through the audited fixed-path bounded read (§7.3: Worker validates
-    // against ITS OWN trusted input — never a model echo). Anything other
-    // than a valid document is NO recheck; the round proceeds with every
-    // selected row conservatively accounted (§7.4).
-    const recheckDoc = recheckInput !== undefined ? await readRecheckDoc(sandbox, recheckInput) : null;
-    if (recheckInput !== undefined && recheckDoc === null) {
-      deps.log.warn(
-        fields,
-        "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable",
-      );
-    }
+    // §7.7 step 5 (cont): read the concurrent recheck seat's document AND its
+    // status through the audited fixed-path bounded reads (§7.3: Worker
+    // validates against ITS OWN trusted input — never a model echo). Anything
+    // other than a valid document is NO recheck; the round proceeds with every
+    // selected row conservatively accounted (§7.4), and the seat's status makes
+    // that loss attributable in D1. Rows the gate dropped are carried as
+    // rejected — by rowId when it had one, by position among the unanswered
+    // sent rows when it did not — so they are never mistaken for rows the seat
+    // never reached.
+    const recheck = recheckInput !== undefined ? await readRecheckDoc(sandbox, recheckInput) : null;
+    const recheckDoc = recheck?.doc ?? null;
+    const rejectedRowIds = recheck?.rejected ?? new Set<string>();
+    const anonymousRejectedRows = recheck?.anonymousRejectedRows ?? 0;
 
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
@@ -3129,16 +3620,113 @@ async function processMessage(
     // assembly + final body. The recheck document is reconciled against the
     // SAME round's final capped findings (§7.4 conservative precedence:
     // same-round recurrence and related unresolved concerns force
-    // unverifiable; omitted rows are accounted but never "assessed").
+    // unverifiable; rows the seat was never given are accounted but never
+    // "assessed").
     const staleContext = pendingApplyFailed || captureFailed;
     const reconciled = reconcileRecheckRound({
       targets,
       doc: recheckDoc,
+      status: recheck?.status ?? null,
       discussion,
       output,
       staleContext,
+      catalogExcluded,
+      catalogBudgetExcluded,
       budgetExcluded,
+      rejectedRowIds,
+      anonymousRejectedRows,
     });
+    // §7.8 attribution: ONE line per recheck round carrying the seat's own
+    // status next to this round's accounting. A lost round therefore leaves a
+    // D1 failure row and this line even when the container's stderr is gone.
+    // Emitted whenever rows were selected: a round the §7.3 size budget emptied
+    // sent nothing, and without this line that silence would be invisible.
+    if (targets.length > 0) {
+      const status = recheck?.status ?? null;
+      const recheckOutcome = status?.outcome ?? "absent";
+      // The runner cancels an unfinished seat when the main review settles
+      // (spec §7.8): the round answered nothing because it was STOPPED, not
+      // because it ran and lost. That is neither a failure row nor an
+      // `invalid-output` for a row the seat never answered.
+      const roundCancelled = recheckOutcome === "skipped" && status?.reason === "aborted";
+      // The status document belongs to the SEAT; a round whose document was
+      // lost has its real cause on the read side (absent / overflow /
+      // validation failure), so that cause LEADS the detail instead of the
+      // seat's `ok: null: null`, which says nothing about what went wrong.
+      // `failed` already names the seat's own fault, so it keeps its triple.
+      const docFailure = recheck?.docFailure ?? null;
+      const recheckDetail = redactExactSecrets(
+        redactSecrets(
+          recheckDoc === null && docFailure !== null && recheckOutcome === "ok"
+            ? `document ${docFailure}: ${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`
+            : `${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`,
+        ),
+        secretValues,
+      ).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
+      deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
+        {
+          ...fields,
+          recheck_outcome: recheckOutcome,
+          // Same wrapper as `error`: a seat-authored `reason` can echo a
+          // credential exactly like `error` can.
+          recheck_reason: status?.reason === null || status?.reason === undefined
+            ? null
+            : redactExactSecrets(redactSecrets(status.reason), secretValues),
+          recheck_error: status?.error === null || status?.error === undefined
+            ? null
+            : redactExactSecrets(redactSecrets(status.error), secretValues),
+          // Named drops + the unnamed ones actually attributed (no usable
+          // rowId, so mapped by position): the count reports what happened,
+          // not only what could be named.
+          rejected: rejectedRowIds.size + reconciled.anonymousRejectedCount,
+          // A seat-authored `rejected_unnamed` is unbounded; any claim beyond
+          // the sent-and-unanswered pool is excess that can claim no row. It is
+          // dropped, and reported here so the silence has a number.
+          rejected_unnamed_ignored: anonymousRejectedRows - reconciled.anonymousRejectedCount,
+          // Real seat answers (the published coverage count), never the
+          // lifecycle clock — a gate-rejected row advances `last_assessed_ms`
+          // without ever having been assessed.
+          assessed: reconciled.assessedCount,
+        },
+        recheckInput !== undefined
+          ? recheckDoc === null
+            ? roundCancelled
+              ? "recheck round cancelled by the runner — no row was answered, no failure recorded"
+              : "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
+            : "recheck round accounted"
+          : captureFailed
+            ? "recheck round accounted — no input sent: lifecycle context capture failed, so no recheck could run"
+            : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
+      );
+      // Shipped failure rule: a round that SENT rows records one row when its
+      // document is absent or the seat reported `failed` — a seat budget skip
+      // records one too, because that round ran and answered nothing. A round
+      // the runner cancelled by design, and a round that sent nothing at all
+      // (capture failed, catalog exclusion, §7.3 size budget), records none:
+      // its rows are already accounted as `budget`/`no-evidence`/`omitted` in
+      // the closure section.
+      if (
+        recheckInput !== undefined &&
+        !roundCancelled &&
+        (recheckDoc === null || recheckOutcome === "failed")
+      ) {
+        // Best-effort: the insert must never mask the round (AL-6 pattern).
+        try {
+          await deps.failureStore.record({
+            installation_id: payload.installation_id,
+            owner: payload.owner,
+            repo: payload.repo,
+            pr_number: payload.pr_number,
+            head_sha: headSha,
+            stage: "recheck",
+            error: recheckDetail,
+          });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(fields, `review_failures insert failed (recheck round continues): ${detail}`);
+        }
+      }
+    }
     const contextCoverage: Coverage = staleContext
       ? "unavailable"
       : roundContextCoverage(discussion);
@@ -3146,7 +3734,8 @@ async function processMessage(
       totalOpen,
       selected: targets.length,
       assessed: reconciled.assessedCount,
-      omitted: reconciled.omittedCount,
+      invalidOutput: reconciled.invalidOutputCount,
+      omitted: reconciled.unansweredCount,
       capped: Math.max(0, totalOpen - targets.length),
       contextCoverage,
     };
