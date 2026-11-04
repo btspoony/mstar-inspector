@@ -1146,9 +1146,12 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         const stored = parseStoredConcurrency(body) ?? submitted;
         // `degraded` is NOT cleared here: it reports that some stored level could
         // not be read, and a workspace write does not repair an unreadable system
-        // row — which is precisely the level that keeps reviews serial.
+        // row. A repair write re-reads instead, so the server decides — a
+        // repaired workspace column reports clean, a broken system row keeps
+        // the warning only.
         setLoaded((previous) => previous && { ...previous, concurrency: stored });
         setDraft(null);
+        if (loaded.degraded) setAttempt((count) => count + 1);
       }
       setConcurrencyNotice(outcome);
     } catch {
@@ -1174,7 +1177,10 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
             // payload are the conservative fallback (serial). The field starts
             // empty and never shows that fallback; a typed value OR the re-read
             // repairs the state.
-            <PageNotice kind="warn" message={t(locale, "workspace.concurrencyUnreadable")} />
+            <PageNotice
+              kind="warn"
+              message={t(locale, "workspace.concurrencyUnreadable", { max: loaded.max })}
+            />
           ) : null}
           <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
             <div className="flex flex-col gap-1.5">

@@ -447,18 +447,31 @@ describe("workspace name card", () => {
     }
   });
 
-  test("a degraded read warns instead of showing the fallback cap in the field", async () => {
-    // The store answered the conservative 1 for both levels because neither
-    // stored value could be read. Rendering that as a normal value would invite
-    // a save of a number nobody stored.
+  test("a degraded read starts empty, and a typed value repairs it", async () => {
+    // The store answered the conservative 1 for both levels because a stored
+    // value could not be read. The field must never present that fallback as
+    // this workspace's setting, and a typed value is the repair path.
     const { win, cleanup } = installDom(`http://localhost${PATH}`);
     const calls: Call[] = [];
     const realFetch = globalThis.fetch;
     let degraded = true;
+    let storedValue = 1;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-      calls.push({ method: init?.method ?? "GET", url: String(input), body: String(init?.body ?? "") });
+      const method = init?.method ?? "GET";
+      const url = String(input);
+      calls.push({ method, url, body: String(init?.body ?? "") });
+      if (method === "PUT") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { concurrency?: number };
+        storedValue = body.concurrency ?? storedValue;
+        // The write replaces the unreadable column, so the re-read is clean.
+        degraded = false;
+        return new Response(JSON.stringify({ concurrency: storedValue }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       return new Response(
-        JSON.stringify({ concurrency: 1, min: 1, max: 32, degraded }),
+        JSON.stringify({ concurrency: storedValue, min: 1, max: 32, degraded }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }) as unknown as typeof fetch;
@@ -468,56 +481,98 @@ describe("workspace name card", () => {
       const root = createRoot(container as unknown as Element);
       await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
 
-      expect(container.textContent).toContain(t("en", "workspace.concurrencyUnreadable"));
-      // The field is present but EMPTY: the fallback must not appear as this
-      // workspace's setting, and a typed value is the repair path.
-      const degradedInput = win.document.querySelector(
+      expect(container.textContent).toContain(
+        t("en", "workspace.concurrencyUnreadable", { max: 32 }),
+      );
+      const field = win.document.querySelector(
         "#workspace-concurrency",
       ) as unknown as HTMLInputElement;
-      expect(degradedInput).not.toBeNull();
-      expect(degradedInput.value).toBe("");
-      expect(degradedInput.required).toBe(true);
-      // The range stays the workspace's own legal range.
+      expect(field).not.toBeNull();
+      expect(field.value).toBe("");
+      expect(field.required).toBe(true);
       expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { max: 32 }));
       const save = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "workspace.concurrencySave"),
       ) as unknown as HTMLButtonElement;
       expect(save.disabled).toBe(false);
-
-      // The re-read is offered too; once it lands, the value the store actually
-      // holds seeds the field.
-      degraded = false;
-      const retry = [...container.querySelectorAll("button")].find(
-        (button) => button.textContent === t("en", "common.retry"),
-      );
-      expect(retry).toBeDefined();
-      await act(async () =>
-        (retry as unknown as HTMLButtonElement).dispatchEvent(
-          new win.Event("click", { bubbles: true }) as unknown as Event,
-        ),
-      );
-      expect(calls.filter((call) => call.url.endsWith("/api/settings/concurrency"))).toHaveLength(2);
-      expect(container.textContent).not.toContain(t("en", "workspace.concurrencyUnreadable"));
-      expect((win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement).value).toBe(
-        "1",
-      );
+      // Retry is offered beside the repair write.
       expect(
-        (
-          [...container.querySelectorAll("button")].find(
-            (button) => button.textContent === t("en", "workspace.concurrencySave"),
-          ) as unknown as HTMLButtonElement
-        ).disabled,
-      ).toBe(false);
+        [...container.querySelectorAll("button")].some(
+          (button) => button.textContent === t("en", "common.retry"),
+        ),
+      ).toBe(true);
 
-      // And the repair path works end to end: a typed value is written.
-      const recovered = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
       const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
       await act(async () => {
-        setValue?.call(recovered, "6");
-        recovered.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+        setValue?.call(field, "6");
+        field.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
       });
       await act(async () =>
-        recovered
+        field
+          .closest("form")
+          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event),
+      );
+
+      expect(calls.filter((call) => call.method === "PUT")).toEqual([
+        {
+          method: "PUT",
+          url: "/dashboard/ws_acme/api/settings/concurrency",
+          body: JSON.stringify({ concurrency: 6 }),
+        },
+      ]);
+      // The accepted write triggers a re-read, so the repaired state converges:
+      // warning gone, the stored number back in the field.
+      expect(container.textContent).not.toContain(t("en", "workspace.concurrencyUnreadable", { max: 32 }));
+      expect(
+        (win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement).value,
+      ).toBe("6");
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("a stored value above the hidden system quota stays visible and saveable", async () => {
+    // The quota applies at admission only. The tenant face never sees it, so a
+    // stored 8 under a quota of 4 renders and re-saves as ordinary data.
+    const { win, cleanup } = installDom(`http://localhost${PATH}`);
+    const calls: Call[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      const url = String(input);
+      calls.push({ method, url, body: String(init?.body ?? "") });
+      if (method === "PUT") {
+        return new Response(JSON.stringify({ concurrency: 8 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
+
+      const field = win.document.querySelector(
+        "#workspace-concurrency",
+      ) as unknown as HTMLInputElement;
+      expect(field.value).toBe("8");
+      const save = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "workspace.concurrencySave"),
+      ) as unknown as HTMLButtonElement;
+      expect(save.disabled).toBe(false);
+
+      // An untouched save re-submits the stored value, never a derived one.
+      await act(async () =>
+        field
           .closest("form")
           ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event),
       );
@@ -525,7 +580,7 @@ describe("workspace name card", () => {
         {
           method: "PUT",
           url: "/dashboard/ws_acme/api/settings/concurrency",
-          body: JSON.stringify({ concurrency: 6 }),
+          body: JSON.stringify({ concurrency: 8 }),
         },
       ]);
 

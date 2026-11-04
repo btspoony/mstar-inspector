@@ -8,6 +8,10 @@
 -- Clamping once, here, keeps every existing row a readable cap; the system row
 -- needs no clamp because its old maximum (64) is inside the new one (256).
 --
+-- An untouched row (NULL) now reads as the 32 default: migration 0040 described
+-- the default "as of then" (16), and this file changes the bound it resolves to
+-- without rewriting an applied migration.
+--
 -- The clamp literal below is the value of `WORKSPACE_CONCURRENCY_MAX` in
 -- `src/dashboard/runtime-config-store.ts`; `tests/store/migration.test.ts`
 -- derives its expectation from that constant, so the two cannot drift apart.

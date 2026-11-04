@@ -441,9 +441,9 @@ export const en = {
     concurrencyFailed: "Could not change the review concurrency — try again.",
     /** {max} = this workspace's own maximum. */
     concurrencyRange: "Accepts 1–{max}.",
-    /** The stored cap could not be read — the numbers are a fallback, not this workspace's setting. */
+    /** {max} = this workspace's own maximum; the shown numbers are the fallback. */
     concurrencyUnreadable:
-      "The stored review concurrency could not be read, so reviews are running one at a time. Nothing was changed and saving is disabled — retry the read.",
+      "The stored review concurrency could not be read, so reviews are running one at a time. The numbers shown are a fallback, not this workspace's setting. Saving a value from 1 to {max} repairs it, or retry the read.",
   },
   /**
    * Platform-operator support (2026-10): the operator's read-only face and the

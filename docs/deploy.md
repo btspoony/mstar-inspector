@@ -2360,8 +2360,7 @@ row expires.
   (`WORKSPACE_CONCURRENCY_MAX`) is a tenant bound, so no workspace can ask for
   more than `32` no matter how high the system quota goes.
   `tests/contracts/wrangler-env-parity.test.ts` pins the config to
-  `wrangler.jsonc`'s `250` literal (asserted in
-  `tests/contracts/wrangler-env-parity.test.ts`);
+  `wrangler.jsonc`'s `250` literal;
   `src/dashboard/runtime-config-store.test.ts`
   drives the accepted ranges through the real write predicates.
 - The tenant face never renders or returns the system value: its settings read
