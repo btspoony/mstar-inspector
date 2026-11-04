@@ -29,7 +29,7 @@ import type { Env } from "../../src/worker/env";
 import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
-import { createTestD1, type TestD1 } from "../store/helpers";
+import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -60,7 +60,10 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // parent-table rebuild that must carry every one of them.
   // 0039: pull_requests — the route writes one ledger row on EVERY verified,
   // non-reject `pull_request` delivery, so a fixture without it would send
-  // every PR delivery down the `pull_request_record_failed` warn branch.
+  // every PR delivery down the `pull_request_record_failed` warn branch. Every
+  // later migration (0040–…) is derived from the directory, so a new one joins
+  // automatically — including 0043, which adds the delivery row's source
+  // repository column `recordDelivery` names.
   for (const name of [
     "0003_dashboard_users.sql",
     "0004_github_apps.sql",
@@ -81,6 +84,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0038_webhook_path_drop.sql",
     // 0039 references github_apps, so it runs after the 0038 rebuild.
     "0039_pull_requests.sql",
+    ...migrationsAfter("0039_pull_requests.sql"),
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

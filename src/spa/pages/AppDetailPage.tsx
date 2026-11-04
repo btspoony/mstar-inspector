@@ -3,7 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import { t } from "../../i18n";
 import { PageHeader } from "@/components/PageHeader";
 import { MetricBand, type Metric } from "@/components/MetricBand";
-import { SettingsView } from "./SettingsPage";
+import { InstallationsSection, SettingsView } from "./SettingsPage";
 import { AppInsightsTab } from "./AppInsightsTab";
 import { AppPullRequestsTab } from "./AppPullRequestsTab";
 import { StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from "@design-system";
@@ -214,10 +214,10 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
     canManageRef.current = payload?.can_manage ?? false;
     if (payload) {
       // Mid-session demotion: a URL still carrying a manager tab
-      // (?tab=insights / ?tab=pull-requests) while the landed payload says
-      // non-manager is rewritten to the bare path (replaceState —
-      // loop-free), so the stale param cannot silently auto-reactivate a
-      // manager face on a later re-promotion.
+      // (?tab=installations / ?tab=insights / ?tab=pull-requests) while the
+      // landed payload says non-manager is rewritten to the bare path
+      // (replaceState — loop-free), so the stale param cannot silently
+      // auto-reactivate a manager face on a later re-promotion.
       if (
         !canManageRef.current &&
         parseAppDetailSearch(window.location.search, true).tab !== "settings"
@@ -322,7 +322,9 @@ export function AppDetailView({
   const pill = appStatusPill(locale, payload.app);
 
   function onTabChange(next: string): void {
-    if (next !== "settings" && next !== "insights" && next !== "pull-requests") return;
+    if (next !== "settings" && next !== "installations" && next !== "insights" && next !== "pull-requests") {
+      return;
+    }
     onSearch({ ...search, tab: next });
   }
 
@@ -373,8 +375,11 @@ export function AppDetailView({
           className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
         >
           <TabsTrigger value="settings">{t(locale, "appDetail.tabSettings")}</TabsTrigger>
-          {/* The 洞察 / Pull requests tabs exist ONLY on the manage face —
-              absence is the non-manager contract, pinned by test. */}
+          {/* The 已安装 / 洞察 / Pull requests tabs exist ONLY on the manage
+              face — absence is the non-manager contract, pinned by test. */}
+          {canManage ? (
+            <TabsTrigger value="installations">{t(locale, "appDetail.tabInstallations")}</TabsTrigger>
+          ) : null}
           {canManage ? (
             <TabsTrigger value="insights">{t(locale, "appDetail.tabInsights")}</TabsTrigger>
           ) : null}
@@ -382,10 +387,10 @@ export function AppDetailView({
             <TabsTrigger value="pull-requests">{t(locale, "appDetail.tabPullRequests")}</TabsTrigger>
           ) : null}
         </TabsList>
-        {/* forceMount on BOTH panels (mount-once tab switching): the
+        {/* forceMount on EVERY panel (mount-once tab switching): the
             settings form state (typed inputs, Add Provider panel, op
-            notices) and the loaded insights data survive 应用设置 ↔ 洞察
-            switches — no unmount, no refetch. Radix does NOT hide
+            notices) and the loaded insights data survive 应用设置 ↔ 已安装 ↔
+            洞察 switches — no unmount, no refetch. Radix does NOT hide
             forced-mounted inactive panels itself; the wrapper's
             `data-[state=inactive]:hidden` carries the one-visible-panel
             invariant (ui-bugs knowledge pin, source-tested below). */}
@@ -397,6 +402,11 @@ export function AppDetailView({
             onReload={onReload}
           />
         </TabsContent>
+        {canManage ? (
+          <TabsContent value="installations" forceMount>
+            <InstallationsSection locale={locale} payload={payload} />
+          </TabsContent>
+        ) : null}
         {canManage ? (
           <TabsContent value="insights" forceMount>
             <AppInsightsTab locale={locale} appId={appId} search={search} onSearch={onSearch} />

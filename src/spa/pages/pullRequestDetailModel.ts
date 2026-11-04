@@ -6,53 +6,37 @@
  * tone, and the fold/copy labels. No React import — the component module owns
  * state, effects and JSX, and these rules are pinnable without a DOM.
  */
+import { FINDING_SEVERITIES } from "../../contracts/finding-severity";
 import { t, type Locale } from "../../i18n";
 import { formatRelativeTime } from "../relative-time";
-import type { PullRequestDetail, PullRequestFinding, PullRequestReview } from "./data";
+import type {
+  PullRequestCounts,
+  PullRequestFailure,
+  PullRequestFinding,
+  PullRequestHead,
+  PullRequestReview,
+} from "./data";
 
 /** The three record families the detail face switches between. */
 export type RecordFamily = "findings" | "reviews" | "failures";
 
-/** The three severity words this face names; every other spelling is `other`. */
-export const SEVERITY_KEYS = {
-  mustFix: "must-fix",
-  shouldFix: "should-fix",
-  nit: "nit",
+/**
+ * The severity buckets in the order an operator asks about them, built from
+ * the shared merge-class vocabulary (`FINDING_SEVERITIES`) so a filter chip is
+ * always a spelling the record route accepts. `severity` is a free string in
+ * the payload; this table names the contract's classes and the catch-all
+ * bucket (`OTHER_BUCKET`) collects every other one.
+ */
+const SEVERITY_PRESENTATION = {
+  "must-fix": { labelKey: "pullRequests.severityMustFix", tone: "danger" },
+  "should-fix": { labelKey: "pullRequests.severityShouldFix", tone: "warn" },
+  nit: { labelKey: "pullRequests.severityNit", tone: "neutral" },
 } as const;
 
-/**
- * The one actionability rule: every severity but a nit asks the operator to
- * act. The payload's severity is a free string, so a spelling this face does
- * not name (the `other` bucket, which the UI keeps visible rather than
- * dropping) is a requested change too — only the one word `nit` reads as no
- * action. The family the face opens on, the trigger's dot and every severity
- * bucket all read this predicate, so no two of them can disagree.
- */
-export function isActionable(severity: string): boolean {
-  return severity !== SEVERITY_KEYS.nit;
-}
-
-/**
- * Severity buckets in the order an operator asks about them. `severity` is a
- * free string in the payload; the table names three spellings and the catch-all
- * bucket (`OTHER_BUCKET`) collects every other one.
- *
- * | bucket     | membership                                  | actionable |
- * |------------|---------------------------------------------|------------|
- * | must-fix   | `severity === "must-fix"`                   | yes        |
- * | should-fix | `severity === "should-fix"`                 | yes        |
- * | nit        | `severity === "nit"`                        | no         |
- * | other      | every spelling the three above do not name  | yes        |
- *
- * Every `actionable` cell is `isActionable` applied to that bucket's findings:
- * a bucket is actionable when any finding in it is, so the table is a reading
- * of the rule, not a second one.
- */
-export const SEVERITY_GROUPS = [
-  { severity: SEVERITY_KEYS.mustFix, labelKey: "pullRequests.severityMustFix", tone: "danger" },
-  { severity: SEVERITY_KEYS.shouldFix, labelKey: "pullRequests.severityShouldFix", tone: "warn" },
-  { severity: SEVERITY_KEYS.nit, labelKey: "pullRequests.severityNit", tone: "neutral" },
-] as const;
+export const SEVERITY_GROUPS = FINDING_SEVERITIES.map((severity) => ({
+  severity,
+  ...SEVERITY_PRESENTATION[severity],
+}));
 
 /** The bucket every spelling outside the table lands in, rendered last. */
 const OTHER_BUCKET = {
@@ -61,26 +45,25 @@ const OTHER_BUCKET = {
   tone: "neutral",
 } as const;
 
-export type SeverityTone = (typeof SEVERITY_GROUPS)[number]["tone"];
+/** A tone a severity bucket can wear. */
+export type SeverityTone = "danger" | "warn" | "neutral";
 
 export type SeverityGroup = {
   key: string;
   label: string;
   tone: SeverityTone;
-  /** Whether the bucket asks for action — the same `isActionable` the dot reads. */
-  actionable: boolean;
   items: { finding: PullRequestFinding; index: number }[];
 };
 
-/** True when the payload holds a finding to act on — the predicate behind the dot. */
-export function hasActionableFinding(detail: PullRequestDetail): boolean {
-  return detail.findings.some((finding) => isActionable(finding.severity));
-}
-
-/** The family the face opens on: the actionable record first, history last. */
-export function defaultFamily(detail: PullRequestDetail): RecordFamily {
-  if (hasActionableFinding(detail)) return "findings";
-  if (detail.failures.length > 0) return "failures";
+/**
+ * The family the face opens on. The head carries only totals, so the order is
+ * the one the counts can answer: records first, history last. The findings
+ * family is ensured first when it has any row, failures next, and reviews —
+ * the history — only when the PR has nothing else.
+ */
+export function defaultFamily(counts: PullRequestCounts): RecordFamily {
+  if (counts.findings > 0) return "findings";
+  if (counts.failures > 0) return "failures";
   return "reviews";
 }
 
@@ -90,28 +73,19 @@ export function severityGroups(
   findings: readonly PullRequestFinding[],
 ): SeverityGroup[] {
   const indexed = findings.map((finding, index) => ({ finding, index }));
-  // One actionability derivation for every bucket, the catch-all included: a
-  // bucket is actionable when one of its findings is, by `isActionable`.
-  const actionable = (items: SeverityGroup["items"]) =>
-    items.some(({ finding }) => isActionable(finding.severity));
   const known = new Set<string>(SEVERITY_GROUPS.map((group) => group.severity));
-  const groups: SeverityGroup[] = SEVERITY_GROUPS.map((group) => {
-    const items = indexed.filter(({ finding }) => finding.severity === group.severity);
-    return {
-      key: group.severity,
-      label: t(locale, group.labelKey),
-      tone: group.tone,
-      actionable: actionable(items),
-      items,
-    };
-  });
+  const groups: SeverityGroup[] = SEVERITY_GROUPS.map((group) => ({
+    key: group.severity,
+    label: t(locale, group.labelKey),
+    tone: group.tone,
+    items: indexed.filter(({ finding }) => finding.severity === group.severity),
+  }));
   const other = indexed.filter(({ finding }) => !known.has(finding.severity));
   if (other.length > 0) {
     groups.push({
       key: OTHER_BUCKET.key,
       label: t(locale, OTHER_BUCKET.labelKey),
       tone: OTHER_BUCKET.tone,
-      actionable: actionable(other),
       items: other,
     });
   }
@@ -230,16 +204,24 @@ export type ActivityEntry = {
 export type TimelineRow = ActivityEntry | { key: "timeline-truncated"; hidden: number };
 
 /**
- * Derive the aside timeline: the merged review/failure history capped at
- * `TIMELINE_LIMIT`, the truncation note when the cap dropped anything, then the
- * PR's own first sighting as the anchor.
+ * Derive the aside timeline from the LOADED pages: the merged review/failure
+ * history capped at `TIMELINE_LIMIT`, the truncation note when the cap dropped
+ * anything, then the PR's own first sighting as the anchor. A section that is
+ * not loaded yet contributes no rows — the aside describes the reads the face
+ * actually made — but the truncation count reads the per-section TOTALS, so it
+ * reports the PR's real remaining history rather than the loaded window's.
  */
-export function timelineRows(locale: Locale, detail: PullRequestDetail): TimelineRow[] {
-  const pr = detail.pull_request;
+export function timelineRows(
+  locale: Locale,
+  pr: PullRequestHead,
+  reviews: readonly PullRequestReview[],
+  failures: readonly PullRequestFailure[],
+  totals: PullRequestCounts,
+): TimelineRow[] {
   // Both tables stamp `datetime('now')` (UTC), so the raw text orders
   // chronologically.
   const history: ActivityEntry[] = [
-    ...detail.reviews.map((review, index) => {
+    ...reviews.map((review, index) => {
       // The payload coerces an absent verdict to ""; a label of "Review · "
       // would paint a separator with nothing after it.
       const label =
@@ -258,7 +240,7 @@ export function timelineRows(locale: Locale, detail: PullRequestDetail): Timelin
         meta: attribution === "" ? when : `${when} · ${attribution}`,
       };
     }),
-    ...detail.failures.map((failure, index) => ({
+    ...failures.map((failure, index) => ({
       at: failure.created_at,
       key: `failure-${index}`,
       tone: "danger" as const,
@@ -270,10 +252,11 @@ export function timelineRows(locale: Locale, detail: PullRequestDetail): Timelin
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   const shown = history.slice(0, TIMELINE_LIMIT);
+  // `history` is the loaded window only (one page per family), so the events
+  // beyond it are the sections' TOTALS minus the rows the window handed over.
+  const hidden = totals.reviews + totals.failures - shown.length;
   const truncated: TimelineRow[] =
-    history.length > shown.length
-      ? [{ key: "timeline-truncated", hidden: history.length - shown.length }]
-      : [];
+    hidden > 0 ? [{ key: "timeline-truncated", hidden }] : [];
   return [
     ...shown,
     ...truncated,

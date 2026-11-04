@@ -1,7 +1,21 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, ChevronRight, Copy } from "lucide-react";
+import { ArrowLeft, ChevronRight, Copy, ExternalLink } from "lucide-react";
+import { MUST_FIX_SEVERITY } from "../../contracts/finding-severity";
 import { t } from "../../i18n";
-import { Button, cn, StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from "@design-system";
+import {
+  Button,
+  cn,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  StatusBadge,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@design-system";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
@@ -10,10 +24,17 @@ import { MetricBand, type Metric } from "../components/MetricBand";
 import { ErrorState } from "../components/state/ErrorState";
 import {
   appPullRequestDetailUrl,
+  appPullRequestRecordsUrl,
+  githubPullRequestUrl,
+  githubRepoUrl,
   parsePullRequestDetail,
+  parseRecordPage,
   pullRequestStatePill,
   type PullRequestDetail,
   type PullRequestRef,
+  type RecordPage,
+  type RecordPageItems,
+  type RecordSection,
 } from "./data";
 import {
   COPY_OUTCOME_MS,
@@ -22,7 +43,7 @@ import {
   foldLabel,
   recordId,
   reviewAttribution,
-  SEVERITY_KEYS,
+  SEVERITY_GROUPS,
   severityGroups,
   timelineRows,
   verdictTone,
@@ -48,15 +69,200 @@ export function currentDetailRead(read: DetailRead | null, pr: string): DetailRe
 }
 
 /**
+ * The page size every section read REQUESTS. The server clamps it and echoes
+ * what it applied, and the pager strides on that; this constant is only the
+ * request and the fallback for a payload that does not echo a limit back.
+ */
+const RECORD_PAGE_SIZE = 10;
+
+/** The findings filter's "no filter" value; the other choices are `mergeClass` severities. */
+const SEVERITY_ALL = "all";
+
+type SectionStatus = "idle" | "loading" | "ok" | "error";
+
+/** One section's read state: the requested window, the filter and the loaded page. */
+export type SectionState<K extends RecordSection> = {
+  offset: number;
+  severity: string;
+  status: SectionStatus;
+  page: RecordPage<RecordPageItems[K]> | null;
+  /**
+   * The NEWEST window this face captured: the section's unfiltered first page,
+   * kept from the first read and never overwritten by a later offset or a
+   * severity filter. The aside timeline reads this rather than `page`, so
+   * paging a family never rewrites the PR's activity into its oldest rows.
+   */
+  newest: RecordPage<RecordPageItems[K]> | null;
+};
+
+/** Every section's state, keyed by family. */
+export type RecordSections = { [K in RecordSection]: SectionState<K> };
+
+type PageRequest = { offset: number; severity: string };
+
+/**
+ * One record section's page reader. Each section owns its state and its own
+ * request ticket: a page or filter the reader has already moved past must not
+ * overwrite the page now on screen. `endpoint` is read at call time only, so a
+ * parent re-render cannot refetch anything.
+ *
+ * The offset and the filter are committed WITH the page they name, never when
+ * the read starts: the pager's range, its button bounds and the filter control
+ * all describe the rows on screen, so a window still in flight cannot make
+ * them report a page that has not landed. A failed read commits the request
+ * too — its retry must re-read the window that failed, not the one still shown.
+ */
+function useRecordSection<K extends RecordSection>(
+  section: K,
+  endpoint: (page: { offset: number; limit: number; severity?: string }) => string,
+): [SectionState<K>, (request: PageRequest) => void] {
+  const [state, setState] = useState<SectionState<K>>({
+    offset: 0,
+    severity: "",
+    status: "idle",
+    page: null,
+    newest: null,
+  });
+  const ticket = useRef(0);
+  // The same read can be asked for twice before a re-render sees it (a tab's
+  // pointer press and click both activate); an identical in-flight request is
+  // the same read, not a second one.
+  const inFlight = useRef<string | null>(null);
+  const load = (request: PageRequest): void => {
+    const key = `${request.offset}\u0000${request.severity}`;
+    if (inFlight.current === key) return;
+    inFlight.current = key;
+    const mine = (ticket.current += 1);
+    setState((previous) => ({ ...previous, status: "loading" }));
+    fetchJson(endpoint({ offset: request.offset, limit: RECORD_PAGE_SIZE, severity: request.severity }))
+      .then((raw) => {
+        if (mine !== ticket.current) return;
+        const page = parseRecordPage(section, raw);
+        setState((previous) => ({
+          ...previous,
+          offset: request.offset,
+          severity: request.severity,
+          status: page === null ? "error" : "ok",
+          page: page ?? previous.page,
+          // The aside describes the PR's newest events, so only the FIRST
+          // unfiltered first page is ever captured: a later offset or filter
+          // must not move it.
+          newest:
+            previous.newest !== null || page === null || request.offset !== 0 || request.severity !== ""
+              ? previous.newest
+              : page,
+        }));
+      })
+      .catch(() => {
+        if (mine !== ticket.current) return;
+        // The failed window is the one its retry must re-read, so the request
+        // commits here even though no page arrived.
+        setState((previous) => ({
+          ...previous,
+          offset: request.offset,
+          severity: request.severity,
+          status: "error",
+        }));
+      })
+      .finally(() => {
+        if (mine === ticket.current) inFlight.current = null;
+      });
+  };
+  return [state, load];
+}
+
+/**
+ * A record list's pager: prev/next disabled at the bounds, and the loaded
+ * range over the section's total. A section with no rows renders nothing —
+ * its empty copy belongs to the list, not to a pager over zero.
+ */
+function SectionPager<K extends RecordSection>({
+  locale,
+  section,
+  state,
+  onLoadPage,
+}: {
+  locale: SpaBoot["locale"];
+  section: K;
+  state: SectionState<K>;
+  onLoadPage: (section: RecordSection, page: Partial<PageRequest>) => void;
+}) {
+  const page = state.page;
+  if (page === null || page.total === 0) return null;
+  // The label is derived from the page in hand, so a total that shrank between
+  // reads cannot invert it: `from` never passes `total`, and `to` never falls
+  // below `from`. Both bounds read the same page the rows come from, and the
+  // buttons stay inert while a read is in flight — the next window is only a
+  // move from the window on screen.
+  // The stride is the limit the SERVER applied (it clamps the requested one),
+  // so a page boundary can never overlap or skip: the constant is only the
+  // fallback for a payload that does not echo it back.
+  const loading = state.status === "loading";
+  const stride = page.limit ?? RECORD_PAGE_SIZE;
+  const from = Math.min(state.offset + 1, page.total);
+  const to = Math.max(from, Math.min(state.offset + page.items.length, page.total));
+  return (
+    <div data-slot="pager" className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span
+          data-slot="pager-range"
+          // The range is the page transition's only non-visual report; it is the
+          // live region for it, so nothing else announces the same text.
+          aria-live="polite"
+          className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tabular-nums text-(--text-faint)"
+        >
+          {t(locale, "pullRequests.pageRange", { from, to, total: page.total })}
+        </span>
+        {/* Rows the row parser refused still sit inside `total`, so the range
+            would otherwise count rows this list can never show on any page. */}
+        {page.dropped === 0 ? null : (
+          <span
+            data-slot="pager-dropped"
+            className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--tone-danger-fg)"
+          >
+            {t(locale, "pullRequests.pageDropped", { count: page.dropped })}
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          disabled={loading || state.offset === 0}
+          onClick={() =>
+            onLoadPage(section, {
+              offset: Math.max(0, state.offset - stride),
+              severity: state.severity,
+            })
+          }
+        >
+          {t(locale, "pullRequests.pagePrev")}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          disabled={loading || state.offset + stride >= page.total}
+          onClick={() => onLoadPage(section, { offset: state.offset + stride, severity: state.severity })}
+        >
+          {t(locale, "pullRequests.pageNext")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
  * The in-place detail face. Its read state lives HERE rather than in the tab,
  * so unmounting discards it: the tab renders this node only while a pr is
  * open, which makes reopening a PR a remount with a clean read instead of a
  * repaint of the previous visit's error. An effect cannot do that job — it
  * runs after paint, and the retained frame IS the frame the operator sees.
  *
- * The tab also keys this node on the pr address, so switching PRs is a
- * remount rather than a stamp comparison and no retained face survives a
- * transition at all.
+ * The tab also keys this node on the App and the pr address, so switching
+ * PRs or Apps is a remount rather than a stamp comparison and no retained
+ * face — head or section page — survives a transition at all.
  */
 export function PullRequestDetail({
   locale,
@@ -79,6 +285,37 @@ export function PullRequestDetail({
   const [read, setRead] = useState<DetailRead | null>(null);
   const [nonce, setNonce] = useState(0);
   const current = currentDetailRead(read, prKey);
+  // One reader per family, each with its own ticket; the object below is the
+  // view's whole page state.
+  const [findings, loadFindings] = useRecordSection("findings", (page) =>
+    appPullRequestRecordsUrl(apiBase(), appId, prRef, "findings", page),
+  );
+  const [reviews, loadReviews] = useRecordSection("reviews", (page) =>
+    appPullRequestRecordsUrl(apiBase(), appId, prRef, "reviews", page),
+  );
+  const [failures, loadFailures] = useRecordSection("failures", (page) =>
+    appPullRequestRecordsUrl(apiBase(), appId, prRef, "failures", page),
+  );
+  const records: RecordSections = { findings, reviews, failures };
+
+  /** Read one section page. Omitted fields keep the section's current window/filter. */
+  const loadPage = (section: RecordSection, page: Partial<PageRequest>): void => {
+    if (section === "findings") {
+      loadFindings({ offset: page.offset ?? findings.offset, severity: page.severity ?? findings.severity });
+    } else if (section === "reviews") {
+      loadReviews({ offset: page.offset ?? reviews.offset, severity: page.severity ?? reviews.severity });
+    } else {
+      loadFailures({ offset: page.offset ?? failures.offset, severity: page.severity ?? failures.severity });
+    }
+  };
+
+  // A tab's first selection loads it; a section that already has a page keeps
+  // it, so switching back and forth never re-reads what is on screen.
+  const ensureSection = (section: RecordSection): void => {
+    const state = section === "findings" ? findings : section === "reviews" ? reviews : failures;
+    if (state.page !== null || state.status === "loading") return;
+    loadPage(section, { offset: state.offset, severity: state.severity });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -87,7 +324,21 @@ export function PullRequestDetail({
       .then((raw) => {
         if (cancelled) return;
         const parsed = parsePullRequestDetail(raw);
-        setRead(parsed ? { pr: prKey, kind: "ok", data: parsed } : { pr: prKey, kind: "error" });
+        if (parsed === null) {
+          setRead({ pr: prKey, kind: "error" });
+          return;
+        }
+        setRead({ pr: prKey, kind: "ok", data: parsed });
+        // The counts the head just landed decide the opening family — the same
+        // derivation the view defaults to, so the visible section is loaded.
+        ensureSection(defaultFamily(parsed.counts));
+        // The aside describes the PR's newest reviews and failures whatever
+        // family the operator opened, so both history first pages are read with
+        // the head rather than on a tab selection. `ensureSection` skips a
+        // section that already has a page, so this never re-reads a window the
+        // operator has paged to.
+        ensureSection("reviews");
+        ensureSection("failures");
       })
       .catch(() => {
         if (!cancelled) setRead({ pr: prKey, kind: "error" });
@@ -95,6 +346,9 @@ export function PullRequestDetail({
     return () => {
       cancelled = true;
     };
+    // `ensureSection` closes over the sections only to skip loaded ones; it is
+    // not a dependency, or the first landing would re-read on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appId, prKey, owner, repo, number, nonce]);
 
   // Retry resets the read in the click itself, so the loading face paints
@@ -115,7 +369,13 @@ export function PullRequestDetail({
       </Button>
       <div aria-busy={current === null || current.kind === "loading"}>
         {current !== null && current.kind === "ok" ? (
-          <PullRequestDetailView locale={locale} detail={current.data} />
+          <PullRequestDetailView
+            locale={locale}
+            detail={current.data}
+            records={records}
+            onEnsureSection={ensureSection}
+            onLoadPage={loadPage}
+          />
         ) : current !== null && current.kind === "error" ? (
           <ErrorState locale={locale} onRetry={retry} />
         ) : (
@@ -156,30 +416,48 @@ const TIMELINE_DOT: Record<ActivityTone, string> = {
 export function PullRequestDetailView({
   locale,
   detail,
+  records,
+  onEnsureSection,
+  onLoadPage,
 }: {
   locale: SpaBoot["locale"];
   detail: PullRequestDetail;
+  /** The per-section page state the host owns. */
+  records: RecordSections;
+  onEnsureSection: (section: RecordSection) => void;
+  onLoadPage: (section: RecordSection, page: Partial<PageRequest>) => void;
 }) {
   const pr = detail.pull_request;
+  const counts = detail.counts;
   const pill = pullRequestStatePill(locale, pr.state);
-  const [family, setFamily] = useState<RecordFamily>(() => defaultFamily(detail));
+  const [family, setFamily] = useState<RecordFamily>(() => defaultFamily(counts));
   // Fold overrides only: an unset key keeps the entry's own default, so a
   // remount never has to seed state from props.
   const [openFindings, setOpenFindings] = useState<Readonly<Record<string, boolean>>>({});
   const [openReviews, setOpenReviews] = useState<Readonly<Record<string, boolean>>>({});
   const baseId = useId();
 
-  const mustFix = detail.findings.filter((finding) => finding.severity === SEVERITY_KEYS.mustFix).length;
-  const groups = severityGroups(locale, detail.findings);
-  // The dot reads the buckets the list below renders — one rule, so a legacy
-  // spelling that lands in `other` cannot be actionable here and quiet there.
-  const findingsActionable = groups.some((group) => group.actionable);
-  // The detail's own review list is the record for "latest": its first row is
-  // the newest review and carries the attribution. The PR row's summary is the
-  // fallback for a detail read that carried no review rows — the band, the
-  // header meta and the review list all read this one value.
-  const latestReview = detail.reviews[0] ?? null;
-  const latestVerdict = latestReview?.verdict ?? pr.latest_review?.verdict ?? "";
+  const findingsPage = records.findings.page;
+  const reviewsPage = records.reviews.page;
+  const failuresPage = records.failures.page;
+  const groups = severityGroups(locale, findingsPage?.items ?? []);
+  // A filtered window with no matches proves the FILTER is empty, not the PR:
+  // the head still counts findings, so the unfiltered copy would contradict the
+  // tab count. Name the severity the operator chose instead; an out-of-set
+  // value names itself, as the severity buckets already do.
+  const activeSeverity = records.findings.severity;
+  const severityGroup = SEVERITY_GROUPS.find((group) => group.severity === activeSeverity);
+  const emptyFindingsCopy =
+    activeSeverity === ""
+      ? t(locale, "pullRequests.noFindings")
+      : t(locale, "pullRequests.noFindingsForSeverity", {
+          severity: severityGroup === undefined ? activeSeverity : t(locale, severityGroup.labelKey),
+        });
+  // The PR's newest review comes from the head payload, never the loaded page:
+  // paging the reviews list must not rewrite the headline verdict, its tone or
+  // the model/provider attribution.
+  const latestReview = detail.latest_review;
+  const latestVerdict = latestReview?.verdict ?? "";
   // Both fields can be empty (a v1 payload records neither): the attribution is
   // then "", and an empty meta item or span would read as a missing value.
   const latestAttribution = latestReview === null ? "" : reviewAttribution(locale, latestReview);
@@ -217,9 +495,12 @@ export function PullRequestDetailView({
     }, COPY_OUTCOME_MS);
   };
   // Radix hands the trigger's value back as a string; only our three triggers
-  // can reach this, but the guard keeps the narrowing honest.
+  // can reach this, but the guard keeps the narrowing honest. Selecting a
+  // family for the first time is what reads its page.
   const selectFamily = (next: string): void => {
-    if (next === "findings" || next === "reviews" || next === "failures") setFamily(next);
+    if (next !== "findings" && next !== "reviews" && next !== "failures") return;
+    setFamily(next);
+    onEnsureSection(next);
   };
 
   const metrics: Metric[] = [
@@ -239,20 +520,22 @@ export function PullRequestDetailView({
         ),
       tone: verdictTone(latestVerdict) === "danger" ? "danger" : undefined,
     },
-    { key: t(locale, "pullRequests.reviews"), value: detail.reviews.length },
+    { key: t(locale, "pullRequests.reviews"), value: counts.reviews },
     {
       key: t(locale, "pullRequests.failures"),
-      value: detail.failures.length,
-      tone: detail.failures.length > 0 ? "danger" : undefined,
+      value: counts.failures,
+      tone: counts.failures > 0 ? "danger" : undefined,
     },
     {
       key: t(locale, "pullRequests.findings"),
+      // The must-fix tally rides the head's counts, so the note describes the
+      // PR rather than the loaded page or the active severity filter.
       value: (
         <>
-          {detail.findings.length}
-          {mustFix > 0 ? (
+          {counts.findings}
+          {counts.must_fix > 0 ? (
             <span className="ml-1 text-(length:--typo-label-12-size) font-normal text-(--text-muted)">
-              {t(locale, "pullRequests.mustFixNote", { count: mustFix })}
+              {t(locale, "pullRequests.mustFixNote", { count: counts.must_fix })}
             </span>
           ) : null}
         </>
@@ -261,7 +544,21 @@ export function PullRequestDetailView({
   ];
 
   const facts: { label: string; value: ReactNode }[] = [
-    { label: t(locale, "pullRequests.factRepo"), value: `${pr.owner}/${pr.repo}` },
+    {
+      label: t(locale, "pullRequests.factRepo"),
+      value: (
+        <a
+          href={githubRepoUrl(pr.owner, pr.repo)}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={t(locale, "pullRequests.openRepoOnGithub", { owner: pr.owner, repo: pr.repo })}
+          className="inline-flex items-center gap-1 underline-offset-2 hover:underline"
+        >
+          {`${pr.owner}/${pr.repo}`}
+          <ExternalLink aria-hidden="true" className="size-3" />
+        </a>
+      ),
+    },
     { label: t(locale, "pullRequests.factNumber"), value: `#${pr.number}` },
     { label: t(locale, "pullRequests.factState"), value: pill.label },
     // The payload coerces a nullable head_sha to "": an empty chip would read
@@ -294,16 +591,45 @@ export function PullRequestDetailView({
 
   // The aside's one list: capped history, the truncation note (when the cap
   // dropped anything) directly above the PR's own first sighting, which always
-  // closes it.
-  const timeline = timelineRows(locale, detail);
+  // closes it. The rows come from each family's FIRST unfiltered page — the
+  // host reads both history first pages with the head, and captures them
+  // before any paging — so the aside describes the newest events of the PR,
+  // never the oldest page of whichever family is open. A section with no
+  // captured window (its read failed) contributes neither rows nor a hidden
+  // count: a note claiming "earlier events not shown" with no row above it
+  // would describe events it has no window into.
+  const reviewsNewest = records.reviews.newest;
+  const failuresNewest = records.failures.newest;
+  const timeline = timelineRows(
+    locale,
+    pr,
+    reviewsNewest?.items ?? [],
+    failuresNewest?.items ?? [],
+    {
+      ...counts,
+      reviews: reviewsNewest === null ? 0 : counts.reviews,
+      failures: failuresNewest === null ? 0 : counts.failures,
+    },
+  );
 
   return (
     <div className="flex flex-col">
       <header className="flex flex-col gap-2.5">
         <div className="flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-(--text-secondary) tabular-nums">
+          <a
+            href={githubPullRequestUrl(pr.owner, pr.repo, pr.number)}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={t(locale, "pullRequests.openOnGithub", {
+              owner: pr.owner,
+              repo: pr.repo,
+              number: pr.number,
+            })}
+            className="inline-flex items-center gap-1 text-(--text-secondary) tabular-nums underline-offset-2 hover:underline"
+          >
             {t(locale, "pullRequests.prNumber", { owner: pr.owner, repo: pr.repo, number: pr.number })}
-          </span>
+            <ExternalLink aria-hidden="true" className="size-3" />
+          </a>
           <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
           {pr.head_sha === "" ? null : (
             <span
@@ -350,12 +676,15 @@ export function PullRequestDetailView({
             value="findings"
             aria-label={t(locale, "pullRequests.familyTabName", {
               label: t(locale, "pullRequests.findings"),
-              count: detail.findings.length,
+              count: counts.findings,
             })}
           >
             {t(locale, "pullRequests.findings")}
-            <span className="text-xs tabular-nums text-(--text-faint)">{detail.findings.length}</span>
-            {findingsActionable ? (
+            <span className="text-xs tabular-nums text-(--text-faint)">{counts.findings}</span>
+            {/* The dot answers "does this PR have a must-fix row" from the
+                head's own count, so a severity filter or a page-2 view cannot
+                clear it — the count beside it describes the PR too. */}
+            {counts.must_fix > 0 ? (
               <span
                 data-slot="family-dot"
                 data-tone="danger"
@@ -368,22 +697,22 @@ export function PullRequestDetailView({
             value="reviews"
             aria-label={t(locale, "pullRequests.familyTabName", {
               label: t(locale, "pullRequests.reviews"),
-              count: detail.reviews.length,
+              count: counts.reviews,
             })}
           >
             {t(locale, "pullRequests.reviews")}
-            <span className="text-xs tabular-nums text-(--text-faint)">{detail.reviews.length}</span>
+            <span className="text-xs tabular-nums text-(--text-faint)">{counts.reviews}</span>
           </TabsTrigger>
           <TabsTrigger
             value="failures"
             aria-label={t(locale, "pullRequests.familyTabName", {
               label: t(locale, "pullRequests.failures"),
-              count: detail.failures.length,
+              count: counts.failures,
             })}
           >
             {t(locale, "pullRequests.failures")}
-            <span className="text-xs tabular-nums text-(--text-faint)">{detail.failures.length}</span>
-            {detail.failures.length > 0 ? (
+            <span className="text-xs tabular-nums text-(--text-faint)">{counts.failures}</span>
+            {counts.failures > 0 ? (
               <span
                 data-slot="family-dot"
                 data-tone="danger"
@@ -397,8 +726,57 @@ export function PullRequestDetailView({
         <div className="mt-(--spacing-5) flex flex-col gap-(--spacing-6) xl:flex-row xl:items-start xl:gap-(--spacing-8)">
           <div className="min-w-0 flex-1">
             <TabsContent value="findings">
-              {detail.findings.length === 0 ? (
-                <p className="text-sm text-(--text-muted)">{t(locale, "pullRequests.noFindings")}</p>
+              {/* The filter sits above the list; changing it reloads from page
+                  one and the pager then counts the filtered total. It reads the
+                  committed filter (the one the loaded rows answer to), so it
+                  stays inert while a new one is in flight. */}
+              {counts.findings === 0 ? null : (
+                <div className="mb-(--spacing-4) flex items-center gap-2">
+                  <Select
+                    value={records.findings.severity === "" ? SEVERITY_ALL : records.findings.severity}
+                    disabled={records.findings.status === "loading"}
+                    onValueChange={(next) =>
+                      onLoadPage("findings", { offset: 0, severity: next === SEVERITY_ALL ? "" : next })
+                    }
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      className="min-w-40"
+                      aria-label={t(locale, "pullRequests.filterSeverity")}
+                    >
+                      <SelectValue placeholder={t(locale, "pullRequests.filterAll")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={SEVERITY_ALL}>{t(locale, "pullRequests.filterAll")}</SelectItem>
+                      {SEVERITY_GROUPS.map((group) => (
+                        <SelectItem key={group.severity} value={group.severity}>
+                          {t(locale, group.labelKey)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              {records.findings.status === "error" ? (
+                <ErrorState
+                  locale={locale}
+                  onRetry={() =>
+                    onLoadPage("findings", {
+                      offset: records.findings.offset,
+                      severity: records.findings.severity,
+                    })
+                  }
+                />
+              ) : findingsPage === null ? (
+                records.findings.status === "loading" ? (
+                  <p role="status" className="text-sm text-(--text-muted)">
+                    {t(locale, "common.loading")}
+                  </p>
+                ) : (
+                  <p className="text-sm text-(--text-muted)">{t(locale, "pullRequests.noFindings")}</p>
+                )
+              ) : findingsPage.total === 0 ? (
+                <p className="text-sm text-(--text-muted)">{emptyFindingsCopy}</p>
               ) : (
                 <div className="flex flex-col gap-(--spacing-6)">
                   {groups.map((group) => (
@@ -410,7 +788,12 @@ export function PullRequestDetailView({
                     >
                       <h3 className="flex items-baseline gap-2 text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)">
                         <span>{group.label}</span>
-                        <span className="tabular-nums text-(--text-muted)">{group.items.length}</span>
+                        {/* The groups are built from the loaded window, while
+                            the tab's count is the head's PR-wide total — so the
+                            header says which one it counts. */}
+                        <span className="tabular-nums text-(--text-muted)">
+                          {t(locale, "pullRequests.groupPageCount", { count: group.items.length })}
+                        </span>
                         <span aria-hidden="true" className="h-px flex-1 self-center bg-(--border-subtle)" />
                       </h3>
                       <ul className="flex flex-col gap-2">
@@ -420,7 +803,7 @@ export function PullRequestDetailView({
                           // together, so position joins it — and the fold
                           // state, the React key and the body id all read it.
                           const findingKey = `${finding.finding_id || "finding"}-${index}`;
-                          const open = openFindings[findingKey] ?? finding.severity === SEVERITY_KEYS.mustFix;
+                          const open = openFindings[findingKey] ?? finding.severity === MUST_FIX_SEVERITY;
                           const location =
                             finding.file_path === ""
                               ? ""
@@ -481,193 +864,248 @@ export function PullRequestDetailView({
                       </ul>
                     </section>
                   ))}
+                  <SectionPager
+                    locale={locale}
+                    section="findings"
+                    state={records.findings}
+                    onLoadPage={onLoadPage}
+                  />
                 </div>
               )}
             </TabsContent>
 
             <TabsContent value="reviews">
-              {detail.reviews.length === 0 ? (
+              {records.reviews.status === "error" ? (
+                <ErrorState
+                  locale={locale}
+                  onRetry={() =>
+                    onLoadPage("reviews", { offset: records.reviews.offset, severity: records.reviews.severity })
+                  }
+                />
+              ) : reviewsPage === null ? (
+                records.reviews.status === "loading" ? (
+                  <p role="status" className="text-sm text-(--text-muted)">
+                    {t(locale, "common.loading")}
+                  </p>
+                ) : (
+                  <p className="text-sm text-(--text-muted)">{t(locale, "pullRequests.noReviews")}</p>
+                )
+              ) : reviewsPage.total === 0 ? (
                 <p className="text-sm text-(--text-muted)">{t(locale, "pullRequests.noReviews")}</p>
               ) : (
-                <ul className="flex flex-col gap-2">
-                  {detail.reviews.map((review, index) => {
-                    // Position in the key keeps it unique; the identity claim
-                    // is the remount — this tree is keyed on the PR, so a
-                    // refetch's positional drift cannot survive into another
-                    // mount and the fold state never crosses PRs.
-                    const reviewKey = `${review.reviewed_at}-${review.head_sha}-${index}`;
-                    const open = openReviews[reviewKey] ?? index === 0;
-                    const id = recordId(baseId, reviewKey);
-                    const attribution = reviewAttribution(locale, review);
-                    return (
-                      <li
-                        key={reviewKey}
-                        className={cn(
-                          "flex flex-col gap-2 rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5",
-                          index === 0 ? "border-(--border-strong)" : "",
-                        )}
-                      >
-                        <div
-                          data-slot="review-head"
-                          className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-(length:--typo-label-12-size) leading-(--typo-label-12-line)"
+                <div className="flex flex-col gap-(--spacing-4)">
+                  <ul className="flex flex-col gap-2">
+                    {reviewsPage.items.map((review, index) => {
+                      // Position in the key keeps it unique; the identity claim
+                      // is the remount — this tree is keyed on the PR, so a
+                      // refetch's positional drift cannot survive into another
+                      // mount and the fold state never crosses PRs.
+                      const reviewKey = `${review.reviewed_at}-${review.head_sha}-${index}`;
+                      const open = openReviews[reviewKey] ?? index === 0;
+                      const id = recordId(baseId, reviewKey);
+                      const attribution = reviewAttribution(locale, review);
+                      return (
+                        <li
+                          key={reviewKey}
+                          className={cn(
+                            "flex flex-col gap-2 rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5",
+                            index === 0 ? "border-(--border-strong)" : "",
+                          )}
                         >
-                          {/* A coerced-empty verdict is no verdict: no pill,
-                              and the row starts at its attribution. */}
-                          {review.verdict === "" ? null : (
-                            <StatusBadge tone={verdictTone(review.verdict)}>{review.verdict}</StatusBadge>
-                          )}
-                          {/* An unattributed review (v1 records no model) gets
-                              no empty span — the row starts at whatever it
-                              does carry. */}
-                          {attribution === "" ? null : (
-                            <span className="text-(--text-muted)">{attribution}</span>
-                          )}
-                          <span className="ml-auto tabular-nums text-(--text-faint)" title={review.reviewed_at}>
-                            {formatRelativeTime(review.reviewed_at, locale)}
-                          </span>
-                          {review.head_sha === "" ? null : (
-                            <span
-                              data-slot="head-sha"
-                              className="rounded-(--radius-control) border border-(--border-default) px-1.5 py-0.5 font-mono text-(--text-muted)"
-                              title={t(locale, "pullRequests.headSha")}
-                            >
-                              {review.head_sha.slice(0, 7)}
+                          <div
+                            data-slot="review-head"
+                            className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-(length:--typo-label-12-size) leading-(--typo-label-12-line)"
+                          >
+                            {/* A coerced-empty verdict is no verdict: no pill,
+                                and the row starts at its attribution. */}
+                            {review.verdict === "" ? null : (
+                              <StatusBadge tone={verdictTone(review.verdict)}>{review.verdict}</StatusBadge>
+                            )}
+                            {/* An unattributed review (v1 records no model) gets
+                                no empty span — the row starts at whatever it
+                                does carry. */}
+                            {attribution === "" ? null : (
+                              <span className="text-(--text-muted)">{attribution}</span>
+                            )}
+                            <span className="ml-auto tabular-nums text-(--text-faint)" title={review.reviewed_at}>
+                              {formatRelativeTime(review.reviewed_at, locale)}
                             </span>
-                          )}
-                        </div>
-                        <p
-                          id={id}
-                          hidden={!open}
-                          className="whitespace-pre-wrap break-words text-sm text-(--text-secondary)"
-                        >
-                          {review.summary_md}
-                        </p>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="xs"
-                          className="self-start text-(--text-muted)"
-                          aria-expanded={open}
-                          aria-controls={id}
-                          aria-label={foldLabel(
-                            locale,
-                            open,
-                            [review.verdict, review.head_sha.slice(0, 7)].filter((part) => part !== "").join(" · "),
-                            index + 1,
-                          )}
-                          onClick={() => setOpenReviews((previous) => ({ ...previous, [reviewKey]: !open }))}
-                        >
-                          <ChevronRight aria-hidden="true" className={cn("transition-transform", open && "rotate-90")} />
-                          {t(locale, open ? "pullRequests.collapse" : "pullRequests.expand")}
-                        </Button>
-                      </li>
-                    );
-                  })}
-                </ul>
+                            {review.head_sha === "" ? null : (
+                              <span
+                                data-slot="head-sha"
+                                className="rounded-(--radius-control) border border-(--border-default) px-1.5 py-0.5 font-mono text-(--text-muted)"
+                                title={t(locale, "pullRequests.headSha")}
+                              >
+                                {review.head_sha.slice(0, 7)}
+                              </span>
+                            )}
+                          </div>
+                          <p
+                            id={id}
+                            hidden={!open}
+                            className="whitespace-pre-wrap break-words text-sm text-(--text-secondary)"
+                          >
+                            {review.summary_md}
+                          </p>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="xs"
+                            className="self-start text-(--text-muted)"
+                            aria-expanded={open}
+                            aria-controls={id}
+                            aria-label={foldLabel(
+                              locale,
+                              open,
+                              [review.verdict, review.head_sha.slice(0, 7)].filter((part) => part !== "").join(" · "),
+                              index + 1,
+                            )}
+                            onClick={() => setOpenReviews((previous) => ({ ...previous, [reviewKey]: !open }))}
+                          >
+                            <ChevronRight aria-hidden="true" className={cn("transition-transform", open && "rotate-90")} />
+                            {t(locale, open ? "pullRequests.collapse" : "pullRequests.expand")}
+                          </Button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <SectionPager
+                    locale={locale}
+                    section="reviews"
+                    state={records.reviews}
+                    onLoadPage={onLoadPage}
+                  />
+                </div>
               )}
             </TabsContent>
 
             <TabsContent value="failures">
-              {detail.failures.length === 0 ? (
+              {records.failures.status === "error" ? (
+                <ErrorState
+                  locale={locale}
+                  onRetry={() =>
+                    onLoadPage("failures", {
+                      offset: records.failures.offset,
+                      severity: records.failures.severity,
+                    })
+                  }
+                />
+              ) : failuresPage === null ? (
+                records.failures.status === "loading" ? (
+                  <p role="status" className="text-sm text-(--text-muted)">
+                    {t(locale, "common.loading")}
+                  </p>
+                ) : (
+                  <p className="text-sm text-(--text-muted)">{t(locale, "pullRequests.noFailures")}</p>
+                )
+              ) : failuresPage.total === 0 ? (
                 <p className="text-sm text-(--text-muted)">{t(locale, "pullRequests.noFailures")}</p>
               ) : (
-                <ul className="flex flex-col gap-2">
-                  {detail.failures.map((failure, index) => {
-                    // The first line is the diagnosis; the rest is evidence.
-                    // Trailing newlines are not another line: `"boom\n"` is
-                    // one line of output, so it gets no disclosure.
-                    const lines = failure.error.replace(/(\r?\n)+$/, "").split(/\r?\n/);
-                    const firstLine = lines[0] ?? "";
-                    // The row's identity is its key; the copy outcome rides the
-                    // same key so the message names the block it belongs to.
-                    const failureKey = `${failure.created_at}-${index}`;
-                    const outcome = copyOutcome[failureKey];
-                    return (
-                      <li
-                        key={failureKey}
-                        data-tone="danger"
-                        className="flex flex-col gap-2 rounded-(--radius-container) border border-(--tone-danger-border) bg-(--tone-danger-bg) px-3.5 py-3"
-                      >
-                        <div className="flex flex-wrap items-center gap-2 text-(length:--typo-label-12-size) leading-(--typo-label-12-line)">
-                          {/* The payload can record no stage: an empty chip
-                              would read as a fact, so it disappears. */}
-                          {failure.stage === "" ? null : (
-                            <span
-                              data-slot="failure-stage"
-                              className="rounded-(--radius-control) border border-(--tone-danger-border) px-1.5 py-0.5 font-mono text-(--tone-danger-fg)"
-                            >
-                              {failure.stage}
+                <div className="flex flex-col gap-(--spacing-4)">
+                  <ul className="flex flex-col gap-2">
+                    {failuresPage.items.map((failure, index) => {
+                      // The first line is the diagnosis; the rest is evidence.
+                      // Trailing newlines are not another line: `"boom\n"` is
+                      // one line of output, so it gets no disclosure.
+                      const lines = failure.error.replace(/(\r?\n)+$/, "").split(/\r?\n/);
+                      const firstLine = lines[0] ?? "";
+                      // The row's identity is its key; the copy outcome rides the
+                      // same key so the message names the block it belongs to.
+                      const failureKey = `${failure.created_at}-${index}`;
+                      const outcome = copyOutcome[failureKey];
+                      return (
+                        <li
+                          key={failureKey}
+                          data-tone="danger"
+                          className="flex flex-col gap-2 rounded-(--radius-container) border border-(--tone-danger-border) bg-(--tone-danger-bg) px-3.5 py-3"
+                        >
+                          <div className="flex flex-wrap items-center gap-2 text-(length:--typo-label-12-size) leading-(--typo-label-12-line)">
+                            {/* The payload can record no stage: an empty chip
+                                would read as a fact, so it disappears. */}
+                            {failure.stage === "" ? null : (
+                              <span
+                                data-slot="failure-stage"
+                                className="rounded-(--radius-control) border border-(--tone-danger-border) px-1.5 py-0.5 font-mono text-(--tone-danger-fg)"
+                              >
+                                {failure.stage}
+                              </span>
+                            )}
+                            <span className="ml-auto tabular-nums text-(--text-faint)" title={failure.created_at}>
+                              {formatRelativeTime(failure.created_at, locale)}
                             </span>
+                          </div>
+                          {/* Model/runtime output — rendered as text, never as HTML. */}
+                          {firstLine === "" ? null : (
+                            <p className="whitespace-pre-wrap break-words font-mono text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--tone-danger-fg)">
+                              {firstLine}
+                            </p>
                           )}
-                          <span className="ml-auto tabular-nums text-(--text-faint)" title={failure.created_at}>
-                            {formatRelativeTime(failure.created_at, locale)}
-                          </span>
-                        </div>
-                        {/* Model/runtime output — rendered as text, never as HTML. */}
-                        {firstLine === "" ? null : (
-                          <p className="whitespace-pre-wrap break-words font-mono text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--tone-danger-fg)">
-                            {firstLine}
-                          </p>
-                        )}
-                        {lines.length > 1 ? (
-                          <details>
-                            <summary className="cursor-pointer text-(length:--typo-label-12-size) text-(--text-secondary)">
-                              {t(locale, "pullRequests.failureRemainingOutput")}
-                            </summary>
-                            {/* The diagnosis above already printed the first
-                                line; this block is the evidence BELOW it. The
-                                copy action still takes the whole error. */}
-                            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre rounded-(--radius-control) border border-(--tone-danger-border) bg-(--surface-page) p-2.5 font-mono text-(length:--typo-label-12-size) leading-relaxed text-(--text-secondary)">
-                              {lines.slice(1).join("\n")}
-                            </pre>
-                          </details>
-                        ) : null}
-                        <div className="flex items-center gap-2">
-                          <Button
-                            data-slot="copy-error"
-                            type="button"
-                            variant="ghost"
-                            size="xs"
-                            className="self-start text-(--text-secondary)"
-                            onClick={() => {
-                              // Feature-detected per press: an insecure context
-                              // or an old browser offers no Clipboard API, and
-                              // that press must report the failure rather than
-                              // leave the previous clipboard content silently in
-                              // place. Both branches set the outcome — a
-                              // rejected write (permission, insecure context)
-                              // leaves the same stale content, so silence would
-                              // let the operator paste the wrong text.
-                              const clipboard: Clipboard | undefined =
-                                typeof navigator === "undefined" ? undefined : navigator.clipboard;
-                              if (clipboard === undefined || typeof clipboard.writeText !== "function") {
-                                announceCopy(failureKey, "failed");
-                                return;
-                              }
-                              // A browser may throw from `writeText` instead of
-                              // rejecting: same outcome, so the write is wrapped
-                              // and both settle paths land on the one machine.
-                              let write: Promise<void>;
-                              try {
-                                write = clipboard.writeText(failure.error);
-                              } catch {
-                                announceCopy(failureKey, "failed");
-                                return;
-                              }
-                              write.then(
-                                () => announceCopy(failureKey, "copied"),
-                                () => announceCopy(failureKey, "failed"),
-                              );
-                            }}
-                          >
-                            <Copy aria-hidden="true" />
-                            {copyOutcomeLabel(locale, outcome)}
-                          </Button>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
+                          {lines.length > 1 ? (
+                            <details>
+                              <summary className="cursor-pointer text-(length:--typo-label-12-size) text-(--text-secondary)">
+                                {t(locale, "pullRequests.failureRemainingOutput")}
+                              </summary>
+                              {/* The diagnosis above already printed the first
+                                  line; this block is the evidence BELOW it. The
+                                  copy action still takes the whole error. */}
+                              <pre className="mt-2 max-h-64 overflow-auto whitespace-pre rounded-(--radius-control) border border-(--tone-danger-border) bg-(--surface-page) p-2.5 font-mono text-(length:--typo-label-12-size) leading-relaxed text-(--text-secondary)">
+                                {lines.slice(1).join("\n")}
+                              </pre>
+                            </details>
+                          ) : null}
+                          <div className="flex items-center gap-2">
+                            <Button
+                              data-slot="copy-error"
+                              type="button"
+                              variant="ghost"
+                              size="xs"
+                              className="self-start text-(--text-secondary)"
+                              onClick={() => {
+                                // Feature-detected per press: an insecure context
+                                // or an old browser offers no Clipboard API, and
+                                // that press must report the failure rather than
+                                // leave the previous clipboard content silently in
+                                // place. Both branches set the outcome — a
+                                // rejected write (permission, insecure context)
+                                // leaves the same stale content, so silence would
+                                // let the operator paste the wrong text.
+                                const clipboard: Clipboard | undefined =
+                                  typeof navigator === "undefined" ? undefined : navigator.clipboard;
+                                if (clipboard === undefined || typeof clipboard.writeText !== "function") {
+                                  announceCopy(failureKey, "failed");
+                                  return;
+                                }
+                                // A browser may throw from `writeText` instead of
+                                // rejecting: same outcome, so the write is wrapped
+                                // and both settle paths land on the one machine.
+                                let write: Promise<void>;
+                                try {
+                                  write = clipboard.writeText(failure.error);
+                                } catch {
+                                  announceCopy(failureKey, "failed");
+                                  return;
+                                }
+                                write.then(
+                                  () => announceCopy(failureKey, "copied"),
+                                  () => announceCopy(failureKey, "failed"),
+                                );
+                              }}
+                            >
+                              <Copy aria-hidden="true" />
+                              {copyOutcomeLabel(locale, outcome)}
+                            </Button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <SectionPager
+                    locale={locale}
+                    section="failures"
+                    state={records.failures}
+                    onLoadPage={onLoadPage}
+                  />
+                </div>
               )}
             </TabsContent>
           </div>

@@ -1,46 +1,43 @@
 /**
- * App detail page (App detail IA): two-tab shell pins.
- * No DOM runner — source-scan + static-SSR + pure-helper contracts, the
- * repo's standard trio (charts-recharts precedent for SSR).
+ * App detail page (App detail IA): the tab shell's product behaviour.
+ * Static-SSR over the pure views plus happy-dom mounts for the stateful
+ * shell, the repo's standard duo (charts-recharts precedent for SSR).
  *
  * 1. Tab shell: default tab 应用设置 on the bare path AND the legacy
  *    /settings deep link; the 洞察 tab renders ONLY on the manage face —
  *    a non-manager must not see the tab at all (absence pinned).
- * 2. Radix Tabs forceMount knowledge: inactive panels must be hidden by
- *    the wrapper's `data-[state=inactive]:hidden` (ui-bugs knowledge pin).
- * 3. URL-derived state: one []-mounted popstate listener + replaceState
- *    commits (spa-url-state-resync contract).
- * 4. R1 closure: the kept data.ts insights helpers (parseInsights /
- *    INSIGHTS_WINDOWS / insightsRepo*) get their new consumer — the
- *    per-App insights tab — via the mount-prefixed
- *    /dashboard/api/apps/:appId/insights/summary face.
+ * 2. Mount-once tab switching: a manager tab switch leaves the settings panel
+ *    mounted (and hidden), so typed form state survives (mounted assertion).
+ * 3. Mid-session demotion: a stale manager-tab URL is rewritten once the
+ *    non-manager payload lands (mounted against the real page).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { act, createElement } from "react";
+import { act, createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Tabs, TabsList, TabsTrigger } from "@design-system";
+import { type Element as DomElement, type HTMLElement as DomHTMLElement, type Window } from "happy-dom";
 import { t } from "../../src/i18n";
 import {
   appDetailSearchQuery,
   appInsightsSummaryUrl,
   appStatusPill,
   parseAppDetailSearch,
+  pullRequestRefOf,
+  type AppDetailSearch,
+  type AppDetailTab,
   type InsightsSummary,
   type SettingsManagePayload,
   type SettingsPayload,
 } from "../../src/spa/pages/data";
 import { AppDetailPage, AppDetailView, loadAppDetail } from "../../src/spa/pages/AppDetailPage";
+import { SettingsView } from "../../src/spa/pages/SettingsPage";
 import { apiBase } from "../../src/spa/workspace-base";
 import { AppInsightsTab, InsightsRecordsView, SEVERITY_SLOTS } from "../../src/spa/pages/AppInsightsTab";
-import { installDom } from "./dom";
+import { installDom, withMarkup } from "./dom";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
-const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
-const insightsTab = readFileSync(join(spaRoot, "pages/AppInsightsTab.tsx"), "utf8");
-const tabsWrapper = readFileSync(join(import.meta.dir, "../../src/design-system/primitives/tabs.tsx"), "utf8");
 
 const IDENTITY_APP = {
   github_slug: "demo",
@@ -93,7 +90,7 @@ const search = { tab: "settings" as const, window: "30" as const, repo: "", pr: 
 const noReload = async () => true;
 const noSearch = () => {};
 
-function renderDetail(payload: SettingsPayload, canManage: boolean) {
+function renderDetail(payload: SettingsPayload, canManage: boolean, tab: AppDetailTab = "settings") {
   return renderToStaticMarkup(
     createElement(AppDetailView, {
       locale: "en",
@@ -101,7 +98,7 @@ function renderDetail(payload: SettingsPayload, canManage: boolean) {
       payload,
       groups: [],
       notice: null,
-      search,
+      search: { ...search, tab },
       onReload: noReload,
       onSearch: noSearch,
     }),
@@ -111,10 +108,12 @@ function renderDetail(payload: SettingsPayload, canManage: boolean) {
 describe("app detail URL state (shared pure helpers)", () => {
   test("default tab is settings on the bare path; ?tab=insights only for a manager", () => {
     expect(parseAppDetailSearch("", true)).toEqual({ tab: "settings", window: "30", repo: "", pr: "" });
+    expect(parseAppDetailSearch("?tab=installations", true).tab).toBe("installations");
     expect(parseAppDetailSearch("?tab=insights", true).tab).toBe("insights");
     expect(parseAppDetailSearch("?tab=pull-requests", true).tab).toBe("pull-requests");
     // A non-manager never resolves to a manager tab — the URL cannot
     // grant the tab the payload denies.
+    expect(parseAppDetailSearch("?tab=installations", false).tab).toBe("settings");
     expect(parseAppDetailSearch("?tab=insights", false).tab).toBe("settings");
     expect(parseAppDetailSearch("?tab=pull-requests", false).tab).toBe("settings");
     // Unknown tab values fall back to settings.
@@ -132,6 +131,33 @@ describe("app detail URL state (shared pure helpers)", () => {
     expect(parseAppDetailSearch("?pr=42", true).pr).toBe("");
     expect(parseAppDetailSearch("?pr=acme/web/abc", true).pr).toBe("");
     expect(parseAppDetailSearch("?pr=a/b/1/2", true).pr).toBe("");
+  });
+
+  test("the pr param and the detail resolver accept exactly the same grammar", () => {
+    // ONE grammar: whatever the URL state accepts, the detail read resolves —
+    // and vice versa. The dot-segment spellings the old shape regex let
+    // through are rejected on both sides, so the address bar can never
+    // advertise a detail that can never open.
+    const accepted = ["acme/web/42", "acme/web/0042", "a/b/1"];
+    for (const pr of accepted) {
+      expect(pullRequestRefOf(pr)).not.toBeNull();
+      expect(parseAppDetailSearch(`?pr=${encodeURIComponent(pr)}`, true).pr).toBe(pr);
+    }
+    const rejected = [
+      "42",
+      "acme/web/abc",
+      "acme/web/",
+      "/web/42",
+      "a/b/1/2",
+      "../settings/1",
+      "./repo/1",
+      "acme/./1",
+      "acme/../1",
+    ];
+    for (const pr of rejected) {
+      expect(pullRequestRefOf(pr)).toBeNull();
+      expect(parseAppDetailSearch(`?pr=${encodeURIComponent(pr)}`, true).pr).toBe("");
+    }
   });
 
   test("insights filter params ride the same query (window segments + repo)", () => {
@@ -168,21 +194,108 @@ describe("app detail URL state (shared pure helpers)", () => {
 });
 
 describe("tab shell rendering (static SSR)", () => {
-  test("default tab is 应用设置 for both roles; the manager sees BOTH tabs", () => {
+  /**
+   * The PAGE's tab bar: the outermost tab list. Nested editors (the model
+   * chain strip inside the settings panel) carry tab lists of their own, so a
+   * bare `[role="tab"]` query would read those too.
+   */
+  const pageTabs = (container: HTMLElement): string[] =>
+    [...(container.querySelector('[role="tablist"]')?.querySelectorAll('[role="tab"]') ?? [])].map(
+      (tab) => tab.textContent ?? "",
+    );
+
+  test("default tab is 应用设置 for both roles; the manager sees ALL three manager tabs", async () => {
     const manage = renderDetail(managePayload, true);
-    expect(manage).toContain(">Settings</button>");
-    expect(manage).toContain(">Insights</button>");
+    // The triggers read by role and name, the way an assistive technology
+    // finds them — never by serialized tag adjacency.
+    expect(await withMarkup(manage, pageTabs)).toEqual([
+      t("en", "appDetail.tabSettings"),
+      t("en", "appDetail.tabInstallations"),
+      t("en", "appDetail.tabInsights"),
+      t("en", "appDetail.tabPullRequests"),
+    ]);
     // The identity header serves both tabs — the GitHub display name (D6).
     expect(manage).toContain(">Demo</h1>");
     expect(manage).toContain("by mallory");
   });
 
-  test("a non-manager sees identity-only with NO 洞察 tab rendered — absence pinned", () => {
+  test("a non-manager sees identity-only with NO manager tab rendered — absence pinned", async () => {
     const identity = renderDetail(identityPayload, false);
-    expect(identity).toContain(">Settings</button>");
-    expect(identity).not.toContain(">Insights</button>");
+    expect(await withMarkup(identity, pageTabs)).toEqual([t("en", "appDetail.tabSettings")]);
     // No insights panel markup anywhere on the face.
     expect(identity).not.toContain("Review health");
+  });
+
+  test("the settings tab no longer carries the installations table or the delivery list — both moved to the Installed tab", () => {
+    const settingsOnly = renderToStaticMarkup(
+      createElement(SettingsView, {
+        locale: "en",
+        payload: {
+          ...managePayload,
+          installations: [{ installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" }],
+          deliveries: [
+            {
+              event_name: "pull_request",
+              outcome: "ok",
+              status_code: null,
+              repository_full_name: "acme/web",
+              created_at: "2026-01-01 00:00:00",
+            },
+          ],
+        },
+        groups: [],
+        onReload: noReload,
+      }),
+    );
+    expect(settingsOnly).not.toContain(t("en", "settings.installationsAccount"));
+    expect(settingsOnly).not.toContain(t("en", "settings.recentDeliveries"));
+    expect(settingsOnly).not.toContain("acme/web");
+  });
+
+  test("the Installed tab renders the installations table and leads each delivery with its source repo", () => {
+    const installed = renderDetail(
+      {
+        ...managePayload,
+        installations: [
+          { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+          { installation_id: 456, account_login: null, seen_at: "2026-01-01 00:00:00" },
+        ],
+        deliveries: [
+          {
+            event_name: "pull_request",
+            outcome: "ok",
+            status_code: null,
+            repository_full_name: "acme/web",
+            created_at: "2026-01-01 00:00:00",
+          },
+          {
+            event_name: "ping",
+            outcome: "ignored",
+            status_code: null,
+            repository_full_name: null,
+            created_at: "2026-01-01 00:00:00",
+          },
+        ],
+      },
+      true,
+      "installations",
+    );
+    expect(installed).toContain(">Installed</button>");
+    // The table lives in the installations panel, and that panel is the ACTIVE
+    // one when the Installed tab is selected (the other panels are mounted but
+    // inactive — the forceMount idiom).
+    const at = installed.indexOf(t("en", "settings.installationsAccount"));
+    const panelTag = installed.slice(
+      installed.lastIndexOf("<div", installed.lastIndexOf('data-slot="tabs-content"', at)),
+      at,
+    );
+    expect(panelTag).toContain('data-state="active"');
+    expect(installed).toContain(t("en", "settings.installationsAccount"));
+    expect(installed).toContain("acme");
+    // The delivery line leads with its repo; a pre-0043 row (NULL source)
+    // falls back to the unknown-source label rather than a blank line.
+    expect(installed).toContain("acme/web");
+    expect(installed).toContain(t("en", "settings.unknownSource"));
   });
 
   test("the identity status pill renders the shared primitive from the single derivation", () => {
@@ -222,93 +335,251 @@ describe("tab shell rendering (static SSR)", () => {
   });
 });
 
-describe("tab shell source contracts", () => {
-  test("page tab face: the shell tab bar rides the line variant with hairline + sized-up left-aligned triggers", () => {
-    // Page-level face (DESIGN.md ### Tabs): the shell's 应用设置/洞察 bar is
-    // the line-tab idiom — full-width, bottom hairline on the border-border
-    // token, larger triggers (16px heading-16 token step, taller bar) — while
-    // the chains-panel segmented pill keeps the component default (its face
-    // stays generic; the variant prop is only set at this consumption site).
-    const bar = detailPage.slice(detailPage.indexOf("<TabsList"), detailPage.indexOf("</TabsList>"));
-    expect(bar).toMatch(/<TabsList\s+variant="line"/);
-    expect(bar).toContain("w-full");
-    expect(bar).toContain("justify-start");
-    // 40px bar is load-bearing: the class must carry the same variant-scoped
-    // prefix as the component base (`group-data-[orientation=horizontal]/tabs:h-9`)
-    // so tailwind-merge dedupes the 36px default — a plain `h-10` loses the
-    // Tailwind v4 cascade and would ship a 36px bar.
-    expect(bar).toContain("group-data-[orientation=horizontal]/tabs:h-10");
-    expect(bar).not.toMatch(/(^|\s)h-10(\s|$)/);
-    // The line variant is set exactly once — this shell bar; no other face
-    // in the page opts in (the chains panel keeps the component default).
-    expect(detailPage.match(/variant="line"/g)?.length).toBe(1);
-    expect(tabsWrapper).toMatch(/defaultVariants:\s*\{\s*variant:\s*"default"/);
-  });
+describe("tab shell mounted behaviour (forceMount)", () => {
+  /** The page's stateful wrapper: the shell owns `search` in production. */
+  function ShellHarness() {
+    const [tabSearch, setTabSearch] = useState<AppDetailSearch>(search);
+    return createElement(AppDetailView, {
+      locale: "en",
+      appId: "1",
+      payload: managePayload,
+      groups: [],
+      notice: null,
+      search: tabSearch,
+      onReload: noReload,
+      onSearch: setTabSearch,
+    });
+  }
 
-  test("the trigger face is the primitive's line variant, not a page-local chain", () => {
-    // The page renders the shared trigger untouched, so a change to the line
-    // variant reaches this page like every other consumer (DESIGN.md: a page
-    // re-spelling a primitive's chain is the duplication the layer exists to
-    // remove). Proven by equality of the two rendered faces, not by a class
-    // string that would pass even if the page appended its own.
-    /** The triggers inside the tab list of one variant — the settings body
-     *  has its own segmented pill, which is a different face. */
-    const triggerFaces = (markup: string, variant: string): string[] => {
-      const lists = [...markup.matchAll(/<div\b[^>]*data-slot="tabs-list"[^>]*>/g)];
-      const at = lists.findIndex((match) => match[0].includes(`data-variant="${variant}"`));
-      if (at < 0) return [];
-      const from = lists[at]?.index ?? 0;
-      const to = lists[at + 1]?.index ?? markup.length;
-      return [...markup.slice(from, to).matchAll(/<button\b[^>]*role="tab"[^>]*>/g)].map(
-        (match) => /class="([^"]*)"/.exec(match[0])?.[1] ?? "",
-      );
-    };
-    const page = triggerFaces(renderDetail(managePayload, true), "line");
-    const primitive = triggerFaces(
-      renderToStaticMarkup(
-        createElement(
-          Tabs,
-          { value: "a" },
-          createElement(
-            TabsList,
-            { variant: "line" },
-            createElement(TabsTrigger, { value: "a" }, "Settings"),
-          ),
-        ),
-      ),
-      "line",
+  /** One press as the browser performs it — a Radix trigger selects on mousedown. */
+  const click = async (win: Window, node: DomElement | null | undefined) => {
+    const pointer = (type: string) =>
+      new win.PointerEvent(type, { bubbles: true, cancelable: true, button: 0 });
+    const mouse = (type: string) =>
+      new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 });
+    await act(async () => {
+      node?.dispatchEvent(pointer("pointerdown"));
+      node?.dispatchEvent(mouse("mousedown"));
+      node?.dispatchEvent(pointer("pointerup"));
+      node?.dispatchEvent(mouse("mouseup"));
+      node?.dispatchEvent(mouse("click"));
+    });
+    await act(async () => {});
+  };
+
+  const tabTrigger = (container: DomElement, label: string) =>
+    [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === label);
+
+  /**
+   * The OUTERMOST tabpanel holding `node` — the shell's panel. The settings
+   * body hosts its own nested Tabs (the model-chain editors), so the nearest
+   * panel would be a chain panel that stays active either way.
+   */
+  const panelOf = (container: DomElement, node: DomElement | null) => {
+    let current: DomElement | null = node;
+    let outer: DomHTMLElement | null = null;
+    while (current !== null && current !== container) {
+      if (current.getAttribute("role") === "tabpanel") outer = current as DomHTMLElement;
+      current = current.parentElement;
+    }
+    return outer;
+  };
+
+  /** The shell's own panels, outer-first: one of them is active at a time. */
+  const shellPanels = (container: DomElement) =>
+    [...container.querySelectorAll('[data-slot="tabs-content"]')].filter(
+      (panel) => panelOf(container, panel) === panel,
     );
-    expect(page).toHaveLength(3);
-    expect(primitive).toHaveLength(1);
-    for (const face of page) expect(face).toBe(primitive[0] ?? "");
-    // …and that shared face is the documented line tab: the heading-16 type
-    // step, named as the token it resolves (DESIGN.md ### Tabs).
-    expect(primitive[0] ?? "").toContain("length:--typo-heading-16-size");
-  });
 
-  test("forceMount knowledge: the ui wrapper hides inactive panels via data-[state=inactive]:hidden", () => {
-    expect(tabsWrapper).toContain("data-[state=inactive]:hidden");
-  });
+  /** The label of the tab whose panel is active — empty when no panel is. */
+  const activeTabLabel = (win: Window, container: DomElement) => {
+    const active = shellPanels(container).filter((panel) => panel.getAttribute("data-state") === "active");
+    if (active.length !== 1) return active.length === 0 ? "" : "multiple";
+    const labelledBy = active[0]?.getAttribute("aria-labelledby") ?? "";
+    return win.document.getElementById(labelledBy)?.textContent ?? "";
+  };
 
-  test("mount-once tab switching: ALL panels forceMount — switching tabs preserves settings form state (qc1)", () => {
+  test("an inactive panel stays mounted but hidden, and the settings form keeps its typed value across a tab switch", async () => {
     // Radix unmounts inactive panels by default, which would destroy the
-    // settings forms (typed inputs, Add Provider panel, op notices) and
-    // refetch the manager tabs from scratch on every switch. All panels
-    // forceMount; the wrapper's data-[state=inactive]:hidden keeps the
-    // one-visible-panel invariant (pin above).
-    expect(detailPage.match(/<TabsContent value="settings" forceMount>/g)?.length).toBe(1);
-    expect(detailPage.match(/<TabsContent value="insights" forceMount>/g)?.length).toBe(1);
-    expect(detailPage.match(/<TabsContent value="pull-requests" forceMount>/g)?.length).toBe(1);
-    // No unmount-by-default panel remains on the shell.
-    expect(detailPage).not.toMatch(/<TabsContent value="[^"]+">\s*\n/);
+    // settings forms and refetch a manager tab on every switch. The shell
+    // forceMounts every panel; the wrapper's data-[state=inactive]:hidden keeps
+    // the one-visible-panel invariant. Typed state surviving the switch is the
+    // behaviour, asserted on the live tree rather than in page source.
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () => root.render(createElement(ShellHarness)));
+      // Open the draft chain panel, then type a name into its input.
+      const addChain = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "settings.addChain"),
+      );
+      await click(win, addChain);
+      const input = () =>
+        container.querySelector(`input[placeholder="${t("en", "settings.chainNamePlaceholder")}"]`);
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(input(), "deep-review");
+        input()?.dispatchEvent(new win.Event("input", { bubbles: true }));
+      });
+      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+      const settingsPanel = panelOf(container, input());
+      expect(settingsPanel?.getAttribute("data-state")).toBe("active");
+
+      // Switch to Installed: the settings panel is still mounted, now hidden.
+      await click(win, tabTrigger(container, t("en", "appDetail.tabInstallations")));
+      expect(panelOf(container, input())).toBe(settingsPanel);
+      expect(settingsPanel?.getAttribute("data-state")).toBe("inactive");
+      // One visible panel: every other shell panel reads inactive.
+      expect(shellPanels(container).map((panel) => panel.getAttribute("data-state"))).toEqual([
+        "inactive",
+        "active",
+        "inactive",
+        "inactive",
+      ]);
+      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+
+      // …and back: the value survived a full round trip.
+      await click(win, tabTrigger(container, t("en", "appDetail.tabSettings")));
+      expect(settingsPanel?.getAttribute("data-state")).toBe("active");
+      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+    } finally {
+      await act(async () => root.unmount());
+      cleanup();
+    }
   });
 
-  test("mid-session demotion rewrite: a stale manager-tab URL is rewritten once the non-manager payload lands (qc2)", async () => {
-    // Product behaviour: ?tab=pull-requests in the address bar + a payload
-    // that says non-manager → the landing effect rewrites the URL to the
-    // bare path (replaceState), so the stale param cannot sit in the
-    // address bar and no manager face renders. A rename of the page's
-    // internals must not false-fail this — it drives the real page.
+  /** A parseable insights summary, so the insights face renders its own body. */
+  const INSIGHTS_SUMMARY = {
+    window_days: 30,
+    repo: "",
+    reviews_total: 0,
+    findings_by_severity: [],
+    verdict_distribution: [],
+    weekly_trend: [],
+    daily_trend: [],
+    findings_distribution: [],
+    repos: [],
+  };
+
+  /**
+   * Mount the stateful page on `url` with the settings read held until the test
+   * releases it, so the frame the payload lands in can be observed rather than
+   * raced. The insights summary answers empty, like the demotion test.
+   */
+  async function mountPageWithHeldPayload(url: string, body: unknown) {
+    const { win, cleanup } = installDom(url);
+    const realFetch = globalThis.fetch;
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const json = (value: unknown) =>
+      new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
+    globalThis.fetch = (async (input: unknown) => {
+      const target = String(input);
+      if (target.endsWith("/models")) return json({ groups: [] });
+      if (target.includes("/insights/summary")) return json(INSIGHTS_SUMMARY);
+      if (target.includes("/pull-requests")) return json({ pull_requests: [] });
+      await held;
+      return json(body);
+    }) as unknown as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })));
+    return {
+      win,
+      container,
+      release: async () => {
+        release();
+        for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+      },
+      unmount: async () => {
+        await act(async () => root.unmount());
+        globalThis.fetch = realFetch;
+        cleanup();
+      },
+    };
+  }
+
+  test("history traversal re-derives the tab from the URL, through the gate mirror", async () => {
+    // The popstate listener is registered once, so it reads the payload's
+    // can_manage through the ref mirror rather than a stale mount-time closure.
+    // A back/forward move onto ?tab=insights must therefore activate 洞察 even
+    // though the gate was still false when the listener was attached.
+    const page = await mountPageWithHeldPayload("http://localhost/dashboard/apps/1", managePayload);
+    try {
+      await page.release();
+      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabSettings"));
+
+      // A forward move: the address changes, then the router's popstate lands.
+      page.win.history.pushState(null, "", "/dashboard/apps/1?tab=insights");
+      await act(async () => page.win.dispatchEvent(new page.win.Event("popstate")));
+      await act(async () => {});
+      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabInsights"));
+
+      // …and back to the bare path returns to 应用设置.
+      page.win.history.pushState(null, "", "/dashboard/apps/1");
+      await act(async () => page.win.dispatchEvent(new page.win.Event("popstate")));
+      await act(async () => {});
+      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabSettings"));
+    } finally {
+      await page.unmount();
+    }
+  });
+
+  test("a manager's ?tab=insights deep link never activates the settings panel in any commit", async () => {
+    // Mounting with the gate still unknown would resolve ?tab=insights to
+    // settings, so the shell withholds the tab face until the payload's gate
+    // is committed. Proving "no settings frame was ever painted" needs a
+    // FRAME-accurate sample: a MutationObserver is delivered as a coalesced
+    // batch and reads the DOM at callback time, so a settings paint immediately
+    // replaced by insights inside one batch is invisible to it. React writes
+    // `data-state` synchronously during each commit, so patching the setter
+    // records every panel activation the tree ever had — one entry per commit,
+    // never coalesced.
+    const page = await mountPageWithHeldPayload("http://localhost/dashboard/apps/1?tab=insights", managePayload);
+    const everActive = new Set<DomElement>();
+    const setAttribute = page.win.Element.prototype.setAttribute;
+    page.win.Element.prototype.setAttribute = function (name: string, value: string) {
+      if (name === "data-state" && value === "active") everActive.add(this);
+      return setAttribute.call(this, name, value);
+    };
+    try {
+      // While the settings read is held the tab face does not exist at all —
+      // the skeleton is the only committed face.
+      expect(page.container.querySelector('[data-slot="page-skeleton"]')).not.toBeNull();
+      expect(shellPanels(page.container)).toEqual([]);
+
+      await page.release();
+      // The shell panels live across commits (forceMount), so every activation
+      // the probe recorded can still be labelled from the settled tree.
+      const activated = [...everActive].filter(
+        (element) =>
+          element.getAttribute("data-slot") === "tabs-content" &&
+          shellPanels(page.container).includes(element as DomHTMLElement),
+      );
+      expect(
+        activated.map(
+          (element) =>
+            page.win.document.getElementById(element.getAttribute("aria-labelledby") ?? "")?.textContent,
+        ),
+      ).toEqual([t("en", "appDetail.tabInsights")]);
+      // The gate confirmed the deep link instead of demoting it: the address
+      // still names the insights tab, so no later popstate re-reads settings.
+      expect(page.win.location.search).toContain("tab=insights");
+    } finally {
+      page.win.Element.prototype.setAttribute = setAttribute;
+      await page.unmount();
+    }
+  });
+
+  test("mid-session demotion: a stale manager-tab URL is rewritten once the non-manager payload lands", async () => {
+    // ?tab=pull-requests in the address bar + a payload that says non-manager
+    // → the landing effect rewrites the URL to the bare path (replaceState),
+    // so the stale param cannot sit there and no manager face renders.
     const { win, cleanup } = installDom("http://localhost/dashboard/apps/1?tab=pull-requests");
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
@@ -320,9 +591,7 @@ describe("tab shell source contracts", () => {
     win.document.body.appendChild(container);
     const root = createRoot(container as unknown as Element);
     try {
-      await act(async () =>
-        root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })),
-      );
+      await act(async () => root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })));
       await act(async () => {});
       expect(win.location.search).not.toContain("tab=pull-requests");
       const text = container.textContent ?? "";
@@ -333,91 +602,6 @@ describe("tab shell source contracts", () => {
       globalThis.fetch = realFetch;
       cleanup();
     }
-  });
-
-  test("insights refetch retains data: content renders on data !== null; ErrorState is initial-load-only (qc3)", () => {
-    // The filter refetch never blanks the four stat sections — the
-    // previous data stays rendered under the polite busy hint, and a
-    // refetch failure over retained data reports in a slim alert line
-    // instead of unmounting the face.
-    expect(insightsTab).toContain('{data !== null ? <InsightsRecordsView locale={locale} data={data} /> : null}');
-    expect(insightsTab).toContain('state === "error" && data === null');
-    expect(insightsTab).toContain('state === "error" && data !== null');
-  });
-
-  test("URL state re-sync: exactly one []-mounted popstate listener; commits ride replaceState, never pushState", () => {
-    expect(detailPage.match(/addEventListener\("popstate"/g)?.length).toBe(1);
-    expect(detailPage).toContain("removeEventListener(\"popstate\"");
-    expect(detailPage).toContain("history.replaceState");
-    // The page never pushes history itself (navigation stays in the router).
-    expect(detailPage).not.toContain(".pushState(");
-    // State derives through the shared pure helper (mount init, appId
-    // re-derivation, payload-landing demotion check + re-derivation,
-    // popstate).
-    expect(detailPage.match(/parseAppDetailSearch\(/g)?.length).toBe(5);
-  });
-
-  test("manager deep-link fix: the gate rides a ref mirror, re-derived when the payload lands — never a stale false closure", () => {
-    // (Fix round 1): the registered-once popstate listener (and the
-    // mount/appId re-derivations) must read the canManageRef mirror — a
-    // stale `payload?.can_manage ?? false` closure would permanently
-    // resolve a manager's `?tab=insights` deep link and history
-    // back/forward to the settings tab.
-    expect(detailPage).toContain("const canManageRef = useRef(false);");
-    expect(detailPage).toContain(
-      "const onPop = () => setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));",
-    );
-    expect(detailPage).not.toContain("parseAppDetailSearch(window.location.search, payload?.can_manage ?? false)");
-    // One re-derivation when the payload lands: the gate mirror is written
-    // and the location re-parsed, so a manager's `?tab=insights` deep link
-    // (and a history entry carrying it — native popstate re-reads the same
-    // ref) activates the insights tab as soon as can_manage is known.
-    const landing = detailPage.slice(
-      detailPage.indexOf("// When the payload lands"),
-      detailPage.indexOf("const onPop"),
-    );
-    expect(landing).toContain("canManageRef.current = payload?.can_manage ?? false;");
-    expect(landing).toContain(
-      "setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));",
-    );
-  });
-
-  test("manager deep-link first paint: the tab face is withheld until the URL tab is committed against the landed payload (qc4)", () => {
-    // The shell seeds `search` with the mount-time gate (false), and the
-    // payload flips `state` to "ok" BEFORE the landing effect re-derives
-    // the tab — rendering the face in between would first-paint 应用设置
-    // on a manager's `?tab=insights` deep link. `searchReady` withholds
-    // the face behind the loading skeleton until the landing effect has
-    // committed the URL-requested tab (or performed the demotion rewrite).
-    expect(detailPage).toContain("const [searchReady, setSearchReady] = useState(false);");
-    const landing = detailPage.slice(
-      detailPage.indexOf("// When the payload lands"),
-      detailPage.indexOf("const onPop"),
-    );
-    // BOTH landing paths commit readiness: the demotion rewrite and the
-    // re-derivation. The gate stays true afterwards — background reloads
-    // never re-flash the skeleton.
-    expect(landing.match(/setSearchReady\(true\);/g)?.length).toBe(2);
-    const render = detailPage.slice(detailPage.indexOf("if (state === \"loading\")"));
-    expect(render).toContain('if (state === "ok" && payload && !searchReady)');
-    expect(render).toContain("<PageSkeleton locale={locale} kind=\"forms\" />");
-    // Loop-free unchanged: the withhold adds no history writes and no new
-    // location parses (the demotion rewrite keeps its replaceState).
-    expect(detailPage).not.toContain(".pushState(");
-  });
-
-  test("R1 closure: the insights tab consumes the kept data.ts helpers over the mount-prefixed per-App face", () => {
-    expect(insightsTab).toContain("appInsightsSummaryUrl(apiBase(), appId");
-    expect(insightsTab).toContain("parseInsights(");
-    expect(insightsTab).toContain("INSIGHTS_WINDOWS.map");
-    expect(insightsTab).toContain("insightsRepoOptions(");
-    expect(insightsTab).toContain('from "./data"');
-    // The repo selector keeps its behaviour: the value goes through the kept
-    // helper, "all" stays the default option, and the options are the
-    // window's repos in the helper's order.
-    expect(insightsTab).toContain("value={insightsRepoSelectValue(search.repo)}");
-    expect(insightsTab).toContain("<SelectItem value={INSIGHTS_REPO_ALL}>");
-    expect(insightsTab).toContain("repoChoices.map((repo) => (");
   });
 });
 
@@ -504,10 +688,59 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     );
     expect(html).toContain('role="status"');
     expect(html).toContain("Loading…");
-    // Retained-data contract unchanged: content still renders on
-    // data !== null, and the retained-data busy hint keeps its own face.
-    expect(insightsTab).toContain('{state === "loading" && data === null ?');
-    expect(insightsTab).toContain('{state === "loading" && data !== null ?');
+  });
+
+  test("a refetch over retained data keeps the records mounted, then reports the failure in place", async () => {
+    // The no-flash contract, driven through the tab's own effect: the
+    // filter change starts a load, and the previous sections stay on screen
+    // under the polite busy hint; a failed refetch reports in a slim alert
+    // line instead of unmounting the face or falling to the initial-load
+    // ErrorState. Both states are read off the live tree, not the source.
+    const pending: Array<(error: Error) => void> = [];
+    let release = false;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      if (!release) return new Response(JSON.stringify(data), { status: 200 });
+      return new Promise<Response>((_resolve, reject) => {
+        pending.push(reject);
+      });
+    }) as unknown as typeof fetch;
+
+    let setWindow: (next: AppDetailSearch["window"]) => void = () => {};
+    function Harness() {
+      const [search, setSearch] = useState<AppDetailSearch>({ tab: "insights", window: "30", repo: "", pr: "" });
+      setWindow = (next) => setSearch((previous) => ({ ...previous, window: next }));
+      return createElement(AppInsightsTab, { locale: "en", appId: "1", search, onSearch: setSearch });
+    }
+
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    const heading = () => container.querySelector("h2")?.textContent ?? "";
+    try {
+      await act(async () => root.render(createElement(Harness)));
+      await act(async () => {});
+      expect(heading()).toContain("Review health");
+
+      // In-flight refetch: the previous sections stay, the busy state is on.
+      release = true;
+      await act(async () => setWindow("90"));
+      expect(heading()).toContain("Review health");
+      expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
+
+      // The refetch fails: the records are still there, the failure is a line
+      // in place, and the initial-load face is not.
+      await act(async () => pending.at(-1)?.(new Error("offline")));
+      await act(async () => {});
+      expect(heading()).toContain("Review health");
+      expect(container.textContent ?? "").toContain(t("en", "common.loadFailed"));
+      expect(container.querySelector('[data-slot="error-state"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
   });
 });
 

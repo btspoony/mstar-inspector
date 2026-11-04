@@ -34,6 +34,7 @@ import {
   payloadMentionsALogin,
   pullRequestRecord,
   WEBHOOK_BODY_LIMIT,
+  webhookRepositoryFullName,
   type WebhookOutcome,
 } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
@@ -351,6 +352,10 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // can trigger a review. NULL (never synced) collapses to "" and matches
   // nothing — the existing fail-safe.
   const appSlug = row.github_slug ?? "";
+  // The classifier's ONE parse, kept for the delivery row's source repository
+  // and the PR ledger below — recording either must not re-parse up-to-1 MB of
+  // body.
+  let classified: unknown = null;
   const outcome = await classifyWebhook(
     appSecret,
     rawBody,
@@ -359,6 +364,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     defaultLog,
     row.id,
     { mode: row.review_trigger_mode, appSlug },
+    (parsed) => {
+      classified = parsed;
+    },
   );
 
   // ...which is also why an unsynced row must not fail SILENTLY: with no slug
@@ -435,6 +443,10 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       eventName,
       outcome: deliveryOutcomeFromWebhook(outcome, row.review_enabled, reviewGlobal),
       statusCode: outcome.kind === "reject" ? outcome.status : null,
+      // The diagnostics face's "which repo did this come from?" answer, read
+      // off the classifier's own single parse of the body — null when the
+      // payload carries no repository.
+      repositoryFullName: webhookRepositoryFullName(classified),
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -453,7 +465,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // validate). Best-effort like recordDelivery above: a store failure logs a
   // structured warn and never changes the response.
   if (eventName === "pull_request") {
-    const record = pullRequestRecord(rawBody);
+    const record = pullRequestRecord(classified);
     if (record === null) {
       // Visible, not silent: this delivery ran (or was ignored) with no ledger
       // row, so the dashboard's "what did this App receive" answer is

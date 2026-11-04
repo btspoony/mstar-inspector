@@ -37,6 +37,7 @@ import {
 import { withMarkup } from "./dom";
 import {
   DETAIL,
+  ROW_HEAD,
   ROW_OPEN,
   jsonResponse,
   mountTabWithGatedFetch,
@@ -122,16 +123,9 @@ const ROW_CLOSED: PullRequestRow = {
 
 /** A second PR's detail payload — the switch target in the S2 test. */
 const DETAIL_B: PullRequestDetail = {
-  pull_request: {
-    ...ROW_OPEN,
-    number: 9,
-    title: "Bump the dependencies",
-    latest_review: null,
-    failure_count: 0,
-  },
-  reviews: [],
-  failures: [],
-  findings: [],
+  pull_request: { ...ROW_HEAD, number: 9, title: "Bump the dependencies" },
+  counts: { findings: 0, reviews: 0, failures: 0, must_fix: 0 },
+  latest_review: null,
 };
 
 /** The stateful wrapper AppDetailView expects: the harness owns the search. */

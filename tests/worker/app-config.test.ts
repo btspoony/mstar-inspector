@@ -29,7 +29,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
-import { createTestD1, type TestD1 } from "../store/helpers";
+import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import {
   CUSTOM_PROVIDER_API_IDS,
@@ -183,10 +183,17 @@ function createPreProviderPoolD1(): TestD1 {
 }
 
 /**
- * Fully-migrated shape: the pre-pool one plus 0024 (the per-key pools), i.e.
- * what `wrangler d1 migrations apply` produces today. 0015 matters because the
- * store's key writes maintain the verified_* columns, so every config-store
- * test must run on the 0015-shaped schema.
+ * The config routes' shape: the pre-pool one plus 0024/0025 (the per-key pools
+ * and their model evidence), 0029/0031–0033 (the support-grant, plan and
+ * `server_flags` tables the SPA boot reads) and the index-only 0034/0035.
+ * Those are every migration between the parent's last file (0023) and the
+ * 0037/0038 tail the parent already applied, so the declared shape has no
+ * hole below the derived anchor. The tail itself is `migrationsAfter(0038)` —
+ * 0038 being the last file applied by hand — so a new migration joins it with
+ * no lockstep edit and nothing between the hand-applied set and the anchor can
+ * silently drop out. 0015 matters because the store's key writes maintain the
+ * verified_* columns, so every config-store test must run on the 0015-shaped
+ * schema. This is the config routes' shape, not a replay of every migration.
  */
 function createAppConfigD1(): TestD1 {
   const db = createPreProviderPoolD1();
@@ -199,6 +206,15 @@ function createAppConfigD1(): TestD1 {
   applyMigration(db, "0031_plans_usage.sql");
   applyMigration(db, "0032_unlimited_plan.sql");
   applyMigration(db, "0033_platform_admin.sql");
+  // 0034/0035 index the support-grant and lapsed-invite predicates: index-only,
+  // and they must follow 0029/0028. They sit here so the derived tail starts at
+  // the last hand-applied file with nothing below it left out.
+  applyMigration(db, "0034_support_grant_indexes.sql");
+  applyMigration(db, "0035_workspace_invite_expiry_index.sql");
+  // The derived tail (0039–…): the settings health face reads the delivery
+  // summary, which names the 0043 source column, and the workspace plan
+  // tables stay complete. A new migration joins here automatically.
+  for (const name of migrationsAfter("0038_webhook_path_drop.sql")) applyMigration(db, name);
   return db;
 }
 

@@ -11,7 +11,7 @@ import type { Env } from "../../src/worker/env";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
-import { createTestD1 } from "../store/helpers";
+import { createTestD1, migrationsAfter } from "../store/helpers";
 import type { SpaBoot } from "../../src/spa/boot";
 import { LOCALE_COOKIE } from "../../src/i18n";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
@@ -69,6 +69,9 @@ function createDb(): ReturnType<typeof createTestD1> {
     "0022_app_trigger_mode.sql",
     "0037_github_metadata_attempt.sql",
     "0038_webhook_path_drop.sql",
+    // The directory-derived tail (0043 adds the delivery source column the
+    // health summary selects), so a new migration joins automatically.
+    ...migrationsAfter("0038_webhook_path_drop.sql"),
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

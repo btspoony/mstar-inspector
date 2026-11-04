@@ -2518,7 +2518,7 @@ describe("existing routes unaffected", () => {
 
   test("bare POST /webhook is 404 — the legacy face is retired and the dashboard mount does not intercept it", async () => {
     const db = createDashboardTestD1();
-    applyMigrationFile(db.raw, "0011_webhook_deliveries.sql");
+    applyDeliveries(db.raw);
     const sent: unknown[] = [];
     const env = makeDbEnv(db, {
       REVIEW_QUEUE: { send: async (msg: unknown) => { sent.push(msg); } } as unknown as Env["REVIEW_QUEUE"],
@@ -2550,6 +2550,18 @@ describe("existing routes unaffected", () => {
 
 function applyMigrationFile(db: Database, name: string): void {
   db.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
+}
+
+/**
+ * The delivery log as THIS fixture builds it: 0011 plus 0043's source column.
+ * Listed explicitly, not derived from the migrations directory — the dashboard
+ * fixture stops at 0038 for `github_apps`, so it is not the production schema,
+ * and a migration that assumes a shape this world never built must be a
+ * deliberate choice here rather than a silently joined tail.
+ */
+function applyDeliveries(db: Database): void {
+  applyMigrationFile(db, "0011_webhook_deliveries.sql");
+  applyMigrationFile(db, "0043_webhook_delivery_repository.sql");
 }
 
 const DASHBOARD_MIGRATION_SEQUENCE = [
@@ -3071,7 +3083,7 @@ describe("dashboard users store (users.ts)", () => {
   test("an accepted invite lets the member read the workspace App list", async () => {
     const env = makeEnv();
     const db = dbOf(env);
-    applyMigrationFile(db.raw, "0011_webhook_deliveries.sql"); // the list's health face
+    applyDeliveries(db.raw); // the list's health face
     await envDb(env).createApp({
       id: crypto.randomUUID(),
       githubSlug: CONVERSION.slug,

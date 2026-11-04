@@ -814,8 +814,8 @@ describe("apps-store delivery read faces (consumption)", () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     const s = store(db);
-    await s.recordDelivery({ appId: app.id, eventName: "ping", outcome: "ignored", statusCode: null });
-    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "rejected", statusCode: 401 });
+    await s.recordDelivery({ appId: app.id, eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null });
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null });
     // Backdate the ignored row so the rejected row is the LATEST.
     db.raw
       .prepare("UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour') WHERE outcome = 'ignored'")
@@ -840,9 +840,9 @@ describe("apps-store delivery read faces (consumption)", () => {
     const s = store(db);
     // The staging shape: one real review verdict buried under a torrent of
     // check_run rows that all land in `ignored`.
-    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
     for (let i = 0; i < 6; i++) {
-      await s.recordDelivery({ appId: app.id, eventName: "check_run", outcome: "ignored", statusCode: null });
+      await s.recordDelivery({ appId: app.id, eventName: "check_run", outcome: "ignored", statusCode: null, repositoryFullName: null });
     }
     // The verdict is the OLDEST row, so plain newest-first would never show it.
     db.raw
@@ -863,7 +863,7 @@ describe("apps-store delivery read faces (consumption)", () => {
     const app = await seedApp(db);
     const s = store(db);
     for (let i = 0; i < 6; i++) {
-      await s.recordDelivery({ appId: app.id, eventName: "check_run", outcome: "ignored", statusCode: null });
+      await s.recordDelivery({ appId: app.id, eventName: "check_run", outcome: "ignored", statusCode: null, repositoryFullName: null });
     }
 
     const recent = await s.listRecentDeliveries(app.id, 5);
@@ -881,12 +881,12 @@ describe("apps-store delivery read faces (consumption)", () => {
     const appC = await seedApp(db, { githubAppId: 123458 }); // zero deliveries
     const s = store(db);
     // appA: latest = rejected (in-window) after an ok + an ignored.
-    await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ignored", statusCode: null });
-    await s.recordDelivery({ appId: appA.id, eventName: "pull_request", outcome: "ok", statusCode: null });
-    await s.recordDelivery({ appId: appA.id, eventName: "pull_request", outcome: "rejected", statusCode: 401 });
+    await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null });
+    await s.recordDelivery({ appId: appA.id, eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
+    await s.recordDelivery({ appId: appA.id, eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null });
     // appB: latest = ok; its one rejected row is aged OUT of the 24h window.
-    await s.recordDelivery({ appId: appB.id, eventName: "pull_request", outcome: "rejected", statusCode: 500 });
-    await s.recordDelivery({ appId: appB.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    await s.recordDelivery({ appId: appB.id, eventName: "pull_request", outcome: "rejected", statusCode: 500, repositoryFullName: null });
+    await s.recordDelivery({ appId: appB.id, eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-25 hours')
@@ -913,7 +913,7 @@ describe("apps-store delivery read faces (consumption)", () => {
     const appA = await seedApp(db);
     await seedApp(db, { githubAppId: 123459 }); // appB — never requested
     const s = store(db);
-    await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ok", statusCode: null });
+    await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ok", statusCode: null, repositoryFullName: null });
 
     expect(await s.deliverySummaries([appA.id])).toEqual(
       expect.objectContaining({ [appA.id]: { latest: expect.objectContaining({ outcome: "ok" }), rejected24h: 0 } }),
@@ -925,8 +925,8 @@ describe("apps-store delivery read faces (consumption)", () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     const s = store(db);
-    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null });
-    await s.recordDelivery({ appId: app.id, eventName: "check_run", outcome: "ignored", statusCode: null });
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
+    await s.recordDelivery({ appId: app.id, eventName: "check_run", outcome: "ignored", statusCode: null, repositoryFullName: null });
     // The check_run row is genuinely newer, so an unconditionally-newest pick returns it.
     db.raw
       .prepare(
@@ -944,10 +944,10 @@ describe("apps-store delivery read faces (consumption)", () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     const s = store(db);
-    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
     // issue_comment is whitelisted and still ignored: no App mention, a bot
     // author, or a comment outside a PR thread all land in `ignored`.
-    await s.recordDelivery({ appId: app.id, eventName: "issue_comment", outcome: "ignored", statusCode: null });
+    await s.recordDelivery({ appId: app.id, eventName: "issue_comment", outcome: "ignored", statusCode: null, repositoryFullName: null });
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour')
@@ -964,8 +964,8 @@ describe("apps-store delivery read faces (consumption)", () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     const s = store(db);
-    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null });
-    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "paused", statusCode: null });
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "paused", statusCode: null, repositoryFullName: null });
     db.raw
       .prepare(`UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour') WHERE outcome = 'ok'`)
       .run();
@@ -979,7 +979,7 @@ describe("apps-store delivery read faces (consumption)", () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     const s = store(db);
-    await s.recordDelivery({ appId: app.id, eventName: "ping", outcome: "ignored", statusCode: null });
+    await s.recordDelivery({ appId: app.id, eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null });
 
     const summaries = await s.deliverySummaries([app.id]);
 

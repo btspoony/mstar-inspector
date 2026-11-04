@@ -173,11 +173,12 @@ describe("settings section flow (r3 baseline § 5)", () => {
     expect(providersSource).not.toContain("<SectionCard");
   });
 
-  test("the section order is the plan's: identity, installations, runtime, configuration, seats, ops", () => {
+  test("the settings tab's section order is the plan's: identity, runtime, configuration, seats, ops", () => {
+    // The installations / deliveries section moved to the App detail's own
+    // Installed tab (AppDetailPage) — it is no longer a settings sibling.
     let cursor = -1;
     for (const marker of [
       "<AppInfoSection",
-      "<InstallationsSection",
       "<RuntimeHarnessSection",
       "<ProvidersSection",
       "<ChainsSection",

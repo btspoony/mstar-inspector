@@ -90,8 +90,12 @@
  *     every requested app in exactly TWO statements regardless of N;
  *     deliverySummary(appId) stays the single-settings-page face.
  *   - event_name is bounded to EVENT_NAME_MAX_LENGTH (64) chars at
- *     persist time — the x-github-event header is attacker-influenced on
+ *     persist time — the x-github-event HEADER is attacker-influenced on
  *     the unauthenticated reject path; the DDL has no length constraint.
+ *     repository_full_name carries a bound too (REPOSITORY_FULL_NAME_MAX_LENGTH,
+ *     160), but for a different reason: it is a verified-body field,
+ *     defence-in-depth against GitHub's own name ceilings — never an
+ *     attacker payload bound.
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
  *     convention); createApp ids are caller-supplied (the reviews.id
  *     caller-UUID convention — review pin: secretbox AAD rowKey MUST
@@ -103,6 +107,7 @@
  *     caller-visible errors, never swallowed.
  */
 import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
+import { MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
 
 /** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
@@ -317,6 +322,19 @@ const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'reject
 export const EVENT_NAME_MAX_LENGTH = 64;
 
 /**
+ * Persist bound for the source repository name (`owner/name`, migration 0043).
+ * A verified-body field: `repository.full_name` rides in the BODY of an
+ * HMAC-verified delivery, and the signature check runs before classification,
+ * so an unverified request never reaches the read that produces it — this is
+ * not attacker-supplied. The bound is therefore defence-in-depth against
+ * GitHub's own ceilings (39-char owner + 100-char repo = 139), and the DDL has
+ * no length constraint. 160 is headroom, never a truncation risk for a real
+ * delivery. The `event_name` bound next to it is the other case: that value is
+ * a HEADER, which the unauthenticated reject path really does hand us.
+ */
+export const REPOSITORY_FULL_NAME_MAX_LENGTH = 160;
+
+/**
  * Bound on `listPullRequests`. Any third party who opens a PR mints a ledger
  * row and only TERMINAL rows are swept, so the live set grows with every open
  * PR across every installed repo. 200 is the newest window an operator can
@@ -352,6 +370,26 @@ const PULL_REQUEST_LEDGER_ORDER = "last_seen_at DESC, pr_number DESC";
 const PULL_REQUEST_WINDOW_SQL = `SELECT owner, repo, pr_number FROM pull_requests
   WHERE app_id = ? ORDER BY ${PULL_REQUEST_LEDGER_ORDER} LIMIT ?`;
 
+/**
+ * Statement 0 of every record-section batch: is this PR on the ledger at all?
+ * A section reader answers pages, not PR existence — `total: 0` covers both an
+ * empty section and an unknown PR — so existence must be decided in the same
+ * batch, and `null` (the route's 404) means "this App never received it".
+ */
+const PULL_REQUEST_EXISTS_SQL = `SELECT 1 AS found FROM pull_requests
+  WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? LIMIT 1`;
+
+/**
+ * Slice to `max` UTF-16 units without leaving half a surrogate pair behind
+ * (a lone surrogate cannot round-trip through D1's TEXT as valid UTF-8).
+ */
+function truncateBounded(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const last = value.charCodeAt(max - 1);
+  // A high surrogate at the cut means its low half is the next unit: drop both.
+  return value.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
+}
+
 /** Input for recordDelivery — one VERIFIED per-App webhook delivery. */
 export type RecordDeliveryInput = {
   appId: string;
@@ -364,6 +402,14 @@ export type RecordDeliveryInput = {
   outcome: DeliveryOutcome;
   /** The classifier's status for rejected; NULL for every other outcome. */
   statusCode: number | null;
+  /**
+   * The delivery's source repository (`owner/name`, migration 0043) — NULL
+   * when the payload carried no `repository` (an install / bypass event).
+   * Truncated to REPOSITORY_FULL_NAME_MAX_LENGTH (160) chars at persist; see
+   * that constant for the trust model (a verified-body field, bounded as
+   * defence-in-depth — not an attacker payload bound like `eventName`).
+   */
+  repositoryFullName: string | null;
 };
 
 /** A row of `webhook_deliveries` (D1 column names, snake_case; migration 0011). */
@@ -373,6 +419,8 @@ export type WebhookDeliveryRow = {
   event_name: string | null;
   outcome: DeliveryOutcome;
   status_code: number | null;
+  /** `owner/name` of the source repo (0043); NULL = unknown source. */
+  repository_full_name: string | null;
   created_at: string;
 };
 
@@ -446,6 +494,15 @@ type AppsStoreD1 = {
   prepare(query: string): AppsStoreStatement;
   batch(statements: AppsStoreStatement[]): Promise<AppsStoreBatchResult[]>;
 };
+
+/** The `SELECT COUNT(*) AS n` row of a batch statement. */
+type CountRow = { n: number };
+
+/** One batch statement's `COUNT(*)` result. */
+function countOf(result: AppsStoreBatchResult): number {
+  const [row] = result.results as CountRow[];
+  return row?.n ?? 0;
+}
 
 /**
  * Tenant read face (migration 0026) — there is exactly one. Every
@@ -559,7 +616,7 @@ export function createAppsStore(db: AppsStoreD1) {
     const [latestRes, rejectedRes] = await Promise.all([
       db
         .prepare(
-          `SELECT app_id, id, event_name, outcome, status_code, created_at FROM (
+          `SELECT app_id, id, event_name, outcome, status_code, repository_full_name, created_at FROM (
              SELECT *, ROW_NUMBER() OVER (PARTITION BY app_id
                ORDER BY ${DELIVERY_VERDICT_TIER_SQL},
                         created_at DESC, rowid DESC) AS rn
@@ -916,8 +973,12 @@ export function createAppsStore(db: AppsStoreD1) {
      * FAILURE_STAGES precedent); FK violations (unknown appId) throw. The
      * webhook face wraps this in try/catch itself — an insert failure must
      * never change the webhook response (best-effort旁路). The event_name
-     * header is capped at EVENT_NAME_MAX_LENGTH chars at persist (seat2
-     * hygiene pin).
+     * header and the repository_full_name body field are capped at their
+     * MAX_LENGTH constants at persist (seat2 hygiene pin) — but only
+     * `event_name` is attacker-influenced: it is the x-github-event HEADER,
+     * which the unauthenticated reject path does reach. `repository_full_name`
+     * comes from the already-parsed, HMAC-verified body, so its bound is
+     * defence-in-depth against GitHub's name ceilings, not a payload bound.
      */
     async recordDelivery(input: RecordDeliveryInput): Promise<void> {
       if (!DELIVERY_OUTCOMES.includes(input.outcome)) {
@@ -925,13 +986,24 @@ export function createAppsStore(db: AppsStoreD1) {
           `apps-store: outcome ${JSON.stringify(input.outcome)} is not on the producer vocabulary (${DELIVERY_OUTCOMES.join(" | ")}) — zero rows written`,
         );
       }
-      const eventName = input.eventName === null ? null : input.eventName.slice(0, EVENT_NAME_MAX_LENGTH);
+      const eventName = input.eventName === null ? null : truncateBounded(input.eventName, EVENT_NAME_MAX_LENGTH);
+      const repositoryFullName =
+        input.repositoryFullName === null
+          ? null
+          : truncateBounded(input.repositoryFullName, REPOSITORY_FULL_NAME_MAX_LENGTH);
       await db
         .prepare(
-          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code)
-           VALUES (?, ?, ?, ?, ?)`,
+          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name)
+           VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .bind(crypto.randomUUID(), input.appId, eventName, input.outcome, input.statusCode)
+        .bind(
+          crypto.randomUUID(),
+          input.appId,
+          eventName,
+          input.outcome,
+          input.statusCode,
+          repositoryFullName,
+        )
         .run();
     },
 
@@ -959,7 +1031,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * Recent-deliveries read face (settings panel): THIS App's rows, verdict
      * tier first, newest first inside each tier (created_at has second
      * precision, so rowid breaks ties inside one second — the order is total
-     * and deterministic), bounded by the caller's N (default 5).
+     * and deterministic), bounded by the caller's N (default 10).
      *
      * The panel exists for one question — is review flowing? — and bypass
      * traffic (`check_run`, `ping`, …) dwarfs review traffic while landing in
@@ -970,7 +1042,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * untouched, and an App whose ONLY traffic is bypass rows still returns
      * those rows — the list never goes empty because of the ranking.
      */
-    async listRecentDeliveries(appId: string, limit = 5): Promise<WebhookDeliveryRow[]> {
+    async listRecentDeliveries(appId: string, limit = 10): Promise<WebhookDeliveryRow[]> {
       const res = await db
         .prepare(
           `SELECT * FROM webhook_deliveries
@@ -1079,11 +1151,9 @@ export function createAppsStore(db: AppsStoreD1) {
      * both are per-round attribution written for rounds that continued
      * (`recheck` a budget skip / dead seat / invalid document, `usage` a
      * failed `usage_events` insert), so a clean PR would otherwise read a
-     * non-zero failure count. This count excludes both; the sweep excludes the
-     * same two stages from paging. The detail face's failure HISTORY excludes
-     * nothing: `usage` (a lost metered record) and `recheck` (a round that
-     * produced no usable document) each need a surface, and the detail's own
-     * `failure_count` still filters the same two stages out.
+     * non-zero failure count. This count excludes both, exactly as the sweep
+     * and the detail face's own failure count and history do: one rule, so the
+     * tab number, the pager and the rows can never disagree.
      */
     async listPullRequests(appId: string): Promise<PullRequestRow[]> {
       const results = await db.batch([
@@ -1126,50 +1196,152 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * ONE pull request with its review history, failures and findings — the
-     * detail face. The address is the ledger's OWN key
-     * (app_id, owner, repo, pr_number): one App can be installed on several
-     * repos, and a number is only unique WITHIN a repo, so a number-only
-     * lookup would answer with a different repo's PR. A miss is `null` — never
-     * a same-number row from another repo.
+     * ONE pull request's head row — the detail face's first read. The address
+     * is the ledger's OWN key (app_id, owner, repo, pr_number): one App can be
+     * installed on several repos, and a number is only unique WITHIN a repo,
+     * so a number-only lookup would answer with a different repo's PR. A miss
+     * is `null` — never a same-number row from another repo.
+     *
+     * The newest review rides along as a whole row: it is the header's ONE
+     * authoritative verdict/attribution source, so paging the reviews section
+     * can never rewrite the headline. The counts are a separate read
+     * (`countPullRequestRecords`), so the head stays one row plus one lookup.
+     */
+    async getPullRequestHead(
+      appId: string,
+      owner: string,
+      repo: string,
+      prNumber: number,
+    ): Promise<PullRequestHeadRow | null> {
+      const results = await db.batch([
+        db
+          .prepare(
+            `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
+             FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+          )
+          .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha FROM reviews
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+             ORDER BY reviewed_at DESC, rowid DESC LIMIT 1`,
+          )
+          .bind(appId, owner, repo, prNumber),
+      ]);
+      const row = results[0]!.results[0] as PullRequestBaseRow | undefined;
+      if (row === undefined) return null;
+      return {
+        ...row,
+        latest_review: (results[1]!.results[0] as PullRequestReviewDetailRow | undefined) ?? null,
+      };
+    },
+
+    /**
+     * The record totals — the head payload's `counts`. Every failure count on
+     * this face (this one, the list's `failure_count`, the failures section's
+     * `total`) carries ONE rule: `PAGING_EXCLUDED_STAGES` rows are per-round
+     * ATTRIBUTION for reviews that continued (`recheck` a budget skip / dead
+     * seat / invalid document, `usage` a failed `usage_events` insert), not
+     * failures of the review ledger this face pages, so a clean PR never
+     * reports one. They stay in `review_failures` for the ops sweep to skip in
+     * its own paging signal and for the log tail.
+     *
+     * `must_fix` is the PR's own count of must-fix findings, unfiltered and
+     * unpaged: the family dot answers "does this PR have one", never "does the
+     * loaded page show one".
+     *
+     * Findings are counted by LIFECYCLE STATE, exactly as the findings page is
+     * read: `review_findings.state` is `open | addressed | dismissed`, and a
+     * finding the pipeline already assessed as addressed or dismissed is not
+     * work left on the PR — it must not keep the tab count or the dot alive.
+     */
+    async countPullRequestRecords(
+      appId: string,
+      owner: string,
+      repo: string,
+      prNumber: number,
+    ): Promise<PullRequestRecordCounts> {
+      const results = await db.batch([
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM review_findings
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'`,
+          )
+          .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM reviews
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+          )
+          .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM review_failures f
+             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
+          )
+          .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM review_findings
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'
+               AND json_extract(original_json, '$.mergeClass') = ?`,
+          )
+          .bind(appId, owner, repo, prNumber, MUST_FIX_SEVERITY),
+      ]);
+      return {
+        findings: countOf(results[0]!),
+        reviews: countOf(results[1]!),
+        failures: countOf(results[2]!),
+        must_fix: countOf(results[3]!),
+      };
+    },
+
+    /**
+     * One page of a PR's findings, newest LIFECYCLE ROW first, optionally
+     * filtered by an exact `mergeClass` (the wire's `severity`). The `total` is
+     * the FILTERED count — the pager's denominator. `null` means the App's
+     * ledger does not hold this PR (the route's 404), decided in the same
+     * batch as the page.
      *
      * Findings come from `review_findings` (the lifecycle table): it carries
      * `finding_id` and the immutable original as JSON, so `severity` is its
      * `mergeClass` (the vocab-switch mapping `findings.severity` already
      * uses), and `title` / `file_path` / `line` / `body` are read out of
-     * `original_json`. Newest lifecycle row first.
+     * `original_json`.
+     *
+     * Only `state = 'open'` rows are listed and counted, the same lifecycle
+     * predicate `countPullRequestRecords` applies: an addressed or dismissed
+     * finding is history, not a record the operator still acts on, and the tab
+     * count, the dot and the pager must agree with the list.
+     *
+     * The page is ordered by `rowid`, the immutable insert order — `updated_ms`
+     * advances every time a review round re-reports an open finding, so
+     * ordering by it would move a row between an offset page read and the next
+     * (duplicating or skipping it). Reviews and failures sort by their own
+     * immutable insert key for the same reason.
      */
-    async getPullRequest(
+    async listPullRequestFindings(
       appId: string,
       owner: string,
       repo: string,
       prNumber: number,
-    ): Promise<PullRequestDetail | null> {
-      const row = await db
-        .prepare(
-          `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-           FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
-        )
-        .bind(appId, owner, repo, prNumber)
-        .first<PullRequestBaseRow>();
-      if (!row) return null;
+      page: PullRequestPageRequest,
+    ): Promise<PullRequestRecordPage<PullRequestFindingRow> | null> {
+      const filter =
+        page.severity === undefined || page.severity === null
+          ? ""
+          : " AND json_extract(original_json, '$.mergeClass') = ?";
+      const filterBinds = filter === "" ? [] : [page.severity];
       const results = await db.batch([
+        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha
-             FROM reviews WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-             ORDER BY reviewed_at DESC, rowid DESC`,
+            `SELECT COUNT(*) AS n FROM review_findings
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'${filter}`,
           )
-          .bind(appId, row.owner, row.repo, prNumber),
-        db
-          .prepare(
-            `SELECT f.stage, f.error, f.created_at
-             FROM review_failures f
-             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?
-             ORDER BY f.created_at DESC, f.rowid DESC`,
-          )
-          .bind(appId, row.owner, row.repo, prNumber),
+          .bind(appId, owner, repo, prNumber, ...filterBinds),
         db
           .prepare(
             `SELECT finding_id,
@@ -1179,42 +1351,99 @@ export function createAppsStore(db: AppsStoreD1) {
                     json_extract(original_json, '$.lineStart') AS line,
                     json_extract(original_json, '$.body') AS body
              FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-             ORDER BY updated_ms DESC, finding_id`,
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'${filter}
+             ORDER BY rowid DESC
+             LIMIT ? OFFSET ?`,
           )
-          .bind(appId, row.owner, row.repo, prNumber),
+          .bind(appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
       ]);
-      // The histories ARE the aggregates: reviews come newest first, so the
-      // first one is the latest verdict; the failure COUNT excludes the
-      // paging set (`PAGING_EXCLUDED_STAGES` — per-round attribution of a
-      // review that continued), while the history list itself carries every
-      // stage, so a lost metered record and a degraded recheck round both
-      // keep a surface.
-      const reviews = results[0]!.results as PullRequestReviewDetailRow[];
-      const failures = results[1]!.results as PullRequestFailureDetailRow[];
+      if (results[0]!.results.length === 0) return null;
       return {
-        pull_request: {
-          number: row.pr_number,
-          owner: row.owner,
-          repo: row.repo,
-          title: row.title,
-          state: row.state,
-          head_sha: row.head_sha,
-          first_seen_at: row.first_seen_at,
-          last_seen_at: row.last_seen_at,
-          latest_review:
-            reviews[0] === undefined ? null : { verdict: reviews[0].verdict, reviewed_at: reviews[0].reviewed_at },
-          failure_count: failures.filter(
-            (failure) => !(PAGING_EXCLUDED_STAGES as readonly string[]).includes(failure.stage),
-          ).length,
-        },
-        reviews,
-        failures,
+        items: results[2]!.results as PullRequestFindingRow[],
+        total: countOf(results[1]!),
+      };
+    },
+
+    /**
+     * One page of a PR's reviews, newest first — the history's first page is
+     * its latest verdict. `null` = the App's ledger does not hold this PR.
+     */
+    async listPullRequestReviews(
+      appId: string,
+      owner: string,
+      repo: string,
+      prNumber: number,
+      page: PullRequestPageRequest,
+    ): Promise<PullRequestRecordPage<PullRequestReviewDetailRow> | null> {
+      const results = await db.batch([
+        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM reviews
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+          )
+          .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha
+             FROM reviews WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+             ORDER BY reviewed_at DESC, rowid DESC
+             LIMIT ? OFFSET ?`,
+          )
+          .bind(appId, owner, repo, prNumber, page.limit, page.offset),
+      ]);
+      if (results[0]!.results.length === 0) return null;
+      return {
         // Nullable columns pass through AS THEY ARE: the store reports what
         // the tables hold, and the route's wire mapping decides what the
         // client may receive (a NULL `provider` is a real, common row — the
         // v1 pipeline never records one).
-        findings: results[2]!.results as PullRequestFindingRow[],
+        items: results[2]!.results as PullRequestReviewDetailRow[],
+        total: countOf(results[1]!),
+      };
+    },
+
+    /**
+     * One page of a PR's review failures, newest first — the diagnostic
+     * payload this face exists for. COUNT and SELECT carry the SAME
+     * `PAGING_EXCLUDED_STAGES` predicate `countPullRequestRecords` applies, so
+     * the tab's number, this `total` and the pager agree with the rendered
+     * rows. `null` = the App's ledger does not hold this PR.
+     */
+    async listPullRequestFailures(
+      appId: string,
+      owner: string,
+      repo: string,
+      prNumber: number,
+      page: PullRequestPageRequest,
+    ): Promise<PullRequestRecordPage<PullRequestFailureDetailRow> | null> {
+      const results = await db.batch([
+        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n
+             FROM review_failures f
+             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
+          )
+          .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT f.stage, f.error, f.created_at
+             FROM review_failures f
+             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
+             ORDER BY f.created_at DESC, f.rowid DESC
+             LIMIT ? OFFSET ?`,
+          )
+          .bind(appId, owner, repo, prNumber, page.limit, page.offset),
+      ]);
+      if (results[0]!.results.length === 0) return null;
+      return {
+        items: results[2]!.results as PullRequestFailureDetailRow[],
+        total: countOf(results[1]!),
       };
     },
   };
@@ -1255,13 +1484,36 @@ export type PullRequestReviewDetailRow = {
 
 export type PullRequestFailureDetailRow = { stage: string; error: string; created_at: string };
 
-/** Detail read result — the row plus its three histories. */
-export type PullRequestDetail = {
-  pull_request: PullRequestRow;
-  reviews: PullRequestReviewDetailRow[];
-  failures: PullRequestFailureDetailRow[];
-  findings: PullRequestFindingRow[];
+/**
+ * The detail head: the ledger row plus its newest review (whole row, nullable)
+ * — the header's authoritative verdict and attribution.
+ */
+export type PullRequestHeadRow = PullRequestBaseRow & {
+  latest_review: PullRequestReviewDetailRow | null;
 };
+
+/**
+ * The record totals (the detail payload's `counts`), plus the PR's own
+ * must-fix tally — the family dot's source, independent of any severity filter
+ * or loaded page.
+ */
+export type PullRequestRecordCounts = {
+  findings: number;
+  reviews: number;
+  failures: number;
+  must_fix: number;
+};
+
+/** One record section's page request — the route validates the bounds before this. */
+export type PullRequestPageRequest = {
+  offset: number;
+  limit: number;
+  /** `findings` only: exact `mergeClass`; absent/`null` is no filter. */
+  severity?: string | null;
+};
+
+/** One record section's page: the rows plus the total the pager counts against. */
+export type PullRequestRecordPage<T> = { items: T[]; total: number };
 
 /**
  * Join the ledger list's three result sets in memory — the tuple

@@ -5,7 +5,7 @@
  * unchanged and a plain read changing nothing.
  */
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, migrationNumber } from "./helpers";
+import { createMigratedTestD1, migrationNumber, migrationsAfter } from "./helpers";
 
 const AT = "2026-10-27T00:00:00.000Z";
 /** Same shape as the operator store's guarded audit append. */
@@ -41,5 +41,11 @@ describe("test D1 double", () => {
     expect(() => migrationNumber("add_index.sql")).toThrow(/add_index\.sql has no numeric prefix/);
     expect(() => migrationNumber("0043_review_inflight.sql")).not.toThrow();
     expect(migrationNumber("0043_review_inflight.sql")).toBe(43);
+  });
+
+  test("both anchor forms select the same tail: the prefix number and the filename", () => {
+    // A fixture declares either anchor; they must not diverge.
+    expect(migrationsAfter("0036_app_identity.sql")).toEqual(migrationsAfter(36));
+    expect(() => migrationsAfter("add_index.sql")).toThrow(/no numeric prefix/);
   });
 });

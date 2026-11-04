@@ -14,7 +14,7 @@ import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
-import { createTestD1, type TestD1 } from "../store/helpers";
+import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -23,7 +23,10 @@ const SECRET = "test-webhook-secret";
 function createMigratedD1(): TestD1 {
   const db = createTestD1();
   // The per-App face's own dependencies (github_apps rebuild chain, workspace
-  // plane, the delivery log) plus 0039 itself — the ledger table.
+  // plane, the delivery log) plus 0039 itself — the ledger table. Migrations
+  // after 0039 (0040–…) are derived from the directory, so a new one joins
+  // this fixture automatically; 0043 is the delivery source column
+  // `recordDelivery` names.
   for (const name of [
     "0003_dashboard_users.sql",
     "0004_github_apps.sql",
@@ -40,6 +43,7 @@ function createMigratedD1(): TestD1 {
     "0037_github_metadata_attempt.sql",
     "0038_webhook_path_drop.sql",
     "0039_pull_requests.sql",
+    ...migrationsAfter("0039_pull_requests.sql"),
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
