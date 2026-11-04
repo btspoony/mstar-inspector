@@ -1144,14 +1144,12 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         // succeeded, so the submitted number stands in for the unreadable one
         // instead of reporting the save as a failure.
         const stored = parseStoredConcurrency(body) ?? submitted;
-        // `degraded` is NOT cleared here: it reports that some stored level could
-        // not be read, and a workspace write does not repair an unreadable system
-        // row. A repair write re-reads instead, so the server decides — a
-        // repaired workspace column reports clean, a broken system row keeps
-        // the warning only.
-        setLoaded((previous) => previous && { ...previous, concurrency: stored });
+        // This write is the workspace's own level, so its value is now known
+        // and trustworthy: show it. A degraded flag caused by the platform
+        // level is re-raised by the next read, and never traps the card in an
+        // empty field after a save that landed.
+        setLoaded((previous) => previous && { ...previous, concurrency: stored, degraded: false });
         setDraft(null);
-        if (loaded.degraded) setAttempt((count) => count + 1);
       }
       setConcurrencyNotice(outcome);
     } catch {

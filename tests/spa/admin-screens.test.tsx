@@ -398,7 +398,7 @@ describe("Runtime screen", () => {
       json({ concurrency: 1, min: 1, max: 256, degraded }),
     );
     expect(surface.text()).toContain(
-      "The stored system concurrency could not be read, so every workspace is running one review at a time. Nothing was changed — retry the read.",
+      "The stored system concurrency could not be read, so every workspace is running one review at a time. Entering a value in range saves a new one, and retrying the read re-checks the stored row.",
     );
     // The form stays — a save is the only way to repair an unreadable row — but
     // its field starts EMPTY and the "effective" line is withheld, so neither

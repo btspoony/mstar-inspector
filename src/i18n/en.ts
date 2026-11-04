@@ -443,7 +443,7 @@ export const en = {
     concurrencyRange: "Accepts 1–{max}.",
     /** {max} = this workspace's own maximum; the shown numbers are the fallback. */
     concurrencyUnreadable:
-      "The stored review concurrency could not be read, so reviews are running one at a time. The numbers shown are a fallback, not this workspace's setting. Saving a value from 1 to {max} repairs it, or retry the read.",
+      "The stored review concurrency could not be read, so reviews may be running one at a time. The numbers shown are a fallback. Saving a value from 1 to {max} sets this workspace's value, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
   },
   /**
    * Platform-operator support (2026-10): the operator's read-only face and the
@@ -917,7 +917,7 @@ export const en = {
       concurrencyCurrent: "Effective on the next review: {value}.",
       /** The stored cap could not be read — the numbers are a fallback, not the stored setting. */
       concurrencyUnreadable:
-        "The stored system concurrency could not be read, so every workspace is running one review at a time. Nothing was changed — retry the read.",
+        "The stored system concurrency could not be read, so every workspace is running one review at a time. Entering a value in range saves a new one, and retrying the read re-checks the stored row.",
     },
     /** Workspaces page. */
     workspaces: {

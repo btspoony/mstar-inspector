@@ -2322,11 +2322,12 @@ it does not lengthen them.
 
 Observation checklist after a concurrency change:
 
-- [ ] Both blocks carry the same ceiling — the `max_concurrency` constant and
-      `max_batch_size: 1` at the top level and inside `env.production`
-      (`bun test tests/contracts/wrangler-env-parity.test.ts` locks the pair;
-      the accepted runtime ranges are driven through their write predicates in
-      `src/dashboard/runtime-config-store.test.ts`).
+- [ ] Both blocks carry the same ceiling — the `max_concurrency` literal `250`
+      and `max_batch_size: 1` at the top level and inside `env.production`.
+      A ceiling change moves both literals AND the `250` pin in
+      `tests/contracts/wrangler-env-parity.test.ts`; the accepted runtime ranges
+      are driven through their write predicates in
+      `src/dashboard/runtime-config-store.test.ts`.
 - [ ] Throughput moved the way the runtime caps predict: raising the D1 caps
       changes the admitted rate on the **next** message; raising only the
       ceiling changes nothing while the caps stay at 256/32.
