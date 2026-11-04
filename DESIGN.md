@@ -1077,6 +1077,16 @@ their own beyond what the component layer already declares:
 - **Notice** — the soft strength of its tone at `copy-14`, control radius,
   `spacing-4` padding. Always state what happened and what to do next on
   error.
+- **field-row** — one labelled control plus the action that submits it, on a
+  single line: the control stack (`label-14`, 6px, then the control) and the
+  `button-md` action share a `flex-wrap items-end spacing-2` row, so
+  `items-end` lands the button's bottom edge on the **control's** bottom edge.
+  A help or range line under the field (12px, `text-muted`) therefore sits
+  **outside** the stack, below the row — inside it, `items-end` aligns the
+  button to that line instead and the row reads visibly crooked. The button
+  never takes a hand-tuned margin to compensate, and the row wraps as a whole
+  at narrow widths. A second control in the same row repeats the same stack,
+  never a bare label.
 - **group-card** — a set of children under one parent object: `surface-card`
   + container radius + `border-default` hairline, the symmetric card padding
   split into a header band (`14px 16px`) and body (`0 16px 14px`), title on
