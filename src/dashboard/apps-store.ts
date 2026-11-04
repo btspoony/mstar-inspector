@@ -275,6 +275,31 @@ export type CheckGate = {
 };
 
 /**
+ * Migration 0045's DDL default for `check_pass_verdicts` (`'["ship it"]'`).
+ * Duplicated rather than imported from the pipeline's `DEFAULT_REVIEW_GATE`:
+ * the dashboard may not import pipeline/review code (architect decision Q2).
+ */
+const DDL_DEFAULT_PASS_VERDICTS: readonly PrVerdict[] = ["ship it"];
+
+/**
+ * The stored verdict array, or the DDL default when the stored value is
+ * unreadable (bad JSON, not an array, or off-vocabulary). The Check lanes read
+ * the gate on every terminalization, so a corrupt row is unreadable
+ * configuration rather than a crash.
+ */
+function storedPassVerdicts(raw: string): readonly PrVerdict[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((entry) => PR_VERDICTS.includes(entry as PrVerdict))) {
+      return parsed as PrVerdict[];
+    }
+  } catch {
+    // fall through to the DDL default
+  }
+  return DDL_DEFAULT_PASS_VERDICTS;
+}
+
+/**
  * The per-App owner allowlist (migration 0045): `enabled` is the switch
  * (default off — every owner behaves as before) and `owners` the accepted
  * repository-owner logins. Enabled with an empty list refuses every owner.
@@ -845,7 +870,8 @@ export function createAppsStore(db: AppsStoreD1) {
      * The App's review gate (migration 0045). Unknown id → null (the
      * getSandboxImageId convention). No tenant join: the gate is a
      * configuration value. The stored verdict array is written only through
-     * saveCheckGate, so it is already vocabulary-validated.
+     * saveCheckGate, so it is already vocabulary-validated; a corrupt stored
+     * value reads as the DDL default instead of throwing.
      */
     async getCheckGate(appId: string): Promise<CheckGate | null> {
       const row = await db
@@ -855,7 +881,7 @@ export function createAppsStore(db: AppsStoreD1) {
       if (!row) return null;
       return {
         minScore: row.check_min_score,
-        passVerdicts: JSON.parse(row.check_pass_verdicts) as PrVerdict[],
+        passVerdicts: storedPassVerdicts(row.check_pass_verdicts),
       };
     },
 

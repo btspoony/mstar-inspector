@@ -2797,6 +2797,13 @@ function settingsRemoveResponse(
 }
 
 /**
+ * The owner allowlist's accepted size (the `save-allowlist` route): the whole
+ * set is replaced inside ONE D1 batch, so an unbounded paste would build an
+ * arbitrarily large batch. 100 covers every realistic shared install.
+ */
+export const ALLOWLIST_MAX_OWNERS = 100;
+
+/**
  * (audit UI-45-03): machine-readable 400 keys for the settings
  * POST family — ONE inventory of the site→key mapping. Values are
  * `settings.error.*` dictionary paths; settings400Response interpolates the
@@ -2858,6 +2865,7 @@ const SETTINGS_400_KEYS = {
   checkScoreInvalid: "settings.error.checkScoreInvalid",
   checkVerdictUnknown: "settings.error.checkVerdictUnknown",
   allowlistToggleInvalid: "settings.error.allowlistToggleInvalid",
+  allowlistTooManyOwners: "settings.error.allowlistTooManyOwners",
   fieldDuplicated: "settings.error.fieldDuplicated",
   unknownOperation: "settings.error.unknownOperation",
   githubMetadataRefreshFailed: "settings.error.githubMetadataRefreshFailed",
@@ -4224,6 +4232,13 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // One login per line: blank lines are noise, duplicates collapse, the
     // operator's order is kept.
     const owners = [...new Set(ownerText.split("\n").map((line) => line.trim()).filter((line) => line !== ""))];
+    // The replace is ONE D1 batch, so the accepted size is bounded here (the
+    // trust boundary): an oversized submission is a keyed 400, zero writes.
+    if (owners.length > ALLOWLIST_MAX_OWNERS) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.allowlistTooManyOwners, {
+        limit: ALLOWLIST_MAX_OWNERS,
+      });
+    }
     try {
       await createAppsStore(gate.db).saveAllowlist(gate.app.id, { enabled: enabled === "1", owners });
     } catch (err) {

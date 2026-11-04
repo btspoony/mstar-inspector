@@ -409,9 +409,12 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // retry) with no `webhook_deliveries` row, no `pull_requests` row, no
   // `last_webhook_at` touch and no enqueue. The switch rides the row this route
   // already read, so only an enabled App pays for the owner-set read; a failed
-  // read logs and proceeds (the gate cannot be applied).
-  const ownerLogin = webhookRepositoryOwnerLogin(classified);
-  if (ownerLogin !== null && row.allowlist_enabled !== 0 && row.github_visibility !== "private") {
+  // read logs and proceeds (the gate cannot be applied). The owner login is
+  // parsed only when those two cheap row checks say the gate applies.
+  const ownerLogin = row.allowlist_enabled !== 0 && row.github_visibility !== "private"
+    ? webhookRepositoryOwnerLogin(classified)
+    : null;
+  if (ownerLogin !== null) {
     try {
       const allowlist = await appsStore.getAllowlist(row.id);
       // GitHub logins are case-insensitive; the stored list keeps the

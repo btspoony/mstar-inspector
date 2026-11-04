@@ -58,6 +58,7 @@ import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../.
 import { composeModelOptions, findFailingSelector } from "../../src/dashboard/model-membership";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
 import { createSecretbox } from "../../src/dashboard/secretbox";
+import { ALLOWLIST_MAX_OWNERS } from "../../src/dashboard/index";
 import { PROVIDERS } from "../../src/pipeline/provider-catalog";
 import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../packages/runner/src/runtime-omp";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -2819,6 +2820,35 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     expect(body.key).toBe("settings.error.allowlistToggleInvalid");
     expect(gateRow(db, app.id)).toEqual(before);
     expect(ownerLogins(db, app.id)).toEqual(["ada"]);
+  });
+
+  test("save-allowlist: the owner set is capped — oversized is a keyed 400 with zero writes", async () => {
+    const { db, app } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "1", owners: "ada" });
+    const before = gateRow(db, app.id);
+    const owners = (count: number) => Array.from({ length: count }, (_, index) => `owner-${index}`).join("\n");
+
+    const over = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-allowlist",
+      enabled: "1",
+      owners: owners(ALLOWLIST_MAX_OWNERS + 1),
+    });
+    expect(over.status).toBe(400);
+    const overBody = (await over.json()) as { key: string };
+    expect(overBody.key).toBe("settings.error.allowlistTooManyOwners");
+    expect(gateRow(db, app.id)).toEqual(before);
+    expect(ownerLogins(db, app.id)).toEqual(["ada"]);
+
+    // Exactly the cap is still accepted: the bound is the batch size, not a
+    // rounding-down of the operator's list.
+    const atCap = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-allowlist",
+      enabled: "1",
+      owners: owners(ALLOWLIST_MAX_OWNERS),
+    });
+    expect(atCap.status).toBe(200);
+    expect(ownerLogins(db, app.id)).toHaveLength(ALLOWLIST_MAX_OWNERS);
   });
 });
 

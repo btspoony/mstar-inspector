@@ -407,6 +407,22 @@ function run(db: TestD1, deps: CheckReconcileDeps = {}) {
   return reconcileReviewChecks(asEnv(db), { log: SILENT_LOG, ...deps });
 }
 
+/**
+ * The same database with the SELECTs matching `matcher` throwing, i.e. a
+ * persistent read failure on exactly those statements (everything else —
+ * including the durable writes and `raw` assertions — still works).
+ */
+function withFailingReads(db: TestD1, matcher: RegExp): TestD1 {
+  return {
+    prepare(sql: string) {
+      if (matcher.test(sql)) throw new Error("d1 read failed");
+      return db.prepare(sql);
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+    raw: db.raw,
+  } as TestD1;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -667,6 +683,43 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       fetchStub.restore();
     }
     expect((await rawRow(db, attempt.identity.attemptId)).observed).toBe("failure");
+  });
+
+  test("a persistent gate/review read failure still terminalizes the attempt (QC3-F-001)", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    // The gate and the APPLIED review are the two reads a corrupt
+    // `check_pass_verdicts` or a failing D1 keeps failing. Both are UNREADABLE
+    // inputs here, never a reason to skip the terminal conclusion: an attempt
+    // that only retried would never conclude its Check.
+    const degraded = withFailingReads(db, /check_pass_verdicts|FROM reviews/);
+    const fetchStub = stubFetch();
+    const pushed: CheckConclusion[] = [];
+    try {
+      const summary = await run(degraded, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          complete: async (identity, _id, conclusion) => {
+            pushed.push(conclusion);
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+          },
+        }),
+      });
+      expect(summary.errors).toBe(0);
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]?.desired).toBe("failure");
+    expect(pushed[0]?.summary).toBe("Review attempt could not be confirmed complete; publication status is unknown.");
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
+    expect(row.recovery_state).toBe("done");
   });
 
   test("a newly discovered proof CORRECTS a persisted unknown failure to success on the same run", async () => {

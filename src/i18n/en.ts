@@ -611,6 +611,8 @@ export const en = {
       checkVerdictUnknown:
         "{verdict} is not a review verdict — use one of: {verdicts}. Nothing was stored.",
       allowlistToggleInvalid: "The owner allowlist switch must be on or off. Nothing was stored.",
+      allowlistTooManyOwners:
+        "The owner allowlist accepts at most {limit} owners — nothing was stored. Remove some logins and resubmit.",
       fieldDuplicated:
         "The {field} field was submitted more than once — resubmit the form with one value. Nothing was saved.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",

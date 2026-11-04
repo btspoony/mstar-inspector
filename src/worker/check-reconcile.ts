@@ -768,8 +768,10 @@ async function reconcileCheckAttempt(
   // The gate decision needs the App's stored gate and the APPLIED review by
   // the same exact scope/SHA. A missing row or tallies-free review is
   // unreadable, so it can never be corrected into a success (spec §7.9).
-  const gate = (await createAppsStore(db).getCheckGate(scope.appId)) ?? DEFAULT_REVIEW_GATE;
-  const review = await readPublishedReview(db, { scope, headSha: owned.identity.headSha });
+  // Both reads are guarded like the proof read above: a persistent read
+  // failure must still leave the row a persisted terminal conclusion, never a
+  // throw that keeps re-selecting the same due attempt forever.
+  const [gate, review] = await Promise.all([readRecoveryGate(db, scope.appId), readRecoveryReview(db, owned)]);
   const conclusion = terminalConclusion(owned, proof, gate, review);
 
   // Intent BEFORE any remote update: the persisted row is the only source the
@@ -1133,6 +1135,32 @@ async function readProof(db: D1Like, owned: CheckOwnership): Promise<Publication
       headSha: owned.identity.headSha,
       ...(owned.publicationId === null ? {} : { publicationId: owned.publicationId }),
     });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The App's gate, or the DDL default when the read is unreadable — the same
+ * fallback the consumer lane uses for its `null`. A read failure is never a
+ * reason to abandon the row: the conclusion below still gets persisted.
+ */
+async function readRecoveryGate(db: D1Like, appId: string): Promise<ReviewGate> {
+  try {
+    return (await createAppsStore(db).getCheckGate(appId)) ?? DEFAULT_REVIEW_GATE;
+  } catch {
+    return DEFAULT_REVIEW_GATE;
+  }
+}
+
+/**
+ * The APPLIED review by the exact scope/SHA. A read failure is UNREADABLE
+ * (`null`), which `decideConclusion` already treats as a failure — never a
+ * pass, and never a throw out of the lane.
+ */
+async function readRecoveryReview(db: D1Like, owned: CheckOwnership): Promise<PublishedReview | null> {
+  try {
+    return await readPublishedReview(db, { scope: owned.identity.scope, headSha: owned.identity.headSha });
   } catch {
     return null;
   }

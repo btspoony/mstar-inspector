@@ -516,6 +516,7 @@ export const zhCN: Dictionary = {
       checkScoreInvalid: "审查门禁分数必须是 0 到 100 之间的整数。未存储任何内容。",
       checkVerdictUnknown: "{verdict} 不是有效的审查结论 — 可用值为：{verdicts}。未存储任何内容。",
       allowlistToggleInvalid: "所有者白名单开关必须为开或关。未存储任何内容。",
+      allowlistTooManyOwners: "所有者白名单最多接受 {limit} 个所有者 — 未存储任何内容。请移除部分登录名后重新提交。",
       fieldDuplicated: "{field} 字段被提交了多次 — 请以单个值重新提交表单。未保存任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
