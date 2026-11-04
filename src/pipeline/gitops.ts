@@ -41,11 +41,6 @@ export type GitOpsInput = {
   prNumber: number;
   cloneDir: string;
   diffPath: string;
-  runnerPath: string;
-  /** Review tier for the runner CLI `--level` (port-validated upstream). */
-  level: ReviewLevel;
-  /** In-image path of the runner `--input` JSON file (reconFacts carrier). */
-  inputPath: string;
 };
 
 export type GitOpsCommands = {
@@ -57,8 +52,6 @@ export type GitOpsCommands = {
   diff: ShellCommand;
   /** Numstat of the PR diff — the runner's seat-partition universe. */
   numstat: ShellCommand;
-  /** Run the in-image review runner (`--level`/`--input` reconFacts JSON). */
-  runner: ShellCommand;
 };
 
 /**
@@ -304,14 +297,13 @@ export function readReportCommand(path: string = REPORT_OUTPUT_PATH): ShellComma
   return boundedFileReadCommand(path, REPORT_FILE_MAX_BYTES);
 }
 
-/** Main-flow commands in execution order (clone → sha → diff → numstat → runner). */
+/** Main-flow commands in execution order (clone → sha → diff → numstat). */
 export function buildGitOpsCommands(input: GitOpsInput): GitOpsCommands {
   return {
     clone: cloneCommand(input.owner, input.repo, input.prNumber, input.cloneDir),
     checkedOutSha: checkedOutShaCommand(input.cloneDir),
     diff: diffCommand(input.owner, input.repo, input.prNumber, input.diffPath),
     numstat: numstatCommand(input.diffPath),
-    runner: runnerCommand(input.runnerPath, input.level, input.inputPath),
   };
 }
 

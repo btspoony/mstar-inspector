@@ -57,6 +57,7 @@ export const testOverrides = {
 // this ONE loader (a static import would run before the workerd shim above).
 export const {
   createReviewConsumer,
+  extractIssueRefs,
   runnerTimeoutMs,
   reviewGuardTtlSeconds,
   guardRetryDelaysSeconds,

@@ -391,11 +391,23 @@ export function buildRevalidatedSection(rows: ClosureRow[]): string {
     return lines.join("\n");
   }
   lines.push("| Prior finding | State | Evidence |", "|---|---|---|");
-  for (const row of rows.slice(0, CLOSURE_MAX_ROWS)) {
+  const shown = rows.slice(0, CLOSURE_MAX_ROWS);
+  for (const row of shown) {
     const title = row.title.replace(/\|/g, "\\|").replace(/\n/g, " ");
+    // `dismissed` keeps the closure table's vocabulary: the same row renders
+    // there as `dismissed (non-fix-dismissal)`, and calling it `still present`
+    // would contradict a row the store already closed.
     const state =
-      row.disposition === "addressed" ? "fixed" : row.disposition === "dismissed" ? "still present" : "not verifiable";
+      row.disposition === "addressed"
+        ? "fixed"
+        : row.disposition === "dismissed"
+          ? `dismissed (${row.reason})`
+          : "not verifiable";
     lines.push(`| ${title} | ${state} | ${row.evidenceKind ?? row.reason} |`);
+  }
+  const overflow = rows.length - shown.length;
+  if (overflow > 0) {
+    lines.push("", `*(+${overflow} more prior finding(s) over the ${CLOSURE_MAX_ROWS}-row display cap)*`);
   }
   return lines.join("\n");
 }
@@ -403,8 +415,11 @@ export function buildRevalidatedSection(rows: ClosureRow[]): string {
 /** The collapsible fix-plan block; markdown text must survive the outer fence. */
 function planBlock(planToFix: string | null): string {
   if (planToFix === null || planToFix === "none") return "none";
-  // A plan that itself contains a fence needs a longer outer fence.
-  const fence = planToFix.includes("```") ? "````" : "```";
+  // The outer fence must outrun every backtick run inside the plan, or a plan
+  // that documents a fence closes this one early and the rest leaks as markup.
+  let longest = 2;
+  for (const run of planToFix.matchAll(/`+/g)) longest = Math.max(longest, run[0].length);
+  const fence = "`".repeat(longest + 1);
   return `<details><summary>Expand fix plan</summary>\n\n${fence}md\n${planToFix}\n${fence}\n\n</details>`;
 }
 
@@ -467,8 +482,10 @@ export function insertReportSections(rendered: string, report: ReportDoc | null,
   let body = rendered;
   if (report !== null) {
     const overview = `**What this PR does**: ${neutralizeReportText(report.overview)}`;
-    // A miss is not reported from here: this function is pure, and the caller
-    // owns logging.
+    // A miss is not reported: this composer is pure (no log sink) and the
+    // anchor is an engine-owned constant pinned with the engine version, so a
+    // miss can only mean that layout changed under us — the overview is
+    // skipped rather than prefixed somewhere the reader would not expect.
     body = insertAfterHeading(body, REVIEW_HEADING, overview) ?? body;
   }
   const withRevalidated = insertBeforeHeading(body, FINDINGS_HEADING, revalidated);

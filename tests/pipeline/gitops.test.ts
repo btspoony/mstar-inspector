@@ -83,13 +83,13 @@ describe("gitops command builders", () => {
     expect(() => writeJsonCommand("/workspace/review-input.json", "ey Jh")).toThrow(/unsafe base64 content/);
   });
 
-  test("readRecheckCommand bounds the read at 262,144 bytes and probes for overflow", () => {
+  test("readRecheckCommand bounds the read at RECHECK_FILE_MAX_BYTES and probes for overflow", () => {
     // Fixed audited path shape: head stops the content stream at the bound,
     // tail probes byte bound+1 → last line 1 = overflow, 0 = exact fit.
     expect(readRecheckCommand("/tmp/mstar-recheck.json")).toBe(
       shellCommand(
-        "head -c '262144' '/tmp/mstar-recheck.json' && printf '\\n' && " +
-          "tail -c '+262145' '/tmp/mstar-recheck.json' | head -c '1' | wc -c",
+        `head -c '${RECHECK_FILE_MAX_BYTES}' '/tmp/mstar-recheck.json' && printf '\\n' && ` +
+          `tail -c '+${RECHECK_FILE_MAX_BYTES + 1}' '/tmp/mstar-recheck.json' | head -c '1' | wc -c`,
       ),
     );
   });
@@ -281,9 +281,6 @@ describe("gitops command builders", () => {
       prNumber: 7,
       cloneDir: "/workspace/repo",
       diffPath: "/workspace/pr.diff",
-      runnerPath: "/opt/runner/packages/runner/src/runner.ts",
-      level: "default",
-      inputPath: "/workspace/review-input.json",
     });
     expect(cmds.clone).toContain("origin 'https://github.com/my-org.example/repo_name-2.git'");
     expect(cmds.clone).toContain("origin 'pull/7/head'");
@@ -294,9 +291,6 @@ describe("gitops command builders", () => {
     // as a second copy of the command string.
     expect(cmds.diff).toContain(boundedFileReadCommand("/workspace/pr.diff", DIFF_PREFETCH_MAX_BYTES));
     expect(cmds.numstat).toBe(shellCommand("git apply --numstat '/workspace/pr.diff'"));
-    expect(cmds.runner).toBe(
-      shellCommand("bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'"),
-    );
   });
 
   describe("injection rejection (fail closed before any shell string is built)", () => {
@@ -342,9 +336,6 @@ describe("gitops command builders", () => {
           prNumber: 42,
           cloneDir: "/workspace/repo",
           diffPath: "/workspace/pr.diff",
-          runnerPath: "/opt/runner/packages/runner/src/runner.ts",
-          level: "quick",
-          inputPath: "/workspace/review-input.json",
         }),
       ).toThrow(/unsafe owner/);
     });
@@ -357,9 +348,6 @@ describe("gitops command builders", () => {
           prNumber: -1,
           cloneDir: "/workspace/repo",
           diffPath: "/workspace/pr.diff",
-          runnerPath: "/opt/runner/packages/runner/src/runner.ts",
-          level: "quick",
-          inputPath: "/workspace/review-input.json",
         }),
       ).toThrow(/unsafe prNumber/);
     });

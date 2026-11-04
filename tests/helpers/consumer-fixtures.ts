@@ -191,9 +191,6 @@ function gitOpsCommandsFor(payload: {
     prNumber: payload.pr_number,
     cloneDir: CLONE_DIR,
     diffPath: DIFF_PATH,
-    runnerPath: RUNNER_PATH,
-    level: TEST_REVIEW_LEVEL,
-    inputPath: RUNNER_INPUT_PATH,
   });
   return new Map(
     Object.entries(commands).map(([kind, command]) => [command, kind as keyof GitOpsCommands] as const),
@@ -397,8 +394,6 @@ function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
     }
     case "numstat":
       return { stdout: state.numstatStdout, stderr: "", exitCode: state.numstatExitCode };
-    case "runner":
-      return { stdout: state.runnerStdout, stderr: state.runnerStderr, exitCode: state.runnerExitCode };
     default:
       break;
   }
