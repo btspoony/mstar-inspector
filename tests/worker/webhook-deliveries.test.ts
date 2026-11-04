@@ -504,6 +504,11 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       // directory, so a new one (0043's source column included) joins
       // automatically. The failure fixture stops before the delivery table.
       names.push("0011_webhook_deliveries.sql", ...migrationsAfter("0038_webhook_path_drop.sql"));
+    } else {
+      // ...but the owner allowlist read runs on every delivery and is
+      // fail-closed, so without 0045's table this fixture would exercise the
+      // gate's 500 instead of the delivery recorder it is here to break.
+      names.push("0045_review_gate_and_owner_allowlist.sql");
     }
     for (const name of names) {
       db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
@@ -1041,7 +1046,9 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(ledgerState(db, appRow.id)).toEqual({ deliveries: 0, pullRequests: 0, lastWebhookAt: null });
   });
 
-  test("private App ignores stored allowlist rows even with the switch on", async () => {
+  test("a cached private App still applies the stored allowlist — visibility only hides the Settings control", async () => {
+    // Admission never reads `github_visibility`, so a stale or genuine
+    // `private` cache must not leave the gate inert.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const apps = createAppsStore(db);
@@ -1054,11 +1061,9 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
 
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(1);
-    expect(deliveriesFor(db, appRow.id)).toEqual([
-      { event_name: "pull_request", outcome: "ok", status_code: null },
-    ]);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(ledgerState(db, appRow.id)).toEqual({ deliveries: 0, pullRequests: 0, lastWebhookAt: null });
   });
 
   test("the owner match is case-insensitive (GitHub logins are)", async () => {
@@ -1077,12 +1082,13 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(sent).toHaveLength(1);
   });
 
-  test("a failed allowlist read logs and the delivery proceeds (the gate cannot be applied)", async () => {
+  test("an unreadable allowlist is fail-closed: 500 with zero writes and zero enqueue", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
     // The switch stays on, but the owner table disappears: the single gate
-    // SELECT cannot run, so the read throws and the gate cannot be applied.
+    // SELECT cannot run, so the gate's state is unknown — and an unknown gate
+    // must not admit. 500 so GitHub retries once D1 is healthy again.
     db.raw.exec("DROP TABLE app_owner_allowlist");
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1098,16 +1104,64 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       console.warn = origWarn;
     }
 
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(1);
-    expect(ledgerState(db, appRow.id).deliveries).toBe(1);
+    expect(res.status).toBe(500);
+    expect(await res.text()).toBe("owner allowlist unreadable");
+    expect(sent).toHaveLength(0);
+    expect(ledgerState(db, appRow.id)).toEqual({ deliveries: 0, pullRequests: 0, lastWebhookAt: null });
     const line = warn.mock.calls
       .map((call) => String(call[0]))
       .find((s) => s.includes("owner_allowlist_read_failed"));
     expect(line).toBeDefined();
     const fields = JSON.parse(line!) as { event: string };
     expect(fields.event).toBe("owner_allowlist_read_failed");
+  });
+
+  test("allowlist ON refuses an issue_comment bot mention from an unlisted owner too", async () => {
+    // The mention face reaches admission like any other job: same 200
+    // refusal, no delivery row, no PR ledger row, no enqueue.
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const apps = createAppsStore(db);
+    await apps.saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({
+      action: "created",
+      installation: { id: 123 },
+      comment: { body: "@app-x[bot] review this" },
+      issue: {
+        number: 42,
+        user: { login: "test-author" },
+        pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+      },
+      repository: { name: "test-repo", owner: { login: "test-owner" } },
+      sender: { type: "User", login: "test-author" },
+    });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "issue_comment"),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(ledgerState(db, appRow.id)).toMatchObject({ deliveries: 0, pullRequests: 0 });
+
+    // Control: the same body IS a mention job — listing the owner enqueues it,
+    // so the zeros above came from the refusal, not from a body that never
+    // classified.
+    await apps.saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
+    const admitted = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "issue_comment"),
+      env,
+    );
+    expect(admitted.status).toBe(200);
+    expect(await admitted.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
   });
 });
 

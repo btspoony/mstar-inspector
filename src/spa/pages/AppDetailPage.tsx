@@ -406,8 +406,10 @@ export function AppDetailView({
             {/* Installed tab: the shareable install link leads, the owner
                 allowlist follows it (owners arrive through installations),
                 then the installation table and its delivery health. A private
-                App renders NO allowlist control — the server ignores stored
-                rows for one, so a switch there would promise nothing. */}
+                App renders NO allowlist control — its installs all sit inside
+                one owner, so the list would show no visible effect — but the
+                server still applies a stored list to its deliveries, which is
+                what the save notice tells the operator. */}
             <div className="flex flex-col">
               <AppInstallSection locale={locale} app={payload.app} />
               {payload.app.github_visibility === "private" ? null : (
