@@ -21,6 +21,7 @@
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
+import type { D1Like } from "../../src/store/types";
 import type { TestD1 } from "../store/helpers";
 
 /** One github_apps row of the post-0038 shape, without the store's crypto path. */
@@ -138,6 +139,28 @@ describe("owner allowlist (migration 0045)", () => {
     expect(await store.saveAllowlist("unknown-app", { enabled: true, owners: ["acme"] })).toBe(false);
     const rows = db.raw.query("SELECT COUNT(*) AS n FROM app_owner_allowlist").get() as { n: number };
     expect(rows.n).toBe(0);
+  });
+
+  test("a soft-delete landing after the pre-read reports false and leaves the switch untouched", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, "app-allow-race", { githubAppId: 5103 });
+    // The pre-read cannot see a delete that lands before the batch, so the
+    // batch's UPDATE repeats the predicate and its change count decides.
+    const racing: D1Like = {
+      prepare: (query) => db.prepare(query),
+      batch: async (statements) => {
+        db.raw.prepare(`UPDATE github_apps SET deleted_at = datetime('now') WHERE id = ?`).run("app-allow-race");
+        return db.batch(statements);
+      },
+    };
+
+    expect(await createAppsStore(racing).saveAllowlist("app-allow-race", { enabled: true, owners: ["acme"] })).toBe(
+      false,
+    );
+    const row = db.raw.query("SELECT allowlist_enabled FROM github_apps WHERE id = ?").get("app-allow-race") as {
+      allowlist_enabled: number;
+    };
+    expect(row.allowlist_enabled).toBe(0);
   });
 });
 

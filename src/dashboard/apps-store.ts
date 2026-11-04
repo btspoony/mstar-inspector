@@ -1023,7 +1023,11 @@ export function createAppsStore(db: AppsStoreD1) {
      * legal and, with the switch on, refuses every owner (fail closed).
      * Refuses a soft-deleted or unknown App BEFORE writing (the setAppStatus
      * rule — a batch cannot skip itself on the UPDATE's row count) and writes
-     * updated_at (an operator mutation). Returns whether the App row exists.
+     * updated_at (an operator mutation). Returns whether the App row was still
+     * live when the batch ran: the UPDATE repeats the `deleted_at IS NULL`
+     * predicate and its change count is the answer, so a delete landing
+     * between the pre-read and the batch reports `false` instead of a save
+     * that never took effect.
      */
     async saveAllowlist(id: string, allowlist: AppAllowlist): Promise<boolean> {
       const live = await db
@@ -1032,7 +1036,7 @@ export function createAppsStore(db: AppsStoreD1) {
         .first<{ id: string }>();
       if (!live) return false;
       const owners = [...new Set(allowlist.owners)];
-      await db.batch([
+      const results = await db.batch([
         db.prepare(`DELETE FROM app_owner_allowlist WHERE app_id = ?`).bind(id),
         ...owners.map((owner) =>
           db
@@ -1043,10 +1047,13 @@ export function createAppsStore(db: AppsStoreD1) {
             .bind(id, owner),
         ),
         db
-          .prepare(`UPDATE github_apps SET allowlist_enabled = ?, updated_at = datetime('now') WHERE id = ?`)
+          .prepare(
+            `UPDATE github_apps SET allowlist_enabled = ?, updated_at = datetime('now')
+             WHERE id = ? AND deleted_at IS NULL`,
+          )
           .bind(allowlist.enabled ? 1 : 0, id),
       ]);
-      return true;
+      return (results.at(-1)?.meta.changes ?? 0) > 0;
     },
 
     /**
