@@ -2676,6 +2676,18 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
 describe("review gate + owner allowlist (payload and ops)", () => {
   const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
 
+  // Switching the allowlist ON probes the App's visibility (the admission
+  // cache), so this suite owns the network: 200 = a public App.
+  let fetchSpy: ReturnType<typeof spyOn>;
+  beforeEach(() => {
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch,
+    );
+  });
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
   /** The gate/allowlist columns as one snapshot, so a zero-write case compares exactly. */
   const gateRow = (db: TestD1, appId: string) =>
     db.raw
@@ -2693,6 +2705,14 @@ describe("review gate + owner allowlist (payload and ops)", () => {
         owner_login: string;
       }>
     ).map((row) => row.owner_login);
+
+  /** The cached visibility column — what delivery admission reads. */
+  const visibilityRow = (db: TestD1, appId: string): string | null => {
+    const row = db.raw
+      .query("SELECT github_visibility FROM github_apps WHERE id = ?")
+      .get(appId) as { github_visibility: string | null };
+    return row.github_visibility;
+  };
 
   test("manager face: gate, allowlist and visibility defaults; the member face carries none of them", async () => {
     const { db } = await seededWorld();
@@ -2849,6 +2869,27 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     });
     expect(atCap.status).toBe(200);
     expect(ownerLogins(db, app.id)).toHaveLength(ALLOWLIST_MAX_OWNERS);
+  });
+
+  test("save-allowlist ON probes visibility first, so a stale cached private cannot leave the gate inert", async () => {
+    const { db, app } = await seededWorld();
+    rawRun(db, "UPDATE github_apps SET github_visibility = 'private' WHERE id = ?", app.id);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "1", owners: "ada" });
+    expect(res.status).toBe(200);
+    // The 200 stub answer replaced the stale 'private': admission now applies.
+    expect(visibilityRow(db, app.id)).toBe("public");
+
+    // An inconclusive probe stores 'unknown' (cannot prove private), never the
+    // stale value it was meant to replace.
+    fetchSpy.mockImplementation((async () => new Response("{}", { status: 503 })) as unknown as typeof fetch);
+    const inconclusive = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-allowlist",
+      enabled: "1",
+      owners: "ada",
+    });
+    expect(inconclusive.status).toBe(200);
+    expect(visibilityRow(db, app.id)).toBe("unknown");
   });
 });
 

@@ -4208,7 +4208,11 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const minScore = Number(rawScore);
     const passVerdicts = submitted as PrVerdict[];
     try {
-      await createAppsStore(gate.db).saveCheckGate(gate.app.id, { minScore, passVerdicts });
+      // `false` = the App row vanished (or was soft-deleted) before this
+      // write: nothing was saved, so the success notice would lie.
+      if (!(await createAppsStore(gate.db).saveCheckGate(gate.app.id, { minScore, passVerdicts }))) {
+        throw new Error(`app ${gate.app.id} vanished before its review gate save`);
+      }
     } catch (err) {
       logSettingsFailure("save_check_gate", gate.app.id, err);
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
@@ -4243,11 +4247,30 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         limit: ALLOWLIST_MAX_OWNERS,
       });
     }
+    const apps = createAppsStore(gate.db);
     try {
-      await createAppsStore(gate.db).saveAllowlist(gate.app.id, { enabled: enabled === "1", owners });
+      // `false` = the App row vanished (or was soft-deleted) before this
+      // write: nothing was saved, so the success notice would lie.
+      if (!(await apps.saveAllowlist(gate.app.id, { enabled: enabled === "1", owners }))) {
+        throw new Error(`app ${gate.app.id} vanished before its owner allowlist save`);
+      }
     } catch (err) {
       logSettingsFailure("save_allowlist", gate.app.id, err);
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
+    }
+    // Admission reads the CACHED visibility and ignores stored rows for a
+    // `private` App, so a stale `private` would leave the gate just switched on
+    // silently inert. Probe now through the metadata refresh's anonymous probe
+    // and store the answer — `unknown` when it cannot answer, which reads as
+    // "cannot prove private". Bookkeeping only: a probe or cache-write failure
+    // is logged and never blocks the save the operator asked for.
+    if (enabled === "1") {
+      try {
+        const visibility = gate.app.github_slug === null ? null : await fetchAppVisibility(gate.app.github_slug);
+        await apps.saveGithubVisibility(gate.app.id, visibility ?? "unknown");
+      } catch (err) {
+        logSettingsFailure("github_visibility", gate.app.id, err);
+      }
     }
     return settingsPostResponse(
       c,
