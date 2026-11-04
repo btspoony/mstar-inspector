@@ -15,10 +15,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
+  boundedFileReadCommand,
   buildGitOpsCommands,
   checkedOutShaCommand,
   cloneCommand,
-  DIFF_PATH,
   DIFF_PREFETCH_MAX_BYTES,
   diffCommand,
   numstatCommand,
@@ -87,7 +87,7 @@ describe("gitops command builders", () => {
     );
   });
 
-  test("readRecheckCommand rejects metacharacter-laden and relative paths fail-closed", () => {
+  test("the bounded read rejects metacharacter-laden and relative paths fail-closed", () => {
     for (const evil of [
       "/tmp/x; rm -rf /",
       "/tmp/$(id)",
@@ -96,30 +96,36 @@ describe("gitops command builders", () => {
       "relative/recheck.json",
       "",
     ]) {
-      expect(() => readRecheckCommand(evil)).toThrow(/unsafe recheck output path/);
+      expect(() => readRecheckCommand(evil)).toThrow(/unsafe bounded read path/);
+      // Same shared builder, same guard: the diff capture path is allowlisted
+      // too (it used to be interpolated with only single quotes).
+      expect(() => diffCommand("acme", "widgets", 42, evil)).toThrow(/unsafe bounded read path/);
     }
   });
 
-  test("the shipped recheck reads emit content + newline + newline-terminated flag (P67-QC-006)", async () => {
-    // ONE oracle over both commands the consumer reads: the document read and
-    // the status read. The parser and the Worker's test double both assume a
-    // NEWLINE-TERMINATED overflow flag (`wc -c` writes its own trailing
-    // newline). Running the built strings through a local POSIX shell against
-    // real files turns that assumption into evidence — no network, no GitHub.
-    // Every fixture lives under a private mkdtemp: no test writes a production
-    // path, so a crashed run can never clobber a real /tmp document.
-    const dir = await mkdtemp(join(tmpdir(), "mstar-recheck-read-"));
+  test("every bounded read emits content + newline + newline-terminated flag (P67-QC-006)", async () => {
+    // ONE oracle over every caller of the shared bounded-read builder: the
+    // recheck document read, the status read and the diff capture (whose
+    // redirect half needs gh, so only its read half runs here). The parser and
+    // the Worker's test double both assume a NEWLINE-TERMINATED overflow flag
+    // (`wc -c` writes its own trailing newline). Running the built strings
+    // through a local POSIX shell against real files turns that assumption
+    // into evidence — no network, no GitHub. Every fixture lives under a
+    // private mkdtemp: no test writes a production path, so a crashed run can
+    // never clobber a real /tmp document.
+    const dir = await mkdtemp(join(tmpdir(), "mstar-bounded-read-"));
     try {
-      const overflowText = "b".repeat(RECHECK_FILE_MAX_BYTES + 1);
       for (const read of [
         {
           // The identity rides the filename, so each entry owns its fixture.
           name: "recheck-doc",
+          maxBytes: RECHECK_FILE_MAX_BYTES,
           command: (path: string) => readRecheckCommand(path),
           fit: JSON.stringify({ schema: "mstar.recheck/v1", headSha: "x", results: [] }),
         },
         {
           name: "recheck-status",
+          maxBytes: RECHECK_FILE_MAX_BYTES,
           command: (path: string) => readRecheckStatusCommand(path),
           fit: JSON.stringify({
             schema: "mstar.recheck-status/v1",
@@ -132,10 +138,17 @@ describe("gitops command builders", () => {
             error: null,
           }),
         },
+        {
+          name: "diff",
+          maxBytes: DIFF_PREFETCH_MAX_BYTES,
+          command: (path: string) => boundedFileReadCommand(path, DIFF_PREFETCH_MAX_BYTES),
+          fit: "diff --git a/src/auth.ts b/src/auth.ts\n@@ -1,2 +1,3 @@\n+a\n b\n",
+        },
       ]) {
+        const overflowText = "b".repeat(read.maxBytes + 1);
         for (const [text, flag, content] of [
           [read.fit, "0", read.fit],
-          [overflowText, "1", overflowText.slice(0, RECHECK_FILE_MAX_BYTES)],
+          [overflowText, "1", overflowText.slice(0, read.maxBytes)],
         ] as const) {
           const path = join(dir, `${read.name}-${flag}.json`);
           await Bun.write(path, text);
@@ -151,36 +164,6 @@ describe("gitops command builders", () => {
           expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe(flag);
           expect(trimmed.slice(0, trimmed.lastIndexOf("\n"))).toBe(content);
         }
-      }
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("diffCommand's bounded read emits content + newline + newline-terminated flag (shell oracle)", async () => {
-    // The redirect half needs gh; the READ half is what the consumer parses, so
-    // it runs here against a real file under a private mkdtemp. Fit keeps the
-    // whole diff and flags 0; one byte past the bound flags 1 — which the
-    // consumer reads as over-size (no slices), never as a small diff.
-    const dir = await mkdtemp(join(tmpdir(), "mstar-diff-read-"));
-    try {
-      // The redirect half needs gh; run the read chain alone (everything after
-      // the `&&`) against a real file.
-      const readChain = diffCommand("acme", "widgets", 42, DIFF_PATH).split(" && ").slice(1).join(" && ");
-      const fit = "diff --git a/src/auth.ts b/src/auth.ts\n@@ -1,2 +1,3 @@\n+a\n b\n";
-      for (const [text, flag, content] of [
-        [fit, "0", fit],
-        ["b".repeat(DIFF_PREFETCH_MAX_BYTES + 1), "1", "b".repeat(DIFF_PREFETCH_MAX_BYTES)],
-      ] as const) {
-        const path = join(dir, `diff-${flag}.patch`);
-        await Bun.write(path, text);
-        const proc = Bun.spawn(["sh", "-c", readChain.replaceAll(DIFF_PATH, path)]);
-        const stdout = await new Response(proc.stdout).text();
-        expect(await proc.exited).toBe(0);
-        expect(stdout.endsWith("\n")).toBe(true);
-        const trimmed = stdout.trimEnd();
-        expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe(flag);
-        expect(trimmed.slice(0, trimmed.lastIndexOf("\n"))).toBe(content);
       }
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -213,7 +196,6 @@ describe("gitops command builders", () => {
     expect(cmds.clone).toContain("origin 'pull/7/head'");
     expect(cmds.checkedOutSha).toBe(shellCommand("git -C '/workspace/repo' rev-parse HEAD"));
     expect(cmds.diff).toContain("gh pr diff '7' --repo 'my-org.example/repo_name-2' > '/workspace/pr.diff'");
-    expect(cmds.diff).toContain(`head -c '${DIFF_PREFETCH_MAX_BYTES}' '/workspace/pr.diff'`);
     expect(cmds.numstat).toBe(shellCommand("git apply --numstat '/workspace/pr.diff'"));
     expect(cmds.runner).toBe(
       shellCommand("bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'"),

@@ -12,9 +12,10 @@
  * ([A-Za-z0-9._-]), prNumber is a positive integer. The in-image path
  * fields (clone/diff/runner/input) are NOT payload-derived — they are
  * fixed constants supplied by the consumer (verified against qc2 F-006);
- * they are still single-quoted. Anything else fails closed with a
- * descriptive error BEFORE a shell string is built — a metacharacter
- * (`;`, space, backtick, `$(...)`, `'`) can never reach `sh -c`.
+ * they are still single-quoted, and every bounded read additionally
+ * allowlists its absolute in-image path in the shared builder. Anything else
+ * fails closed with a descriptive error BEFORE a shell string is built — a
+ * metacharacter (`;`, space, backtick, `$(...)`, `'`) can never reach `sh -c`.
  *
  * Primary diff path is `gh pr diff` (falsified: GH_TOKEN env injection
  * works, non-empty diff, exit 0). The clone step exists so the in-image
@@ -99,6 +100,28 @@ function assertPrNumber(prNumber: number): void {
   }
 }
 
+/** Absolute in-image path charset for the bounded reads — no shell metacharacter. */
+const IN_IMAGE_PATH_RE = /^\/[A-Za-z0-9._/-]+$/;
+
+/**
+ * Bounded read of one in-image file: the first `maxBytes` bytes (`head -c`
+ * stops the stream at the bound), a `\n` separator written by `printf`, then
+ * the overflow probe's byte count — `wc -c` output, which is ITSELF
+ * newline-terminated. So a real run ends `<content>\n0\n` (fit) or
+ * `<content>\n1\n` (a byte exists BEYOND the bound). A missing/unreadable file
+ * fails the `head` chain (non-zero exit, empty stdout). The path is
+ * allowlisted and single-quoted HERE so every caller inherits the same guard
+ * (diff capture, recheck document/status); `maxBytes` is always an in-repo
+ * constant, never payload-derived.
+ */
+export function boundedFileReadCommand(path: string, maxBytes: number): ShellCommand {
+  assertShellSafe(path, IN_IMAGE_PATH_RE, "bounded read path");
+  return shellCommand(
+    `head -c '${maxBytes}' '${path}' && printf '\\n' && ` +
+      `tail -c '+${maxBytes + 1}' '${path}' | head -c '1' | wc -c`,
+  );
+}
+
 /**
  * Shallow clone of the PR head branch. `gh pr diff` reads the LIVE PR head,
  * so the checkout must match the diff: fetch the `pull/<n>/head` ref (GitHub
@@ -140,22 +163,18 @@ export function checkedOutShaCommand(cloneDir: string): ShellCommand {
  * file and left the exec's stdout EMPTY, so every round captured no diff and
  * every prior-finding row fell to a fabricated `no-evidence`.
  *
- * Output contract (the bytes the consumer parses; the sandbox double mirrors
- * it): `gh pr diff > diffPath` writes the file, then the first
- * DIFF_PREFETCH_MAX_BYTES bytes of that file (`head -c` stops the stream at
- * the bound), a `\n` separator from `printf`, then the overflow probe's byte
- * count — `wc -c` output, ITSELF newline-terminated. A real run ends
- * `<diff>\n0\n` (fit) or `<diff-prefix>\n1\n` (a byte exists BEYOND the bound →
- * the text is unavailable, never truncated). gh's own failure fails the chain
- * (non-zero exit, no stdout) — no file, no capture.
+ * The read half is `boundedFileReadCommand` at DIFF_PREFETCH_MAX_BYTES (its
+ * output contract lives there): `<diff>\n0\n` (fit) or `<diff-prefix>\n1\n`
+ * (a byte exists BEYOND the bound → the text is unavailable, never
+ * truncated). gh's own failure fails the chain (non-zero exit, no stdout) —
+ * no file, no capture.
  */
 export function diffCommand(owner: string, repo: string, prNumber: number, diffPath: string): ShellCommand {
   assertOwnerRepo(owner, repo);
   assertPrNumber(prNumber);
   return shellCommand(
     `gh pr diff '${prNumber}' --repo '${owner}/${repo}' > '${diffPath}' && ` +
-      `head -c '${DIFF_PREFETCH_MAX_BYTES}' '${diffPath}' && printf '\\n' && ` +
-      `tail -c '+${DIFF_PREFETCH_MAX_BYTES + 1}' '${diffPath}' | head -c '1' | wc -c`,
+      boundedFileReadCommand(diffPath, DIFF_PREFETCH_MAX_BYTES),
   );
 }
 
@@ -198,27 +217,17 @@ export function runnerCommand(
 }
 
 /**
- * Bounded read of the runner's recheck output file (spec §7.8):
- * the Worker consumes the seat's validated document through THIS audited
- * command — never an arbitrary model-produced path. Output contract (the exact
- * bytes the consumer parses and its double mirrors): the first
- * RECHECK_FILE_MAX_BYTES (262,144) bytes of the file (`head -c` stops the
- * stream at the bound), a `\n` separator written by `printf`, then the overflow
- * probe's byte count — `wc -c` output, which is ITSELF newline-terminated. So
- * a real run ends `<content>\n0\n` (fit) or `<content>\n1\n` (a byte exists
- * BEYOND the bound: tail probes byte bound+1 → treat the read as invalid).
- * A missing/unreadable file fails the `head` chain (non-zero exit, empty
- * stdout) — the consumer fails closed either way (invalid → no recheck).
- * The path is allowlisted and single-quoted like every builder here; the
- * consumer passes the same fixed constant the runner flag wrote
- * (RECHECK_OUTPUT_PATH).
+ * Bounded read of the runner's recheck output file (spec §7.8): the Worker
+ * consumes the seat's validated document through THIS audited command — never
+ * an arbitrary model-produced path. The transport (byte bound + `\n` +
+ * newline-terminated overflow flag) is `boundedFileReadCommand`, shared with
+ * the diff capture and the status read. A missing/unreadable file fails the
+ * `head` chain (non-zero exit, empty stdout) — the consumer fails closed
+ * either way (invalid → no recheck). The consumer passes the same fixed
+ * constant the runner flag wrote (RECHECK_OUTPUT_PATH).
  */
 export function readRecheckCommand(path: string): ShellCommand {
-  assertShellSafe(path, /^\/[A-Za-z0-9._/-]+$/, "recheck output path");
-  return shellCommand(
-    `head -c '${RECHECK_FILE_MAX_BYTES}' '${path}' && printf '\\n' && ` +
-      `tail -c '+${RECHECK_FILE_MAX_BYTES + 1}' '${path}' | head -c '1' | wc -c`,
-  );
+  return boundedFileReadCommand(path, RECHECK_FILE_MAX_BYTES);
 }
 
 /**
