@@ -613,6 +613,8 @@ export const en = {
       allowlistToggleInvalid: "The owner allowlist switch must be on or off. Nothing was stored.",
       allowlistTooManyOwners:
         "The owner allowlist accepts at most {limit} owners — nothing was stored. Remove some logins and resubmit.",
+      allowlistInvalidOwner:
+        "{owner} is not a valid GitHub login — use 1–39 letters, digits, or hyphens. Nothing was stored.",
       fieldDuplicated:
         "The {field} field was submitted more than once — resubmit the form with one value. Nothing was saved.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
@@ -799,6 +801,8 @@ export const en = {
     reviewGateFailClosed:
       "No verdict is selected: no review can ever pass, so every Check fails until you pick one.",
     reviewGateSave: "Save review gate",
+    reviewGateUnreadable:
+      "This App's stored review gate could not be read, so it cannot be edited here. The Check keeps failing closed until the stored configuration is repaired.",
   },
   manifest: {
     title: "Create GitHub App",

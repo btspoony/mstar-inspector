@@ -1062,6 +1062,10 @@ export function createAppsStore(db: AppsStoreD1) {
       // Every statement repeats the liveness predicate: a soft delete landing
       // between the pre-read and the batch then writes NO owner rows and does
       // not flip the switch, instead of leaving a deleted App's list behind.
+      // ONE batch on purpose: chunking was tried and reverted because a split
+      // replace is not atomic — a failed later chunk leaves a partial owner
+      // set. The statement count (ALLOWLIST_MAX_OWNERS + 2) stays below any
+      // observed D1 batch limit.
       const liveApp = `EXISTS (SELECT 1 FROM github_apps g WHERE g.id = ? AND g.deleted_at IS NULL)`;
       const results = await db.batch([
         db.prepare(`DELETE FROM app_owner_allowlist WHERE app_id = ? AND ${liveApp}`).bind(id, id),

@@ -27,6 +27,7 @@ import {
 import {
   AppInfoSection,
   DraftChainPanel,
+  ReviewGateSection,
   draftChainTabLabel,
   githubAppSettingsUrl,
 } from "../../src/spa/pages/SettingsPage";
@@ -2358,5 +2359,34 @@ describe("the tenant support notice renders nothing until the client read", () =
       }),
     );
     expect(markup).toBe("");
+  });
+});
+
+describe("review gate section", () => {
+  test("an unreadable gate renders the read-only notice instead of the controls", () => {
+    const unreadable = renderToStaticMarkup(
+      createElement(ReviewGateSection, {
+        locale: "en",
+        payload: { ...detailPayload(), check_gate: null },
+        onSettings: noopSave,
+      }),
+    );
+    // The copy's apostrophe is HTML-escaped in the markup, so the pin is the
+    // sentence fragment that carries no special characters.
+    expect(t("en", "settings.reviewGateUnreadable")).toContain("stored review gate could not be read");
+    expect(unreadable).toContain("stored review gate could not be read");
+    // No control and no save path — a gate that cannot be read cannot be edited.
+    expect(unreadable).not.toContain(t("en", "settings.reviewGateScore"));
+    expect(unreadable).not.toContain(t("en", "settings.reviewGateSave"));
+
+    const readable = renderToStaticMarkup(
+      createElement(ReviewGateSection, {
+        locale: "en",
+        payload: detailPayload(),
+        onSettings: noopSave,
+      }),
+    );
+    expect(readable).toContain(t("en", "settings.reviewGateSave"));
+    expect(readable).not.toContain("stored review gate could not be read");
   });
 });

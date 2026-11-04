@@ -517,6 +517,8 @@ export const zhCN: Dictionary = {
       checkVerdictUnknown: "{verdict} 不是有效的审查结论 — 可用值为：{verdicts}。未存储任何内容。",
       allowlistToggleInvalid: "所有者白名单开关必须为开或关。未存储任何内容。",
       allowlistTooManyOwners: "所有者白名单最多接受 {limit} 个所有者 — 未存储任何内容。请移除部分登录名后重新提交。",
+      allowlistInvalidOwner:
+        "{owner} 不是有效的 GitHub 登录名 — 请使用 1–39 个字母、数字或连字符。未存储任何内容。",
       fieldDuplicated: "{field} 字段被提交了多次 — 请以单个值重新提交表单。未保存任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
@@ -672,6 +674,8 @@ export const zhCN: Dictionary = {
     reviewGateVerdicts: "可通过的结论",
     reviewGateFailClosed: "未选中任何结论：任何审查都无法通过 — 在你选中之前，每个 Check 都会失败。",
     reviewGateSave: "保存审查门禁",
+    reviewGateUnreadable:
+      "无法读取此 App 已存储的审查门禁，因此无法在此编辑。在存储的配置被修复之前，Check 会持续按失败处理。",
   },
   manifest: {
     title: "创建 GitHub App",

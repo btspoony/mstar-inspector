@@ -505,9 +505,10 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       // automatically. The failure fixture stops before the delivery table.
       names.push("0011_webhook_deliveries.sql", ...migrationsAfter("0038_webhook_path_drop.sql"));
     } else {
-      // ...but the owner allowlist read runs on every delivery and is
-      // fail-closed, so without 0045's table this fixture would exercise the
-      // gate's 500 instead of the delivery recorder it is here to break.
+      // ...but the owner allowlist read runs on every review-triggering
+      // delivery (pull_request / issue_comment) and is fail-closed, so without
+      // 0045's table this fixture would exercise the gate's 500 instead of the
+      // delivery recorder it is here to break.
       names.push("0045_review_gate_and_owner_allowlist.sql");
     }
     for (const name of names) {
@@ -1091,6 +1092,30 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(line).toBeDefined();
     const fields = JSON.parse(line!) as { event: string };
     expect(fields.event).toBe("owner_allowlist_read_failed");
+  });
+
+  test("installation bookkeeping is never gated: an unreadable allowlist still records the delivery", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // The switch is on and the owner table is gone — an unreadable gate. Only
+    // `pull_request` / `issue_comment` can enqueue a review, so admission never
+    // consults it for an install event: the bookkeeping proceeds, no 500.
+    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
+    db.raw.exec("DROP TABLE app_owner_allowlist");
+    const body = JSON.stringify({ action: "created", installation: { id: 123 } });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "installation"),
+      makeEnv(db),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(deliveriesFor(db, appRow.id)).toEqual([
+      { event_name: "installation", outcome: "ignored", status_code: null },
+    ]);
   });
 
   test("allowlist ON refuses an issue_comment bot mention from an unlisted owner too", async () => {

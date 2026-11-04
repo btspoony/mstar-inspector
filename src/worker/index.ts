@@ -402,20 +402,25 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   }
 
   // Owner allowlist admission (migration 0045, AC5–AC7): after classification,
-  // BEFORE any ledger write. An App whose switch is on reviews only the
-  // repository owners it lists; the login comes off the classifier's own single
-  // parse. That parse is pure, so it always runs — a payload without one (an
-  // install event, a malformed body) cannot be judged, so it proceeds. The
-  // cached `github_visibility` is NOT part of this decision: `private` only
-  // hides the Settings control, and a stale cached `private` must never leave
-  // the gate inert. The switch and the owner set come from ONE `getAllowlist`
-  // snapshot — the row's own `allowlist_enabled` is never consulted for this
-  // decision. A refusal is a 200 (GitHub must not retry) with no
-  // `webhook_deliveries` row, no `pull_requests` row, no `last_webhook_at`
-  // touch and no enqueue. An allowlist that cannot be read — a thrown read, or
-  // a null on a row that was read moments earlier — is fail-CLOSED: 500 with
-  // those same zero writes, so an unapplied gate never admits a delivery.
-  const ownerLogin = webhookRepositoryOwnerLogin(classified);
+  // BEFORE any ledger write, and ONLY for the two review-triggering events
+  // (`pull_request`, `issue_comment`) — the events this route can enqueue a
+  // review for. Every other event, `installation` bookkeeping included, is
+  // never gated: it has no review to admit or refuse. An App whose switch is on
+  // reviews only the repository owners it lists; the login comes off the
+  // classifier's own single parse, so the up-to-1 MB body is never re-parsed.
+  // That parse is pure and a review-triggering payload without a repository
+  // owner cannot be judged, so such a delivery proceeds. The cached
+  // `github_visibility` is NOT part of this decision: `private` only hides the
+  // Settings control, and a stale cached `private` must never leave the gate
+  // inert. The switch and the owner set come from ONE `getAllowlist` snapshot —
+  // the row's own `allowlist_enabled` is never consulted for this decision. A
+  // refusal is a 200 (GitHub must not retry) with no `webhook_deliveries` row,
+  // no `pull_requests` row, no `last_webhook_at` touch and no enqueue. An
+  // allowlist that cannot be read — a thrown read, or a null on a row that was
+  // read moments earlier — is fail-CLOSED: 500 with those same zero writes, so
+  // an unapplied gate never admits a delivery.
+  const reviewTriggering = eventName === "pull_request" || eventName === "issue_comment";
+  const ownerLogin = reviewTriggering ? webhookRepositoryOwnerLogin(classified) : null;
   if (ownerLogin !== null) {
     let allowlist: AppAllowlist | null;
     try {

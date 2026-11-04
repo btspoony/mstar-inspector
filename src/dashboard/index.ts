@@ -2867,6 +2867,7 @@ const SETTINGS_400_KEYS = {
   checkVerdictUnknown: "settings.error.checkVerdictUnknown",
   allowlistToggleInvalid: "settings.error.allowlistToggleInvalid",
   allowlistTooManyOwners: "settings.error.allowlistTooManyOwners",
+  allowlistInvalidOwner: "settings.error.allowlistInvalidOwner",
   fieldDuplicated: "settings.error.fieldDuplicated",
   unknownOperation: "settings.error.unknownOperation",
   githubMetadataRefreshFailed: "settings.error.githubMetadataRefreshFailed",
@@ -3168,19 +3169,17 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const deliverySummary = await apps.deliverySummary(app.id);
     // Migration 0045 configuration: the review gate, the owner allowlist and
     // the cached GitHub visibility, read from the row this route has already
-    // resolved. A settings page must not render a gate it cannot read: the
-    // route's catch answers 500, the honest surface. The two nulls do NOT mean
-    // the same thing — `getCheckGate` is null for a deleted row AND for a live
-    // row whose stored verdict list is unreadable, while `getAllowlist` reads
-    // the row itself, so its null can only mean the row is gone.
+    // resolved. The two nulls do NOT mean the same thing — `getCheckGate` is
+    // null for a deleted row AND for a live row whose stored verdict list is
+    // unreadable, while `getAllowlist` reads the row itself, so its null can
+    // only mean the row is gone. A VANISHED row is the 500 (reading an App's
+    // configuration it no longer has is the honest failure); an unreadable
+    // verdict list is not — the face serves `check_gate: null`, every other
+    // field stays readable, and the SPA renders a read-only notice instead of
+    // controls that could not round-trip.
     const checkGate = await apps.getCheckGate(app.id);
     const allowlist = await apps.getAllowlist(app.id);
     const githubVisibility = await apps.getGithubVisibility(app.id);
-    if (checkGate === null) {
-      throw new Error(
-        `app settings row ${app.id}: the review gate is unreadable (deleted row or an unreadable stored verdict list)`,
-      );
-    }
     if (allowlist === null) {
       throw new Error(`app settings row ${app.id} vanished while reading its review gate configuration`);
     }
@@ -3364,7 +3363,12 @@ const appSettingsRoute = async (c: DashboardContext) => {
       sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
       // Migration 0045: the review gate (the Check's pass condition) and the
       // owner allowlist (switch + accepted logins) — manager face only.
-      check_gate: { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+      // `check_gate: null` = the stored verdict list is unreadable; the SPA
+      // then renders a read-only notice rather than a gate it cannot save.
+      check_gate:
+        checkGate === null
+          ? null
+          : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
       allowlist: { enabled: allowlist.enabled, owners: [...allowlist.owners] },
     });
   } catch (err) {
@@ -4250,6 +4254,15 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const owners = dedupeOwnerLogins(
       ownerText.split("\n").map((line) => line.trim()).filter((line) => line !== ""),
     );
+    // Same GitHub login grammar as the invite route: a login that can never
+    // match a real owner would sit in the table as a dead row that admits
+    // nobody, so the offending entry is named back to the operator.
+    const invalidOwner = owners.find((owner) => !GITHUB_LOGIN_PATTERN.test(owner));
+    if (invalidOwner !== undefined) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.allowlistInvalidOwner, {
+        owner: invalidOwner,
+      });
+    }
     // The replace is ONE D1 batch, so the accepted size is bounded here (the
     // trust boundary): an oversized submission is a keyed 400, zero writes.
     if (owners.length > ALLOWLIST_MAX_OWNERS) {

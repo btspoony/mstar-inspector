@@ -2015,5 +2015,12 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
       .query("SELECT owner_login FROM app_owner_allowlist WHERE app_id = 'allow-app' ORDER BY owner_login")
       .all() as Array<{ owner_login: string }>;
     expect(owners.map((entry) => entry.owner_login)).toEqual(["acme", "beta"]);
+
+    // No ON DELETE (NO ACTION), the 0006/app-config precedent: the parent →
+    // child direction refuses too, so soft-delete stays the only removal path
+    // and an App can never lose its rows by hard deletion.
+    expect(() => db.raw.prepare("DELETE FROM github_apps WHERE id = 'allow-app'").run()).toThrow(
+      /FOREIGN KEY constraint failed/,
+    );
   });
 });

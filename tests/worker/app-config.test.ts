@@ -2739,6 +2739,27 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     expect("github_visibility" in memberBody.app).toBe(false);
   });
 
+  test("manager face: an unreadable stored gate serves check_gate null and keeps the rest of the payload", async () => {
+    const { db, app } = await seededWorld();
+    // A JSON-valid but off-vocabulary verdict list passes the DDL CHECK and is
+    // unreadable configuration to the store. The settings face must not 500 on
+    // it: the gate arrives as null, the SPA renders a read-only notice, and
+    // every other field stays readable.
+    rawRun(db, `UPDATE github_apps SET check_pass_verdicts = '["lgtm"]' WHERE id = ?`, app.id);
+    const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      can_manage: boolean;
+      check_gate: unknown;
+      allowlist: { enabled: boolean; owners: string[] };
+      app: { id: string };
+    };
+    expect(body.can_manage).toBe(true);
+    expect(body.check_gate).toBeNull();
+    expect(body.app.id).toBe(app.id);
+    expect(body.allowlist).toEqual({ enabled: false, owners: [] });
+  });
+
   test("save-check-gate: two distinct pass_verdicts persist in submission order, and the next read serves them", async () => {
     const { db } = await seededWorld();
     const res = await worker.fetch(
@@ -2931,6 +2952,28 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     });
     expect(atCap.status).toBe(200);
     expect(ownerLogins(db, app.id)).toHaveLength(ALLOWLIST_MAX_OWNERS);
+  });
+
+  test("save-allowlist: an entry that is not a GitHub login → keyed 400 naming it, zero writes", async () => {
+    const { db, app } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "1", owners: "ada" });
+    const before = gateRow(db, app.id);
+    // A leading @, a comma-joined pair and a login past GitHub's 39-char limit
+    // can never match a real owner: each is refused by name.
+    for (const bad of ["@acme", "acme, otherco", "a".repeat(40)]) {
+      const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+        op: "save-allowlist",
+        enabled: "1",
+        owners: bad,
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { key: string; params: { owner: string } };
+      expect(body.key).toBe("settings.error.allowlistInvalidOwner");
+      expect(body.params.owner).toBe(bad);
+      expect(gateRow(db, app.id)).toEqual(before);
+      expect(ownerLogins(db, app.id)).toEqual(["ada"]);
+    }
   });
 
   test("save-allowlist ON probes visibility first, so a stale cached private cannot leave the gate inert", async () => {

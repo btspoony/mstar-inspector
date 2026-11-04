@@ -451,6 +451,11 @@ describe("members/apps/settings parsers", () => {
     ).toBeNull();
     // An empty set is a legal stored configuration (nothing passes).
     expect(parseSettings({ ...base, check_gate: { min_score: 80, pass_verdicts: [] } })).not.toBeNull();
+    // An unreadable stored verdict list arrives as explicit `null` — the
+    // server's honest degradation — and still parses, so the section can
+    // render its read-only notice instead of failing the whole face.
+    const unreadable = parseSettings({ ...base, check_gate: null });
+    expect(unreadable && unreadable.can_manage && unreadable.check_gate).toBeNull();
     expect(parseSettings({ ...base, allowlist: { ...base.allowlist, enabled: "yes" } })).toBeNull();
     expect(parseSettings({ ...base, allowlist: { ...base.allowlist, owners: [7] } })).toBeNull();
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "hidden" } })).toBeNull();
@@ -458,7 +463,7 @@ describe("members/apps/settings parsers", () => {
     // settings control submits exactly these strings back on save.
     for (const verdict of SPA_PR_VERDICTS) {
       const parsed = parseSettings({ ...base, check_gate: { min_score: 80, pass_verdicts: [verdict] } });
-      expect(parsed && parsed.can_manage && parsed.check_gate.pass_verdicts).toEqual([verdict]);
+      expect(parsed && parsed.can_manage && parsed.check_gate?.pass_verdicts).toEqual([verdict]);
     }
     // A never-probed App reads as 'unknown' and a failed read as null — both parse.
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "unknown" } })).not.toBeNull();

@@ -59,6 +59,7 @@ import {
   splitModelChain,
   type ChainTab,
   type AllowlistSettings,
+  type CheckGateSettings,
   type ConcurrencySettings,
   type ModelOptionGroup,
   type ReviewTriggerMode,
@@ -970,6 +971,30 @@ export function ReviewGateSection({
   onSettings: (fields: Record<string, string> | URLSearchParams) => Promise<OpNotice>;
 }) {
   const gate = payload.check_gate;
+  // An unreadable stored verdict list arrives as `null`: there is no value to
+  // render and nothing a save could round-trip, so the section keeps its
+  // heading and states the degradation instead of offering dead controls.
+  if (gate === null) {
+    return (
+      <FlowSection title={t(locale, "settings.reviewGate")} subtitle={t(locale, "settings.reviewGateCopy")}>
+        <p role="status" className="text-sm text-(--tone-warn-fg)">
+          {t(locale, "settings.reviewGateUnreadable")}
+        </p>
+      </FlowSection>
+    );
+  }
+  return <ReviewGateEditor locale={locale} gate={gate} onSettings={onSettings} />;
+}
+
+function ReviewGateEditor({
+  locale,
+  gate,
+  onSettings,
+}: {
+  locale: SpaBoot["locale"];
+  gate: CheckGateSettings;
+  onSettings: (fields: Record<string, string> | URLSearchParams) => Promise<OpNotice>;
+}) {
   const [score, setScore] = useState(String(gate.min_score));
   const [verdicts, setVerdicts] = useState<string[]>([...gate.pass_verdicts]);
   const [busy, setBusy] = useState(false);

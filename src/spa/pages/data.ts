@@ -494,8 +494,12 @@ export type SettingsManagePayload = {
   /** The App's stable workspace id — server-resolved, never a path segment. */
   workspace_id: string;
   app: SettingsAppMeta;
-  /** The review gate (migration 0045) — the Check's pass condition. */
-  check_gate: CheckGateSettings;
+  /**
+   * The review gate (migration 0045) — the Check's pass condition. `null` =
+   * the stored verdict list is unreadable: the section renders a read-only
+   * notice, since a gate that cannot be read cannot be edited.
+   */
+  check_gate: CheckGateSettings | null;
   /** The owner allowlist switch + accepted owner logins (migration 0045). */
   allowlist: AllowlistSettings;
   keys: ProviderKeyRow[];
@@ -1519,9 +1523,11 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
   // The review gate and the owner allowlist ride the MANAGER face
   // (migration 0045): the Check's pass condition and the owner admission
-  // set. A malformed shape fails the parse instead of rendering a control
-  // that cannot round-trip.
-  if (!isCheckGateSettings(data.check_gate)) return null;
+  // set. A gate whose stored verdict list is unreadable arrives as explicit
+  // `null` (the server's honest degradation), which the section renders as a
+  // read-only notice; any other malformed shape fails the parse instead of
+  // rendering a control that cannot round-trip.
+  if (data.check_gate !== null && !isCheckGateSettings(data.check_gate)) return null;
   if (!isAllowlistSettings(data.allowlist)) return null;
   // Cached visibility is nullable (null = the row read failed); any other
   // value must be on the probe's own vocabulary.
