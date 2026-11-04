@@ -446,23 +446,30 @@ function insertBeforeHeading(body: string, anchor: string, block: string): strin
 
 /**
  * A report line markdown would read as STRUCTURE rather than text: an ATX
- * heading, or a setext underline / thematic break (`---`, `===` turn the line
- * above them into a heading). The four raw report fields are model/PR-echoed
- * text, so a spoofed `### Findings` would otherwise steal the anchor the
- * revalidated table is inserted at and a `## 📋 Review` would fork the layout.
- * Up to three leading spaces still count: markdown reads those as the same
- * heading, so the indent is part of the match (4+ spaces is a code block, a
- * structure no heading anchor can be forged in).
+ * heading, or a setext underline / thematic break (any of `-`, `*`, `_` at
+ * least three times, optionally spaced — those turn the line above them into a
+ * heading — or a `===` underline). The four raw report fields are
+ * model/PR-echoed text, so a spoofed `### Findings` would otherwise steal the
+ * anchor the revalidated table is inserted at and a `## 📋 Review` would fork
+ * the layout. Up to three leading spaces still count: markdown reads those as
+ * the same heading, so the indent is part of the match (4+ spaces is a code
+ * block, a structure no heading anchor can be forged in).
  */
-const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|-{3,}\s*$|={3,}\s*$)/;
+const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|={3,}\s*$)/;
 
 /**
  * Escape the first character of every structure line, so the field stays text:
  * `### Findings` renders literally and is no longer an insertion anchor.
- * `planToFix` is NOT passed through here — it is already fenced as code.
+ * Raw HTML is the OTHER structure channel: an unclosed `<details>` routes
+ * everything after it on the comment into a collapsed block, so `&` then `<`
+ * are escaped (in that order, so the `&lt;` this produces is not re-escaped)
+ * and no tag can open. `planToFix` is NOT passed through here — it is already
+ * fenced as code.
  */
 function neutralizeReportText(text: string): string {
   return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
     .split("\n")
     .map((line) => {
       const indent = REPORT_STRUCTURE_LINE.exec(line)?.[1];
