@@ -2952,6 +2952,20 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     });
     expect(inconclusive.status).toBe(200);
     expect(visibilityRow(db, app.id)).toBe("unknown");
+
+    // An App with no slug has nothing to probe and nothing to invalidate: the
+    // save skips both the probe and the cache write, so the stored value
+    // stands instead of being overwritten with a fabricated 'unknown'.
+    rawRun(db, "UPDATE github_apps SET github_slug = NULL, github_visibility = 'public' WHERE id = ?", app.id);
+    fetchSpy.mockClear();
+    const slugless = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-allowlist",
+      enabled: "1",
+      owners: "ada",
+    });
+    expect(slugless.status).toBe(200);
+    expect(visibilityRow(db, app.id)).toBe("public");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   test("save-allowlist ON: the notice states enforcement, and says a private App keeps the control", async () => {

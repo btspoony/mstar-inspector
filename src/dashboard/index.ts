@@ -4272,16 +4272,17 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // visibility; `private` only changes the SPA's private-App note under an
     // allowlist control it renders regardless. So the copy below reports the
     // state the save just produced, and it needs the resolved visibility so a
-    // `private` App is told the stored list still applies. Probe through the
-    // metadata refresh's anonymous probe and store the answer — `unknown`
-    // when it cannot answer — then derive the copy from it. Bookkeeping only: a
-    // probe or cache-write failure is logged and never blocks the save the
-    // operator asked for.
+    // `private` App is told the stored list still applies. A save probes
+    // through the metadata refresh's anonymous probe and caches the answer —
+    // `unknown` only when the probe ran and could not answer. An App with no
+    // slug has nothing to probe and nothing to invalidate, so it skips the
+    // probe and the cache write, leaving the cached value standing.
+    // Bookkeeping only: a probe or cache-write failure is logged and never
+    // blocks the save the operator asked for.
     let visibility = gate.app.github_visibility ?? "unknown";
-    if (enabled === "1") {
+    if (enabled === "1" && gate.app.github_slug !== null) {
       try {
-        const probed = gate.app.github_slug === null ? null : await fetchAppVisibility(gate.app.github_slug);
-        visibility = probed ?? "unknown";
+        visibility = (await fetchAppVisibility(gate.app.github_slug)) ?? "unknown";
         await apps.saveGithubVisibility(gate.app.id, visibility);
       } catch (err) {
         logSettingsFailure("github_visibility", gate.app.id, err);
