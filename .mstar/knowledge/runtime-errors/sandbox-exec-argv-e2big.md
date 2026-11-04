@@ -38,9 +38,9 @@ A review round dies in the sandbox stage with `Command 'timeout' could not be st
 
 `src/pipeline/sandbox.ts` runs every step as `["timeout", "--kill-after=5", "<s>", "/bin/sh", "-lc", command]`. Each array item is one `execve` argument, so the whole shell command — including the base64 body of the runner input — was **one** argument.
 
-Linux caps a single argument at `MAX_ARG_STRLEN = 131,072` bytes. `writeJsonCommand` used to build `printf '%s' '<base64>' | base64 -d > '<path>'`, and the recheck input is capped at 512 KiB (`RECHECK_INPUT_MAX_BYTES`). Base64 is `4 × ceil(n / 3)`, so any runner-input JSON above 98,304 bytes produced a command argument above 128 KiB and `execve` refused to start `timeout`.
+Linux caps a single argument at `MAX_ARG_STRLEN = 131,072` bytes. `writeJsonCommand` used to build `printf '%s' '<base64>' | base64 -d > '<path>'`, and the recheck input is capped at 512 KiB (`RECHECK_INPUT_MAX_BYTES`). Base64 is `4 × ceil(n / 3)`, so the threshold sits just below 98,304 bytes: the wrapping text (`printf '%s' '' | base64 -d > '<path>'`) and the terminating NUL share that same argument, so the base64 body alone cannot use the full 128 KiB.
 
-A first round carries only `reconFacts` (a few KiB). A round with open findings adds `recheck` — targets plus evidence slices plus discussion — and that is what takes the document across the limit. The defect therefore looks like "this PR broke", when it is "this PR has enough findings".
+A first round carries `reconFacts`, `capabilityHosts`, and the optional `modelOverrides` and `customProviders` (a few KiB). A round with open findings adds `recheck` — targets plus evidence slices plus discussion — and that is what takes the document across the limit. The defect therefore looks like "this PR broke", when it is "this PR has enough findings".
 
 ## Solution
 

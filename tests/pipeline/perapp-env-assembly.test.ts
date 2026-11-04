@@ -349,7 +349,7 @@ function runnerInputs(): Array<Record<string, unknown>> {
     .map((c) => {
       const stdin = (c.opts as { stdin?: string } | undefined)?.stdin;
       if (stdin === undefined) throw new Error("runner-input write arrived without a stdin payload");
-      return JSON.parse(atob(stdin)) as Record<string, unknown>;
+      return JSON.parse(Buffer.from(stdin, "base64").toString("utf8")) as Record<string, unknown>;
     });
 }
 

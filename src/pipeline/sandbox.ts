@@ -57,11 +57,12 @@ export type SandboxBinding = unknown;
 export const DEFAULT_EXEC_TIMEOUT_MS = 600_000;
 
 /**
- * Upper bound on a `runCommand` `stdin` payload (the credential transport).
- * The legal payload is bounded by the store's own limits — at most
- * MAX_KEYS_PER_PROVIDER keys of MAX_PROVIDER_KEY_LENGTH per provider, over the
- * BYOK allowlist plus MAX_CUSTOM_PROVIDER_COUNT custom declarations (~1 MB
- * worst case). This cap sits above that and fails closed BEFORE a process
+ * Upper bound on a `runCommand` `stdin` payload. The pipe carries two payload
+ * classes: the credential transport — at most MAX_KEYS_PER_PROVIDER keys of
+ * MAX_PROVIDER_KEY_LENGTH per provider, over the BYOK allowlist plus
+ * MAX_CUSTOM_PROVIDER_COUNT custom declarations (~1 MB worst case) — and the
+ * runner-input document (the recheck input is capped at 512 KiB, ~683 KiB once
+ * base64-encoded). This cap sits above both and fails closed BEFORE a process
  * starts, so a runaway payload can never reach the pipe.
  */
 export const MAX_EXEC_STDIN_BYTES = 2 * 1024 * 1024;
