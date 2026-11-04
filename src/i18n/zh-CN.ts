@@ -372,18 +372,16 @@ export const zhCN: Dictionary = {
     nameSaved: "工作区名称已更新。",
     nameFailed: "修改工作区名称失败，请重试。",
     concurrencyHeading: "审查并发",
-    concurrencyDescription: "此工作区同时运行的审查数量。平台的系统上限始终叠加生效。",
+    concurrencyDescription: "此工作区最多同时运行的审查数量。平台可能进一步限制。",
     concurrencyLabel: "并发审查数",
     concurrencySave: "保存并发数",
     concurrencySaved: "审查并发数已更新。",
     concurrencyFailed: "修改审查并发数失败，请重试。",
-    /** {system} = 该工作区不能超过的平台系统上限。 */
-    concurrencySystemCap: "系统上限：{system}。",
-    concurrencyStoredAboveSystem:
-      "已存储值：{stored} — 高于当前系统上限 {system}。请输入不大于 {system} 的值后再保存；在此之前按系统上限生效。",
-    /** 已存储的并发上限无法读取——显示的数字只是兜底值，不是此工作区的设置。 */
+    /** {max} = 此工作区自己的上限。 */
+    concurrencyRange: "可设置 1–{max}。",
+    /** {max} = 此工作区自身上限；显示的数字只是兜底值。 */
     concurrencyUnreadable:
-      "无法读取已存储的审查并发数，因此审查会逐个运行。设置未被修改且保存已禁用——请重新读取。",
+      "无法读取已存储的审查并发数，因此审查可能仍逐个运行。显示的数字只是兜底值。保存 1–{max} 之间的值会设置本工作区的值，重新读取可刷新；若刷新后仍提示，请联系平台运维。",
   },
   /**
    * 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
@@ -518,7 +516,6 @@ export const zhCN: Dictionary = {
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
       concurrencyInvalid: "并发数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
-      concurrencyAboveSystem: "该并发数高于本平台的系统上限（{system}）。请改为 {system} 或更低 — 未存储任何内容。",
     },
     ops: "运维",
     opsCopy: "以下操作改变此 App 如何应答传入的投递。",
@@ -773,7 +770,7 @@ export const zhCN: Dictionary = {
       description: "非机密的运行时参数。更改会在下一次审查生效，并追加一条审计记录。",
       loadFailed: "无法加载运行时参数。",
       concurrencyTitle: "系统审查并发",
-      concurrencyDescription: "整个平台同时运行的审查数量。每个工作区的上限都受此值约束。",
+      concurrencyDescription: "整个平台同时运行的审查数量。Cloudflare Queues 最多同时投递 250 个，因此高于该值的配额有效但平台无法跑满。",
       concurrencyLabel: "并发审查数",
       concurrencySave: "保存",
       concurrencySaved: "已保存。",
@@ -783,7 +780,7 @@ export const zhCN: Dictionary = {
       concurrencyCurrent: "下一次审查生效值：{value}。",
       /** 已存储的上限无法读取——数字只是兜底值，不是已存储的设置。 */
       concurrencyUnreadable:
-        "无法读取已存储的系统并发数，因此每个工作区都在逐个运行审查。设置未被修改——请重新读取。",
+        "无法读取已存储的系统并发数，因此每个工作区都在逐个运行审查。输入范围内的值可保存为新的并发数，重新读取会重新检查该行。",
     },
     /** 工作区页。 */
     workspaces: {

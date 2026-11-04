@@ -56,11 +56,11 @@ const failingDb: DashboardD1 = {
 describe("readReviewConcurrency", () => {
   test("a healthy read exposes both caps and their effective min, and logs nothing", async () => {
     const { warns, log } = capture();
-    // Absent settings: system defaults to 32, the workspace column to 16.
+    // Absent settings: system defaults to 256, the workspace column to 32.
     expect(await readReviewConcurrency(fixture(), WS, log)).toEqual({
-      system: 32,
-      workspace: 16,
-      effective: 16,
+      system: 256,
+      workspace: 32,
+      effective: 32,
       degraded: false,
     });
     expect(warns).toEqual([]);
@@ -71,7 +71,7 @@ describe("readReviewConcurrency", () => {
     db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 2 WHERE id = ?1`).run(WS);
     const { warns, log } = capture();
     expect(await readReviewConcurrency(db, WS, log)).toEqual({
-      system: 32,
+      system: 256,
       workspace: 2,
       effective: 2,
       degraded: false,

@@ -203,7 +203,7 @@ describe("workspace name card", () => {
         });
       }
       if (url.endsWith("/api/settings/concurrency")) {
-        return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250, degraded: false }), {
+        return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -230,7 +230,7 @@ describe("workspace name card", () => {
       // The read lands the stored value, not the documented default.
       const input = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
       expect(input.value).toBe("8");
-      expect(container.textContent).toContain(t("en", "workspace.concurrencySystemCap", { system: 32 }));
+      expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { max: 32 }));
 
       const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
       await act(async () => {
@@ -276,7 +276,7 @@ describe("workspace name card", () => {
         });
       }
       if (url.endsWith("/api/settings/concurrency")) {
-        return new Response(JSON.stringify({ concurrency: 6, system: 32, min: 1, max: 250, degraded: false }), {
+        return new Response(JSON.stringify({ concurrency: 6, min: 1, max: 32, degraded: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -315,88 +315,6 @@ describe("workspace name card", () => {
     }
   });
 
-  test("a stored value above the system cap keeps the stored number and disables Save until an in-range value is typed", async () => {
-    // An operator lowered the platform cap to 4 after this workspace stored 8.
-    // An untouched save must NOT rewrite the tenant's value to the derived
-    // minimum, and it cannot send the stored 8 either (the server refuses it),
-    // so Save stays disabled with copy that says what to type.
-    const { win, cleanup } = installDom(`http://localhost${PATH}`);
-    const calls: Call[] = [];
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-      const method = init?.method ?? "GET";
-      const url = String(input);
-      calls.push({ method, url, body: String(init?.body ?? "") });
-      if (method === "PUT") {
-        return new Response(JSON.stringify({ concurrency: 3 }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      if (url.endsWith("/api/settings/concurrency")) {
-        return new Response(JSON.stringify({ concurrency: 8, system: 4, min: 1, max: 250, degraded: false }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return new Response(JSON.stringify({ grants: [] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
-    try {
-      const container = win.document.createElement("div");
-      win.document.body.appendChild(container);
-      const root = createRoot(container as unknown as Element);
-      await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
-
-      const input = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
-      // The field shows what the tenant stored, never the derived minimum.
-      expect(input.value).toBe("8");
-      expect(container.textContent).toContain(
-        t("en", "workspace.concurrencyStoredAboveSystem", { stored: 8, system: 4 }),
-      );
-      const save = [...container.querySelectorAll("button")].find(
-        (button) => button.textContent === t("en", "workspace.concurrencySave"),
-      ) as unknown as HTMLButtonElement;
-      expect(save.disabled).toBe(true);
-
-      // Submit while untouched: nothing is written, so no stored value is
-      // silently replaced.
-      await act(async () =>
-        input
-          .closest("form")
-          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event),
-      );
-      expect(calls.filter((call) => call.method === "PUT")).toEqual([]);
-
-      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
-      await act(async () => {
-        setValue?.call(input, "3");
-        input.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
-      });
-      expect(save.disabled).toBe(false);
-      await act(async () =>
-        input
-          .closest("form")
-          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event),
-      );
-      expect(calls.filter((call) => call.method === "PUT")).toEqual([
-        {
-          method: "PUT",
-          url: "/dashboard/ws_acme/api/settings/concurrency",
-          body: JSON.stringify({ concurrency: 3 }),
-        },
-      ]);
-      expect(container.textContent).toContain(t("en", "workspace.concurrencySaved"));
-
-      await act(async () => root.unmount());
-    } finally {
-      globalThis.fetch = realFetch;
-      cleanup();
-    }
-  });
-
   test("a non-JSON 2xx is a successful save with a cleared draft", async () => {
     // The write landed; only its body is unreadable. Reporting it as a failure
     // would leave the stale draft in the form after a save that stored a value.
@@ -413,7 +331,7 @@ describe("workspace name card", () => {
           headers: { "Content-Type": "text/html" },
         });
       }
-      return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250, degraded: false }), {
+      return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -467,12 +385,12 @@ describe("workspace name card", () => {
         });
       }
       if (url === "/dashboard/ws_beta/api/settings/concurrency") {
-        return new Response(JSON.stringify({ concurrency: 5, system: 12, min: 1, max: 250, degraded: false }), {
+        return new Response(JSON.stringify({ concurrency: 5, min: 1, max: 32, degraded: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
       }
-      return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250, degraded: false }), {
+      return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -504,11 +422,9 @@ describe("workspace name card", () => {
         win.dispatchEvent(new win.Event("popstate"));
       });
 
-      // B's read replaced A's: its stored value and ceiling, never A's draft.
+      // B's read replaced A's stored value, never A's draft.
       const reloaded = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
       expect(reloaded.value).toBe("5");
-      expect(container.textContent).toContain(t("en", "workspace.concurrencySystemCap", { system: 12 }));
-      expect(container.textContent).not.toContain(t("en", "workspace.concurrencySystemCap", { system: 32 }));
       expect(calls.map((call) => call.url)).toContain("/dashboard/ws_beta/api/settings/concurrency");
 
       await act(async () => {
@@ -531,18 +447,31 @@ describe("workspace name card", () => {
     }
   });
 
-  test("a degraded read warns instead of showing the fallback cap in the field", async () => {
-    // The store answered the conservative 1 for both levels because neither
-    // stored value could be read. Rendering that as a normal value would invite
-    // a save of a number nobody stored.
+  test("a degraded read starts empty, and a typed value repairs it", async () => {
+    // The store answered the conservative 1 for both levels because a stored
+    // value could not be read. The field must never present that fallback as
+    // this workspace's setting, and a typed value is the repair path.
     const { win, cleanup } = installDom(`http://localhost${PATH}`);
     const calls: Call[] = [];
     const realFetch = globalThis.fetch;
     let degraded = true;
+    let storedValue = 1;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-      calls.push({ method: init?.method ?? "GET", url: String(input), body: String(init?.body ?? "") });
+      const method = init?.method ?? "GET";
+      const url = String(input);
+      calls.push({ method, url, body: String(init?.body ?? "") });
+      if (method === "PUT") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { concurrency?: number };
+        storedValue = body.concurrency ?? storedValue;
+        // The write replaces the unreadable column, so the re-read is clean.
+        degraded = false;
+        return new Response(JSON.stringify({ concurrency: storedValue }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       return new Response(
-        JSON.stringify({ concurrency: 1, system: 1, min: 1, max: 250, degraded }),
+        JSON.stringify({ concurrency: storedValue, min: 1, max: 32, degraded }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }) as unknown as typeof fetch;
@@ -552,44 +481,51 @@ describe("workspace name card", () => {
       const root = createRoot(container as unknown as Element);
       await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
 
-      expect(container.textContent).toContain(t("en", "workspace.concurrencyUnreadable"));
-      // No field at all: a number the store never held must not appear as this
-      // workspace's setting, and there is no value an operator could type into
-      // a form built from an unreadable payload.
-      expect(win.document.querySelector("#workspace-concurrency")).toBeNull();
-      // Nor may the "system cap" line state the fallback as the real ceiling.
-      expect(container.textContent).not.toContain(t("en", "workspace.concurrencySystemCap", { system: 1 }));
-      // Saving is disabled outright: with the stored value unreadable, any
-      // write would replace a number nobody could read.
+      expect(container.textContent).toContain(
+        t("en", "workspace.concurrencyUnreadable", { max: 32 }),
+      );
+      const field = win.document.querySelector(
+        "#workspace-concurrency",
+      ) as unknown as HTMLInputElement;
+      expect(field).not.toBeNull();
+      expect(field.value).toBe("");
+      expect(field.required).toBe(true);
+      expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { max: 32 }));
       const save = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "workspace.concurrencySave"),
       ) as unknown as HTMLButtonElement;
-      expect(save.disabled).toBe(true);
-
-      // The only offered recovery is the re-read; once it lands, the value the
-      // store actually holds seeds the field and Save is available again.
-      degraded = false;
-      const retry = [...container.querySelectorAll("button")].find(
-        (button) => button.textContent === t("en", "common.retry"),
-      );
-      expect(retry).toBeDefined();
-      await act(async () =>
-        (retry as unknown as HTMLButtonElement).dispatchEvent(
-          new win.Event("click", { bubbles: true }) as unknown as Event,
-        ),
-      );
-      expect(calls.filter((call) => call.url.endsWith("/api/settings/concurrency"))).toHaveLength(2);
-      expect(container.textContent).not.toContain(t("en", "workspace.concurrencyUnreadable"));
-      expect((win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement).value).toBe(
-        "1",
-      );
+      expect(save.disabled).toBe(false);
+      // Retry is offered beside the repair write.
       expect(
-        (
-          [...container.querySelectorAll("button")].find(
-            (button) => button.textContent === t("en", "workspace.concurrencySave"),
-          ) as unknown as HTMLButtonElement
-        ).disabled,
-      ).toBe(false);
+        [...container.querySelectorAll("button")].some(
+          (button) => button.textContent === t("en", "common.retry"),
+        ),
+      ).toBe(true);
+
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(field, "6");
+        field.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+      });
+      await act(async () =>
+        field
+          .closest("form")
+          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event),
+      );
+
+      expect(calls.filter((call) => call.method === "PUT")).toEqual([
+        {
+          method: "PUT",
+          url: "/dashboard/ws_acme/api/settings/concurrency",
+          body: JSON.stringify({ concurrency: 6 }),
+        },
+      ]);
+      // The accepted write triggers a re-read, so the repaired state converges:
+      // warning gone, the stored number back in the field.
+      expect(container.textContent).not.toContain(t("en", "workspace.concurrencyUnreadable", { max: 32 }));
+      expect(
+        (win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement).value,
+      ).toBe("6");
 
       await act(async () => root.unmount());
     } finally {

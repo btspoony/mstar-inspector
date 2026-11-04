@@ -2298,8 +2298,8 @@ places. Keep them apart when reasoning about throughput:
 
 | Bound | Where it lives | Value | What it means |
 |---|---|---|---|
-| Deploy-time **ceiling** | `wrangler.jsonc → queues.consumers[…].max_concurrency` (top level **and** `env.production`) | `64` | The most queue messages the platform may run at once. Ships with the Worker; changing it is a deploy. |
-| Runtime **caps** | D1 — `review_runtime_settings` + `workspaces.max_concurrent_reviews` | system `32`, workspace `16` | The business quota: `min(system, workspace)`. Read per message; changing it needs no deploy (see § Review concurrency caps). |
+| Deploy-time **ceiling** | `wrangler.jsonc → queues.consumers[…].max_concurrency` (top level **and** `env.production`) | `250` | The most queue messages the platform may run at once. Ships with the Worker; changing it is a deploy. |
+| Runtime **caps** | D1 — `review_runtime_settings` + `workspaces.max_concurrent_reviews` | system `256`, workspace `32` | The business quota: `min(system, workspace)`. Read per message; changing it needs no deploy (see § Review concurrency caps). |
 | Per-PR **lock** | `review_inflight` primary key | 1 | One review per PR, always. |
 
 The contract the deployment ships is therefore **per-PR serial, cross-PR
@@ -2313,25 +2313,26 @@ makes the platform scale consumer concurrency by backlog with no bound at
 all (wrangler's config schema). Each attempt's unique sandbox id starts its
 **own** container under `scheduling_policy: "durable_object"` (the 0.12
 `max_instances` cap no longer exists — see the `containers` comment in
-`wrangler.jsonc`), so `64` is the widest blast radius the account should ever
-accept. It is also the accepted maximum for the runtime caps
-(`CONCURRENCY_MAX` in `src/dashboard/runtime-config-store.ts`, via
-`QUEUE_CONCURRENCY_CEILING`): a cap the platform cannot deliver is refused
-rather than stored, and `tests/contracts/wrangler-env-parity.test.ts` locks the
-two numbers together — raise the ceiling only together with that constant and
-the runtime defaults. Remember the platform's 15 min queue-consumer wall-clock
+`wrangler.jsonc`), so `250` is the widest blast radius the account should ever
+accept — it is also Cloudflare Queues' hard limit on concurrent consumer
+invocations. The system quota's own maximum is `256`
+(`SYSTEM_CONCURRENCY_MAX`), deliberately above the ceiling: a quota above it is
+a valid business setting that the platform simply cannot saturate, and the
+ceiling still bounds the real blast radius. Remember the platform's 15 min queue-consumer wall-clock
 cap still bounds any single deep review — concurrency changes overlap reviews,
 it does not lengthen them.
 
 Observation checklist after a concurrency change:
 
-- [ ] Both blocks carry the same ceiling — the `max_concurrency` constant and
-      `max_batch_size: 1` at the top level and inside `env.production`
-      (`bun test tests/contracts/wrangler-env-parity.test.ts` locks the pair
-      and the runtime cap range).
+- [ ] Both blocks carry the same ceiling — the `max_concurrency` literal `250`
+      and `max_batch_size: 1` at the top level and inside `env.production`.
+      A ceiling change moves both literals together AND the `250` pin in
+      `tests/contracts/wrangler-env-parity.test.ts`; the accepted runtime ranges are
+      driven through their write predicates in
+      `src/dashboard/runtime-config-store.test.ts`.
 - [ ] Throughput moved the way the runtime caps predict: raising the D1 caps
       changes the admitted rate on the **next** message; raising only the
-      ceiling changes nothing while the caps stay at 32/16.
+      ceiling changes nothing while the caps stay at 256/32.
 - [ ] No `pr-held` burst in the logs for a single busy PR — a repeat there
       means retries are outrunning the lock, not that the ceiling is low.
 - [ ] Container count stays under the account's container limit; the ceiling
@@ -2341,34 +2342,69 @@ Observation checklist after a concurrency change:
 
 The queue consumer holds at most `min(system cap, workspace cap)` reviews at
 once, and never two attempts for the same PR (the per-PR `review_inflight`
-row). Both caps are read from D1 on **every** queue message — no KV, no
+row). With both levels absent the admission is `min(256, 32) = 32` per
+workspace — the delivery ceiling of 250 is only reachable as the aggregate of
+at least eight workspaces running at their own maximum. Both caps are read from D1 on **every** queue message — no KV, no
 request cache — so a change applies to the **next** message without a
 redeploy; reviews already running keep their slot until their `review_inflight`
 row expires.
 
-| Cap | Default | Stored in | Changed by |
+| Cap | Default and maximum | Stored in | Changed by |
 |---|---|---|---|
-| System | 32 | `review_runtime_settings`, key `review.concurrency.system` (migration `0040`; absent row = default) | platform operator — admin console `PATCH /_internal_admin/api/runtime` with `{"concurrency": <1..64>}` |
-| Workspace | 16 | `workspaces.max_concurrent_reviews` (migration `0040`; NULL = default) | workspace owner/admin — dashboard Settings, `PUT /<workspaceRef>/api/settings/concurrency` |
+| System | `256` (absent row = default) | `review_runtime_settings`, key `review.concurrency.system` (migration `0040`) | platform operator — admin console `PATCH /_internal_admin/api/runtime` with `{"concurrency": <1..256>}` |
+| Workspace | `32` (NULL column = default) | `workspaces.max_concurrent_reviews` (migration `0040`) | workspace owner/admin — dashboard Settings, `PUT /<workspaceRef>/api/settings/concurrency` |
 | Per PR | 1 | `review_inflight` primary key | never configurable |
 
-- Both caps share one accepted range: integers in `1..64`. Its upper bound is
-  the deploy-time queue ceiling (§ Queue consumer concurrency), never a larger
-  round number — a system cap above `64` would be accepted and still never take
-  effect, because the platform admits at most `64` consumer invocations. The
-  two are one constant (`QUEUE_CONCURRENCY_CEILING`, which `CONCURRENCY_MAX`
-  mirrors) and `tests/contracts/wrangler-env-parity.test.ts` fails if either
-  drifts.
-- A workspace value above the **current** system cap is refused with a keyed
-  400, never clamped; lowering the system cap below an existing workspace value
-  needs no workspace write — `min` applies the system value from the next
-  message on.
+- The two levels have their own ranges: system `1..256`, workspace `1..32`.
+  The system maximum is the platform-wide quota, not the queue ceiling: the
+  deploy-time `max_concurrency` is `250` (Cloudflare Queues' hard limit), so a
+  system quota between `251` and `256` is accepted and simply cannot be
+  saturated — at most `250` reviews run concurrently. The workspace maximum
+  (`WORKSPACE_CONCURRENCY_MAX`) is a tenant bound, so no workspace can ask for
+  more than `32` no matter how high the system quota goes.
+  `wrangler.jsonc` owns the two `250` literals, and
+  `src/dashboard/runtime-config-store.test.ts` drives the accepted ranges
+  through the real write predicates.
+- The tenant face never renders or returns the system value: its settings read
+  answers `{ concurrency, min, max, degraded }`, its write range is `1..32`, and
+  a workspace write is never compared with the system quota — that comparison
+  would let a tenant binary-search the platform number. The quota applies at
+  admission as `min(system, workspace)`.
+- A workspace value is accepted whenever it is inside `1..32`, regardless of
+  the current system quota. Lowering the quota below an existing workspace
+  value needs no workspace write — `min` applies the system value from the next
+  message on, and the tenant's card keeps showing its own stored value.
+- Migration `0043` rewrites every stored workspace value above `32` (legal
+  under the previous `1..64` range) down to `32` when it applies. This is a
+  one-time, customer-visible lowering of an existing setting, performed at
+  deploy time; the tenant's card shows the clamped value afterwards. The
+  migration records each previous value in `workspace_concurrency_clamp_0043`
+  (one row per affected workspace) — that table is the per-row answer. For the
+  pre-apply evidence, run this BEFORE the deploy and keep the output with the
+  deploy evidence; restoring the whole database follows § Rollback
+  (production), which is an accepted limitation on its own:
+
+  ```sql
+  SELECT id, max_concurrent_reviews FROM workspaces
+   WHERE max_concurrent_reviews > 32 ORDER BY id;
+  ```
+
+  Deploy-window caveat: migrations apply BEFORE the Worker cutover, so the
+  previously deployed API can still accept one more `33..64` value in that
+  window. Such a row is NOT in the record table, and 0043 never runs again;
+  the reader clamps it to `32` (so the workspace keeps a real cap) and the
+  stored column matches the card again after the owner's next save. Seeing a
+  `>32` row after the deploy is therefore expected self-healing state, not a
+  failed migration.
 - Every accepted write lands with its `platform_audit_events` row (actor
   included) in one D1 batch; a refused write changes no row and audits
   nothing.
-- Each Worker reads **its own** D1, so a cap is set per environment; these
-  caps are business quotas, and neither can exceed the deploy-time queue
-  ceiling (§ Queue consumer concurrency).
+- Each Worker reads **its own** D1, so a cap is set per environment. These are
+  business quotas with independent ranges: a workspace value is accepted whenever
+  it is inside `1..32`, whatever the system quota says, and admission applies
+  `min(system, workspace)` per message. The system quota may exceed the
+  deploy-time queue ceiling (§ Queue consumer concurrency) — in that case the
+  platform delivers at most the ceiling.
 - A read failure, or a stored value the reader cannot trust, answers the
   conservative cap **1** (serial) and logs ONE `review_concurrency_degraded`
   warn carrying `workspace_id` and `effective` — the gate degrades to serial,

@@ -47,6 +47,7 @@ import {
   DEFAULT_CHAIN_NAME,
   isPaused,
   isReviewTriggerMode,
+  concurrencySubmitBlocked,
   modelChainTabs,
   parseConcurrencySettings,
   parseStoredConcurrency,
@@ -1085,8 +1086,9 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
 /**
  * The workspace review-concurrency cap — the tenant half of the runtime
  * configuration (iteration spec §1.1). Owner/admin only; the server re-checks
- * the role and refuses a value above the system cap with a keyed 400, so this
- * card only renders the range it was told.
+ * the role and validates the value against the workspace's own range only, so
+ * this card renders the `min`/`max` the payload carried and never sees the
+ * platform quota.
  */
 export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"] }) {
   const [loaded, setLoaded] = useState<ConcurrencySettings | null>(null);
@@ -1095,8 +1097,8 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
   // Section-local channel, like the name card's: an op outcome never rides the page-level notice.
   const [concurrencyNotice, setConcurrencyNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
-  // A degraded read is re-read on demand: the stored value is untrusted, so
-  // "try again" is the only action until a read lands.
+  // A degraded read starts the field empty and offers two ways out: type a
+  // value (the repair write) or re-read.
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
@@ -1123,15 +1125,9 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busy || loaded === null) return; // in-flight guard — no double submit
-    // A degraded read carries the conservative fallback, not this tenant's
-    // value: writing it would replace a number nobody could read. The only
-    // action in that state is the re-read.
-    if (loaded.degraded) return;
+    if (concurrencySubmitBlocked(loaded.degraded, draft)) return;
     // An untouched form must submit the STORED value, never a derived one: the
-    // stored number is what the tenant set. Above the system cap there is no
-    // honest untouched submit — the server would refuse it — so the form stays
-    // disabled until the operator types a value inside the range.
-    if (draft === null && loaded.concurrency > loaded.system) return;
+    // stored number is what the tenant set.
     setBusy(true);
     const submitted = Number((draft ?? String(loaded.concurrency)).trim());
     try {
@@ -1145,10 +1141,10 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         // succeeded, so the submitted number stands in for the unreadable one
         // instead of reporting the save as a failure.
         const stored = parseStoredConcurrency(body) ?? submitted;
-        // `degraded` is NOT cleared here: it reports that some stored level could
-        // not be read, and a workspace write does not repair an unreadable system
-        // row — which is precisely the level that keeps reviews serial.
-        setLoaded((previous) => previous && { ...previous, concurrency: stored });
+        // This write is the workspace's own level — the only level this
+        // payload's `degraded` reports — so the accepted value is now known
+        // and trustworthy: show it and clear the flag.
+        setLoaded((previous) => previous && { ...previous, concurrency: stored, degraded: false });
         setDraft(null);
       }
       setConcurrencyNotice(outcome);
@@ -1168,58 +1164,48 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         <LoadFailedNotice locale={locale} />
       ) : loaded === null ? (
         <LoadingNotice locale={locale} />
-      ) : loaded.degraded ? (
-        // The store could not trust the stored cap, so both numbers in the
-        // payload are the conservative fallback (serial). Saving one would
-        // replace a value nobody read, so Save is shown disabled and the only
-        // action until a read lands is the re-read.
+      ) : (
         <div className="flex flex-col gap-3">
-          <PageNotice kind="warn" message={t(locale, "workspace.concurrencyUnreadable")} />
-          <div className="flex flex-wrap items-end gap-2">
-            <Button type="button" disabled>
+          {loaded.degraded ? (
+            // The store could not trust the stored cap, so both numbers in the
+            // payload are the conservative fallback (serial). The field starts
+            // empty and never shows that fallback; a typed value OR the re-read
+            // repairs the state.
+            <PageNotice
+              kind="warn"
+              message={t(locale, "workspace.concurrencyUnreadable", { max: loaded.max })}
+            />
+          ) : null}
+          <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium" htmlFor="workspace-concurrency">
+                {t(locale, "workspace.concurrencyLabel")}
+              </label>
+              <Input
+                id="workspace-concurrency"
+                type="number"
+                min={loaded.min}
+                max={loaded.max}
+                className="w-32"
+                autoComplete="off"
+                required
+                value={draft ?? (loaded.degraded ? "" : String(loaded.concurrency))}
+                onChange={(event) => setDraft(event.target.value)}
+              />
+              <span className="text-xs text-muted-foreground">
+                {t(locale, "workspace.concurrencyRange", { max: loaded.max })}
+              </span>
+            </div>
+            <Button type="submit" disabled={busy}>
               {t(locale, "workspace.concurrencySave")}
             </Button>
-            <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
-              {t(locale, "common.retry")}
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium" htmlFor="workspace-concurrency">
-              {t(locale, "workspace.concurrencyLabel")}
-            </label>
-            <Input
-              id="workspace-concurrency"
-              type="number"
-              min={loaded.min}
-              max={loaded.system}
-              className="w-32"
-              autoComplete="off"
-              value={draft ?? String(loaded.concurrency)}
-              onChange={(event) => setDraft(event.target.value)}
-            />
-            <span className="text-xs text-muted-foreground">
-              {t(locale, "workspace.concurrencySystemCap", { system: loaded.system })}
-            </span>
-            {loaded.concurrency > loaded.system ? (
-              // An operator lowered the system cap after this workspace stored
-              // its own. The stored number is what the tenant set, so it stays
-              // in the field — but it is outside the input's range, so Save is
-              // disabled until the operator types a value the server accepts.
-              <span className="text-xs text-muted-foreground">
-                {t(locale, "workspace.concurrencyStoredAboveSystem", {
-                  stored: loaded.concurrency,
-                  system: loaded.system,
-                })}
-              </span>
+            {loaded.degraded ? (
+              <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
+                {t(locale, "common.retry")}
+              </Button>
             ) : null}
-          </div>
-          <Button type="submit" disabled={busy || (draft === null && loaded.concurrency > loaded.system)}>
-            {t(locale, "workspace.concurrencySave")}
-          </Button>
-        </form>
+          </form>
+        </div>
       )}
       <NoticeRegion notice={concurrencyNotice} />
     </FlowSection>

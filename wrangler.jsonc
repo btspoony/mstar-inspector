@@ -42,14 +42,16 @@
         // capped by min(system, workspace) read from D1 on EVERY message
         // (src/pipeline/concurrency-reader.ts → review_inflight admission) —
         // so raising or lowering this number never changes the business
-        // quota, only the platform's hard upper bound. 64 sits above the
-        // 32/16 runtime defaults and stays bounded because each attempt's
-        // unique sandbox id (src/pipeline/consumer.ts) starts its OWN
-        // container under scheduling_policy: "durable_object" (the 0.12
-        // max_instances cap is gone — see the containers comment below).
+        // quota, only the platform's hard upper bound. 250 is Cloudflare
+        // Queues' own hard limit on concurrent consumer invocations; the
+        // system quota (256) may sit above it, in which case the platform
+        // simply cannot saturate the quota. Each attempt's unique sandbox
+        // id (src/pipeline/consumer.ts) starts its OWN container under
+        // scheduling_policy: "durable_object" (the 0.12 max_instances cap is
+        // gone — see the containers comment below).
         // UNSET would let the platform auto-scale by backlog with no bound
         // at all (wrangler config schema), which is why this is explicit.
-        "max_concurrency": 64,
+        "max_concurrency": 250,
         "max_retries": 3,
         "dead_letter_queue": "review-dlq"
       }
@@ -90,7 +92,7 @@
   // `image_build_context` have no equivalent under this policy — the instance
   // size moves into `container.start()` (lite) and concurrency is bounded by
   // the consumer's runtime caps plus its deploy-time ceiling
-  // (max_concurrency: 64 above). `build_context` "." lets
+  // (max_concurrency: 250 above). `build_context` "." lets
   // the Dockerfile COPY the runner package manifest, its lockfile and the
   // packages/{shared,runner}/src trees into the image (T2 finding). The binding
   // name stays `SANDBOX` so `PipelineEnv` and every
@@ -194,13 +196,13 @@
         // Same protective consumer shape as staging (see the top-level
         // rationale), against the prod queue pair; the 15 min consumer
         // wall-clock cap applies here identically. max_concurrency is the
-        // same deploy-time ceiling (64) — the effective admission stays
+        // same deploy-time ceiling (250) — the effective admission stays
         // min(system, workspace), read per message.
         "consumers": [
           {
             "queue": "review-queue-prod",
             "max_batch_size": 1,
-            "max_concurrency": 64,
+            "max_concurrency": 250,
             "max_retries": 3,
             "dead_letter_queue": "review-dlq-prod"
           }

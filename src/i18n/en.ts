@@ -434,20 +434,16 @@ export const en = {
     nameFailed: "Could not change the workspace name — try again.",
     /** The owner/admin concurrency card (iteration spec §1.1). */
     concurrencyHeading: "Review concurrency",
-    concurrencyDescription:
-      "How many reviews this workspace runs at once. The platform's system cap always applies on top.",
+    concurrencyDescription: "How many reviews this workspace may run at once. The platform can further limit it.",
     concurrencyLabel: "Concurrent reviews",
     concurrencySave: "Save concurrency",
     concurrencySaved: "Review concurrency updated.",
     concurrencyFailed: "Could not change the review concurrency — try again.",
-    /** {system} = the platform's system cap this workspace cannot exceed. */
-    concurrencySystemCap: "System cap: {system}.",
-    /** {stored} > {system}: an operator lowered the system cap after this workspace's value was stored. */
-    concurrencyStoredAboveSystem:
-      "Stored value: {stored} — above the current system cap of {system}. Enter a value of {system} or less to save; until then the system cap applies.",
-    /** The stored cap could not be read — the numbers are a fallback, not this workspace's setting. */
+    /** {max} = this workspace's own maximum. */
+    concurrencyRange: "Accepts 1–{max}.",
+    /** {max} = this workspace's own maximum; the shown numbers are the fallback. */
     concurrencyUnreadable:
-      "The stored review concurrency could not be read, so reviews are running one at a time. Nothing was changed and saving is disabled — retry the read.",
+      "The stored review concurrency could not be read, so reviews may be running one at a time. The numbers shown are a fallback. Saving a value from 1 to {max} sets this workspace's value, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
   },
   /**
    * Platform-operator support (2026-10): the operator's read-only face and the
@@ -615,8 +611,6 @@ export const en = {
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
       concurrencyInvalid: "Concurrency must be a whole number from {min} to {max}. Nothing was stored.",
-      concurrencyAboveSystem:
-        "That concurrency is above this platform's system cap ({system}). Lower it to {system} or less — nothing was stored.",
     },
     ops: "Operations",
     opsCopy: "These actions change how this App answers incoming deliveries.",
@@ -913,7 +907,7 @@ export const en = {
       loadFailed: "Could not load the runtime parameters.",
       concurrencyTitle: "System review concurrency",
       concurrencyDescription:
-        "How many reviews the whole platform runs at once. No workspace cap can exceed this value.",
+        "How many reviews the whole platform runs at once. Cloudflare Queues delivers at most 250 concurrently, so a value above that is a valid quota the platform cannot saturate.",
       concurrencyLabel: "Concurrent reviews",
       concurrencySave: "Save",
       concurrencySaved: "Saved.",
@@ -923,7 +917,7 @@ export const en = {
       concurrencyCurrent: "Effective on the next review: {value}.",
       /** The stored cap could not be read — the numbers are a fallback, not the stored setting. */
       concurrencyUnreadable:
-        "The stored system concurrency could not be read, so every workspace is running one review at a time. Nothing was changed — retry the read.",
+        "The stored system concurrency could not be read, so every workspace is running one review at a time. Entering a value in range saves a new one, and retrying the read re-checks the stored row.",
     },
     /** Workspaces page. */
     workspaces: {

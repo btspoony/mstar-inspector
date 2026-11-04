@@ -18,6 +18,10 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createMigratedTestD1, createTestD1 } from "./helpers";
+import {
+  WORKSPACE_CONCURRENCY_MAX,
+  getEffectiveConcurrency,
+} from "../../src/dashboard/runtime-config-store";
 import type { TestD1 } from "./helpers";
 import type { D1Like } from "../../src/store/types";
 
@@ -1832,5 +1836,100 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     // The file's own PRAGMA switches leave FK enforcement ON for the rest of
     // the run (the connection default the migration must not weaken).
     expect((db.raw.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
+  });
+});
+
+describe("migrations/0043_workspace_concurrency_bound.sql", () => {
+  test("clamps rows above the maximum when applied, and a replay is a no-op", async () => {
+    // Apply everything BEFORE 0043, so the file runs for the first time over
+    // rows that already exist — the real deploy order.
+    const db = createTestD1();
+    const before = readdirSync(MIGRATIONS_DIR)
+      .filter(
+        (name) =>
+          name.endsWith(".sql") &&
+          name >= "0003_dashboard_users.sql" &&
+          name < "0043_workspace_concurrency_bound.sql",
+      )
+      .sort();
+    for (const name of before) {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    const insert = db.raw.prepare(
+      `INSERT INTO workspaces (id, slug, name, created_at, max_concurrent_reviews)
+       VALUES (?1, ?1, ?1, '2026-11-04T00:00:00.000Z', ?2)`,
+    );
+    // 33 and 64 were legal under the previous shared 1..64 range; 32 is the
+    // new maximum, 8 an ordinary value, NULL the absent setting.
+    for (const [id, cap] of [
+      ["ws_40", 40],
+      ["ws_33", 33],
+      ["ws_32", WORKSPACE_CONCURRENCY_MAX],
+      ["ws_8", 8],
+      ["ws_null", null],
+    ] as const) {
+      insert.run(id, cap);
+    }
+    // The system row is deliberately outside the clamp's WHERE: its old
+    // maximum (64) fits inside the new one (256).
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.concurrency.system', '64', '2026-11-04T00:00:00.000Z', 'migration-test')`,
+      )
+      .run();
+
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0043_workspace_concurrency_bound.sql"), "utf8"));
+
+    const rows = db.raw
+      .query("SELECT id, max_concurrent_reviews AS cap FROM workspaces WHERE id LIKE 'ws\\_%' ESCAPE '\\' ORDER BY id")
+      .all() as Array<{ id: string; cap: number | null }>;
+    // The clamp literal in the migration is this constant's value; deriving the
+    // expectation here makes a future bound change fail loudly.
+    expect(Object.fromEntries(rows.map((row) => [row.id, row.cap]))).toEqual({
+      ws_40: WORKSPACE_CONCURRENCY_MAX,
+      ws_33: WORKSPACE_CONCURRENCY_MAX,
+      ws_32: WORKSPACE_CONCURRENCY_MAX,
+      ws_8: 8,
+      ws_null: null,
+    });
+
+    // The migration's product promise: a formerly-64 value reads as an
+    // ordinary, non-degraded cap after the clamp.
+    expect(await getEffectiveConcurrency(db, "ws_40")).toEqual({
+      system: 64,
+      workspace: WORKSPACE_CONCURRENCY_MAX,
+      effective: WORKSPACE_CONCURRENCY_MAX,
+      degraded: false,
+    });
+
+    // The system row is untouched by the clamp.
+    const system = db.raw
+      .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.concurrency.system'")
+      .get() as { value: string };
+    expect(system.value).toBe("64");
+
+    // The previous values survive in the migration's own record table.
+    const recorded = db.raw
+      .prepare(
+        `SELECT workspace_id, previous_value, clamped_to
+           FROM workspace_concurrency_clamp_0043 ORDER BY workspace_id`,
+      )
+      .all() as Array<{ workspace_id: string; previous_value: number; clamped_to: number }>;
+    expect(recorded).toEqual([
+      { workspace_id: "ws_33", previous_value: 33, clamped_to: WORKSPACE_CONCURRENCY_MAX },
+      { workspace_id: "ws_40", previous_value: 40, clamped_to: WORKSPACE_CONCURRENCY_MAX },
+    ]);
+
+    // Replaying the file on the clamped schema is a no-op.
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0043_workspace_concurrency_bound.sql"), "utf8"));
+    const replay = db.raw
+      .query("SELECT id, max_concurrent_reviews AS cap FROM workspaces WHERE id LIKE 'ws\\_%' ESCAPE '\\' ORDER BY id")
+      .all() as Array<{ id: string; cap: number | null }>;
+    expect(replay).toEqual(rows);
+    const recordedAgain = db.raw
+      .query("SELECT COUNT(*) AS n FROM workspace_concurrency_clamp_0043")
+      .get() as { n: number };
+    expect(recordedAgain.n).toBe(2);
   });
 });

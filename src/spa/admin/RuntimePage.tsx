@@ -13,6 +13,7 @@ import { t, type Locale } from "../../i18n";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { PageNotice } from "../pages/PageNotice";
+import { concurrencySubmitBlocked } from "../pages/data";
 import { AdminWriteError, readRuntime, setSystemConcurrency, useLoaded } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
@@ -30,21 +31,18 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   ): Promise<void> {
     event.preventDefault();
     if (busy) return; // in-flight guard — no double submit
-    // A degraded read carries the conservative fallback, not a stored value: an
-    // empty draft would submit that fallback as if the operator had typed it.
-    // Retry is the only action until the read succeeds.
-    if (degraded) return;
+    if (concurrencySubmitBlocked(degraded, draft)) return;
     // `Number("")` is 0 and `Number("8abc")` is NaN — both fail the server's
-    // 1..64 gate, so the browser's own parsing needs no second validator.
+    // accepted-range gate, so the browser's own parsing needs no second validator.
     const next = Number((draft ?? String(stored)).trim());
     setBusy(true);
     setNotice(null);
     try {
-      const stored = await setSystemConcurrency(next);
+      const saved = await setSystemConcurrency(next);
       // A 2xx rewrote exactly the level this page reports, so the row is
       // readable again: the server's answer replaces the value and clears the
       // flag that made the field start empty.
-      update((data) => ({ ...data, concurrency: stored, degraded: false }));
+      update((data) => ({ ...data, concurrency: saved, degraded: false }));
       setDraft(null);
       setNotice({ kind: "success", message: t(locale, "admin.runtime.concurrencySaved") });
     } catch (error) {
@@ -90,8 +88,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   // The stored cap could not be trusted, so `data.concurrency` is
                   // the conservative fallback: showing it as the current value
                   // would invite saving a number nobody stored. The form starts
-                  // empty, withholds the "effective" line, and its save is
-                  // refused — Retry is the only action while the read is degraded.
+                  // empty and withholds the "effective" line; a typed value or
+                  // Retry both repair the state.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.concurrencyUnreadable")} />
                   </div>
@@ -111,12 +109,12 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       max={data.max}
                       className="w-32"
                       autoComplete="off"
-                      required={data.degraded}
+                      required
                       value={draft ?? (data.degraded ? "" : String(data.concurrency))}
                       onChange={(event) => setDraft(event.target.value)}
                     />
                   </div>
-                  <Button type="submit" disabled={busy || data.degraded}>
+                  <Button type="submit" disabled={busy}>
                     {t(locale, "admin.runtime.concurrencySave")}
                   </Button>
                   {data.degraded ? (

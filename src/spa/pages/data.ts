@@ -1507,23 +1507,36 @@ export function parseModels(data: unknown): ModelsPayload | null {
   return { groups };
 }
 
-/** The workspace concurrency face: the stored cap plus the ceiling and range it must respect. */
+/** The workspace concurrency face: the stored cap plus its own range. */
 export type ConcurrencySettings = {
   concurrency: number;
-  system: number;
   min: number;
   max: number;
-  /** The stored cap could not be read: both numbers above are the conservative fallback. */
+  /** The stored cap could not be read: the numbers above are the conservative fallback. */
   degraded: boolean;
 };
 
+/**
+ * Whether a concurrency form must not submit: a degraded read's conservative
+ * fallback is never a value anyone stored, and an empty draft cannot be a
+ * repair. A typed value IS the repair, so the form stays usable.
+ */
+export function concurrencySubmitBlocked(degraded: boolean, draft: string | null): boolean {
+  // Two different no-value states share one outcome (nothing to write): an
+  // untouched degraded form (the payload is the conservative fallback) and a
+  // cleared field (`Number("")` is 0). The `required` inputs catch the second
+  // in the browser; this guard also covers a submit event that bypasses them.
+  if (draft === null) return degraded;
+  return draft.trim() === "";
+}
+
 export function parseConcurrencySettings(data: unknown): ConcurrencySettings | null {
   if (!isRecord(data)) return null;
-  const { concurrency, system, min, max, degraded } = data;
-  if (typeof concurrency !== "number" || typeof system !== "number") return null;
+  const { concurrency, min, max, degraded } = data;
+  if (typeof concurrency !== "number") return null;
   if (typeof min !== "number" || typeof max !== "number") return null;
   if (typeof degraded !== "boolean") return null;
-  return { concurrency, system, min, max, degraded };
+  return { concurrency, min, max, degraded };
 }
 
 /**

@@ -182,11 +182,10 @@ import {
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
 import {
-  AboveSystemError,
-  CONCURRENCY_MAX,
   CONCURRENCY_MIN,
   RuntimeConfigError,
-  getEffectiveConcurrency,
+  WORKSPACE_CONCURRENCY_MAX,
+  getWorkspaceConcurrency,
   isConcurrencyValue,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
@@ -2301,10 +2300,12 @@ const workspaceNameRoute = async (c: DashboardContext) => {
 // --- Workspace settings: the review-concurrency cap ---
 //
 // The tenant half of the runtime configuration (iteration spec §1.1): the
-// effective cap is min(system, this). Owner/admin may read and change it; a
-// plain member gets the tenant 404 — the value is not theirs either way. The
-// store owns validation and refuses a value above the system cap rather than
-// clamping it, so no request can store a number that would never apply.
+// effective cap is min(system, this), but the system level is platform data —
+// the tenant payload exposes only the workspace's own value and its own
+// maximum. Owner/admin may read and change it; a plain member gets the tenant
+// 404 — the value is not theirs either way. A write is validated against the
+// workspace maximum only: comparing it with the system quota would let the
+// tenant binary-search that number through accepted and refused writes.
 const workspaceConcurrencyGate = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return { ok: false as const, response: member.response };
@@ -2317,14 +2318,14 @@ const workspaceConcurrencyGate = async (c: DashboardContext) => {
 const workspaceConcurrencyReadRoute = async (c: DashboardContext) => {
   const gate = await workspaceConcurrencyGate(c);
   if (!gate.ok) return gate.response;
-  // ONE statement answers both levels, so the pair can never be torn by a
-  // concurrent system-cap change — and the store stays the only parse path.
-  const caps = await getEffectiveConcurrency(gate.member.db, gate.member.scope.workspaceId);
+  // The tenant face reads its own column only: a corrupt platform row must not
+  // blank a workspace whose value is perfectly readable — the tenant can neither
+  // see nor repair that row. Admission still applies min(system, workspace).
+  const caps = await getWorkspaceConcurrency(gate.member.db, gate.member.scope.workspaceId);
   return c.json({
-    concurrency: caps.workspace,
-    system: caps.system,
+    concurrency: caps.concurrency,
     min: CONCURRENCY_MIN,
-    max: CONCURRENCY_MAX,
+    max: WORKSPACE_CONCURRENCY_MAX,
     degraded: caps.degraded,
   });
 };
@@ -2340,10 +2341,10 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
   } catch {
     // malformed body → the shape gate's 400, never a 500
   }
-  if (!isConcurrencyValue(value)) {
+  if (!isConcurrencyValue(value, WORKSPACE_CONCURRENCY_MAX)) {
     return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
       min: CONCURRENCY_MIN,
-      max: CONCURRENCY_MAX,
+      max: WORKSPACE_CONCURRENCY_MAX,
     });
   }
   try {
@@ -2351,15 +2352,13 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
   } catch (err) {
     if (!(err instanceof RuntimeConfigError)) throw err;
     // A row retired between the gate and the UPDATE is the same 404 an unknown
-    // ref gets; the cap refusal carries the ceiling its own predicate compared
-    // against, so this route never re-derives it.
+    // ref gets. The range refusal stays mapped even though the route gate
+    // already validated the value: the store owns the accepted range, and a
+    // divergence between the two checks must not surface as a 500.
     if (err.reason === "unknown_workspace") return await tenantNotFound(c);
-    if (err instanceof AboveSystemError) {
-      return keyed400(c, SETTINGS_400_KEYS.concurrencyAboveSystem, { system: err.system });
-    }
     return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
       min: CONCURRENCY_MIN,
-      max: CONCURRENCY_MAX,
+      max: WORKSPACE_CONCURRENCY_MAX,
     });
   }
 };
@@ -2855,7 +2854,6 @@ const SETTINGS_400_KEYS = {
   githubMetadataRefreshFailed: "settings.error.githubMetadataRefreshFailed",
   /** Workspace review-concurrency cap (iteration spec §2.3). */
   concurrencyInvalid: "settings.error.concurrencyInvalid",
-  concurrencyAboveSystem: "settings.error.concurrencyAboveSystem",
 } as const satisfies Record<string, DictionaryKey>;
 
 /**

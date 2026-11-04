@@ -49,6 +49,10 @@ import { acquireInflight } from "../../src/store/inflight-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
 import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
+import {
+  SYSTEM_CONCURRENCY_DEFAULT,
+  WORKSPACE_CONCURRENCY_DEFAULT,
+} from "../../src/dashboard/runtime-config-store";
 import { REDACTED } from "../../src/pipeline/redact";
 import type { PipelineEnv } from "../../src/pipeline/consumer";
 import type { InstallationTokenGrant, ReviewCommenter, UpsertPlan } from "../../src/pipeline/comment";
@@ -1822,8 +1826,8 @@ describe("createReviewConsumer", () => {
     // Review-concurrency §1.3: the refusal is observable — which bound held the
     // message, against which caps. The live row is this PR's own.
     expect(infoLine!.fields.reason).toBe("pr-held");
-    expect(infoLine!.fields.system_cap).toBe(32);
-    expect(infoLine!.fields.workspace_cap).toBe(16);
+    expect(infoLine!.fields.system_cap).toBe(SYSTEM_CONCURRENCY_DEFAULT);
+    expect(infoLine!.fields.workspace_cap).toBe(WORKSPACE_CONCURRENCY_DEFAULT);
   });
 
   test("guard-held backoff escalates 60s → 300s → 1200s across attempts (BB-3)", async () => {
@@ -2416,7 +2420,7 @@ describe("createReviewConsumer", () => {
     const heldLine = logLines.find((l) => l.msg.includes("review not admitted"));
     expect(heldLine!.fields.reason).toBe("system-cap");
     expect(heldLine!.fields.system_cap).toBe(1);
-    expect(heldLine!.fields.workspace_cap).toBe(16);
+    expect(heldLine!.fields.workspace_cap).toBe(WORKSPACE_CONCURRENCY_DEFAULT);
     // W-1: a retried refusal is NOT yet a failure — the attempt may still be
     // admitted later, so no failure row is owed.
     expect(failureRows(db)).toHaveLength(0);
@@ -2426,7 +2430,7 @@ describe("createReviewConsumer", () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The system cap stays at its default 32; this workspace may hold ONE review.
+    // The system cap stays at its default 256; this workspace may hold ONE review.
     db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
     // A DIFFERENT PR of the SAME workspace holds that one slot.
     await seedInflight(db, { pr_number: 7 });
@@ -2442,7 +2446,7 @@ describe("createReviewConsumer", () => {
     // so the operator can tell a busy workspace from a full deployment.
     const heldLine = logLines.find((l) => l.msg.includes("review not admitted"));
     expect(heldLine!.fields.reason).toBe("workspace-cap");
-    expect(heldLine!.fields.system_cap).toBe(32);
+    expect(heldLine!.fields.system_cap).toBe(SYSTEM_CONCURRENCY_DEFAULT);
     expect(heldLine!.fields.workspace_cap).toBe(1);
     expect(failureRows(db)).toHaveLength(0);
   });

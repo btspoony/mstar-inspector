@@ -334,7 +334,7 @@ describe("Flags screen", () => {
 });
 
 describe("Runtime screen", () => {
-  const RUNTIME = { concurrency: 24, min: 1, max: 64, degraded: false };
+  const RUNTIME = { concurrency: 24, min: 1, max: 256, degraded: false };
 
   test("a failed read renders the error with a retry that reloads", async () => {
     let failing = true;
@@ -374,7 +374,7 @@ describe("Runtime screen", () => {
   test("a refusal reports the generic failure plus the server's detail", async () => {
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
-        ? new Response(JSON.stringify({ error: "body must be { concurrency: <integer in 1..64> }" }), {
+        ? new Response(JSON.stringify({ error: "body must be { concurrency: <integer in 1..256> }" }), {
             status: 400,
             headers: { "Content-Type": "application/json" },
           })
@@ -384,7 +384,7 @@ describe("Runtime screen", () => {
     await surface.click(surface.container.querySelector('button[type="submit"]'));
 
     expect(surface.text()).toContain("Could not change the system concurrency.");
-    expect(surface.text()).toContain("body must be { concurrency: <integer in 1..64> }");
+    expect(surface.text()).toContain("body must be { concurrency: <integer in 1..256> }");
     // The rejected write leaves the stored value as it was.
     expect(surface.text()).toContain("Effective on the next review: 24.");
     await surface.close();
@@ -395,10 +395,10 @@ describe("Runtime screen", () => {
     // Showing 1 as a normal value would invite saving a number nobody stored.
     let degraded = true;
     const surface = await runtimeScreen(() =>
-      json({ concurrency: 1, min: 1, max: 64, degraded }),
+      json({ concurrency: 1, min: 1, max: 256, degraded }),
     );
     expect(surface.text()).toContain(
-      "The stored system concurrency could not be read, so every workspace is running one review at a time. Nothing was changed — retry the read.",
+      "The stored system concurrency could not be read, so every workspace is running one review at a time. Entering a value in range saves a new one, and retrying the read re-checks the stored row.",
     );
     // The form stays — a save is the only way to repair an unreadable row — but
     // its field starts EMPTY and the "effective" line is withheld, so neither
@@ -420,27 +420,34 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
-  test("a submit on a degraded read is refused — retry is the only action", async () => {
+  test("a typed value repairs a degraded read; an empty submit writes nothing", async () => {
     // `data.concurrency` is the conservative fallback, not a stored value: an
-    // empty draft would otherwise submit it as if the operator had typed it.
+    // empty draft must never write it. A typed value is the repair path.
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
         ? json({ concurrency: 41 })
-        : json({ concurrency: 1, min: 1, max: 64, degraded: true }),
+        : json({ concurrency: 1, min: 1, max: 256, degraded: true }),
     );
     expect(surface.text()).toContain("could not be read");
+    expect(
+      (surface.container.querySelector('button[type="submit"]') as unknown as HTMLButtonElement).disabled,
+    ).toBe(false);
 
-    const save = surface.container.querySelector('button[type="submit"]');
-    expect((save as unknown as HTMLButtonElement | null)?.disabled).toBe(true);
-    await surface.click(save);
-    // The handler refuses even a submit event the disabled button never sends,
-    // so re-enabling the button cannot turn the fallback into a write.
+    // An untouched form submits nothing — the fallback is not a value anyone
+    // stored.
     const form = surface.container.querySelector("form")!;
     await act(async () => {
       form.dispatchEvent(new surface.win.Event("submit", { bubbles: true, cancelable: true }));
     });
     expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([]);
-    expect(surface.text()).not.toContain("Saved.");
+
+    await surface.type("#system-concurrency", "41");
+    await surface.click(surface.container.querySelector('button[type="submit"]'));
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      { url: "/_internal_admin/api/runtime", method: "PATCH", body: { concurrency: 41 } },
+    ]);
+    expect(surface.text()).toContain("Saved.");
+    expect(surface.text()).toContain("Effective on the next review: 41.");
     await surface.close();
   });
 

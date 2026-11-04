@@ -23,10 +23,6 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { stripJsonComments } from "../../scripts/check-image-inputs";
-import {
-  QUEUE_CONCURRENCY_CEILING,
-  isConcurrencyValue,
-} from "../../src/dashboard/runtime-config-store";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const CONFIG_PATH = join(REPO_ROOT, "wrangler.jsonc");
@@ -164,7 +160,8 @@ function containerFingerprints(block: Json): string[] {
  * that declares no DLQ at all, or drops its retry batch bounds, is exactly the
  * drift this lock catches. Both consumers pin max_batch_size 1, the
  * deploy-time max_concurrency ceiling and max_retries 3 (see the
- * wrangler.jsonc rationale); the ceiling VALUE is pinned separately below.
+ * wrangler.jsonc rationale). Set-equality keeps the two blocks equal; the
+ * ceiling VALUE is pinned to Cloudflare's 250 by the test below it.
  */
 function consumerTuningFingerprints(block: Json): string[] {
   return asArray(asObject(block.queues).consumers).map((entry) =>
@@ -264,39 +261,18 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     expectSameSet("queues.consumers[] tuning", consumerTuningFingerprints);
   });
 
-  /** `max_concurrency` is the deploy-time CEILING only — the effective
-   * admission is min(system, workspace) read from D1 per message — so parity
-   * alone would pass with any equal value. Both blocks therefore pin the same
-   * constant, `QUEUE_CONCURRENCY_CEILING`, which the runtime cap range reads as
-   * its own maximum (asserted immediately below): above the platform's 32/16
-   * defaults and bounded because each attempt's own sandbox id starts its own
-   * container. The other tuning values (`max_batch_size`, retries, DLQ) stay
-   * config decisions: set-equality above already keeps the two blocks from
-   * drifting apart, and re-stating their literals here would only duplicate
-   * the config (round-8 review). See the wrangler.jsonc rationale. */
-  test("both consumer blocks pin the deploy-time ceiling to QUEUE_CONCURRENCY_CEILING", () => {
+  /** The ceiling's VALUE is a deploy-config decision, but it is the blast-radius
+   * bound (every admitted attempt starts its own container), so both blocks are
+   * pinned to Cloudflare Queues' hard limit: 250 concurrent consumer
+   * invocations. Set-equality above only keeps the two blocks from drifting. */
+  test("both consumer blocks pin the deploy-time ceiling to Cloudflare's 250", () => {
     for (const [block, consumer] of [
       ["top level (staging)", asArray(asObject(staging.queues).consumers)[0]],
       ["env.production", asArray(asObject(production.queues).consumers)[0]],
     ] as [string, Json | undefined][]) {
       if (!consumer) throw new Error(`wrangler.jsonc: ${block} consumer entry is missing`);
-      expect(
-        consumer.max_concurrency,
-        `wrangler.jsonc: ${block} max_concurrency ceiling`,
-      ).toBe(QUEUE_CONCURRENCY_CEILING);
+      expect(consumer.max_concurrency, `wrangler.jsonc: ${block} max_concurrency ceiling`).toBe(250);
     }
-  });
-
-  /** The invariant the two numbers above exist for: a cap the deployed ceiling
-   * cannot deliver is a setting that silently never applies. A cap raised to 250
-   * against a ceiling of 64 was exactly that — accepted by every write and
-   * unreachable at admission. Asserted through the predicate the writes and
-   * reads actually run, so the bound is behaviour rather than a re-statement of
-   * the constant that defines it. */
-  test("the accepted cap range ends at the deployed ceiling", () => {
-    expect(isConcurrencyValue(QUEUE_CONCURRENCY_CEILING)).toBe(true);
-    expect(isConcurrencyValue(QUEUE_CONCURRENCY_CEILING + 1)).toBe(false);
-    expect(isConcurrencyValue(0)).toBe(false);
   });
 
   /** A second/unregistered container entry must fail the lock, not hide behind
