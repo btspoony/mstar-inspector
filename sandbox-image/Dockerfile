@@ -7,6 +7,10 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the deep review's report seat now runs on its OWN session instead of
+# the deep parent's. The parent carries the review's single prompt/yield stream
+# (its terminal yield IS the envelope), so a report child riding it was a second
+# stream on the same session. A stale image keeps the parent-session report seat.
 # rebuild: the runner now clears the fixed side-channel files (`--recheck-out`,
 # `--report-out` and the recheck status) BEFORE the runtime starts. Those paths
 # are shared by every attempt, so a retry or re-delivered job would otherwise
