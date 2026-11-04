@@ -14,11 +14,19 @@ import { Hono } from "hono";
 import { isPlatformOperator } from "../dashboard/index";
 import { listAllActiveSupportGrants } from "../dashboard/operator-store";
 import {
+  CHECK_TERMINALIZE_MAX,
+  CHECK_TERMINALIZE_MIN,
+  CHECK_UPDATE_MAX,
+  CHECK_UPDATE_MIN,
   CONCURRENCY_MIN,
+  RuntimeConfigError,
   SYSTEM_CONCURRENCY_MAX,
+  getCheckBudgets,
   getSystemConcurrency,
   isConcurrencyValue,
+  setCheckBudgets,
   setSystemConcurrency,
+  type CheckBudgetValues,
 } from "../dashboard/runtime-config-store";
 import { resolveLocale, t, type Locale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
@@ -128,13 +136,32 @@ async function readRuntime(c: AdminContext): Promise<Response> {
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
-  const system = await getSystemConcurrency(db);
+  const [system, budgets] = await Promise.all([getSystemConcurrency(db), getCheckBudgets(db)]);
   return c.json({
     concurrency: system.concurrency,
     min: CONCURRENCY_MIN,
     max: SYSTEM_CONCURRENCY_MAX,
     degraded: system.degraded,
+    // §7.10 Check budgets: global, absent-row defaults documented in the store.
+    checkBudgets: {
+      terminalizeMs: budgets.terminalizeMs,
+      updateMs: budgets.updateMs,
+      terminalizeMin: CHECK_TERMINALIZE_MIN,
+      terminalizeMax: CHECK_TERMINALIZE_MAX,
+      updateMin: CHECK_UPDATE_MIN,
+      updateMax: CHECK_UPDATE_MAX,
+      degraded: budgets.degraded,
+    },
   });
+}
+
+/** The accepted `checkBudgets` body shape; the store owns the accepted ranges. */
+function checkBudgetsBody(value: unknown): CheckBudgetValues | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { terminalizeMs, updateMs } = value as { terminalizeMs?: unknown; updateMs?: unknown };
+  return typeof terminalizeMs === "number" && typeof updateMs === "number"
+    ? { terminalizeMs, updateMs }
+    : null;
 }
 
 async function setRuntime(c: AdminContext): Promise<Response> {
@@ -142,20 +169,40 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
-  let value: unknown;
+  let concurrency: unknown;
+  let rawBudgets: unknown;
   try {
-    const body = (await c.req.json()) as { concurrency?: unknown };
-    value = body.concurrency;
+    const body = (await c.req.json()) as { concurrency?: unknown; checkBudgets?: unknown };
+    concurrency = body.concurrency;
+    rawBudgets = body.checkBudgets;
   } catch {
     // malformed body → the shape gate's 400, never a 500
   }
-  if (!isConcurrencyValue(value, SYSTEM_CONCURRENCY_MAX)) {
+  // One save writes one parameter: a body carrying both is a shape error, so a
+  // refused half can never leave the other half written.
+  if (rawBudgets !== undefined) {
+    if (concurrency !== undefined) {
+      return c.json({ error: "body must carry exactly one of concurrency | checkBudgets" }, 400);
+    }
+    const pair = checkBudgetsBody(rawBudgets);
+    if (pair === null) {
+      return c.json({ error: "body must be { checkBudgets: { terminalizeMs, updateMs } }" }, 400);
+    }
+    try {
+      return c.json({ checkBudgets: await setCheckBudgets(db, pair, login) });
+    } catch (error) {
+      // Out of range: the store owns the ranges and the message.
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (!isConcurrencyValue(concurrency, SYSTEM_CONCURRENCY_MAX)) {
     return c.json(
       { error: `body must be { concurrency: <integer in ${CONCURRENCY_MIN}..${SYSTEM_CONCURRENCY_MAX}> }` },
       400,
     );
   }
-  return c.json({ concurrency: await setSystemConcurrency(db, value, login) });
+  return c.json({ concurrency: await setSystemConcurrency(db, concurrency, login) });
 }
 
 /**

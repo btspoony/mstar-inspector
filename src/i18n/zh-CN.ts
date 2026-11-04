@@ -807,6 +807,20 @@ export const zhCN: Dictionary = {
       /** 已存储的上限无法读取——数字只是兜底值，不是已存储的设置。 */
       concurrencyUnreadable:
         "无法读取已存储的系统并发数，因此每个工作区都在逐个运行审查。输入范围内的值可保存为新的并发数，重新读取会重新检查该行。",
+      checkTitle: "检查预算",
+      checkDescription:
+        "审查等待其 GitHub Check 的时长：terminalize hook 与唯一一次终态 update。审查不会被这两个上限阻塞。",
+      terminalizeLabel: "terminalize hook（毫秒）",
+      updateLabel: "Check update（毫秒）",
+      checkSave: "保存",
+      checkSaved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      checkFailed: "修改检查预算失败。",
+      /** {terminalize}/{update} = 当前存储的预算（或文档默认值）。 */
+      checkCurrent: "下一次审查生效值：terminalize {terminalize} 毫秒，update {update} 毫秒。",
+      /** 两个已存储的预算都无法读取——数字只是文档默认值。 */
+      checkUnreadable:
+        "无法读取已存储的检查预算，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
       // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
       // 与 /healthz 字段及 release tag 同形。
       version: "版本 {version}",

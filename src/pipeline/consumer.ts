@@ -134,6 +134,7 @@ import {
 import { boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
+import type { ShellCommand } from "./shell-command";
 import {
   buildGitOpsCommands,
   CLONE_DIR,
@@ -188,6 +189,12 @@ import {
   type InflightRefusal,
 } from "../store/inflight-store";
 import { readReviewConcurrency } from "./concurrency-reader";
+import {
+  CHECK_TERMINALIZE_DEFAULT,
+  CHECK_UPDATE_DEFAULT,
+  readCheckBudgets,
+  type CheckBudgets,
+} from "./check-budgets-reader";
 
 export type PipelineEnv = {
   DB: D1Database;
@@ -261,15 +268,6 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
 export const QUEUE_MAX_ATTEMPTS = 4;
 
 /**
- * Cap on the prefetched PR diff considered for the line-comments hunk
- * prefilter (qc3 F-101): 2 MiB of diff text. Beyond it,
- * parseDiffHunkRanges would materialize a full line array per qualifying
- * round on multi-MB PRs; overflow degrades to the prefetch-failure path
- * (base-filter attempt; a residual 422 still falls back per AL-3).
- */
-export const DIFF_PREFETCH_MAX_BYTES = 2 * 1024 * 1024;
-
-/**
  * Runner exec timeout for the job's review level (spec d5-budget L4 — the
  * helper trio runnerTimeoutMs / reviewGuardTtlSeconds /
  * guardRetryDelaysSeconds is the naming SSOT; no bare re-exported constants).
@@ -311,8 +309,10 @@ export type ConsumerLogFields = {
    * `review_concurrency_degraded` (the review-concurrency cutover, 2026-11 —
    * union widened ADDITIVELY): the
    * concurrency reader's degraded-read warn, relayed on this channel.
+   * `review_check_budgets_degraded` (same channel, spec §7.10): the check-budget
+   * reader's degraded-read warn.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded";
   action: string;
   installation_id: number;
   owner: string;
@@ -323,6 +323,8 @@ export type ConsumerLogFields = {
   /** github_apps.id the job resolves to (per-App jobs only). */
   app_id?: string;
   idempotency_key?: string;
+  /** review_check_attempts.attempt_id — the Check attempt a line is about. */
+  attempt_id?: string;
   /**
    * The metered ledger identity (`usage_events.review_id`) and its workspace.
    * Carried on the usage-write failure lines so a dropped attempt can be
@@ -432,6 +434,16 @@ export type ConsumerLogFields = {
    */
   rejected_unnamed_ignored?: number;
   assessed?: number;
+  /**
+   * Set on the diff-capture warn, naming WHY the captured text cannot prove a
+   * row: `empty` (the exec exited 0 and delivered nothing while the same
+   * round's numstat shows a diff — a capture failure), `overflow` (the diff
+   * exists but is over DIFF_PREFETCH_MAX_BYTES) or `unreadable` (the sandbox
+   * reply carried no flag line — the command itself always terminates one, so
+   * this can only be a broken transport). All three make the round's recheck
+   * context unavailable; none is published as `no-evidence`.
+   */
+  diff_capture?: "empty" | "overflow" | "unreadable";
 };
 
 export type ConsumerLog = {
@@ -707,11 +719,22 @@ async function handleGuardHeld(
 // (`createCheckLifecycle`) and `createReviewConsumer` injects it; the dependency stays
 // optional, and a hooks object that cannot reach a Checks surface still
 // produces no row and no remote run. Hook exceptions/timeouts are caught by
-// the consumer (≤2 requests / 2 seconds per inline hook is the hook's own
-// budget — no publication path waits for hook retries).
+// the consumer (the begin hook gets ≤2 requests / 2 seconds of consumer wait;
+// the terminalize hook runs after the review reaches a terminal outcome — a
+// pre-publication failure included — and may wait ≤10 seconds, with
+// its promise handed to the invocation context — no publication path waits for
+// hook retries).
 // ---------------------------------------------------------------------------
 
 export type CheckHandle = { attemptId: string; scope: Scope; githubAppId: number; headSha: string; lease: Lease };
+
+/**
+ * The invocation's lifetime hook: the queue handler passes
+ * `ctx.waitUntil` so a terminalize promise that outlives the consumer still
+ * finishes. A rejection it sees after the consumer's budget elapsed is
+ * reported from the hand-off as a warn, never left as an unhandled rejection.
+ */
+export type CheckBackgroundSink = { waitUntil(promise: Promise<unknown>): void };
 
 export type CheckLifecycleHooks = {
   begin(input: {
@@ -731,7 +754,9 @@ export type CheckLifecycleHooks = {
     latch?: CheckBeginLatch;
   }): Promise<CheckHandle | null>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
-    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error" }): Promise<void>;
+    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error";
+    /** The operator-configured bound on the terminal `checks.update` (spec §7.10). */
+    updateBudgetMs: number }): Promise<void>;
 };
 
 /**
@@ -742,8 +767,8 @@ export type CheckLifecycleHooks = {
 export const CHECK_EXECUTION_WINDOW_MS = 900_000;
 
 /**
- * Inline hook budget guard (spec §7.10: "Each inline hook has ≤2 requests /
- * 2 seconds total"). Exported because it is the containment bound the Check
+ * Begin-hook budget (spec §7.10: "The begin hook has ≤2 requests / 2 seconds
+ * of consumer wait"). Exported because it is the containment bound the Check
  * lifecycle must honour, and the two hook-timeout cases pin it by value.
  */
 export const CHECK_HOOK_TIMEOUT_MS = 2_000;
@@ -763,23 +788,31 @@ const RECHECK_INPUT_MAX_BYTES = 512 * 1024;
 const RECHECK_INPUT_SCHEMA = "mstar.recheck-input/v1";
 
 /**
- * Await a promise with the §7.10 inline-hook budget as a hard consumer-side
+ * Await a promise with the relevant §7.10 hook budget as a hard consumer-side
  * bound. The bound is on the CONSUMER's wait, not on the hook's work: a hook
  * that settles late keeps running detached — this guard creates no AbortSignal
  * (the locked seam exposes none), so a late create can still complete durably
  * on its own, but `onBudgetElapsed` fires at the instant this invocation gives
  * up on it, which is what lets the lifecycle stop attaching a run on behalf of
- * a caller that is no longer waiting. The consumer never waits past
- * `CHECK_HOOK_TIMEOUT_MS`, and a rejection that lands after the timeout is
- * swallowed rather than surfacing unhandled.
+ * a caller that is no longer waiting. `budgetMs` is REQUIRED — the two cases
+ * differ by an order of magnitude (`CHECK_HOOK_TIMEOUT_MS` for begin, the
+ * operator-configured `review.check.terminalize_timeout_ms` for terminalize)
+ * and neither may silently inherit the other's bound. The consumer never waits
+ * past it; a rejection that lands after the timeout is contained by the
+ * caller's hand-off, not left as an unhandled rejection.
  */
-async function withHookTimeout<T>(promise: Promise<T>, fallback: T, onBudgetElapsed?: () => void): Promise<T> {
+async function withHookTimeout<T>(
+  promise: Promise<T>,
+  fallback: T,
+  budgetMs: number,
+  onBudgetElapsed?: () => void,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<T>((resolve) => {
     timer = setTimeout(() => {
       onBudgetElapsed?.();
       resolve(fallback);
-    }, CHECK_HOOK_TIMEOUT_MS);
+    }, budgetMs);
   });
   // A hook rejecting AFTER its timeout won the race must not surface as an
   // unhandled rejection — the failure is already treated as the fallback.
@@ -1511,17 +1544,24 @@ function roundContextCoverage(discussion: Discussion): Coverage {
 }
 
 /**
- * Payload text of one bounded read command, plus WHY it yielded nothing.
- * Non-zero exit, a missing flag line, or overflow beyond the byte bound are all
- * "no payload" to the caller, but they are different D1 causes, so the failure
- * is named rather than collapsed into a bare null. Shared by the recheck
- * document and status reads — the transport is identical, only the file
+ * Payload text of one bounded read, plus WHY it yielded nothing. A missing
+ * flag line or overflow beyond the byte bound are both "no payload" to the
+ * caller, but they are different D1 causes, so the failure is named rather
+ * than collapsed into a bare null. Shared by the recheck document and status
+ * reads and the diff capture — the transport is identical, only the producer
  * differs.
  */
-async function boundedRead(
-  sandbox: ReviewSandbox,
-  command: ReturnType<typeof readRecheckCommand>,
-): Promise<{ text: string | null; failure: string | null }> {
+type BoundedRead = { text: string | null; failure: "overflow" | "unreadable" | null };
+
+function parseBoundedRead(stdout: string): BoundedRead {
+  const out = stdout.trimEnd();
+  const split = out.lastIndexOf("\n");
+  if (split < 0) return { text: null, failure: "unreadable" };
+  if (out.slice(split + 1).trim() !== "0") return { text: null, failure: "overflow" }; // beyond the byte bound
+  return { text: out.slice(0, split), failure: null };
+}
+
+async function boundedRead(sandbox: ReviewSandbox, command: ShellCommand): Promise<BoundedRead> {
   let read;
   try {
     read = await sandbox.runCommand(command, { timeout: EXEC_TIMEOUT_GIT_MS });
@@ -1529,11 +1569,7 @@ async function boundedRead(
     return { text: null, failure: "unreadable" };
   }
   if (read.exitCode !== 0) return { text: null, failure: "unreadable" };
-  const out = read.stdout.trimEnd();
-  const split = out.lastIndexOf("\n");
-  if (split < 0) return { text: null, failure: "unreadable" };
-  if (out.slice(split + 1).trim() !== "0") return { text: null, failure: "overflow" }; // beyond the byte bound
-  return { text: out.slice(0, split), failure: null };
+  return parseBoundedRead(read.stdout);
 }
 
 /**
@@ -1871,6 +1907,13 @@ type ProcessDeps = {
    * proof.
    */
   checks?: CheckLifecycleHooks;
+  /**
+   * The invocation's lifetime hook (`ctx.waitUntil` in the queue handler):
+   * the terminalize promise is handed to it, so a hook that outlives the
+   * consumer still finishes instead of dying with the isolate. Absent in
+   * tests that do not watch the detached promise.
+   */
+  background?: CheckBackgroundSink;
   /**
    * The PR head watermark read (migration 0044) — `createAppsStore(env.DB)
    * .selectPrHead` in production, built ONCE per consumer (and injectable in
@@ -2631,6 +2674,7 @@ export function createReviewConsumer(
   env: PipelineEnv,
   log: ConsumerLog = defaultConsumerLog,
   overrides: ConsumerOverrides = {},
+  background?: CheckBackgroundSink,
 ): (batch: MessageBatch<ReviewJobPayload>) => Promise<void> {
   // The per-App commenter cache (lock L4) is also the Check lane's
   // credential route: the lifecycle resolves THIS message's App adapter from
@@ -2652,6 +2696,7 @@ export function createReviewConsumer(
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
     selectPrHead: overrides.selectPrHead ?? appsStore.selectPrHead,
     log,
+    background,
   };
   // §7.10 Check seam: production always supplies the
   // lifecycle; an override replaces it wholesale. An App whose commenter
@@ -2763,6 +2808,11 @@ async function processMessage(
   // isolated warns, and a hook timeout resolves without blocking the path.
   let checkHandle: CheckHandle | null = null;
   let checkTerminalized = false;
+  // §7.10 Check budgets, filled by the ONE per-message runtime read (after the
+  // level resolves, before the begin hook). Every terminal path runs after that
+  // read; a path that somehow reached one without it is still bounded by the
+  // store's documented defaults rather than waiting forever.
+  let checkBudgets: CheckBudgets | null = null;
   // Set the moment the prepared publication send is ATTEMPTED: a throw after
   // this point is post-send uncertainty (publication-unknown), never a
   // clean pre-publication failure.
@@ -2773,12 +2823,67 @@ async function processMessage(
   ): Promise<void> => {
     if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
     checkTerminalized = true;
+    // The per-message read always precedes every terminal path; the fallback
+    // keeps a future caller bounded by the store's documented defaults.
+    const budgets = checkBudgets ?? {
+      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+      updateMs: CHECK_UPDATE_DEFAULT,
+      degraded: false,
+    };
+    // Set when the consumer stops waiting on the hook: only past that point is
+    // a later rejection detached, so only then does the sink report it.
+    let abandoned = false;
     try {
-      await withHookTimeout(deps.checks.terminalize({ handle: checkHandle, publicationId, outcome }), undefined as void);
+      const terminalize = deps.checks.terminalize({
+        handle: checkHandle,
+        publicationId,
+        outcome,
+        updateBudgetMs: budgets.updateMs,
+      });
+      const attemptId = checkHandle.attemptId;
+      // The invocation owns the promise: if the budget below expires, the hook
+      // still finishes after this consumer returns. A rejection landing after
+      // that point has no inline waiter left to report it.
+      deps.background?.waitUntil(
+        terminalize.catch((err: unknown) => {
+          if (!abandoned) return; // the inline await below already reports it
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(
+            {
+              ...(baseFields ?? payloadIdentityFields(payload)),
+              sandbox_id: sandboxId,
+              attempt_id: attemptId,
+            },
+            `check terminalize hook failed after its budget (detached): ${detail}`,
+          );
+        }),
+      );
+      await withHookTimeout(
+        terminalize,
+        undefined as void,
+        budgets.terminalizeMs,
+        () => {
+          abandoned = true;
+          deps.log.warn(
+            {
+              ...(baseFields ?? payloadIdentityFields(payload)),
+              sandbox_id: sandboxId,
+              attempt_id: attemptId,
+            },
+            deps.background === undefined
+              ? "check terminalize hook exceeded its budget (detached; no invocation context to finish it)"
+              : "check terminalize hook exceeded its budget (left to the invocation context)",
+          );
+        },
+      );
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(
-        { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+        {
+          ...(baseFields ?? payloadIdentityFields(payload)),
+          sandbox_id: sandboxId,
+          attempt_id: checkHandle?.attemptId,
+        },
         `check terminalize hook failed (isolated): ${detail}`,
       );
     }
@@ -3262,17 +3367,27 @@ async function processMessage(
       deps.log.warn(fields, `lifecycle target capture failed — context-unavailable: ${detail}`);
     }
 
-    // Diff (GH_TOKEN via exec env only — never in the command). The stdout
-    // is retained as the WORKER-CONTROLLED §7.3 trusted capture: the
-    // evidence catalog slices AND the line-intent hunk prefilter both derive
-    // from this one diff. Over the in-memory bound the text is treated as
-    // unavailable (no slices; base-filter line comments) — never truncated
-    // slices.
+    // Diff (GH_TOKEN via exec env only — never in the command). The command
+    // writes the file for numstat AND streams a BOUNDED copy back: that stdout
+    // is the WORKER-CONTROLLED §7.3 trusted capture the evidence catalog
+    // slices and the line-intent hunk prefilter both derive from. The bounded
+    // read names three outcomes, deliberately distinct:
+    //   fit        → the text IS the capture;
+    //   overflow   → over DIFF_PREFETCH_MAX_BYTES: the diff exists but cannot
+    //                prove any row (no slices; base-filter line comments),
+    //                never truncated slices;
+    //   unreadable → no flag line at all: the transport broke, so the capture
+    //                failed whatever the file holds (a zero-change PR still
+    //                prints its `\n0\n` flag line).
+    // An empty `fit` payload is NOT decided here: `gh pr diff` also writes
+    // nothing for a PR with no changes, and only the numstat of the same round
+    // can tell the two apart (see step 6).
     const diff = await sandbox.runCommand(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
     if (diff.exitCode !== 0) {
       throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
     }
-    const diffText = diff.stdout.length <= DIFF_PREFETCH_MAX_BYTES ? diff.stdout : "";
+    const diffRead = parseBoundedRead(diff.stdout);
+    const diffText = diffRead.text ?? "";
 
     // Trusted evidence catalog (§7.3) for the selected targets, pinned to
     // the authoritative checkout SHA. A target the captured diff cannot prove
@@ -3384,6 +3499,13 @@ async function processMessage(
     // fully operational; hook failure is isolated and cannot prevent the
     // review (step 5).
     if (deps.checks !== undefined) {
+      // §7.10 Check budgets: ONE read per message, taken only once this
+      // message can actually produce a Check — a refused or duplicate delivery
+      // never pays for it. Every terminal path below shares this pair.
+      checkBudgets = await readCheckBudgets(deps.env.DB, {
+        warn: (readerFields, msg) =>
+          deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
+      });
       // One latch per `begin` call, created HERE and never stored anywhere: a
       // later message cannot clear or reuse it, so a detached begin from this
       // message stays abandoned for its whole lifetime (QC1-001 replacement
@@ -3401,6 +3523,8 @@ async function processMessage(
             latch: beginLatch,
           }),
           null,
+          // The begin hook keeps §7.10's 2 s: it runs before model work.
+          CHECK_HOOK_TIMEOUT_MS,
           // The consumer gave up waiting: a lifecycle that reads this call's
           // latch stops attaching state on behalf of this abandoned invocation
           // and leaves the created run with a terminal obligation (§7.10's
@@ -3428,6 +3552,30 @@ async function processMessage(
       .split("\n")
       .map((line) => line.trimEnd())
       .filter((line) => line !== "");
+
+    // A non-delivered diff capture is ambiguous, and only THIS round's
+    // numstat — the diff FILE `git apply` read, not the bounded stdout — can
+    // resolve the EMPTY case. Non-empty numstat means the redirect wrote a diff
+    // the read did not deliver: a CAPTURE FAILURE, so the round is
+    // context-incomplete, never every row published as a confident
+    // `no-evidence`. Both empty is a genuinely empty PR: a normal round.
+    // `overflow` and `unreadable` are capture failures by construction — the
+    // diff exists but is over the bound, or the transport broke — so they take
+    // the same accounting with their own `diff_capture` cause: an over-bound
+    // capture is "too large to prove", never "nothing to prove". The recheck
+    // input built above cannot change: any of the three leaves the catalog
+    // with no slices and every target excluded, so no input was built either
+    // way. Line comments keep the over-size behaviour — `diffText` stays "",
+    // so the hunk prefilter degrades to the base filter.
+    const diffCaptureFailure =
+      diffRead.failure ?? (diffRead.text === "" && numstatLines.length > 0 ? "empty" : undefined);
+    if (diffCaptureFailure !== undefined) {
+      captureFailed = true;
+      deps.log.warn(
+        { ...fields, diff_capture: diffCaptureFailure },
+        `diff capture ${diffCaptureFailure} — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+      );
+    }
 
     // 7. Runner input JSON (reconFacts): `<owner>/<repo>#<pr>` and
     // `head <sha>` fold into the envelope target INSIDE the runtime — the
@@ -3467,10 +3615,12 @@ async function processMessage(
       // byte-identically to the pre-recheck payload.
       ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
     };
-    const writeInput = await sandbox.runCommand(
-      writeJsonCommand(RUNNER_INPUT_PATH, toBase64Utf8(JSON.stringify(runnerInput))),
-      { timeout: EXEC_TIMEOUT_GIT_MS },
-    );
+    // The document rides the exec stdin pipe: as an argv string it became one
+    // argument, and a recheck round above ~98 KiB breaches Linux's 128 KiB cap.
+    const writeInput = await sandbox.runCommand(writeJsonCommand(RUNNER_INPUT_PATH), {
+      stdin: toBase64Utf8(JSON.stringify(runnerInput)),
+      timeout: EXEC_TIMEOUT_GIT_MS,
+    });
     if (writeInput.exitCode !== 0) {
       throw new Error(`runner input write failed: exit ${writeInput.exitCode}`);
     }

@@ -31,15 +31,22 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  CHECK_TERMINALIZE_DEFAULT,
+  CHECK_TERMINALIZE_KEY,
+  CHECK_UPDATE_DEFAULT,
+  CHECK_UPDATE_KEY,
   CONCURRENCY_MIN,
+  RuntimeConfigError,
   SYSTEM_CONCURRENCY_DEFAULT,
   SYSTEM_CONCURRENCY_KEY,
   SYSTEM_CONCURRENCY_MAX,
   WORKSPACE_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_MAX,
+  getCheckBudgets,
   getEffectiveConcurrency,
   getSystemConcurrency,
   getWorkspaceConcurrency,
+  setCheckBudgets,
   setSystemConcurrency,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
@@ -478,5 +485,111 @@ describe("runtime-config-store", () => {
       },
       { actor_login: ACTOR, action: "workspace.concurrency.set", target_id: WS },
     ]);
+  });
+});
+
+describe("check budgets", () => {
+  /** Both stored budget rows, raw, keyed by PK. */
+  function storedBudgetsRaw(db: TestD1): Record<string, string> {
+    const rows = db.raw
+      .prepare("SELECT key, value FROM review_runtime_settings ORDER BY key")
+      .all() as Array<{ key: string; value: string }>;
+    return Object.fromEntries(rows.map((row) => [row.key, row.value]));
+  }
+
+  test("absent rows fall back to the documented defaults without degrading", async () =>
+    expect(await getCheckBudgets(fixture())).toEqual({
+      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+      updateMs: CHECK_UPDATE_DEFAULT,
+      degraded: false,
+    }));
+
+  test("an untrusted or out-of-range stored value answers the defaults with degraded: true", async () => {
+    for (const value of ["not-a-number", "999999", "0"]) {
+      const db = fixture();
+      db.raw
+        .prepare(
+          `INSERT INTO review_runtime_settings (key, value, updated_at)
+           VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+        )
+        .run(CHECK_UPDATE_KEY, value);
+      expect(await getCheckBudgets(db), value).toEqual({
+        terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+        updateMs: CHECK_UPDATE_DEFAULT,
+        degraded: true,
+      });
+    }
+  });
+
+  test("a read failure answers the defaults with degraded: true and never throws", async () =>
+    expect(await getCheckBudgets(failingDb)).toEqual({
+      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+      updateMs: CHECK_UPDATE_DEFAULT,
+      degraded: true,
+    }));
+
+  test("an out-of-range pair is refused and writes nothing", async () => {
+    const db = fixture();
+    for (const pair of [
+      { terminalizeMs: 999, updateMs: 5_000 },
+      { terminalizeMs: 30_001, updateMs: 5_000 },
+      { terminalizeMs: 10_000, updateMs: 499 },
+      { terminalizeMs: 10_000, updateMs: 15_001 },
+      { terminalizeMs: 10_000.5, updateMs: 5_000 },
+    ]) {
+      await expect(setCheckBudgets(db, pair, ACTOR)).rejects.toBeInstanceOf(RuntimeConfigError);
+    }
+    expect(storedBudgetsRaw(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a pair whose wait does not exceed the send budget is refused with the relation only", async () => {
+    const db = fixture();
+    for (const pair of [
+      { terminalizeMs: 5_000, updateMs: 5_000 },
+      { terminalizeMs: 4_000, updateMs: 5_000 },
+    ]) {
+      const error = await setCheckBudgets(db, pair, ACTOR).catch((thrown: unknown) => thrown);
+      expect(error).toBeInstanceOf(RuntimeConfigError);
+      // The refusal states the RELATION, never the other stored value.
+      expect((error as Error).message).toBe(
+        "the terminalize timeout must be greater than the check update budget",
+      );
+    }
+    expect(storedBudgetsRaw(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("an accepted pair lands both rows with one audit row, and reads back", async () => {
+    const db = fixture();
+    expect(await setCheckBudgets(db, { terminalizeMs: 12_000, updateMs: 7_000 }, ACTOR)).toEqual({
+      terminalizeMs: 12_000,
+      updateMs: 7_000,
+    });
+    expect(storedBudgetsRaw(db)).toEqual({
+      [CHECK_TERMINALIZE_KEY]: "12000",
+      [CHECK_UPDATE_KEY]: "7000",
+    });
+    expect(await getCheckBudgets(db)).toEqual({
+      terminalizeMs: 12_000,
+      updateMs: 7_000,
+      degraded: false,
+    });
+    expect(auditRows(db)).toEqual([
+      { action: "runtime.check_budgets.set", target_id: "review.check.budgets" },
+    ]);
+    expect(auditDetails(db, "runtime.check_budgets.set")).toEqual([
+      {
+        before: { terminalizeMs: null, updateMs: null },
+        after: { terminalizeMs: 12_000, updateMs: 7_000 },
+      },
+    ]);
+
+    // A second save records the previous pair as `before`.
+    await setCheckBudgets(db, { terminalizeMs: 9_000, updateMs: 6_000 }, ACTOR);
+    expect(auditDetails(db, "runtime.check_budgets.set")[1]).toEqual({
+      before: { terminalizeMs: 12_000, updateMs: 7_000 },
+      after: { terminalizeMs: 9_000, updateMs: 6_000 },
+    });
   });
 });

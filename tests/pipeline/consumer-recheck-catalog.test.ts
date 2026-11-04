@@ -15,6 +15,7 @@ import {
   VALID_DIFF,
   VALID_OUTPUT,
   createSeededTestD1,
+  recheckDocWith,
   seedAssociation,
   seedOpenTarget,
   seedPriorPublication,
@@ -22,6 +23,8 @@ import {
 import {
   commenterCalls,
   createReviewConsumer,
+  DIFF_PREFETCH_MAX_BYTES,
+  logLines,
   makeBatch,
   makeEnv,
   makePayload,
@@ -84,6 +87,170 @@ function catalogBudgetDiff(files: number): string {
 }
 
 describe("recheck evidence catalog and window slicing (§7.3)", () => {
+  test("a captured diff rides the bounded read, so the catalog proves the row (was: empty capture → zero slices)", async () => {
+    // The production command streams the diff back bounded; the retired shape
+    // redirected gh's stdout into the file and left the exec's stdout EMPTY,
+    // so `buildEvidenceCatalog("")` excluded every target and the round
+    // published `no-evidence` for rows it had never shown the seat. The double
+    // answers the redirect-only shape with empty stdout (exactly like the real
+    // shell), so this case fails on that shape and passes on this one.
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The catalog has a slice for the row, and the row is sent.
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
+      recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ id: string; path: string }> };
+    };
+    expect(runnerInput.recheck.targets.map((t) => t.rowId)).toEqual([TARGET_ROW_ID]);
+    expect(runnerInput.recheck.evidence.map((slice) => slice.id)).toContain("ev-1");
+    expect(runnerInput.recheck.evidence.every((slice) => slice.path === "src/auth.ts")).toBe(true);
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("addressed (verified-fix)");
+    expect(prepared.body).not.toContain("unverifiable (no-evidence)");
+  });
+
+  test("an empty capture with a non-empty numstat is a capture failure: context-incomplete, never no-evidence for every row", async () => {
+    // The redirect wrote a diff (numstat is non-empty) but the bounded read
+    // delivered nothing: that is a CAPTURE FAILURE. Publishing it as 25
+    // confident `no-evidence` verdicts is a fabrication; the round must say its
+    // context was incomplete and send no recheck input.
+    reset();
+    sandbox.diffStdout = "";
+    sandbox.numstatStdout = "10\t2\tsrc/auth.ts\n";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const warn = logLines.find((l) => l.fields.diff_capture === "empty");
+    expect(warn?.level).toBe("warn");
+    expect(warn?.msg).toContain("context-unavailable");
+    // No recheck round went out: the runner input carries no recheck section.
+    const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { recheck?: unknown };
+    expect(writtenInput.recheck).toBeUndefined();
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (context-incomplete)");
+    expect(prepared.body).not.toContain("unverifiable (no-evidence)");
+    expect(prepared.body).toContain("context coverage: unavailable");
+    // The row is never assessed, and a capture failure records no recheck row.
+    const findingRow = db.raw.query("SELECT last_assessed_ms FROM review_findings").get() as {
+      last_assessed_ms: number | null;
+    };
+    expect(findingRow.last_assessed_ms).toBeNull();
+    expect(db.raw.query("SELECT * FROM review_failures").all()).toHaveLength(0);
+  });
+
+  test("an empty capture with an empty numstat is a genuinely empty PR: a normal round", async () => {
+    // `gh pr diff` writes nothing for a zero-change PR, and the bounded read
+    // returns exactly that. Two empty captures are the same PR, not a lost
+    // read: no capture-failure warn, no context-incomplete labels.
+    reset();
+    sandbox.diffStdout = "";
+    sandbox.numstatStdout = "";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(logLines.some((l) => l.fields.diff_capture !== undefined)).toBe(false);
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (no-evidence)");
+    expect(prepared.body).not.toContain("context-incomplete");
+    const findingRow = db.raw.query("SELECT last_assessed_ms FROM review_findings").get() as {
+      last_assessed_ms: number | null;
+    };
+    expect(findingRow.last_assessed_ms).toBeNull();
+    expect(db.raw.query("SELECT * FROM review_failures").all()).toHaveLength(0);
+  });
+
+  test("an over-bound capture is context-incomplete, never a fabricated no-evidence per row", async () => {
+    // The bounded read flags a byte beyond DIFF_PREFETCH_MAX_BYTES. The diff
+    // exists but cannot prove a row, so the round must say "the context was
+    // incomplete" — publishing `no-evidence` per row would claim the diff was
+    // inspected and came up empty. Slices stay off and the round still runs
+    // (no throw, no failure row): only the accounting changes.
+    reset();
+    sandbox.diffStdout = "b".repeat(DIFF_PREFETCH_MAX_BYTES + 1);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The warn names the over-size cause, not the empty-capture one.
+    const warn = logLines.find((l) => l.fields.diff_capture !== undefined);
+    expect(warn?.fields.diff_capture).toBe("overflow");
+    expect(warn?.level).toBe("warn");
+    expect(warn?.msg).toContain("context-unavailable");
+    // No slices ride, so no recheck round is dispatched.
+    const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { recheck?: unknown };
+    expect(writtenInput.recheck).toBeUndefined();
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
+    expect(prepared.body).toContain("unverifiable (context-incomplete)");
+    expect(prepared.body).not.toContain("unverifiable (no-evidence)");
+    expect(prepared.body).toContain("context coverage: unavailable");
+    // The row is never assessed, and over-size records no failure row.
+    const findingRow = db.raw.query("SELECT last_assessed_ms FROM review_findings").get() as {
+      last_assessed_ms: number | null;
+    };
+    expect(findingRow.last_assessed_ms).toBeNull();
+    expect(db.raw.query("SELECT * FROM review_failures").all()).toHaveLength(0);
+  });
+
+  test("a reply with no flag line is a capture failure, never a confident no-evidence", async () => {
+    // `parseBoundedRead` names a bounded read whose reply carries NO flag line
+    // `unreadable`: the diff may well be on disk, but the Worker never received
+    // a verdict about it. The command always terminates its own reply, so this
+    // is the transport breaking — still a capture failure, and the round must
+    // say so instead of publishing `no-evidence` for every row.
+    reset();
+    sandbox.diffReadStdout = "";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const warn = logLines.find((l) => l.fields.diff_capture !== undefined);
+    expect(warn?.fields.diff_capture).toBe("unreadable");
+    expect(warn?.level).toBe("warn");
+    expect(warn?.msg).toContain("context-unavailable");
+    // Context unavailable → no recheck round goes out…
+    const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { recheck?: unknown };
+    expect(writtenInput.recheck).toBeUndefined();
+    // …the round itself still runs (the runner input was written), and the
+    // prepared body names the reason instead of claiming the rows were checked.
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (context-incomplete)");
+    expect(prepared.body).not.toContain("unverifiable (no-evidence)");
+    expect(prepared.body).toContain("context coverage: unavailable");
+    expect(db.raw.query("SELECT * FROM review_failures").all()).toHaveLength(0);
+  });
+
   test("a row the trusted catalog cannot prove never rides the wire: no-evidence, never budget, never assessed", async () => {
     reset();
     sandbox.diffStdout = VALID_DIFF;

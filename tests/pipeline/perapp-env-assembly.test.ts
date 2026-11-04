@@ -162,12 +162,17 @@ async function seedTamperedKey(
 // --- sandbox fake (injected via createReviewConsumer overrides) -------------
 
 const sandboxCalls: Array<{ cmd: string; opts?: unknown }> = [];
+/** Numstat stdout for the next run (the reconFacts carrier; set per test). */
+let numstatStdout = "";
 
 const fakeSandbox = {
   runCommand: mock(async (cmd: string, opts?: unknown) => {
     sandboxCalls.push({ cmd, opts });
     if (cmd.includes("rev-parse")) {
       return { stdout: `${SHA}\n`, stderr: "", exitCode: 0 };
+    }
+    if (cmd.includes("--numstat")) {
+      return { stdout: numstatStdout, stderr: "", exitCode: 0 };
     }
     if (cmd.includes("--input")) {
       return { stdout: JSON.stringify(VALID_OUTPUT), stderr: "", exitCode: 0 };
@@ -313,6 +318,7 @@ function reset(): void {
   appCalls.length = 0;
   kvGuardPuts.length = 0;
   logLines.length = 0;
+  numstatStdout = "";
 }
 
 /** The runner exec call's env, in message order (one entry per runner step). */
@@ -339,16 +345,17 @@ function runnerPools(): Array<Record<string, string[]> | undefined> {
 
 /**
  * The DECODED runner input JSON payloads, in write order (one per
- * `printf … | base64 -d > '/workspace/review-input.json'` step — the runner
- * exec command references the same path but carries no base64 payload).
+ * `base64 -d > '/workspace/review-input.json'` step — the document arrives on
+ * that exec's STDIN pipe, so the runner exec command references the same path
+ * but carries no base64 payload).
  */
 function runnerInputs(): Array<Record<string, unknown>> {
   return sandboxCalls
     .filter((c) => c.cmd.includes("base64 -d > '/workspace/review-input.json'"))
     .map((c) => {
-      const payload = /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d/.exec(c.cmd)?.[1];
-      if (!payload) throw new Error(`runner-input write command without a base64 payload: ${c.cmd}`);
-      return JSON.parse(atob(payload)) as Record<string, unknown>;
+      const stdin = (c.opts as { stdin?: string } | undefined)?.stdin;
+      if (stdin === undefined) throw new Error("runner-input write arrived without a stdin payload");
+      return JSON.parse(Buffer.from(stdin, "base64").toString("utf8")) as Record<string, unknown>;
     });
 }
 
@@ -875,6 +882,9 @@ describe("runner input modelOverrides threading", () => {
 
   test("app message with NO role map: input JSON omits the field entirely (no-map run)", async () => {
     reset();
+    // Non-ASCII numstat path: the runner input rides stdin base64, so the test
+    // helper's decode must be UTF-8 (atob would mangle it to latin1).
+    numstatStdout = "1\t1\tdocs/中文.md\n";
     const appDb = createMigratedTestD1();
     const appX = await seedApp(appDb, "app-x"); // github_apps row, NO role rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
@@ -883,6 +893,7 @@ describe("runner input modelOverrides threading", () => {
     // No role map → the runner input JSON omits the field entirely
     // (byte-identical to a no-map run); capability hosts ride always.
     expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
+    expect(appInput!.reconFacts).toContain("1\t1\tdocs/中文.md");
   });
 
   test("an all-cleared role map resolves to NO field (empty map = current behavior)", async () => {

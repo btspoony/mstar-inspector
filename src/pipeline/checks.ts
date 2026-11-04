@@ -68,6 +68,7 @@ import {
   getCheckOwnership,
 } from "../store/review-checks";
 import { redactSecrets } from "./redact";
+import { CHECK_UPDATE_DEFAULT } from "./check-budgets-reader";
 
 // ---------------------------------------------------------------------------
 // Transport seam (spec §7.6: one credential path; §7.9: typed responses)
@@ -217,6 +218,14 @@ export type ChecksDeps = {
    * recovery has not yet bumped the epoch (spec §7.9).
    */
   nowMs: () => number;
+  /**
+   * Adapter-level fallback bound on the terminal update send. The consumer
+   * passes the operator-configured budget per message; this field covers every
+   * other caller (recovery). Omitted entirely → the store's documented
+   * absent-row default (`CHECK_UPDATE_DEFAULT`). Injectable so tests exercise
+   * the timeout without waiting the default budget out.
+   */
+  updateBudgetMs?: number;
 };
 
 /** The §7.9 adapter surface, bound to one App credential. */
@@ -236,6 +245,8 @@ export type ChecksAdapter = {
     lease: Lease;
     checkRunId: number;
     conclusion: CheckConclusion;
+    /** The operator-configured update budget for THIS call; omitted → the adapter-level fallback. */
+    updateBudgetMs?: number;
   }): Promise<
     | { kind: "completed"; remote: CheckRemote }
     | { kind: "unavailable"; reason: string; requests: number }
@@ -299,6 +310,37 @@ function sendRequests<T>(promise: Promise<T>): Promise<{ sent: number; outcome: 
     (outcome) => ({ sent: 1, outcome }),
     (failure: unknown) => ({ sent: isRequestNotDispatched(failure) ? 0 : 1, outcome: { failure } }),
   );
+}
+
+/**
+ * The bound on the terminal UPDATE send. A create may take as long as the
+ * transport needs (the row stays `sending` and recovery adopts), but a
+ * finished review must not sit on its lease waiting for an update that never
+ * answers: at the budget the send is reported unavailable so the lifecycle
+ * releases the attempt to recovery (spec §7.10: a Check never delays the
+ * review, and a lease is never held by a caller that can no longer make
+ * progress). The bound itself comes from the operator runtime configuration
+ * (`review.check.update_timeout_ms`); `CHECK_UPDATE_DEFAULT` is only its
+ * documented absent-row default.
+ */
+
+/**
+ * `sendRequests` bounded by a wall-clock budget. A timed-out request may still
+ * have reached GitHub, so it is reported as SENT (`requests: 1`) — recovery
+ * must adopt/retry conservatively instead of assuming nothing landed.
+ */
+async function sendRequestsWithin<T>(
+  promise: Promise<T>,
+  budgetMs: number,
+  label: string,
+): Promise<{ sent: number; outcome: T | { failure: unknown } }> {
+  const { promise: budget, resolve } = Promise.withResolvers<{ sent: number; outcome: { failure: unknown } }>();
+  const timer = setTimeout(() => resolve({ sent: 1, outcome: { failure: new Error(`${label} exceeded ${budgetMs}ms`) } }), budgetMs);
+  try {
+    return await Promise.race([sendRequests(promise), budget]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Adoption walk bounds (spec §7.9: "max 2 pages", per_page 100). */
@@ -496,7 +538,13 @@ async function adoptCheckRunWith(
  */
 async function completeCheckWith(
   deps: ChecksDeps,
-  input: { identity: CheckIdentity; lease: Lease; checkRunId: number; conclusion: CheckConclusion },
+  input: {
+    identity: CheckIdentity;
+    lease: Lease;
+    checkRunId: number;
+    conclusion: CheckConclusion;
+    updateBudgetMs?: number;
+  },
 ): Promise<{ kind: "completed"; remote: CheckRemote } | { kind: "unavailable"; reason: string; requests: number }> {
   const owned = await guardOwnership(deps, input.identity, input.lease, deps.nowMs());
   if (owned.kind === "unavailable") return owned;
@@ -539,7 +587,7 @@ async function completeCheckWith(
     return refused("lease expired before the update request");
   }
   const { scope } = identity;
-  const attempted = await sendRequests(
+  const attempted = await sendRequestsWithin(
     client.rest.checks.update({
       owner: scope.owner,
       repo: scope.repo,
@@ -549,6 +597,8 @@ async function completeCheckWith(
       title: frozen.title,
       summary: frozen.summary,
     }),
+    input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT,
+    "check update",
   );
   if ("failure" in attempted.outcome) {
     return { kind: "unavailable", requests: attempted.sent, reason: surfaceFailure(attempted.outcome.failure, "check update") };
@@ -965,6 +1015,12 @@ export type CheckLifecycle = {
     handle: CheckLifecycleHandle;
     publicationId: string | null;
     outcome: CheckTerminalOutcome;
+    /**
+     * The operator-configured bound on the one terminal `checks.update`
+     * (`review.check.update_timeout_ms`). Omitted → the adapter's own fallback,
+     * then the store's documented default (recovery callers).
+     */
+    updateBudgetMs?: number;
   }): Promise<void>;
 };
 
@@ -1236,6 +1292,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         lease: fenceFor(handle.lease).lease,
         checkRunId,
         conclusion,
+        updateBudgetMs: input.updateBudgetMs,
       });
       if (completed.kind === "completed") {
         // `observed` advances ONLY from this validated response (spec §7.9),

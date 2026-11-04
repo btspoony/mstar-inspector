@@ -21,6 +21,24 @@ Examples: `.worktrees/my-topic/`, `.worktrees/feat-foo/`.
 
 The directory is gitignored. Do not `git add` it. Cleanup still uses `git worktree remove` on abandoned paths listed by `git worktree list`.
 
+## Configuration surfaces (hard rule)
+
+Non-secret values that an operator, a workspace owner, or an App owner may reasonably want to change MUST live in a configuration surface. They MUST NOT be a source constant, a `wrangler.jsonc` var, or a `.dev.vars` entry.
+
+| Level | Surface | Use for |
+|---|---|---|
+| Global / platform | operator admin → `review_runtime_settings` system rows (`src/admin/index.ts`, `/api/runtime`) | budgets and limits justified by platform behaviour — queue wall clock, isolate lifetime, provider/GitHub latency, platform retention defaults |
+| Workspace | workspace settings (`workspaces` columns and the workspace settings routes) | review behaviour a tenant tunes for its own repositories |
+| Per App | App settings (`app_*` tables and the App routes) | model chains, provider keys, per-App policy |
+
+Pick the narrowest level that owns the decision. A value that only the platform's own runtime constraints justify belongs to the global level; a value a tenant would want different belongs to that tenant's workspace; a value specific to one App belongs to that App.
+
+A source constant is allowed ONLY for an invariant nobody may configure: protocol limits (GitHub body size, signature freshness), platform hard caps, enum values, wire-format sizes. "It is only a default" is not an exemption — a default is the absent-row fallback of a configuration surface, read from that surface at runtime.
+
+Secrets are out of scope here: they keep their existing secret-store path.
+
+`wrangler.jsonc` `vars` and `.dev.vars` carry deployment-shape facts only (`DEPLOYMENT_MODE`), never a tuning knob. A new tunable ships with its surface in the same change: the store key, the read path with its documented absent-row default, the admin or settings write route, and the UI control.
+
 ## No local process IDs in tracked content
 
 `.mstar/` harness state (plans, iterations, SDD runs, workflows, status) is

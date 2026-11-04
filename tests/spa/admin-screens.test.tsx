@@ -334,7 +334,22 @@ describe("Flags screen", () => {
 });
 
 describe("Runtime screen", () => {
-  const RUNTIME = { concurrency: 24, min: 1, max: 256, degraded: false };
+  const CHECK_BUDGETS = {
+    terminalizeMs: 10_000,
+    updateMs: 5_000,
+    terminalizeMin: 1_000,
+    terminalizeMax: 30_000,
+    updateMin: 500,
+    updateMax: 15_000,
+    degraded: false,
+  };
+  const RUNTIME = {
+    concurrency: 24,
+    min: 1,
+    max: 256,
+    degraded: false,
+    checkBudgets: CHECK_BUDGETS,
+  };
 
   test("a failed read renders the error with a retry that reloads", async () => {
     let failing = true;
@@ -395,7 +410,7 @@ describe("Runtime screen", () => {
     // Showing 1 as a normal value would invite saving a number nobody stored.
     let degraded = true;
     const surface = await runtimeScreen(() =>
-      json({ concurrency: 1, min: 1, max: 256, degraded }),
+      json({ concurrency: 1, min: 1, max: 256, degraded, checkBudgets: CHECK_BUDGETS }),
     );
     expect(surface.text()).toContain(
       "The stored system concurrency could not be read, so every workspace is running one review at a time. Entering a value in range saves a new one, and retrying the read re-checks the stored row.",
@@ -426,7 +441,7 @@ describe("Runtime screen", () => {
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
         ? json({ concurrency: 41 })
-        : json({ concurrency: 1, min: 1, max: 256, degraded: true }),
+        : json({ concurrency: 1, min: 1, max: 256, degraded: true, checkBudgets: CHECK_BUDGETS }),
     );
     expect(surface.text()).toContain("could not be read");
     expect(
@@ -451,10 +466,76 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("an older server without checkBudgets still renders the concurrency card", async () => {
+    // A previously deployed Worker behind this bundle: the field is absent, so
+    // the budget card is hidden and the concurrency card is untouched.
+    const surface = await runtimeScreen(() =>
+      json({ concurrency: 24, min: 1, max: 256, degraded: false }),
+    );
+    expect(surface.text()).toContain("Effective on the next review: 24.");
+    expect(surface.container.querySelector("#check-terminalize-budget")).toBeNull();
+    expect(surface.container.querySelector("#system-concurrency")).not.toBeNull();
+    await surface.close();
+  });
+
   test("a zh_CN render shows the page's dictionary copy", async () => {
     const surface = await runtimeScreen(() => json(RUNTIME), "zh_CN");
     expect(surface.text()).toContain("运行时参数");
     expect(surface.text()).toContain("下一次审查生效值：24。");
+    await surface.close();
+  });
+
+  test("the Check budgets card shows both stored values and one save fires exactly one PATCH", async () => {
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ checkBudgets: { terminalizeMs: 12_000, updateMs: 7_000 } })
+        : json(RUNTIME),
+    );
+    const terminalize = surface.container.querySelector("#check-terminalize-budget") as unknown as HTMLInputElement;
+    expect(terminalize.value).toBe("10000");
+
+    await surface.type("#check-terminalize-budget", "12000");
+    await surface.type("#check-update-budget", "7000");
+    // The second form's submit button is the budget save.
+    const budgetForm = surface.container.querySelector("#check-terminalize-budget")!.closest("form")!;
+    await surface.click(budgetForm.querySelector('button[type="submit"]'));
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { checkBudgets: { terminalizeMs: 12_000, updateMs: 7_000 } },
+      },
+    ]);
+    expect(
+      (surface.container.querySelector("#check-terminalize-budget") as unknown as HTMLInputElement).value,
+    ).toBe("12000");
+    expect(surface.text()).toContain("Saved.");
+    await surface.close();
+  });
+
+  test("a refused budget pair reports the server's relation text inside the budget card", async () => {
+    // The store owns the terminalize>update rule; the card surfaces its text
+    // next to the fields that produced it, not as a page-wide banner.
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? new Response(
+            JSON.stringify({
+              error: "the terminalize timeout must be greater than the check update budget",
+            }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          )
+        : json(RUNTIME),
+    );
+    await surface.type("#check-terminalize-budget", "4000");
+    await surface.type("#check-update-budget", "5000");
+    const budgetForm = surface.container.querySelector("#check-terminalize-budget")!.closest("form")!;
+    await surface.click(budgetForm.querySelector('button[type="submit"]'));
+
+    expect(surface.text()).toContain("Could not change the check budgets.");
+    expect(surface.text()).toContain("the terminalize timeout must be greater than the check update budget");
+    // The rejected write never replaced the stored pair.
+    expect(surface.text()).toContain("Effective on the next review: terminalize 10000 ms, update 5000 ms.");
     await surface.close();
   });
 });

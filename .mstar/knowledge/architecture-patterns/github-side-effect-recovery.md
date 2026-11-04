@@ -75,6 +75,21 @@ const handle = await raceWithBudget(begin, () => abort.abort());
 
 Never store this flag on a consumer-wide object and reset it for the next message. Multiple attempts for the same PR and SHA can coexist. A late begin must consult its own signal, retain any possibly-created remote identity, freeze a terminal desired state, and make recovery immediately due. Starting another message cannot un-abandon it.
 
+### Give the terminal side effect its own budget and an owner
+
+`begin` runs before model work and must stay cheap; terminalization runs after the review's outcome is durable, so one bound cannot serve both. Use two explicit budgets and make the parameter required — a defaulted budget silently applies the wrong one to a new caller:
+
+```ts
+await withHookTimeout(beginPromise, null, BEGIN_HOOK_BUDGET_MS, () => beginLatch.abandon());
+const terminalize = lifecycle.terminalize({ handle, publicationId, outcome });
+background.waitUntil(terminalize.catch((err) => log.warn(err)));   // invocation-owned
+await withHookTimeout(terminalize, undefined, TERMINALIZE_HOOK_BUDGET_MS);
+```
+
+A detached promise with no `waitUntil` owner is not "best effort": the isolate may reclaim it between the budget expiry and the first durable write, leaving the row holding its full execution lease. Because the recovery selector only admits a row whose lease has expired, that gap costs a whole lease plus one reconciler period — measured at 15–25 minutes on a `*/15` schedule while the review comment had already been public for seconds. The check is a secondary side effect; its budget is about isolating it from publication, not about keeping the invocation alive.
+
+The remote update itself needs a bound shorter than the hook budget, so the timeout is reached while the local lease is still usable. A timed-out request must report as possibly sent (`sent: 1`), never as zero, and the existing release path then makes recovery due in about a minute instead of at the execution deadline.
+
 ### Suspend unchanged operator failures without hiding recovery
 
 Credential identity mismatch, decrypt failure, missing exact-App routing, disabled Apps, and review pause are operator-state failures, not transient per-row retries. Persist a bounded typed suspension reason plus a non-secret digest of the relevant encrypted envelope/routing state. An unchanged state stays outside the due batch and performs no credential probe.
