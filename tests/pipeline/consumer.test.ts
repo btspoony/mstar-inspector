@@ -85,6 +85,12 @@ import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
+import {
+  readRecheckCommand,
+  readRecheckStatusCommand,
+  readReportCommand,
+} from "../../src/pipeline/gitops";
 import { sk, gh, AWS_CANARY_KEY } from "../helpers/fake-secrets";
 import {
   SHA,
@@ -146,6 +152,7 @@ import {
   messageAckCalls,
   messageRetryCalls,
   PR_CONTEXT_EXEC_TIMEOUT_MS,
+  POST_RUNNER_READ_TIMEOUT_MS,
   queueState,
   reset as resetHarness,
   reviewGuardTtlSeconds,
@@ -154,7 +161,7 @@ import {
   testLog,
   testOverrides,
 } from "../helpers/consumer-harness";
-import { PR_CONTEXT_MAX_ISSUES } from "../../packages/shared/src/report-wire";
+import { PR_CONTEXT_MAX_ISSUES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 
 /** Runner exec call's env (the sandbox fake stores opts as unknown). */
 function runnerExecEnv(): Record<string, string> {
@@ -2828,19 +2835,33 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
+    const postRunnerCmds = new Set<string>([
+      readRecheckCommand(RECHECK_OUTPUT_PATH),
+      readRecheckStatusCommand(RECHECK_STATUS_PATH),
+      readReportCommand(REPORT_OUTPUT_PATH),
+    ]);
     const timed = sandbox.calls.filter(
       (call) => (call.opts as { timeout?: number } | undefined)?.timeout === EXEC_TIMEOUT_GIT_MS,
     );
+    // The post-runner bounded reads carry their own tighter bound, not the
+    // git window (nor the capture's, which it happens to share numerically).
+    const postRunner = sandbox.calls.filter((call) => postRunnerCmds.has(call.cmd));
+    expect(postRunner).toHaveLength(3);
+    for (const read of postRunner) {
+      expect((read.opts as { timeout?: number } | undefined)?.timeout).toBe(POST_RUNNER_READ_TIMEOUT_MS);
+    }
     // The four PR-context reads carry the tighter capture bound instead.
     const captured = sandbox.calls.filter(
-      (call) => (call.opts as { timeout?: number } | undefined)?.timeout === PR_CONTEXT_EXEC_TIMEOUT_MS,
+      (call) =>
+        (call.opts as { timeout?: number } | undefined)?.timeout === PR_CONTEXT_EXEC_TIMEOUT_MS &&
+        !postRunnerCmds.has(call.cmd),
     );
     // `gh pr view` + one `gh issue view` per linked issue (the cap).
     expect(captured).toHaveLength(1 + PR_CONTEXT_MAX_ISSUES);
     // One command per billed window — except `readRecheckDoc`, which races the
     // document and status reads in ONE Promise.all window (two commands, one
     // entry). A new sandbox step without its ledger entry breaks this.
-    expect(timed.length + captured.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 1);
+    expect(timed.length + captured.length + postRunner.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 1);
   });
 
   test("guardRetryDelaysSeconds per level — the schedule covers the guard TTL (AC-4)", () => {

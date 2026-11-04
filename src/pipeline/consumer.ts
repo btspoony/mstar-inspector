@@ -257,6 +257,20 @@ const OMP_AGENT_DIR = "/opt/omp-agent";
 /** gh/git steps (clone, rev-parse, diff, numstat, runner-input write) — measured ~2.6s total, 2min each is generous. */
 export const EXEC_TIMEOUT_GIT_MS = 120_000;
 /**
+ * Bound for the bounded reads issued AFTER the paid runner (ms): the recheck
+ * document, the recheck status and the report document. They are local file
+ * reads — no git-sized window — and they share the round clock with the
+ * capture and the runner, so the PR-context gate reserves their worst case.
+ */
+export const POST_RUNNER_READ_TIMEOUT_MS = 30_000;
+/** Post-runner bounded reads per round — the count the gate reserves. */
+const POST_RUNNER_READ_COUNT = 3;
+/**
+ * Worst case the round clock owes those reads (ms): every one may consume its
+ * whole `POST_RUNNER_READ_TIMEOUT_MS`. 90_000ms at the current count.
+ */
+export const POST_RUNNER_READ_BUDGET_MS = POST_RUNNER_READ_COUNT * POST_RUNNER_READ_TIMEOUT_MS;
+/**
  * In-image runner budget per review level (ms). One Worker deployment = one
  * REVIEW_LEVEL = one timeout table (spec d5-budget § Trigger): quick/default
  * keep the frozen 10min ceiling (measured ~52s on a real model call); deep
@@ -538,9 +552,11 @@ export const defaultConsumerLog: ConsumerLog = {
  * its length) and it is pinned against a real round: consumer.test.ts runs the
  * maximal round and requires exactly this many bounded commands. The four
  * PR-context reads run under the tighter `PR_CONTEXT_EXEC_TIMEOUT_MS` (30s)
- * but still bill at 120s here — a deliberate over-count, so the TTL stays
- * conservative. An uncounted step lets the row expire while a legal review is
- * still posting, so a new one must fail that test until it is added here.
+ * and the post-runner document/status/report reads under
+ * `POST_RUNNER_READ_TIMEOUT_MS` (also 30s), but all still bill at 120s here —
+ * a deliberate over-count, so the TTL stays conservative. An uncounted step
+ * lets the row expire while a legal review is still posting, so a new one must
+ * fail that test until it is added here.
  */
 export const GUARD_TIMED_SANDBOX_STEPS: readonly string[] = [
   "clone",
@@ -1000,7 +1016,7 @@ async function readReportDoc(
   log: ConsumerLog,
   fields: ConsumerLogFields,
 ): Promise<ReportDoc | null> {
-  const read = await boundedRead(sandbox, readReportCommand());
+  const read = await boundedRead(sandbox, readReportCommand(), POST_RUNNER_READ_TIMEOUT_MS);
   if (read.failure !== null) {
     log.warn(
       { ...fields, report_doc: read.failure === "overflow" ? "overflow" : "unreadable" },
@@ -1121,10 +1137,11 @@ function clampContextText(text: string, maxChars: number): string {
  * Round arithmetic (`ROUND_BUDGET_MS` = 900_000ms):
  *   capture worst case (1 + PR_CONTEXT_MAX_ISSUES) × 30_000 = 120_000ms
  *   quick/default runner                                     = 600_000ms
- *   gate needs 720_000ms → funded at round start with 180_000ms to spare.
- * A deep round needs 840_000 + 120_000 = 960_000ms, more than the 900_000ms
- * window, so deep rounds always skip the capture — narrative never trades
- * away a deep run's window. Changing either metric re-derives the gate.
+ *   post-runner bounded reads (3 × POST_RUNNER_READ_TIMEOUT_MS) =  90_000ms
+ *   gate needs 810_000ms → funded at round start with 90_000ms to spare.
+ * A deep round needs 840_000 + 120_000 + 90_000 = 1_050_000ms, more than the
+ * 900_000ms window, so deep rounds always skip the capture — narrative never
+ * trades away a deep run's window. Changing any term re-derives the gate.
  */
 export const PR_CONTEXT_EXEC_TIMEOUT_MS = 30_000;
 
@@ -1143,8 +1160,9 @@ export const PR_CONTEXT_WORST_CASE_MS = (1 + PR_CONTEXT_MAX_ISSUES) * PR_CONTEXT
  * Bounded by the ROUND's clock: the capture runs before the paid run and each
  * gh read can consume its whole `PR_CONTEXT_EXEC_TIMEOUT_MS`, so a slow
  * sandbox could spend the round's window on a narrative. The gate therefore
- * requires the remainder to cover the worst-case capture AND the level's
- * runner budget — the run must still fit after the capture — and only then
+ * requires the remainder to cover the worst-case capture, the level's runner
+ * budget AND the post-runner bounded reads that share this round's clock —
+ * the reads must still fit after the capture and the run — and only then
  * does the remaining time bound how many issue reads start, so the review
  * itself never carries the cost.
  *
@@ -1173,12 +1191,15 @@ async function capturePrContext(
   const remainingMs = roundDeadlineMs - Date.now();
   // The capture is spent BEFORE the paid run, so its bound must leave the
   // level's own exec budget intact: a capture that fits but eats the runner's
-  // window turns a review into a timeout.
-  const captureBudgetMs = PR_CONTEXT_WORST_CASE_MS + runnerTimeoutMs(level);
+  // window turns a review into a timeout. The post-runner bounded reads share
+  // that same clock, so their worst case is reserved too — a capture that
+  // consumed the whole remainder would starve them.
+  const captureBudgetMs =
+    PR_CONTEXT_WORST_CASE_MS + runnerTimeoutMs(level) + POST_RUNNER_READ_BUDGET_MS;
   if (remainingMs < captureBudgetMs) {
     log.warn(
       { ...fields, report_context: "budget" },
-      `report context budget — ${remainingMs}ms left of the round, the capture costs up to ${PR_CONTEXT_WORST_CASE_MS}ms and the run still needs its ${runnerTimeoutMs(level)}ms — skipped, report sections degrade to none`,
+      `report context budget — ${remainingMs}ms left of the round, the capture costs up to ${PR_CONTEXT_WORST_CASE_MS}ms, the run still needs its ${runnerTimeoutMs(level)}ms and the post-runner reads ${POST_RUNNER_READ_BUDGET_MS}ms — skipped, report sections degrade to none`,
     );
     return undefined;
   }
@@ -1902,10 +1923,14 @@ function parseBoundedRead(stdout: string): BoundedRead {
   return { text: out.slice(0, split), failure: null };
 }
 
-async function boundedRead(sandbox: ReviewSandbox, command: ShellCommand): Promise<BoundedRead> {
+async function boundedRead(
+  sandbox: ReviewSandbox,
+  command: ShellCommand,
+  timeoutMs: number,
+): Promise<BoundedRead> {
   let read;
   try {
-    read = await sandbox.runCommand(command, { timeout: EXEC_TIMEOUT_GIT_MS });
+    read = await sandbox.runCommand(command, { timeout: timeoutMs });
   } catch {
     return { text: null, failure: "unreadable" };
   }
@@ -2007,8 +2032,8 @@ async function readRecheckDoc(
   status: RecheckStatus | null;
 }> {
   const [docRead, statusRead] = await Promise.all([
-    boundedRead(sandbox, readRecheckCommand(RECHECK_OUTPUT_PATH)),
-    boundedRead(sandbox, readRecheckStatusCommand()),
+    boundedRead(sandbox, readRecheckCommand(RECHECK_OUTPUT_PATH), POST_RUNNER_READ_TIMEOUT_MS),
+    boundedRead(sandbox, readRecheckStatusCommand(), POST_RUNNER_READ_TIMEOUT_MS),
   ]);
   let doc: RecheckDoc | null = null;
   // A zero-byte payload is the seat writing nothing: absent, not malformed.
@@ -4073,11 +4098,11 @@ async function processMessage(
     // packages/shared/src, tests/review/runtime-boundary).
     // PR context for the report seat (best-effort): the description plus the
     // issues it closes/references, read through gh with the same exec env the
-    // diff uses. Bounded by the round's own clock (each read can burn a whole
-    // 120s window) and gated so the level's runner budget survives the capture;
-    // any failure or a budget skip resolves undefined (with one named warn) so
-    // the published report sections degrade to `none` — a narrative gap never
-    // fails a review.
+    // diff uses. Bounded by the round's own clock (each read can burn its whole
+    // PR_CONTEXT_EXEC_TIMEOUT_MS window) and gated so the level's runner budget
+    // AND the post-runner bounded reads survive the capture; any failure or a
+    // budget skip resolves undefined (with one named warn) so the published
+    // report sections degrade to `none` — a narrative gap never fails a review.
     const prContext = await capturePrContext(
       sandbox,
       payload,
