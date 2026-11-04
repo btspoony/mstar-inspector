@@ -28,8 +28,9 @@ public App and `404` for a private one. Probe it that way:
 
 A `404` is ambiguous: it is also what a missing or renamed slug returns, so a
 stale cached slug can read as `private`. That no longer costs anything on the
-delivery path — admission never reads this cache — it only hides the owner
-allowlist control on the settings page while the stored list stays enforced.
+delivery path — admission never reads this cache — and it no longer hides
+anything: the owner allowlist control renders for every cached value, with a
+note for `private` that the stored list still applies.
 
 The probe runs on two occasions: after
 a successful profile fetch, on the slug that fetch resolved (or the already
@@ -53,9 +54,9 @@ An App can restrict review work to a set of repository owners. The switch is
 off by default and off means the pre-existing behavior exactly.
 
 When the switch is on, admission happens after classification and before the
-first write, for EVERY cached visibility. `private` never exempts a delivery:
-it only hides the dashboard control, so a stale `private` cache can never leave
-the gate inert.
+first write, for EVERY cached visibility. `private` never exempts a delivery
+and never hides the control; it only adds a note, so a stale `private` cache
+can never leave the gate inert or unmanageable.
 
 - owner readable and listed -> continue
 - owner readable and not listed -> respond `200` with a short body and write
