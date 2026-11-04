@@ -17,9 +17,11 @@ import { mock } from "bun:test";
 import type { ReviewOutput } from "../../src/review/schema";
 import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
 import {
+  boundedFileReadCommand,
   buildGitOpsCommands,
   CLONE_DIR,
   DIFF_PATH,
+  DIFF_PREFETCH_MAX_BYTES,
   readRecheckCommand,
   readRecheckStatusCommand,
   RUNNER_INPUT_PATH,
@@ -127,8 +129,6 @@ export async function seedAppConfig(
   }
 }
 
-// line comments: the prefetched diff fixture (now the
-// WORKER-CAPTURED sandbox diff — same text, one capture).
 /** Default diff fixture: a src/auth.ts hunk whose right range covers line 21. */
 export const VALID_DIFF = [
   "diff --git a/src/auth.ts b/src/auth.ts",
@@ -219,6 +219,12 @@ const RUNNER_CMDS: ReadonlySet<string> = new Set(
     runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, RECHECK_OUTPUT_PATH),
   ]),
 );
+/**
+ * The diff capture's bounded READ half, built by the same production builder
+ * the command composes — so a transport change edits the product, not this
+ * double. The redirect (`gh pr diff … > file`) is the part that never changes.
+ */
+const DIFF_READ = boundedFileReadCommand(DIFF_PATH, DIFF_PREFETCH_MAX_BYTES);
 /** The audited bounded reads, built by production code from the fixed paths. */
 const RECHECK_DOC_READ = readRecheckCommand(RECHECK_OUTPUT_PATH);
 const RECHECK_STATUS_READ = readRecheckStatusCommand(RECHECK_STATUS_PATH);
@@ -242,8 +248,15 @@ export type FakeSandboxState = {
   resolvedSha: string;
   revParseExitCode: number;
   cloneExitCode: number;
+  /** The diff FILE the production command writes; the double streams it back bounded. */
   diffStdout: string;
   diffExitCode: number;
+  /**
+   * Raw stdout a BROKEN transport answers the bounded read with, replacing the
+   * command's own `<content>\n<flag>\n` reply (an empty one has no flag line).
+   * `null` = answer like the real command.
+   */
+  diffReadStdout: string | null;
   numstatStdout: string;
   numstatExitCode: number;
   writeInputExitCode: number;
@@ -277,8 +290,12 @@ export function initialFakeSandboxState(): FakeSandboxState {
     resolvedSha: SHA,
     revParseExitCode: 0,
     cloneExitCode: 0,
-    diffStdout: "",
+    // A HEALTHY capture by default: an empty diff next to the non-empty numstat
+    // below is a capture FAILURE, so an untouched case would silently take the
+    // context-incomplete path. Cases that need a lost capture opt in explicitly.
+    diffStdout: VALID_DIFF,
     diffExitCode: 0,
+    diffReadStdout: null,
     numstatStdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n",
     numstatExitCode: 0,
     writeInputExitCode: 0,
@@ -314,8 +331,33 @@ function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
       return { stdout: "", stderr: "", exitCode: state.cloneExitCode };
     case "checkedOutSha":
       return { stdout: `${state.resolvedSha}\n`, stderr: "", exitCode: state.revParseExitCode };
-    case "diff":
-      return { stdout: state.diffStdout, stderr: "", exitCode: state.diffExitCode };
+    case "diff": {
+      // Production shape (`diffCommand`): gh redirects the diff into the file,
+      // then its READ HALF streams it back — first DIFF_PREFETCH_MAX_BYTES
+      // bytes, `\n`, then the `wc -c` overflow flag. DIFF_READ is built by the
+      // production builder, so a transport change edits the product, never
+      // this double. (The retired redirect-only shape carries no read half and
+      // is not a command any builder emits, so it never reaches this case.)
+      if (state.diffExitCode !== 0) {
+        // `gh` fails the chain BEFORE the read half runs: no bounded payload
+        // can accompany a failed exit.
+        return { stdout: "", stderr: "gh failed", exitCode: state.diffExitCode };
+      }
+      if (!cmd.endsWith(DIFF_READ)) {
+        throw new Error(`fake sandbox: diff command without its bounded read: ${cmd}`);
+      }
+      // The command ALWAYS terminates its reply with the flag line; only a
+      // broken transport does not, which `diffReadStdout` reproduces.
+      if (state.diffReadStdout !== null) {
+        return { stdout: state.diffReadStdout, stderr: "", exitCode: 0 };
+      }
+      // `diffStdout` is the FILE content here, so returning it raw (the defect
+      // this replaced) could never exercise the transport.
+      const bytes = Buffer.from(state.diffStdout);
+      const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
+      const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
+      return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: 0 };
+    }
     case "numstat":
       return { stdout: state.numstatStdout, stderr: "", exitCode: state.numstatExitCode };
     case "runner":

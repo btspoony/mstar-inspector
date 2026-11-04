@@ -134,6 +134,7 @@ import {
 import { boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
+import type { ShellCommand } from "./shell-command";
 import {
   buildGitOpsCommands,
   CLONE_DIR,
@@ -259,15 +260,6 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
  * fails when the two numbers drift.
  */
 export const QUEUE_MAX_ATTEMPTS = 4;
-
-/**
- * Cap on the prefetched PR diff considered for the line-comments hunk
- * prefilter (qc3 F-101): 2 MiB of diff text. Beyond it,
- * parseDiffHunkRanges would materialize a full line array per qualifying
- * round on multi-MB PRs; overflow degrades to the prefetch-failure path
- * (base-filter attempt; a residual 422 still falls back per AL-3).
- */
-export const DIFF_PREFETCH_MAX_BYTES = 2 * 1024 * 1024;
 
 /**
  * Runner exec timeout for the job's review level (spec d5-budget L4 — the
@@ -432,6 +424,16 @@ export type ConsumerLogFields = {
    */
   rejected_unnamed_ignored?: number;
   assessed?: number;
+  /**
+   * Set on the diff-capture warn, naming WHY the captured text cannot prove a
+   * row: `empty` (the exec exited 0 and delivered nothing while the same
+   * round's numstat shows a diff — a capture failure), `overflow` (the diff
+   * exists but is over DIFF_PREFETCH_MAX_BYTES) or `unreadable` (the sandbox
+   * reply carried no flag line — the command itself always terminates one, so
+   * this can only be a broken transport). All three make the round's recheck
+   * context unavailable; none is published as `no-evidence`.
+   */
+  diff_capture?: "empty" | "overflow" | "unreadable";
 };
 
 export type ConsumerLog = {
@@ -1511,17 +1513,24 @@ function roundContextCoverage(discussion: Discussion): Coverage {
 }
 
 /**
- * Payload text of one bounded read command, plus WHY it yielded nothing.
- * Non-zero exit, a missing flag line, or overflow beyond the byte bound are all
- * "no payload" to the caller, but they are different D1 causes, so the failure
- * is named rather than collapsed into a bare null. Shared by the recheck
- * document and status reads — the transport is identical, only the file
+ * Payload text of one bounded read, plus WHY it yielded nothing. A missing
+ * flag line or overflow beyond the byte bound are both "no payload" to the
+ * caller, but they are different D1 causes, so the failure is named rather
+ * than collapsed into a bare null. Shared by the recheck document and status
+ * reads and the diff capture — the transport is identical, only the producer
  * differs.
  */
-async function boundedRead(
-  sandbox: ReviewSandbox,
-  command: ReturnType<typeof readRecheckCommand>,
-): Promise<{ text: string | null; failure: string | null }> {
+type BoundedRead = { text: string | null; failure: "overflow" | "unreadable" | null };
+
+function parseBoundedRead(stdout: string): BoundedRead {
+  const out = stdout.trimEnd();
+  const split = out.lastIndexOf("\n");
+  if (split < 0) return { text: null, failure: "unreadable" };
+  if (out.slice(split + 1).trim() !== "0") return { text: null, failure: "overflow" }; // beyond the byte bound
+  return { text: out.slice(0, split), failure: null };
+}
+
+async function boundedRead(sandbox: ReviewSandbox, command: ShellCommand): Promise<BoundedRead> {
   let read;
   try {
     read = await sandbox.runCommand(command, { timeout: EXEC_TIMEOUT_GIT_MS });
@@ -1529,11 +1538,7 @@ async function boundedRead(
     return { text: null, failure: "unreadable" };
   }
   if (read.exitCode !== 0) return { text: null, failure: "unreadable" };
-  const out = read.stdout.trimEnd();
-  const split = out.lastIndexOf("\n");
-  if (split < 0) return { text: null, failure: "unreadable" };
-  if (out.slice(split + 1).trim() !== "0") return { text: null, failure: "overflow" }; // beyond the byte bound
-  return { text: out.slice(0, split), failure: null };
+  return parseBoundedRead(read.stdout);
 }
 
 /**
@@ -3258,17 +3263,27 @@ async function processMessage(
       deps.log.warn(fields, `lifecycle target capture failed — context-unavailable: ${detail}`);
     }
 
-    // Diff (GH_TOKEN via exec env only — never in the command). The stdout
-    // is retained as the WORKER-CONTROLLED §7.3 trusted capture: the
-    // evidence catalog slices AND the line-intent hunk prefilter both derive
-    // from this one diff. Over the in-memory bound the text is treated as
-    // unavailable (no slices; base-filter line comments) — never truncated
-    // slices.
+    // Diff (GH_TOKEN via exec env only — never in the command). The command
+    // writes the file for numstat AND streams a BOUNDED copy back: that stdout
+    // is the WORKER-CONTROLLED §7.3 trusted capture the evidence catalog
+    // slices and the line-intent hunk prefilter both derive from. The bounded
+    // read names three outcomes, deliberately distinct:
+    //   fit        → the text IS the capture;
+    //   overflow   → over DIFF_PREFETCH_MAX_BYTES: the diff exists but cannot
+    //                prove any row (no slices; base-filter line comments),
+    //                never truncated slices;
+    //   unreadable → no flag line at all: the transport broke, so the capture
+    //                failed whatever the file holds (a zero-change PR still
+    //                prints its `\n0\n` flag line).
+    // An empty `fit` payload is NOT decided here: `gh pr diff` also writes
+    // nothing for a PR with no changes, and only the numstat of the same round
+    // can tell the two apart (see step 6).
     const diff = await sandbox.runCommand(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
     if (diff.exitCode !== 0) {
       throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
     }
-    const diffText = diff.stdout.length <= DIFF_PREFETCH_MAX_BYTES ? diff.stdout : "";
+    const diffRead = parseBoundedRead(diff.stdout);
+    const diffText = diffRead.text ?? "";
 
     // Trusted evidence catalog (§7.3) for the selected targets, pinned to
     // the authoritative checkout SHA. A target the captured diff cannot prove
@@ -3424,6 +3439,30 @@ async function processMessage(
       .split("\n")
       .map((line) => line.trimEnd())
       .filter((line) => line !== "");
+
+    // A non-delivered diff capture is ambiguous, and only THIS round's
+    // numstat — the diff FILE `git apply` read, not the bounded stdout — can
+    // resolve the EMPTY case. Non-empty numstat means the redirect wrote a diff
+    // the read did not deliver: a CAPTURE FAILURE, so the round is
+    // context-incomplete, never every row published as a confident
+    // `no-evidence`. Both empty is a genuinely empty PR: a normal round.
+    // `overflow` and `unreadable` are capture failures by construction — the
+    // diff exists but is over the bound, or the transport broke — so they take
+    // the same accounting with their own `diff_capture` cause: an over-bound
+    // capture is "too large to prove", never "nothing to prove". The recheck
+    // input built above cannot change: any of the three leaves the catalog
+    // with no slices and every target excluded, so no input was built either
+    // way. Line comments keep the over-size behaviour — `diffText` stays "",
+    // so the hunk prefilter degrades to the base filter.
+    const diffCaptureFailure =
+      diffRead.failure ?? (diffRead.text === "" && numstatLines.length > 0 ? "empty" : undefined);
+    if (diffCaptureFailure !== undefined) {
+      captureFailed = true;
+      deps.log.warn(
+        { ...fields, diff_capture: diffCaptureFailure },
+        `diff capture ${diffCaptureFailure} — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+      );
+    }
 
     // 7. Runner input JSON (reconFacts): `<owner>/<repo>#<pr>` and
     // `head <sha>` fold into the envelope target INSIDE the runtime — the
