@@ -48,29 +48,24 @@ export function migrationNumber(name: string): number {
 }
 
 /**
- * Wrangler applies migrations in NUMERIC prefix order, so a lexical filename
- * compare would put `1000_*` before `999_*`. Every migration selector below
- * (and the equivalence fixtures in the pipeline suites) goes through this.
+ * The directory-derived migrations AFTER an anchor, in wrangler's apply order
+ * (numeric prefix, so `1000_*` follows `999_*`). The anchor is either the
+ * prefix number or a migration filename — a fixture declares the exact shape
+ * it reconstructs, then appends this tail, so a new migration joins it with no
+ * lockstep edit. A filename without a numeric prefix throws BY NAME
+ * (`migrationNumber`): its apply order is undefined, and a silent drop would
+ * apply a partial schema and hide the cause.
  */
-export function migrationsAfter(number: number): string[] {
+export function migrationsAfter(anchor: number | string): string[] {
+  const from = typeof anchor === "number" ? anchor : migrationNumber(anchor);
   return readdirSync(MIGRATIONS_DIR)
     .filter((name) => name.endsWith(".sql"))
     .sort((a, b) => migrationNumber(a) - migrationNumber(b))
-    .filter((name) => migrationNumber(name) > number);
+    .filter((name) => migrationNumber(name) > from);
 }
 
 /** Full migration list, in wrangler's apply order (numeric, not lexical). */
 const ALL_MIGRATIONS = migrationsAfter(0);
-
-/**
- * The directory-derived migrations whose filename sorts after `name` (the
- * wrangler apply order). A fixture lists the shape it must reconstruct up to
- * some migration, then appends this tail — so a new migration joins it with
- * no lockstep edit, and the fixture keeps the exact starting point it declares.
- */
-export function migrationsAfter(name: string): string[] {
-  return ALL_MIGRATIONS.filter((migration) => migration > name);
-}
 
 /** Execute the migration DDL on a fresh in-memory database. */
 function applyMigration(db: Database, migrations: readonly string[]): void {

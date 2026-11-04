@@ -38,14 +38,6 @@ import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput 
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
-/**
- * Every migration after the 0036 identity rewrite, in wrangler's apply order
- * (numeric prefix order, so `1000_*` follows `999_*`). Derived from the
- * directory so a future migration cannot leave this fixture on a stale schema;
- * the 0036 boundary itself stays explicit below because that loop exists to
- * reconstruct a specific historical shape.
- */
-const MIGRATIONS_AFTER_0036 = migrationsAfter(36);
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 /** Distinct fake App PEMs — isolation asserts the factory receives the right one. */

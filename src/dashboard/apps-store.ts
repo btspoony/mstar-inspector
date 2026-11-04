@@ -1155,7 +1155,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * same two stages from paging. The detail face's failure HISTORY excludes
      * nothing: `usage` (a lost metered record) and `recheck` (a round that
      * produced no usable document) each need a surface, and the detail's own
-     * `failure_count` still filters the same two stages out.
+     * `counts.failures` still filters the same two stages out.
      */
     async listPullRequests(appId: string): Promise<PullRequestRow[]> {
       const results = await db.batch([
@@ -1240,10 +1240,18 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * The record totals — the head payload's `counts`. The failure count rides
-     * the same join the failures section pages, so the tab count and the list
-     * length always agree. `must_fix` is the PR's own count of must-fix
-     * findings, unfiltered and unpaged: the family dot answers "does this PR
-     * have one", never "does the loaded page show one".
+     * the same join the failures section pages, plus the
+     * `PAGING_EXCLUDED_STAGES` exclusion: those rows are per-round ATTRIBUTION
+     * for reviews that continued (`recheck` a budget skip / dead seat / invalid
+     * document, `usage` a failed `usage_events` insert), so a clean PR would
+     * otherwise report failures it never had. The section itself excludes
+     * nothing — `usage` (a lost metered record) and `recheck` (a round that
+     * produced no usable document) each need a surface — so its `total` may
+     * exceed this count by exactly those rows.
+     *
+     * `must_fix` is the PR's own count of must-fix findings, unfiltered and
+     * unpaged: the family dot answers "does this PR have one", never "does the
+     * loaded page show one".
      *
      * Findings are counted by LIFECYCLE STATE, exactly as the findings page is
      * read: `review_findings.state` is `open | addressed | dismissed`, and a
@@ -1273,7 +1281,8 @@ export function createAppsStore(db: AppsStoreD1) {
           .prepare(
             `SELECT COUNT(*) AS n FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
+             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
           .bind(appId, owner, repo, prNumber),
         db

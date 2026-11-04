@@ -164,11 +164,15 @@ describe("listPullRequests", () => {
       const rows = await createAppsStore(db).listPullRequests(APP_ID);
       const byNumber = new Map(rows.map((row) => [row.number, row]));
       expect(byNumber.get(131)!.failure_count).toBe(0);
-      const detail = await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 131);
+      const store = createAppsStore(db);
       // Still not a REVIEW failure — the attribution row has a surface in the
-      // detail history, and its count stays 0.
-      expect(detail!.pull_request.failure_count).toBe(0);
-      expect(detail!.failures).toEqual([{ stage, error, created_at: expect.any(String) }]);
+      // detail's paged history, while the detail's failure COUNT stays 0.
+      expect((await store.countPullRequestRecords(APP_ID, "acme", "widgets", 131)).failures).toBe(0);
+      const history = await store.listPullRequestFailures(APP_ID, "acme", "widgets", 131, {
+        offset: 0,
+        limit: 10,
+      });
+      expect(history!.items).toEqual([{ stage, error, created_at: expect.any(String) }]);
       // Still in D1 as attribution — only the failure count drops it.
       expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 1 });
     });
