@@ -10,10 +10,11 @@
 --   check_min_score      INTEGER NOT NULL DEFAULT 80 — the score floor.
 --   check_pass_verdicts  TEXT NOT NULL DEFAULT '["ship it"]' — a JSON array of
 --                        the engine `PR_VERDICTS` spellings; the store rejects
---                        an off-vocabulary value before the write and this
---                        column has no CHECK because JSON contents cannot be
---                        enumerated in DDL. Reading the column back yields the
---                        same array the writer validated.
+--                        an off-vocabulary value before the write. The DDL
+--                        CHECK pins JSON well-formedness only — enumeration
+--                        cannot be expressed in DDL — so the store read path
+--                        still treats a well-formed but off-vocabulary array
+--                        as unreadable configuration.
 --   allowlist_enabled    INTEGER NOT NULL DEFAULT 0 — the owner allowlist
 --                        switch. Off (the default) behaves exactly like before
 --                        this migration; on with an EMPTY list refuses every
@@ -42,7 +43,7 @@
 -- down).
 
 ALTER TABLE github_apps ADD COLUMN check_min_score INTEGER NOT NULL DEFAULT 80 CHECK(check_min_score BETWEEN 0 AND 100);
-ALTER TABLE github_apps ADD COLUMN check_pass_verdicts TEXT NOT NULL DEFAULT '["ship it"]';
+ALTER TABLE github_apps ADD COLUMN check_pass_verdicts TEXT NOT NULL DEFAULT '["ship it"]' CHECK(json_valid(check_pass_verdicts));
 ALTER TABLE github_apps ADD COLUMN allowlist_enabled INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE github_apps ADD COLUMN github_visibility TEXT CHECK(github_visibility IN ('public','private','unknown'));
 

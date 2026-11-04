@@ -63,6 +63,7 @@ import {
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";
 import {
   createAppsStore,
+  dedupeOwnerLogins,
   REVIEW_TRIGGER_MODES,
   type DeliverySummary,
   type GithubAppRow,
@@ -4238,8 +4239,11 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     }
     const ownerText = typeof form.owners === "string" ? form.owners : "";
     // One login per line: blank lines are noise, duplicates collapse, the
-    // operator's order is kept.
-    const owners = [...new Set(ownerText.split("\n").map((line) => line.trim()).filter((line) => line !== ""))];
+    // operator's order is kept. GitHub logins are case-insensitive, so case
+    // variants are the SAME owner and collapse to the first spelling.
+    const owners = dedupeOwnerLogins(
+      ownerText.split("\n").map((line) => line.trim()).filter((line) => line !== ""),
+    );
     // The replace is ONE D1 batch, so the accepted size is bounded here (the
     // trust boundary): an oversized submission is a keyed 400, zero writes.
     if (owners.length > ALLOWLIST_MAX_OWNERS) {

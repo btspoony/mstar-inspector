@@ -1157,6 +1157,10 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
         });
         expect(decided.desired).toBe("success");
         expect(decided.summary).toBe(CHECK_SUMMARIES.gateMet(sha7, normal.round, "ship it", score, gate));
+        // The wording is pinned independently of the summary builder.
+        expect(decided.summary).toContain('verdict "ship it"');
+        expect(decided.summary).toContain(`score ${score}`);
+        expect(decided.summary).toContain("floor 80");
         expect(decided.title).toBe(CHECK_NAME);
       }
     }

@@ -455,12 +455,15 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   }
 
   // AL-20-1: best-effort delivery recording — the R2 diagnostics
-  // face ("断线看得见"). ONE row per VERIFIED delivery, written immediately
-  // after classification (before the reject return) so EVERY classified
-  // outcome lands: reject → rejected (status_code = the classifier's
-  // status), ignore → ignored, job + review_enabled=0 or review_global=0 →
-  // paused, job → ok, installation → ignored (verified, but it enqueues
-  // nothing — not a reviewable event).
+  // face ("断线看得见"). ONE row per ADMITTED verified delivery, written
+  // immediately after classification (before the reject return) so every
+  // classified outcome that reaches this line lands: reject → rejected
+  // (status_code = the classifier's status), ignore → ignored, job +
+  // review_enabled=0 or review_global=0 → paused, job → ok, installation →
+  // ignored (verified, but it enqueues nothing — not a reviewable event).
+  // The owner-allowlist refusal above (200 `ignored`) and its unreadable-read
+  // 500 return BEFORE this line, so those verified outcomes land no row by
+  // design — the gate admitted nothing.
   // pre-classify failures (413 / db-guard / 404 /
   // decrypt 500) never reach this line and record nothing (the retired
   // legacy face recorded nothing by design — AL-20-1: legacy 不落行; app_id

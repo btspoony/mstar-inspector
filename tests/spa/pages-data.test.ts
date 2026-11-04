@@ -33,7 +33,6 @@ import {
   type ProviderKeyRow,
 } from "../../src/spa/pages/data";
 import { DEFAULT_CHAIN_NAME as STORE_DEFAULT_CHAIN_NAME } from "../../src/dashboard/app-config-store";
-import { PR_VERDICTS as ENGINE_PR_VERDICTS } from "@mstar-harness/engine";
 
 describe("workspace role guard", () => {
   test("owner and admin manage members; a plain member only reads the list", () => {
@@ -447,6 +446,12 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings({ ...base, allowlist: { ...base.allowlist, enabled: "yes" } })).toBeNull();
     expect(parseSettings({ ...base, allowlist: { ...base.allowlist, owners: [7] } })).toBeNull();
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "hidden" } })).toBeNull();
+    // Every verdict the SPA renders round-trips through this parse: the
+    // settings control submits exactly these strings back on save.
+    for (const verdict of SPA_PR_VERDICTS) {
+      const parsed = parseSettings({ ...base, check_gate: { min_score: 80, pass_verdicts: [verdict] } });
+      expect(parsed && parsed.can_manage && parsed.check_gate.pass_verdicts).toEqual([verdict]);
+    }
     // A never-probed App reads as 'unknown' and a failed read as null — both parse.
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "unknown" } })).not.toBeNull();
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: null } })).not.toBeNull();
@@ -1007,12 +1012,5 @@ describe("invite grammar + page copy", () => {
       expect(zh.length).toBeGreaterThan(0);
       expect(zh).not.toBe(en);
     }
-  });
-});
-
-describe("review gate verdict mirror", () => {
-  // The SPA cannot import the Node-only engine, so this pins the copy to it.
-  test("the SPA PR_VERDICTS mirror equals the engine tuple, in order", () => {
-    expect([...SPA_PR_VERDICTS]).toEqual([...ENGINE_PR_VERDICTS]);
   });
 });

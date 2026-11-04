@@ -1990,6 +1990,13 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
       db.raw.prepare("UPDATE github_apps SET github_visibility = 'secret' WHERE id = 'legacy-app'").run(),
     ).toThrow();
     db.raw.prepare("UPDATE github_apps SET github_visibility = 'private' WHERE id = 'legacy-app'").run();
+    // JSON well-formedness is enforced; enumeration is not expressible in
+    // DDL, so a well-formed off-vocabulary array is still storable and the
+    // store read path — not the CHECK — rejects it.
+    expect(() =>
+      db.raw.prepare(`UPDATE github_apps SET check_pass_verdicts = '{not json' WHERE id = 'legacy-app'`).run(),
+    ).toThrow();
+    db.raw.prepare(`UPDATE github_apps SET check_pass_verdicts = '["lgtm"]' WHERE id = 'legacy-app'`).run();
   });
 
   test("app_owner_allowlist is keyed per (app, owner) and references github_apps", () => {

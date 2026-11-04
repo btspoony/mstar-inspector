@@ -4244,6 +4244,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(update.conclusion).toBe("success");
     expect(update.title).toBe(CHECK_NAME);
     expect(update.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(update.summary).toContain('verdict "ship it"');
+    expect(update.summary).toContain("score 85");
+    expect(update.summary).toContain("floor 80");
 
     // Order: the create lands after the authoritative-SHA step and before the
     // model work; the terminal update lands after the publication was posted.
@@ -4793,6 +4796,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.check_run_id).not.toBeNull();
     expect(row.desired).toBe("success");
     expect(row.desired_summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(row.desired_summary).toContain('verdict "ship it"');
+    expect(row.desired_summary).toContain("score 85");
+    expect(row.desired_summary).toContain("floor 80");
     expect(row.desired_title).toBe(CHECK_NAME);
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();

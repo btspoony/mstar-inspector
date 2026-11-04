@@ -480,12 +480,12 @@ export type PublishedReview = { verdict: string; scorePct: number | null };
 export function decideConclusion(input: {
   proof: PublicationProof | null;
   outcome: 'pre-publication-failure' | 'degraded-not-posted' | 'publication-unknown' | 'expired' | 'local-error';
-  gate: ReviewGate;
+  gate: ReviewGate | null;
   review: PublishedReview | null;
 }): CheckConclusion;
 ```
 
-`neutral` remains in the persisted vocabulary (`CheckDesired`, the `review_checks` DDL CHECK) for historical rows only; the current decision function never produces it. `gate` is the App's `check_min_score` / `check_pass_verdicts` pair (engine `PR_VERDICTS` vocabulary, validated before any write), read through the App store. `review` is the applied row read by exact `(installation_id, owner, repo, pr_number, head_sha)` from `reviews`: `verdict` from the row and `scorePct` from `envelope.tally.scorePct`. A missing row or a row without a readable tally is UNREADABLE — `null`/null score, never an assumed pass.
+`neutral` remains in the persisted vocabulary (`CheckDesired`, the `review_checks` DDL CHECK) for historical rows only; the current decision function never produces it. `gate` is the App's `check_min_score` / `check_pass_verdicts` pair (engine `PR_VERDICTS` vocabulary, validated before any write), read through the App store. `review` is the applied row read by exact `(installation_id, owner, repo, pr_number, head_sha)` from `reviews`: `verdict` from the row and `scorePct` from `envelope.tally.scorePct`. A missing row or a row without a readable tally is UNREADABLE — `null`/null score, never an assumed pass. `gate` is `null` when the App's own gate configuration cannot be read (unknown App, or a stored verdict array the store rejects); that is unreadable CONFIGURATION and concludes `failure` with its own wording, distinct from an unreadable review/tally.
 
 Adapters use the existing Octokit's typed `rest.checks.create/update/get/listForRef` responses; no `Record<string,unknown>` return surface that omits App/status/conclusion evidence. `beginCheck` and `completeCheck` validate identity and current lease immediately before any send; they never mutate a caller-supplied run without its persisted ownership record.
 
@@ -501,6 +501,7 @@ All local updates require `(id,holder,lease_epoch,lease_until_ms > now)`; remote
 |---|---|---|
 | Confirmed normal publication and the applied review MEETS the App gate (verdict on the passing list AND score ≥ floor) | success | `Review gate met for <sha7> (round N): verdict "<v>", score <s> (floor <min>; allowed: <list>).` |
 | Confirmed normal publication and the applied review misses the gate | failure | `Review gate missed for <sha7>: verdict "<v>", score <s> (floor <min>; allowed: <list>).` |
+| Confirmed normal publication and the App's gate configuration is unreadable (`gate` is `null`) | failure | `Review gate could not be evaluated for <sha7>: the App's gate configuration could not be read.` |
 | Confirmed normal publication and the review row or its tally is unreadable | failure | `Review gate could not be evaluated for <sha7>: no published review with a readable tally (floor <min>; allowed: <list>).` |
 | Confirmed degraded publication | failure | `Review output was invalid; a degraded summary comment was published.` |
 | Definitive failure before any publication send | failure | `Review execution failed before publication: <reason>. No review was published.` |

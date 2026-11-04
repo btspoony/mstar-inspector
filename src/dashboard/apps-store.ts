@@ -304,6 +304,21 @@ export type AppAllowlist = {
   owners: readonly string[];
 };
 
+/**
+ * Collapse the allowlist owner set: GitHub logins are case-insensitive, so
+ * `Ada` and `ada` are ONE owner — the first submitted spelling wins (the
+ * operator's order, and the form the settings page shows back).
+ */
+export function dedupeOwnerLogins(logins: readonly string[]): string[] {
+  const seen = new Set<string>();
+  return logins.filter((login) => {
+    const folded = login.toLowerCase();
+    if (seen.has(folded)) return false;
+    seen.add(folded);
+    return true;
+  });
+}
+
 /** Input for createApp — encrypted payloads are built by the caller. */
 export type CreateAppInput = {
   /**
@@ -1021,8 +1036,10 @@ export function createAppsStore(db: AppsStoreD1) {
      * Save the App's owner allowlist (migration 0045): the switch plus the
      * owner set, which is REPLACED — delete-then-insert in ONE batch, so a
      * removal is written by the same operation that adds. Duplicate logins
-     * collapse (the set is keyed on (app_id, owner_login)); an empty set is
-     * legal and, with the switch on, refuses every owner (fail closed).
+     * collapse case-insensitively (GitHub logins are case-insensitive; the
+     * first spelling is kept), because SQLite's (app_id, owner_login) key is
+     * case-sensitive; an empty set is legal and, with the switch on, refuses
+     * every owner (fail closed).
      * Refuses a soft-deleted or unknown App BEFORE writing (the setAppStatus
      * rule) and writes updated_at (an operator mutation). Returns whether the
      * App row was still live when the batch ran: every batch statement — the
@@ -1037,7 +1054,7 @@ export function createAppsStore(db: AppsStoreD1) {
         .bind(id)
         .first<{ id: string }>();
       if (!live) return false;
-      const owners = [...new Set(allowlist.owners)];
+      const owners = dedupeOwnerLogins(allowlist.owners);
       // Every statement repeats the liveness predicate: a soft delete landing
       // between the pre-read and the batch then writes NO owner rows and does
       // not flip the switch, instead of leaving a deleted App's list behind.

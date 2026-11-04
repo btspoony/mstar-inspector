@@ -2858,10 +2858,16 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       op: "save-allowlist",
       enabled: "1",
-      owners: "ada\n ada \n\nacme\n",
+      owners: "ada\n ada \n\nAcme\nacme\n",
     });
     expect(res.status).toBe(200);
-    expect(ownerLogins(db, app.id)).toEqual(["acme", "ada"]);
+    // GitHub logins are case-insensitive: `Acme` and `acme` are ONE owner,
+    // stored once under the first submitted spelling.
+    expect(ownerLogins(db, app.id)).toEqual(["Acme", "ada"]);
+    const acmeRows = db.raw
+      .query("SELECT COUNT(*) AS n FROM app_owner_allowlist WHERE app_id = ? AND lower(owner_login) = 'acme'")
+      .get(app.id) as { n: number };
+    expect(acmeRows.n).toBe(1);
   });
 
   test("save-allowlist: non-owner member → 403, zero mutation (switch, owners and probe cache)", async () => {

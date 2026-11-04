@@ -87,14 +87,24 @@ describe("review gate (migration 0045)", () => {
     seedApp(db, "app-corrupt", { githubAppId: 5004 });
     const store = createAppsStore(db);
 
-    // Off-vocabulary array and valid-but-not-an-array are equally unreadable:
+    // JSON well-formedness is a DDL CHECK, so the unreadable values that can
+    // still exist are well-formed JSON that is not a verdict array: a JSON
+    // string, and an array with an off-vocabulary entry. Both read as null —
     // no gate is served at all, so every Check lane fails closed.
-    for (const stored of ["{not json", '"ship it"', '["lgtm"]']) {
+    for (const stored of ['"ship it"', '["lgtm"]']) {
       db.raw
         .prepare(`UPDATE github_apps SET check_min_score = 55, check_pass_verdicts = ? WHERE id = 'app-corrupt'`)
         .run(stored);
       expect(await store.getCheckGate("app-corrupt")).toBeNull();
     }
+
+    // Malformed JSON cannot even be stored: the column's CHECK rejects it.
+    expect(() =>
+      db.raw
+        .prepare(`UPDATE github_apps SET check_pass_verdicts = '{not json' WHERE id = 'app-corrupt'`)
+        .run(),
+    ).toThrow();
+    expect(await store.getCheckGate("app-corrupt")).toBeNull();
   });
 
   test("refuses a soft-deleted App with no write", async () => {
