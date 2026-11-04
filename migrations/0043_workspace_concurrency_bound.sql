@@ -2,11 +2,12 @@
 -- values stored under the previous, wider range.
 --
 -- The workspace cap moved from a shared 1..64 range to its own 1..32 maximum
--- (the system level keeps 1..256). A value written under the old range would
--- now read as untrusted by `src/dashboard/runtime-config-store.ts`, degrading
--- that workspace to serial reviews for a number it was once allowed to store.
--- Clamping once, here, keeps every existing row a readable cap; the system row
--- needs no clamp because its old maximum (64) is inside the new one (256).
+-- (the system level keeps 1..256). The goal is data hygiene, not survival: the
+-- reader now CLAMPS an above-maximum value to the maximum (so a row stored in
+-- the deploy window never degrades to serial), which would leave the column
+-- disagreeing with the card and with the write path's 1..32 range. This file
+-- makes the stored value match what every surface reports. The system row needs
+-- no clamp because its old maximum (64) is inside the new one (256).
 --
 -- An untouched row (NULL) now reads as the 32 default: migration 0040 described
 -- the default "as of then" (16), and this file changes the bound it resolves to
@@ -16,7 +17,8 @@
 -- `src/dashboard/runtime-config-store.ts`; `tests/store/migration.test.ts`
 -- derives its expectation from that constant, so the two cannot drift apart.
 --
--- Append-only on the production DB: one UPDATE, no schema change.
+-- Append-only on the production DB: one new record table plus one UPDATE. A
+-- rollback restores the Worker, not the table — the record rows stay.
 
 -- The previous values are recorded in this migration's own table rather than
 -- `platform_audit_events`: that ledger is created by 0033, and several fixtures
