@@ -1000,12 +1000,27 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    } finally {
+      console.warn = origWarn;
+    }
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
     expect(ledgerState(db, appRow.id)).toEqual({ deliveries: 0, pullRequests: 0, lastWebhookAt: null });
+    // The refusal writes nothing, so this line is its ONLY evidence
+    // (docs/deploy.md) — and it names the owner it refused.
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("owner_not_allowlisted"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; detail: string };
+    expect(fields.event).toBe("owner_not_allowlisted");
+    expect(fields.detail).toContain("owner=test-owner");
   });
 
   test("a rejected delivery keeps its classifier status: the allowlist never masks a malformed payload", async () => {
@@ -1041,12 +1056,26 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    } finally {
+      console.warn = origWarn;
+    }
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
     expect(ledgerState(db, appRow.id)).toEqual({ deliveries: 0, pullRequests: 0, lastWebhookAt: null });
+    // An empty list refuses everyone through the same admitted-by-nobody path,
+    // so it logs the same line.
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("owner_not_allowlisted"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string };
+    expect(fields.event).toBe("owner_not_allowlisted");
   });
 
   test("a cached private App still applies the stored allowlist — visibility only adds the private-App note", async () => {
@@ -1186,16 +1215,29 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       sender: { type: "User", login: "test-author" },
     });
 
-    const res = await postWebhook(
-      "/webhook/default/app-x",
-      body,
-      await sigHeaders("secret-x", body, "issue_comment"),
-      env,
-    );
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        await sigHeaders("secret-x", body, "issue_comment"),
+        env,
+      );
+    } finally {
+      console.warn = origWarn;
+    }
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
     expect(ledgerState(db, appRow.id)).toMatchObject({ deliveries: 0, pullRequests: 0 });
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("owner_not_allowlisted"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; detail: string };
+    expect(fields.event).toBe("owner_not_allowlisted");
+    expect(fields.detail).toContain("owner=test-owner");
 
     // Control: the same body IS a mention job — listing the owner enqueues it,
     // so the zeros above came from the refusal, not from a body that never
