@@ -181,9 +181,12 @@ export type ReviewArtifactDoc = ArtifactDoc & {
    */
   provider?: string | null;
   /**
-   * The round's capture failed (empty/unreadable diff read), so this row's
-   * `verdict` does NOT cover the PR scope: the row is published and stored,
-   * but `findIncrementBase` must never diff a later round against it.
+   * The round could not fully scan the scope it claims to have reviewed, so
+   * its `verdict` covers only what was read: the lifecycle-target capture
+   * failed (D1 read error), the discussion capture failed, an increment diff
+   * came back empty, or the diff capture was empty / over the byte bound /
+   * unreadable. The row is still published and stored, but `findIncrementBase`
+   * must never diff a later round against it.
    * Optional; omitted = 0 (byte-compat for every other caller).
    */
   contextIncomplete?: boolean;
