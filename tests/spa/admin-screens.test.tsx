@@ -420,27 +420,34 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
-  test("a submit on a degraded read is refused — retry is the only action", async () => {
+  test("a typed value repairs a degraded read; an empty submit writes nothing", async () => {
     // `data.concurrency` is the conservative fallback, not a stored value: an
-    // empty draft would otherwise submit it as if the operator had typed it.
+    // empty draft must never write it. A typed value is the repair path.
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
         ? json({ concurrency: 41 })
         : json({ concurrency: 1, min: 1, max: 256, degraded: true }),
     );
     expect(surface.text()).toContain("could not be read");
+    expect(
+      (surface.container.querySelector('button[type="submit"]') as unknown as HTMLButtonElement).disabled,
+    ).toBe(false);
 
-    const save = surface.container.querySelector('button[type="submit"]');
-    expect((save as unknown as HTMLButtonElement | null)?.disabled).toBe(true);
-    await surface.click(save);
-    // The handler refuses even a submit event the disabled button never sends,
-    // so re-enabling the button cannot turn the fallback into a write.
+    // An untouched form submits nothing — the fallback is not a value anyone
+    // stored.
     const form = surface.container.querySelector("form")!;
     await act(async () => {
       form.dispatchEvent(new surface.win.Event("submit", { bubbles: true, cancelable: true }));
     });
     expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([]);
-    expect(surface.text()).not.toContain("Saved.");
+
+    await surface.type("#system-concurrency", "41");
+    await surface.click(surface.container.querySelector('button[type="submit"]'));
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      { url: "/_internal_admin/api/runtime", method: "PATCH", body: { concurrency: 41 } },
+    ]);
+    expect(surface.text()).toContain("Saved.");
+    expect(surface.text()).toContain("Effective on the next review: 41.");
     await surface.close();
   });
 

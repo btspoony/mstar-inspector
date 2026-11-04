@@ -2349,14 +2349,13 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
   try {
     return c.json({ concurrency: await setWorkspaceConcurrency(db, scope.workspaceId, value, user.github_login) });
   } catch (err) {
-    if (!(err instanceof RuntimeConfigError)) throw err;
-    // A row retired between the gate and the UPDATE is the same 404 an unknown
-    // ref gets.
-    if (err.reason === "unknown_workspace") return await tenantNotFound(c);
-    return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
-      min: CONCURRENCY_MIN,
-      max: WORKSPACE_CONCURRENCY_MAX,
-    });
+    // The route already validated the range, so the only store refusal left is
+    // a row retired between the gate and the UPDATE — the same 404 an unknown
+    // ref gets. Anything else is a real fault and must not be flattened to a 400.
+    if (err instanceof RuntimeConfigError && err.reason === "unknown_workspace") {
+      return await tenantNotFound(c);
+    }
+    throw err;
   }
 };
 

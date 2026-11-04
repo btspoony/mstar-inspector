@@ -263,10 +263,11 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
   /** `max_concurrency` is the deploy-time CEILING only — the effective
    * admission is min(system, workspace) read from D1 per message — so parity
    * alone would pass with any equal value. Both blocks therefore pin the same
-   * Cloudflare Queues' hard limit (250 concurrent consumer invocations). The
- * accepted runtime ranges live beside their write predicates in
- * runtime-config-store.test.ts, not here. Above the platform's 250/32
-   * defaults and bounded because each attempt's own sandbox id starts its own
+   * Cloudflare Queues' hard limit (250 concurrent consumer invocations), which
+ * is the deploy-time delivery ceiling — not a runtime default (those are
+ * 256/32). The accepted runtime ranges live beside their write predicates in
+ * runtime-config-store.test.ts, not here. Bounded because each attempt's own
+   * sandbox id starts its own
    * container. The other tuning values (`max_batch_size`, retries, DLQ) stay
    * config decisions: set-equality above already keeps the two blocks from
    * drifting apart, and re-stating their literals here would only duplicate

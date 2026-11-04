@@ -1125,9 +1125,10 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
     event.preventDefault();
     if (busy || loaded === null) return; // in-flight guard — no double submit
     // A degraded read carries the conservative fallback, not this tenant's
-    // value: writing it would replace a number nobody could read. The only
-    // action in that state is the re-read.
-    if (loaded.degraded) return;
+    // value: an empty draft must not write it. A TYPED value is the repair
+    // path — the write replaces the unreadable column — so the form stays
+    // enabled in this state.
+    if (loaded.degraded && draft === null) return;
     // An untouched form must submit the STORED value, never a derived one: the
     // stored number is what the tenant set.
     setBusy(true);
@@ -1166,46 +1167,45 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         <LoadFailedNotice locale={locale} />
       ) : loaded === null ? (
         <LoadingNotice locale={locale} />
-      ) : loaded.degraded ? (
-        // The store could not trust the stored cap, so both numbers in the
-        // payload are the conservative fallback (serial). Saving one would
-        // replace a value nobody read, so Save is shown disabled and the only
-        // action until a read lands is the re-read.
+      ) : (
         <div className="flex flex-col gap-3">
-          <PageNotice kind="warn" message={t(locale, "workspace.concurrencyUnreadable")} />
-          <div className="flex flex-wrap items-end gap-2">
-            <Button type="button" disabled>
+          {loaded.degraded ? (
+            // The store could not trust the stored cap, so both numbers in the
+            // payload are the conservative fallback (serial). The field starts
+            // empty and never shows that fallback; a typed value OR the re-read
+            // repairs the state.
+            <PageNotice kind="warn" message={t(locale, "workspace.concurrencyUnreadable")} />
+          ) : null}
+          <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium" htmlFor="workspace-concurrency">
+                {t(locale, "workspace.concurrencyLabel")}
+              </label>
+              <Input
+                id="workspace-concurrency"
+                type="number"
+                min={loaded.min}
+                max={loaded.max}
+                className="w-32"
+                autoComplete="off"
+                required={loaded.degraded}
+                value={draft ?? (loaded.degraded ? "" : String(loaded.concurrency))}
+                onChange={(event) => setDraft(event.target.value)}
+              />
+              <span className="text-xs text-muted-foreground">
+                {t(locale, "workspace.concurrencyRange", { max: loaded.max })}
+              </span>
+            </div>
+            <Button type="submit" disabled={busy}>
               {t(locale, "workspace.concurrencySave")}
             </Button>
-            <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
-              {t(locale, "common.retry")}
-            </Button>
-          </div>
+            {loaded.degraded ? (
+              <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
+                {t(locale, "common.retry")}
+              </Button>
+            ) : null}
+          </form>
         </div>
-      ) : (
-        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium" htmlFor="workspace-concurrency">
-              {t(locale, "workspace.concurrencyLabel")}
-            </label>
-            <Input
-              id="workspace-concurrency"
-              type="number"
-              min={loaded.min}
-              max={loaded.max}
-              className="w-32"
-              autoComplete="off"
-              value={draft ?? String(loaded.concurrency)}
-              onChange={(event) => setDraft(event.target.value)}
-            />
-            <span className="text-xs text-muted-foreground">
-              {t(locale, "workspace.concurrencyRange", { max: loaded.max })}
-            </span>
-          </div>
-          <Button type="submit" disabled={busy}>
-            {t(locale, "workspace.concurrencySave")}
-          </Button>
-        </form>
       )}
       <NoticeRegion notice={concurrencyNotice} />
     </FlowSection>

@@ -31,9 +31,10 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     event.preventDefault();
     if (busy) return; // in-flight guard — no double submit
     // A degraded read carries the conservative fallback, not a stored value: an
-    // empty draft would submit that fallback as if the operator had typed it.
-    // Retry is the only action until the read succeeds.
-    if (degraded) return;
+    // empty draft must not submit that fallback as if the operator had typed
+    // it. A TYPED value is the repair path — the write replaces the unreadable
+    // row — so the form stays enabled in this state.
+    if (degraded && draft === null) return;
     // `Number("")` is 0 and `Number("8abc")` is NaN — both fail the server's
     // accepted-range gate, so the browser's own parsing needs no second validator.
     const next = Number((draft ?? String(stored)).trim());
@@ -90,8 +91,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   // The stored cap could not be trusted, so `data.concurrency` is
                   // the conservative fallback: showing it as the current value
                   // would invite saving a number nobody stored. The form starts
-                  // empty, withholds the "effective" line, and its save is
-                  // refused — Retry is the only action while the read is degraded.
+                  // empty and withholds the "effective" line; a typed value or
+                  // Retry both repair the state.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.concurrencyUnreadable")} />
                   </div>
@@ -116,7 +117,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       onChange={(event) => setDraft(event.target.value)}
                     />
                   </div>
-                  <Button type="submit" disabled={busy || data.degraded}>
+                  <Button type="submit" disabled={busy}>
                     {t(locale, "admin.runtime.concurrencySave")}
                   </Button>
                   {data.degraded ? (

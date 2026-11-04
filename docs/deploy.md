@@ -2340,8 +2340,8 @@ Observation checklist after a concurrency change:
 The queue consumer holds at most `min(system cap, workspace cap)` reviews at
 once, and never two attempts for the same PR (the per-PR `review_inflight`
 row). With both levels absent the admission is `min(256, 32) = 32` per
-workspace — the delivery ceiling of 250 is only reachable after an operator
-raises individual workspace caps. Both caps are read from D1 on **every** queue message — no KV, no
+workspace — the delivery ceiling of 250 is only reachable as the aggregate of
+at least eight workspaces running at their own maximum. Both caps are read from D1 on **every** queue message — no KV, no
 request cache — so a change applies to the **next** message without a
 redeploy; reviews already running keep their slot until their `review_inflight`
 row expires.
@@ -2360,7 +2360,8 @@ row expires.
   (`WORKSPACE_CONCURRENCY_MAX`) is a tenant bound, so no workspace can ask for
   more than `32` no matter how high the system quota goes.
   `tests/contracts/wrangler-env-parity.test.ts` pins the config to
-  the `250` literal in `tests/contracts/wrangler-env-parity.test.ts`;
+  `wrangler.jsonc`'s `250` literal (asserted in
+  `tests/contracts/wrangler-env-parity.test.ts`);
   `src/dashboard/runtime-config-store.test.ts`
   drives the accepted ranges through the real write predicates.
 - The tenant face never renders or returns the system value: its settings read
@@ -2380,10 +2381,11 @@ row expires.
   included) in one D1 batch; a refused write changes no row and audits
   nothing.
 - Each Worker reads **its own** D1, so a cap is set per environment. These are
-  business quotas: the workspace cap can never exceed the system quota, and the
-  system quota may exceed the deploy-time queue ceiling (§ Queue consumer
-  concurrency) — in that case the platform delivers at most the ceiling, so the
-  quota is the bound that first applies only below it.
+  business quotas with independent ranges: a workspace value is accepted whenever
+  it is inside `1..32`, whatever the system quota says, and admission applies
+  `min(system, workspace)` per message. The system quota may exceed the
+  deploy-time queue ceiling (§ Queue consumer concurrency) — in that case the
+  platform delivers at most the ceiling.
 - A read failure, or a stored value the reader cannot trust, answers the
   conservative cap **1** (serial) and logs ONE `review_concurrency_degraded`
   warn carrying `workspace_id` and `effective` — the gate degrades to serial,

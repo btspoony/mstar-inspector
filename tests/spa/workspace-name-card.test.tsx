@@ -469,21 +469,23 @@ describe("workspace name card", () => {
       await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
 
       expect(container.textContent).toContain(t("en", "workspace.concurrencyUnreadable"));
-      // No field at all: a number the store never held must not appear as this
-      // workspace's setting, and there is no value an operator could type into
-      // a form built from an unreadable payload.
-      expect(win.document.querySelector("#workspace-concurrency")).toBeNull();
-      // Nor may a range line state the fallback as the real ceiling.
-      expect(container.textContent).not.toContain(t("en", "workspace.concurrencyRange", { max: 32 }));
-      // Saving is disabled outright: with the stored value unreadable, any
-      // write would replace a number nobody could read.
+      // The field is present but EMPTY: the fallback must not appear as this
+      // workspace's setting, and a typed value is the repair path.
+      const degradedInput = win.document.querySelector(
+        "#workspace-concurrency",
+      ) as unknown as HTMLInputElement;
+      expect(degradedInput).not.toBeNull();
+      expect(degradedInput.value).toBe("");
+      expect(degradedInput.required).toBe(true);
+      // The range stays the workspace's own legal range.
+      expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { max: 32 }));
       const save = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "workspace.concurrencySave"),
       ) as unknown as HTMLButtonElement;
-      expect(save.disabled).toBe(true);
+      expect(save.disabled).toBe(false);
 
-      // The only offered recovery is the re-read; once it lands, the value the
-      // store actually holds seeds the field and Save is available again.
+      // The re-read is offered too; once it lands, the value the store actually
+      // holds seeds the field.
       degraded = false;
       const retry = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "common.retry"),
@@ -506,6 +508,26 @@ describe("workspace name card", () => {
           ) as unknown as HTMLButtonElement
         ).disabled,
       ).toBe(false);
+
+      // And the repair path works end to end: a typed value is written.
+      const recovered = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(recovered, "6");
+        recovered.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+      });
+      await act(async () =>
+        recovered
+          .closest("form")
+          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event),
+      );
+      expect(calls.filter((call) => call.method === "PUT")).toEqual([
+        {
+          method: "PUT",
+          url: "/dashboard/ws_acme/api/settings/concurrency",
+          body: JSON.stringify({ concurrency: 6 }),
+        },
+      ]);
 
       await act(async () => root.unmount());
     } finally {
