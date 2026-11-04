@@ -20,8 +20,10 @@ import {
   boundedFileReadCommand,
   buildGitOpsCommands,
   CLONE_DIR,
+  compareStatusCommand,
   DIFF_PATH,
   DIFF_PREFETCH_MAX_BYTES,
+  incrementDiffCommand,
   issueViewCommand,
   prBodyCommand,
   readRecheckCommand,
@@ -234,6 +236,22 @@ const RECHECK_STATUS_READ = readRecheckStatusCommand(RECHECK_STATUS_PATH);
 const REPORT_READ = readReportCommand();
 const PR_BODY_READ = prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER);
 /**
+ * The two increment commands carry per-round shas, so the double matches them
+ * by the fixed head and tail the production builders emit AROUND those shas:
+ * a command-shape change edits the product, never a hand-typed prefix here.
+ */
+const SHA_PROBE = "0".repeat(40);
+function aroundSha(command: string): { head: string; tail: string } {
+  return {
+    head: command.slice(0, command.indexOf(SHA_PROBE)),
+    tail: command.slice(command.lastIndexOf(SHA_PROBE) + SHA_PROBE.length),
+  };
+}
+const COMPARE = aroundSha(compareStatusCommand(TEST_OWNER, TEST_REPO, SHA_PROBE, SHA_PROBE));
+const INCREMENT_DIFF = aroundSha(
+  incrementDiffCommand(TEST_OWNER, TEST_REPO, SHA_PROBE, SHA_PROBE, DIFF_PATH),
+);
+/**
  * The input write is the one command with a per-round payload; its fixed head
  * and tail come from the builder itself, so only the base64 body is asserted
  * by shape.
@@ -439,12 +457,13 @@ function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
     return { stdout: `${state.recheckStatusContent}\n${state.recheckStatusOverflow}\n`, stderr: "", exitCode: 0 };
   }
   // Increment rounds: the compare verdict, then base...head replacing the diff
-  // file. Both are identified by their stable command shape (the shas are
-  // per-round), so the double stays payload-agnostic exactly like the diff read.
-  if (cmd.startsWith("gh api 'repos/") && cmd.includes("/compare/") && cmd.endsWith(".status'")) {
+  // file. Both are matched by the production builder's fixed head/tail around
+  // the per-round shas, so the double stays payload-agnostic exactly like the
+  // diff read.
+  if (cmd.startsWith(COMPARE.head) && cmd.endsWith(COMPARE.tail)) {
     return { stdout: `${state.compareStatus}\n`, stderr: "", exitCode: state.compareExitCode };
   }
-  if (cmd.startsWith("gh api -H 'Accept: application/vnd.github.v3.diff'")) {
+  if (cmd.startsWith(INCREMENT_DIFF.head) && cmd.endsWith(INCREMENT_DIFF.tail)) {
     const bytes = Buffer.from(state.incrementDiffStdout);
     const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
     const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";

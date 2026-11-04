@@ -96,9 +96,17 @@ function runnerInput(): Record<string, unknown> {
   return JSON.parse(sandbox.writtenInputJson!) as Record<string, unknown>;
 }
 
-/** The prepared review body the round sent. */
+/**
+ * The prepared review body the round sent — and the round sent exactly ONE.
+ * Taking the first call would let a duplicate-publication regression pass every
+ * body assertion in this suite.
+ */
 function preparedBody(): string {
-  return (commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string }).body;
+  const prepared = commenterCalls.filter((call) => call.op === "post-prepared");
+  expect(prepared).toHaveLength(1);
+  // The harness records `args` as `unknown`; this double is its only writer.
+  const call = prepared[0]!.args as { body: string };
+  return call.body;
 }
 
 describe("incremental review rounds", () => {
