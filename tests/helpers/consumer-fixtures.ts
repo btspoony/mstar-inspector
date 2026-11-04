@@ -276,6 +276,8 @@ export type FakeSandboxState = {
   /** `gh pr view`/`gh issue view` answers for the report seat's PR context. */
   prBodyContent: string;
   prBodyExitCode: number;
+  /** Raw `gh pr view` stdout override — a reply that is not JSON at all. */
+  prBodyRaw: string | null;
   issueBodies: Map<number, { title: string; body: string }>;
   issueViewExitCode: number;
   /** The runner's recheck document and the `wc -c` overflow flag of its read. */
@@ -329,6 +331,7 @@ export function initialFakeSandboxState(): FakeSandboxState {
     // A report-path case sets this to 0 and scripts `prBodyContent`.
     prBodyContent: "",
     prBodyExitCode: 1,
+    prBodyRaw: null,
     issueBodies: new Map(),
     issueViewExitCode: 0,
     recheckFileContent: "",
@@ -414,6 +417,8 @@ function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
   if (cmd === PR_BODY_READ) {
     // `gh pr view` failing (non-zero exit) is the real "no PR context" path.
     if (state.prBodyExitCode !== 0) return { stdout: "", stderr: "gh failed", exitCode: state.prBodyExitCode };
+    // A reply that is not JSON at all (an HTML error page, a banner).
+    if (state.prBodyRaw !== null) return { stdout: state.prBodyRaw, stderr: "", exitCode: 0 };
     return { stdout: JSON.stringify({ body: state.prBodyContent }), stderr: "", exitCode: 0 };
   }
   for (const [issueNumber, issue] of state.issueBodies) {
