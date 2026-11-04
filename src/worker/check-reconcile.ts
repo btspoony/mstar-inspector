@@ -764,14 +764,16 @@ async function reconcileCheckAttempt(
   //    lane only ever READS what that lane persisted — never a send, replay
   //    or paid re-review.
   const proof = await readProof(db, owned);
-  // The gate decision needs the App's stored gate and the APPLIED review by
-  // the same exact scope/SHA. A missing or corrupt gate row, or a
-  // tallies-free review, is unreadable, so it can never be corrected into a
-  // success (spec §7.9).
+  // The gate decision needs the App's stored gate and the review THIS proof
+  // published. A missing or corrupt gate row, or a tallies-free review, is
+  // unreadable, so it can never be corrected into a success (spec §7.9).
   // Both reads are guarded like the proof read above: a persistent read
   // failure must still leave the row a persisted terminal conclusion, never a
   // throw that keeps re-selecting the same due attempt forever.
-  const [gate, review] = await Promise.all([readRecoveryGate(db, scope.appId), readRecoveryReview(db, owned)]);
+  const [gate, review] = await Promise.all([
+    readRecoveryGate(db, scope.appId),
+    readRecoveryReview(db, owned, proof?.publicationId ?? null),
+  ]);
   const conclusion = terminalConclusion(owned, proof, gate, review);
 
   // Intent BEFORE any remote update: the persisted row is the only source the
@@ -1156,13 +1158,24 @@ async function readRecoveryGate(db: D1Like, appId: string): Promise<ReviewGate |
 }
 
 /**
- * The APPLIED review by the exact scope/SHA. A read failure is UNREADABLE
- * (`null`), which `decideConclusion` already treats as a failure — never a
- * pass, and never a throw out of the lane.
+ * The review THIS proof publication carried — the same preference the proof
+ * read makes, so the Check is judged by the envelope the attempt published
+ * rather than by the scope/SHA `reviews` projection, which can lag the apply
+ * or belong to an earlier attempt for the same head SHA. A read failure is
+ * UNREADABLE (`null`), which `decideConclusion` already treats as a failure —
+ * never a pass, and never a throw out of the lane.
  */
-async function readRecoveryReview(db: D1Like, owned: CheckOwnership): Promise<PublishedReview | null> {
+async function readRecoveryReview(
+  db: D1Like,
+  owned: CheckOwnership,
+  publicationId: string | null,
+): Promise<PublishedReview | null> {
   try {
-    return await readPublishedReview(db, { scope: owned.identity.scope, headSha: owned.identity.headSha });
+    return await readPublishedReview(db, {
+      scope: owned.identity.scope,
+      headSha: owned.identity.headSha,
+      ...(publicationId === null ? {} : { publicationId }),
+    });
   } catch {
     return null;
   }

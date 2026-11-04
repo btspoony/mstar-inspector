@@ -182,13 +182,14 @@ function seedPublication(
   headSha: string,
   proof: PublicationProof,
   phase = "confirmed",
+  payload: unknown = {},
 ): void {
   db.raw
     .prepare(
       `INSERT INTO review_publications
          (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms, confirmed_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, 1, 'done', ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'done', ?, ?, ?)`,
     )
     .run(
       proof.publicationId,
@@ -200,6 +201,7 @@ function seedPublication(
       headSha,
       proof.kind,
       phase,
+      JSON.stringify(payload),
       JSON.stringify(proof),
       T0 - 20_000,
       T0 - 10_000,
@@ -207,9 +209,9 @@ function seedPublication(
     );
 }
 
-/** The applied review the gate reads (verdict + envelope tally); `scorePct` null = no tally. */
-function seedReview(db: TestD1, scope: Scope, headSha: string, verdict: string, scorePct: number | null): void {
-  const envelope = {
+/** An `mstar.review/v1` envelope with the given verdict and tally score. */
+function reviewEnvelope(verdict: string, scorePct: number | null): Record<string, unknown> {
+  return {
     schema: "mstar.review/v1",
     verdict,
     findings: [],
@@ -217,12 +219,59 @@ function seedReview(db: TestD1, scope: Scope, headSha: string, verdict: string, 
       ? {}
       : { tally: { verdict, scorePct, tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 0 }, chatHeader: "h" } }),
   };
+}
+
+/**
+ * A staged `kind: "review"` publication payload carrying its own envelope —
+ * the second attempt's journal row, distinct from any `reviews` row.
+ */
+function reviewPayload(scope: Scope, headSha: string, verdict: string, scorePct: number): unknown {
+  return {
+    version: 1,
+    scope,
+    headSha,
+    kind: "review",
+    round: 3,
+    targetCommentId: null,
+    body: `## Review\n\n${verdict}`,
+    bodySha256: "a".repeat(64),
+    artifact: {
+      kind: "review",
+      key: {
+        installation_id: scope.installationId,
+        owner: scope.owner,
+        repo: scope.repo,
+        pr_number: scope.prNumber,
+        head_sha: headSha,
+      },
+      schema: "mstar.review/v1",
+      payload: reviewEnvelope(verdict, scorePct),
+      appId: scope.appId,
+      model: null,
+      provider: null,
+    },
+    lifecycle: null,
+    lineIntents: [],
+  };
+}
+
+/** The applied review the gate reads (verdict + envelope tally); `scorePct` null = no tally. */
+function seedReview(db: TestD1, scope: Scope, headSha: string, verdict: string, scorePct: number | null): void {
   db.raw
     .prepare(
       `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, envelope)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(crypto.randomUUID(), scope.installationId, scope.owner, scope.repo, scope.prNumber, headSha, verdict, JSON.stringify(envelope));
+    .run(
+      crypto.randomUUID(),
+      scope.installationId,
+      scope.owner,
+      scope.repo,
+      scope.prNumber,
+      headSha,
+      verdict,
+      JSON.stringify(reviewEnvelope(verdict, scorePct)),
+    );
 }
 
 async function rawRow(db: TestD1, id: string): Promise<Record<string, string | number | null>> {
@@ -778,6 +827,44 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.publication_id).toBe(proof.publicationId);
     // The correction happened on the SAME owned run — no second generation.
     expect(await db.prepare(`SELECT COUNT(*) AS n FROM review_checks`).first<{ n: number }>()).toEqual({ n: 1 });
+  });
+
+  test("the gate reads the attempt's OWN publication, not the scope/SHA reviews row", async () => {
+    // `reviews` holds ONE row per scope/SHA (UNIQUE key, first write wins) and
+    // the journal holds ONE review publication per scope/SHA, so under RL-12 a
+    // later attempt re-uses that publication while the `reviews` projection can
+    // still be the FIRST attempt's result — or not applied at all. The gate
+    // must read the envelope the proof's publication carried; a stale row must
+    // not decide a fresh round.
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const proof = proofFor(attempt.identity, "review");
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 95));
+    seedReview(db, SCOPE, SHA, "blocked", 40);
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          complete: async (identity, _id, conclusion) => {
+            expect(conclusion.desired).toBe("success");
+            expect(conclusion.summary).toContain('verdict "ship it"');
+            expect(conclusion.summary).toContain("score 95");
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
+          },
+        }),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.publication_id).toBe(proof.publicationId);
   });
 
   test("proof from ANOTHER SHA never decides this attempt's conclusion", async () => {

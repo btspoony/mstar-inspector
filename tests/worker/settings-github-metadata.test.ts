@@ -86,17 +86,18 @@ const GITHUB_PUBLIC_APPS_URL = "https://api.github.com/apps/";
 
 /**
  * One refresh = `GET /app` plus, only when the profile yields a slug, the
- * anonymous `GET /apps/{slug}` visibility probe — answered 404 (private), the
- * status no assertion here reads. Any other upstream URL is a failure, not a
- * silent answer.
+ * anonymous `GET /apps/{slug}` visibility probe. `probeStatus` decides the
+ * visibility answer: 404 = private (the default here), 200 = public, anything
+ * else (503) = inconclusive, the "keep the stored value" branch. Any other
+ * upstream URL is a failure, not a silent answer.
  */
-function githubStub(profile: Record<string, unknown>) {
+function githubStub(profile: Record<string, unknown>, probeStatus = 404) {
   const body = JSON.stringify(profile);
   return (url: string) => {
     if (url === GITHUB_APP_URL) {
       return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
     }
-    if (url.startsWith(GITHUB_PUBLIC_APPS_URL)) return new Response(null, { status: 404 });
+    if (url.startsWith(GITHUB_PUBLIC_APPS_URL)) return new Response(null, { status: probeStatus });
     throw new Error(`unexpected fetch: ${url}`);
   };
 }
@@ -190,6 +191,7 @@ type CachedColumns = {
   github_avatar_url: string | null;
   github_metadata_synced_at: string | null;
   github_metadata_attempted_at: string | null;
+  github_visibility: string | null;
   github_slug: string | null;
   created_at: string;
   updated_at: string;
@@ -198,7 +200,7 @@ type CachedColumns = {
 const cachedColumns = (db: TestD1, appId: string): CachedColumns =>
   db.raw
     .query(
-      "SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at, github_metadata_attempted_at, github_slug, created_at, updated_at FROM github_apps WHERE id = ?",
+      "SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at, github_metadata_attempted_at, github_visibility, github_slug, created_at, updated_at FROM github_apps WHERE id = ?",
     )
     .get(appId) as CachedColumns;
 
@@ -314,6 +316,27 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const row = cachedColumns(db, appId);
     expect(row.github_name).toBe("Renamed Inspector");
     expect(row.github_metadata_synced_at).not.toBeNull();
+  });
+
+  test("an inconclusive visibility probe (503) keeps the stored github_visibility", async () => {
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    db.raw.query("UPDATE github_apps SET github_visibility = 'private' WHERE id = ?").run(appId);
+    const { calls } = stubFetch(githubStub(GITHUB_PROFILE, 503));
+
+    const res = await getSettings("mallory", makeEnv(db));
+
+    expect(res.status).toBe(200);
+    // The refresh really ran and really probed: the new profile landed, so a
+    // preserved visibility cannot be a short-circuit that never fetched.
+    expect(appProfileCalls(calls)).toHaveLength(1);
+    expect(calls.map((call) => call.url)).toContain(`${GITHUB_PUBLIC_APPS_URL}acme-inspector`);
+    const body = (await res.json()) as { app: Record<string, unknown> };
+    expect(body.app.github_name).toBe("Acme Inspector");
+    expect(body.app.github_visibility).toBe("private");
+    const row = cachedColumns(db, appId);
+    expect(row.github_name).toBe("Acme Inspector");
+    expect(row.github_visibility).toBe("private");
   });
 
   test("fetch {ok:false} (HTTP 404) → 200 fail-open with the cached (null) columns; synced_at stays NULL", async () => {

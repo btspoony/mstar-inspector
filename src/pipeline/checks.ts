@@ -809,12 +809,13 @@ export type CheckTerminalOutcome =
  * `readPublicationProof`, which the caller uses to obtain `proof`; this
  * function trusts what it is handed and reads `kind` alone. A `null` proof is
  * UNPROVEN — which is not the same as "not published", and is why an unknown
- * outcome must conclude `failure` rather than guess. `review` is the applied
- * review read by exact scope/SHA; `null` or a null score is UNREADABLE, never
- * a pass. `gate` is the stored App gate; `null` is unreadable CONFIGURATION
- * and fails closed — there is no permissive default to fall back to.
- * `neutral` is unreachable: a degraded publication cannot prove the gate was
- * met (clarify C3).
+ * outcome must conclude `failure` rather than guess. `review` is the review
+ * THIS proof publication carried (`readPublishedReview` prefers its payload and
+ * only falls back to the scope/SHA row); `null` or a null score is UNREADABLE,
+ * never a pass. `gate` is the stored App gate; `null` is unreadable
+ * CONFIGURATION and fails closed — there is no permissive default to fall back
+ * to. `neutral` is unreachable: a degraded publication cannot prove the gate
+ * was met (clarify C3).
  */
 export function decideConclusion(input: {
   proof: PublicationProof | null;
@@ -1169,18 +1170,25 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // PROOF decides (spec §7.9): exact App/scope/SHA, this attempt's
       // publication id preferred. `null` is UNPROVEN — never "not published" —
       // which is why an unconfirmed send must conclude `failure`, not success.
-      // The gate and the APPLIED review are read by the same exact scope/SHA;
-      // a review row without a readable tally stays unreadable, never a pass,
-      // and an unreadable gate row fails closed the same way.
-      const [proof, gate, review] = await Promise.all([
+      // The APPLIED review follows that SAME proof publication: RL-12 lets a
+      // second attempt share the head SHA, so the scope/SHA `reviews` row may
+      // be an earlier attempt's result and must not decide this one. The gate
+      // is read with them; a review payload without a readable tally stays
+      // unreadable, never a pass, and an unreadable gate row fails closed the
+      // same way.
+      const [proof, gate] = await Promise.all([
         readPublicationProof(deps.db, {
           scope: handle.scope,
           headSha: handle.headSha,
           publicationId: input.publicationId ?? undefined,
         }),
         deps.getCheckGate(handle.scope),
-        readPublishedReview(deps.db, { scope: handle.scope, headSha: handle.headSha }),
       ]);
+      const review = await readPublishedReview(deps.db, {
+        scope: handle.scope,
+        headSha: handle.headSha,
+        ...(proof === null ? {} : { publicationId: proof.publicationId }),
+      });
       const conclusion = decideConclusion({
         proof,
         outcome: input.outcome,

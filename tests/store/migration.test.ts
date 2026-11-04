@@ -1971,19 +1971,18 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
       github_visibility: null,
     });
 
-    // The columns' own contract: NOT NULL with those DDL defaults, and a
-    // nullable visibility that admits only the three known spellings.
+    // The columns' own contract: NOT NULL, and a nullable visibility (the
+    // default VALUES themselves are pinned above, row-level).
     const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
       name: string;
       type: string;
       notnull: number;
-      dflt_value: string | null;
     }>;
     const byName = Object.fromEntries(cols.map((col) => [col.name, col]));
-    expect(byName.check_min_score).toMatchObject({ type: "INTEGER", notnull: 1, dflt_value: "80" });
-    expect(byName.check_pass_verdicts).toMatchObject({ type: "TEXT", notnull: 1, dflt_value: `'["ship it"]'` });
-    expect(byName.allowlist_enabled).toMatchObject({ type: "INTEGER", notnull: 1, dflt_value: "0" });
-    expect(byName.github_visibility).toMatchObject({ type: "TEXT", notnull: 0, dflt_value: null });
+    expect(byName.check_min_score).toMatchObject({ type: "INTEGER", notnull: 1 });
+    expect(byName.check_pass_verdicts).toMatchObject({ type: "TEXT", notnull: 1 });
+    expect(byName.allowlist_enabled).toMatchObject({ type: "INTEGER", notnull: 1 });
+    expect(byName.github_visibility).toMatchObject({ type: "TEXT", notnull: 0 });
 
     expect(() => db.raw.prepare("UPDATE github_apps SET check_min_score = 101 WHERE id = 'legacy-app'").run()).toThrow();
     expect(() =>

@@ -4493,13 +4493,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(kvPuts).toHaveLength(1);
   });
 
-  test("check lifecycle: a confirmed publication whose review row could not be applied concludes the unreadable-gate failure", async () => {
+  test("check lifecycle: a confirmed publication is judged by its own envelope even when the local apply failed", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
     // Fail ONLY a batch issued after the publication proof is durable. The
-    // proof is persisted, but the applied review row is not — and without a
-    // readable verdict/tally the gate cannot be proven met (spec §7.9).
+    // proof is persisted, the applied `reviews` row is not — the gate must
+    // still read the envelope THIS publication carried (spec §7.9), because
+    // the row is a projection that can lag or hold another attempt's result.
     const failingDb = {
       ...db,
       batch: async (statements: Parameters<typeof db.batch>[0]) => {
@@ -4518,11 +4519,11 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
-    expect(update.conclusion).toBe("failure");
-    expect(update.summary).toBe(CHECK_SUMMARIES.gateUnreadable(SHA.slice(0, 7), GATE));
+    expect(update.conclusion).toBe("success");
+    expect(update.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
     const row = checkRowFor(db, SHA);
-    expect(row.desired).toBe("failure");
-    expect(row.observed).toBe("failure");
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
     expect(row.terminal_ms).not.toBeNull();
     // The publication stayed confirmed (the local apply is M8's), the proof
     // was durable, and the KV done-state followed the confirmation.

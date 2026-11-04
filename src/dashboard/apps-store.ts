@@ -306,8 +306,10 @@ export type AppAllowlist = {
 
 /**
  * Collapse the allowlist owner set: GitHub logins are case-insensitive, so
- * `Ada` and `ada` are ONE owner — the first submitted spelling wins (the
- * operator's order, and the form the settings page shows back).
+ * `Ada` and `ada` are ONE owner and the first submitted spelling is the one
+ * kept. Order is NOT preserved: the table has no sequence column and
+ * `getAllowlist` reads `ORDER BY owner_login`, so the settings form lists the
+ * owners alphabetically however they were submitted.
  */
 export function dedupeOwnerLogins(logins: readonly string[]): string[] {
   const seen = new Set<string>();
@@ -897,10 +899,12 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * The App's owner allowlist (migration 0045): the switch plus the owner
-     * logins in login order. Unknown id → null. ONE statement, so the switch
-     * and the owner set come from the same snapshot — a save landing between
-     * two reads could otherwise admit against a switch that no longer
-     * applies to the list it was read with.
+     * logins sorted by `owner_login` (SQLite's BINARY collation). The read is
+     * alphabetical, NOT submission order — there is no sequence column, so the
+     * settings form does not play the list back as it was saved. Unknown id →
+     * null. ONE statement, so the switch and the owner set come from the same
+     * snapshot — a save landing between two reads could otherwise admit against
+     * a switch that no longer applies to the list it was read with.
      */
     async getAllowlist(appId: string): Promise<AppAllowlist | null> {
       const rows = await db

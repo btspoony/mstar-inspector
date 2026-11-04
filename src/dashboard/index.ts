@@ -3168,15 +3168,21 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const deliverySummary = await apps.deliverySummary(app.id);
     // Migration 0045 configuration: the review gate, the owner allowlist and
     // the cached GitHub visibility, read from the row this route has already
-    // resolved (the manager face cannot be built without the first two — a
-    // null here means a concurrent delete OR an unreadable stored gate, and a
-    // settings page must not render a gate it cannot read: the route's catch
-    // answers 500, the honest surface).
+    // resolved. A settings page must not render a gate it cannot read: the
+    // route's catch answers 500, the honest surface. The two nulls do NOT mean
+    // the same thing — `getCheckGate` is null for a deleted row AND for a live
+    // row whose stored verdict list is unreadable, while `getAllowlist` reads
+    // the row itself, so its null can only mean the row is gone.
     const checkGate = await apps.getCheckGate(app.id);
     const allowlist = await apps.getAllowlist(app.id);
     const githubVisibility = await apps.getGithubVisibility(app.id);
-    if (checkGate === null || allowlist === null) {
-      throw new Error(`app settings row ${app.id} vanished while reading its review gate`);
+    if (checkGate === null) {
+      throw new Error(
+        `app settings row ${app.id}: the review gate is unreadable (deleted row or an unreadable stored verdict list)`,
+      );
+    }
+    if (allowlist === null) {
+      throw new Error(`app settings row ${app.id} vanished while reading its review gate configuration`);
     }
     const base = {
       // The stable workspace id the App belongs to (server-resolved scope,

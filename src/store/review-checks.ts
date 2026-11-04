@@ -1396,15 +1396,34 @@ export async function retryCheckRecovery(
 export { readPublicationProof } from "./finding-lifecycle";
 
 /**
- * The applied review for a Check's exact scope/SHA (spec §7.9 gate read):
- * `reviews.verdict` plus `envelope.tally.scorePct`. Missing row → `null`; a row
- * without a readable tally keeps its verdict with `scorePct: null`. Read-only:
- * it never mutates or fabricates an outcome.
+ * The review a Check is judged by (spec §7.9 gate read): the envelope the
+ * attempt itself PUBLISHED, preferred over the scope/SHA `reviews` row.
+ * `reviews` is a projection of the local apply — first write wins, and it can
+ * lag a confirmed publication (apply still due, or failed) or belong to an
+ * earlier attempt for the same head SHA, which RL-12 allows. It also carries no
+ * proof identity, so it must never override the envelope the proof's
+ * publication actually carried: `review_publications.payload_json` →
+ * `artifact.payload`.
+ *
+ * `publicationId` is the proof's publication id. Absent, or its payload
+ * unreadable (missing row, bad JSON, no artifact envelope, no verdict), the
+ * scope/SHA row decides — the pre-existing behaviour. A readable payload whose
+ * tally is missing keeps its verdict with `scorePct: null` (unreadable gate
+ * input, never a fallback to another attempt's score). Missing row → `null`.
+ * Read-only: it never mutates or fabricates an outcome.
  */
 export async function readPublishedReview(
   db: D1Like,
-  input: { scope: Scope; headSha: string },
+  input: { scope: Scope; headSha: string; publicationId?: string },
 ): Promise<PublishedReview | null> {
+  if (input.publicationId !== undefined) {
+    const published = await readPublicationReview(db, {
+      scope: input.scope,
+      headSha: input.headSha,
+      publicationId: input.publicationId,
+    });
+    if (published !== null) return published;
+  }
   const row = await db
     .prepare(
       `SELECT verdict, envelope FROM reviews
@@ -1419,21 +1438,60 @@ export async function readPublishedReview(
     )
     .first<{ verdict: string; envelope: string | null }>();
   if (row === null) return null;
-  return { verdict: row.verdict, scorePct: tallyScore(row.envelope) };
+  return { verdict: row.verdict, scorePct: tallyScore(parseJson(row.envelope)) };
 }
 
-/** `envelope.tally.scorePct` when it is an integer inside the schema's 0..100 domain. */
-function tallyScore(envelope: string | null): number | null {
-  if (envelope === null) return null;
-  let parsed: unknown;
+/**
+ * The envelope THIS publication carried, by exact App/scope/SHA identity (a
+ * row of another attempt or another App must never decide this one). `null`
+ * means the payload is unreadable, not "no review was published".
+ */
+async function readPublicationReview(
+  db: D1Like,
+  input: { scope: Scope; headSha: string; publicationId: string },
+): Promise<PublishedReview | null> {
+  const row = await db
+    .prepare(
+      `SELECT payload_json FROM review_publications
+       WHERE id = ? AND app_id = ? AND installation_id = ? AND owner = ? AND repo = ?
+         AND pr_number = ? AND head_sha = ?`,
+    )
+    .bind(
+      input.publicationId,
+      input.scope.appId,
+      input.scope.installationId,
+      input.scope.owner,
+      input.scope.repo,
+      input.scope.prNumber,
+      input.headSha,
+    )
+    .first<{ payload_json: string }>();
+  if (row === null) return null;
+  const artifact = recordOf(recordOf(parseJson(row.payload_json))?.artifact);
+  const envelope = recordOf(artifact?.payload);
+  if (envelope === null || typeof envelope.verdict !== "string") return null;
+  return { verdict: envelope.verdict, scorePct: tallyScore(envelope) };
+}
+
+function parseJson(text: string | null): unknown {
+  if (text === null) return null;
   try {
-    parsed = JSON.parse(envelope);
+    return JSON.parse(text);
   } catch {
     return null;
   }
-  if (typeof parsed !== "object" || parsed === null || !("tally" in parsed)) return null;
-  const { tally } = parsed;
-  if (typeof tally !== "object" || tally === null || !("scorePct" in tally)) return null;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** `envelope.tally.scorePct` when it is an integer inside the schema's 0..100 domain. */
+function tallyScore(envelope: unknown): number | null {
+  const tally = recordOf(recordOf(envelope)?.tally);
+  if (tally === null) return null;
   const { scorePct } = tally;
   return typeof scorePct === "number" && Number.isInteger(scorePct) && scorePct >= 0 && scorePct <= 100 ? scorePct : null;
 }
