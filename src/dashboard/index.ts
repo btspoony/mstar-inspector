@@ -4258,26 +4258,43 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       logSettingsFailure("save_allowlist", gate.app.id, err);
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
-    // Admission reads the CACHED visibility and ignores stored rows for a
-    // `private` App, so a stale `private` would leave the gate just switched on
-    // silently inert. Probe now through the metadata refresh's anonymous probe
-    // and store the answer — `unknown` when it cannot answer, which reads as
-    // "cannot prove private". Bookkeeping only: a probe or cache-write failure
-    // is logged and never blocks the save the operator asked for.
+    // Admission applies whenever this switch is on, whatever the cached
+    // visibility; `private` only hides the SPA's allowlist control. So the
+    // copy below reports the state the save just produced, and it needs the
+    // resolved visibility: a stored `private` hides a control that still
+    // matters, which is exactly what the operator must be told. Probe through
+    // the metadata refresh's anonymous probe and store the answer — `unknown`
+    // when it cannot answer — then derive the copy from it. Bookkeeping only: a
+    // probe or cache-write failure is logged and never blocks the save the
+    // operator asked for.
+    let visibility = gate.app.github_visibility ?? "unknown";
     if (enabled === "1") {
       try {
-        const visibility = gate.app.github_slug === null ? null : await fetchAppVisibility(gate.app.github_slug);
-        await apps.saveGithubVisibility(gate.app.id, visibility ?? "unknown");
+        const probed = gate.app.github_slug === null ? null : await fetchAppVisibility(gate.app.github_slug);
+        visibility = probed ?? "unknown";
+        await apps.saveGithubVisibility(gate.app.id, visibility);
       } catch (err) {
         logSettingsFailure("github_visibility", gate.app.id, err);
       }
     }
+    if (enabled !== "1") {
+      return settingsPostResponse(
+        c,
+        gate.app.github_app_id,
+        `Saved the owner allowlist for ${appDisplayName(gate.app)} — switched off; every owner is reviewed as before.`,
+      );
+    }
+    // One owner / many owners reads correctly, and a `private` App says where
+    // its control went instead of leaving the operator to wonder.
+    const accepted = `${owners.length} ${owners.length === 1 ? "owner" : "owners"} accepted; every other owner is refused.`;
+    const hiddenControl =
+      visibility === "private"
+        ? " This App is private, so its Settings control stays hidden — the stored list still applies to its deliveries."
+        : "";
     return settingsPostResponse(
       c,
       gate.app.github_app_id,
-      enabled === "1"
-        ? `Saved the owner allowlist for ${appDisplayName(gate.app)} — ${owners.length} ${owners.length === 1 ? "owner" : "owners"} accepted; every other owner is refused.`
-        : `Saved the owner allowlist for ${appDisplayName(gate.app)} — switched off; every owner is reviewed as before.`,
+      `Saved the owner allowlist for ${appDisplayName(gate.app)} — ${accepted}${hiddenControl}`,
     );
   }
   // Review fold-in: an unknown op is a validation failure like any

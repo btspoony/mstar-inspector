@@ -2739,7 +2739,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     expect("github_visibility" in memberBody.app).toBe(false);
   });
 
-  test("save-check-gate: repeated pass_verdicts values persist, and the next read serves them", async () => {
+  test("save-check-gate: two distinct pass_verdicts persist in submission order, and the next read serves them", async () => {
     const { db } = await seededWorld();
     const res = await worker.fetch(
       new Request(`https://worker.local${SETTINGS}`, {
@@ -2758,6 +2758,28 @@ describe("review gate + owner allowlist (payload and ops)", () => {
       await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db))
     ).json()) as { check_gate: { min_score: number; pass_verdicts: string[] } };
     expect(read.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it", "needs fixes"] });
+  });
+
+  test("save-check-gate: the same verdict submitted twice is stored once", async () => {
+    const { db, app } = await seededWorld();
+    const res = await worker.fetch(
+      new Request(`https://worker.local${SETTINGS}`, {
+        method: "POST",
+        headers: {
+          Cookie: `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: "op=save-check-gate&min_score=90&pass_verdicts=ship+it&pass_verdicts=ship+it",
+      }),
+      makeEnv(db),
+    );
+    expect(res.status).toBe(200);
+    // The gate is a SET: a duplicated checkbox cannot inflate the stored row.
+    expect(JSON.parse(gateRow(db, app.id).check_pass_verdicts)).toEqual(["ship it"]);
+    const read = (await (
+      await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db))
+    ).json()) as { check_gate: { min_score: number; pass_verdicts: string[] } };
+    expect(read.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it"] });
   });
 
   test("save-check-gate: out-of-range or non-integer score → keyed 400, zero writes", async () => {
@@ -2890,6 +2912,48 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     });
     expect(inconclusive.status).toBe(200);
     expect(visibilityRow(db, app.id)).toBe("unknown");
+  });
+
+  test("save-allowlist ON: the notice states enforcement, and names the hidden control for a private App", async () => {
+    const { db, app } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const publicSave = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-allowlist",
+      enabled: "1",
+      owners: "ada\nalice",
+    });
+    expect(publicSave.status).toBe(200);
+    // Admission applies whatever the cached visibility, so a public App gets
+    // the plain enforcement sentence and no hidden-control caveat.
+    expect(await publicSave.text()).toBe(
+      "Saved the owner allowlist for mallorys-app — 2 owners accepted; every other owner is refused.",
+    );
+
+    // The probe proves this App private: the stored list still applies, but
+    // the Settings control is hidden — which is exactly what the copy says.
+    fetchSpy.mockImplementation((async () => new Response("{}", { status: 404 })) as unknown as typeof fetch);
+    const privateSave = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-allowlist",
+      enabled: "1",
+      owners: "ada",
+    });
+    expect(privateSave.status).toBe(200);
+    expect(visibilityRow(db, app.id)).toBe("private");
+    expect(await privateSave.text()).toBe(
+      "Saved the owner allowlist for mallorys-app — 1 owner accepted; every other owner is refused. " +
+        "This App is private, so its Settings control stays hidden — the stored list still applies to its deliveries.",
+    );
+
+    // Switched off: neither caveat applies.
+    const off = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-allowlist",
+      enabled: "0",
+      owners: "ada",
+    });
+    expect(off.status).toBe(200);
+    expect(await off.text()).toBe(
+      "Saved the owner allowlist for mallorys-app — switched off; every owner is reviewed as before.",
+    );
   });
 });
 
