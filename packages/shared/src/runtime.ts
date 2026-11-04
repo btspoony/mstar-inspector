@@ -153,6 +153,14 @@ export type AgentRuntimeRunInput = {
    * null, so the legacy runner input stays byte-identical.
    */
   prContext?: PrContext;
+  /**
+   * Optional caller abort for the whole run (port-level teardown). The review
+   * paths join it with their own teardown signal before handing it to the
+   * report seat, so a caller that abandons a run stops a seat that is already
+   * in flight. ABSENT = the legacy runtime input: the report seat keeps only
+   * its own budget timer.
+   */
+  signal?: AbortSignal;
 };
 
 /** One completed review run: the validated envelope plus its optional side documents. */

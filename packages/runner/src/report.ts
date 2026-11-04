@@ -173,7 +173,7 @@ export async function runReportSeat(input: {
   prContext: PrContext;
   model: string[];
   level: ReviewLevel;
-  /** Optional caller abort (run teardown); the seat's own timer always applies. */
+  /** Caller abort (run teardown, joined with the caller's own signal); the seat's own timer always applies. */
   signal?: AbortSignal;
 }): Promise<ReportDoc | null> {
   const external = input.signal ?? new AbortController().signal;
@@ -233,6 +233,8 @@ export async function runReportSeat(input: {
   }
   const gate = validateReportDoc(data);
   if (!gate.ok) {
+    // `validateReportDoc` names only the shape it requires, never the received
+    // keys/values (seat-authored text), so this line carries no attacker echo.
     console.error(
       JSON.stringify({ event: "report_seat_failed", error: redactedError(`report document failed validation: ${gate.error}`) }),
     );
