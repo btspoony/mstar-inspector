@@ -86,6 +86,22 @@ function parseStored(value: unknown, max: number): number | undefined {
   return isConcurrencyValue(parsed, max) ? parsed : Number.NaN;
 }
 
+/**
+ * The workspace column's parse. A value ABOVE the per-workspace maximum is
+ * clamped to it rather than treated as untrusted: migration 0043 lowers the
+ * rows that exist when it applies, but the window between "migrations applied"
+ * and "new Worker live" lets the previously deployed API store one more
+ * 33..64 value. Reading it as the maximum keeps that workspace at a real cap
+ * instead of degrading the whole workspace to serial.
+ */
+function parseWorkspaceStored(value: unknown): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "string" && typeof value !== "number") return Number.NaN;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed < CONCURRENCY_MIN) return Number.NaN;
+  return Math.min(parsed, WORKSPACE_CONCURRENCY_MAX);
+}
+
 /** One single-level read: the cap, plus whether the stored value could be trusted. */
 export type ConcurrencyRead = { concurrency: number; degraded: boolean };
 
@@ -171,7 +187,13 @@ export async function getWorkspaceConcurrency(
       )
       .bind(workspaceId)
       .first<RuntimeSettingRow>();
-    return resolveRow(row, WORKSPACE_CONCURRENCY_DEFAULT, WORKSPACE_CONCURRENCY_MAX);
+    if (row === null) return { concurrency: WORKSPACE_CONCURRENCY_DEFAULT, degraded: false };
+    if (row.value === undefined) return { concurrency: CONCURRENCY_MIN, degraded: true };
+    const parsed = parseWorkspaceStored(row.value);
+    if (parsed === undefined) return { concurrency: WORKSPACE_CONCURRENCY_DEFAULT, degraded: false };
+    return Number.isNaN(parsed)
+      ? { concurrency: CONCURRENCY_MIN, degraded: true }
+      : { concurrency: parsed, degraded: false };
   } catch {
     return { concurrency: CONCURRENCY_MIN, degraded: true };
   }
@@ -218,7 +240,7 @@ export async function getEffectiveConcurrency(
       return degradedConcurrency();
     }
     const storedSystem = parseStored(row.system_value, SYSTEM_CONCURRENCY_MAX);
-    const storedWorkspace = parseStored(row.workspace_value, WORKSPACE_CONCURRENCY_MAX);
+    const storedWorkspace = parseWorkspaceStored(row.workspace_value);
     if (Number.isNaN(storedSystem) || Number.isNaN(storedWorkspace)) {
       return degradedConcurrency();
     }

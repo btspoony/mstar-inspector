@@ -1895,5 +1895,12 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
       .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.concurrency.system'")
       .get() as { value: string };
     expect(system.value).toBe("64");
+
+    // Replaying the file on the clamped schema is a no-op.
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0043_workspace_concurrency_bound.sql"), "utf8"));
+    const replay = db.raw
+      .query("SELECT id, max_concurrent_reviews AS cap FROM workspaces WHERE id LIKE 'ws\\_%' ESCAPE '\\' ORDER BY id")
+      .all() as Array<{ id: string; cap: number | null }>;
+    expect(replay).toEqual(rows);
   });
 });

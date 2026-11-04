@@ -47,6 +47,7 @@ import {
   DEFAULT_CHAIN_NAME,
   isPaused,
   isReviewTriggerMode,
+  concurrencySubmitBlocked,
   modelChainTabs,
   parseConcurrencySettings,
   parseStoredConcurrency,
@@ -1096,8 +1097,8 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
   // Section-local channel, like the name card's: an op outcome never rides the page-level notice.
   const [concurrencyNotice, setConcurrencyNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
-  // A degraded read is re-read on demand: the stored value is untrusted, so
-  // "try again" is the only action until a read lands.
+  // A degraded read starts the field empty and offers two ways out: type a
+  // value (the repair write) or re-read.
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
@@ -1124,11 +1125,7 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busy || loaded === null) return; // in-flight guard — no double submit
-    // A degraded read carries the conservative fallback, not this tenant's
-    // value: an empty draft must not write it. A TYPED value is the repair
-    // path — the write replaces the unreadable column — so the form stays
-    // enabled in this state.
-    if (loaded.degraded && draft === null) return;
+    if (concurrencySubmitBlocked(loaded.degraded, draft)) return;
     // An untouched form must submit the STORED value, never a derived one: the
     // stored number is what the tenant set.
     setBusy(true);

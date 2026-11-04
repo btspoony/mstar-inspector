@@ -1516,6 +1516,15 @@ export type ConcurrencySettings = {
   degraded: boolean;
 };
 
+/**
+ * Whether a concurrency form must not submit: a degraded read's conservative
+ * fallback is never a value anyone stored, and an empty draft cannot be a
+ * repair. A typed value IS the repair, so the form stays usable.
+ */
+export function concurrencySubmitBlocked(degraded: boolean, draft: string | null): boolean {
+  return degraded && draft === null;
+}
+
 export function parseConcurrencySettings(data: unknown): ConcurrencySettings | null {
   if (!isRecord(data)) return null;
   const { concurrency, min, max, degraded } = data;

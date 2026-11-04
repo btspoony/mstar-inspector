@@ -13,6 +13,7 @@ import { t, type Locale } from "../../i18n";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { PageNotice } from "../pages/PageNotice";
+import { concurrencySubmitBlocked } from "../pages/data";
 import { AdminWriteError, readRuntime, setSystemConcurrency, useLoaded } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
@@ -30,11 +31,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   ): Promise<void> {
     event.preventDefault();
     if (busy) return; // in-flight guard — no double submit
-    // A degraded read carries the conservative fallback, not a stored value: an
-    // empty draft must not submit that fallback as if the operator had typed
-    // it. A TYPED value is the repair path — the write replaces the unreadable
-    // row — so the form stays enabled in this state.
-    if (degraded && draft === null) return;
+    if (concurrencySubmitBlocked(degraded, draft)) return;
     // `Number("")` is 0 and `Number("8abc")` is NaN — both fail the server's
     // accepted-range gate, so the browser's own parsing needs no second validator.
     const next = Number((draft ?? String(stored)).trim());

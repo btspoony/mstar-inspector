@@ -18,7 +18,9 @@
  *   - a PRESENT value that is not a string or number is untrusted, never
  *     coerced (`["16"]`, `true` and `{}` all degrade)
  *   - a read failure answers the conservative cap with `degraded: true` and
- *     never throws
+ *     never throws (both readers)
+ *   - a workspace value above its maximum is clamped to the maximum by the
+ *     read, so a deploy-window write cannot degrade that workspace to serial
  *   - a retired workspace (`deleted_at` set) is ABSENT to both reads — the
  *     default applies, matching the write's live-workspace predicate
  *   - a refused write changes no row and appends no audit row
@@ -37,6 +39,7 @@ import {
   WORKSPACE_CONCURRENCY_MAX,
   getEffectiveConcurrency,
   getSystemConcurrency,
+  getWorkspaceConcurrency,
   setSystemConcurrency,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
@@ -189,20 +192,32 @@ describe("runtime-config-store", () => {
     });
   });
 
-  test("a workspace value above its maximum is untrusted, not a default", async () => {
-    // 0043 clamps rows written under the old 1..64 range; this is the read-side
-    // backstop for a row that still carries one (a hand edit, a missed deploy).
+  test("a workspace value above its maximum reads as the maximum, not degraded", async () => {
+    // 0043 lowers the rows that exist when it applies, but the window between
+    // "migrations applied" and "new Worker live" can admit one more 33..64
+    // write. The read clamps it so the workspace keeps a real cap instead of
+    // degrading to serial.
     const db = fixture();
     db.raw
       .prepare("UPDATE workspaces SET max_concurrent_reviews = ?1 WHERE id = ?2")
-      .run(WORKSPACE_CONCURRENCY_MAX + 1, WS);
+      .run(WORKSPACE_CONCURRENCY_MAX + 8, WS);
+    expect(await getWorkspaceConcurrency(db, WS)).toEqual({
+      concurrency: WORKSPACE_CONCURRENCY_MAX,
+      degraded: false,
+    });
     expect(await getEffectiveConcurrency(db, WS)).toEqual({
-      system: CONCURRENCY_MIN,
-      workspace: CONCURRENCY_MIN,
-      effective: CONCURRENCY_MIN,
-      degraded: true,
+      system: SYSTEM_CONCURRENCY_DEFAULT,
+      workspace: WORKSPACE_CONCURRENCY_MAX,
+      effective: WORKSPACE_CONCURRENCY_MAX,
+      degraded: false,
     });
   });
+
+  test("a D1 failure on the workspace reader answers the conservative cap", async () =>
+    expect(await getWorkspaceConcurrency(failingDb, WS)).toEqual({
+      concurrency: CONCURRENCY_MIN,
+      degraded: true,
+    }));
 
   test("an unreadable result row degrades instead of guessing defaults", async () => {
     const rowlessDb: DashboardD1 = {
