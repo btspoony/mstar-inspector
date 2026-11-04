@@ -125,6 +125,7 @@ export const en = {
   appDetail: {
     backToApps: "Back to Apps",
     tabSettings: "Settings",
+    tabInstallations: "Installed",
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
   },
@@ -151,6 +152,10 @@ export const en = {
     },
     /** The detail header line: `{owner}/{repo} #{number}`. */
     prNumber: "{owner}/{repo} #{number}",
+    /** The header line's accessible name: the PR's GitHub address. */
+    openOnGithub: "Open {owner}/{repo}#{number} on GitHub",
+    /** The aside repo value's accessible name: the repository's GitHub address. */
+    openRepoOnGithub: "Open {owner}/{repo} on GitHub",
     /** The short-sha chip's tooltip. */
     headSha: "Head SHA",
     reviews: "Reviews",
@@ -160,6 +165,9 @@ export const en = {
     noFailures: "No failures for this pull request.",
     findings: "Findings",
     noFindings: "No findings for this pull request.",
+    /** A filtered findings window with no match: it names the active severity,
+        not the PR (the head count still says the PR has findings). */
+    noFindingsForSeverity: "No findings with severity {severity}.",
     /** The detail header's meta line. */
     firstSeen: "First seen",
     lastSeen: "Last seen",
@@ -172,6 +180,24 @@ export const en = {
     familyTabName: "{label} ({count})",
     /** The findings metric's note, rendered beside the count. */
     mustFixNote: "{count} must-fix",
+    /** The findings filter's label and its "no filter" choice. */
+    filterSeverity: "Severity",
+    filterAll: "All",
+    /** The pager under a record list: prev/next and the loaded range over the total. */
+    pagePrev: "Previous",
+    pageNext: "Next",
+    pageRange: "{from}–{to} / {total}",
+    /**
+     * Beside the range: rows this page's parser refused. They stay inside
+     * `total`, so the list cannot reach them from any window.
+     */
+    pageDropped: "{count} rows could not be shown",
+    /**
+     * A severity group's count. The groups are built from the loaded window,
+     * while the tab's count is the PR's whole total — so the header names
+     * which one it counts.
+     */
+    groupPageCount: "{count} on this page",
     /** Severity group headers, in the order the groups render. */
     severityMustFix: "Must fix",
     severityShouldFix: "Should fix",
@@ -490,9 +516,10 @@ export const en = {
     noInstallations: "No installations yet.",
     recentDeliveries: "Recent deliveries",
     recentDeliveriesCopy:
-      "Up to 5 webhook deliveries — outcomes that report a verdict (OK / Paused / Rejected) come first, then the rest newest first.",
+      "Up to 10 webhook deliveries — outcomes that report a verdict (OK / Paused / Rejected) come first, then the rest newest first.",
     noDeliveries: "No deliveries yet.",
     unknownEvent: "unknown event",
+    unknownSource: "unknown repo",
     status: "status {code}",
     addToChain: "Add to chain",
     noAutoDiscovery: "This provider does not list models — pick from another verified provider.",

@@ -105,6 +105,7 @@ export const zhCN: Dictionary = {
   appDetail: {
     backToApps: "返回应用",
     tabSettings: "应用设置",
+    tabInstallations: "已安装",
     tabInsights: "洞察",
     tabPullRequests: "拉取请求",
   },
@@ -127,6 +128,10 @@ export const zhCN: Dictionary = {
     },
     /** 详情头部行：`{owner}/{repo} #{number}`。 */
     prNumber: "{owner}/{repo} #{number}",
+    /** 头部行的可访问名称：该 PR 的 GitHub 地址。 */
+    openOnGithub: "在 GitHub 打开 {owner}/{repo}#{number}",
+    /** 侧栏仓库值的可访问名称：该仓库的 GitHub 地址。 */
+    openRepoOnGithub: "在 GitHub 打开 {owner}/{repo}",
     /** 短 SHA 徽标的悬浮提示。 */
     headSha: "头部 SHA",
     reviews: "审查",
@@ -136,6 +141,9 @@ export const zhCN: Dictionary = {
     noFailures: "此拉取请求没有失败记录。",
     findings: "发现",
     noFindings: "此拉取请求没有发现问题。",
+    /** 筛选后的发现窗口没有匹配项：文案点名当前严重程度，而不是整个 PR
+        （头部计数仍表明该 PR 有发现）。 */
+    noFindingsForSeverity: "没有严重程度为“{severity}”的发现。",
     /** 详情头部的元信息行。 */
     firstSeen: "首次出现",
     lastSeen: "最近出现",
@@ -146,8 +154,19 @@ export const zhCN: Dictionary = {
     recordsLabel: "拉取请求记录",
     /** 类别触发按钮的可访问名称：标签与它绘制的计数。 */
     familyTabName: "{label}（{count}）",
-    /** 发现指标中数量旁的提示。 */
+    /** 发现指标旁的备注，与计数同行渲染。 */
     mustFixNote: "{count} 项必须修复",
+    /** 发现筛选的标签与“不筛选”选项。 */
+    filterSeverity: "严重程度",
+    filterAll: "全部",
+    /** 记录列表下方的分页：上一页/下一页与相对总数的已加载区间。 */
+    pagePrev: "上一页",
+    pageNext: "下一页",
+    pageRange: "{from}–{to} / {total}",
+    /** 分页区间旁：本页解析被拒绝的行数，它们仍计入总数，任何窗口都取不到。 */
+    pageDropped: "{count} 行无法显示",
+    /** 严重度分组的计数：分组来自已加载的一页，而标签页的计数是全 PR 总数。 */
+    groupPageCount: "本页 {count}",
     /** 严重度分组标题，按渲染顺序。 */
     severityMustFix: "必须修复",
     severityShouldFix: "建议修复",
@@ -424,9 +443,10 @@ export const zhCN: Dictionary = {
     metricKeys: "密钥",
     noInstallations: "还没有安装。",
     recentDeliveries: "最近投递",
-    recentDeliveriesCopy: "最多 5 次 webhook 投递 — 带结论的（正常 / 已暂停 / 已拒绝）排在前，其余按时间从新到旧。",
+    recentDeliveriesCopy: "最多 10 次 webhook 投递 — 带结论的（正常 / 已暂停 / 已拒绝）排在前，其余按时间从新到旧。",
     noDeliveries: "还没有投递。",
     unknownEvent: "未知事件",
+    unknownSource: "未知仓库",
     status: "状态 {code}",
     addToChain: "加入模型链",
     noAutoDiscovery: "此 provider 不列出模型 — 请从其他已验证 provider 中选择。",

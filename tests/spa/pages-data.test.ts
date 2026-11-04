@@ -246,6 +246,13 @@ describe("members/apps/settings parsers", () => {
   });
 
   test("parseSettings requires can_manage, created_by, the collections, and chains", () => {
+    const delivery = {
+      event_name: "pull_request",
+      outcome: "ok",
+      status_code: null,
+      repository_full_name: "acme/web",
+      created_at: "2026-01-01 00:00:00",
+    };
     const ok = parseSettings({
       can_manage: true,
       workspace_id: "ws_0123456789abcdefghijkl",
@@ -266,7 +273,9 @@ describe("members/apps/settings parsers", () => {
       model_chains: [],
       custom_providers: [],
       installations: [],
-      deliveries: [],
+      // The delivery rows carry the source repository (migration 0043); the
+      // parse stays array-level and keeps the rows verbatim.
+      deliveries: [delivery],
       configured_providers: [],
       provider_catalog: [],
       model_role_ids: ["mstar-review-seat"],
@@ -275,6 +284,7 @@ describe("members/apps/settings parsers", () => {
     });
     expect(ok?.app.id).toBe("app-demo");
     expect(ok?.can_manage).toBe(true);
+    expect(ok && ok.can_manage && ok.deliveries).toEqual([delivery]);
     expect(
       parseSettings({
         app: { github_slug: "demo", id: "app-demo", status: "active", review_enabled: 1, last_webhook_at: null },

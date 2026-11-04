@@ -416,6 +416,8 @@ type SettingsHealth = {
     event_name: string | null;
     outcome: string;
     status_code: number | null;
+    /** `owner/name` of the source repo (migration 0043); NULL = unknown source. */
+    repository_full_name: string | null;
     created_at: string;
   }>;
   delivery_summary?: {
@@ -706,14 +708,15 @@ export function appInsightsSummaryUrl(
   return `${base}/api/apps/${encodeURIComponent(appId)}/insights/summary?${params.toString()}`;
 }
 
-/**
- * The per-App pull-request ledger (the Pull requests tab). One row per PR
- * the App received — the list face and the detail's `pull_request` share
- * this exact shape.
- */
 export type PullRequestState = "open" | "closed" | "merged";
 
-export type PullRequestRow = {
+/**
+ * The per-App pull-request ledger's head row — the list's rows and the
+ * detail's `pull_request` are ONE shape: the list adds its two aggregates, the
+ * detail its record totals. `failure_count` is the list's alone; the detail
+ * already carries `counts.failures`, so one number has one carrier.
+ */
+export type PullRequestHead = {
   number: number;
   owner: string;
   repo: string;
@@ -722,6 +725,9 @@ export type PullRequestRow = {
   head_sha: string;
   first_seen_at: string;
   last_seen_at: string;
+};
+
+export type PullRequestRow = PullRequestHead & {
   latest_review: { verdict: string; reviewed_at: string } | null;
   failure_count: number;
 };
@@ -748,12 +754,46 @@ export type PullRequestFinding = {
   body: string;
 };
 
-/** The PR detail payload (`GET …/pull-requests/:owner/:repo/:number`). */
+/** The PR detail payload's record totals — one number per record family, plus
+ * the PR's own must-fix tally (the family dot's source, page-independent). */
+export type PullRequestCounts = {
+  findings: number;
+  reviews: number;
+  failures: number;
+  must_fix: number;
+};
+
+/**
+ * The PR detail payload (`GET …/pull-requests/:owner/:repo/:number`): the head
+ * row plus its record totals. The families themselves are paged reads.
+ * `latest_review` is the PR's newest review — the header's ONE source for
+ * verdict and attribution, independent of whichever reviews page is loaded.
+ */
 export type PullRequestDetail = {
-  pull_request: PullRequestRow;
-  reviews: PullRequestReview[];
-  failures: PullRequestFailure[];
-  findings: PullRequestFinding[];
+  pull_request: PullRequestHead;
+  counts: PullRequestCounts;
+  latest_review: PullRequestReview | null;
+};
+
+/** The three record families, one paged read each. */
+export type RecordSection = "findings" | "reviews" | "failures";
+
+/**
+ * One record section's page: the rows that could be shown, the server's own
+ * total, and the read's two bookkeeping facts. `dropped` counts rows this
+ * parser refused (they are inside `total`, so the pager would otherwise
+ * promise rows no window can render); `limit` is the page size the server
+ * actually applied — it clamps, so the pager must stride on this rather than
+ * on the size it asked for. `limit` is absent from a payload that predates
+ * the echo, and the pager then falls back to its own constant.
+ */
+export type RecordPage<T> = { items: T[]; total: number; dropped: number; limit?: number };
+
+/** Each section's row type — what `parseRecordPage` yields for that section. */
+export type RecordPageItems = {
+  findings: PullRequestFinding;
+  reviews: PullRequestReview;
+  failures: PullRequestFailure;
 };
 
 /**
@@ -764,19 +804,16 @@ export type PullRequestDetail = {
 export type PullRequestRef = { owner: string; repo: string; number: number };
 
 /**
- * Per-row list parse (QC: one nullable row must not blank the list). The
- * nullable DISPLAY fields coerce to "" and an unknown state clamps to
- * "open"; only the address and timestamp fields stay required — a row
- * without them cannot be listed or fetched, so it is dropped individually
- * and the rest of the list still renders. The returned row always carries
- * non-null strings (the type is not weakened).
+ * The head fields both faces read (QC: one nullable row must not blank the
+ * list). The nullable DISPLAY fields coerce to "" and an unknown state clamps
+ * to "open"; only the address and timestamp fields stay required — a row
+ * without them cannot be listed or fetched, so it is dropped individually.
  */
-function parsePullRequestRow(value: unknown): PullRequestRow | null {
+function parsePullRequestHead(value: unknown): PullRequestHead | null {
   if (!isRecord(value)) return null;
   if (typeof value.number !== "number" || !Number.isFinite(value.number)) return null;
   if (typeof value.owner !== "string" || typeof value.repo !== "string") return null;
   if (typeof value.first_seen_at !== "string" || typeof value.last_seen_at !== "string") return null;
-  if (typeof value.failure_count !== "number") return null;
   return {
     number: value.number,
     owner: value.owner,
@@ -786,6 +823,20 @@ function parsePullRequestRow(value: unknown): PullRequestRow | null {
     head_sha: typeof value.head_sha === "string" ? value.head_sha : "",
     first_seen_at: value.first_seen_at,
     last_seen_at: value.last_seen_at,
+  };
+}
+
+/**
+ * One LIST row: the head plus the two aggregates the list face renders. A row
+ * without a numeric `failure_count` cannot report the count it exists for, so
+ * it is dropped individually and the rest of the list still renders.
+ */
+function parsePullRequestRow(value: unknown): PullRequestRow | null {
+  const head = parsePullRequestHead(value);
+  if (head === null || !isRecord(value)) return null;
+  if (typeof value.failure_count !== "number") return null;
+  return {
+    ...head,
     latest_review: parseLatestReview(value.latest_review),
     failure_count: value.failure_count,
   };
@@ -861,23 +912,73 @@ export function parsePullRequestList(data: unknown): PullRequestRow[] | null {
 }
 
 /**
- * The detail payload: row + reviews + failures + findings. The envelope
- * keeps its shape (a missing/!array face fails the parse), but every
- * array is parsed per entry — one drifted review/failure/finding is
- * dropped, not the whole detail.
+ * The detail payload: the head row plus its record totals. The envelope is
+ * strict — a missing row or a missing/non-finite tab count fails the whole
+ * parse, because a silent zero would disable a tab's count. `must_fix` is the
+ * exception: it is a head fact newer than the envelope, so a payload that
+ * predates it is tolerated at zero (no danger dot) rather than turning the
+ * whole face into an error, exactly as an absent `RecordPage.limit` is.
  */
 export function parsePullRequestDetail(data: unknown): PullRequestDetail | null {
   if (!isRecord(data)) return null;
-  const pull_request = parsePullRequestRow(data.pull_request);
+  const pull_request = parsePullRequestHead(data.pull_request);
   if (pull_request === null) return null;
-  if (!Array.isArray(data.reviews) || !Array.isArray(data.failures) || !Array.isArray(data.findings)) {
-    return null;
-  }
+  const counts = parsePullRequestCounts(data.counts);
+  if (counts === null) return null;
+  // Absent/drifted → null (no headline verdict); the envelope itself still parses.
+  return { pull_request, counts, latest_review: parsePullRequestReview(data.latest_review) };
+}
+
+/**
+ * A tab count is required and finite; anything else fails the payload —
+ * a silent zero there would disable a tab that has rows.
+ */
+function finiteCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parsePullRequestCounts(value: unknown): PullRequestCounts | null {
+  if (!isRecord(value)) return null;
+  const findings = finiteCount(value.findings);
+  const reviews = finiteCount(value.reviews);
+  const failures = finiteCount(value.failures);
+  if (findings === null || reviews === null || failures === null) return null;
+  // Absent → 0 (a pre-`must_fix` payload: no dot, no note); present-but-malformed
+  // → fail, like every other count.
+  const must_fix = value.must_fix === undefined ? 0 : finiteCount(value.must_fix);
+  if (must_fix === null) return null;
+  return { findings, reviews, failures, must_fix };
+}
+
+/** One row parser per section — the page parse below is keyed by it. */
+const RECORD_PARSERS = {
+  findings: parsePullRequestFinding,
+  reviews: parsePullRequestReview,
+  failures: parsePullRequestFailure,
+} satisfies { [K in RecordSection]: (value: unknown) => RecordPageItems[K] | null };
+
+/**
+ * One record page: `{ items, total, limit }` in, `{ items, total, dropped,
+ * limit }` out. The envelope is strict (a missing `items` array or a
+ * non-finite `total` fails the page), but every row is parsed per entry — one
+ * drifted record is dropped, not the whole page — and the drop is REPORTED,
+ * because the server's `total` still counts the row it could not render.
+ */
+export function parseRecordPage<S extends RecordSection>(
+  section: S,
+  data: unknown,
+): RecordPage<RecordPageItems[S]> | null {
+  if (!isRecord(data) || !Array.isArray(data.items)) return null;
+  const total = finiteCount(data.total);
+  if (total === null) return null;
+  const parse = RECORD_PARSERS[section] as (value: unknown) => RecordPageItems[S] | null;
+  const items = data.items.map(parse).filter(present);
+  const limit = finiteCount(data.limit);
   return {
-    pull_request,
-    reviews: data.reviews.map(parsePullRequestReview).filter(present),
-    failures: data.failures.map(parsePullRequestFailure).filter(present),
-    findings: data.findings.map(parsePullRequestFinding).filter(present),
+    items,
+    total,
+    dropped: data.items.length - items.length,
+    ...(limit === null || limit <= 0 ? {} : { limit }),
   };
 }
 
@@ -899,6 +1000,38 @@ export function appPullRequestDetailUrl(base: string, appId: string, ref: PullRe
 }
 
 /**
+ * One record section's page URL. `offset`/`limit` ride every request — the
+ * server's bounds are the contract — and `severity` only when the findings
+ * filter is set; the query is encoded, so a free-form value cannot break out
+ * of it.
+ */
+export function appPullRequestRecordsUrl(
+  base: string,
+  appId: string,
+  ref: PullRequestRef,
+  section: RecordSection,
+  page: { offset: number; limit: number; severity?: string },
+): string {
+  const params = new URLSearchParams({ offset: String(page.offset), limit: String(page.limit) });
+  if (page.severity !== undefined && page.severity !== "") params.set("severity", page.severity);
+  return `${appPullRequestDetailUrl(base, appId, ref)}/${section}?${params.toString()}`;
+}
+
+/**
+ * The PR's own repository on GitHub, built from the ROW's owner/repo. Each
+ * segment is passed through `encodeURIComponent`, so a hostile segment stays
+ * inside the URL path — it cannot rewrite the host, the query or the fragment.
+ */
+export function githubRepoUrl(owner: string, repo: string): string {
+  return `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+}
+
+/** The PR on GitHub: the same repository address plus its `/pull/<number>`. */
+export function githubPullRequestUrl(owner: string, repo: string, number: number): string {
+  return `${githubRepoUrl(owner, repo)}/pull/${encodeURIComponent(String(number))}`;
+}
+
+/**
  * The PR state pill's copy + tone, derived once for the list and the
  * detail face. The state vocabulary is the API contract's closed set; the
  * face itself belongs to `StatusBadge` in `@design-system`.
@@ -912,8 +1045,11 @@ export function pullRequestStatePill(
   return { label: t(locale, "pullRequests.state.open"), tone: "accent" };
 }
 
-/** The App detail page's tabs (应用设置 / 洞察 / Pull requests). The last two are manager-only. */
-export type AppDetailTab = "settings" | "insights" | "pull-requests";
+/**
+ * The App detail page's tabs (应用设置 / 已安装 / 洞察 / Pull requests). The
+ * last three are manager-only — they render from the manage payload.
+ */
+export type AppDetailTab = "settings" | "installations" | "insights" | "pull-requests";
 
 /**
  * URL-derived detail state: the active tab, the insights filters, and the
@@ -921,17 +1057,20 @@ export type AppDetailTab = "settings" | "insights" | "pull-requests";
  */
 export type AppDetailSearch = { tab: AppDetailTab; window: InsightsWindow; repo: string; pr: string };
 
-/** The `pr` search param shape: `owner/repo/number`, number = decimal digits. */
-const PR_PARAM_PATTERN = /^[^/]+\/[^/]+\/\d+$/;
-
 /**
- * The `pr` param string → a detail address, or null when the param is
- * absent or malformed (the tab then renders the list). `.`/`..` segments
- * are rejected outright — encoding cannot neutralise a dot-segment
- * (`encodeURIComponent("..")` is `".."`), so the boundary has to be here.
+ * The `pr` param string → a detail address, or null when the param is absent
+ * or malformed (the tab then renders the list). This function IS the `pr`
+ * grammar — `parseAppDetailSearch` accepts exactly what it resolves, so the
+ * URL state can never carry an address the detail read refuses. `.`/`..`
+ * segments are rejected outright — encoding cannot neutralise a dot-segment
+ * (`encodeURIComponent("..")` is `".."`), so the boundary has to be here —
+ * and exactly three segments are accepted, so a longer path is not silently
+ * read as its first three.
  */
 export function pullRequestRefOf(pr: string): PullRequestRef | null {
-  const [owner, repo, number] = pr.split("/");
+  const parts = pr.split("/");
+  if (parts.length !== 3) return null;
+  const [owner, repo, number] = parts;
   if (owner === undefined || repo === undefined || number === undefined) return null;
   if (!/^\d+$/.test(number) || owner === "" || repo === "") return null;
   if (owner === "." || owner === ".." || repo === "." || repo === "..") return null;
@@ -943,23 +1082,27 @@ export function pullRequestRefOf(pr: string): PullRequestRef | null {
  * shared by the mount initializer and the popstate re-sync (the
  * spa-url-state-resync contract), built on the pinned insights helpers
  * (off-set windows resolve to the default segment). The manager-gated tab
- * values (`insights`, `pull-requests`) are honored only for managers; a
- * non-manager — or any other tab value — always resolves to the settings
- * tab. `pr` rides verbatim when it matches the `owner/repo/number` shape.
+ * values (`installations`, `insights`, `pull-requests`) are honored only for
+ * managers; a non-manager — or any other tab value — always resolves to the
+ * settings tab. `pr` rides verbatim only when `pullRequestRefOf` resolves it —
+ * the same predicate the detail face reads — so the address bar never
+ * advertises an open detail that can never open.
  */
 export function parseAppDetailSearch(search: string, canManage: boolean): AppDetailSearch {
   const insights = parseInsightsSearch(search);
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   const rawTab = params.get("tab");
   // The bare path IS settings — the only legal non-settings values are the
-  // two manager tabs, gated by the payload's can_manage.
+  // three manager tabs, gated by the payload's can_manage.
   const tab: AppDetailTab =
-    canManage && (rawTab === "insights" || rawTab === "pull-requests") ? rawTab : "settings";
+    canManage && (rawTab === "installations" || rawTab === "insights" || rawTab === "pull-requests")
+      ? rawTab
+      : "settings";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";
   const rawPr = params.get("pr");
-  const pr = rawPr !== null && PR_PARAM_PATTERN.test(rawPr) ? rawPr : "";
+  const pr = rawPr !== null && pullRequestRefOf(rawPr) !== null ? rawPr : "";
   return { tab, window, repo: insights.repo, pr };
 }
 

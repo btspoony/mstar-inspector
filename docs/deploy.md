@@ -2390,10 +2390,9 @@ row expires.
   or produced an invalid document, and a `usage_events` insert that failed
   while the review continued — so the count excludes them. They stay in the
   table as attribution and never page ops. The same contract supplies the
-  dashboard's own predicates: the per-PR failure COUNT excludes the same two
-  stages, while the per-PR failure HISTORY excludes nothing — every stage
-  stays listed there, so each attribution row keeps a surface. The stage
-  lists are written once.
+  dashboard's own predicates: the per-PR failure COUNT and the per-PR failure
+  HISTORY exclude the same two stages, so the tab's number and the pager under
+  it always agree. The stage lists are written once.
 - Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
   leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).
   Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,

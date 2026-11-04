@@ -367,7 +367,14 @@ const installationSchema = z
   .nullable()
   .optional();
 const repositorySchema = z
-  .object({ name: z.string(), owner: z.object({ login: z.string() }) })
+  .object({
+    name: z.string(),
+    owner: z.object({ login: z.string() }),
+    // Optional: GitHub states the `owner/name` form on every repository
+    // payload, but the classifiers only ever needed the pair — requiring it
+    // would turn an old-shaped delivery into a parse failure.
+    full_name: z.string().min(1).optional(),
+  })
   .nullable()
   .optional();
 
@@ -490,6 +497,7 @@ export async function classifyWebhook(
   log?: HandlerLog,
   cacheKey?: string,
   trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
+  onParsed?: (parsed: unknown) => void,
 ): Promise<WebhookOutcome> {
   if (!secret || secret === "development") {
     log?.warn(
@@ -519,7 +527,7 @@ export async function classifyWebhook(
     );
     return { kind: "reject", status: 401, reason: "signature verification failed" };
   }
-  return classifyEvent(eventName, rawBody, log, trigger);
+  return classifyEvent(eventName, rawBody, log, trigger, onParsed);
 }
 
 /**
@@ -540,18 +548,24 @@ export function classifyEvent(
   rawBody: string,
   log?: HandlerLog,
   trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
+  onParsed?: (parsed: unknown) => void,
 ): WebhookOutcome {
+  // ONE parse per delivery: the classifiers read this document, and `onParsed`
+  // hands the same one to the caller (the route records its source repository
+  // from it), so no delivery is JSON.parse'd a second time.
+  const parsed = parseBody(rawBody);
+  onParsed?.(parsed);
   if (!eventName) {
     return { kind: "ignore", reason: "missing X-GitHub-Event header" };
   }
   if (eventName === "pull_request") {
-    return classifyPullRequest(rawBody, trigger.mode, log);
+    return classifyPullRequest(parsed, trigger.mode, log);
   }
   if (eventName === "issue_comment") {
-    return classifyIssueComment(rawBody, log, trigger.appSlug);
+    return classifyIssueComment(parsed, log, trigger.appSlug);
   }
   if (eventName === "installation") {
-    return classifyInstallation(rawBody);
+    return classifyInstallation(parsed);
   }
   return { kind: "ignore", reason: `event ${eventName} is not whitelisted` };
 }
@@ -566,8 +580,7 @@ export function classifyEvent(
  * GitHub retries non-2xx, but a payload that cannot name an installation is
  * not something a retry fixes.
  */
-function classifyInstallation(rawBody: string): WebhookOutcome {
-  const parsed = parseBody(rawBody);
+function classifyInstallation(parsed: unknown): WebhookOutcome {
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
   }
@@ -590,8 +603,7 @@ function classifyInstallation(rawBody: string): WebhookOutcome {
   };
 }
 
-function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode, log?: HandlerLog): WebhookOutcome {
-  const parsed = parseBody(rawBody);
+function classifyPullRequest(parsed: unknown, mode: ReviewTriggerMode, log?: HandlerLog): WebhookOutcome {
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
   }
@@ -647,8 +659,7 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode, log?: Han
   };
 }
 
-function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appSlug: string): WebhookOutcome {
-  const parsed = parseBody(rawBody);
+function classifyIssueComment(parsed: unknown, log: HandlerLog | undefined, appSlug: string): WebhookOutcome {
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
   }
@@ -738,11 +749,12 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
  * a value: the ledger's `state` domain is GitHub's own ('open' | 'closed'),
  * promoted to 'merged' when the payload says so.
  *
- * Deliberately a SECOND parse of the same body: `classifyEvent` returns the
- * identity only on a `job`, and the ledger must also record the `ignore`
- * outcomes (a non-whitelisted action, a mode that does not auto-trigger).
+ * Takes the ALREADY PARSED body (the one `classifyEvent` read), never the raw
+ * text: the ledger must also record the `ignore` outcomes — a non-whitelisted
+ * action, a mode that does not auto-trigger — which the classifier's outcome
+ * does not carry, so it reads the same document instead of parsing it again.
  */
-export function pullRequestRecord(rawBody: string): {
+export function pullRequestRecord(parsed: unknown): {
   owner: string;
   repo: string;
   prNumber: number;
@@ -751,7 +763,6 @@ export function pullRequestRecord(rawBody: string): {
   headSha: string | null;
   updatedAt: string | null;
 } | null {
-  const parsed = parseBody(rawBody);
   if (parsed === null) return null;
   const result = pullRequestSchema.safeParse(parsed);
   if (!result.success) return null;
@@ -775,6 +786,54 @@ export function pullRequestRecord(rawBody: string): {
     // EXPLICITLY.
     updatedAt: normalizeRfc3339(pull_request?.updated_at) ?? null,
   };
+}
+
+/**
+ * The delivery's SOURCE repository (`owner/name`) — the diagnostics face's
+ * "which repo did this delivery come from?" answer, which the delivery row
+ * could not give before migration 0043. `repository.full_name` wins when
+ * GitHub states it; the same block's `owner.login` + `name` pair is the
+ * fallback. `null` when the document carries no `repository`, or states
+ * neither form.
+ *
+ * Takes the ALREADY PARSED body (the one `classifyEvent` read), never the raw
+ * text: a delivery record must not re-parse the payload the classifier just
+ * parsed. That document is also why the field is trusted: `classifyEvent` runs
+ * only after `verifySignature` succeeds, so `null` (no classification ran) or
+ * a document both mean an HMAC-verified body — never an unauthenticated one.
+ * The store still truncates the value as defence-in-depth against GitHub's own
+ * name ceilings; unlike `event_name` (an x-github-event HEADER, which the
+ * unauthenticated reject path does reach), that bound is not a payload bound.
+ *
+ * The preferred source is read on its own: a delivery that states only
+ * `full_name`, or states it beside a malformed `owner`/`name`, still has the
+ * authoritative name. Each field degrades to absent (`.catch`) instead of
+ * failing the whole read, so junk in one component cannot discard another.
+ *
+ * Never throws: this rides the best-effort delivery-recording path, so a
+ * malformed body degrades to "unknown source" rather than costing the row.
+ */
+export function webhookRepositoryFullName(parsed: unknown): string | null {
+  if (parsed === null) return null;
+  const result = z
+    .object({
+      repository: z
+        .object({
+          full_name: z.string().min(1).nullish().catch(null),
+          name: z.string().nullish().catch(null),
+          owner: z.object({ login: z.string() }).nullish().catch(null),
+        })
+        .nullish()
+        .catch(null),
+    })
+    .safeParse(parsed);
+  if (!result.success) return null;
+  const repository = result.data.repository;
+  if (!repository) return null;
+  if (repository.full_name) return repository.full_name;
+  const login = repository.owner?.login ?? "";
+  const name = repository.name ?? "";
+  return login === "" || name === "" ? null : `${login}/${name}`;
 }
 
 function parseBody(rawBody: string): unknown {

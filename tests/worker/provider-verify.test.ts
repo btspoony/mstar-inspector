@@ -18,7 +18,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import {
@@ -109,6 +109,9 @@ async function createPopulatedPre0015D1(): Promise<TestD1> {
     "0022_app_trigger_mode.sql",
     "0037_github_metadata_attempt.sql",
     "0038_webhook_path_drop.sql",
+    // The directory-derived tail (0043 adds the delivery source column the
+    // health summary selects), so a new migration joins automatically.
+    ...migrationsAfter("0038_webhook_path_drop.sql"),
   ]) {
     applyMigration(db, name);
   }

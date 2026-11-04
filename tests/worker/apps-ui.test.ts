@@ -27,7 +27,7 @@ import type { Env } from "../../src/worker/env";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
-import { createTestD1 } from "../store/helpers";
+import { createTestD1, migrationsAfter } from "../store/helpers";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
@@ -85,6 +85,9 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0019_github_apps_metadata.sql",
     "0037_github_metadata_attempt.sql",
     "0038_webhook_path_drop.sql",
+    // The directory-derived tail (0043 adds the delivery source column the
+    // health summary selects), so a new migration joins automatically.
+    ...migrationsAfter("0038_webhook_path_drop.sql"),
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

@@ -39,14 +39,6 @@ import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput 
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
-/**
- * Every migration after the 0036 identity rewrite, in wrangler's apply order
- * (numeric prefix order, so `1000_*` follows `999_*`). Derived from the
- * directory so a future migration cannot leave this fixture on a stale schema;
- * the 0036 boundary itself stays explicit below because that loop exists to
- * reconstruct a specific historical shape.
- */
-const MIGRATIONS_AFTER_0036 = migrationsAfter(36);
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 /** Distinct fake App PEMs — isolation asserts the factory receives the right one. */
@@ -97,6 +89,10 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0006_app_provider_config.sql",
     "0008_github_apps_ops.sql",
     "0009_app_model_roles.sql",
+    // 0011: the delivery table — 0043 adds a column to it, so the fixture must
+    // carry it before the derived tail runs. Listed here at its wrangler
+    // position (after 0009/0010), not appended where the need was noticed.
+    "0011_webhook_deliveries.sql",
     "0012_custom_providers_and_key_updated_at.sql",
     "0015_provider_verification.sql",
     "0017_app_model_chains.sql",
@@ -109,10 +105,11 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     // 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
     "0036_app_identity.sql",
-    // Every later migration, derived from the directory (0040/0041 included):
+    // Every later migration, derived from the directory (0040–… included):
     // the consumer's per-message admission reads the runtime caps and writes
-    // the `review_inflight` row on EVERY admitted message.
-    ...MIGRATIONS_AFTER_0036,
+    // the `review_inflight` row on EVERY admitted message, and 0043 adds the
+    // delivery source column.
+    ...migrationsAfter("0036_app_identity.sql"),
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

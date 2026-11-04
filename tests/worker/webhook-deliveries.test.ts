@@ -28,11 +28,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Webhooks } from "@octokit/webhooks";
 import worker, { deliveryOutcomeFromWebhook } from "../../src/worker/index";
+import { webhookRepositoryFullName } from "../../src/worker/webhooks";
 import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore, DELIVERY_OUTCOMES } from "../../src/dashboard/apps-store";
 import type { DeliveryOutcome } from "../../src/dashboard/apps-store";
-import { createMigratedTestD1, createTestD1 } from "../store/helpers";
+import { createMigratedTestD1, createTestD1, migrationsAfter } from "../store/helpers";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -169,6 +170,107 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
   });
 });
 
+describe("migrations/0043_webhook_delivery_repository.sql", () => {
+  /** The delivery table's pre-0043 shape: github_apps (post-0036) + 0011. */
+  function preSourceDb(): ReturnType<typeof createTestD1> {
+    const db = createTestD1();
+    for (const name of ["0004_github_apps.sql", "0036_app_identity.sql", "0011_webhook_deliveries.sql"]) {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  test("applies over existing delivery rows: they survive with a NULL source, and a new insert can carry owner/name", () => {
+    const db = preSourceDb();
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps
+           (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+            created_by, status, deleted_at, created_at, updated_at)
+         VALUES ('app-1', 'app-1', 'app-1', 1001, 'App 1', 'v1.primary.aXZpdi5jdA==', 'v1.primary.aXZpdi5jdA==',
+                 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+      )
+      .run();
+    // A delivery recorded BEFORE the column existed — the row the
+    // unknown-source label is for.
+    db.raw
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code)
+         VALUES ('delivery-old', 'app-1', 'pull_request', 'ok', NULL)`,
+      )
+      .run();
+
+    // Forward-only ALTER: no table rewrite, so the old row is still there.
+    expect(() =>
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0043_webhook_delivery_repository.sql"), "utf8")),
+    ).not.toThrow();
+    expect(db.raw.query("SELECT id, repository_full_name FROM webhook_deliveries").all()).toEqual([
+      { id: "delivery-old", repository_full_name: null },
+    ]);
+
+    // …and a post-0043 insert carries the source.
+    db.raw
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name)
+         VALUES ('delivery-new', 'app-1', 'pull_request', 'ok', NULL, 'acme/widgets')`,
+      )
+      .run();
+    expect(
+      db.raw.query("SELECT repository_full_name FROM webhook_deliveries WHERE id = 'delivery-new'").get(),
+    ).toEqual({ repository_full_name: "acme/widgets" });
+  });
+});
+
+describe("webhookRepositoryFullName (delivery source repo, migration 0043)", () => {
+  /** The classifier passes its OWN parse; these cases exercise that document. */
+  const parse = JSON.parse as (text: string) => unknown;
+
+  test("full_name wins, owner/name is the fallback, and a document with no source is null — never throws", () => {
+    expect(
+      webhookRepositoryFullName(
+        parse(JSON.stringify({ repository: { name: "widgets", owner: { login: "acme" }, full_name: "acme/widgets" } })),
+      ),
+    ).toBe("acme/widgets");
+    expect(
+      webhookRepositoryFullName(parse(JSON.stringify({ repository: { name: "widgets", owner: { login: "acme" } } }))),
+    ).toBe("acme/widgets");
+    // An empty name is not a repository; an absent repository block is not one either.
+    expect(
+      webhookRepositoryFullName(parse(JSON.stringify({ repository: { name: "", owner: { login: "acme" } } }))),
+    ).toBeNull();
+    expect(webhookRepositoryFullName(parse(JSON.stringify({ zen: "Keep it logically awesome." })))).toBeNull();
+    expect(webhookRepositoryFullName(parse(JSON.stringify({ repository: null })))).toBeNull();
+    // A document the parse could not produce (an unparsable / JSON `null` body).
+    expect(webhookRepositoryFullName(null)).toBeNull();
+    expect(webhookRepositoryFullName(parse("null"))).toBeNull();
+  });
+
+  test("the preferred source is read on its own, without a valid owner/name pair", () => {
+    // The authoritative form alone — no `name`, no `owner` — still names the repo.
+    expect(webhookRepositoryFullName(parse(JSON.stringify({ repository: { full_name: "acme/widgets" } })))).toBe(
+      "acme/widgets",
+    );
+    // A malformed fallback pair does not discard a valid preferred source.
+    expect(
+      webhookRepositoryFullName(
+        parse(JSON.stringify({ repository: { full_name: "acme/widgets", name: 42, owner: { login: "" } } })),
+      ),
+    ).toBe("acme/widgets");
+    // A conflicting pair loses to full_name.
+    expect(
+      webhookRepositoryFullName(
+        parse(JSON.stringify({ repository: { full_name: "acme/widgets", name: "other", owner: { login: "elsewhere" } } })),
+      ),
+    ).toBe("acme/widgets");
+    // An unusable full_name falls through to the pair; an empty one is not a name.
+    expect(
+      webhookRepositoryFullName(
+        parse(JSON.stringify({ repository: { full_name: "", name: "widgets", owner: { login: "acme" } } })),
+      ),
+    ).toBe("acme/widgets");
+  });
+});
+
 describe("apps-store delivery face (recordDelivery / deliverySummary / listRecentDeliveries)", () => {
   /** Raw-insert one github_apps row (dummy envelopes — no decryption here). */
   function seedAppRow(db: ReturnType<typeof createTestD1>, id = "app-1"): void {
@@ -188,8 +290,8 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     seedAppRow(db);
     const store = createAppsStore(db);
 
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null });
-    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "rejected", statusCode: 401 });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "rejected", statusCode: 401, repositoryFullName: null });
 
     const rows = db.raw.query("SELECT * FROM webhook_deliveries ORDER BY rowid").all() as Array<{
       id: string;
@@ -224,6 +326,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
         eventName: "pull_request",
         outcome: "not-an-outcome" as DeliveryOutcome,
         statusCode: null,
+        repositoryFullName: null,
       }),
     ).rejects.toThrow(/not on the producer vocabulary/);
     const count = db.raw.query("SELECT COUNT(*) AS n FROM webhook_deliveries").get() as { n: number };
@@ -241,10 +344,10 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     const store = createAppsStore(db);
     // Backdate every row but the newest so the order is observable
     // (datetime('now') has second resolution).
-    await store.recordDelivery({ appId: "app-1", eventName: "ping", outcome: "ignored", statusCode: null });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401 });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "paused", statusCode: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "paused", statusCode: null, repositoryFullName: null });
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-25 hours')
@@ -262,9 +365,9 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     const db = createMigratedTestD1();
     seedAppRow(db);
     const store = createAppsStore(db);
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401 });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 500 });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 500, repositoryFullName: null });
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-25 hours')
@@ -292,9 +395,9 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     seedAppRow(db, "app-2");
     const store = createAppsStore(db);
     for (let i = 1; i <= 7; i++) {
-      await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null });
+      await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
     }
-    await store.recordDelivery({ appId: "app-2", eventName: "ping", outcome: "ignored", statusCode: null });
+    await store.recordDelivery({ appId: "app-2", eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null });
     // Backdate the first six so the newest-first order is observable.
     db.raw
       .prepare(
@@ -311,27 +414,62 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     expect(await store.listRecentDeliveries("no-such-app", 5)).toEqual([]);
   });
 
-  test("recordDelivery caps event_name at 64 chars at persist time (seat2 hygiene pin)", async () => {
+  test("listRecentDeliveries defaults to 10 rows when the caller passes no limit", async () => {
+    const db = createMigratedTestD1();
+    seedAppRow(db);
+    const store = createAppsStore(db);
+    for (let i = 1; i <= 12; i++) {
+      await store.recordDelivery({
+        appId: "app-1",
+        eventName: "pull_request",
+        outcome: "ok",
+        statusCode: null,
+        repositoryFullName: null,
+      });
+    }
+
+    expect(await store.listRecentDeliveries("app-1")).toHaveLength(10);
+  });
+
+  test("recordDelivery caps event_name at 64 chars and repository_full_name at 160 at persist time", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
     const store = createAppsStore(db);
 
-    // The x-github-event header is attacker-influenced on the
-    // unauthenticated reject path — the persisted value must be bounded.
+    // The store bounds what it persists, whatever its caller passes: the
+    // x-github-event header is attacker-influenced on the unauthenticated
+    // reject path, while the body's repository name is only capped as
+    // defence-in-depth against GitHub's own length ceilings.
     await store.recordDelivery({
       appId: "app-1",
       eventName: "x".repeat(200),
       outcome: "ok",
       statusCode: null,
+      repositoryFullName: "y".repeat(2000),
     });
-    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "ignored", statusCode: null });
+    // A non-BMP character STRADDLING the bound must not leave half a surrogate
+    // pair in D1 (a lone surrogate cannot round-trip as valid UTF-8): the cut
+    // backs off one unit and drops the whole code point.
+    await store.recordDelivery({
+      appId: "app-1",
+      eventName: `${"x".repeat(63)}😀`,
+      outcome: "ok",
+      statusCode: null,
+      repositoryFullName: `${"y".repeat(159)}😀`,
+    });
+    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "ignored", statusCode: null, repositoryFullName: null });
 
     const rows = db.raw
-      .query("SELECT event_name FROM webhook_deliveries ORDER BY rowid")
-      .all() as Array<{ event_name: string | null }>;
-    expect(rows).toHaveLength(2);
+      .query("SELECT event_name, repository_full_name FROM webhook_deliveries ORDER BY rowid")
+      .all() as Array<{ event_name: string | null; repository_full_name: string | null }>;
+    expect(rows).toHaveLength(3);
     expect(rows[0]!.event_name).toBe("x".repeat(64));
-    expect(rows[1]!.event_name).toBeNull(); // NULL (absent header) passes through untouched
+    expect(rows[0]!.repository_full_name).toBe("y".repeat(160));
+    expect(rows[1]!.event_name).toBe("x".repeat(63));
+    expect(rows[1]!.repository_full_name).toBe("y".repeat(159));
+    // NULL (absent header / no repository) passes through untouched.
+    expect(rows[2]!.event_name).toBeNull();
+    expect(rows[2]!.repository_full_name).toBeNull();
   });
 });
 
@@ -362,7 +500,10 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       "0038_webhook_path_drop.sql",
     ];
     if (withDeliveries) {
-      names.push("0011_webhook_deliveries.sql");
+      // 0011 plus every migration after the 0038 rebuild — derived from the
+      // directory, so a new one (0043's source column included) joins
+      // automatically. The failure fixture stops before the delivery table.
+      names.push("0011_webhook_deliveries.sql", ...migrationsAfter("0038_webhook_path_drop.sql"));
     }
     for (const name of names) {
       db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
@@ -496,6 +637,69 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(deliveriesFor(db, appRow.id)).toEqual([
       { event_name: "pull_request", outcome: "ok", status_code: null },
     ]);
+  });
+
+  test("a pull_request delivery persists the payload's source repository (repository.full_name)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const body = JSON.stringify({
+      ...PR_PAYLOAD,
+      repository: { name: "test-repo", owner: { login: "test-owner" }, full_name: "test-owner/test-repo" },
+    });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), makeEnv(db));
+
+    expect(res.status).toBe(200);
+    const rows = db.raw
+      .query("SELECT repository_full_name FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ repository_full_name: string | null }>;
+    expect(rows).toEqual([{ repository_full_name: "test-owner/test-repo" }]);
+  });
+
+  test("an ignored delivery still records its source repository", async () => {
+    // The ignore paths are the unauthenticated junk traffic the delivery face
+    // still records for the operator; the source repository is the fact that
+    // outlives the ignored payload.
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // A `ping` delivery: no PR ledger read (that is its own document and its
+    // own concern), so the delivery row is the only thing this payload writes.
+    const body = JSON.stringify({
+      zen: "Keep it logically awesome.",
+      repository: { name: "test-repo", owner: { login: "test-owner" }, full_name: "test-owner/test-repo" },
+    });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "ping"),
+      makeEnv(db),
+    );
+
+    expect(await res.text()).toBe("ignored");
+    const rows = db.raw
+      .query("SELECT repository_full_name FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ repository_full_name: string | null }>;
+    expect(rows).toEqual([{ repository_full_name: "test-owner/test-repo" }]);
+  });
+
+  test("a payload without a repository persists NULL — the unknown-source row still records", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const body = JSON.stringify({ zen: "Keep it logically awesome." });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "ping"),
+      makeEnv(db),
+    );
+
+    expect(res.status).toBe(200);
+    const rows = db.raw
+      .query("SELECT event_name, repository_full_name FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ event_name: string | null; repository_full_name: string | null }>;
+    expect(rows).toEqual([{ event_name: "ping", repository_full_name: null }]);
   });
 
   test("paused path: review_enabled=0 → 2xx ignored, zero enqueue + row outcome='paused'", async () => {
