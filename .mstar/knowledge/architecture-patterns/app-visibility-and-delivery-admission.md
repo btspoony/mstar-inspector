@@ -27,19 +27,22 @@ public App and `404` for a private one. Probe it that way:
 - anything else, or a timeout -> keep the previously stored value
 
 A `404` is ambiguous: it is also what a missing or renamed slug returns, so a
-stale cached slug can read as `private`. The probe runs only after a successful
-profile fetch, on the slug that fetch resolved (or the already cached one when
-the payload carries none) — never on its own, which is what keeps that case
-rare. An uncertain answer (any other status, or a timeout) keeps the previously
-stored value rather than guessing.
+stale cached slug can read as `private`. The probe runs on two occasions: after
+a successful profile fetch, on the slug that fetch resolved (or the already
+cached one when the payload carries none); and whenever the owner allowlist is
+switched ON, because admission trusts this cache and a stale `private` would
+silently leave the gate inert. An uncertain answer (any other status, or a
+timeout) keeps the previously stored value on the refresh path, while the
+enable path stores `unknown` — the cache it replaces is exactly what may be
+wrong.
 
 The probe must not send the App JWT or installation token; authenticating it
 would make a private App answer `200` and erase the distinction.
 
 `github_visibility` stays nullable. `null` means never probed, and consumers
 must treat it as "cannot prove private", not as `private`. The probe runs
-during metadata refresh, so a row created before this field existed reads
-`null` until its next refresh.
+during metadata refresh and on an allowlist enable, so a row created before
+this field existed reads `null` until one of those happens.
 
 ## Delivery admission runs before any record
 
@@ -69,8 +72,11 @@ here because it is not obvious from the code:
   cannot reach this point without a valid App-signed payload
 - the opposite direction silently drops real review work whenever D1 is
   degraded, and the tenant has no surface that would show the drop
-- the refusal count of a working allowlist remains visible in the delivery
-  ledger, so an outage-caused pass is distinguishable from a policy pass
+- a refusal leaves no delivery record: it is one structured log line
+  (`owner_not_allowlisted`) with no `webhook_deliveries` row, no PR ledger row
+  and no `last_webhook_at` touch. An outage-caused admission is therefore
+  distinguishable only by the ABSENCE of that log line — nothing in the
+  delivery ledger counts refusals
 
 The Check path takes the opposite direction on unreadable configuration: an
 App row or review row that cannot be read concludes `failure`, because a pass
