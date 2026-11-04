@@ -66,8 +66,10 @@
 # `--report-out` (a second side document, `mstar.report/v1`, written beside the
 # recheck document) and the report seat itself; the Worker's compare gate and
 # its `since <base>` reconFact assume a runner that understands a delta
-# universe. A stale image writes no report document at all, so every narrative
-# section publishes `none` while the round looks successful.
+# universe. A stale image does NOT degrade to `none`: its runner rejects the
+# unknown `--report-out` flag with a usage error, exits 2 with no stdout, and
+# the round fails as a runner failure — so the image must be rebuilt before the
+# Worker sends that flag.
 # rebuild: the report validator now rejects a document that is over the read's
 # BYTE bound (character budgets alone cannot bound UTF-8 bytes) with an explicit
 # reason, and the report seat honours a caller signal aborted before the call

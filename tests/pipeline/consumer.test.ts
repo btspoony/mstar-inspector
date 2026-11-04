@@ -1057,9 +1057,11 @@ describe("createReviewConsumer", () => {
     // false-timeout a deep three-phase run into the DLQ (spec d5-budget
     // Problem Statement).
     expect(runnerExecTimeout()).toBe(840_000);
-    // The admission row's TTL follows the same level table (AC-S10-guard).
-    // The seconds figure is pinned ONCE, by that guard test; this reads it.
-    expect(admissionTtlMs).toBe(reviewGuardTtlSeconds("deep") * 1000);
+    // The admission row's TTL follows the same level table (AC-S10-guard):
+    // deep is 2532s. Pinned as the table's figure, like the runner budgets
+    // below — the arithmetic that produces it is pinned once, by the guard
+    // test.
+    expect(admissionTtlMs).toBe(2_532_000);
     // The quick/default 10-minute table is frozen (spec: 禁止把 quick 全局改成 deep 档预算).
     expect(runnerTimeoutMs("quick")).toBe(600_000);
     expect(runnerTimeoutMs("default")).toBe(600_000);

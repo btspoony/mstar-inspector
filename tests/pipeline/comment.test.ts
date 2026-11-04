@@ -110,6 +110,16 @@ describe("truncateSummary", () => {
     expect((truncated.match(/<details>/g) ?? []).length).toBe((truncated.match(/<\/details>/g) ?? []).length);
   });
 
+  test("a cut inside a tilde fence inside a fold closes the fence before the fold", () => {
+    const narrative = `<details>\n<summary>Plan</summary>\n\n~~~md\n${"step\n".repeat(3000)}~~~\n</details>`;
+    const truncated = truncateSummary(narrative);
+    expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
+    // A tilde fence closes with tildes: a backticked closer would leave the
+    // block open and hide the fold that answers it.
+    expect(truncated.endsWith("~~~\n\n</details>…")).toBe(true);
+    expect((truncated.match(/<details>/g) ?? []).length).toBe((truncated.match(/<\/details>/g) ?? []).length);
+  });
+
   test("a narrative without a fence or fold is byte-identical", () => {
     const narrative = "Two issues found.\n\n- **auth**: expiry\n- 100% covered\n";
     expect(truncateSummary(narrative)).toBe(narrative);
@@ -953,6 +963,26 @@ describe("report sections (mstar.report/v1 side document)", () => {
     }
   });
 
+  test("an unclosed code fence in a report field cannot swallow the sections after it", () => {
+    // `~~~` opens a block exactly like backticks: left unclosed it runs to the
+    // end of the comment, the sections and the marker lines after it included.
+    for (const fence of ["~~~", "```"]) {
+      const body = insertReportSections(
+        renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] }),
+        { ...report, verified: `- suite green\n${fence}\ntail`, planToFix: "none" },
+        "### Revalidated findings\n\nnone",
+      );
+      // Escaped in place: the opener stays text and the field is still readable.
+      expect(body).toContain(`\n\\${fence}\ntail\n`);
+      // No line of the body can open a block at all.
+      expect(body.split("\n").filter((line) => /^ {0,3}(`{3,}|~{3,})/.test(line))).toHaveLength(0);
+      const escaped = body.indexOf(`\\${fence}`);
+      for (const section of ["### 🗑️ Considered & rejected", "## 🛠️ Plan to fix"]) {
+        expect(body.indexOf(section)).toBeGreaterThan(escaped);
+      }
+    }
+  });
+
   test("every thematic-break form is neutralized: `***`, `___` and spaced runs", () => {
     const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
     for (const rule of ["***", "___", "- - -", "* * *", "_ _ _", "----", "==="]) {
@@ -1124,6 +1154,30 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     }
     expect(prepared).toContain("Review 7 · commit 0123456");
     expect(prepared.trimEnd().endsWith(publicationMarker)).toBe(true);
+  });
+
+  test("a clamp cut inside a tilde fence closes it", () => {
+    // A finding body renders verbatim, so its tilde fence reaches the clamp
+    // exactly like the fix plan's backticked one.
+    const body = buildReviewBody({
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      findings: [
+        {
+          mergeClass: "must-fix",
+          title: "Tilde fence",
+          file_path: "src/auth.ts",
+          line_start: 1,
+          line_end: 1,
+          body: `~~~\n${"x".repeat(REVIEW_BODY_LIMIT)}`,
+        },
+      ],
+    });
+    expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
+    expect(body).toContain("…");
+    // Opener plus the closer the cut appends: an odd count means the trailer
+    // and the publication marker render inside the block.
+    expect(body.split("\n").filter((line) => /^ {0,3}~{3,}/.test(line))).toHaveLength(2);
   });
 
   test("within-limit bodies pass through verbatim", () => {

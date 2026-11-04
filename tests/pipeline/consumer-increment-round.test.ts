@@ -61,12 +61,13 @@ const PREVIOUS_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 /**
  * The round's command shapes, built by the production builders: a change to a
  * command must edit the product, not this suite. The compare read carries
- * per-round shas, so its fixed PREFIX answers "was a compare issued at all".
+ * per-round shas, so its fixed compare PATH answers "was a compare issued at
+ * all" without counting the round's other repo-root `gh api` reads.
  */
 const compareCommand = (baseSha: string) => compareStatusCommand(TEST_OWNER, TEST_REPO, baseSha, SHA);
-const COMPARE_PREFIX = compareCommand(SHA).split("/compare/")[0]!;
+const COMPARE_PATH = `${compareCommand(SHA).split("/compare/")[0]!}/compare/`;
 const issueView = (issueNumber: number) => issueViewCommand(TEST_OWNER, TEST_REPO, issueNumber);
-const compareIssued = (): boolean => sandbox.calls.some((call) => call.cmd.startsWith(COMPARE_PREFIX));
+const compareIssued = (): boolean => sandbox.calls.some((call) => call.cmd.startsWith(COMPARE_PATH));
 
 /**
  * One reviewed row for this PR at `headSha` (the increment base candidate).

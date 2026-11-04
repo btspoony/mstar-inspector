@@ -196,28 +196,31 @@ function boundIncomplete(fact: { reason: string; unscanned: readonly string[] })
 
 /**
  * The closing fence for the code block `text` leaves open ("" when none). A
- * fenced block runs from an opening line (0-3 spaces, 3+ backticks, an info
- * string without a backtick) to the next line of only backticks at least as
- * long. The fix plan renders inside `<details>` as a backticked `md` block, so
- * a cut inside it closes only the fold and leaves the fence open — GitHub then
- * routes everything after it, trailer and publication marker included, into the
- * code block instead of publishing it.
+ * fenced block runs from an opening line (0-3 spaces, 3+ backticks OR 3+
+ * tildes, an info string without a backtick when the fence is backticked) to
+ * the next line of only the same character, at least as long. The fix plan
+ * renders inside `<details>` as a backticked `md` block, so a cut inside it
+ * closes only the fold and leaves the fence open — GitHub then routes
+ * everything after it, trailer and publication marker included, into the code
+ * block instead of publishing it.
  */
 function closerForOpenFence(text: string): string {
-  let open = 0;
+  let open: { ch: string; len: number } | null = null;
   for (const line of text.split("\n")) {
-    const fence = /^ {0,3}(`{3,})(.*)$/.exec(line);
+    const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     if (fence === null) continue;
-    const run = fence[1]?.length ?? 0;
+    const run = fence[1]!;
+    const ch = run[0]!;
     const info = fence[2] ?? "";
-    if (open === 0) {
-      // A backtick in the info string means this line is not a fence at all.
-      if (!info.includes("`")) open = run;
-    } else if (run >= open && info.trim() === "") {
-      open = 0;
+    if (open === null) {
+      // A backtick in the info string means a BACKTICK line is not a fence at
+      // all — a tilde fence's info string may hold backticks.
+      if (ch === "~" || !info.includes("`")) open = { ch, len: run.length };
+    } else if (ch === open.ch && run.length >= open.len && info.trim() === "") {
+      open = null;
     }
   }
-  return open === 0 ? "" : `\n${"`".repeat(open)}`;
+  return open === null ? "" : `\n${open.ch.repeat(open.len)}`;
 }
 
 /** Close whatever `text` leaves open: the fence first (it opened inside the fold), then every fold. */
@@ -463,16 +466,18 @@ function insertBeforeHeading(body: string, anchor: string, block: string): strin
 
 /**
  * A report line markdown would read as STRUCTURE rather than text: an ATX
- * heading, or a setext underline / thematic break (any of `-`, `*`, `_` at
- * least three times, optionally spaced — those turn the line above them into a
- * heading — or a `===` underline). The four raw report fields are
- * model/PR-echoed text, so a spoofed `### Findings` would otherwise steal the
- * anchor the revalidated table is inserted at and a `## 📋 Review` would fork
- * the layout. Up to three leading spaces still count: markdown reads those as
- * the same heading, so the indent is part of the match (4+ spaces is a code
- * block, a structure no heading anchor can be forged in).
+ * heading; a setext underline / thematic break (any of `-`, `*`, `_` at least
+ * three times, optionally spaced — those turn the line above them into a
+ * heading — or a `===` underline); or a code-fence opener (3+ backticks or
+ * tildes), which left unclosed runs to the end of the comment. The four raw
+ * report fields are model/PR-echoed text, so a spoofed `### Findings` would
+ * otherwise steal the anchor the revalidated table is inserted at, a
+ * `## 📋 Review` would fork the layout, and a stray `~~~` would swallow every
+ * section after it. Up to three leading spaces still count: markdown reads
+ * those as the same structure, so the indent is part of the match (4+ spaces
+ * is a code block, a structure no heading anchor can be forged in).
  */
-const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|={3,}\s*$)/;
+const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|={3,}\s*$|`{3,}|~{3,})/;
 
 /**
  * Escape the first character of every structure line, so the field stays text:
