@@ -111,11 +111,14 @@ export const SUMMARY_MD_LIMIT = 8000;
  */
 export const REVIEW_BODY_LIMIT = 65000;
 
-/** Close every fold `text` leaves open — a lone `</details>` closes only one. */
+/** How many `<details>` folds `text` leaves open — a lone `</details>` closes one. */
+function openFoldCount(text: string): number {
+  return (text.match(/<details>/g) ?? []).length - (text.match(/<\/details>/g) ?? []).length;
+}
+
+/** Close every fold `text` leaves open. */
 function closeOpenFolds(text: string): string {
-  const open = (text.match(/<details>/g) ?? []).length - (text.match(/<\/details>/g) ?? []).length;
-  if (open <= 0) return text;
-  return `${text}${Array.from({ length: open }, () => "\n\n</details>").join("")}`;
+  return `${text}${"\n\n</details>".repeat(Math.max(0, openFoldCount(text)))}`;
 }
 
 /** Truncate summary_md to the body budget (char-based; GitHub counts chars). */
@@ -184,22 +187,47 @@ function boundIncomplete(fact: { reason: string; unscanned: readonly string[] })
 }
 
 /**
- * Cut `text` to `budget` chars, keeping the head — and close any fold the cut
- * left open. An unclosed `<details>` makes GitHub route the rest of the
- * comment into the collapsed block, so the trailer and the publication marker
- * would vanish behind a fold nobody opened. Every clamp that can cut inside a
- * fold goes through here.
+ * The closing fence for the code block `text` leaves open ("" when none). A
+ * fenced block runs from an opening line (0-3 spaces, 3+ backticks, an info
+ * string without a backtick) to the next line of only backticks at least as
+ * long. The fix plan renders inside `<details>` as a backticked `md` block, so
+ * a cut inside it closes only the fold and leaves the fence open — GitHub then
+ * routes everything after it, trailer and publication marker included, into the
+ * code block instead of publishing it.
+ */
+function closerForOpenFence(text: string): string {
+  let open = 0;
+  for (const line of text.split("\n")) {
+    const fence = /^ {0,3}(`{3,})(.*)$/.exec(line);
+    if (fence === null) continue;
+    const run = fence[1]?.length ?? 0;
+    const info = fence[2] ?? "";
+    if (open === 0) {
+      // A backtick in the info string means this line is not a fence at all.
+      if (!info.includes("`")) open = run;
+    } else if (run >= open && info.trim() === "") {
+      open = 0;
+    }
+  }
+  return open === 0 ? "" : `\n${"`".repeat(open)}`;
+}
+
+/**
+ * Cut `text` to `budget` chars, keeping the head — and close any fence and any
+ * fold the cut left open. An unclosed `<details>` makes GitHub route the rest
+ * of the comment into the collapsed block, so the trailer and the publication
+ * marker would vanish behind a fold nobody opened; an unclosed fence does the
+ * same to the marker lines. Every clamp that can cut inside either goes through
+ * here. The closers' length comes out of the budget, so the result never
+ * overshoots it.
  */
 function clampKeepingHead(text: string, budget: number): string {
   if (text.length <= budget) return text;
   const head = text.slice(0, Math.max(0, budget - 1));
-  const open =
-    (head.match(/<details>/g) ?? []).length - (head.match(/<\/details>/g) ?? []).length;
-  if (open <= 0) return `${head}…`;
-  // Close EVERY fold the cut left open, paying their length out of the budget.
-  const closers = Array.from({ length: open }, () => "\n\n</details>").join("");
+  // The fence opens INSIDE the fold, so it closes first.
+  const closers = closerForOpenFence(head) + "\n\n</details>".repeat(Math.max(0, openFoldCount(head)));
   const room = budget - 1 - closers.length;
-  if (room <= 0) return `${head}…`;
+  if (closers === "" || room <= 0) return `${head}…`;
   return `${head.slice(0, room)}${closers}…`;
 }
 

@@ -132,6 +132,8 @@ describe("validateReportDoc", () => {
       ),
     };
     expect(Buffer.byteLength(JSON.stringify(maximal))).toBeLessThan(REPORT_FILE_MAX_BYTES);
+    // ...and it is still a document the gate accepts, not just a byte count.
+    expect(validateReportDoc(maximal).ok).toBe(true);
   });
 
   test("rejects a document over the BYTE bound, and accepts one just under it", () => {
