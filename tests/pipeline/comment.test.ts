@@ -904,6 +904,60 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(body).toContain("**What this PR does**: Adds an expiry guard");
   });
 
+  test("raw HTML in a report field cannot fold the sections after it", () => {
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "review",
+    });
+    // An unclosed `<details>` routes everything after it into a collapsed
+    // block — plan and publication marker included — so the tag must stay text.
+    for (const html of ["<details>fold the tail", "<details open>\nfold the tail"]) {
+      const body = buildPreparedReviewBody({
+        output: { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        omittedFindings: 0,
+        round: 1,
+        headSha: "0123456789abcdef0123456789abcdef01234567",
+        publicationMarker,
+        reportParts: {
+          report: { ...report, verified: `- ${html}`, rejected: "R&D &lt;details&gt;" },
+          revalidated: "### Revalidated findings\n\nnone",
+        },
+      });
+      expect(body).toContain("&lt;details");
+      // The plan block is the body's ONLY fold, and it is closed: nothing the
+      // field said can swallow the sections below it.
+      expect(body.match(/<details/g)).toHaveLength(1);
+      expect(body.match(/<\/details>/g)).toHaveLength(1);
+      expect(body.indexOf("### 🗑️ Considered & rejected")).toBeGreaterThan(body.indexOf("&lt;details"));
+      expect(body.indexOf("## 🛠️ Plan to fix")).toBeGreaterThan(body.indexOf("### 🗑️ Considered & rejected"));
+      expect(body.trimEnd().endsWith(publicationMarker)).toBe(true);
+      // `&` is escaped too, so an entity the field already carried stays
+      // visible text instead of being re-read as markup.
+      expect(body).toContain("R&amp;D &amp;lt;details&amp;gt;");
+    }
+  });
+
+  test("every thematic-break form is neutralized: `***`, `___` and spaced runs", () => {
+    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
+    for (const rule of ["***", "___", "- - -", "* * *", "_ _ _", "----", "==="]) {
+      const body = insertReportSections(
+        rendered,
+        { ...report, verified: `suite green\n${rule}\ntail` },
+        "### Revalidated findings\n\nnone",
+      );
+      expect(body).toContain(`\\${rule}`);
+    }
+    // A list item and a two-dash run are text, not breaks: they stay untouched.
+    const safe = insertReportSections(
+      rendered,
+      { ...report, verified: "- item\n-- two dashes" },
+      "### Revalidated findings\n\nnone",
+    );
+    expect(safe).toContain("\n- item");
+    expect(safe).toContain("-- two dashes");
+  });
+
   test("an anchor miss skips that section silently, leaving the layout intact", () => {
     // Not the engine's layout: no `## 📋 Review` line. The renderer is pure —
     // it returns the body unchanged for that section and logs nothing.

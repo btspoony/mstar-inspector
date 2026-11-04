@@ -10,7 +10,8 @@ category: Added
   `**What this PR does**` overview, a mechanical `### Revalidated findings` table, `### Linked-issue AC`,
   `### ✅ Verified`, `### 🗑️ Considered & rejected`, and a collapsible `## 🛠️ Plan to fix`. These ride a
   side document (`mstar.report/v1`) written by a bounded report seat, validated fail-closed by the Worker,
-  and rendered as `none` when unavailable.
+  and rendered as `none` when unavailable. Report text cannot fold or re-head the comment: headings,
+  thematic breaks and raw HTML are neutralized before insertion, and the fix plan stays fenced as code.
 - **The report is bound to the reviewed head**: the side document carries the reviewed `headSha`, written
   by the runner from the envelope rather than the seat, and the Worker refuses a document bound to any
   other head — a report a skipped seat left behind in the container can no longer speak for a later
@@ -26,7 +27,8 @@ category: Added
 - **完整审查报告**：发布的评论现在携带 envelope 无法承载的内容——`**What this PR does**` 概述、机器生成的
   `### Revalidated findings` 表、`### Linked-issue AC`、`### ✅ Verified`、`### 🗑️ Considered & rejected`
   与可折叠的 `## 🛠️ Plan to fix`。这些内容走独立文档（`mstar.report/v1`），由有界报告席位写出，Worker
-  失败即拒绝校验，缺失时统一渲染为 `none`。
+  失败即拒绝校验，缺失时统一渲染为 `none`。报告文本无法折叠或改写评论结构：标题、分隔线与原始 HTML 在插入前
+  均已中和，修复计划始终以代码块围栏呈现。
 - **报告绑定到本次审查的 head**：独立文档携带被审查的 `headSha`，由 runner 从 envelope 写入（而非席位自己），
   Worker 拒绝任何绑定到其它 head 的文档——席位被跳过时遗留在容器里的报告不会再冒充后续一次审查。席位定义缺失
   或 envelope 无 head 时降级为 `none`，绝不会让审查失败。
