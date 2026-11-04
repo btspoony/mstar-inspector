@@ -69,6 +69,8 @@ let fakeEnvelope: Record<string, unknown> | undefined;
 let fakeRecheck: Record<string, unknown> | null = null;
 /** Recheck status the fake runtime resolves with (undefined = no recheck round ran). */
 let fakeRecheckStatus: RecheckStatus | undefined;
+/** Report document the fake runtime resolves with (null = no report). */
+let fakeReport: Record<string, unknown> | null = null;
 /** Error the fake runtime rejects with; takes precedence when set. */
 let runtimeError: Error | undefined;
 /** Captured runReview inputs. */
@@ -119,6 +121,7 @@ const fakeRuntime: AgentRuntime = {
       envelope: fakeEnvelope as MstarReviewV1,
       recheck: fakeRecheck as ReviewRunResult["recheck"],
       ...(fakeRecheckStatus !== undefined ? { recheckStatus: fakeRecheckStatus } : {}),
+      report: fakeReport as ReviewRunResult["report"],
     };
   }),
 };
@@ -320,6 +323,7 @@ afterEach(() => {
   fakeEnvelope = ENVELOPE;
   fakeRecheck = null;
   fakeRecheckStatus = undefined;
+  fakeReport = null;
   runtimeError = undefined;
   cleanupAgentDirs();
   runInputs.length = 0;
@@ -862,6 +866,88 @@ describe("runner entry — --recheck-out channel", () => {
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
     const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out"]);
     expect(code).toBe(2);
+    expect(stdout).toBe("");
+    expect(runInputs).toHaveLength(0);
+  });
+});
+
+describe("runner entry — --report-out channel", () => {
+  const REPORT_DOC = {
+    schema: "mstar.report/v1",
+    overview: "Adds an expiry guard.",
+    linkedIssueAc: "none",
+    verified: "none",
+    rejected: "none",
+    planToFix: "none",
+  };
+  const PR_CONTEXT = { prBody: "Closes #7", issues: [{ number: 7, title: "Guard", body: "reject expired" }] };
+
+  test("report + flag → file written BEFORE stdout; prContext forwarded verbatim", async () => {
+    fakeEnvelope = ENVELOPE;
+    fakeReport = REPORT_DOC;
+    const outDir = mkdtempSync(join(tmpdir(), "report-out-"));
+    const outPath = join(outDir, "report.json");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, prContext: PR_CONTEXT });
+    const { code, stdout, stderr } = await runCli([
+      "--level",
+      "quick",
+      "--input",
+      inputPath,
+      "--report-out",
+      outPath,
+    ]);
+
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    expect(JSON.parse(readFileSync(outPath, "utf8"))).toEqual(REPORT_DOC);
+    expect(runInputs[0]).toMatchObject({ prContext: PR_CONTEXT });
+  });
+
+  test("no report result → nothing written, exit 0 (the sections degrade to `none`)", async () => {
+    fakeEnvelope = ENVELOPE;
+    fakeReport = null;
+    const outDir = mkdtempSync(join(tmpdir(), "report-out-"));
+    const outPath = join(outDir, "report.json");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, prContext: PR_CONTEXT });
+    const { code } = await runCli(["--level", "quick", "--input", inputPath, "--report-out", outPath]);
+
+    expect(code).toBe(0);
+    expect(existsSync(outPath)).toBe(false);
+  });
+
+  test("input without prContext stays byte-identical: no `prContext` key reaches the runtime", async () => {
+    fakeEnvelope = ENVELOPE;
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+    const { code } = await runCli(["--level", "quick", "--input", inputPath]);
+    expect(code).toBe(0);
+    expect(Object.keys(runInputs[0]!)).not.toContain("prContext");
+  });
+
+  test("--report-out write failure → exit 1, stdout empty, stderr diagnostic", async () => {
+    fakeEnvelope = ENVELOPE;
+    fakeReport = REPORT_DOC;
+    // A directory path makes writeFileSync throw (EISDIR).
+    const outDir = mkdtempSync(join(tmpdir(), "report-out-"));
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, prContext: PR_CONTEXT });
+    const { code, stdout, stderr } = await runCli([
+      "--level",
+      "quick",
+      "--input",
+      inputPath,
+      "--report-out",
+      outDir,
+    ]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("cannot write report output");
+  });
+
+  test("a malformed prContext is a usage-level input error (exit 1, no run)", async () => {
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, prContext: { prBody: 7, issues: [] } });
+    const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath]);
+    expect(code).toBe(1);
     expect(stdout).toBe("");
     expect(runInputs).toHaveLength(0);
   });

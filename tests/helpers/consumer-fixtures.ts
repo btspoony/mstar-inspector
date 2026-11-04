@@ -22,8 +22,11 @@ import {
   CLONE_DIR,
   DIFF_PATH,
   DIFF_PREFETCH_MAX_BYTES,
+  issueViewCommand,
+  prBodyCommand,
   readRecheckCommand,
   readRecheckStatusCommand,
+  readReportCommand,
   RUNNER_INPUT_PATH,
   RUNNER_PATH,
   runnerCommand,
@@ -32,6 +35,7 @@ import {
 import type { GitOpsCommands } from "../../src/pipeline/gitops";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
+import { REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -217,6 +221,8 @@ const RUNNER_CMDS: ReadonlySet<string> = new Set(
   REVIEW_LEVELS.flatMap((level) => [
     runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH),
     runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, RECHECK_OUTPUT_PATH),
+    runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, undefined, REPORT_OUTPUT_PATH),
+    runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, RECHECK_OUTPUT_PATH, REPORT_OUTPUT_PATH),
   ]),
 );
 /**
@@ -228,6 +234,8 @@ const DIFF_READ = boundedFileReadCommand(DIFF_PATH, DIFF_PREFETCH_MAX_BYTES);
 /** The audited bounded reads, built by production code from the fixed paths. */
 const RECHECK_DOC_READ = readRecheckCommand(RECHECK_OUTPUT_PATH);
 const RECHECK_STATUS_READ = readRecheckStatusCommand(RECHECK_STATUS_PATH);
+const REPORT_READ = readReportCommand();
+const PR_BODY_READ = prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER);
 /**
  * The input write is the one command with a per-round payload; its fixed head
  * and tail come from the builder itself, so only the base64 body is asserted
@@ -259,9 +267,20 @@ export type FakeSandboxState = {
   diffReadStdout: string | null;
   numstatStdout: string;
   numstatExitCode: number;
+  /** The `gh api .../compare/base...head` verdict (`ahead` starts an increment round). */
+  compareStatus: string;
+  compareExitCode: number;
+  /** The increment round's base...head diff FILE content + its command's exit. */
+  incrementDiffStdout: string;
+  incrementDiffExitCode: number;
   writeInputExitCode: number;
   /** Decoded runner --input JSON written via the base64 write step. */
   writtenInputJson: string | undefined;
+  /** `gh pr view`/`gh issue view` answers for the report seat's PR context. */
+  prBodyContent: string;
+  prBodyExitCode: number;
+  issueBodies: Map<number, { title: string; body: string }>;
+  issueViewExitCode: number;
   /** The runner's recheck document and the `wc -c` overflow flag of its read. */
   recheckFileContent: string;
   recheckFileOverflow: string;
@@ -270,6 +289,10 @@ export type FakeSandboxState = {
   recheckStatusContent: string | null;
   recheckStatusOverflow: string;
   recheckStatusExitCode: number;
+  /** The runner's report document (mstar.report/v1) and its read's overflow flag. */
+  reportFileContent: string;
+  reportFileOverflow: string;
+  reportFileExitCode: number;
   runnerStdout: string;
   runnerStderr: string;
   runnerExitCode: number;
@@ -298,14 +321,28 @@ export function initialFakeSandboxState(): FakeSandboxState {
     diffReadStdout: null,
     numstatStdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n",
     numstatExitCode: 0,
+    compareStatus: "ahead",
+    compareExitCode: 0,
+    incrementDiffStdout: "",
+    incrementDiffExitCode: 0,
     writeInputExitCode: 0,
     writtenInputJson: undefined,
+    // Default: gh cannot answer, so no prContext is captured and the runner
+    // gets no `--report-out` — every pre-report call sequence stays intact.
+    // A report-path case sets this to 0 and scripts `prBodyContent`.
+    prBodyContent: "",
+    prBodyExitCode: 1,
+    issueBodies: new Map(),
+    issueViewExitCode: 0,
     recheckFileContent: "",
     recheckFileOverflow: "0",
     recheckFileExitCode: 0,
     recheckStatusContent: null,
     recheckStatusOverflow: "0",
     recheckStatusExitCode: 0,
+    reportFileContent: "",
+    reportFileOverflow: "0",
+    reportFileExitCode: 0,
     runnerStdout: "",
     runnerStderr: "",
     runnerExitCode: 0,
@@ -376,6 +413,23 @@ function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
     }
     return { stdout: `${state.recheckFileContent}\n${state.recheckFileOverflow}\n`, stderr: "", exitCode: 0 };
   }
+  // The report seat's PR context reads. The PR body is OPTIONAL (`null` = gh
+  // failed), so a case that does not script one sees the real "no context"
+  // path: no prContext, no --report-out, `none` headings.
+  if (cmd === PR_BODY_READ) {
+    // `gh pr view` failing (non-zero exit) is the real "no PR context" path.
+    if (state.prBodyExitCode !== 0) return { stdout: "", stderr: "gh failed", exitCode: state.prBodyExitCode };
+    return { stdout: JSON.stringify({ body: state.prBodyContent }), stderr: "", exitCode: 0 };
+  }
+  for (const [issueNumber, issue] of state.issueBodies) {
+    if (cmd !== issueViewCommand(TEST_OWNER, TEST_REPO, issueNumber)) continue;
+    if (state.issueViewExitCode !== 0) return { stdout: "", stderr: "gh failed", exitCode: state.issueViewExitCode };
+    return {
+      stdout: JSON.stringify({ number: issueNumber, title: issue.title, body: issue.body }),
+      stderr: "",
+      exitCode: 0,
+    };
+  }
   if (cmd === RECHECK_STATUS_READ) {
     if (state.recheckStatusExitCode !== 0) {
       return { stdout: "", stderr: "read failed", exitCode: state.recheckStatusExitCode };
@@ -383,6 +437,24 @@ function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
     // A missing status file fails the head chain, exactly like the real one.
     if (state.recheckStatusContent === null) return { stdout: "", stderr: "no such file", exitCode: 1 };
     return { stdout: `${state.recheckStatusContent}\n${state.recheckStatusOverflow}\n`, stderr: "", exitCode: 0 };
+  }
+  // Increment rounds: the compare verdict, then base...head replacing the diff
+  // file. Both are identified by their stable command shape (the shas are
+  // per-round), so the double stays payload-agnostic exactly like the diff read.
+  if (cmd.startsWith("gh api 'repos/") && cmd.includes("/compare/") && cmd.endsWith(".status'")) {
+    return { stdout: `${state.compareStatus}\n`, stderr: "", exitCode: state.compareExitCode };
+  }
+  if (cmd.startsWith("gh api -H 'Accept: application/vnd.github.v3.diff'")) {
+    const bytes = Buffer.from(state.incrementDiffStdout);
+    const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
+    const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
+    return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: state.incrementDiffExitCode };
+  }
+  if (cmd === REPORT_READ) {
+    if (state.reportFileExitCode !== 0) {
+      return { stdout: "", stderr: "read failed", exitCode: state.reportFileExitCode };
+    }
+    return { stdout: `${state.reportFileContent}\n${state.reportFileOverflow}\n`, stderr: "", exitCode: 0 };
   }
   if (RUNNER_CMDS.has(cmd)) {
     return { stdout: state.runnerStdout, stderr: state.runnerStderr, exitCode: state.runnerExitCode };

@@ -19,16 +19,23 @@ import {
   buildGitOpsCommands,
   checkedOutShaCommand,
   cloneCommand,
+  compareStatusCommand,
+  DIFF_PATH,
   DIFF_PREFETCH_MAX_BYTES,
   diffCommand,
+  incrementDiffCommand,
+  issueViewCommand,
   numstatCommand,
+  prBodyCommand,
   readRecheckCommand,
   readRecheckStatusCommand,
+  readReportCommand,
   runnerCommand,
   writeJsonCommand,
 } from "../../src/pipeline/gitops";
 import { shellCommand } from "../../src/pipeline/shell-command";
 import { RECHECK_FILE_MAX_BYTES } from "../../packages/shared/src/recheck-wire";
+import { REPORT_FILE_MAX_BYTES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 
 describe("gitops command builders", () => {
   test("valid inputs produce single-quoted, allowlisted commands", () => {
@@ -176,6 +183,84 @@ describe("gitops command builders", () => {
     }
   });
 
+  test("compareStatusCommand reads the compare verdict through gh's --jq surface", () => {
+    expect(compareStatusCommand("acme", "widgets", "a".repeat(40), "b".repeat(40))).toBe(
+      shellCommand(`gh api 'repos/acme/widgets/compare/${"a".repeat(40)}...${"b".repeat(40)}' --jq '.status'`),
+    );
+  });
+
+  test("incrementDiffCommand captures base...head with the SAME bounded read as the PR diff", () => {
+    const base = "a".repeat(40);
+    const head = "b".repeat(40);
+    expect(incrementDiffCommand("acme", "widgets", base, head, DIFF_PATH)).toBe(
+      shellCommand(
+        `gh api -H 'Accept: application/vnd.github.v3.diff' 'repos/acme/widgets/compare/${base}...${head}' > '${DIFF_PATH}' && ` +
+          `head -c '${DIFF_PREFETCH_MAX_BYTES}' '${DIFF_PATH}' && printf '\\n' && ` +
+          `tail -c '+${DIFF_PREFETCH_MAX_BYTES + 1}' '${DIFF_PATH}' | head -c '1' | wc -c`,
+      ),
+    );
+    // The three-dot form is the one `compare` reports `ahead` for, so the two
+    // steps agree by construction.
+    expect(incrementDiffCommand("acme", "widgets", base, head, DIFF_PATH)).toContain(`/${base}...${head}`);
+  });
+
+  test("compareStatusCommand / incrementDiffCommand reject a non-hex sha before any shell string", () => {
+    for (const evil of ["", "ABC", "../../etc", "a".repeat(40) + ";rm -rf /", "zzzzzzz", "a".repeat(65)]) {
+      expect(() => compareStatusCommand("acme", "widgets", evil, "b".repeat(40))).toThrow(/unsafe base sha/);
+      expect(() => compareStatusCommand("acme", "widgets", "a".repeat(40), evil)).toThrow(/unsafe head sha/);
+      expect(() => incrementDiffCommand("acme", "widgets", evil, "b".repeat(40), DIFF_PATH)).toThrow(/unsafe base sha/);
+      expect(() => incrementDiffCommand("acme", "widgets", "a".repeat(40), evil, DIFF_PATH)).toThrow(/unsafe head sha/);
+    }
+  });
+
+  test("prBodyCommand / issueViewCommand read through gh's JSON surface, numbers guarded", () => {
+    expect(prBodyCommand("acme", "widgets", 42)).toBe(
+      shellCommand("gh pr view '42' --repo 'acme/widgets' --json body"),
+    );
+    expect(issueViewCommand("acme", "widgets", 7)).toBe(
+      shellCommand("gh issue view '7' --repo 'acme/widgets' --json number,title,body"),
+    );
+    expect(() => issueViewCommand("acme", "widgets", 0)).toThrow(/unsafe prNumber/);
+    expect(() => prBodyCommand("acme;rm", "widgets", 42)).toThrow(/unsafe owner/);
+  });
+
+  test("readReportCommand shares the bounded-read transport with its own byte bound", () => {
+    expect(readReportCommand()).toBe(
+      shellCommand(
+        `head -c '${REPORT_FILE_MAX_BYTES}' '${REPORT_OUTPUT_PATH}' && printf '\\n' && ` +
+          `tail -c '+${REPORT_FILE_MAX_BYTES + 1}' '${REPORT_OUTPUT_PATH}' | head -c '1' | wc -c`,
+      ),
+    );
+    // Same path allowlist as the other reads: no metacharacters, absolute only.
+    expect(() => readReportCommand("/tmp/a b")).toThrow(/unsafe report output path/);
+    expect(() => readReportCommand("relative/report.json")).toThrow(/unsafe report output path/);
+  });
+
+  test("runnerCommand appends --report-out after --recheck-out (both optional, both quoted)", () => {
+    expect(
+      runnerCommand(
+        "/opt/runner/packages/runner/src/runner.ts",
+        "quick",
+        "/workspace/review-input.json",
+        "/tmp/mstar-recheck.json",
+        "/tmp/mstar-report.json",
+      ),
+    ).toBe(
+      shellCommand(
+        "bun run '/opt/runner/packages/runner/src/runner.ts' --level 'quick' --input '/workspace/review-input.json' " +
+          "--recheck-out '/tmp/mstar-recheck.json' --report-out '/tmp/mstar-report.json'",
+      ),
+    );
+    // Report only (no recheck round): the recheck flag is simply absent.
+    expect(
+      runnerCommand("/opt/runner/packages/runner/src/runner.ts", "quick", "/workspace/review-input.json", undefined, "/tmp/mstar-report.json"),
+    ).toBe(
+      shellCommand(
+        "bun run '/opt/runner/packages/runner/src/runner.ts' --level 'quick' --input '/workspace/review-input.json' " +
+          "--report-out '/tmp/mstar-report.json'",
+      ),
+    );
+  });
   test("runnerCommand appends the optional --recheck-out flag quoted", () => {
     expect(
       runnerCommand("/opt/runner/packages/runner/src/runner.ts", "quick", "/workspace/review-input.json", "/tmp/mstar-recheck.json"),

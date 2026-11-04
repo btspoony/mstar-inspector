@@ -308,6 +308,9 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
       expect.stringContaining("git apply --numstat '/workspace/pr.diff'"),
+      // The report seat's PR context read (best-effort; `gh` failing here
+      // only drops the narrative sections).
+      expect.stringContaining("gh pr view '42' --repo 'acme/widgets' --json body"),
       expect.stringContaining("base64 -d > '/workspace/review-input.json'"),
       expect.stringContaining(
         "bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'",
@@ -338,13 +341,16 @@ describe("createReviewConsumer", () => {
     expect(sandbox.calls[1]!.opts).toEqual({ timeout: 120_000 });
     // Diff: gh step, GH_TOKEN via exec env only.
     expect(sandbox.calls[2]!.opts).toEqual({ env: { GH_TOKEN: gh("s", "installation_token") }, timeout: 120_000 });
-    // Numstat + input write: plain git/shell steps, git timeout.
+    // Numstat: a plain git step, git timeout.
     expect(sandbox.calls[3]!.opts).toEqual({ timeout: 120_000 });
-    expect(sandbox.calls[4]!.opts).toEqual({ timeout: 120_000 });
+    // PR context read: gh step, GH_TOKEN via exec env only.
+    expect(sandbox.calls[4]!.opts).toEqual({ env: { GH_TOKEN: gh("s", "installation_token") }, timeout: 120_000 });
+    // Input write: shell step, git timeout.
+    expect(sandbox.calls[5]!.opts).toEqual({ timeout: 120_000 });
     // Runner: cwd = clone dir; harness paths + the model chain via exec env,
     // and the App's key pool via the exec STDIN payload (the only credential
     // channel — the env carries no key).
-    expect(sandbox.calls[5]!.opts).toEqual({
+    expect(sandbox.calls[6]!.opts).toEqual({
       cwd: "/workspace/repo",
       env: {
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
@@ -433,7 +439,7 @@ describe("createReviewConsumer", () => {
     expect(sandbox.destroyCalls).toBe(1);
   });
 
-  test("null payload sha → actual sha read from the checkout (no gh pr view)", async () => {
+  test("null payload sha → actual sha read from the checkout, never from a gh read", async () => {
     reset();
     sandbox.resolvedSha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -442,10 +448,11 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment" })));
 
-    // No gh pr view anywhere: the authoritative sha comes from the clone.
-    expect(sandbox.calls.some((c) => c.cmd.includes("gh pr view"))).toBe(false);
+    // The authoritative sha comes from the clone: no gh read runs before the
+    // checkout, and rev-parse is the second command of the round.
     expect(sandbox.calls[0]!.cmd).toContain("git init '/workspace/repo'");
     expect(sandbox.calls[1]!.cmd).toContain("git -C '/workspace/repo' rev-parse HEAD");
+    expect(sandbox.calls.findIndex((c) => c.cmd.includes("gh pr view"))).toBeGreaterThan(1);
     const row = db.raw.query("SELECT * FROM reviews").get() as { head_sha: string };
     expect(row.head_sha).toBe("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
     expect(kvPuts).toEqual([

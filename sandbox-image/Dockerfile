@@ -51,6 +51,12 @@
 # rebuild: evidence slices now carry `addedNewLines`, so a `current-code` proof
 # must cite a line the hunk added, and the status `reason` is a closed
 # vocabulary with `rejected_unnamed` counting the drops no row id could name.
+# rebuild: incremental rounds and the narrative report seat. The runner gains
+# `--report-out` (a second side document, `mstar.report/v1`, written beside the
+# recheck document) and the report seat itself; the Worker's compare gate and
+# its `since <base>` reconFact assume a runner that understands a delta
+# universe. A stale image writes no report document at all, so every narrative
+# section publishes `none` while the round looks successful.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and

@@ -28,13 +28,17 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { renderReviewMarkdown } from "@mstar-harness/engine";
+import type { ReportDoc } from "../../packages/shared/src/report-wire";
 import {
   buildClosureSection,
   buildDegradedBody,
   buildPreparedDegradedBody,
   buildPreparedReviewBody,
   buildPublicationMarker,
+  buildRevalidatedSection,
   buildReviewBody,
+  insertReportSections,
   CLOSURE_MAX_ROWS,
   createReviewCommenter,
   DEGRADED_EXCERPT_LIMIT,
@@ -630,6 +634,183 @@ describe("review comment upsert (T5)", () => {
     });
   });
 });
+describe("report sections (mstar.report/v1 side document)", () => {
+  const report: ReportDoc = {
+    schema: "mstar.report/v1",
+    overview: "Adds an expiry guard to the auth path.",
+    linkedIssueAc: "Expiry rejected: met.",
+    verified: "- unit suite → green",
+    rejected: "**Retry loop**: rejected — the diff never touches it.",
+    planToFix: "1. Add the guard.\n2. Rerun the suite.",
+  };
+
+  test("buildRevalidatedSection derives the state MECHANICALLY from the closure rows", () => {
+    const rows: ClosureRow[] = [
+      { title: "A | b", disposition: "addressed", reason: "verified-fix", evidenceKind: "current-code", thread: "-" },
+      { title: "C", disposition: "dismissed", reason: "non-fix-dismissal", evidenceKind: null, thread: "-" },
+      { title: "D", disposition: "unverifiable", reason: "no-evidence", evidenceKind: null, thread: "-" },
+    ];
+    const md = buildRevalidatedSection(rows);
+    expect(md.startsWith("### Revalidated findings\n\n| Prior finding | State | Evidence |")).toBe(true);
+    expect(md).toContain("| A \\| b | fixed | current-code |");
+    expect(md).toContain("| C | still present | non-fix-dismissal |");
+    expect(md).toContain("| D | not verifiable | no-evidence |");
+  });
+
+  test("buildRevalidatedSection with no rows writes `none` under the heading", () => {
+    expect(buildRevalidatedSection([])).toBe("### Revalidated findings\n\nnone");
+  });
+
+  test("insertReportSections places every section at its template anchor", () => {
+    const rendered = renderReviewMarkdown({
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      summary_md: "Two issues found.",
+      findings: [
+        {
+          mergeClass: "should-fix",
+          title: "Fractional expiry",
+          body: "b",
+          file_path: "src/auth.ts",
+          line_start: 21,
+          line_end: 21,
+        },
+      ],
+    });
+    const body = insertReportSections(rendered, report, "### Revalidated findings\n\nnone");
+    const order = [
+      "## 📋 Review",
+      "**What this PR does**",
+      "Two issues found.",
+      "### Revalidated findings",
+      "### Findings",
+      "#### 🟠 Fractional expiry",
+      "### Linked-issue AC",
+      "### ✅ Verified",
+      "### 🗑️ Considered & rejected",
+      "## 🛠️ Plan to fix",
+    ];
+    const positions = order.map((needle) => body.indexOf(needle));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    // The plan is a collapsible, copyable block.
+    expect(body).toContain(
+      "<details><summary>Expand fix plan</summary>\n\n```md\n1. Add the guard.\n2. Rerun the suite.\n```\n\n</details>",
+    );
+  });
+
+  test("a zero-finding envelope: the revalidated table self-adds the empty `### Findings`", () => {
+    const rendered = renderReviewMarkdown({
+      schema: "mstar.review/v1",
+      verdict: "ship it",
+      findings: [],
+    });
+    expect(rendered).not.toContain("### Findings");
+    const body = insertReportSections(rendered, report, "### Revalidated findings\n\nnone");
+    expect(body).toContain("### Revalidated findings");
+    // Revalidated FIRST, then the added heading — the fixed template order.
+    expect(body.indexOf("### Revalidated findings")).toBeLessThan(body.indexOf("### Findings"));
+    expect(body).toContain("### Linked-issue AC");
+  });
+
+  test("a null report keeps every heading and writes `none` under each", () => {
+    const rendered = renderReviewMarkdown({
+      schema: "mstar.review/v1",
+      verdict: "ship it",
+      findings: [],
+    });
+    const body = insertReportSections(rendered, null, "### Revalidated findings\n\nnone");
+    expect(body).not.toContain("**What this PR does**");
+    expect(body).toContain("### Linked-issue AC\n\nnone");
+    expect(body).toContain("### ✅ Verified\n\nnone");
+    expect(body).toContain("### 🗑️ Considered & rejected\n\nnone");
+    expect(body).toContain("## 🛠️ Plan to fix\n\nnone");
+    expect(body).not.toContain("<details><summary>Expand fix plan");
+  });
+
+  test("an anchor miss skips that section with a log, leaving the layout intact", () => {
+    // Not the engine's layout: no `## 📋 Review` line.
+    const rendered = "## Verdict: something\n\nbody";
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => warns.push(String(message));
+    try {
+      const body = insertReportSections(rendered, report, "### Revalidated findings\n\nnone");
+      // Nothing was prepended, and the fixed tail still landed.
+      expect(body.startsWith("## Verdict: something")).toBe(true);
+      expect(body).not.toContain("**What this PR does**");
+      expect(body).toContain("### Linked-issue AC");
+      expect(warns.some((line) => line.includes("report_section_skipped"))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("a fix plan containing a fence gets a longer outer fence", () => {
+    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
+    const body = insertReportSections(rendered, { ...report, planToFix: "```ts\nx\n```" }, "none");
+    expect(body).toContain("````md");
+    expect(body).toContain("````");
+  });
+
+  test("buildPreparedReviewBody + reportParts: the sections land inside the trusted frame", () => {
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "review",
+    });
+    const body = buildPreparedReviewBody({
+      output: { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+      omittedFindings: 0,
+      round: 1,
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      publicationMarker,
+      reportParts: { report, revalidated: "### Revalidated findings\n\nnone" },
+    });
+    expect(body.startsWith("<!-- mstar-inspector:review:v1 round=1 -->")).toBe(true);
+    expect(body.trimEnd().endsWith(publicationMarker)).toBe(true);
+    expect(body).toContain("**What this PR does**: Adds an expiry guard");
+    expect(body).toContain("### Linked-issue AC");
+  });
+
+  test("buildPreparedReviewBody without reportParts is byte-identical to the pre-report body", () => {
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "review",
+    });
+    const input = {
+      output: { schema: "mstar.review/v1", verdict: "ship it" as const, findings: [] },
+      omittedFindings: 0,
+      round: 1,
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      publicationMarker,
+    } satisfies Parameters<typeof buildPreparedReviewBody>[0];
+    const body = buildPreparedReviewBody(input);
+    expect(body).not.toContain("### Linked-issue AC");
+    expect(body).not.toContain("### Revalidated findings");
+    // `since` absent too: a full round's header is unchanged.
+    expect(body).toContain("Review 1 · commit 0123456\n");
+  });
+
+  test("sinceSha appends the 7-char marker on the header only", () => {
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "review",
+    });
+    const body = buildPreparedReviewBody({
+      output: { schema: "mstar.review/v1", verdict: "ship it" as const, findings: [] },
+      omittedFindings: 0,
+      round: 4,
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      publicationMarker,
+      sinceSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    });
+    expect(body).toContain("Review 4 · commit 0123456 · since bbbbbbb");
+  });
+});
+
 describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
   const output: ReviewOutput = {
     schema: "mstar.review/v1",

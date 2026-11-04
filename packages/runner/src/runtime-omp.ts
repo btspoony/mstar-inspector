@@ -96,6 +96,8 @@ import {
 } from "@mstar-harness/engine";
 import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../shared/src/runtime";
 import { remainingOuterMs, remainingSoftMinutes, runRecheckSeat, type RecheckSeatResult } from "./recheck";
+import { runReportSeat, revalidatedNotes } from "./report";
+import type { ReportDoc } from "../../shared/src/report-wire";
 
 /**
  * Environment override for the mstar-harness plugin root — the primary,
@@ -1478,10 +1480,19 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       // unfinished seat — never start or await a fresh budget after review.
       recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
+      // The narrative report runs after BOTH the parent turn and the recheck
+      // seat settled (it cites their results), on the parent session.
+      const report = await runReportSeatFor(
+        input,
+        asToolSession(parentSession, cwd),
+        envelope,
+        settled?.doc ?? null,
+      );
       return {
         envelope,
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
+        report,
       };
     });
   } finally {
@@ -1504,6 +1515,29 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
     // removes the dirs only if we left them empty).
     await removeInstalledAgents(cwd, installedFiles);
   }
+}
+
+/**
+ * Run the narrative report seat for one settled review, serial and bounded.
+ * Absent `prContext` = legacy input: no seat, `null` — byte-identical behavior.
+ * The signal is a local controller so a teardown cannot leave the seat running
+ * past the run (its own timer already bounds the window).
+ */
+async function runReportSeatFor(
+  input: AgentRuntimeRunInput,
+  session: ToolSession,
+  envelope: MstarReviewV1,
+  recheckDoc: import("../../shared/src/recheck-wire").RecheckDoc | null,
+): Promise<ReportDoc | null> {
+  if (input.prContext === undefined) return null;
+  return runReportSeat({
+    session,
+    envelopeJson: JSON.stringify(envelope),
+    revalidated: revalidatedNotes(input.recheck, recheckDoc),
+    prContext: input.prContext,
+    model: seatModelChain(input),
+    level: input.level,
+  });
 }
 
 /**
@@ -1778,10 +1812,17 @@ export const ompAgentRuntime: AgentRuntime = {
         const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");
         throw new Error(`synthesized review failed mstar.review/v1 validation: ${detail}`);
       }
+      // The narrative report runs AFTER the settled review, serially: it must
+      // never compete with a seat for the run's model budget, and it can only
+      // describe findings that already exist. A null report (no prContext, a
+      // failed seat, an invalid document) degrades the sections to `none` —
+      // never a failed review.
+      const report = await runReportSeatFor(input, toolSession, envelope, settled?.doc ?? null);
       return {
         envelope,
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
+        report,
       };
     } finally {
       if (session) {

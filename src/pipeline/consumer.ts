@@ -138,20 +138,34 @@ import type { ShellCommand } from "./shell-command";
 import {
   buildGitOpsCommands,
   CLONE_DIR,
+  compareStatusCommand,
   DIFF_PATH,
+  incrementDiffCommand,
+  issueViewCommand,
+  prBodyCommand,
   readRecheckCommand,
   readRecheckStatusCommand,
+  readReportCommand,
   RUNNER_INPUT_PATH,
   RUNNER_PATH,
   runnerCommand,
   writeJsonCommand,
 } from "./gitops";
 import {
+  PR_CONTEXT_MAX_CHARS,
+  PR_CONTEXT_MAX_ISSUES,
+  REPORT_OUTPUT_PATH,
+  validateReportDoc,
+  type PrContext,
+  type ReportDoc,
+} from "../../packages/shared/src/report-wire";
+import {
   assertSandboxGrant,
   buildClosureSection,
   buildPreparedDegradedBody,
   buildPreparedReviewBody,
   buildPublicationMarker,
+  buildRevalidatedSection,
   createReviewCommenter,
   filterLineCommentFindings,
   PreparedSendRejected,
@@ -434,6 +448,13 @@ export type ConsumerLogFields = {
    * context unavailable; none is published as `no-evidence`.
    */
   diff_capture?: "empty" | "overflow" | "unreadable";
+  /**
+   * Increment-round diagnostics: the compare verdict (`ahead` is the only one
+   * that starts an increment round) when the round reviewed the full diff, and
+   * the base sha on the increment capture-failure line.
+   */
+  increment_status?: string;
+  increment_since?: string;
 };
 
 export type ConsumerLog = {
@@ -858,6 +879,131 @@ async function applyPendingLifecycleJournals(
     if (!applied) return false;
   }
   return true;
+}
+
+/**
+ * Bounded read + validation + redaction of the report seat's document: the
+ * audited fixed-path read (`readReportCommand`) yields `<content>\n<flag>`;
+ * anything other than a flag-0 document that passes `validateReportDoc` is NO
+ * report (the sections render `none`). Each narrative field is redacted before
+ * it can reach a public body — the seat's text is model output like any other,
+ * and a prompt-injected credential can hide in a PR description it quoted.
+ */
+async function readReportDoc(sandbox: ReviewSandbox, secretValues: string[]): Promise<ReportDoc | null> {
+  const read = await boundedRead(sandbox, readReportCommand());
+  if (read.text === null || read.text.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(read.text);
+  } catch {
+    return null;
+  }
+  const gate = validateReportDoc(parsed);
+  if (!gate.ok) return null;
+  const redact = (text: string) => redactExactSecrets(redactSecrets(text), secretValues);
+  return {
+    schema: "mstar.report/v1",
+    overview: redact(gate.doc.overview),
+    linkedIssueAc: redact(gate.doc.linkedIssueAc),
+    verified: redact(gate.doc.verified),
+    rejected: redact(gate.doc.rejected),
+    planToFix: redact(gate.doc.planToFix),
+  };
+}
+
+/**
+ * The most recent REVIEWED head of this PR whose review was not an
+ * `incomplete` (stopped) run — the base an incremental round diffs against.
+ * `incomplete` rows are excluded on purpose: a stopped round never scanned
+ * its scope, so diffing against it would silently inherit that gap.
+ *
+ * `reviews` is keyed per (installation, owner, repo, pr) with one row per
+ * reviewed sha, and `reviewed_at` is second-resolution, so `rowid` breaks
+ * same-second ties in insertion order.
+ */
+async function findIncrementBase(db: PipelineEnv["DB"], scope: Scope): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT head_sha FROM reviews
+       WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND verdict <> 'incomplete'
+       ORDER BY reviewed_at DESC, rowid DESC
+       LIMIT 1`,
+    )
+    .bind(scope.installationId, scope.owner, scope.repo, scope.prNumber)
+    .first<{ head_sha: string }>();
+  return row?.head_sha ?? null;
+}
+
+/** Closing/mentioning issue refs the report seat may read (finite vocabulary). */
+const ISSUE_REF_RE = /\b(?:closes|closed|fixes|fixed|resolves|resolved|refs?|references?)\s*:?\s*#(\d+)\b/gi;
+
+/**
+ * Extract the issue numbers a PR body claims to close or reference. A finite
+ * keyword table over the body text; duplicates collapse, order is first
+ * appearance, and the list is capped by the caller (`PR_CONTEXT_MAX_ISSUES`).
+ */
+export function extractIssueRefs(prBody: string): number[] {
+  const seen = new Set<number>();
+  for (const match of prBody.matchAll(ISSUE_REF_RE)) {
+    const issueNumber = Number(match[1]);
+    if (Number.isInteger(issueNumber) && issueNumber > 0) seen.add(issueNumber);
+  }
+  return [...seen];
+}
+
+/** Bound untrusted text by characters, marking the cut. */
+function clampContextText(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\n[... truncated ...]`;
+}
+
+/**
+ * Capture the PR context the report seat reads: the PR description, then up
+ * to `PR_CONTEXT_MAX_ISSUES` issues it closes/references. Every value is
+ * clamped — this is attacker-controlled prose that rides into a prompt.
+ *
+ * Any failure (gh missing, API error, non-JSON output) resolves `undefined`:
+ * the report sections then degrade to `none`, which is a smaller loss than
+ * failing a review over its narrative.
+ */
+async function capturePrContext(
+  sandbox: ReviewSandbox,
+  payload: ReviewJobPayload,
+  token: string,
+): Promise<PrContext | undefined> {
+  const exec = { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS };
+  let prBody: string;
+  try {
+    const pr = await sandbox.runCommand(
+      prBodyCommand(payload.owner, payload.repo, payload.pr_number),
+      exec,
+    );
+    if (pr.exitCode !== 0) return undefined;
+    const parsed = JSON.parse(pr.stdout) as { body?: unknown };
+    prBody = typeof parsed.body === "string" ? parsed.body : "";
+  } catch {
+    return undefined;
+  }
+  const issues: PrContext["issues"] = [];
+  for (const issueNumber of extractIssueRefs(prBody).slice(0, PR_CONTEXT_MAX_ISSUES)) {
+    try {
+      const issue = await sandbox.runCommand(
+        issueViewCommand(payload.owner, payload.repo, issueNumber),
+        exec,
+      );
+      if (issue.exitCode !== 0) continue;
+      const parsed = JSON.parse(issue.stdout) as { number?: unknown; title?: unknown; body?: unknown };
+      if (typeof parsed.number !== "number" || typeof parsed.title !== "string") continue;
+      issues.push({
+        number: parsed.number,
+        title: clampContextText(parsed.title, PR_CONTEXT_MAX_CHARS),
+        body: clampContextText(typeof parsed.body === "string" ? parsed.body : "", PR_CONTEXT_MAX_CHARS),
+      });
+    } catch {
+      continue;
+    }
+  }
+  return { prBody: clampContextText(prBody, PR_CONTEXT_MAX_CHARS), issues };
 }
 
 /**
@@ -3263,6 +3409,35 @@ async function processMessage(
       deps.log.warn(fields, `lifecycle target capture failed — context-unavailable: ${detail}`);
     }
 
+    // Incremental round selection: when this PR has a previously REVIEWED head,
+    // ask GitHub whether it is an ancestor of this one. Only `ahead` is an
+    // honest increment (base...head is then exactly the work since the last
+    // review); `behind`/`diverged`/`identical`/a 404 after a force-push or any
+    // non-zero exit keep the FULL diff. The base read never fails the round:
+    // a D1 hiccup or a malformed sha simply means "no increment".
+    const incrementBase = await findIncrementBase(deps.env.DB, lifecycleScope).catch(() => null);
+    let sinceSha: string | null = null;
+    if (incrementBase !== null && incrementBase !== headSha) {
+      try {
+        const compare = await sandbox.runCommand(
+          compareStatusCommand(payload.owner, payload.repo, incrementBase, headSha),
+          { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS },
+        );
+        const status = compare.stdout.trim();
+        if (compare.exitCode === 0 && status === "ahead") {
+          sinceSha = incrementBase;
+        } else {
+          deps.log.info(
+            { ...fields, increment_status: compare.exitCode === 0 ? status : `exit ${compare.exitCode}` },
+            "incremental base not an ancestor of this head — reviewing the full diff",
+          );
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.info({ ...fields, increment_status: "unavailable" }, `compare status unavailable — full diff: ${detail}`);
+      }
+    }
+
     // Diff (GH_TOKEN via exec env only — never in the command). The command
     // writes the file for numstat AND streams a BOUNDED copy back: that stdout
     // is the WORKER-CONTROLLED §7.3 trusted capture the evidence catalog
@@ -3278,12 +3453,40 @@ async function processMessage(
     // An empty `fit` payload is NOT decided here: `gh pr diff` also writes
     // nothing for a PR with no changes, and only the numstat of the same round
     // can tell the two apart (see step 6).
+    // An incremental round captures the FULL diff here as well: the prior
+    // findings live in files the increment may not touch, so their evidence
+    // catalog can only be proven against the whole PR diff. The increment
+    // capture below feeds the numstat partition ONLY.
     const diff = await sandbox.runCommand(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
     if (diff.exitCode !== 0) {
       throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
     }
     const diffRead = parseBoundedRead(diff.stdout);
     const diffText = diffRead.text ?? "";
+
+    // Increment capture (numstat partition only): base...head replaces the
+    // file AFTER the full diff text is already in memory, so the evidence
+    // catalog above keeps proving prior findings against the whole PR.
+    // Failure discipline is the diff text's own — a non-zero exit throws, an
+    // unreadable/empty capture marks the round context-incomplete. Never a
+    // silent fall back to the full diff: the `since` fact would then be a lie.
+    if (sinceSha !== null) {
+      const increment = await sandbox.runCommand(
+        incrementDiffCommand(payload.owner, payload.repo, sinceSha, headSha, DIFF_PATH),
+        { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS },
+      );
+      if (increment.exitCode !== 0) {
+        throw new Error(`increment diff failed: exit ${increment.exitCode}, stdout ${increment.stdout.length}B`);
+      }
+      const incrementRead = parseBoundedRead(increment.stdout);
+      if (incrementRead.failure === "unreadable" || (incrementRead.failure === null && incrementRead.text === "")) {
+        captureFailed = true;
+        deps.log.warn(
+          { ...fields, diff_capture: "empty", increment_since: sinceSha },
+          "increment diff capture empty — context-unavailable (no evidence catalog; rows stay context-incomplete)",
+        );
+      }
+    }
 
     // Trusted evidence catalog (§7.3) for the selected targets, pinned to
     // the authoritative checkout SHA. A target the captured diff cannot prove
@@ -3430,7 +3633,9 @@ async function processMessage(
 
     // 6. Numstat of the PR diff — `git apply --numstat` reads the unified
     // diff without applying it. The lines ("<add>\t<del>\t<path>") are the
-    // runner's seat-partition universe (reconFacts convention).
+    // runner's seat-partition universe (reconFacts convention). On an
+    // incremental round the file holds base...head, so the seats partition the
+    // work done since the last review instead of the whole PR.
     const numstat = await sandbox.runCommand(cmds.numstat, { timeout: EXEC_TIMEOUT_GIT_MS });
     if (numstat.exitCode !== 0) {
       throw new Error(`numstat failed: exit ${numstat.exitCode}, stdout ${numstat.stdout.length}B`);
@@ -3469,10 +3674,12 @@ async function processMessage(
     // AUTHORITATIVE checkout sha is used so the ArtifactStore.put target
     // cross-check agrees with the idempotency key — plus the numstat
     // universe. base64-transported so the JSON never touches shell quoting;
-    // worktreePath = the clone (the seats' read cwd).
+    // worktreePath = the clone (the seats' read cwd). An incremental round
+    // adds `since <base>` so the seats know their universe is a delta.
     const reconFacts = [
       `${payload.owner}/${payload.repo}#${payload.pr_number}`,
       `head ${headSha}`,
+      ...(sinceSha !== null ? [`since ${sinceSha}`] : []),
       ...numstatLines,
     ];
     // The App's per-role model overrides ride as an OPTIONAL
@@ -3489,6 +3696,12 @@ async function processMessage(
     // registry data) — the in-image synthesizer's base (it cannot import the
     // contract: the runner module graph stays inside packages/runner/src +
     // packages/shared/src, tests/review/runtime-boundary).
+    // PR context for the report seat (best-effort): the description plus the
+    // issues it closes/references, read through gh with the same exec env the
+    // diff uses. Any failure resolves undefined and the published report
+    // sections degrade to `none` — a narrative gap never fails a review.
+    const prContext = await capturePrContext(sandbox, payload, token);
+
     const runnerInput = {
       worktreePath: CLONE_DIR,
       reconFacts,
@@ -3501,6 +3714,9 @@ async function processMessage(
       // exist — a first round with an empty lifecycle serializes
       // byte-identically to the pre-recheck payload.
       ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
+      // The report seat's untrusted input. Absent when gh could not answer,
+      // so no report is attempted and the sections render `none`.
+      ...(prContext !== undefined ? { prContext } : {}),
     };
     const writeInput = await sandbox.runCommand(
       writeJsonCommand(RUNNER_INPUT_PATH, toBase64Utf8(JSON.stringify(runnerInput))),
@@ -3533,11 +3749,15 @@ async function processMessage(
     secretValues = sessionSecretValues(runnerEnv, credentials.keyValues, token);
     // §7.8: with a recheck input the runner gains `--recheck-out` — the seat
     // writes its validated document to the audited fixed path before the
-    // envelope reaches stdout.
-    const runnerCmd =
-      recheckInput !== undefined
-        ? runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, RECHECK_OUTPUT_PATH)
-        : cmds.runner;
+    // envelope reaches stdout. `--report-out` rides whenever the report seat
+    // has context to work with.
+    const runnerCmd = runnerCommand(
+      RUNNER_PATH,
+      level,
+      RUNNER_INPUT_PATH,
+      recheckInput !== undefined ? RECHECK_OUTPUT_PATH : undefined,
+      prContext !== undefined ? REPORT_OUTPUT_PATH : undefined,
+    );
     const run = await sandbox.runCommand(runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,
@@ -3576,6 +3796,13 @@ async function processMessage(
     const recheckDoc = recheck?.doc ?? null;
     const rejectedRowIds = recheck?.rejected ?? new Set<string>();
     const anonymousRejectedRows = recheck?.anonymousRejectedRows ?? 0;
+
+    // The report document (mstar.report/v1) rides the SAME audited bounded read
+    // and the SAME fail-closed rule: the Worker validates it against its own
+    // gate and falls back to `none` headings, or null when the seat wrote
+    // nothing. Read only when the runner was actually given `--report-out`.
+    const report: ReportDoc | null =
+      prContext !== undefined ? await readReportDoc(sandbox, secretValues) : null;
 
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
@@ -3833,6 +4060,11 @@ async function processMessage(
       headSha,
       closure,
       publicationMarker,
+      ...(sinceSha !== null ? { sinceSha } : {}),
+      // The revalidated table is rendered mechanically from the closure rows;
+      // the report may be null (no prContext / seat failure), in which case
+      // every heading still renders with `none`.
+      reportParts: { report, revalidated: buildRevalidatedSection(closureRows) },
     });
     const bodySha256 = await sha256Hex(preparedBody);
 

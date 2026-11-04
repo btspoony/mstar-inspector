@@ -80,6 +80,7 @@ import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../revi
 import { redactSecrets } from "./redact";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
+import type { ReportDoc } from "../../packages/shared/src/report-wire";
 import type { LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
 import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
@@ -236,6 +237,7 @@ export function buildReviewBody(
   output: ReviewOutput,
   omittedFindings = 0,
   closure?: string,
+  reportParts?: { report: ReportDoc | null; revalidated: string },
 ): string {
   let rendered = output;
   if (output.incomplete !== undefined) {
@@ -257,7 +259,14 @@ export function buildReviewBody(
   if (rendered.summary_md !== undefined) {
     rendered = { ...rendered, summary_md: truncateSummary(rendered.summary_md) };
   }
-  const sections = [renderReviewMarkdown(rendered)];
+  let core = renderReviewMarkdown(rendered);
+  // The report sections are composed into the engine's layout by ANCHOR, so
+  // the renderer keeps owning the layout and an absent report leaves the
+  // string byte-identical to the pre-report shape.
+  if (reportParts !== undefined) {
+    core = insertReportSections(core, reportParts.report, reportParts.revalidated);
+  }
+  const sections = [core];
   if (omittedFindings > 0) sections.push(`*(+${omittedFindings} more findings omitted)*`);
   if (closure) sections.push(closure);
   return clampKeepingHead(sections.join("\n\n"), REVIEW_BODY_LIMIT);
@@ -358,6 +367,122 @@ export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[
 }
 
 // ---------------------------------------------------------------------------
+// Report sections (mstar.report/v1 side document): the narrative a human
+// report needs around the engine's layout. Inserted by ANCHOR, never by
+// rebuilding the layout — the renderer stays the single owner of the verdict,
+// tally, review narrative and finding blocks.
+// ---------------------------------------------------------------------------
+
+/** The engine's narrative heading — the overview's anchor. */
+const REVIEW_HEADING = "## 📋 Review";
+/** The engine's findings heading — the revalidated table's anchor. */
+const FINDINGS_HEADING = "### Findings";
+
+/**
+ * The revalidation table, derived MECHANICALLY from the round's closure rows
+ * (one renderer for the states, no second model pass): an addressed concern is
+ * `fixed`, a dismissed one still stands (`still present`), everything else is
+ * `not verifiable`. `none` when the round rechecked nothing.
+ */
+export function buildRevalidatedSection(rows: ClosureRow[]): string {
+  const lines = ["### Revalidated findings", ""];
+  if (rows.length === 0) {
+    lines.push("none");
+    return lines.join("\n");
+  }
+  lines.push("| Prior finding | State | Evidence |", "|---|---|---|");
+  for (const row of rows.slice(0, CLOSURE_MAX_ROWS)) {
+    const title = row.title.replace(/\|/g, "\\|").replace(/\n/g, " ");
+    const state =
+      row.disposition === "addressed" ? "fixed" : row.disposition === "dismissed" ? "still present" : "not verifiable";
+    lines.push(`| ${title} | ${state} | ${row.evidenceKind ?? row.reason} |`);
+  }
+  return lines.join("\n");
+}
+
+/** The collapsible fix-plan block; markdown text must survive the outer fence. */
+function planBlock(planToFix: string | null): string {
+  if (planToFix === null || planToFix === "none") return "none";
+  // A plan that itself contains a fence needs a longer outer fence.
+  const fence = planToFix.includes("```") ? "````" : "```";
+  return `<details><summary>Expand fix plan</summary>\n\n${fence}md\n${planToFix}\n${fence}\n\n</details>`;
+}
+
+/** Insert `block` after the line that equals `anchor` (first occurrence). */
+function insertAfterHeading(body: string, anchor: string, block: string): string | null {
+  const lines = body.split("\n");
+  const index = lines.indexOf(anchor);
+  if (index < 0) return null;
+  lines.splice(index + 1, 0, "", block);
+  return lines.join("\n");
+}
+
+/** Insert `block` before the line that equals `anchor` (first occurrence). */
+function insertBeforeHeading(body: string, anchor: string, block: string): string | null {
+  const lines = body.split("\n");
+  const index = lines.indexOf(anchor);
+  if (index < 0) return null;
+  lines.splice(index, 0, block, "");
+  return lines.join("\n");
+}
+
+/**
+ * Compose the report sections into an engine-rendered review body:
+ *
+ *   `## 📋 Review` → overview → (narrative) → `### Revalidated findings` →
+ *   `### Findings` → `### Linked-issue AC` → `### ✅ Verified` →
+ *   `### 🗑️ Considered & rejected` → `## 🛠️ Plan to fix`
+ *
+ * Anchors are matched on exact heading lines. A body that carries no
+ * `## 📋 Review` line is not the engine's layout: the overview is SKIPPED (one
+ * warn) rather than prepended somewhere the reader would not expect, and the
+ * remaining sections are still appended. A zero-finding envelope omits
+ * `### Findings`; the empty heading is added so the revalidated table keeps its
+ * position and the layout stays fixed. A missing report writes `none` under
+ * every heading — the headings themselves are never deleted.
+ */
+export function insertReportSections(rendered: string, report: ReportDoc | null, revalidated: string): string {
+  let body = rendered;
+  if (report !== null) {
+    const overview = `**What this PR does**: ${report.overview}`;
+    const withOverview = insertAfterHeading(body, REVIEW_HEADING, overview);
+    if (withOverview === null) {
+      console.warn(
+        JSON.stringify({ event: "report_section_skipped", section: "overview", anchor: REVIEW_HEADING }),
+      );
+    } else {
+      body = withOverview;
+    }
+  }
+  const withRevalidated = insertBeforeHeading(body, FINDINGS_HEADING, revalidated);
+  if (withRevalidated === null) {
+    // Zero-finding envelope: the renderer omitted the heading, so this IS the
+    // template's self-add case — revalidated table, then the empty heading.
+    body = `${body}\n\n${revalidated}\n\n${FINDINGS_HEADING}\n\nnone`;
+  } else {
+    body = withRevalidated;
+  }
+  const tail = [
+    "### Linked-issue AC",
+    "",
+    report?.linkedIssueAc ?? "none",
+    "",
+    "### ✅ Verified",
+    "",
+    report?.verified ?? "none",
+    "",
+    "### 🗑️ Considered & rejected",
+    "",
+    report?.rejected ?? "none",
+    "",
+    "## 🛠️ Plan to fix",
+    "",
+    planBlock(report?.planToFix ?? null),
+  ].join("\n");
+  return `${body}\n\n${tail}`;
+}
+
+// ---------------------------------------------------------------------------
 // Prepared publication (spec §7.7): the FINAL body is computed and
 // durably staged BEFORE any GitHub mutation; the send publishes exactly the
 // prepared upsert. The publication identity marker is appended to the round
@@ -389,6 +514,19 @@ export function buildPreparedReviewBody(input: {
   headSha: string;
   closure?: string;
   publicationMarker: string;
+  /**
+   * Previous reviewed head this round was diffed against (increment rounds
+   * only). Rendered as ` · since <sha7>` on the header so a reader can tell
+   * an incremental round from a full one at a glance; absent on full rounds,
+   * where the body is byte-identical to the pre-increment shape.
+   */
+  sinceSha?: string;
+  /**
+   * Report sections (mstar.report/v1 side document). `report: null` writes the
+   * headings with `none`; omitted entirely keeps the pre-report body
+   * byte-identical.
+   */
+  reportParts?: { report: ReportDoc | null; revalidated: string };
 }): string {
   const roundMarker = `<!-- mstar-inspector:review:v1 round=${input.round} -->`;
   // English, like every other string this body renders (verdict, tally, the
@@ -396,9 +534,11 @@ export function buildPreparedReviewBody(input: {
   // unreadable to most readers and unlocalized for the rest: the body has no
   // locale input, so the only consistent choice is the one language the rest of
   // it already uses.
-  const header = `Review ${input.round} · commit ${input.headSha.slice(0, 7)}`;
+  const header =
+    `Review ${input.round} · commit ${input.headSha.slice(0, 7)}` +
+    (input.sinceSha === undefined ? "" : ` · since ${input.sinceSha.slice(0, 7)}`);
   const core = stripInspectorMarkerSyntax(
-    buildReviewBody(input.output, input.omittedFindings, input.closure),
+    buildReviewBody(input.output, input.omittedFindings, input.closure, input.reportParts),
   );
   // Both markers and the header are reserved before the clamp: two blank-line
   // separators (after the round marker, before the header), the header↔marker
