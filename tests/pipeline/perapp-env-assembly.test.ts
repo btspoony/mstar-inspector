@@ -162,12 +162,17 @@ async function seedTamperedKey(
 // --- sandbox fake (injected via createReviewConsumer overrides) -------------
 
 const sandboxCalls: Array<{ cmd: string; opts?: unknown }> = [];
+/** Numstat stdout for the next run (the reconFacts carrier; set per test). */
+let numstatStdout = "";
 
 const fakeSandbox = {
   runCommand: mock(async (cmd: string, opts?: unknown) => {
     sandboxCalls.push({ cmd, opts });
     if (cmd.includes("rev-parse")) {
       return { stdout: `${SHA}\n`, stderr: "", exitCode: 0 };
+    }
+    if (cmd.includes("--numstat")) {
+      return { stdout: numstatStdout, stderr: "", exitCode: 0 };
     }
     if (cmd.includes("--input")) {
       return { stdout: JSON.stringify(VALID_OUTPUT), stderr: "", exitCode: 0 };
@@ -313,6 +318,7 @@ function reset(): void {
   appCalls.length = 0;
   kvGuardPuts.length = 0;
   logLines.length = 0;
+  numstatStdout = "";
 }
 
 /** The runner exec call's env, in message order (one entry per runner step). */
@@ -349,7 +355,7 @@ function runnerInputs(): Array<Record<string, unknown>> {
     .map((c) => {
       const stdin = (c.opts as { stdin?: string } | undefined)?.stdin;
       if (stdin === undefined) throw new Error("runner-input write arrived without a stdin payload");
-      return JSON.parse(atob(stdin)) as Record<string, unknown>;
+      return JSON.parse(Buffer.from(stdin, "base64").toString("utf8")) as Record<string, unknown>;
     });
 }
 
@@ -876,6 +882,9 @@ describe("runner input modelOverrides threading", () => {
 
   test("app message with NO role map: input JSON omits the field entirely (no-map run)", async () => {
     reset();
+    // Non-ASCII numstat path: the runner input rides stdin base64, so the test
+    // helper's decode must be UTF-8 (atob would mangle it to latin1).
+    numstatStdout = "1\t1\tdocs/中文.md\n";
     const appDb = createMigratedTestD1();
     const appX = await seedApp(appDb, "app-x"); // github_apps row, NO role rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
@@ -884,6 +893,7 @@ describe("runner input modelOverrides threading", () => {
     // No role map → the runner input JSON omits the field entirely
     // (byte-identical to a no-map run); capability hosts ride always.
     expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
+    expect(appInput!.reconFacts).toContain("1\t1\tdocs/中文.md");
   });
 
   test("an all-cleared role map resolves to NO field (empty map = current behavior)", async () => {

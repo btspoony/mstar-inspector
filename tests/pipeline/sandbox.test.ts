@@ -10,6 +10,7 @@
  *   - runCommand wraps the branded command ONCE: GNU `timeout` bound +
  *     `/bin/sh -lc` sink, per-call env/cwd, buffered output mapped to
  *     { stdout, stderr, exitCode };
+ *   - the command and every env value are UTF-8 byte-bounded (MAX_EXEC_COMMAND_BYTES per argument, 8 KiB per env value);
  *   - every run is time-bounded: an explicit opts.timeout wins, otherwise
  *     DEFAULT_EXEC_TIMEOUT_MS is applied (plan QC 06 fix round 1 / qc3 F-001);
  *   - destroy() delegates to the container destroy;
@@ -199,8 +200,15 @@ function makeContainer(): FakeContainer {
 // no matter which test file's registration a shared process saw first.
 import "../helpers/cloudflare-workers-mock";
 
-const { SandboxV1, getSandbox, DEFAULT_EXEC_TIMEOUT_MS, MAX_EXEC_COMMAND_BYTES, MAX_EXEC_STDIN_BYTES, shellCommand } =
-  await import("../../src/pipeline/sandbox");
+const {
+  SandboxV1,
+  getSandbox,
+  DEFAULT_EXEC_TIMEOUT_MS,
+  MAX_EXEC_COMMAND_BYTES,
+  MAX_EXEC_ENV_VALUE_BYTES,
+  MAX_EXEC_STDIN_BYTES,
+  shellCommand,
+} = await import("../../src/pipeline/sandbox");
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
 
 /** The adapter's idle bound — pinned here so a silent shrink below the deep-review envelope fails. */
@@ -477,7 +485,7 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
     expect(Object.hasOwn(execCalls[0]!.opts as object, "stdin")).toBe(false);
   });
 
-  test("an oversized payload fails closed BEFORE any process starts — and the error carries no payload", async () => {
+  test("an oversized payload fails closed BEFORE the container starts — and the error carries the size, never the payload", async () => {
     reset();
     const { sandbox } = makeDo();
     const payload = `s${"e".repeat(MAX_EXEC_STDIN_BYTES)}`; // one byte past the cap
@@ -489,39 +497,28 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
       message = (error as Error).message;
     }
 
-    expect(message).toContain(`exceeds the ${MAX_EXEC_STDIN_BYTES}-byte`);
+    expect(message).toBe(
+      `the exec stdin payload is ${MAX_EXEC_STDIN_BYTES + 1} bytes, above the ${MAX_EXEC_STDIN_BYTES}-byte bound`,
+    );
     expect(message).not.toContain("seee");
+    expect(startCalls).toEqual([]);
     expect(execCalls).toEqual([]);
   });
 
-  test("a command or env value past the per-argument bound fails closed BEFORE any process starts — and the error carries no text", async () => {
+  test("the documented worst-case runner input (4 × ceil(512 KiB / 3) = 699,052 bytes) fits the cap and reaches the child", async () => {
     reset();
+    execStdin = "reader";
     const { sandbox } = makeDo();
-    const command = "z".repeat(MAX_EXEC_COMMAND_BYTES + 1); // one byte past the cap
+    // A cap lowered under this size fails here: the runner-input document is
+    // the payload class the 2 MiB bound is sized for.
+    const payload = "x".repeat(4 * Math.ceil((512 * 1024) / 3));
 
-    let message = "";
-    try {
-      await sandbox.runCommand(shellCommand(command));
-    } catch (error) {
-      message = (error as Error).message;
-    }
+    await sandbox.runCommand(shellCommand("bun run runner.ts"), { stdin: payload });
 
-    expect(message).toBe(
-      `exec command is ${MAX_EXEC_COMMAND_BYTES + 1} bytes, above the ${MAX_EXEC_COMMAND_BYTES}-byte bound`,
-    );
-    expect(message).not.toContain("zzz");
-    expect(execCalls).toEqual([]);
-
-    reset();
-    try {
-      await sandbox.runCommand(shellCommand("echo hi"), { env: { BIG: "e".repeat(8 * 1024 + 1) } });
-    } catch (error) {
-      message = (error as Error).message;
-    }
-
-    expect(message).toBe("exec env BIG is 8193 bytes, above the 8192-byte bound");
-    expect(message).not.toContain("eee");
-    expect(execCalls).toEqual([]);
+    expect(payload.length).toBe(699_052);
+    expect(execCalls).toHaveLength(1);
+    expect(execStdinBytes).toBe(payload);
+    expect(execStdinEof).toBe(true);
   });
 
   test("a stdin write failure on a child that claims success is refused (never a keyless run reported as ok)", async () => {
@@ -604,5 +601,77 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
     expect(stdinEvents).toEqual(["write", "write-settled", "close"]);
     expect(execStdinBytes).toBe(PAYLOAD);
     expect(execStdinEof).toBe(true);
+  });
+});
+
+/**
+ * The per-argument bound: the command and every env value are measured in
+ * UTF-8 bytes and refused before the container starts, so a payload that would
+ * make `execve` report E2BIG fails where the diagnosis is readable instead.
+ */
+describe("SandboxV1 exec argv/env bounds", () => {
+  test("a command or env value past the per-argument bound fails closed BEFORE any process starts — and the error carries no text", async () => {
+    reset();
+    const { sandbox } = makeDo();
+    const command = "z".repeat(MAX_EXEC_COMMAND_BYTES + 1); // one byte past the cap
+
+    let message = "";
+    try {
+      await sandbox.runCommand(shellCommand(command));
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toBe(
+      `exec command is ${MAX_EXEC_COMMAND_BYTES + 1} bytes, above the ${MAX_EXEC_COMMAND_BYTES}-byte bound`,
+    );
+    expect(message).not.toContain("zzz");
+    expect(execCalls).toEqual([]);
+    expect(startCalls).toEqual([]);
+
+    reset();
+    try {
+      await sandbox.runCommand(shellCommand("echo hi"), { env: { BIG: "e".repeat(MAX_EXEC_ENV_VALUE_BYTES + 1) } });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toBe(
+      `exec env BIG is ${MAX_EXEC_ENV_VALUE_BYTES + 1} bytes, above the ${MAX_EXEC_ENV_VALUE_BYTES}-byte bound`,
+    );
+    expect(message).not.toContain("eee");
+    expect(execCalls).toEqual([]);
+    expect(startCalls).toEqual([]);
+  });
+
+  test("the bound counts UTF-8 bytes, not string length (a multibyte command past the cap is refused)", async () => {
+    reset();
+    const { sandbox } = makeDo();
+    // 32,769 characters × 3 bytes: a String.length implementation would accept it.
+    const command = "字".repeat(MAX_EXEC_COMMAND_BYTES / 3 + 1);
+    const bytes = new TextEncoder().encode(command).byteLength;
+
+    let message = "";
+    try {
+      await sandbox.runCommand(shellCommand(command));
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain(String(bytes));
+    expect(execCalls).toEqual([]);
+    expect(startCalls).toEqual([]);
+  });
+
+  test("a command and an env value exactly AT the bound are accepted (the cap is a strict >)", async () => {
+    reset();
+    const { sandbox } = makeDo();
+
+    await sandbox.runCommand(shellCommand("c".repeat(MAX_EXEC_COMMAND_BYTES)));
+    expect(execCalls).toHaveLength(1);
+
+    reset();
+    await sandbox.runCommand(shellCommand("echo hi"), { env: { BIG: "e".repeat(MAX_EXEC_ENV_VALUE_BYTES) } });
+    expect(execCalls).toHaveLength(1);
   });
 });
