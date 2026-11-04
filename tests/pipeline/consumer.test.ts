@@ -169,6 +169,12 @@ function runnerExecTimeout(): number | undefined {
   return (call.opts as { timeout?: number }).timeout;
 }
 
+/** The runner-input write's exec opts; the fake stores `opts` as unknown. */
+function inputWriteOpts(): { stdin?: string } | undefined {
+  const write = sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'");
+  return write?.opts as { stdin?: string } | undefined;
+}
+
 /** Hold the next runner exec; `reached` resolves once it is parked. */
 function holdFirstRunner(): { reached: Promise<void>; release: () => void } {
   const released = Promise.withResolvers<void>();
@@ -446,6 +452,34 @@ describe("createReviewConsumer", () => {
       },
     ]);
     expect(sandbox.destroyCalls).toBe(1);
+  });
+
+  test("a runner input past Linux's 128 KiB argv cap rides stdin, never an argument", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // 2,800 numstat rows put the serialized runner input well past
+    // MAX_ARG_STRLEN (128 KiB): that is the size at which a recheck round used
+    // to kill the exec with E2BIG before `timeout` could start.
+    sandbox.numstatStdout = "12\t34\tsrc/generated/bulk-module-with-a-long-name.ts\n".repeat(2_800);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The write step is a fixed command: the document has no place in argv.
+    const writeIndex = sandbox.calls.findIndex((c) => c.cmd === "base64 -d > '/workspace/review-input.json'");
+    expect(writeIndex).toBeGreaterThanOrEqual(0);
+    const stdin = inputWriteOpts()?.stdin;
+    expect(stdin).toBeDefined();
+    expect(Buffer.byteLength(stdin!)).toBeGreaterThan(128 * 1024);
+    // No exec argument carries the payload at all, and the runner still starts
+    // on the same --input path, reading what the container decoded from the pipe.
+    expect(sandbox.calls.every((c) => !c.cmd.includes(stdin!.slice(0, 256)))).toBe(true);
+    const runnerCmd = sandbox.calls[writeIndex + 1]!.cmd;
+    expect(runnerCmd).toContain("--input '/workspace/review-input.json'");
+    expect(runnerCmd).not.toContain(stdin!.slice(0, 256));
+    const written = JSON.parse(sandbox.writtenInputJson!) as { reconFacts: string[] };
+    expect(written.reconFacts).toHaveLength(2 + 2_800);
   });
 
   test("null payload sha → actual sha read from the checkout (no gh pr view)", async () => {
