@@ -34,17 +34,14 @@
  * to the consumer that has a logger (the pipeline reader), not here.
  *
  * Write discipline: the system value is an integer in 1..SYSTEM_CONCURRENCY_MAX
- * (the platform-wide quota; the deploy-time queue ceiling can deliver at most
- * QUEUE_CONCURRENCY_CEILING of it at once);
- * the workspace value is an integer in 1..WORKSPACE_CONCURRENCY_MAX, which is
- * the per-workspace maximum the tenant face never has to derive from the system
- * cap. A workspace value above the CURRENT system value is refused, never
- * clamped.
- * The cap is part of the UPDATE's own predicate, so the refusal is decided by
- * the write against the cap as it stands at that moment — a concurrent
- * lowering cannot slip between a check and the write. Both writes land with
- * their `platform_audit_events` row in ONE `db.batch`, the `flag.set` pattern
- * in src/admin/index.ts — a failed write appends no audit row.
+ * (the platform-wide quota; Cloudflare Queues delivers at most 250 of it at
+ * once); the workspace value is an integer in 1..WORKSPACE_CONCURRENCY_MAX.
+ * The two bounds are independent: a workspace write is NEVER compared with the
+ * system quota — that comparison would let a tenant binary-search the platform
+ * number — and the quota applies only at admission, as
+ * `min(system, workspace)`. Both writes land with their
+ * `platform_audit_events` row in ONE `db.batch`, the `flag.set` pattern in
+ * src/admin/index.ts — a failed write appends no audit row.
  *
  * Module boundary: a dashboard leaf whose only import is the `DashboardD1`
  * type from ./users — no store/pipeline/review code, no runtime dependency.
@@ -59,19 +56,6 @@ export const SYSTEM_CONCURRENCY_DEFAULT = 256;
 export const WORKSPACE_CONCURRENCY_DEFAULT = 32;
 /** Lower bound of a stored value; also the degraded read fallback. */
 export const CONCURRENCY_MIN = 1;
-/**
- * The deploy-time queue ceiling: `queues.consumers[].max_concurrency` in
- * `wrangler.jsonc` (top level and `env.production`). Cloudflare Queues caps
- * concurrent consumer invocations at 250, so this is the most the platform can
- * ever run at once — `tests/contracts/wrangler-env-parity.test.ts` locks the
- * config to this constant.
- *
- * It is NOT the system quota's upper bound: the system cap is a business
- * parameter (default and maximum 256), and a value above this ceiling simply
- * cannot be saturated — admission runs at most 250 reviews concurrently. The
- * two numbers answer different questions and must not be collapsed.
- */
-export const QUEUE_CONCURRENCY_CEILING = 250;
 /** Upper bound of the system value: the platform-wide quota, independent of the queue ceiling. */
 export const SYSTEM_CONCURRENCY_MAX = 256;
 /** Upper bound of the workspace value: the per-workspace maximum. */

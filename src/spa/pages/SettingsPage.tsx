@@ -1085,8 +1085,9 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
 /**
  * The workspace review-concurrency cap — the tenant half of the runtime
  * configuration (iteration spec §1.1). Owner/admin only; the server re-checks
- * the role and refuses a value above the system cap with a keyed 400, so this
- * card only renders the range it was told.
+ * the role and validates the value against the workspace's own range only, so
+ * this card renders the `min`/`max` the payload carried and never sees the
+ * platform quota.
  */
 export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"] }) {
   const [loaded, setLoaded] = useState<ConcurrencySettings | null>(null);

@@ -372,13 +372,13 @@ export const zhCN: Dictionary = {
     nameSaved: "工作区名称已更新。",
     nameFailed: "修改工作区名称失败，请重试。",
     concurrencyHeading: "审查并发",
-    concurrencyDescription: "此工作区同时运行的审查数量。",
+    concurrencyDescription: "此工作区最多同时运行的审查数量。平台可能进一步限制。",
     concurrencyLabel: "并发审查数",
     concurrencySave: "保存并发数",
     concurrencySaved: "审查并发数已更新。",
     concurrencyFailed: "修改审查并发数失败，请重试。",
     /** {max} = 此工作区自己的上限。 */
-    concurrencyRange: "最多 {max} 个并发审查。",
+    concurrencyRange: "可设置 1–{max}。",
     /** 已存储的并发上限无法读取——显示的数字只是兜底值，不是此工作区的设置。 */
     concurrencyUnreadable:
       "无法读取已存储的审查并发数，因此审查会逐个运行。设置未被修改且保存已禁用——请重新读取。",

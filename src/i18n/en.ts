@@ -434,13 +434,13 @@ export const en = {
     nameFailed: "Could not change the workspace name — try again.",
     /** The owner/admin concurrency card (iteration spec §1.1). */
     concurrencyHeading: "Review concurrency",
-    concurrencyDescription: "How many reviews this workspace runs at once.",
+    concurrencyDescription: "How many reviews this workspace may run at once. The platform can further limit it.",
     concurrencyLabel: "Concurrent reviews",
     concurrencySave: "Save concurrency",
     concurrencySaved: "Review concurrency updated.",
     concurrencyFailed: "Could not change the review concurrency — try again.",
     /** {max} = this workspace's own maximum. */
-    concurrencyRange: "Up to {max} concurrent reviews.",
+    concurrencyRange: "Accepts 1–{max}.",
     /** The stored cap could not be read — the numbers are a fallback, not this workspace's setting. */
     concurrencyUnreadable:
       "The stored review concurrency could not be read, so reviews are running one at a time. Nothing was changed and saving is disabled — retry the read.",

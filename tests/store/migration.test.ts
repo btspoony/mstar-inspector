@@ -18,6 +18,11 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createMigratedTestD1, createTestD1 } from "./helpers";
+import {
+  SYSTEM_CONCURRENCY_DEFAULT,
+  WORKSPACE_CONCURRENCY_MAX,
+  getEffectiveConcurrency,
+} from "../../src/dashboard/runtime-config-store";
 import type { TestD1 } from "./helpers";
 import type { D1Like } from "../../src/store/types";
 
@@ -1836,7 +1841,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
 });
 
 describe("migrations/0043_workspace_concurrency_bound.sql", () => {
-  test("clamps stored workspace caps above 32 and leaves every other row alone", () => {
+  test("clamps stored workspace caps above the maximum and leaves every other row alone", async () => {
     const db = createMigratedTestD1();
     const insert = db.raw.prepare(
       `INSERT INTO workspaces (id, slug, name, created_at, max_concurrent_reviews)
@@ -1847,7 +1852,7 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
     for (const [id, cap] of [
       ["ws_40", 40],
       ["ws_33", 33],
-      ["ws_32", 32],
+      ["ws_32", WORKSPACE_CONCURRENCY_MAX],
       ["ws_8", 8],
       ["ws_null", null],
     ] as const) {
@@ -1859,12 +1864,23 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
     const rows = db.raw
       .query("SELECT id, max_concurrent_reviews AS cap FROM workspaces WHERE id LIKE 'ws\\_%' ESCAPE '\\' ORDER BY id")
       .all() as Array<{ id: string; cap: number | null }>;
+    // The clamp literal in the migration is this constant's value; deriving the
+    // expectation here makes a future bound change fail loudly.
     expect(Object.fromEntries(rows.map((row) => [row.id, row.cap]))).toEqual({
-      ws_40: 32,
-      ws_33: 32,
-      ws_32: 32,
+      ws_40: WORKSPACE_CONCURRENCY_MAX,
+      ws_33: WORKSPACE_CONCURRENCY_MAX,
+      ws_32: WORKSPACE_CONCURRENCY_MAX,
       ws_8: 8,
       ws_null: null,
+    });
+
+    // The migration's product promise: a formerly-64 value reads as an
+    // ordinary, non-degraded cap after the clamp.
+    expect(await getEffectiveConcurrency(db, "ws_40")).toEqual({
+      system: SYSTEM_CONCURRENCY_DEFAULT,
+      workspace: WORKSPACE_CONCURRENCY_MAX,
+      effective: WORKSPACE_CONCURRENCY_MAX,
+      degraded: false,
     });
   });
 });

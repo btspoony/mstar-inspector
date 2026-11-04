@@ -2313,7 +2313,7 @@ all (wrangler's config schema). Each attempt's unique sandbox id starts its
 `wrangler.jsonc`), so `250` is the widest blast radius the account should ever
 accept — it is also Cloudflare Queues' hard limit on concurrent consumer
 invocations. `tests/contracts/wrangler-env-parity.test.ts` locks the config to
-`QUEUE_CONCURRENCY_CEILING`. The system quota's own maximum is `256`
+the platform's 250 limit. The system quota's own maximum is `256`
 (`SYSTEM_CONCURRENCY_MAX`), deliberately above the ceiling: a quota above it is
 a valid business setting that the platform simply cannot saturate, and the
 ceiling still bounds the real blast radius. Remember the platform's 15 min queue-consumer wall-clock
@@ -2339,7 +2339,9 @@ Observation checklist after a concurrency change:
 
 The queue consumer holds at most `min(system cap, workspace cap)` reviews at
 once, and never two attempts for the same PR (the per-PR `review_inflight`
-row). Both caps are read from D1 on **every** queue message — no KV, no
+row). With both levels absent the admission is `min(256, 32) = 32` per
+workspace — the delivery ceiling of 250 is only reachable after an operator
+raises individual workspace caps. Both caps are read from D1 on **every** queue message — no KV, no
 request cache — so a change applies to the **next** message without a
 redeploy; reviews already running keep their slot until their `review_inflight`
 row expires.
@@ -2358,7 +2360,8 @@ row expires.
   (`WORKSPACE_CONCURRENCY_MAX`) is a tenant bound, so no workspace can ask for
   more than `32` no matter how high the system quota goes.
   `tests/contracts/wrangler-env-parity.test.ts` pins the config to
-  `QUEUE_CONCURRENCY_CEILING`; `src/dashboard/runtime-config-store.test.ts`
+  the `250` literal in `tests/contracts/wrangler-env-parity.test.ts`;
+  `src/dashboard/runtime-config-store.test.ts`
   drives the accepted ranges through the real write predicates.
 - The tenant face never renders or returns the system value: its settings read
   answers `{ concurrency, min, max, degraded }`, its write range is `1..32`, and

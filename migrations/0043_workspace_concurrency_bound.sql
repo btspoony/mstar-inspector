@@ -8,6 +8,10 @@
 -- Clamping once, here, keeps every existing row a readable cap; the system row
 -- needs no clamp because its old maximum (64) is inside the new one (256).
 --
+-- The clamp literal below is the value of `WORKSPACE_CONCURRENCY_MAX` in
+-- `src/dashboard/runtime-config-store.ts`; `tests/store/migration.test.ts`
+-- derives its expectation from that constant, so the two cannot drift apart.
+--
 -- Append-only on the production DB: one UPDATE, no schema change.
 
 UPDATE workspaces SET max_concurrent_reviews = 32 WHERE max_concurrent_reviews > 32;
