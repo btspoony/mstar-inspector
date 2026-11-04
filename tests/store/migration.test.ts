@@ -1840,7 +1840,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
 });
 
 describe("migrations/0043_workspace_concurrency_bound.sql", () => {
-  test("clamps stored workspace caps above the maximum and leaves every other row alone", async () => {
+  test("clamps rows above the maximum when applied, and a replay is a no-op", async () => {
     const db = createMigratedTestD1();
     const insert = db.raw.prepare(
       `INSERT INTO workspaces (id, slug, name, created_at, max_concurrent_reviews)

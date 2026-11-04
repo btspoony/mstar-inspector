@@ -2385,6 +2385,14 @@ row expires.
   SELECT id, max_concurrent_reviews FROM workspaces
    WHERE max_concurrent_reviews > 32 ORDER BY id;
   ```
+
+  Deploy-window caveat: migrations apply BEFORE the Worker cutover, so the
+  previously deployed API can still accept one more `33..64` value in that
+  window. Such a row is NOT in the record table, and 0043 never runs again;
+  the reader clamps it to `32` (so the workspace keeps a real cap) and the
+  stored column matches the card again after the owner's next save. Seeing a
+  `>32` row after the deploy is therefore expected self-healing state, not a
+  failed migration.
 - Every accepted write lands with its `platform_audit_events` row (actor
   included) in one D1 batch; a refused write changes no row and audits
   nothing.

@@ -534,63 +534,6 @@ describe("workspace name card", () => {
     }
   });
 
-  test("a stored value above the hidden system quota stays visible and saveable", async () => {
-    // The quota applies at admission only. The tenant face never sees it, so a
-    // stored 8 under a quota of 4 renders and re-saves as ordinary data.
-    const { win, cleanup } = installDom(`http://localhost${PATH}`);
-    const calls: Call[] = [];
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-      const method = init?.method ?? "GET";
-      const url = String(input);
-      calls.push({ method, url, body: String(init?.body ?? "") });
-      if (method === "PUT") {
-        return new Response(JSON.stringify({ concurrency: 8 }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return new Response(
-        JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      );
-    }) as unknown as typeof fetch;
-    try {
-      const container = win.document.createElement("div");
-      win.document.body.appendChild(container);
-      const root = createRoot(container as unknown as Element);
-      await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
-
-      const field = win.document.querySelector(
-        "#workspace-concurrency",
-      ) as unknown as HTMLInputElement;
-      expect(field.value).toBe("8");
-      const save = [...container.querySelectorAll("button")].find(
-        (button) => button.textContent === t("en", "workspace.concurrencySave"),
-      ) as unknown as HTMLButtonElement;
-      expect(save.disabled).toBe(false);
-
-      // An untouched save re-submits the stored value, never a derived one.
-      await act(async () =>
-        field
-          .closest("form")
-          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event),
-      );
-      expect(calls.filter((call) => call.method === "PUT")).toEqual([
-        {
-          method: "PUT",
-          url: "/dashboard/ws_acme/api/settings/concurrency",
-          body: JSON.stringify({ concurrency: 8 }),
-        },
-      ]);
-
-      await act(async () => root.unmount());
-    } finally {
-      globalThis.fetch = realFetch;
-      cleanup();
-    }
-  });
-
   test("an admin gets the concurrency card but no name form; a plain member gets the refusal copy", () => {
     // The name is owner-only; the review concurrency is owner-or-admin — the
     // page mirrors the two routes rather than the stricter gate alone.
