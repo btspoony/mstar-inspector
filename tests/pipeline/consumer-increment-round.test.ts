@@ -137,8 +137,9 @@ describe("incremental review rounds", () => {
       ]);
       expect(preparedBody()).toContain(`Review 1 · commit ${SHA.slice(0, 7)}`);
       expect(preparedBody()).not.toContain(" · since ");
-      // The choice is logged with the verdict, never silently.
-      expect(logLines.some((l) => l.fields.increment_status !== undefined)).toBe(true);
+      // The choice is logged with the verdict, never silently — and the value
+      // IS the verdict, not merely some status.
+      expect(logLines.filter((l) => l.fields.increment_status === (exitCode === 0 ? status : `exit ${exitCode}`))).toHaveLength(1);
     });
   }
 
@@ -441,6 +442,62 @@ describe("incremental review rounds", () => {
     expect(body).toContain("### 🗑️ Considered & rejected\n\nnone");
     expect(body).toContain("## 🛠️ Plan to fix\n\nnone");
     expect(sandbox.calls.some((c) => c.cmd.includes("--report-out"))).toBe(false);
+  });
+
+  // The PR-context capture is best-effort, but its failures are named: an
+  // unattributed `none` section is indistinguishable from a PR with nothing to
+  // say, and the report seat simply never runs.
+  test("a `gh pr view` failure warns once with its cause, then renders `none`", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    // The default state: `gh pr view` exits 1, so no PR context is captured.
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const warns = logLines.filter((l) => l.level === "warn" && l.fields.report_context !== undefined);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.fields.report_context).toBe("pr-view");
+    expect(warns[0]!.fields.report_context_issue).toBeUndefined();
+    expect(preparedBody()).toContain("### Linked-issue AC\n\nnone");
+  });
+
+  test("a non-JSON `gh pr view` reply carries its own cause", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.prBodyExitCode = 0;
+    sandbox.prBodyRaw = "<html>502 Bad Gateway</html>";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const warns = logLines.filter((l) => l.level === "warn" && l.fields.report_context !== undefined);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.fields.report_context).toBe("pr-view-json");
+    expect(preparedBody()).toContain("### Linked-issue AC\n\nnone");
+  });
+
+  test("an unreadable linked issue warns with its number", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.prBodyExitCode = 0;
+    sandbox.prBodyContent = "Closes #7";
+    sandbox.issueBodies.set(7, { title: "Guard", body: "- reject expired tokens" });
+    sandbox.issueViewExitCode = 1;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const warns = logLines.filter((l) => l.level === "warn" && l.fields.report_context !== undefined);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.fields.report_context).toBe("issue-view");
+    expect(warns[0]!.fields.report_context_issue).toBe(7);
   });
 
   test("a report document that fails its gate renders `none`, never a partial body", async () => {

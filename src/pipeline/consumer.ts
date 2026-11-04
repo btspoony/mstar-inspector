@@ -304,6 +304,9 @@ export const INLINE_RESOLVE_BUDGET_MS = 12_000;
 /** Per-entry slice (ms) — one §7.5 discover + resolve must fit inside it. */
 export const INLINE_RESOLVE_ENTRY_MS = 6_000;
 
+/** The named causes of a failed PR-context capture (`ConsumerLogFields.report_context`). */
+export type ReportContextFailure = "pr-view" | "pr-view-json" | "issue-view" | "issue-view-json";
+
 /** Structured log fields: seven event fields + sandbox id + idempotency key
  * + the d5-budget visibility quartet (level / runner_timeout_ms /
  * elapsed_ms / orchestration — spec d5-budget L5: they ride THIS channel;
@@ -465,6 +468,15 @@ export type ConsumerLogFields = {
    */
   increment_status?: string;
   increment_since?: string;
+  /**
+   * Why the report seat's PR-context capture yielded nothing: `pr-view` (the
+   * `gh pr view` exec failed), `pr-view-json` (its reply was not the JSON shape
+   * asked for), `issue-view` (one referenced issue could not be read) or
+   * `issue-view-json` (an issue reply was not that shape). The issue number
+   * rides `report_context_issue`. The sections then degrade to `none`.
+   */
+  report_context?: ReportContextFailure;
+  report_context_issue?: number;
   /**
    * Why the seat's report document yielded no sections (the `none` headings):
    * one named cause per rejected read, so a missing narrative is attributable
@@ -1037,44 +1049,62 @@ function clampContextText(text: string, maxChars: number): string {
  * to `PR_CONTEXT_MAX_ISSUES` issues it closes/references. Every value is
  * clamped — this is attacker-controlled prose that rides into a prompt.
  *
- * Any failure (gh missing, API error, non-JSON output) resolves `undefined`:
- * the report sections then degrade to `none`, which is a smaller loss than
- * failing a review over its narrative.
+ * Any failure (gh missing, API error, non-JSON output) resolves `undefined`
+ * after ONE warn naming the cause: the report sections then degrade to `none`,
+ * which is a smaller loss than failing a review over its narrative — but an
+ * unattributed gap is indistinguishable from a PR that simply has no context.
  */
 async function capturePrContext(
   sandbox: ReviewSandbox,
   payload: ReviewJobPayload,
   token: string,
+  log: ConsumerLog,
+  fields: ConsumerLogFields,
 ): Promise<PrContext | undefined> {
   const exec = { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS };
+  const warn = (cause: ReportContextFailure, issue?: number): void => {
+    log.warn(
+      { ...fields, report_context: cause, ...(issue === undefined ? {} : { report_context_issue: issue }) },
+      `report context ${cause}${issue === undefined ? "" : ` (issue #${issue})`} — report sections degrade to none`,
+    );
+  };
+  const prRead = await sandbox
+    .runCommand(prBodyCommand(payload.owner, payload.repo, payload.pr_number), exec)
+    .catch(() => null);
+  if (prRead === null || prRead.exitCode !== 0) {
+    warn("pr-view");
+    return undefined;
+  }
   let prBody: string;
   try {
-    const pr = await sandbox.runCommand(
-      prBodyCommand(payload.owner, payload.repo, payload.pr_number),
-      exec,
-    );
-    if (pr.exitCode !== 0) return undefined;
-    const parsed = JSON.parse(pr.stdout) as { body?: unknown };
+    const parsed = JSON.parse(prRead.stdout) as { body?: unknown };
     prBody = typeof parsed.body === "string" ? parsed.body : "";
   } catch {
+    warn("pr-view-json");
     return undefined;
   }
   const issues: PrContext["issues"] = [];
   for (const issueNumber of extractIssueRefs(prBody).slice(0, PR_CONTEXT_MAX_ISSUES)) {
+    const issueRead = await sandbox
+      .runCommand(issueViewCommand(payload.owner, payload.repo, issueNumber), exec)
+      .catch(() => null);
+    if (issueRead === null || issueRead.exitCode !== 0) {
+      warn("issue-view", issueNumber);
+      continue;
+    }
     try {
-      const issue = await sandbox.runCommand(
-        issueViewCommand(payload.owner, payload.repo, issueNumber),
-        exec,
-      );
-      if (issue.exitCode !== 0) continue;
-      const parsed = JSON.parse(issue.stdout) as { number?: unknown; title?: unknown; body?: unknown };
-      if (typeof parsed.number !== "number" || typeof parsed.title !== "string") continue;
+      const parsed = JSON.parse(issueRead.stdout) as { number?: unknown; title?: unknown; body?: unknown };
+      if (typeof parsed.number !== "number" || typeof parsed.title !== "string") {
+        warn("issue-view-json", issueNumber);
+        continue;
+      }
       issues.push({
         number: parsed.number,
         title: clampContextText(parsed.title, PR_CONTEXT_MAX_CHARS),
         body: clampContextText(typeof parsed.body === "string" ? parsed.body : "", PR_CONTEXT_MAX_CHARS),
       });
     } catch {
+      warn("issue-view-json", issueNumber);
       continue;
     }
   }
@@ -3852,9 +3882,10 @@ async function processMessage(
     // packages/shared/src, tests/review/runtime-boundary).
     // PR context for the report seat (best-effort): the description plus the
     // issues it closes/references, read through gh with the same exec env the
-    // diff uses. Any failure resolves undefined and the published report
-    // sections degrade to `none` — a narrative gap never fails a review.
-    const prContext = await capturePrContext(sandbox, payload, token);
+    // diff uses. Any failure resolves undefined (with one named warn) and the
+    // published report sections degrade to `none` — a narrative gap never
+    // fails a review.
+    const prContext = await capturePrContext(sandbox, payload, token, deps.log, fields);
 
     const runnerInput = {
       worktreePath: CLONE_DIR,
