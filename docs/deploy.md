@@ -2300,6 +2300,77 @@ Contract:
 [`.mstar/specs/review-trigger-policy.md`](../.mstar/specs/review-trigger-policy.md)
 (§2.1 classification matrix, §3 mention grammar).
 
+### Owner allowlist and App visibility (per App)
+
+An App can restrict review work to a set of repository owners — the
+`allowlist_enabled` switch on `github_apps` plus the `app_owner_allowlist`
+table (migration `0045`), edited per App on the dashboard page's **Installed**
+tab (the owners arrive through that App's installations, so the control sits
+next to them). `0045` is additive: four `ADD COLUMN`s whose NOT NULL columns
+carry defaults — an existing row materializes the allowlist off, the gate at
+80 points on the verdict `ship it` — plus the new table, so the apply needs no
+backfill and no settings visit.
+
+- **Off by default, and off is the historical behavior exactly** — every owner
+  is reviewed as before.
+- **On:** a delivery is admitted only when its `repository.owner.login` is
+  listed, on the `pull_request` trigger and the `issue_comment` mention alike.
+  Logins compare case-insensitively; the stored list keeps the operator's case.
+- **A refused delivery is answered `200` and writes nothing.** "Nothing" is
+  exact: no `webhook_deliveries` row, no PR ledger row, no `last_webhook_at`
+  touch and no enqueued job. `200` is deliberate — a refusal is a policy
+  outcome, not a retryable error, and GitHub redelivers non-2xx responses. The
+  only trace is one structured warn whose `event` is `owner_not_allowlisted`;
+  its `detail` carries `workspace_id=`, `app_id=` and the refused `owner=`.
+  Grep it with `wrangler tail`. Refusals never reach the delivery ledger, so
+  that line is the only evidence a delivery was refused rather than lost.
+- **Enabled with an empty list refuses every owner** (fail closed). The form
+  warns before saving and the save still lands — an empty list is a deliberate,
+  legal state.
+- **Scope:** the gate is per App and applies to that App's own installs. One
+  App's list never changes another App's deliveries.
+
+**Visibility is probed, not read.** Whether an App is public or private has no
+authenticated API field, so the dashboard probes it anonymously — `GET
+https://api.github.com/apps/{slug}` with no credentials (3-second budget, no
+retries). The probe must stay unauthenticated: an App JWT makes a private App
+answer `200` and erases the distinction.
+
+| Probe answer | Result |
+|---|---|
+| `200` | stored as `public` |
+| `404` | stored as `private` |
+| any other status, or a timeout | keep the stored value on the metadata-refresh path; store `unknown` when the probe is forced by an allowlist enable |
+| never probed (NULL column) | reads as `unknown` |
+
+The probe runs during the App's metadata refresh and again whenever an enabled
+allowlist is saved — admission trusts the cached value, so a stale `private`
+would leave a freshly enabled gate silently inert. A `404` is ambiguous (a
+missing or renamed slug answers the same), which is why an unreadable answer is
+never upgraded to proof of `private`.
+
+- A `private` App **ignores stored allowlist rows entirely**, and its Installed
+  tab renders no allowlist control — a switch there would promise nothing.
+  Making an App private therefore renders its list inert rather than enforcing
+  it.
+- `unknown` cannot prove `private`, so the list applies.
+- Caching visibility writes that column only; `updated_at` stays the
+  operator-mutation timestamp.
+
+**Read failures on the admission path fail open.** A failed allowlist read
+(store error, timeout, missing row) lets the delivery proceed and logs
+`owner_allowlist_read_failed`; the webhook response is unaffected. This is by
+design, and it is not symmetric with the Check path:
+
+- signature verification and installation identity already ran, so nothing
+  reaches that point without a valid App-signed payload;
+- refusing instead would silently drop real review work whenever D1 is
+  degraded, with no surface that shows the drop;
+- an App row or review row that cannot be read concludes the Check `failure`
+  (fail closed), because a pass would assert a review bar that was never
+  evaluated. A read failure on an admission gate and a read failure on an
+  evidence gate are not the same event.
+
 ### Queue consumer concurrency — deploy-time ceiling and runtime caps
 
 Two different numbers bound the consumer, and they are owned in two different
