@@ -1173,28 +1173,28 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // The APPLIED review follows that SAME proof publication: RL-12 lets a
       // second attempt share the head SHA, so the scope/SHA `reviews` row may
       // be an earlier attempt's result and must not decide this one. The gate
-      // is read with them; a review payload without a readable tally stays
+      // and the review are consulted ONLY inside `decideConclusion`'s proof
+      // branch, so without a proof both reads are skipped rather than issued
+      // and discarded; a review payload without a readable tally stays
       // unreadable, never a pass, and an unreadable gate row fails closed the
       // same way.
-      const [proof, gate] = await Promise.all([
-        readPublicationProof(deps.db, {
-          scope: handle.scope,
-          headSha: handle.headSha,
-          publicationId: input.publicationId ?? undefined,
-        }),
-        deps.getCheckGate(handle.scope),
-      ]);
-      // PROOF decides: without one the review is never consulted (the
-      // conclusion is the honest unconfirmed failure), so the read is skipped
-      // rather than issued and discarded.
-      const review =
+      const proof = await readPublicationProof(deps.db, {
+        scope: handle.scope,
+        headSha: handle.headSha,
+        publicationId: input.publicationId ?? undefined,
+      });
+      const gateAndReview: readonly [ReviewGate | null, PublishedReview | null] =
         proof === null
-          ? null
-          : await readPublishedReview(deps.db, {
-              scope: handle.scope,
-              headSha: handle.headSha,
-              publicationId: proof.publicationId,
-            });
+          ? [null, null]
+          : await Promise.all([
+              deps.getCheckGate(handle.scope),
+              readPublishedReview(deps.db, {
+                scope: handle.scope,
+                headSha: handle.headSha,
+                publicationId: proof.publicationId,
+              }),
+            ]);
+      const [gate, review] = gateAndReview;
       const conclusion = decideConclusion({
         proof,
         outcome: input.outcome,
