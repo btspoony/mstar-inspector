@@ -32,9 +32,12 @@
  * Visibility probe: whether an App is public is NOT part of `GET /app`, so
  * the refresh rides a second, anonymous request — `GET
  * https://api.github.com/apps/{slug}`, no Authorization — whose status is the
- * whole answer (200 public, 404 private, anything else = no answer: keep the
- * stored value). It shares this module because it shares the refresh's
- * failure discipline and bounds, not because it shares the JWT path.
+ * whole answer (200 public, 404 private, anything else = no answer: `null`).
+ * A `null` answer is the CALLER's to weigh, and the two callers weigh it
+ * differently: the metadata refresh keeps the stored value, while the
+ * allowlist save's forced probe stores `unknown` so its notice reports the
+ * state that save just produced. It shares this module because it shares the
+ * refresh's failure discipline and bounds, not because it shares the JWT path.
  *
  * Failure discipline (AD-531): ZERO retries (the caller's 24h TTL bounds
  * the cost to ≤1 fetch per request; ≤1/App/day once a sync succeeds), a
@@ -59,7 +62,8 @@ const FETCH_TIMEOUT_MS = 5_000;
 /**
  * Visibility probe budget: an anonymous GET answers from the public App
  * listing, so a miss is cheap — 3 seconds, zero retries, and any non-answer
- * keeps the last stored value instead of clearing it.
+ * is `null`: the metadata refresh keeps the last stored value instead of
+ * clearing it, the allowlist save's forced probe stores `unknown`.
  */
 const VISIBILITY_TIMEOUT_MS = 3_000;
 /**
@@ -269,7 +273,8 @@ export async function fetchAppMetadata(
 /**
  * The two states an anonymous `GET /apps/{slug}` can prove. `null` from
  * {@link fetchAppVisibility} is not a third state — it means "no answer", and
- * the caller keeps the stored value.
+ * each caller decides what that leaves: the metadata refresh keeps the stored
+ * value, the allowlist save's forced probe stores `unknown`.
  */
 export type GithubAppVisibilityProbe = "public" | "private";
 
@@ -280,9 +285,10 @@ export type GithubAppVisibilityProbe = "public" | "private";
  *
  * Mapping (GitHub answers 200 for a public App and 404 for a private one):
  *   200 → `"public"`, 404 → `"private"`, anything else (5xx, rate limit,
- *   network failure, 3s timeout) → `null`, so the caller keeps the last
- *   stored value instead of treating an outage as "private". Never throws,
- *   zero retries — the metadata refresh that calls it is already
+ *   network failure, 3s timeout) → `null`, which is "no answer" — never
+ *   "private". The caller weighs it: the metadata refresh keeps the last
+ *   stored value, the allowlist save's forced probe stores `unknown`. Never
+ *   throws, zero retries — the metadata refresh that calls it is already
  *   failure-tolerant and TTL-bounded.
  */
 export async function fetchAppVisibility(slug: string): Promise<GithubAppVisibilityProbe | null> {
@@ -303,8 +309,8 @@ export async function fetchAppVisibility(slug: string): Promise<GithubAppVisibil
     if (res.status === 404) return "private";
     return null;
   } catch {
-    // Network failure / timeout / malformed response — one shape: keep the
-    // stored value.
+    // Network failure / timeout / malformed response — one shape: "no
+    // answer", which the caller weighs (keep the stored value, or `unknown`).
     return null;
   }
 }

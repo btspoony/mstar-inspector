@@ -176,8 +176,11 @@ export type GithubAppRow = {
   allowlist_enabled: number;
   /**
    * Cached GitHub App visibility (migration 0045): 'public' | 'private' |
-   * 'unknown', written by the anonymous `GET /apps/{slug}` probe during the
-   * metadata refresh. NULL = never probed; getGithubVisibility reads it as
+   * 'unknown', written by the anonymous `GET /apps/{slug}` probe. Two callers
+   * probe and they answer a no-answer differently: the metadata refresh
+   * skips the write, keeping the stored value, while the allowlist save's
+   * forced probe stores 'unknown' because its notice reports the state that
+   * save just produced. NULL = never probed; getGithubVisibility reads it as
    * 'unknown' (cannot prove private). Admission never reads this column: the
    * allowlist applies whatever the visibility, which only picks the wording
    * of the allowlist control's private-App note.
@@ -257,9 +260,11 @@ export const REVIEW_TRIGGER_MODES: readonly ReviewTriggerMode[] = Object.freeze(
 
 /**
  * Cached GitHub App visibility (migration 0045, the `github_visibility`
- * column value domain). `unknown` is also what a NULL column reads as: the
- * anonymous `GET /apps/{slug}` probe answers public/404, and any other
- * response keeps the last known value instead of guessing.
+ * column value domain). `unknown` is also what a NULL column reads as. The
+ * anonymous `GET /apps/{slug}` probe answers public/404 and `null` to a
+ * no-answer; the metadata refresh then keeps the last stored value, while the
+ * allowlist save's forced probe stores `unknown` — its copy reports the state
+ * that save just produced, not a guess at an earlier one.
  */
 export type GithubVisibility = "public" | "private" | "unknown";
 
