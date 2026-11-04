@@ -4577,10 +4577,11 @@ async function processMessage(
         appId: payload.appRef.appId,
         model: chainHeadSelector(effectiveModelChain(appCfg).chain),
         provider: null,
-        // A capture-failed round still publishes, but its row must never be
-        // an incremental base: the flag rides the staged artifact so the put
-        // that writes it (here or on recovery) persists it.
-        contextIncomplete: captureFailed,
+        // A stale-context round (its pending lifecycle journal failed to
+        // apply OR its capture failed) still publishes, but its row must
+        // never be an incremental base: the flag rides the staged artifact
+        // so the put that writes it (here or on recovery) persists it.
+        contextIncomplete: staleContext,
       },
       lifecycle: lifecycleRound,
       lineIntents,

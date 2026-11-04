@@ -182,11 +182,12 @@ export type ReviewArtifactDoc = ArtifactDoc & {
   provider?: string | null;
   /**
    * The round could not fully scan the scope it claims to have reviewed, so
-   * its `verdict` covers only what was read: the lifecycle-target capture
-   * failed (D1 read error), the discussion capture failed, an increment diff
-   * came back empty, or the diff capture was empty / over the byte bound /
-   * unreadable. The row is still published and stored, but `findIncrementBase`
-   * must never diff a later round against it.
+   * its `verdict` covers only what was read: the pending lifecycle journal
+   * apply failed (its closure/anchor state was never applied), or the capture
+   * failed — lifecycle targets (D1 read error), the discussion, an increment
+   * diff that came back empty, or a diff capture that was empty / over the
+   * byte bound / unreadable. The row is still published and stored, but
+   * `findIncrementBase` must never diff a later round against it.
    * Optional; omitted = 0 (byte-compat for every other caller).
    */
   contextIncomplete?: boolean;

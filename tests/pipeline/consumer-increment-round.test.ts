@@ -397,6 +397,49 @@ describe("incremental review rounds", () => {
     expect(storedContextIncomplete(db)).toBe(1);
   });
 
+  test("a pending journal apply failure also stores context_incomplete = 1, and that head is never the next base", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    const db = await createSeededTestD1();
+    // A CONFIRMED publication of an earlier head whose payload cannot apply:
+    // the round runs with stale lifecycle context (closure/anchor state never
+    // applied), which is a SECOND way to be incomplete — not a capture failure.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, created_ms, updated_ms, recovery_state)
+         VALUES ('aaaaaaaa-0000-4000-8000-000000000046', ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{}', 1, 1, 'pending')`,
+      )
+      .run(TEST_APP_ID, TEST_INSTALLATION_ID, TEST_OWNER, TEST_REPO, TEST_PR_NUMBER, PREVIOUS_SHA);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(storedContextIncomplete(db)).toBe(1);
+
+    // The next round at a newer head: the row above is the newest REVIEWED head
+    // of this PR, and the flag keeps it out of the base read. The stale journal
+    // is settled first so this round is otherwise clean.
+    db.raw.prepare("UPDATE review_publications SET recovery_state = 'done' WHERE head_sha = ?").run(PREVIOUS_SHA);
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.compareStatus = "ahead";
+    sandbox.diffStdout = VALID_DIFF;
+    const nextSha = "d".repeat(40);
+    // The round keys off the CHECKOUT sha, not the payload's: without this the
+    // second delivery would dedup on the first round's head.
+    sandbox.resolvedSha = nextSha;
+    await consumer(makeBatch(makePayload({ head_sha: nextSha })));
+
+    expect(compareIssued()).toBe(false);
+    expect(runnerInput().reconFacts).not.toContain(`since ${SHA}`);
+    // …and the clean round writes 0 of its own.
+    expect(storedContextIncomplete(db, nextSha)).toBe(0);
+  });
+
   test("a healthy round stores context_incomplete = 0", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
