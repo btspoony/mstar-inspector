@@ -770,7 +770,7 @@ export const zhCN: Dictionary = {
       description: "非机密的运行时参数。更改会在下一次审查生效，并追加一条审计记录。",
       loadFailed: "无法加载运行时参数。",
       concurrencyTitle: "系统审查并发",
-      concurrencyDescription: "整个平台同时运行的审查数量。每个工作区的上限都受此值约束。",
+      concurrencyDescription: "整个平台同时运行的审查数量。Cloudflare Queues 最多同时投递 250 个，因此高于该值的配额有效但平台无法跑满。",
       concurrencyLabel: "并发审查数",
       concurrencySave: "保存",
       concurrencySaved: "已保存。",

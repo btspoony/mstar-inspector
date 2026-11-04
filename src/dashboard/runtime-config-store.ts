@@ -56,7 +56,11 @@ export const SYSTEM_CONCURRENCY_DEFAULT = 256;
 export const WORKSPACE_CONCURRENCY_DEFAULT = 32;
 /** Lower bound of a stored value; also the degraded read fallback. */
 export const CONCURRENCY_MIN = 1;
-/** Upper bound of the system value: the platform-wide quota, independent of the queue ceiling. */
+/**
+ * Upper bound of the system value: the platform-wide quota, independent of the
+ * queue ceiling. A stored 256 is a valid quota the platform can only saturate
+ * to 250 (Cloudflare's delivery limit), which the operator console states.
+ */
 export const SYSTEM_CONCURRENCY_MAX = 256;
 /** Upper bound of the workspace value: the per-workspace maximum. */
 export const WORKSPACE_CONCURRENCY_MAX = 32;

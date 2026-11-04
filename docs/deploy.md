@@ -2323,8 +2323,8 @@ Observation checklist after a concurrency change:
 
 - [ ] Both blocks carry the same ceiling — the `max_concurrency` literal `250`
       and `max_batch_size: 1` at the top level and inside `env.production`.
-      A ceiling change moves both literals together (the parity test's
-      set-equality fails if they drift apart); the accepted runtime ranges are
+      A ceiling change moves both literals together AND the `250` pin in
+      `tests/contracts/wrangler-env-parity.test.ts`; the accepted runtime ranges are
       driven through their write predicates in
       `src/dashboard/runtime-config-store.test.ts`.
 - [ ] Throughput moved the way the runtime caps predict: raising the D1 caps

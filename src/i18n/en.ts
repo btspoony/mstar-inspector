@@ -907,7 +907,7 @@ export const en = {
       loadFailed: "Could not load the runtime parameters.",
       concurrencyTitle: "System review concurrency",
       concurrencyDescription:
-        "How many reviews the whole platform runs at once. No workspace cap can exceed this value.",
+        "How many reviews the whole platform runs at once. Cloudflare Queues delivers at most 250 concurrently, so a value above that is a valid quota the platform cannot saturate.",
       concurrencyLabel: "Concurrent reviews",
       concurrencySave: "Save",
       concurrencySaved: "Saved.",

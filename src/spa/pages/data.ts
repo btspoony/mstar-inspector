@@ -1522,9 +1522,10 @@ export type ConcurrencySettings = {
  * repair. A typed value IS the repair, so the form stays usable.
  */
 export function concurrencySubmitBlocked(degraded: boolean, draft: string | null): boolean {
-  // An untouched degraded form has no value to write (the field's payload is
-  // the conservative fallback). A cleared field is never a value either:
-  // `Number("")` is 0, which the server would refuse after a round-trip.
+  // Two different no-value states share one outcome (nothing to write): an
+  // untouched degraded form (the payload is the conservative fallback) and a
+  // cleared field (`Number("")` is 0). The `required` inputs catch the second
+  // in the browser; this guard also covers a submit event that bypasses them.
   if (draft === null) return degraded;
   return draft.trim() === "";
 }
