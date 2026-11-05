@@ -276,6 +276,8 @@ const SETTINGS_PAYLOAD: SettingsManagePayload = {
     last_webhook_at: null,
     sandbox_image_id: "omp",
     review_trigger_mode: "every_push",
+    review_level: null,
+    default_review_level: "default",
     github_visibility: "unknown",
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },

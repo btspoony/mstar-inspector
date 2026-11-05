@@ -19,19 +19,27 @@ import {
   CHECK_UPDATE_MAX,
   CHECK_UPDATE_MIN,
   CONCURRENCY_MIN,
+  RECHECK_ASSIGNMENT_MAX,
+  RECHECK_ASSIGNMENT_MIN,
   RuntimeConfigError,
   SYSTEM_CONCURRENCY_MAX,
   getCheckBudgets,
+  getRecheckAssignmentMaxBytes,
   getSystemConcurrency,
   isConcurrencyValue,
+  readDefaultReviewLevel,
   setCheckBudgets,
+  setDefaultReviewLevel,
+  setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
   type CheckBudgetValues,
 } from "../dashboard/runtime-config-store";
+import { REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { resolveLocale, t, type Locale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
 import { ADMIN_PAGES } from "../spa/admin/pages";
 import { RESERVED_WORKSPACE_SLUGS } from "../spa/routes";
+import { createFailureStore } from "../store/failure-store";
 import type { Env } from "../worker/env";
 import { isServerFlagKey, listFlags } from "./flags";
 import { operatorLogin, type AdminContext } from "./gate";
@@ -129,14 +137,21 @@ async function setFlag(c: AdminContext): Promise<Response> {
  * configuration (iteration spec §1.1). One row in `review_runtime_settings`,
  * absent = the documented default; the leaf store owns the parse, the
  * 1..SYSTEM_CONCURRENCY_MAX range and the audit row, so this handler only
- * gates, shapes and maps.
+ * gates, shapes and maps. The operator default review depth rides the same
+ * read: the tier every App without its own depth inherits.
  */
 async function readRuntime(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
-  const [system, budgets] = await Promise.all([getSystemConcurrency(db), getCheckBudgets(db)]);
+  const [system, budgets, level, recheck, admissionDrops24h] = await Promise.all([
+    getSystemConcurrency(db),
+    getCheckBudgets(db),
+    readDefaultReviewLevel(db),
+    getRecheckAssignmentMaxBytes(db),
+    createFailureStore(db).countAdmissionDrops24h(),
+  ]);
   return c.json({
     concurrency: system.concurrency,
     min: CONCURRENCY_MIN,
@@ -152,6 +167,20 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       updateMax: CHECK_UPDATE_MAX,
       degraded: budgets.degraded,
     },
+    // The inheritance default, with the vocabulary so the console needs no
+    // second source for its options.
+    reviewLevel: { value: level.value, levels: REVIEW_LEVELS, degraded: level.degraded },
+    // The recheck seat's ask budget: global, absent-row default in the store.
+    recheckAssignment: {
+      maxBytes: recheck.maxBytes,
+      min: RECHECK_ASSIGNMENT_MIN,
+      max: RECHECK_ASSIGNMENT_MAX,
+      degraded: recheck.degraded,
+    },
+    // Admission drops the pipeline already records as `review_failures` rows,
+    // grouped by the reason token of the drop prefix over the last 24h — the
+    // sub-threshold signal the failure sweep cannot page on.
+    admissionDrops24h,
   });
 }
 
@@ -171,19 +200,62 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   if (!db) return c.notFound();
   let concurrency: unknown;
   let rawBudgets: unknown;
+  let rawLevel: unknown;
+  let rawRecheck: unknown;
   try {
-    const body = (await c.req.json()) as { concurrency?: unknown; checkBudgets?: unknown };
+    const body = (await c.req.json()) as {
+      concurrency?: unknown;
+      checkBudgets?: unknown;
+      reviewLevel?: unknown;
+      recheckAssignment?: unknown;
+    };
     concurrency = body.concurrency;
     rawBudgets = body.checkBudgets;
+    rawLevel = body.reviewLevel;
+    rawRecheck = body.recheckAssignment;
   } catch {
     // malformed body → the shape gate's 400, never a 500
   }
-  // One save writes one parameter: a body carrying both is a shape error, so a
-  // refused half can never leave the other half written.
-  if (rawBudgets !== undefined) {
-    if (concurrency !== undefined) {
-      return c.json({ error: "body must carry exactly one of concurrency | checkBudgets" }, 400);
+  // One save writes one parameter: a body carrying more than one is a shape
+  // error, so a refused half can never leave another half written.
+  if ([concurrency, rawBudgets, rawLevel, rawRecheck].filter((value) => value !== undefined).length > 1) {
+    return c.json(
+      { error: "body must carry exactly one of concurrency | checkBudgets | reviewLevel | recheckAssignment" },
+      400,
+    );
+  }
+  if (rawRecheck !== undefined) {
+    const maxBytes =
+      typeof rawRecheck === "object" && rawRecheck !== null && "maxBytes" in rawRecheck
+        ? rawRecheck.maxBytes
+        : undefined;
+    if (typeof maxBytes !== "number") {
+      return c.json({ error: "body must be { recheckAssignment: { maxBytes } }" }, 400);
     }
+    try {
+      // The store owns the accepted range and the refusal message.
+      return c.json({
+        recheckAssignment: {
+          maxBytes: await setRecheckAssignmentMaxBytes(db, maxBytes, login),
+        },
+      });
+    } catch (error) {
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawLevel !== undefined) {
+    try {
+      // The store owns the vocabulary and the refusal message.
+      return c.json({
+        reviewLevel: await setDefaultReviewLevel(db, rawLevel as ReviewLevel, login),
+      });
+    } catch (error) {
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawBudgets !== undefined) {
     const pair = checkBudgetsBody(rawBudgets);
     if (pair === null) {
       return c.json({ error: "body must be { checkBudgets: { terminalizeMs, updateMs } }" }, 400);

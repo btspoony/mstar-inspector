@@ -91,7 +91,7 @@ import {
 } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
-import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../../packages/shared/src/runtime";
+import type { CustomProviderDeclaration, ReviewLevel } from "../../packages/shared/src/runtime";
 import { providerEnvName } from "./provider-catalog";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
@@ -178,8 +178,12 @@ import {
 // sanctioned reader of the dashboard store leaves (apps-store reads the
 // github_apps row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
-import { createAppsStore } from "../dashboard/apps-store";
+import { createAppsStore, parseAppReviewLevel } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
+// The operator default review depth (migration 0047 pairing): read ONLY when
+// the App row's `review_level` is NULL, through the same runtime-config leaf
+// the admission settings use.
+import { getRecheckAssignmentMaxBytes, readDefaultReviewLevel } from "../dashboard/runtime-config-store";
 // Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads app_provider_keys / app_model_config and
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
@@ -228,22 +232,14 @@ export type PipelineEnv = {
    */
   DASHBOARD_ENCRYPTION_KEY?: string;
   /**
-   * Review tier for the in-image runner: "quick" (1 seat),
-   * "default" (2 seats, the harness no-flag landing tier), or "deep" (the
-   * three-stage parent-session path). Unset/empty → "default". Any other
-   * value fails the review fail-loud — the port never silently downgrades;
-   * the valid-value list lives in REVIEW_LEVELS (the SSOT the error message
-   * quotes), so this doc cannot drift when the universe widens again.
-   */
-  REVIEW_LEVEL?: string;
-  /**
    * AL-24-5 (zero global fallback): provider keys and the model chain NEVER
    * come from the Worker env — OMP_MODEL_KEY / OMP_REVIEW_MODEL / the 18
    * per-provider key fields were retired. Every key and the chain resolve
    * from the App's own per-App config (resolveAppConfig keys map +
    * modelChain, custom declarations); an App missing either fails closed
-   * (assertAppConfigComplete → F-001 channel). The only remaining
-   * deployment-level knob is the review tier above.
+   * (assertAppConfigComplete → F-001 channel). The review depth is per App
+   * too (`github_apps.review_level`, falling back to the operator default in
+   * `review_runtime_settings`) — this env carries no deployment-wide level.
    */
 };
 
@@ -271,15 +267,15 @@ const POST_RUNNER_READ_COUNT = 3;
  */
 export const POST_RUNNER_READ_BUDGET_MS = POST_RUNNER_READ_COUNT * POST_RUNNER_READ_TIMEOUT_MS;
 /**
- * In-image runner budget per review level (ms). One Worker deployment = one
- * REVIEW_LEVEL = one timeout table (spec d5-budget § Trigger): quick/default
- * keep the frozen 10min ceiling (measured ~52s on a real model call); deep
- * gets 14min: Cloudflare Queue consumers cap at 15min wall-clock, so the
- * grill-me 30min budget could never finish in-consumer (force-kill skips
- * finally, retries DLQ — the d5-budget review's qc2/qc3 Critical); 14min still
- * covers the three-phase parent-session run without false-timeout into the
- * DLQ. Record<ReviewLevel, …> makes a future level widen fail at compile
- * time, never silently fall back.
+ * In-image runner budget per review level (ms) — each App resolves its own
+ * depth, so one deployment serves several tables at once (spec d5-budget
+ * § Trigger): quick/default keep the frozen 10min ceiling (measured ~52s on a
+ * real model call); deep gets 14min: Cloudflare Queue consumers cap at 15min
+ * wall-clock, so the grill-me 30min budget could never finish in-consumer
+ * (force-kill skips finally, retries DLQ — the d5-budget review's qc2/qc3
+ * Critical); 14min still covers the three-phase parent-session run without
+ * false-timeout into the DLQ. Record<ReviewLevel, …> makes a future level
+ * widen fail at compile time, never silently fall back.
  */
 const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
   quick: 600_000,
@@ -346,11 +342,17 @@ export type ConsumerLogFields = {
    * concurrency reader's degraded-read warn, relayed on this channel.
    * `review_check_budgets_degraded` (same channel, spec §7.10): the check-budget
    * reader's degraded-read warn.
+   * `review_level_degraded` (same channel, migration 0047): the operator-default
+   * review-level read's degraded warn — a corrupt row falls back to `default`
+   * and says so here instead of degrading silently.
+   * `review_recheck_assignment_degraded` (same channel): the recheck seat's
+   * ask-budget read's degraded warn — a corrupt row falls back to the runner's
+   * documented budget and says so here.
    * `review_no_increment` (union widened ADDITIVELY): an incremental round whose
    * `base...head` is genuinely empty — the prior round already covers this head,
    * so the delivery is acked without a new review body.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_no_increment";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment";
   action: string;
   installation_id: number;
   owner: string;
@@ -372,6 +374,8 @@ export type ConsumerLogFields = {
   workspace_id?: string;
   /** The degraded concurrency read's cap (always the conservative 1 when degraded). */
   effective?: number;
+  /** The degraded recheck ask-budget read's value (the runner's documented default). */
+  max_bytes?: number;
   /**
    * Review admission (§1.3): WHY the in-flight guard held this message —
    * `pr-held` (this PR already has a live review), `system-cap` /
@@ -403,7 +407,7 @@ export type ConsumerLogFields = {
   error_cause?: string;
   /** Whether a failed usage insert landed: true, false (verified absent), or unreadable. */
   usage_applied?: boolean | "unknown";
-  /** Review tier resolved from REVIEW_LEVEL. */
+  /** Review depth resolved for this message (the App row, else the operator default). */
   level?: ReviewLevel;
   /** Runner wall-clock budget for `level` (ms) — runnerTimeoutMs(level). */
   runner_timeout_ms?: number;
@@ -658,7 +662,17 @@ export type ProcessOutcome =
    * refusal was a cap/storage one, so no row holds this PR): the terminal ack
    * records the drop unless the live review covers this message's own sha.
    */
-  | { kind: "guard-held"; admission: AdmissionRefusalFields; heldHeadSha: string | null }
+  | {
+      kind: "guard-held";
+      admission: AdmissionRefusalFields;
+      heldHeadSha: string | null;
+      /**
+       * The App's resolved review depth, carried from the same row read that
+       * admitted this message: the retry schedule must follow the App, and the
+       * ack path runs AFTER processMessage returns — never a second lookup.
+       */
+      level: ReviewLevel;
+    }
   | { kind: "paused" }
   | { kind: "degraded" }
   /**
@@ -711,6 +725,7 @@ async function handleGuardHeld(
   deps: ProcessDeps,
   admission: AdmissionRefusalFields,
   heldHeadSha: string | null,
+  level: ReviewLevel,
 ): Promise<void> {
   const fields = { ...toBaseFields(message.body), ...admission };
   // Why this message was held, appended to both lines: the delay schedule alone
@@ -723,10 +738,8 @@ async function handleGuardHeld(
   // storage refusal means none exists at all — saying "still in flight" there
   // would send an operator looking for a review that was never started.
   const what = admission.reason === "pr-held" ? "review already in flight" : "review not admitted";
-  // REVIEW_LEVEL is a Worker-level setting (one deployment = one level), and
-  // processMessage already resolved it before touching the guard — re-resolving
-  // here cannot throw on the guard-held path.
-  const level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
+  // The App's resolved depth rides the outcome: processMessage resolved it from
+  // the App row BEFORE the guard, so this retry path reads no storage at all.
   const delays = guardRetryDelaysSeconds(level);
   const delaySeconds = delays[message.attempts - 1];
   if (delaySeconds !== undefined) {
@@ -2355,7 +2368,18 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
  * retry→DLQ path — the wrong semantics for an intentional pause.
  */
 type CommenterResolution =
-  | { kind: "ok"; commenter: ReviewCommenter; githubAppId: number; workspaceId: string }
+  | {
+      kind: "ok";
+      commenter: ReviewCommenter;
+      githubAppId: number;
+      workspaceId: string;
+      /**
+       * The App row's RAW `review_level` (migration 0047) — `null` = follow the
+       * operator default. Read through `parseAppReviewLevel`; carrying it here
+       * keeps the depth on the same per-message row read (never a second query).
+       */
+      reviewLevel: string | null;
+    }
   | { kind: "paused" };
 
 /**
@@ -2421,7 +2445,13 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
   const cached = deps.appCommenters.get(appRef.appId);
   if (cached !== undefined && cached.fingerprint === fingerprint) {
-    return { kind: "ok", commenter: cached.commenter, githubAppId: cached.githubAppId, workspaceId: row.workspace_id };
+    return {
+      kind: "ok",
+      commenter: cached.commenter,
+      githubAppId: cached.githubAppId,
+      workspaceId: row.workspace_id,
+      reviewLevel: row.review_level,
+    };
   }
   // Cache miss (first message for this App) or fingerprint mismatch
   // (rotation): decrypt + build + REPLACE the entry. A decrypt failure here
@@ -2434,7 +2464,13 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   );
   const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
   deps.appCommenters.set(appRef.appId, { commenter, fingerprint, githubAppId: row.github_app_id });
-  return { kind: "ok", commenter, githubAppId: row.github_app_id, workspaceId: row.workspace_id };
+  return {
+    kind: "ok",
+    commenter,
+    githubAppId: row.github_app_id,
+    workspaceId: row.workspace_id,
+    reviewLevel: row.review_level,
+  };
 }
 
 /**
@@ -2466,22 +2502,6 @@ async function readPrHead(
     );
     return null;
   }
-}
-
-/**
- * Resolve the review tier from PipelineEnv.REVIEW_LEVEL (AC-S7-level).
- * Unset/empty → "default" (the harness no-flag landing tier).
- * Anything else throws — the port rejects unknown levels fail-loud and never
- * silently downgrades (spec § 档位). "deep" is a legal tier;
- * the message lists every tier from REVIEW_LEVELS so it cannot drift when
- * the level universe widens again (architect lock L3).
- */
-export function resolveReviewLevel(value: string | undefined): ReviewLevel {
-  if (value === undefined || value === "") return "default";
-  if (isReviewLevel(value)) return value;
-  throw new Error(
-    `invalid REVIEW_LEVEL ${JSON.stringify(value)} — expected one of: ${REVIEW_LEVELS.join(", ")}`,
-  );
 }
 
 /**
@@ -3116,7 +3136,7 @@ export function createReviewConsumer(
       // delayed retry (or the final ack-with-warning) instead of throwing
       // into the queue's immediate ×3 retry → DLQ path.
       if (outcome.kind === "guard-held") {
-        await handleGuardHeld(message, deps, outcome.admission, outcome.heldHeadSha);
+        await handleGuardHeld(message, deps, outcome.admission, outcome.heldHeadSha, outcome.level);
       } else if (outcome.kind === "paused") {
         // Architect lock L4: a paused App's in-flight message is
         // acked DIRECTLY — an intentional skip (its claim was already stamped
@@ -3170,10 +3190,10 @@ async function processMessage(
   // (head_sha=null) are serialized per PR too; the row also reserves the
   // workspace and system capacity slots.
   let inflight: { key: InflightKey; attemptId: string; ttlSeconds: number } | null = null;
-  // Set once REVIEW_LEVEL resolves inside the try (resolution must stay in
-  // the try so an invalid value gets the structured error log); the admission
-  // row's TTL needs the same level. inflight ≠ null ⇒ level is set
-  // (resolution precedes admission).
+  // Set once the App row resolves inside the try (the paused gate returns
+  // before it); the admission row's TTL needs the same level. inflight ≠ null
+  // ⇒ level is set (resolution precedes admission). The failure path tolerates
+  // `undefined` — a pre-resolution failure has no App to attribute a level to.
   let level: ReviewLevel | undefined;
   // Runner wall-clock start (d5-budget AC-S10-logs): set just before the
   // runner exec so the failure log can carry elapsed_ms. VISIBILITY ONLY —
@@ -3294,10 +3314,6 @@ async function processMessage(
 
   try {
     baseFields = toBaseFields(payload);
-    // Review tier (AC-S7-level): resolved BEFORE any sandbox/KV step so a
-    // misconfigured REVIEW_LEVEL fails loud (structured log + rethrow)
-    // without touching the in-flight guard.
-    level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
     // Credential resolution FIRST (lock L4 — consumer-side),
     // before the guard/sandbox: app → D1 row gated
     // missing/deleted/disabled (throw → retry/DLQ, byte-identical) then
@@ -3351,6 +3367,26 @@ async function processMessage(
       return { kind: "paused" };
     }
     const { commenter, githubAppId, workspaceId } = resolution;
+    // The App's review depth (migration 0047), resolved from the SAME row read
+    // that resolved its credentials — the admission TTL, the runner budget and
+    // the guard backoff all use it. A NULL (or off-vocabulary) column follows
+    // the operator default: one bounded settings read, issued only then. A
+    // degraded read answers the documented default and owes the operator one
+    // structured warn (the concurrency reader's contract) — never a silent
+    // fallback.
+    const appLevel = parseAppReviewLevel(resolution.reviewLevel);
+    if (appLevel !== null) {
+      level = appLevel;
+    } else {
+      const fallback = await readDefaultReviewLevel(deps.env.DB);
+      level = fallback.value;
+      if (fallback.degraded) {
+        deps.log.warn(
+          { ...baseFields, event: "review_level_degraded", level: fallback.value },
+          "operator default review level read degraded — using the documented default",
+        );
+      }
+    }
     // Supersede skip (migration 0044): a queued delivery whose PR head has
     // already advanced must cost nothing that can fail it, hold the guard, or
     // start work — no admission row, no sandbox, no Check, no publication.
@@ -3532,6 +3568,7 @@ async function processMessage(
         kind: "guard-held",
         admission: refusal,
         heldHeadSha: admission.reason === "pr-held" ? admission.heldHeadSha : null,
+        level,
       };
     }
     inflight = { key: inflightKey, attemptId, ttlSeconds };
@@ -3970,6 +4007,28 @@ async function processMessage(
       }
     }
 
+    // §7.8: the seat's ask budget is an operator setting, read ONCE per message
+    // and only when a recheck round will actually be asked, so a delivery with
+    // no open rows pays nothing. It rides the runner input as its own top-level
+    // field — the `mstar.recheck-input/v1` document stays frozen.
+    let recheckAssignmentMaxBytes: number | undefined;
+    if (recheckInput !== undefined) {
+      const budget = await getRecheckAssignmentMaxBytes(deps.env.DB);
+      recheckAssignmentMaxBytes = budget.maxBytes;
+      // A degraded read answers the documented default and owes the operator
+      // one structured warn (the level/concurrency readers' contract).
+      if (budget.degraded) {
+        deps.log.warn(
+          {
+            ...(baseFields ?? payloadIdentityFields(payload)),
+            event: "review_recheck_assignment_degraded",
+            max_bytes: budget.maxBytes,
+          },
+          "recheck assignment budget read degraded — using the documented default",
+        );
+      }
+    }
+
     // 6. §7.7 step 4 — the fenced Check claim: after the authoritative SHA
     // and dedup, BEFORE model work. Absent `checks` dep = no Checks, M8
     // fully operational; hook failure is isolated and cannot prevent the
@@ -4136,6 +4195,9 @@ async function processMessage(
       // exist — a first round with an empty lifecycle serializes
       // byte-identically to the pre-recheck payload.
       ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
+      // The seat's ask budget: a top-level runner field, never part of the
+      // frozen recheck document.
+      ...(recheckAssignmentMaxBytes !== undefined ? { recheckAssignmentMaxBytes } : {}),
       // The report seat's untrusted input. Absent when gh could not answer,
       // so no report is attempted and the sections render `none`.
       ...(prContext !== undefined ? { prContext } : {}),

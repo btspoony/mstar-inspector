@@ -354,6 +354,21 @@ export function isReviewTriggerMode(value: unknown): value is ReviewTriggerMode 
 }
 
 /**
+ * Per-App review levels (migration 0047) — the `github_apps.review_level`
+ * closed vocabulary. Mirrors packages/shared/src/runtime `REVIEW_LEVELS`
+ * across the bundle boundary (the REVIEW_TRIGGER_MODES convention: documented,
+ * deliberately not imported). Values are wire-verbatim; only labels localize.
+ * `null`/absent is not a member — it is "no App choice" (follow the operator
+ * default).
+ */
+export const REVIEW_LEVELS = ["quick", "default", "deep"] as const;
+export type ReviewLevel = (typeof REVIEW_LEVELS)[number];
+
+export function isReviewLevel(value: unknown): value is ReviewLevel {
+  return (REVIEW_LEVELS as readonly string[]).includes(value as string);
+}
+
+/**
  * The D4 identity set — the fields the GET /api/apps list rows expose
  * (github_app_id, status, review_enabled, created_by) plus created_at and
  * the cached public GitHub profile. This is the NON-MANAGER detail face's
@@ -432,6 +447,14 @@ export type SettingsAppMeta = {
   sandbox_image_id: string;
   /** The App's review trigger mode (spec §2) — the control's current value. */
   review_trigger_mode: ReviewTriggerMode;
+  /**
+   * The App's stored review depth (migration 0047); `null` = follow the
+   * operator default. The server parses an off-vocabulary stored value to
+   * null, so a dead selection never renders.
+   */
+  review_level: ReviewLevel | null;
+  /** The operator level a `null` review_level currently resolves to. */
+  default_review_level: ReviewLevel;
   /**
    * The cached public GitHub profile the settings route serves
    * (migration 0019 columns). Every field nullable — NULL = never synced (old
@@ -1536,6 +1559,11 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // off-vocabulary value (DB CHECK makes it impossible from a correct
   // worker) fails the parse instead of rendering a dead selection.
   if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
+  // The review depth and the operator default it inherits (migration 0047):
+  // null = the inherit face. An off-vocabulary level fails the parse instead
+  // of rendering a dead selection.
+  if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
+  if (!isReviewLevel(data.app.default_review_level)) return null;
   // The review gate and the owner allowlist ride the MANAGER face
   // (migration 0045): the Check's pass condition and the owner admission
   // set. A gate whose stored verdict list is unreadable arrives as explicit

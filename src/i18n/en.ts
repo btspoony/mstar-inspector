@@ -616,6 +616,8 @@ export const en = {
         "This App already has the maximum of {limit} custom providers — remove one before materializing another (updating an existing declaration is always allowed). Nothing was stored.",
       runtimeHarnessUnknown: "Unknown or disabled runtime harness — nothing was stored.",
       triggerModeUnknown: "{mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
+      reviewLevelUnknown:
+        "{level} is not a review depth — use quick, default, or deep (or inherit to follow the operator default). Nothing was stored.",
       checkScoreInvalid: "The review gate score must be a whole number from 0 to 100. Nothing was stored.",
       checkVerdictUnknown:
         "{verdict} is not a review verdict — use one of: {verdicts}. Nothing was stored.",
@@ -652,6 +654,20 @@ export const en = {
     triggerModeManual: "Manual",
     triggerModeMention: "PR author or repo owner: comment this on the PR to (re-)start a review:",
     triggerModeMentionAria: "Bot mention: {mention}",
+    // Review depth (migration 0047): the four faces of the App's depth select.
+    // Wire values stay quick/default/deep (plus the inherit face's own
+    // sentinel); only the labels localize. "Standard" is the `default` enum's
+    // tenant-facing name — a degree word beside Quick and Deep.
+    reviewDepth: "Review depth",
+    reviewDepthCopy:
+      "How thoroughly each review of this App runs. Quick is the cheapest; Deep is the most thorough.",
+    reviewDepthQuick: "Quick",
+    reviewDepthQuickHint: "fast, single-pass review",
+    reviewDepthStandard: "Standard",
+    reviewDepthStandardHint: "balanced depth (recommended)",
+    reviewDepthDeep: "Deep",
+    reviewDepthDeepHint: "most thorough, slower",
+    reviewDepthInherit: "Follow operator default (currently {level})",
     confirmPauseTitle: "Pause reviews for {slug}?",
     confirmPauseBody: "Webhooks stay connected — deliveries are answered and ignored until you resume.",
     confirmResumeTitle: "Resume reviews for {slug}?",
@@ -970,6 +986,43 @@ export const en = {
       /** Neither stored budget could be read — the numbers are the documented defaults. */
       checkUnreadable:
         "The stored check budgets could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
+      /** The operator default an App without its own depth inherits. */
+      reviewLevelTitle: "Review depth",
+      reviewLevelDescription: "Applies to Apps that have not chosen their own review depth.",
+      reviewLevelLabel: "Default review depth",
+      reviewLevelQuick: "Quick — fast, single-pass review",
+      reviewLevelStandard: "Standard — balanced depth (recommended)",
+      reviewLevelDeep: "Deep — most thorough, slower",
+      reviewLevelSave: "Save",
+      reviewLevelSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      reviewLevelFailed: "Could not change the default review depth.",
+      /** The stored level could not be read — the shown tier is the documented default. */
+      reviewLevelUnreadable:
+        "The stored default review depth could not be read, so Apps without their own depth run Standard. Choosing a level saves a new one, and retrying the read re-checks the row.",
+      /** The prior-findings seat's ask budget. */
+      recheckTitle: "Recheck assignment budget",
+      recheckDescription:
+        "How much of a round the prior-findings seat is asked with, in UTF-8 bytes. Every prior finding and the discussion always ride; evidence slices ride until this budget is spent.",
+      recheckLabel: "Assignment budget (bytes)",
+      recheckSave: "Save",
+      recheckSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      recheckFailed: "Could not change the recheck assignment budget.",
+      /** {value} = the budget currently stored (or the documented default). */
+      recheckCurrent: "Effective on the next review: {value} bytes.",
+      /** The stored budget could not be read — the number is the documented default. */
+      recheckUnreadable:
+        "The stored recheck assignment budget could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
+      /** Admission refusals the pipeline recorded over the trailing 24h. */
+      admissionDropsTitle: "Admission drops (last 24 hours)",
+      admissionDropsDescription:
+        "Reviews the pipeline refused to admit, counted by reason. A dropped review never started; the counts read the failure rows the pipeline already writes.",
+      /** Why an admission was refused: the PR lock, a cap, or a storage fault. */
+      admissionDropsPrHeld: "PR in flight",
+      admissionDropsSystemCap: "System cap",
+      admissionDropsWorkspaceCap: "Workspace cap",
+      admissionDropsError: "Storage error",
       /**
        * Deployment version footer. `{version}` carries the
        * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the

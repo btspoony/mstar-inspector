@@ -115,6 +115,7 @@ const USAGE =
   "(input JSON: { capabilityHosts: [{ id, catalogProviderId, apiKeyEnv, baseUrl, api, auth, models }], " +
   "worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string>, " +
   "customProviders?: [{ provider_id, base_url, api, model_ids }], recheck?: mstar.recheck-input/v1 document, " +
+  "recheckAssignmentMaxBytes?: integer > 0, " +
   "prContext?: { prBody: string, issues: [{ number, title, body }] } })";
 
 /** Validated shape of the --input JSON file. */
@@ -126,6 +127,8 @@ type RunnerInputJson = {
   customProviders?: CustomProviderDeclaration[];
   /** Optional typed recheck input — passed through to the runtime. */
   recheck?: RecheckInput;
+  /** The operator's recheck ask budget in bytes — absent = the runner default. */
+  recheckAssignmentMaxBytes?: number;
   /** Optional PR context for the report seat — passed through to the runtime. */
   prContext?: PrContext;
 };
@@ -338,6 +341,15 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
       throw new Error("input JSON field `recheck`.discussion must be an object");
     }
     input.recheck = doc as RecheckInput;
+  }
+  if (record.recheckAssignmentMaxBytes !== undefined) {
+    // Shape validation ONLY: the accepted RANGE lives in the dashboard store
+    // (`review.recheck.assignment_max_bytes`), which the consumer read.
+    const maxBytes = record.recheckAssignmentMaxBytes;
+    if (typeof maxBytes !== "number" || !Number.isInteger(maxBytes) || maxBytes <= 0) {
+      throw new Error("input JSON field `recheckAssignmentMaxBytes` must be a positive integer when present");
+    }
+    input.recheckAssignmentMaxBytes = maxBytes;
   }
   if (record.prContext !== undefined) {
     // Shape validation ONLY, mirroring the recheck guard: the consumer builds
@@ -697,6 +709,11 @@ export async function main(
         // Optional typed recheck input: included ONLY when
         // present — same byte-identical legacy rule as modelOverrides.
         ...(json.recheck !== undefined ? { recheck: json.recheck } : {}),
+        // The operator's ask budget: read once by the consumer, absent for a
+        // legacy input, so the runtime keeps its documented default.
+        ...(json.recheckAssignmentMaxBytes !== undefined
+          ? { recheckAssignmentMaxBytes: json.recheckAssignmentMaxBytes }
+          : {}),
         // Optional PR context: the report seat's untrusted input. Absent =
         // no report seat runs, so the runtime input stays byte-identical.
         ...(json.prContext !== undefined ? { prContext: json.prContext } : {}),
