@@ -783,6 +783,16 @@ describe("pull request detail reads", () => {
       ["F-2", null],
       ["F-1", 2],
     ]);
+
+    // The severity predicate binds BETWEEN the scope and paging binds, so a
+    // shifted bind would filter, page or count the wrong window.
+    const filtered = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
+      offset: 0,
+      limit: 10,
+      severity: "nit",
+    });
+    expect(filtered!.total).toBe(1);
+    expect(filtered!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([["F-2", null]]);
   });
 
   test("unknown PR number → null head (the route's 404)", async () => {

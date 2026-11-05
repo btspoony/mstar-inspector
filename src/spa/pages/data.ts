@@ -813,8 +813,8 @@ export type PullRequestReview = {
   head_sha: string;
   /** Ordinal of this round in the PR's oldest-first review history; `null` when the payload carries none. */
   round: number | null;
-  /** Findings this round reported. */
-  findings: number;
+  /** Findings this round reported; `null` when the payload reports no tally (absence, not zero). */
+  findings: number | null;
   /** Wall clock of the round in ms; `null` for rows written before the measurement. */
   duration_ms: number | null;
 };
@@ -932,9 +932,17 @@ function parseLatestReview(value: unknown): { verdict: string; reviewed_at: stri
 }
 
 /**
- * A round ordinal, a wall clock or a findings tally: a finite non-negative
- * integer passes, and anything else is "no value" (`null`) rather than a
- * coerced zero. 0 is a real duration and a real tally; round 0 never exists.
+ * A round ordinal: the PR's history numbers rounds from 1 (oldest first), so a
+ * zero or negative ordinal never exists and reads as "no value" (`null`).
+ */
+function positiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null;
+}
+
+/**
+ * A wall clock or a findings tally: a finite non-negative integer passes, and
+ * anything else is "no value" (`null`) rather than a coerced zero — 0 is a
+ * real duration and a real tally, an absent one is not.
  */
 function nonNegativeInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
@@ -957,10 +965,10 @@ function parsePullRequestReview(value: unknown): PullRequestReview | null {
     provider: typeof value.provider === "string" ? value.provider : "",
     reviewed_at: value.reviewed_at,
     head_sha: value.head_sha,
-    round: nonNegativeInteger(value.round),
-    // A fractional, negative or non-numeric tally is zero findings, never
-    // "2.5 findings" in the rendered count.
-    findings: nonNegativeInteger(value.findings) ?? 0,
+    round: positiveInteger(value.round),
+    // A missing or malformed tally is ABSENCE, not zero: the row omits the
+    // count rather than claiming the round reported nothing.
+    findings: nonNegativeInteger(value.findings),
     duration_ms: nonNegativeInteger(value.duration_ms),
   };
 }
@@ -993,7 +1001,7 @@ function parsePullRequestFinding(value: unknown): PullRequestFinding | null {
     file_path: typeof value.file_path === "string" ? value.file_path : "",
     line: value.line,
     body: typeof value.body === "string" ? value.body : "",
-    review_round: nonNegativeInteger(value.review_round),
+    review_round: positiveInteger(value.review_round),
   };
 }
 

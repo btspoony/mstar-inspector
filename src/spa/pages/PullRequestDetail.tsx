@@ -938,19 +938,29 @@ export function PullRequestDetailView({
                             {attribution === "" ? null : (
                               <span className="text-(--text-muted)">{attribution}</span>
                             )}
-                            <span data-slot="review-findings" className="tabular-nums text-(--text-muted)">
-                              {t(
-                                locale,
-                                review.findings === 1
-                                  ? "pullRequests.reviewFindingsOne"
-                                  : "pullRequests.reviewFindings",
-                                { count: review.findings },
-                              )}
-                            </span>
+                            {/* A payload that reports no tally omits the
+                                count rather than claiming the round found
+                                nothing. */}
+                            {review.findings === null ? null : (
+                              <span data-slot="review-findings" className="tabular-nums text-(--text-muted)">
+                                {t(
+                                  locale,
+                                  review.findings === 1
+                                    ? "pullRequests.reviewFindingsOne"
+                                    : "pullRequests.reviewFindings",
+                                  { count: review.findings },
+                                )}
+                              </span>
+                            )}
                             {/* Historical rows carry no measured clock: the
                                 row simply omits the time. */}
                             {review.duration_ms === null ? null : (
-                              <span data-slot="review-duration" className="tabular-nums text-(--text-muted)">
+                              <span
+                                data-slot="review-duration"
+                                className="tabular-nums text-(--text-muted)"
+                                title={t(locale, "pullRequests.reviewDurationLabel")}
+                                aria-label={t(locale, "pullRequests.reviewDurationLabel")}
+                              >
                                 {formatReviewDuration(locale, review.duration_ms)}
                               </span>
                             )}

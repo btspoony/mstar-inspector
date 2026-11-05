@@ -219,29 +219,41 @@ describe("pull request detail data plane (pure helpers)", () => {
       review_round: 1,
     });
     // A payload that predates the round fields still renders its rows: the
-    // ordinal and clock are "no value" (`null`), the count is zero — never a
-    // coerced 0 round, and never NaN in the rendered count.
+    // ordinal and clock are "no value" (`null`), and so is the absent tally —
+    // never a coerced 0 count and never NaN in the rendered count.
     const legacyRound = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], round: "2", findings: "2", duration_ms: -1 }],
       total: 1,
     })?.items[0];
-    expect(legacyRound).toMatchObject({ round: null, findings: 0, duration_ms: null });
-    // A fractional or negative tally is not a count: 0, never "2.5 findings".
+    expect(legacyRound).toMatchObject({ round: null, findings: null, duration_ms: null });
+    // Round 0 is not a round either: the history numbers from 1.
+    const zeroRound = parseRecordPage("reviews", {
+      items: [{ ...REVIEWS[0], round: 0 }],
+      total: 1,
+    })?.items[0];
+    expect(zeroRound?.round).toBeNull();
+    // A fractional or negative tally is not a count: absent, never
+    // "2.5 findings".
     const fractional = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], findings: 2.5 }],
       total: 1,
     })?.items[0];
-    expect(fractional?.findings).toBe(0);
+    expect(fractional?.findings).toBeNull();
     const negative = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], findings: -3 }],
       total: 1,
     })?.items[0];
-    expect(negative?.findings).toBe(0);
+    expect(negative?.findings).toBeNull();
     const legacyFinding = parseRecordPage("findings", {
       items: [{ ...FINDINGS[0], review_round: 1.5 }],
       total: 1,
     })?.items[0];
     expect(legacyFinding?.review_round).toBeNull();
+    const zeroFindingRound = parseRecordPage("findings", {
+      items: [{ ...FINDINGS[0], review_round: 0 }],
+      total: 1,
+    })?.items[0];
+    expect(zeroFindingRound?.review_round).toBeNull();
     const detail: PullRequestDetail = {
       ...DETAIL,
       counts: { ...DETAIL.counts, reviews: 1, findings: 1 },
@@ -937,6 +949,18 @@ describe("pull request detail face (static SSR)", () => {
         findings: 1,
         duration_ms: null,
       },
+      {
+        // A payload older than the round facts: the row still renders, with
+        // no ordinal and no measured clock.
+        verdict: "ship it",
+        model: "kimi-for-coding",
+        provider: "",
+        reviewed_at: "2026-10-29 09:00:00",
+        head_sha: "ccc333d",
+        round: null,
+        findings: 0,
+        duration_ms: null,
+      },
     ]);
     const markup = face(
       { findings: page([]), failures: page([]), reviews },
@@ -945,11 +969,15 @@ describe("pull request detail face (static SSR)", () => {
     );
     const read = await withMarkup(markup, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
+      heads: container.querySelectorAll('[data-slot="review-head"]').length,
       rounds: [...container.querySelectorAll('[data-slot="review-round"]')].map((chip) => chip.textContent ?? ""),
       counts: [...container.querySelectorAll('[data-slot="review-findings"]')].map((count) => count.textContent ?? ""),
-      // Only the measured round prints a time; the historical row omits it.
+      // Only the measured round prints a time; the historical rows omit it.
       durations: [...container.querySelectorAll('[data-slot="review-duration"]')].map(
         (duration) => duration.textContent ?? "",
+      ),
+      durationLabels: [...container.querySelectorAll('[data-slot="review-duration"]')].map((duration) =>
+        duration.getAttribute("aria-label"),
       ),
       // The summary body and its expand/collapse control are gone: a review
       // row is its head line alone.
@@ -961,6 +989,8 @@ describe("pull request detail face (static SSR)", () => {
       olderHead: reviewHead(container, 1),
     }));
     expect(read.selected).toEqual([false, true, false]);
+    // Three rows render; only the two carrying an ordinal print a chip.
+    expect(read.heads).toBe(3);
     expect(read.rounds).toEqual([
       t("en", "pullRequests.reviewRound", { round: 2 }),
       t("en", "pullRequests.reviewRound", { round: 1 }),
@@ -968,8 +998,12 @@ describe("pull request detail face (static SSR)", () => {
     expect(read.counts).toEqual([
       t("en", "pullRequests.reviewFindings", { count: 3 }),
       t("en", "pullRequests.reviewFindingsOne", { count: 1 }),
+      t("en", "pullRequests.reviewFindings", { count: 0 }),
     ]);
     expect(read.durations).toEqual([t("en", "pullRequests.reviewDurationMinutes", { minutes: 1, seconds: 5 })]);
+    // The bare value is not the whole accessible name: the span says what the
+    // clock measures.
+    expect(read.durationLabels).toEqual([t("en", "pullRequests.reviewDurationLabel")]);
     expect(read.foldControls).toBe(0);
     expect(read.bodies).toEqual([]);
     expect(read.latestHead).toContain(

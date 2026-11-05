@@ -2089,6 +2089,48 @@ describe("migrations/0046_reviews_context_incomplete.sql", () => {
   });
 });
 
+describe("migrations/0049_reviews_duration_ms.sql", () => {
+  /** The shipped chain before the column: every migration below 0049. */
+  function createPre0049Db(): TestD1 {
+    const db = createTestD1();
+    for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
+      (migration) => migrationNumber(migration) < 49,
+    )) {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  test("the column is nullable with no default, and an existing row reads NULL", () => {
+    const db = createPre0049Db();
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
+         VALUES ('r1', 123, 'acme', 'widgets', 42, ?, 'needs fixes', 'old')`,
+      )
+      .run("a".repeat(40));
+
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0049_reviews_duration_ms.sql"), "utf8"));
+
+    // No duration is fabricated for history: a pre-column round reports none,
+    // and the UI omits the time rather than printing a made-up 0.
+    const row = db.raw.query("SELECT duration_ms FROM reviews WHERE id = 'r1'").get() as {
+      duration_ms: number | null;
+    };
+    expect(row.duration_ms).toBeNull();
+    const column = (
+      db.raw.query("PRAGMA table_info(reviews)").all() as Array<{
+        name: string;
+        notnull: number;
+        dflt_value: string | null;
+      }>
+    ).find((c) => c.name === "duration_ms")!;
+    expect(column).toBeDefined();
+    expect(column.notnull).toBe(0);
+    expect(column.dflt_value).toBeNull();
+  });
+});
+
 /**
  * The recheck rotation's PR-scoped thread probe (migration 0047).
  *

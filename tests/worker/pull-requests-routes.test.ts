@@ -311,15 +311,46 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(body.items[0]).toMatchObject({ verdict: "comment", model: "", provider: "" });
   });
 
+  test("a review row carries its round, its findings tally and its run time", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    // Two rounds; only the newer one was measured and reported a finding.
+    seedReviews(db, 2);
+    db.raw.prepare("UPDATE reviews SET duration_ms = 42000 WHERE id = 'r-1'").run();
+    db.raw
+      .prepare("INSERT INTO findings (id, review_id, severity, title) VALUES ('f-1', 'r-1', 'must-fix', 'a')")
+      .run();
+
+    const res = await getFace(sectionPath("reviews"), db);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: Array<Record<string, unknown>>; total: number };
+    expect(body.total).toBe(2);
+    // Newest first: round 2 is the measured round with one finding; round 1
+    // predates the measurement and reported none.
+    expect(body.items.map((item) => [item.round, item.findings, item.duration_ms])).toEqual([
+      [2, 1, 42_000],
+      [1, 0, null],
+    ]);
+  });
+
   test("a repo-wide finding (null file_path) round-trips as ''", async () => {
     const db = await fixture();
     seedInstallation(db);
-    seedFindings(db, [{ id: "row-1", findingId: "F-1", mergeClass: "nit", filePath: null, lineStart: null }]);
+    // Two rounds: sha-0 is round 1, sha-1 round 2 — the sha seedFindings stamps.
+    seedReviews(db, 2);
+    seedFindings(db, [
+      { id: "row-1", findingId: "F-1", mergeClass: "nit", filePath: null, lineStart: null },
+      { id: "row-2", findingId: "F-2", mergeClass: "must-fix", filePath: "src/a.ts", lineStart: 3 },
+    ]);
+    // A first-seen sha no stored review carries has no round to name.
+    db.raw.prepare("UPDATE review_findings SET first_seen_sha = 'sha-gone' WHERE finding_id = 'F-2'").run();
 
     const res = await getFace(sectionPath("findings"), db);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<Record<string, unknown>> };
-    expect(body.items[0]).toMatchObject({ finding_id: "F-1", file_path: "", line: null });
+    // Newest insert first: the unmatched row, then the round-2 match.
+    expect(body.items[0]).toMatchObject({ finding_id: "F-2", review_round: null });
+    expect(body.items[1]).toMatchObject({ finding_id: "F-1", file_path: "", line: null, review_round: 2 });
   });
 
   test("returns the head row and its counts only — no record arrays", async () => {
@@ -384,9 +415,9 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
       reviewed_at: "2026-01-02 00:00:00",
       head_sha: "sha-1",
       // The head's review carries no round facts: the parser coerces them to
-      // their "nothing recorded" face.
+      // their "nothing recorded" face — absence, not a zero tally.
       round: null,
-      findings: 0,
+      findings: null,
       duration_ms: null,
     });
   });

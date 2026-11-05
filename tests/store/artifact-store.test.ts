@@ -348,6 +348,25 @@ describe("createArtifactStore().put", () => {
     expect(JSON.parse(envelope.envelope)).toEqual(payload());
   });
 
+  test("durationMs: a measured clock persists; an omitted one stays NULL (never fabricated)", async () => {
+    const db = createSeededTestD1();
+    const store = createArtifactStore(db);
+
+    await store.put(reviewDoc({ durationMs: 42_000 }));
+    // A caller that measures nothing (historical / aborted round) omits the
+    // field: the 15th bind must land NULL rather than a fabricated 0.
+    await store.put(reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "d".repeat(40) }) }));
+
+    const measured = db.raw.query("SELECT duration_ms FROM reviews WHERE head_sha = ?").get(SHA) as {
+      duration_ms: number | null;
+    };
+    expect(measured.duration_ms).toBe(42_000);
+    const unmeasured = db.raw
+      .query("SELECT duration_ms FROM reviews WHERE head_sha = ?")
+      .get("d".repeat(40)) as { duration_ms: number | null };
+    expect(unmeasured.duration_ms).toBeNull();
+  });
+
   test("an appId with no github_apps row is FK-rejected with zero rows written", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
