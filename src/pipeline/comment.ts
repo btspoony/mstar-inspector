@@ -499,10 +499,12 @@ function planBlock(planToFix: string | null, budget = Number.POSITIVE_INFINITY):
 }
 
 /** Insert `block` after the line that equals `anchor` (first occurrence). */
-function insertAfterHeading(body: string, anchor: string, block: string): string | null {
+function insertAfterHeading(body: string, anchor: string, block: string): string {
   const lines = body.split("\n");
   const index = lines.indexOf(anchor);
-  if (index < 0) return null;
+  // The engine's renderer emits this heading unconditionally, so a miss means
+  // the pinned layout changed: refuse to drop the report overview silently.
+  if (index < 0) throw new Error(`report anchor missing: ${anchor}`);
   lines.splice(index + 1, 0, "", block);
   return lines.join("\n");
 }
@@ -606,21 +608,15 @@ function neutralizeReportText(text: string): string {
  * verbatim, so a summary line that is EXACTLY `## 📋 Review` is matched instead
  * of the engine's own heading. The overview still lands in the body, a little
  * earlier — accepted next to parsing the model's summary as markdown here. A
- * body that carries no `## 📋 Review` line is not the engine's layout: the
- * overview is SKIPPED rather than prepended somewhere the reader would not
- * expect. A zero-finding envelope omits `### Findings`; the empty heading is
- * added so the closure always has its anchor and the section order matches
- * every other round.
+ * zero-finding envelope omits `### Findings`; the empty heading is added so the
+ * closure always has its anchor and the section order matches every other
+ * round.
  */
 function insertReportFields(rendered: string, report: ReportDoc | null): string {
   let body = rendered;
   if (report !== null) {
     const overview = `**What this PR does**: ${neutralizeReportText(report.overview)}`;
-    // A miss is not reported: this composer is pure (no log sink) and the
-    // anchor is an engine-owned constant pinned with the engine version, so a
-    // miss can only mean that layout changed under us — the overview is
-    // skipped rather than prefixed somewhere the reader would not expect.
-    body = insertAfterHeading(body, REVIEW_HEADING, overview) ?? body;
+    body = insertAfterHeading(body, REVIEW_HEADING, overview);
   }
   if (body.split("\n").includes(FINDINGS_HEADING)) return body;
   // Zero-finding envelope: the renderer omitted the heading, so this IS the

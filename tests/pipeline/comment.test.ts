@@ -459,6 +459,20 @@ describe("buildReviewBody", () => {
       expect(body).not.toContain("unscanned:");
     }
   });
+
+  test("a settled verdict publishes a narrative that looks like a fact pair verbatim", () => {
+    // The echo strip is scoped to an envelope that CARRIES `incomplete`. A
+    // settled verdict's seat narrative is model text, not a restatement of a
+    // rendered pair, so those lines stay exactly as the model wrote them.
+    const narrative = "Runner recovered.\n\ncause: runner timed out\nunscanned: tests/a.ts";
+    const body = buildReviewBody({ ...output, verdict: "needs fixes", findings: [], summary_md: narrative });
+    expect(body).toContain(narrative);
+    // No pair is rendered above the review section: one line each, and both
+    // come from the narrative.
+    expect(body.match(/^cause: /gm)).toHaveLength(1);
+    expect(body.match(/^unscanned: /gm)).toHaveLength(1);
+    expect(body.indexOf("cause: runner timed out")).toBeGreaterThan(body.indexOf("## 📋 Review"));
+  });
 });
 
 describe("review comment upsert (T5)", () => {
@@ -1085,7 +1099,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       );
       // Escaped in place: the field's text survives and opens no structure.
       expect(body).toContain(`\n${escaped}\ntail\n`);
-      expect(body.split("\n").filter((line) => /^ {0,3}([-=]+[ \t]*$|[-*+][ \t]|\d{1,9}[.)][ \t])/.test(line))).toHaveLength(0);
+      expect(body.split("\n").filter((line) => /^ {0,3}([-=]+[ \t]*$|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/.test(line))).toHaveLength(0);
       // The engine's headings keep their structure and order.
       expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
         "## ✅ Verdict: `ship it`",
@@ -1112,6 +1126,13 @@ describe("report sections (mstar.report/v1 side document)", () => {
       ["+ bullet\nabsorbed", ["\\+ bullet"]],
       ["1. step\nabsorbed", ["1\\. step"]],
       ["1) step\nabsorbed", ["1\\) step"]],
+      // A marker alone on its line opens a block too; the shipped rule accepts
+      // line end, so the scan below must as well.
+      ["-\nabsorbed", ["\\-"]],
+      ["*\nabsorbed", ["\\*"]],
+      ["+\nabsorbed", ["\\+"]],
+      ["1.\nabsorbed", ["1\\."]],
+      ["1)\nabsorbed", ["1\\)"]],
     ];
     for (const [field, escaped] of cases) {
       const body = buildReviewBody(
@@ -1125,7 +1146,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       // Escaped in place: the field's text survives and opens no block.
       for (const line of escaped) expect(body).toContain(`\n${line}\n`);
       // No line of the body still starts a table row, quote or list item.
-      expect(body.split("\n").filter((line) => /^ {0,3}([|>]|[-*+][ \t]|\d{1,9}[.)][ \t])/.test(line))).toHaveLength(0);
+      expect(body.split("\n").filter((line) => /^ {0,3}([|>]|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/.test(line))).toHaveLength(0);
       // The engine's sections keep their structure: nothing was absorbed.
       expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
         "## ✅ Verdict: `ship it`",
