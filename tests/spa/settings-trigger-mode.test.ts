@@ -199,10 +199,12 @@ describe("mention-string display (spec §3 operator visibility, SSR)", () => {
   test("no github_slug → no mention renders at all (D2 fail-safe; never a placeholder)", () => {
     // Before the first metadata sync there is no real mention target: the
     // hint paragraph stays off the face entirely, the mode control does not.
-    // Structural absence, not a copy literal: the hint paragraph owns this
-    // control's ONLY <code>/title="@…" node, so rewording the copy can never
-    // make the assertion pass vacuously.
+    // Structural absence, not a copy literal: without a slug the whole hint
+    // <p> is gone (it owns this control's only paragraph and <code>), so a
+    // regression that renders the paragraph with a conditional <code> fails
+    // here too — and rewording the copy cannot make the assertion vacuous.
     const html = controlHtml("every_push", "en", null);
+    expect(html).not.toContain("<p");
     expect(html).not.toContain("<code");
     expect(html).not.toContain('title="@');
     expect(html).toContain('role="radiogroup"');
@@ -210,10 +212,11 @@ describe("mention-string display (spec §3 operator visibility, SSR)", () => {
 
   test("the mention copy sits in the control (near the mode segments, per the assignment)", () => {
     const html = controlHtml("every_push");
-    expect(html.indexOf('role="radiogroup"')).toBeGreaterThan(-1);
-    expect(html.indexOf("@acme")).toBeGreaterThan(html.indexOf('role="radiogroup"'));
-    // The hint rides it ("(re-)start a review" is the copy fragment).
-    expect(html).toContain("(re-)start a review");
+    const segments = html.indexOf('role="radiogroup"');
+    expect(segments).toBeGreaterThan(-1);
+    // Ordering, never a copy fragment: the hint's <code> follows the segments.
+    expect(html.indexOf("<code")).toBeGreaterThan(segments);
+    expect(html.indexOf("@acme")).toBeGreaterThan(segments);
   });
 });
 
@@ -410,7 +413,7 @@ describe("save flow + 400 fallback contract", () => {
     expect(t("en", "settings.triggerModeMention")).toContain("PR author");
     expect(t("en", "settings.triggerModeMention")).toContain("repo owner");
     expect(t("zh_CN", "settings.triggerModeMention")).toContain("PR 作者");
-    expect(t("zh_CN", "settings.triggerModeMention")).toContain("仓库 owner");
+    expect(t("zh_CN", "settings.triggerModeMention")).toContain("仓库所有者");
     expect(t("en", "settings.triggerModeMentionAria", { mention: "@a" })).toBe("Bot mention: @a");
     expect(t("zh_CN", "settings.triggerModeMentionAria", { mention: "@a" })).toBe("机器人提及：@a");
   });

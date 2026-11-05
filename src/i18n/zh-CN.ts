@@ -546,7 +546,7 @@ export const zhCN: Dictionary = {
     triggerModeOpen: "首次打开",
     triggerModeEveryPush: "每次推送",
     triggerModeManual: "仅手动",
-    triggerModeMention: "仅 PR 作者或仓库 owner：在 PR 评论中 @ 它即可（重新）启动审查：",
+    triggerModeMention: "PR 作者或仓库所有者：在 PR 评论中 @ 它即可（重新）启动审查：",
     triggerModeMentionAria: "机器人提及：{mention}",
     confirmPauseTitle: "暂停 {slug} 的审查？",
     confirmPauseBody: "Webhook 保持连接 — 投递会被应答并忽略，直到你恢复。",
