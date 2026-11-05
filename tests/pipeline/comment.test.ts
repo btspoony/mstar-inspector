@@ -90,6 +90,26 @@ describe("truncateSummary", () => {
     expect(truncated.endsWith("…")).toBe(true);
   });
 
+  test("a cut between the halves of an emoji at the budget edge posts readable text", () => {
+    // The pair straddles the 8000-char cut: a raw slice keeps its high half and
+    // the posted body carries a replacement character.
+    const narrative = `${"x".repeat(SUMMARY_MD_LIMIT - 2)}😀${"y".repeat(200)}`;
+    const truncated = truncateSummary(narrative);
+    expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
+    expect(truncated.endsWith("…")).toBe(true);
+    // Well-formed text survives an encode/decode round trip; a lone surrogate does not.
+    expect(new TextDecoder().decode(new TextEncoder().encode(truncated))).toBe(truncated);
+  });
+
+  test("a cut between the halves of an emoji behind a fence closer posts readable text", () => {
+    // The second cut moves back by the closer's length and lands mid-pair.
+    const narrative = `\`\`\`\n${"x".repeat(SUMMARY_MD_LIMIT - 10)}😀${"y".repeat(200)}`;
+    const truncated = truncateSummary(narrative);
+    expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
+    expect(truncated.endsWith("\n```…")).toBe(true);
+    expect(new TextDecoder().decode(new TextEncoder().encode(truncated))).toBe(truncated);
+  });
+
   test("a cut inside an unclosed fence closes it, so the rest of the body is not code", () => {
     const narrative = `Intro.\n\n\`\`\`ts\n${"const x = 1;\n".repeat(900)}\`\`\`\n\nTail.`;
     const truncated = truncateSummary(narrative);

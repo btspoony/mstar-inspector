@@ -133,11 +133,13 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
   const closers = closersFor(md);
   if (md.length + closers.length <= limit) return `${md}${closers}`;
   // Shortening the head can drop the opener a closer answered, so re-derive
-  // the closers on each shorter head until head + closers + "…" fits.
-  let head = md.slice(0, limit - 1);
+  // the closers on each shorter head until head + closers + "…" fits. Cuts go
+  // through the pair-safe slice: a cut between an emoji's halves posts a
+  // replacement character instead of the character.
+  let head = sliceWithoutSplittingPair(md, limit - 1);
   for (;;) {
     const headClosers = closersFor(head);
-    const next = head.slice(0, Math.max(0, limit - 1 - headClosers.length));
+    const next = sliceWithoutSplittingPair(head, Math.max(0, limit - 1 - headClosers.length));
     if (next === head) return `${head}${headClosers}…`;
     head = next;
   }
