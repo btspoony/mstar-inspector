@@ -3,22 +3,20 @@
  * Same gates as the HTML pages; payloads never include encrypted columns.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
-import { createTestD1, migrationsAfter } from "../store/helpers";
+import { createTestD1 } from "../store/helpers";
+import { SPA_PAGE_APIS_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
 import type { SpaBoot } from "../../src/spa/boot";
 import { LOCALE_COOKIE } from "../../src/i18n";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 import { htmlGetRequest, withSpaAssets } from "../helpers/spa";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
-const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
 async function encryptedColumns(id: string): Promise<{ privateKeyEnc: string; webhookSecretEnc: string }> {
@@ -31,53 +29,7 @@ async function encryptedColumns(id: string): Promise<{ privateKeyEnc: string; we
 
 function createDb(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
-  for (const name of [
-    "0003_dashboard_users.sql",
-    "0004_github_apps.sql",
-    "0005_reviews_app_id.sql",
-    "0006_app_provider_config.sql",
-    "0007_reviews_app_id_index.sql",
-    "0008_github_apps_ops.sql",
-    "0009_app_model_roles.sql",
-    // 0010: the derived tail's 0048 indexes review_failures, so the table this
-    // hand-listed shape skipped must exist before the tail runs.
-    "0010_review_failures.sql",
-    "0011_webhook_deliveries.sql",
-    "0012_custom_providers_and_key_updated_at.sql",
-    "0015_provider_verification.sql",
-    "0017_app_model_chains.sql",
-    "0018_app_sandbox_images.sql",
-    "0019_github_apps_metadata.sql",
-    // The settings face reads the custom-provider KEY pool (the settings key
-    // rows cover both pools), so this world needs the per-key shape too.
-    "0023_removed_logins.sql",
-    "0024_provider_multi_key.sql",
-    // 0026: createApp also writes the App's workspace mapping.
-    "0026_workspaces.sql",
-    // 0027/0028: the shell boot names the caller's workspaces (switcher rows)
-    // and their pending invites, so this world carries both tables.
-    "0027_workspace_backfill.sql",
-    "0028_workspace_invites.sql",
-    // The shell boot reads the support-grant table, the plan catalogue +
-    // subscriptions and `server_flags`, so the dispatch face runs on the
-    // production shape.
-    "0029_operator_support.sql",
-    "0031_plans_usage.sql",
-    "0032_unlimited_plan.sql",
-    "0033_platform_admin.sql",
-    // 0036: github_apps.slug → webhook_path plus the cached github_slug.
-    "0036_app_identity.sql",
-    // 0038 rebuilds github_apps, so the fixture must carry every column the
-    // rebuild copies (0018/0019 already applied above).
-    "0022_app_trigger_mode.sql",
-    "0037_github_metadata_attempt.sql",
-    "0038_webhook_path_drop.sql",
-    // The directory-derived tail (0043 adds the delivery source column the
-    // health summary selects), so a new migration joins automatically.
-    ...migrationsAfter("0038_webhook_path_drop.sql"),
-  ]) {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
-  }
+  applyMigrations(db, SPA_PAGE_APIS_MIGRATIONS);
   return db;
 }
 

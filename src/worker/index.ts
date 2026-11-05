@@ -654,7 +654,10 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // classification, before the queue send. The queue message carries the
   // appId reference only (lock L4: the PEM never leaves the consumer).
   await handleReviewJob({ ...outcome.payload, appRef: { appId: row.id } }, {
-    env: c.env,
+    // `db` is the route's already-narrowed binding (the unbound guard above
+    // returned 500): the durable comment claim must never run against a
+    // possibly-unbound DB.
+    env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,
   });
   return c.text("accepted", 200);
@@ -751,7 +754,7 @@ export default {
         );
         return;
       }
-      await runSweep(env.DB, { alertUrl: env.ALERT_WEBHOOK_URL });
+      await runSweep(env.DB, { alertUrl: env.ALERT_WEBHOOK_URL, queue: env.REVIEW_QUEUE });
     } catch (error) {
       // SEC-03: the sweep-failure detail is redacted before the warn line —
       // an infra error can interpolate a secret-shaped value

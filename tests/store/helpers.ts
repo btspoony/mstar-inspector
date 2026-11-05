@@ -67,7 +67,14 @@ export function migrationsAfter(anchor: number | string): string[] {
 /** Full migration list, in wrangler's apply order (numeric, not lexical). */
 const ALL_MIGRATIONS = migrationsAfter(0);
 
-/** Execute the migration DDL on a fresh in-memory database. */
+/**
+ * Execute the migration DDL on a fresh in-memory database.
+ *
+ * Stays local instead of `applyMigrations` (`../helpers/migration-shapes`):
+ * this is the raw `Database` layer that module itself imports `migrationsAfter`
+ * / `TestD1` from, so the reverse import would be a cycle — and it runs before
+ * the D1 wrapper (and its `PRAGMA foreign_keys`) exists.
+ */
 function applyMigration(db: Database, migrations: readonly string[]): void {
   // SQLite enforces foreign keys per-connection; D1 has them on by default.
   db.exec("PRAGMA foreign_keys = ON;");

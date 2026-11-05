@@ -38,8 +38,6 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
@@ -49,7 +47,12 @@ import { createFailureStore } from "../../src/store/failure-store";
 import { acquireInflight } from "../../src/store/inflight-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
-import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
+import { createTestD1, type TestD1 } from "../store/helpers";
+import {
+  CONSUMER_POST_CHAINS_MIGRATIONS,
+  CONSUMER_PRE_CHAINS_MIGRATIONS,
+  applyMigrations,
+} from "../helpers/migration-shapes";
 import {
   REVIEW_LEVEL_KEY,
   SYSTEM_CONCURRENCY_DEFAULT,
@@ -121,15 +124,6 @@ import {
 
 /** The review gate the seeded test App carries (migration 0045's DDL default). */
 const GATE = { minScore: 80, passVerdicts: ["ship it"] } as const;
-
-/**
- * The migrations after the 0036 identity rewrite, in wrangler's apply order.
- * Derived from the directory (numeric prefix order, so `1000_*` follows
- * `999_*`) so a future migration cannot leave the equivalence fixture on a
- * stale schema; the 0036 boundary stays explicit because that fixture
- * reconstructs a specific historical shape.
- */
-const MIGRATIONS_AFTER_0036 = migrationsAfter(36);
 
 // --- shared runtime doubles -------------------------------------------------
 // The sandbox/commenter/KV doubles, the payload + batch builders and `reset`
@@ -1807,24 +1801,7 @@ describe("createReviewConsumer", () => {
     // journal tables (0020) are required by the §7.7 step-2 read
     // and are unrelated to the 0017 backfill under test.
     const db = createTestD1();
-    for (const name of [
-      "0003_dashboard_users.sql",
-      "0004_github_apps.sql",
-      "0005_reviews_app_id.sql",
-      "0006_app_provider_config.sql",
-      "0007_reviews_app_id_index.sql",
-      "0008_github_apps_ops.sql",
-      "0009_app_model_roles.sql",
-      "0010_review_failures.sql",
-      "0011_webhook_deliveries.sql",
-      "0012_custom_providers_and_key_updated_at.sql",
-      "0013_findings_review_id_index.sql",
-      "0014_idx_reviews_reviewed_at.sql",
-      "0015_provider_verification.sql",
-      "0016_users_login_nocase_unique.sql",
-    ]) {
-      db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
-    }
+    applyMigrations(db, CONSUMER_PRE_CHAINS_MIGRATIONS);
     // Seed the pre-chains shape: github_apps + app_model_config chain +
     // app_model_roles rows + the ark BYOK key (the fail-closed gate needs
     // it). The chain and selectors are the byte-identical baseline.
@@ -1874,36 +1851,12 @@ describe("createReviewConsumer", () => {
         .run(appId, provider, await box.encryptSecret(key, `app_provider_keys.key_enc:${appId}:${provider}`));
     }
     // Apply 0017 (the backfill) — the migration under test.
-    db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", "0017_app_model_chains.sql"), "utf8"));
+    applyMigrations(db, ["0017_app_model_chains.sql"]);
     // 0018 ships with the consumer that resolves the App's sandbox
     // image — the row backfills to the 'omp' default exactly like a real
-    // pre-37 App under this deployment pair. 0019–0024 complete the current
-    // migration set (0019 metadata, 0020 the lifecycle journal the
-    // consumer's step-2 read queries, 0021–0022 the check / trigger columns,
-    // 0024 the per-key provider pools the store now writes).
-    for (const name of [
-      "0018_app_sandbox_images.sql",
-      "0019_github_apps_metadata.sql",
-      "0020_finding_lifecycle.sql",
-      "0021_review_checks.sql",
-      "0022_app_trigger_mode.sql",
-      "0024_provider_multi_key.sql",
-      "0026_workspaces.sql",
-      // The workspace plane every App read joins; 0027 attributes the legacy
-      // App above to the 'default' workspace exactly as a real deployment does.
-      "0027_workspace_backfill.sql",
-      // 0031 completes the current set: the consumer meters every started
-      // execution into usage_events.
-      "0031_plans_usage.sql",
-      // 0036 renames the seeded route-key column, as the deploy does.
-      "0036_app_identity.sql",
-      // Every migration after 0036, derived from the directory (0039–0041
-      // included): the consumer's admission reads the runtime caps and writes
-      // the `review_inflight` row on every admitted message.
-      ...MIGRATIONS_AFTER_0036,
-    ]) {
-      db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
-    }
+    // pre-37 App under this deployment pair; the rest of the half completes
+    // the current migration set (see CONSUMER_POST_CHAINS_MIGRATIONS).
+    applyMigrations(db, CONSUMER_POST_CHAINS_MIGRATIONS);
     // Post-migration resolution is byte-identical: the default row holds
     // the chain verbatim; the seat-<role> chains + reference rows resolve
     // to the same overrides map; every carried key row was promoted to its
@@ -3346,7 +3299,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(prepared.body).toContain("addressed (verified-fix)");
     expect(prepared.body).toContain("current-code");
     expect(prepared.body).toContain("not yet resolved");
-    expect(prepared.body).toContain("Reassessed 1/1 open prior finding(s)");
+    expect(prepared.body).toContain("Reassessed 1/1 prior finding(s)");
 
     // Step 9: the round assessment is durable — the row closed addressed and
     // BOTH rotation clocks advanced (selected → scheduled, assessed → assessed).
@@ -3383,6 +3336,105 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     // The post-publish line comments + degraded cleanup still ran.
     expect(commenterCalls.some((c) => c.op === "line-comments")).toBe(true);
     expect(commenterCalls.some((c) => c.op === "delete-degraded")).toBe(true);
+  });
+
+  test("the coverage counters describe the extended rotation: an addressed row with a non-terminal association is recheckable", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    // One open row (answered this round) plus one ADDRESSED row whose thread
+    // is still unresolved — the second is only recheckable because of it.
+    await seedOpenTarget(db);
+    const addressedRowId = "bbbbbbbb-0000-4000-8000-000000000009";
+    await seedOpenTarget(db, { state: "addressed", rowId: addressedRowId, findingId: "f-second" });
+    db.raw
+      .prepare(
+        `INSERT INTO review_threads
+           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+            original_sha, round, intent_json, resolution_state, created_ms, updated_ms)
+         VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, 1, '{}', 'pending', 3000, 3000)`,
+      )
+      .run("cccccccc-0000-4000-8000-000000000009", addressedRowId, PRIOR_PUB_ID, TEST_APP_ID, PRIOR_SHA);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The published line reports the recheckable universe and keeps the
+    // partition identity: assessed + invalid-output + omitted = selected.
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("Reassessed 1/2 prior finding(s) this round");
+    expect(prepared.body).toContain("0 over cap · 2 recheckable");
+    const publication = db.raw
+      .query(`SELECT payload_json FROM review_publications WHERE id <> '${PRIOR_PUB_ID}'`)
+      .get() as { payload_json: string };
+    const coverage = (
+      JSON.parse(publication.payload_json) as {
+        lifecycle: { coverage: { totalOpen: number; selected: number; assessed: number; invalidOutput: number; omitted: number; capped: number } };
+      }
+    ).lifecycle.coverage;
+    expect(coverage).toMatchObject({ totalOpen: 2, selected: 2, capped: 0 });
+    expect(coverage.assessed + coverage.invalidOutput + coverage.omitted).toBe(coverage.selected);
+  });
+
+  test("an addressed row re-selected by the rotation is re-verified in the round and its thread resolves", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The seat re-verifies the concern against the CURRENT discussion and says
+    // it is still fixed.
+    sandbox.recheckFileContent = recheckDocWith({});
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db, { state: "addressed" });
+    await seedAssociation(db, "PRRT_thread1");
+    commenterState.discussion = {
+      items: [],
+      issueCoverage: "complete",
+      issueDigest: "issue-digest",
+      capturedMs: 0,
+      threads: [
+        {
+          associationId: ASSOC_ID,
+          threadId: "PRRT_thread1",
+          commentId: 8,
+          headSha: SHA,
+          digest: "thread-digest-1",
+          commentCount: 2,
+          capturedMs: 0,
+          coverage: "complete",
+          modelCoverage: "complete",
+        },
+      ],
+    };
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The addressed row really rode the rotation: it is the round's only
+    // recheck target, so the seat verified it against the current discussion.
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as { recheck?: { targets: RecheckTarget[] } };
+    expect(runnerInput.recheck!.targets.map((target) => target.rowId)).toEqual([TARGET_ROW_ID]);
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("Reassessed 1/1 prior finding(s) this round");
+    // ...and the ordinary resolution path resolved it with THIS round's snapshot.
+    const discoverIdx = commenterCalls.findIndex((c) => c.op === "discover");
+    const resolveIdx = commenterCalls.findIndex((c) => c.op === "resolve");
+    expect(discoverIdx).toBeGreaterThan(-1);
+    expect(resolveIdx).toBe(discoverIdx + 1);
+    // Recorded double args: the kernel received this round's verified snapshot.
+    const resolveCall = commenterCalls[resolveIdx]!.args as { associationId: string; verified: { snapshot: { digest: string }; assessment: { disposition: string } } };
+    expect(resolveCall.associationId).toBe(ASSOC_ID);
+    expect(resolveCall.verified.snapshot.digest).toBe("thread-digest-1");
+    expect(resolveCall.verified.assessment.disposition).toBe("addressed");
+    const threadRow = db.raw.query(`SELECT verified_json, resolution_state FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as {
+      verified_json: string | null;
+      resolution_state: string;
+    };
+    expect(JSON.parse(threadRow.verified_json!).snapshot.digest).toBe("thread-digest-1");
+    expect(threadRow.resolution_state).toBe("pending");
   });
 
   test("the configured recheck assignment budget rides the runner input, never the frozen document", async () => {
@@ -3588,7 +3640,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     await consumer(makeBatch(makePayload()));
 
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
+    expect(prepared.body).toContain("Reassessed 0/1 prior finding(s)");
     expect(prepared.body).toContain("1 omitted");
     expect(prepared.body).toContain("unverifiable (omitted)");
     // Scheduling advanced (selected rows rotate) but the row was NOT assessed.
@@ -6731,4 +6783,127 @@ describe("usage ledger (migration 0031)", () => {
       [key, 2],
     ]);
   });
+});
+
+/**
+ * Migration 0048 — the pipeline's atomic consume. The worker inserts the claim
+ * `queued` BEFORE it enqueues, so the first delivery to reach `processMessage`
+ * flips it to `consumed` and every later delivery of that comment acks without
+ * running anything: at-least-once queue delivery, at-most-once execution.
+ */
+describe("comment-trigger claim consumption (migration 0048)", () => {
+  function seedClaim(
+    db: TestD1,
+    payload: ReviewJobPayload,
+    commentId: number,
+    state: "queued" | "expired",
+  ): void {
+    db.raw
+      .prepare(
+        `INSERT INTO comment_trigger_claims
+           (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, 1)`,
+      )
+      .run(
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        commentId,
+        state,
+        JSON.stringify(payload),
+      );
+  }
+
+  function claimRows(db: TestD1) {
+    return db.raw.query("SELECT state, consumed_ms, payload_json FROM comment_trigger_claims").all() as Array<{
+      state: string;
+      consumed_ms: number | null;
+      payload_json: string | null;
+    }>;
+  }
+
+  test("the first delivery consumes the row; the redelivery acks without running", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9001 });
+    seedClaim(db, payload, 9001, "queued");
+
+    // An unresolvable App throws AFTER the claim: the row must already be
+    // `consumed`, because a failed comment-triggered run is re-run by posting a
+    // new comment, never by replaying this one.
+    db.raw.prepare("UPDATE github_apps SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: db as never }),
+      testLog,
+      testOverrides,
+    );
+    await expect(consumer(makeBatch(payload))).rejects.toThrow();
+    // The claim row becomes a terminal tombstone: consumed, payload dropped,
+    // and never deleted — it is what refuses every later delivery.
+    expect(claimRows(db)).toEqual([
+      { state: "consumed", consumed_ms: expect.any(Number), payload_json: null },
+    ]);
+
+    // The redelivery is refused BEFORE that same App resolution, so it neither
+    // throws nor reaches the sandbox.
+    await consumer(makeBatch(payload));
+
+    expect(logLines.some((l) => l.msg.includes("comment trigger already claimed"))).toBe(true);
+    expect(sandbox.calls).toHaveLength(0);
+    // The tombstone survives the refused redelivery.
+    expect(claimRows(db)).toHaveLength(1);
+  });
+
+  test("a job without comment_id never touches the claim table", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    db.raw.prepare("UPDATE github_apps SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: db as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await expect(
+      consumer(makeBatch(makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment" }))),
+    ).rejects.toThrow();
+
+    expect(claimRows(db)).toEqual([]);
+    expect(logLines.some((l) => l.msg.includes("comment trigger already claimed"))).toBe(false);
+  });
+
+  // Fail-closed consume: a delivery whose row is gone (the worker's
+  // send-failure release) or terminal (the outbox attempt cap) must ack
+  // WITHOUT running — it must never execute the same comment a second time.
+  for (const [label, state] of [
+    ["the claim row is gone (send-failure release)", null],
+    ["the claim row is expired (outbox attempt cap)", "expired"],
+  ] as const) {
+    test(`${label} → ack without running`, async () => {
+      reset();
+      const db = await createSeededTestD1();
+      const payload = makePayload({
+        head_sha: null,
+        action: "created",
+        triggered_by: "issue_comment",
+        comment_id: 9100,
+      });
+      if (state !== null) seedClaim(db, payload, 9100, state);
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(payload));
+
+      // `{kind:"ok"}` = no retry, so the queue auto-acks: nothing is retried
+      // or dead-lettered, and nothing costly runs.
+      expect(messageRetryCalls).toHaveLength(0);
+      expect(messageAckCalls).toHaveLength(0);
+      expect(
+        logLines.some((l) => l.msg.includes("comment trigger already claimed — ack without running")),
+      ).toBe(true);
+      // Nothing costly ran: no sandbox, no GitHub write.
+      expect(sandbox.calls).toHaveLength(0);
+      expect(commenterCalls).toHaveLength(0);
+    });
+  }
 });

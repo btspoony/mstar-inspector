@@ -44,8 +44,8 @@
  *     unknown/ambiguous, never authority. Discovered ids persist under the
  *     association's lease before resolving.
  *   - Resolution (`resolveFindingThread`): acquire the association lease;
- *     reload the row (not superseded, finding still addressed by this exact
- *     verified publication); prove root ownership/provenance; require all
+ *     reload the row (not superseded, finding still addressed, and this exact
+ *     row's verified verdict); prove root ownership/provenance; require all
  *     recorded coverage complete; fetch the current thread + issue discussion
  *     and compare HEAD, full thread digest/count and the issue digest with
  *     the snapshots actually sent — mismatch is `needs-recheck`, never a
@@ -57,6 +57,16 @@
  *     read records `lateChange` honestly — GitHub has no conditional resolve
  *     CAS (spec RL-12); a late change never claims to cover the newer
  *     discussion and never unresolves a human-visible thread.
+ *   - Publication fence: the gate requires the finding to still be
+ *     `addressed` and the verified assessment to target this exact row — NOT
+ *     `finding.last_publication_id = row.publication_id`. The rotation
+ *     re-selects addressed rows whose association is still non-terminal, and
+ *     the seen upsert only rewrites `last_publication_id` when a new
+ *     publication reports the fingerprint again (which reopens the row, so it
+ *     is no longer `addressed`); requiring the old equality would therefore
+ *     block every re-selected row forever. Supersession, ownership, complete
+ *     coverage and the live HEAD/thread/issue-digest fences are unchanged, so
+ *     a recurrence or a human reply still fails closed.
  */
 
 import type { Coverage, ThreadSnapshot } from "../../packages/shared/src/recheck-wire";
@@ -67,6 +77,9 @@ import {
   type Scope,
   type VerifiedResolution,
 } from "../store/finding-lifecycle";
+// Marker-prefix SSOT is the leaf marker module (no duplicated literals, no
+// comment-module cycle).
+import { DEGRADED_MARKER_PREFIX, REVIEW_MARKER_PREFIX } from "./review-markers";
 
 // ---------------------------------------------------------------------------
 // Opaque marker wire (spec §7.5)
@@ -462,12 +475,41 @@ export type IssueCapture = {
 };
 
 /**
+ * The Inspector's own publication comments — the review and degraded chains
+ * both upsert ONE issue comment whose body starts with their marker prefix
+ * (spec §7.5/§7.8). They are excluded from the CAPTURED issue discussion so
+ * the model context, the capture-time digest and the resolve-side digest all
+ * share one domain: posting a review cannot change the digest it was
+ * verified against, and the model never re-reads its own previous review as
+ * human discussion. Bot authorship is what `findReviewComment` /
+ * `findDegradedComment` already require, so a human-planted marker is not
+ * ours.
+ *
+ * Accepted limit: a FOREIGN App's bot-authored comment whose body carries
+ * our marker prefix would also leave the digest domain. The marker embeds a
+ * publication UUID this App generates, so the collision is cosmetic;
+ * enforcing authorship would need the probed App identity inside the capture
+ * layer, which this layer does not have.
+ */
+function isOwnPublicationComment(entry: ThreadCommentEntry): boolean {
+  return (
+    entry.authorType === "Bot" &&
+    (entry.body.startsWith(REVIEW_MARKER_PREFIX) || entry.body.startsWith(DEGRADED_MARKER_PREFIX))
+  );
+}
+
+/**
  * Newest-first issue-comment capture (spec §7.8): the PR's
  * `comments(last:100, before:cursor)` connection walked backward, TWO pages
  * maximum — deliberately avoiding the oldest-first REST `issues.listComments`
  * first pages. Nodes are merged chronologically for presentation/digests.
  * After a complete walk the final newest page count and PR HEAD are RE-READ
  * (spec §7.5/§7.8 stability recheck) — drift marks the capture incomplete.
+ *
+ * `totalCount` and pagination completeness describe the RAW GitHub
+ * connection; the returned `comments` exclude the Inspector's own publication
+ * comments (the digest/context domain), so the truncation bound is applied to
+ * the returned entries by the caller.
  */
 export async function fetchIssueComments(
   octokit: GraphqlOctokit,
@@ -522,7 +564,7 @@ export async function fetchIssueComments(
       complete = false;
     }
   }
-  return { headRefOid, comments, totalCount, complete };
+  return { headRefOid, comments: comments.filter((entry) => !isOwnPublicationComment(entry)), totalCount, complete };
 }
 
 const REVIEW_THREADS_QUERY = `
@@ -1133,19 +1175,24 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "abandoned", reason: "superseded" };
   }
 
-  // 3. The finding must still be addressed by THIS exact verified
-  //    publication, and the verified assessment must be an addressed
-  //    verdict for this exact row (never an unverifiable one).
+  // 3. The finding must still be addressed, and the verified assessment must
+  //    be an addressed verdict for this exact row (never an unverifiable one).
+  //    The finding's `last_publication_id` is deliberately NOT required to be
+  //    this association's publication: the rotation re-selects addressed rows
+  //    whose association is still non-terminal and the seat re-verifies them in
+  //    a real round, while the seen upsert only bumps `last_publication_id`
+  //    when a publication reports the fingerprint again (which reopens the
+  //    row). Supersession — a recurring concern — is fenced above, and a
+  //    reopened finding is not `addressed`, so nothing wider is admitted.
   const finding = await deps.db
-    .prepare(`SELECT state, last_publication_id FROM review_findings WHERE id = ?`)
+    .prepare(`SELECT state FROM review_findings WHERE id = ?`)
     .bind(row.finding_row_id)
-    .first<{ state: string; last_publication_id: string }>();
+    .first<{ state: string }>();
   if (
     verified.assessment.disposition !== "addressed" ||
     verified.assessment.rowId !== row.finding_row_id ||
     finding === null ||
-    finding.state !== "addressed" ||
-    finding.last_publication_id !== row.publication_id
+    finding.state !== "addressed"
   ) {
     await releaseAssociationLease(deps.db, associationId, lease, nowMs);
     return { kind: "needs-recheck", reason: "concern-unresolved" };

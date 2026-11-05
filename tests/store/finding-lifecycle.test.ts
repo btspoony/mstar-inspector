@@ -41,7 +41,7 @@ import type { MstarReviewFinding, MstarReviewV1 } from "@mstar-harness/engine";
 import {
   applyPublishedLifecycle,
   claimPublication,
-  countOpenFindings,
+  countRecheckableFindings,
   hasUnprovenDegradedPublication,
   listPublicationRecovery,
   listResolutionRecovery,
@@ -929,7 +929,7 @@ describe("fair rotation (spec §7.2)", () => {
         .run(`row-${i}`, APP_ID, 123, "acme", "widgets", 42, `f-${i}`, JSON.stringify(originalFinding()), SHA, SHA, i * 10, i * 10);
     }
 
-    expect(await countOpenFindings(db, SCOPE)).toBe(26);
+    expect(await countRecheckableFindings(db, SCOPE)).toBe(26);
 
     // LIMIT caps at ASSESSMENT_TARGET_CAP even if a caller asks for more.
     const selected = await selectAssessmentTargets(db, SCOPE, 500);
@@ -958,7 +958,7 @@ describe("fair rotation (spec §7.2)", () => {
     // the previously unselected row-26 is now first, and every later entry
     // is one of the previously selected rows now waiting behind it (the
     // cap still holds — one of the 25 rotated rows is truncated by LIMIT).
-    expect(await countOpenFindings(db, SCOPE)).toBe(26);
+    expect(await countRecheckableFindings(db, SCOPE)).toBe(26);
     const next = await selectAssessmentTargets(db, SCOPE, 25);
     expect(next).toHaveLength(25);
     expect(next[0]!.rowId).toBe("row-26");
@@ -1003,6 +1003,103 @@ describe("fair rotation (spec §7.2)", () => {
 
     const order = await selectAssessmentTargets(db, SCOPE, 25);
     expect(order.map((t) => t.rowId)).toEqual(["row-old", "row-newer", "row-closed"]);
+  });
+
+  /** One lifecycle row (state is whatever the caller needs) against pub-1. */
+  const insertFinding = (db: TestD1, id: string, state: string, createdMs: number): void => {
+    db.raw
+      .prepare(
+        `INSERT INTO review_findings
+           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+            first_seen_round, last_seen_round, state, created_ms, updated_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pub-1', 'pub-1', ?, ?, 1, 1, ?, ?, ?)`,
+      )
+      .run(id, APP_ID, 123, "acme", "widgets", 42, `f-${id}`, JSON.stringify(originalFinding()), SHA, SHA, state, createdMs, createdMs);
+  };
+
+  /** One association of a lifecycle row, in the given resolution state. */
+  const insertThread = (
+    db: TestD1,
+    id: string,
+    findingRowId: string,
+    resolutionState: string,
+    superseded: string | null = null,
+  ): void => {
+    db.raw
+      .prepare(
+        `INSERT INTO review_threads
+           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+            original_sha, round, intent_json, resolution_state, verified_json,
+            superseded_by_publication_id, created_ms, updated_ms)
+         VALUES (?, ?, 'pub-1', ?, 123, 'acme', 'widgets', 42, ?, 1, '{}', ?, '{"snapshot":1}', ?, ?, ?)`,
+      )
+      .run(id, findingRowId, APP_ID, SHA, resolutionState, superseded, 1000, 1000);
+  };
+
+  test("addressed rows re-enter the rotation only while an association is still non-terminal", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
+    insertFinding(db, "row-open", "open", 1000);
+    insertFinding(db, "row-pending", "addressed", 2000);
+    insertFinding(db, "row-retry", "addressed", 3000);
+    insertFinding(db, "row-needs-recheck", "addressed", 4000);
+    insertFinding(db, "row-local-error", "addressed", 5000);
+    insertFinding(db, "row-resolved", "addressed", 6000);
+    insertFinding(db, "row-abandoned", "addressed", 7000);
+    insertFinding(db, "row-superseded", "addressed", 8000);
+    insertFinding(db, "row-untracked", "addressed", 9000);
+    insertThread(db, "t-pending", "row-pending", "pending");
+    insertThread(db, "t-retry", "row-retry", "retry");
+    insertThread(db, "t-needs-recheck", "row-needs-recheck", "needs-recheck");
+    insertThread(db, "t-local-error", "row-local-error", "local-error");
+    insertThread(db, "t-resolved", "row-resolved", "resolved");
+    insertThread(db, "t-abandoned", "row-abandoned", "abandoned");
+    insertThread(db, "t-superseded", "row-superseded", "pending", "pub-x");
+
+    // An addressed row with no association, only terminal associations, or
+    // only a superseded one stays out of the rotation for good.
+    const selected = await selectAssessmentTargets(db, SCOPE, 25);
+    expect(selected.map((t) => t.rowId)).toEqual([
+      "row-open", "row-pending", "row-retry", "row-needs-recheck", "row-local-error",
+    ]);
+    // The coverage total binds the SAME predicate as the selector, so the
+    // invariant the published coverage line depends on (`capped` = the honest
+    // remainder) holds with addressed rows in the selection.
+    const totalOpen = await countRecheckableFindings(db, SCOPE);
+    expect(totalOpen).toBe(5);
+    expect(selected.length).toBeLessThanOrEqual(totalOpen);
+  });
+
+  test("a re-selected addressed row advances last_scheduled_ms, so it cannot starve the rows behind it", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
+    insertFinding(db, "row-a", "addressed", 1000);
+    insertFinding(db, "row-b", "addressed", 2000);
+    insertThread(db, "t-a", "row-a", "pending");
+    insertThread(db, "t-b", "row-b", "pending");
+
+    expect((await selectAssessmentTargets(db, SCOPE, 1)).map((t) => t.rowId)).toEqual(["row-a"]);
+    const pay = payload({
+      headSha: SHA2,
+      round: 2,
+      artifact: artifactDoc({
+        key: idemKey({ installation_id: SCOPE.installationId, owner: SCOPE.owner, repo: SCOPE.repo, pr_number: SCOPE.prNumber, head_sha: SHA2 }),
+      }),
+      lifecycle: lifecycleRound({
+        selectedRowIds: ["row-a"],
+        coverage: { totalOpen: 2, selected: 1, assessed: 0, omitted: 1, capped: 1, contextCoverage: "complete" },
+      }),
+    });
+    const lease = await stageClaimProve(db, "pub-2", pay, 10_000);
+    expect(await applyPublishedLifecycle(db, "pub-2", lease, 10_000)).toBe(true);
+
+    const clock = db.raw.query("SELECT last_scheduled_ms FROM review_findings WHERE id = 'row-a'").get() as {
+      last_scheduled_ms: number | null;
+    };
+    expect(clock.last_scheduled_ms).toBe(10_000);
+    // The row that was behind it is served next — unsolvable rows rotate out.
+    expect((await selectAssessmentTargets(db, SCOPE, 1)).map((t) => t.rowId)).toEqual(["row-b"]);
   });
 });
 
@@ -1113,7 +1210,7 @@ describe("tenant/App isolation", () => {
       )
       .run(APP_ID, 123, "acme", "other-repo", 42, JSON.stringify(originalFinding()), SHA, SHA);
 
-    expect(await countOpenFindings(db, SCOPE)).toBe(0);
+    expect(await countRecheckableFindings(db, SCOPE)).toBe(0);
     expect(await selectAssessmentTargets(db, SCOPE, 25)).toEqual([]);
     expect(await readPublicationProof(db, { scope: { ...SCOPE, appId: OTHER_APP_ID }, headSha: SHA })).toBeNull();
     expect(await readPublicationProof(db, { scope: SCOPE, headSha: SHA })).toBeNull(); // staged ≠ proven

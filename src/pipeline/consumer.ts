@@ -102,7 +102,7 @@ import { computeFindingFingerprint } from "../store/fingerprint";
 import {
   applyPublishedLifecycle,
   claimPublication,
-  countOpenFindings,
+  countRecheckableFindings,
   findPublicationJournal,
   hasUnprovenDegradedPublication,
   PUBLICATION_HANDOFF_PHASES,
@@ -3484,6 +3484,41 @@ async function processMessage(
 
   try {
     baseFields = toBaseFields(payload);
+    // Durable per-comment claim (migration 0048) — the atomic step that turns
+    // at-least-once queue delivery into at-most-once execution. The worker
+    // already inserted the row `queued` before it enqueued, so the conditional
+    // UPDATE below decides which delivery runs: a queue redelivery, an outbox
+    // re-send, or a delivery arriving after the 24h KV claim lapsed all find
+    // `state` no longer `queued` and ack without running.
+    //
+    // Deliberately BEFORE the level/credential resolution: the claim must be
+    // recorded even when the run itself fails, because a comment-triggered
+    // review is re-run by posting a new comment (a new id), never by replaying
+    // this one (the documented accepted limit).
+    //
+    // The payload is cleared in the same statement: it is only needed while
+    // `queued` (the outbox re-send), and the row itself lives on as the
+    // tombstone that refuses every later delivery of this comment.
+    if (payload.comment_id !== undefined) {
+      const claimed = await deps.env.DB.prepare(
+        `UPDATE comment_trigger_claims SET state = 'consumed', consumed_ms = ?, payload_json = NULL
+          WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
+            AND state = 'queued'`,
+      )
+        .bind(
+          Date.now(),
+          payload.installation_id,
+          payload.owner,
+          payload.repo,
+          payload.pr_number,
+          payload.comment_id,
+        )
+        .run();
+      if (claimed.meta.changes === 0) {
+        deps.log.info(baseFields, "comment trigger already claimed — ack without running");
+        return { kind: "ok" };
+      }
+    }
     // Credential resolution FIRST (lock L4 — consumer-side),
     // before the guard/sandbox: app → D1 row gated
     // missing/deleted/disabled (throw → retry/DLQ, byte-identical) then
@@ -4041,7 +4076,7 @@ async function processMessage(
     let captureFailed = false;
     try {
       targets = await selectAssessmentTargets(deps.env.DB, lifecycleScope, ASSESSMENT_TARGET_CAP);
-      totalOpen = await countOpenFindings(deps.env.DB, lifecycleScope);
+      totalOpen = await countRecheckableFindings(deps.env.DB, lifecycleScope);
     } catch (err) {
       captureFailed = true;
       const detail = err instanceof Error ? err.message : String(err);

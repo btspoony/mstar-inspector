@@ -45,11 +45,14 @@ export const EXPIRED_DEADLINE = T0 - 1_800_000;
 
 export const SILENT_LOG = { warn: () => {}, info: () => {} };
 
+/** The cron's queue binding (comment-claim outbox): these suites re-send nothing. */
+export const NOOP_QUEUE = { send: async () => {} } as unknown as ScheduledEnv["REVIEW_QUEUE"];
+
 /** `CHECK_SUMMARIES.unconfirmed` — the give-up fallback the consumer freezes. */
 export const UNCONFIRMED = "Review attempt could not be confirmed complete; publication status is unknown.";
 
 export function asEnv(db: TestD1): ScheduledEnv {
-  return { DB: db as unknown as ScheduledEnv["DB"] };
+  return { DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE };
 }
 
 export function seedApp(

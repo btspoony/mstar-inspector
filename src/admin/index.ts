@@ -18,21 +18,30 @@ import {
   CHECK_TERMINALIZE_MIN,
   CHECK_UPDATE_MAX,
   CHECK_UPDATE_MIN,
+  COMMENT_CLAIM_ATTEMPTS_MAX,
+  COMMENT_CLAIM_ATTEMPTS_MIN,
+  COMMENT_CLAIM_OUTBOX_MAX,
+  COMMENT_CLAIM_OUTBOX_MIN,
+  COMMENT_CLAIM_RETRY_MAX,
+  COMMENT_CLAIM_RETRY_MIN,
   CONCURRENCY_MIN,
   RECHECK_ASSIGNMENT_MAX,
   RECHECK_ASSIGNMENT_MIN,
   RuntimeConfigError,
   SYSTEM_CONCURRENCY_MAX,
   getCheckBudgets,
+  getCommentClaimSettings,
   getRecheckAssignmentMaxBytes,
   getSystemConcurrency,
   isConcurrencyValue,
   readDefaultReviewLevel,
   setCheckBudgets,
+  setCommentClaimSettings,
   setDefaultReviewLevel,
   setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
   type CheckBudgetValues,
+  type CommentClaimValues,
 } from "../dashboard/runtime-config-store";
 import { REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { resolveLocale, t, type Locale } from "../i18n";
@@ -145,9 +154,10 @@ async function readRuntime(c: AdminContext): Promise<Response> {
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
-  const [system, budgets, level, recheck, admissionDrops24h] = await Promise.all([
+  const [system, budgets, claim, level, recheck, admissionDrops24h] = await Promise.all([
     getSystemConcurrency(db),
     getCheckBudgets(db),
+    getCommentClaimSettings(db),
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
     createFailureStore(db).countAdmissionDrops24h(),
@@ -167,6 +177,19 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       updateMax: CHECK_UPDATE_MAX,
       degraded: budgets.degraded,
     },
+    // Migration 0048 comment-claim outbox budgets: the same global surface.
+    commentClaim: {
+      retryMs: claim.retryMs,
+      maxAttempts: claim.maxAttempts,
+      outboxCap: claim.outboxCap,
+      retryMin: COMMENT_CLAIM_RETRY_MIN,
+      retryMax: COMMENT_CLAIM_RETRY_MAX,
+      attemptsMin: COMMENT_CLAIM_ATTEMPTS_MIN,
+      attemptsMax: COMMENT_CLAIM_ATTEMPTS_MAX,
+      outboxMin: COMMENT_CLAIM_OUTBOX_MIN,
+      outboxMax: COMMENT_CLAIM_OUTBOX_MAX,
+      degraded: claim.degraded,
+    },
     // The inheritance default, with the vocabulary so the console needs no
     // second source for its options.
     reviewLevel: { value: level.value, levels: REVIEW_LEVELS, degraded: level.degraded },
@@ -182,6 +205,19 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     // sub-threshold signal the failure sweep cannot page on.
     admissionDrops24h,
   });
+}
+
+/** The accepted `commentClaim` body shape; the store owns the accepted ranges. */
+function commentClaimBody(value: unknown): CommentClaimValues | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { retryMs, maxAttempts, outboxCap } = value as {
+    retryMs?: unknown;
+    maxAttempts?: unknown;
+    outboxCap?: unknown;
+  };
+  return typeof retryMs === "number" && typeof maxAttempts === "number" && typeof outboxCap === "number"
+    ? { retryMs, maxAttempts, outboxCap }
+    : null;
 }
 
 /** The accepted `checkBudgets` body shape; the store owns the accepted ranges. */
@@ -200,17 +236,20 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   if (!db) return c.notFound();
   let concurrency: unknown;
   let rawBudgets: unknown;
+  let rawClaim: unknown;
   let rawLevel: unknown;
   let rawRecheck: unknown;
   try {
     const body = (await c.req.json()) as {
       concurrency?: unknown;
       checkBudgets?: unknown;
+      commentClaim?: unknown;
       reviewLevel?: unknown;
       recheckAssignment?: unknown;
     };
     concurrency = body.concurrency;
     rawBudgets = body.checkBudgets;
+    rawClaim = body.commentClaim;
     rawLevel = body.reviewLevel;
     rawRecheck = body.recheckAssignment;
   } catch {
@@ -218,11 +257,33 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   }
   // One save writes one parameter: a body carrying more than one is a shape
   // error, so a refused half can never leave another half written.
-  if ([concurrency, rawBudgets, rawLevel, rawRecheck].filter((value) => value !== undefined).length > 1) {
+  if (
+    [concurrency, rawBudgets, rawClaim, rawLevel, rawRecheck].filter((value) => value !== undefined)
+      .length > 1
+  ) {
     return c.json(
-      { error: "body must carry exactly one of concurrency | checkBudgets | reviewLevel | recheckAssignment" },
+      {
+        error:
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | reviewLevel | recheckAssignment",
+      },
       400,
     );
+  }
+  if (rawClaim !== undefined) {
+    const trio = commentClaimBody(rawClaim);
+    if (trio === null) {
+      return c.json(
+        { error: "body must be { commentClaim: { retryMs, maxAttempts, outboxCap } }" },
+        400,
+      );
+    }
+    try {
+      return c.json({ commentClaim: await setCommentClaimSettings(db, trio, login) });
+    } catch (error) {
+      // Out of range: the store owns the ranges and the message.
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
   }
   if (rawRecheck !== undefined) {
     const maxBytes =

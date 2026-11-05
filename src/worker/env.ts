@@ -92,12 +92,19 @@ export type Env = {
  * read. Derived via `Pick` so the narrowing is compiler-enforced against
  * `Env` and cannot drift as `Env` evolves (optionality rides along: `DB`
  * stays optional — unbound fails closed with a warn, never a throw). The
- * sweep is read-only; `DASHBOARD_ENCRYPTION_KEY` (§7.11: "the
+ * sweep's reads are joined by one bounded queue write (the comment-claim
+ * outbox, below); `DASHBOARD_ENCRYPTION_KEY` (§7.11: "the
  * already-used App-decryption secret binding") is what M8's reconciler
  * needs to decrypt per-App credentials for prepared-send/discovery/resolve
- * recovery — the sweep itself never touches it.
+ * recovery — the sweep itself never touches it. `REVIEW_QUEUE` is the one
+ * WRITE the sweep performs (migration 0048): it re-sends the stored payload of
+ * a `comment_trigger_claims` row whose send never happened, so a crash between
+ * claim and send cannot lose a comment-triggered review.
  */
-export type ScheduledEnv = Pick<Env, "DB" | "ALERT_WEBHOOK_URL" | "DASHBOARD_ENCRYPTION_KEY">;
+export type ScheduledEnv = Pick<
+  Env,
+  "DB" | "ALERT_WEBHOOK_URL" | "DASHBOARD_ENCRYPTION_KEY" | "REVIEW_QUEUE"
+>;
 
 /** The two deployment shapes `DEPLOYMENT_MODE` accepts. */
 export type DeploymentMode = "self-hosted" | "saas";

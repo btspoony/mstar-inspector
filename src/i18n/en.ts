@@ -986,6 +986,22 @@ export const en = {
       /** Neither stored budget could be read — the numbers are the documented defaults. */
       checkUnreadable:
         "The stored check budgets could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
+      claimTitle: "Comment-trigger recovery",
+      claimDescription:
+        "How the cron recovers a bot-mention comment whose queue send never happened: how long a claimed comment waits before it is re-sent, how many attempts it gets, and how many claims one sweep re-sends.",
+      retryLabel: "Retry window (ms)",
+      attemptsLabel: "Max attempts",
+      outboxLabel: "Outbox batch",
+      claimSave: "Save",
+      claimSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      claimFailed: "Could not change the comment-trigger recovery settings.",
+      /** {retry}/{attempts}/{outbox} = the stored settings (or the documented defaults). */
+      claimCurrent:
+        "Effective on the next sweep: retry after {retry} ms, {attempts} attempts, {outbox} claims per sweep.",
+      /** No stored setting could be read — the numbers are the documented defaults. */
+      claimUnreadable:
+        "The stored comment-trigger recovery settings could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
       /** The operator default an App without its own depth inherits. */
       reviewLevelTitle: "Review depth",
       reviewLevelDescription: "Applies to Apps that have not chosen their own review depth.",

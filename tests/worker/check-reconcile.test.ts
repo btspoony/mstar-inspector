@@ -90,6 +90,7 @@ import {
   CLAIM_AT,
   EXPIRED_DEADLINE,
   SILENT_LOG,
+  NOOP_QUEUE,
   UNCONFIRMED,
   agreeingScript,
   asEnv,
@@ -1174,7 +1175,7 @@ describe("scheduled composition (spec §7.11)", () => {
     // A due Check row exists, yet this expression must not touch it.
     const { attempt } = await claim(db);
 
-    const events = await captureComposition({ DB: db as unknown as ScheduledEnv["DB"] });
+    const events = await captureComposition({ DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE });
 
     const sweepAt = events.indexOf("ops_sweep_alert");
     const lifecycleAt = events.indexOf("ops_lifecycle_reconcile");
@@ -1203,7 +1204,7 @@ describe("scheduled composition (spec §7.11)", () => {
       batch: async () => [],
     } as unknown as TestD1;
 
-    const events = await captureComposition({ DB: broken as unknown as ScheduledEnv["DB"] });
+    const events = await captureComposition({ DB: broken as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE });
 
     expect(events[0]).toBe("retention_swept_failed");
     expect(events).toContain("ops_sweep_failed");
@@ -1211,8 +1212,8 @@ describe("scheduled composition (spec §7.11)", () => {
     // The Check lane is not part of this expression at all.
     expect(events).not.toContain("ops_check_reconcile");
 
-    // And with a working DB the lifecycle lane still reaches its terminal line.
-    const events2 = await captureComposition({ DB: db as unknown as ScheduledEnv["DB"] });
+    // And with a working DB both later lanes still reach their terminal lines.
+    const events2 = await captureComposition({ DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE });
     expect(events2).toContain("ops_lifecycle_reconcile");
     expect(events2).not.toContain("ops_check_reconcile");
   });
@@ -1231,7 +1232,7 @@ describe("scheduled composition (spec §7.11)", () => {
     }
     const { attempt } = await claim(db);
     db.raw.prepare(`DELETE FROM app_installations WHERE app_id = ?`).run(APP);
-    const env = { DB: db as unknown as ScheduledEnv["DB"] };
+    const env = { DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE };
 
     const minute = await captureComposition(env, "* * * * *");
     // The Check lane alone — none of the other stages' lines — and it really

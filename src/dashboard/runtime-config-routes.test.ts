@@ -145,6 +145,20 @@ const DEFAULT_CHECK_BUDGETS = {
   degraded: false,
 };
 
+/** The documented absent-row comment-claim settings as the operator API reports them. */
+const DEFAULT_COMMENT_CLAIM = {
+  retryMs: 300_000,
+  maxAttempts: 3,
+  outboxCap: 20,
+  retryMin: 30_000,
+  retryMax: 3_600_000,
+  attemptsMin: 1,
+  attemptsMax: 10,
+  outboxMin: 1,
+  outboxMax: 100,
+  degraded: false,
+};
+
 /** Both stored budget rows, raw, keyed by PK. */
 function storedBudgets(db: TestD1): Record<string, string> {
   const rows = db.raw
@@ -301,6 +315,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       max: 256,
       degraded: true,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
+      commentClaim: DEFAULT_COMMENT_CLAIM,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
@@ -394,6 +409,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       max: 256,
       degraded: false,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
+      commentClaim: DEFAULT_COMMENT_CLAIM,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
@@ -405,6 +421,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       max: 256,
       degraded: false,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
+      commentClaim: DEFAULT_COMMENT_CLAIM,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
@@ -529,6 +546,80 @@ describe("PATCH /_internal_admin/api/runtime checkBudgets", () => {
       body: JSON.stringify({ concurrency: 8, checkBudgets: { terminalizeMs: 10_000, updateMs: 5_000 } }),
     });
     expect(res.status).toBe(400);
+    expect(storedSystem(db)).toBeNull();
+    expect(storedBudgets(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("PATCH /_internal_admin/api/runtime commentClaim", () => {
+  test("writes all three rows with one audit row and reports the stored trio", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ commentClaim: { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      commentClaim: { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 },
+    });
+    expect(storedBudgets(db)).toEqual({
+      "review.comment_claim.retry_ms": "60000",
+      "review.comment_claim.max_attempts": "5",
+      "review.comment_claim.outbox_cap": "10",
+    });
+    expect(auditRows(db)).toEqual([
+      {
+        action: "runtime.comment_claim.set",
+        actor_login: OPERATOR,
+        target_type: "runtime",
+        target_id: "review.comment_claim.budgets",
+      },
+    ]);
+    const read = (await (await runtimeApi(db, { method: "GET" })).json()) as {
+      commentClaim: Record<string, unknown>;
+    };
+    expect(read.commentClaim).toEqual({
+      ...DEFAULT_COMMENT_CLAIM,
+      retryMs: 60_000,
+      maxAttempts: 5,
+      outboxCap: 10,
+    });
+  });
+
+  test("an out-of-range or malformed trio is a 400 that writes nothing", async () => {
+    const { db } = fixture();
+    for (const body of [
+      JSON.stringify({ commentClaim: { retryMs: 29_999, maxAttempts: 3, outboxCap: 20 } }),
+      JSON.stringify({ commentClaim: { retryMs: 300_000, maxAttempts: 0, outboxCap: 20 } }),
+      JSON.stringify({ commentClaim: { retryMs: 300_000, maxAttempts: 3, outboxCap: 101 } }),
+      JSON.stringify({ commentClaim: { retryMs: "300000", maxAttempts: 3, outboxCap: 20 } }),
+      JSON.stringify({ commentClaim: { retryMs: 300_000, maxAttempts: 3 } }),
+      JSON.stringify({ commentClaim: null }),
+    ]) {
+      const res = await runtimeApi(db, { method: "PATCH", body });
+      expect(res.status, body).toBe(400);
+      expect(await res.json()).toHaveProperty("error");
+    }
+    expect(storedBudgets(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a body carrying the claim group plus any sibling parameter is refused whole", async () => {
+    const { db } = fixture();
+    for (const body of [
+      JSON.stringify({
+        concurrency: 8,
+        commentClaim: { retryMs: 300_000, maxAttempts: 3, outboxCap: 20 },
+      }),
+      JSON.stringify({
+        checkBudgets: { terminalizeMs: 10_000, updateMs: 5_000 },
+        commentClaim: { retryMs: 300_000, maxAttempts: 3, outboxCap: 20 },
+      }),
+    ]) {
+      const res = await runtimeApi(db, { method: "PATCH", body });
+      expect(res.status, body).toBe(400);
+    }
     expect(storedSystem(db)).toBeNull();
     expect(storedBudgets(db)).toEqual({});
     expect(auditRows(db)).toEqual([]);

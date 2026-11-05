@@ -31,12 +31,14 @@ import {
   AdminWriteError,
   readRuntime,
   setCheckBudgets,
+  setCommentClaimSettings,
   setDefaultReviewLevel,
   setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
   useLoaded,
   type AdmissionDropCounts,
   type CheckBudgetConfig,
+  type CommentClaimConfig,
   type RecheckAssignmentConfig,
   type ReviewLevelConfig,
 } from "./api";
@@ -64,6 +66,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [draft, setDraft] = useState<string | null>(null);
   const [terminalizeDraft, setTerminalizeDraft] = useState<string | null>(null);
   const [updateDraft, setUpdateDraft] = useState<string | null>(null);
+  const [retryDraft, setRetryDraft] = useState<string | null>(null);
+  const [attemptsDraft, setAttemptsDraft] = useState<string | null>(null);
+  const [outboxDraft, setOutboxDraft] = useState<string | null>(null);
   const [levelDraft, setLevelDraft] = useState<string | null>(null);
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -73,7 +78,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [notice, setNotice] = useState<{
     kind: "success" | "error";
     message: string;
-    source: "concurrency" | "checkBudgets" | "reviewLevel" | "recheckAssignment";
+    source: "concurrency" | "checkBudgets" | "commentClaim" | "reviewLevel" | "recheckAssignment";
   } | null>(null);
 
   async function onSubmit(
@@ -155,6 +160,53 @@ export function RuntimePage({ locale }: { locale: Locale }) {
             ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
             : generic,
         source: "checkBudgets",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSaveClaim(
+    event: FormEvent<HTMLFormElement>,
+    stored: CommentClaimConfig,
+  ): Promise<void> {
+    event.preventDefault();
+    if (busy) return; // in-flight guard — no double submit
+    if (
+      concurrencySubmitBlocked(stored.degraded, retryDraft) ||
+      concurrencySubmitBlocked(stored.degraded, attemptsDraft) ||
+      concurrencySubmitBlocked(stored.degraded, outboxDraft)
+    ) {
+      return;
+    }
+    // Same browser-side parsing as the sibling cards: the server's range gate
+    // is the only validator.
+    const retryMs = Number((retryDraft ?? String(stored.retryMs)).trim());
+    const maxAttempts = Number((attemptsDraft ?? String(stored.maxAttempts)).trim());
+    const outboxCap = Number((outboxDraft ?? String(stored.outboxCap)).trim());
+    setBusy(true);
+    setNotice(null);
+    try {
+      const saved = await setCommentClaimSettings({ retryMs, maxAttempts, outboxCap }, stored);
+      // A 2xx rewrote all three rows, so the card reads as trusted again.
+      update((data) => ({ ...data, commentClaim: saved }));
+      setRetryDraft(null);
+      setAttemptsDraft(null);
+      setOutboxDraft(null);
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.claimSaved"),
+        source: "commentClaim",
+      });
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.claimFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+        source: "commentClaim",
       });
     } finally {
       setBusy(false);
@@ -250,6 +302,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           // concurrency card is exactly as before, and nothing renders a bare
           // `undefined`.
           const budgets = data.checkBudgets;
+          // Same absence rule for the migration-0048 card: an older Worker
+          // behind this bundle reports no group, so the card is hidden.
+          const claim = data.commentClaim;
           // Same older-Worker rule for the default review depth.
           const level = data.reviewLevel;
           // And for the recheck seat's ask budget.
@@ -400,6 +455,101 @@ export function RuntimePage({ locale }: { locale: Locale }) {
               </CardContent>
             </SectionCard>
             )}
+            {claim === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.claimTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.claimDescription")}
+                </p>
+                {notice?.source === "commentClaim" ? (
+                  <div className="mt-4">
+                    <PageNotice kind={notice.kind} message={notice.message} />
+                  </div>
+                ) : null}
+                {claim.degraded ? (
+                  // Every number is the documented default, not the stored
+                  // setting: the form starts empty so a save cannot pin them.
+                  <div className="mt-4">
+                    <PageNotice kind="warn" message={t(locale, "admin.runtime.claimUnreadable")} />
+                  </div>
+                ) : null}
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => void onSaveClaim(event, claim)}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="claim-retry-budget">
+                      {t(locale, "admin.runtime.retryLabel")}
+                    </label>
+                    <Input
+                      id="claim-retry-budget"
+                      type="number"
+                      min={claim.retryMin}
+                      max={claim.retryMax}
+                      className="w-36"
+                      autoComplete="off"
+                      required
+                      value={retryDraft ?? (claim.degraded ? "" : String(claim.retryMs))}
+                      onChange={(event) => setRetryDraft(event.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="claim-attempts-budget">
+                      {t(locale, "admin.runtime.attemptsLabel")}
+                    </label>
+                    <Input
+                      id="claim-attempts-budget"
+                      type="number"
+                      min={claim.attemptsMin}
+                      max={claim.attemptsMax}
+                      className="w-24"
+                      autoComplete="off"
+                      required
+                      value={attemptsDraft ?? (claim.degraded ? "" : String(claim.maxAttempts))}
+                      onChange={(event) => setAttemptsDraft(event.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="claim-outbox-budget">
+                      {t(locale, "admin.runtime.outboxLabel")}
+                    </label>
+                    <Input
+                      id="claim-outbox-budget"
+                      type="number"
+                      min={claim.outboxMin}
+                      max={claim.outboxMax}
+                      className="w-24"
+                      autoComplete="off"
+                      required
+                      value={outboxDraft ?? (claim.degraded ? "" : String(claim.outboxCap))}
+                      onChange={(event) => setOutboxDraft(event.target.value)}
+                    />
+                  </div>
+                  <Button type="submit" disabled={busy}>
+                    {t(locale, "admin.runtime.claimSave")}
+                  </Button>
+                  {claim.degraded ? (
+                    <Button type="button" variant="secondary" onClick={reload}>
+                      {t(locale, "common.retry")}
+                    </Button>
+                  ) : null}
+                </form>
+                {claim.degraded ? null : (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {t(locale, "admin.runtime.claimCurrent", {
+                      retry: claim.retryMs,
+                      attempts: claim.maxAttempts,
+                      outbox: claim.outboxCap,
+                    })}
+                  </p>
+                )}
+              </CardContent>
+            </SectionCard>
+            )}
+
             {level === null ? null : (
             <SectionCard tier="secondary">
               <CardHeader>
@@ -463,6 +613,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
               </CardContent>
             </SectionCard>
             )}
+
             {recheck === null ? null : (
             <SectionCard tier="secondary">
               <CardHeader>
