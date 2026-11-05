@@ -573,6 +573,9 @@ function insertReportFields(rendered: string, report: ReportDoc | null, revalida
   return withRevalidated;
 }
 
+/** What a section body becomes when the tail cannot afford its text. */
+export const TRUNCATION_MARKER = "[... truncated to fit the comment limit ...]";
+
 /**
  * The report tail: `### Linked-issue AC`, `### ✅ Verified`,
  * `### 🗑️ Considered & rejected` and `## 🛠️ Plan to fix`.
@@ -581,42 +584,62 @@ function insertReportFields(rendered: string, report: ReportDoc | null, revalida
  * keeps the head — a tail appended before the clamp is the first thing lost on
  * a long body, exactly the newest sections the report exists to publish. When
  * the tail alone does not fit `limit` (less the blank-line separator and the
- * one-character core cut marker), it degrades in a fixed order:
+ * one-character core cut marker), it degrades in a fixed ladder, and every
+ * heading survives every rung:
  *
  *   1. truncate the plan block — it is the only section with a fence and a
  *      fold, so it is the only one that can be cut without leaving markdown
  *      structure open, and it frees the most bytes; fence and fold stay closed;
- *   2. drop whole sections, lowest value first: rejected → verified →
- *      linked-issue AC. The plan (the most actionable part) is kept last.
+ *   2. replace a section's body with `TRUNCATION_MARKER`, lowest value first:
+ *      rejected → verified → linked-issue AC. The heading stays, so a reader
+ *      sees that the section exists and was cut rather than a section that
+ *      silently vanished;
+ *   3. write `none` under all four headings in their fixed order — the
+ *      shortest form this can return. Only if even that exceeds `limit` does
+ *      the tail contribute nothing: the four headings are its irreducible
+ *      cost, and exceeding `limit` is not an option.
  *
  * Whatever survives is balanced and no longer than `limit`.
  */
 function buildReportTail(report: ReportDoc | null, limit = Number.POSITIVE_INFINITY): string {
   const field = (value: string | undefined): string =>
     value === undefined ? "none" : neutralizeReportText(value);
-  const planHeading = "## 🛠️ Plan to fix";
-  const sections = [
-    `### Linked-issue AC\n\n${field(report?.linkedIssueAc)}`,
-    `### ✅ Verified\n\n${field(report?.verified)}`,
-    `### 🗑️ Considered & rejected\n\n${field(report?.rejected)}`,
-    `${planHeading}\n\n${planBlock(report?.planToFix ?? null)}`,
+  const headings = [
+    "### Linked-issue AC",
+    "### ✅ Verified",
+    "### 🗑️ Considered & rejected",
+    "## 🛠️ Plan to fix",
   ];
+  const bodies = [
+    field(report?.linkedIssueAc),
+    field(report?.verified),
+    field(report?.rejected),
+    planBlock(report?.planToFix ?? null),
+  ];
+  const render = (count = headings.length): string =>
+    headings
+      .slice(0, count)
+      .map((heading, index) => `${heading}\n\n${bodies[index]!}`)
+      .join("\n\n");
   // The caller joins the tail with one blank line and keeps one character for
   // the core's cut marker.
-  let tail = sections.join("\n\n");
-  if (tail.length + 3 <= limit) return tail;
-  const base = sections.slice(0, 3).join("\n\n");
+  const fits = (text: string): boolean => text.length + 3 <= limit;
+
+  let tail = render();
+  if (fits(tail)) return tail;
   // base + "\n\n" + heading + "\n\n" + block + "\n\n" + "…" <= limit.
-  const planBudget = limit - base.length - planHeading.length - 7;
-  sections[3] = `${planHeading}\n\n${planBlock(report?.planToFix ?? null, planBudget)}`;
-  tail = sections.join("\n\n");
-  if (tail.length + 3 <= limit) return tail;
+  const base = render(3);
+  bodies[3] = planBlock(report?.planToFix ?? null, limit - base.length - headings[3]!.length - 7);
+  tail = render();
+  if (fits(tail)) return tail;
   for (const index of [2, 1, 0]) {
-    sections[index] = "";
-    tail = sections.filter((text) => text !== "").join("\n\n");
-    if (tail.length + 3 <= limit) return tail;
+    bodies[index] = TRUNCATION_MARKER;
+    tail = render();
+    if (fits(tail)) return tail;
   }
-  return "";
+  bodies.fill("none");
+  tail = render();
+  return fits(tail) ? tail : "";
 }
 
 // ---------------------------------------------------------------------------

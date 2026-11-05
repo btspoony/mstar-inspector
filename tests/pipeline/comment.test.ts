@@ -55,6 +55,7 @@ import {
   deleteDegradedCommentWithOctokit,
   REVIEW_BODY_LIMIT,
   SUMMARY_MD_LIMIT,
+  TRUNCATION_MARKER,
   truncateSummary,
   type ClosureCoverage,
   type ClosureRow,
@@ -1280,6 +1281,35 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(fenceLines(body)).toHaveLength(2);
     expect((body.match(/<details>/g) ?? []).length).toBe(1);
     expect((body.match(/<\/details>/g) ?? []).length).toBe(1);
+  });
+
+  test("a limit that forces degradation keeps every heading, marks each dropped body, and stays inside it", () => {
+    const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
+    const limit = 500;
+    const body = buildReviewBody(
+      small,
+      0,
+      {
+        report: {
+          ...reportDoc,
+          linkedIssueAc: "a".repeat(400),
+          verified: "b".repeat(400),
+          rejected: "c".repeat(400),
+          planToFix: "x".repeat(REVIEW_BODY_LIMIT),
+        },
+        revalidated: "### Revalidated findings\n\nnone",
+      },
+      limit,
+    );
+    expect(body.length).toBeLessThanOrEqual(limit);
+    const positions = reportTailHeadings.map((heading) => body.indexOf(heading));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
+    // No body quietly vanished: the three section bodies this limit cannot
+    // afford render the marker under their headings, and the plan block has no
+    // room left for a balanced fence and fold.
+    expect(body.split(TRUNCATION_MARKER)).toHaveLength(4);
+    expect(body).toContain(`${reportTailHeadings[3]}\n\nnone`);
   });
 
   test("without report parts the body is the pre-report shape, unchanged", () => {
