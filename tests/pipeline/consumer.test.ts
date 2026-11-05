@@ -328,6 +328,21 @@ function dbFailingOn(db: TestD1, match: string) {
   };
 }
 
+/** The real D1 double with ONE statement family throwing exactly ONCE. */
+function failingOnceOn(db: TestD1, match: string) {
+  let fired = false;
+  return {
+    prepare: (sql: string) => {
+      if (!fired && sql.includes(match)) {
+        fired = true;
+        throw new Error(`D1 unavailable once: ${match}`);
+      }
+      return db.prepare(sql);
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+  };
+}
+
 /** Seed one `review_runtime_settings` row (the operator configuration surface). */
 function seedCheckBudget(db: TestD1, key: string, value: string): void {
   db.raw
@@ -5963,6 +5978,65 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(publicationRow(db).phase).toBe("applied");
   }, 20_000);
 
+  test("check lifecycle: a failed supersede handoff keeps the review and claims NO second Check", async () => {
+    // The fallback intent write and the release write are the two fenced
+    // statements; either can fault on its own, and neither may leave this
+    // invocation holding two Check executions.
+    for (const match of ["desired = 'in_progress'", "recovery_state = ?, next_attempt_ms = ?, last_error = ?"] as const) {
+      reset();
+      sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+      sandbox.resolvedSha = SHA2; // the checkout moved on from the payload sha
+      const db = await createSeededTestD1();
+      const flaky = failingOnceOn(db, match);
+      const real = lifecycleFor(flaky as never);
+      const beginCalls: string[] = [];
+      const consumer = createReviewConsumer(
+        await makeEnv({ DB: flaky as never }),
+        testLog,
+        {
+          ...testOverrides,
+          checks: {
+            begin: (input) => {
+              beginCalls.push(input.headSha);
+              return real.begin(input);
+            },
+            terminalize: (input) => real.terminalize(input),
+            abandonTerminalize: (input) => real.abandonTerminalize(input),
+          },
+        },
+      );
+
+      await consumer(makeBatch(makePayload()));
+
+      // The handoff reported failure, so NO claim was made at the new head —
+      // the contradicted attempt may still hold this invocation's lease.
+      expect(beginCalls, match).toEqual([SHA]);
+      expect(checkRequests.map((r) => r.op), match).toEqual(["create"]);
+      expect(checkRows(db), match).toHaveLength(1);
+      const early = checkRows(db)[0]!;
+      expect(early.head_sha, match).toBe(SHA);
+      expect(early.holder, match).not.toBeNull();
+      expect(early.lease_until_ms, match).not.toBeNull();
+      if (match === "desired = 'in_progress'") {
+        // The intent write never landed: the row still wants `in_progress`.
+        expect(early.desired, match).toBe("in_progress");
+      } else {
+        // The intent landed, the release did not: terminal text, held lease.
+        expect(early.desired, match).toBe("failure");
+        expect(early.desired_summary, match).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
+      }
+
+      // A Check fault never blocks the review.
+      expect(commenterCalls.filter((c) => c.op === "post-prepared"), match).toHaveLength(1);
+      expect(publicationRow(db).phase, match).toBe("applied");
+
+      const failed = logLines.filter((line) => line.fields.event === "check_abandon_failed");
+      expect(failed, match).toHaveLength(1);
+      expect(failed[0]!.fields.attempt_id, match).toBe(early.id);
+      expect(String(failed[0]!.fields.check_reason), match).toContain("newer commit");
+    }
+  });
+
   test("check lifecycle: a contradicted claim stays superseded when the new head hits idempotency", async () => {
     for (const dedup of ["kv", "d1"] as const) {
       reset();
@@ -6079,6 +6153,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRowFor(db, SHA)).toEqual(owned);
   });
 
+  // SUPPLEMENTARY contract, not the fails-first evidence for the atomic writer:
+  // the old read-then-write ALREADY refused success→failure, so this case
+  // passes against that revert too. What it pins is that a REFUSED rewrite
+  // still releases the lease. The writer's atomicity evidence is the
+  // gate-failure case above (a precise `failure` summary the old setter would
+  // overwrite) plus the store-level interleaving case in
+  // `tests/store/review-checks.test.ts`.
   test("check lifecycle: a give-up after a proof-derived success neither rewrites the intent nor keeps the lease", async () => {
     reset();
     const db = await createSeededTestD1();

@@ -3274,15 +3274,24 @@ async function processMessage(
   let sendAttempt: { publicationId: string } | null = null;
   /**
    * §7.10 give-up handoff: the consumer stopped waiting on the terminalize
-   * hook. The lifecycle re-writes the frozen intent and releases the lease to
-   * the Check recovery lane with NO remote request, so the minute reconciler
-   * closes the run instead of waiting out the execution deadline (spec §7.11).
-   * The promise is handed to the invocation context when one exists, so a
-   * Check write never adds a wait to the review's own return.
+   * hook. The lifecycle freezes a terminal intent (only where none is frozen)
+   * and releases the lease to the Check recovery lane with NO remote request,
+   * so the minute reconciler closes the run instead of waiting out the
+   * execution deadline (spec §7.11). The promise is handed to the invocation
+   * context when one exists, so a Check write never adds a wait to the
+   * review's own return.
+   *
+   * Resolves `true` only when the handoff COMPLETED under this lease (intent +
+   * release, two fenced writes). `false` means the attempt may still hold this
+   * consumer's lease, so a caller taking a second Check ownership must not do
+   * so — a Check fault never blocks the review, but it must not double-claim
+   * either.
    */
-  const abandonCheck = (handle: CheckHandle, reason: string, outcome?: "superseded"): Promise<void> => {
+  const abandonCheck = (handle: CheckHandle, reason: string, outcome?: "superseded"): Promise<boolean> => {
     const abandon = deps.checks?.abandonTerminalize;
-    if (abandon === undefined) return Promise.resolve();
+    // No give-up seam (test doubles only; production always supplies it):
+    // nothing can prove this attempt released, so report the handoff as failed.
+    if (abandon === undefined) return Promise.resolve(false);
     const line = {
       ...(baseFields ?? payloadIdentityFields(payload)),
       sandbox_id: sandboxId,
@@ -3295,6 +3304,7 @@ async function processMessage(
           { ...line, event: "check_abandon_released" },
           "check attempt released for recovery after the consumer stopped waiting on terminalize",
         );
+        return true;
       },
       (err: unknown) => {
         const detail = err instanceof Error ? err.message : String(err);
@@ -3302,6 +3312,7 @@ async function processMessage(
           { ...line, event: "check_abandon_failed" },
           `check attempt release failed (it keeps its execution deadline): ${detail}`,
         );
+        return false;
       },
     );
     deps.background?.waitUntil(release);
@@ -3326,7 +3337,7 @@ async function processMessage(
     let abandoned = false;
     // The give-up handoff the overrun callback starts: awaited below when no
     // invocation context can own it (spec §7.10's no-context fallback).
-    let giveUpRelease: Promise<void> | undefined;
+    let giveUpRelease: Promise<boolean> | undefined;
     try {
       const terminalize = deps.checks!.terminalize({
         handle,
@@ -3829,16 +3840,27 @@ async function processMessage(
         `check attempt superseded: claimed ${supersededHandle.headSha.slice(0, 7)}, checked out ${headSha.slice(0, 7)}`,
       );
       // Freeze the contradicted attempt's `superseded` intent and release it —
-      // ONE fenced D1 write, awaited so the old row is terminal-intent +
-      // released BEFORE the new claim (no two live local leases) and never
-      // left `in_progress`. Its remote send belongs to the minute recovery
-      // cron, so the new head's review never waits on the Check hook.
-      await abandonCheck(
+      // TWO fenced D1 writes (intent + release), no remote request. Its remote
+      // send belongs to the minute recovery cron, so the new head's review
+      // never waits on the Check hook.
+      const handedOff = await abandonCheck(
         supersededHandle,
         "the checkout proved a newer commit than the claim",
         "superseded",
       );
-      checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
+      if (handedOff) {
+        checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
+      } else {
+        // The handoff failed, so the old attempt may still hold this
+        // consumer's lease: claiming the new head anyway would put two live
+        // consumer-owned claims on one invocation. A Check fault never blocks
+        // the review — this message reviews the checked-out commit with NO
+        // Check, and the old attempt's own deadline hands it to recovery.
+        deps.log.warn(
+          fields ?? baseFields ?? payloadIdentityFields(payload),
+          `check supersede handoff failed — continuing the review for ${headSha.slice(0, 7)} with no Check`,
+        );
+      }
     }
 
     const key: IdempotencyKey = {
