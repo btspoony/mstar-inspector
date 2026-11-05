@@ -1158,6 +1158,11 @@ export type CheckLifecycle = {
    * recovery sends exactly that text; only a row still wanting `in_progress`
    * receives the fallback, and that condition is the UPDATE's predicate — so a
    * terminalize freezing its conclusion concurrently wins.
+   *
+   * Resolves `true` only when the fenced RELEASE write changed the row. A
+   * live fence recovery already claimed, or an expired lease, writes nothing —
+   * and a caller about to take the next attempt must read that as "not
+   * handed off". A store fault rejects (never swallowed).
    */
   abandonTerminalize(input: {
     handle: CheckLifecycleHandle;
@@ -1170,7 +1175,7 @@ export type CheckLifecycle = {
      * reviewed nothing for its own SHA.
      */
     outcome?: "superseded";
-  }): Promise<void>;
+  }): Promise<boolean>;
 };
 
 /**
@@ -1258,15 +1263,18 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
    * remote request was already issued (or may have been) for this attempt:
    * such a row is `remote-unconfirmed` so recovery adopts instead of blindly
    * creating, otherwise it is `pending`. The clock is sampled for THIS write.
+   * `true` only when the fenced UPDATE changed the row: a live fence recovery
+   * already claimed (or an expired lease) writes nothing, and a caller that
+   * needs proof of the handoff must not read that as a release.
    */
   const releaseForRecovery = async (
     attemptId: string,
     lease: Lease,
     reason: string,
     requestsSpent: boolean,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const nowMs = deps.nowMs();
-    await deferCheckRecovery(
+    return deferCheckRecovery(
       deps.db,
       attemptId,
       lease,
@@ -1490,9 +1498,10 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // Released on BOTH branches — an already-frozen intent is sent by
       // recovery exactly as it stands. `requestsSpent: true` keeps the row
       // `remote-unconfirmed`, so recovery ADOPTS the run the interrupted
-      // terminalize may already have updated (RL-12). A dead fence (recovery
-      // claimed the attempt) refuses both statements: the silent no-op.
-      await releaseForRecovery(handle.attemptId, fence.lease, input.reason, true);
+      // terminalize may already have updated (RL-12). The boolean is the
+      // RELEASE write's own result: a dead fence (recovery claimed the
+      // attempt, or the lease expired) changed nothing and reports `false`.
+      return releaseForRecovery(handle.attemptId, fence.lease, input.reason, true);
     },
   };
 }

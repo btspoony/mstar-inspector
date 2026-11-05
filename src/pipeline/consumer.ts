@@ -908,9 +908,11 @@ export type CheckLifecycleHooks = {
    * none is frozen (the predicate is in the UPDATE, so a concurrent
    * terminalize's text wins) and releases the lease to recovery WITHOUT a
    * remote request, so the minute reconciler closes the run instead of waiting
-   * out the execution deadline. A lease recovery already claimed is a no-op.
+   * out the execution deadline. Resolves `true` only when the fenced release
+   * changed the row — a lease recovery already claimed, or an expired lease,
+   * changed nothing and resolves `false`; a store fault rejects.
    */
-  abandonTerminalize?(input: { handle: CheckHandle; reason: string; outcome?: "superseded" }): Promise<void>;
+  abandonTerminalize?(input: { handle: CheckHandle; reason: string; outcome?: "superseded" }): Promise<boolean>;
 };
 
 /**
@@ -3284,10 +3286,11 @@ async function processMessage(
    * review's own return.
    *
    * Resolves `true` only when the handoff COMPLETED under this lease (intent +
-   * release, two fenced writes). `false` means the attempt may still hold this
-   * consumer's lease, so a caller taking a second Check ownership must not do
-   * so — a Check fault never blocks the review, but it must not double-claim
-   * either.
+   * release, two fenced writes) and the release actually changed the row.
+   * `false` means the attempt may still hold this consumer's lease (or the
+   * no-op proved it was not ours to release), so a caller taking a second
+   * Check ownership must not do so — a Check fault never blocks the review,
+   * but it must not double-claim either.
    */
   const abandonCheck = (handle: CheckHandle, reason: string, outcome?: "superseded"): Promise<boolean> => {
     const abandon = deps.checks?.abandonTerminalize;
@@ -3301,12 +3304,21 @@ async function processMessage(
       check_reason: reason,
     };
     const release = abandon({ handle, reason, ...(outcome === undefined ? {} : { outcome }) }).then(
-      () => {
+      (released) => {
+        if (released) {
+          deps.log.warn(
+            { ...line, event: "check_abandon_released" },
+            "check attempt released for recovery after the consumer stopped waiting on terminalize",
+          );
+          return true;
+        }
+        // The fenced release wrote nothing: recovery already owns the attempt
+        // (or the lease expired). Report it honestly — it is not a release.
         deps.log.warn(
-          { ...line, event: "check_abandon_released" },
-          "check attempt released for recovery after the consumer stopped waiting on terminalize",
+          { ...line, event: "check_abandon_failed" },
+          "check attempt release wrote nothing (recovery already claimed it, or the lease is no longer live)",
         );
-        return true;
+        return false;
       },
       (err: unknown) => {
         const detail = err instanceof Error ? err.message : String(err);
@@ -3914,9 +3926,15 @@ async function processMessage(
         fields,
         `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
       );
-      // Deliberately NOT terminalized: recovery is about to publish for this
-      // head, and the honest Check conclusion is that publication's proof —
-      // a premature `neutral` here would outlive the proof that corrects it.
+      // Deliberately NOT terminalized: recovery already owns a publication for
+      // this head, and the honest Check conclusion is that publication's proof
+      // — a premature `neutral` here would outlive the proof that corrects it.
+      // The admitted claim is RELEASED instead (remote-unconfirmed + the first
+      // backoff rung), so the minute lane adopts this run and concludes from
+      // that proof; leaving it on the visitor's 15-minute lease would close it
+      // red on a commit whose review was published — the symptom this change
+      // exists to remove.
+      if (checkHandle !== null) await abandonCheck(checkHandle, "publication journal handoff");
       return { kind: "ok" };
     }
 

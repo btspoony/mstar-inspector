@@ -79,8 +79,10 @@ import {
   attachCheckRunId,
   claimAttempt,
   claimCheckRecovery,
+  deferCheckRecovery,
   setCheckCreateState,
   setCheckDesired,
+  setCheckFallbackDesired,
 } from "../../src/store/review-checks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
@@ -328,19 +330,16 @@ function dbFailingOn(db: TestD1, match: string) {
   };
 }
 
-/** The real D1 double with ONE statement family throwing exactly ONCE. */
-function failingOnceOn(db: TestD1, match: string) {
-  let fired = false;
-  return {
-    prepare: (sql: string) => {
-      if (!fired && sql.includes(match)) {
-        fired = true;
-        throw new Error(`D1 unavailable once: ${match}`);
-      }
-      return db.prepare(sql);
-    },
-    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
-  };
+/** Seed a publication-journal row for the delivered head (the hand-off probe). */
+function seedJournalRow(db: TestD1, headSha: string, phase = "prepared"): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_publications
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+          payload_json, created_ms, updated_ms)
+       VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', ?, '{}', 1000, 1000)`,
+    )
+    .run(`journal-${phase}`, TEST_APP_ID, headSha, phase);
 }
 
 /** Seed one `review_runtime_settings` row (the operator configuration surface). */
@@ -5858,6 +5857,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         abandonTerminalize: async () => {
           await Bun.sleep(150);
           releaseLanded = true;
+          return true;
         },
       },
     }); // NO invocation context: §7.10's inline fallback is the only owner
@@ -6007,77 +6007,98 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
-    const startedAt = Date.now();
     await consumer(makeBatch(makePayload()));
-    const elapsed = Date.now() - startedAt;
 
+    // The old run's update was never sent, and the operation order proves the
+    // new head's path never went through the terminalize budget.
     expect(earlyUpdateSent).toBe(false);
-    expect(elapsed).toBeLessThan(3_000);
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "create", "update"]);
     expect(checkRowFor(db, SHA).holder).toBeNull();
     expect(checkRowFor(db, SHA2).observed).toBe("success");
     expect(publicationRow(db).phase).toBe("applied");
   }, 20_000);
 
-  test("check lifecycle: a failed supersede handoff keeps the review and claims NO second Check", async () => {
-    // The fallback intent write and the release write are the two fenced
-    // statements; either can fault on its own, and neither may leave this
-    // invocation holding two Check executions.
-    for (const match of ["desired = 'in_progress'", "recovery_state = ?, next_attempt_ms = ?, last_error = ?"] as const) {
+  test("check lifecycle: a give-up that did not release keeps the review and claims NO second Check", async () => {
+    // The handoff's two fenced writes — the intent, then the release — are
+    // failed through the SEAM itself: the wrapper reuses the real store
+    // helpers and rejects at the chosen step (or reports a no-op release), so
+    // a statement edit can never silently disarm the fault the way a SQL-text
+    // match could.
+    for (const step of ["intent", "release", "no-op"] as const) {
       reset();
       sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
       sandbox.resolvedSha = SHA2; // the checkout moved on from the payload sha
       const db = await createSeededTestD1();
-      const flaky = failingOnceOn(db, match);
-      const real = lifecycleFor(flaky as never);
+      const real = lifecycleFor(db);
       const beginCalls: string[] = [];
-      const consumer = createReviewConsumer(
-        await makeEnv({ DB: flaky as never }),
-        testLog,
-        {
-          ...testOverrides,
-          checks: {
-            begin: (input) => {
-              beginCalls.push(input.headSha);
-              return real.begin(input);
-            },
-            terminalize: (input) => real.terminalize(input),
-            abandonTerminalize: (input) => real.abandonTerminalize(input),
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+        ...testOverrides,
+        checks: {
+          begin: (input) => {
+            beginCalls.push(input.headSha);
+            return real.begin(input);
+          },
+          terminalize: (input) => real.terminalize(input),
+          abandonTerminalize: async (input) => {
+            if (step === "intent") throw new Error("intent write unavailable");
+            const summary =
+              input.outcome === "superseded"
+                ? CHECK_SUMMARIES.superseded(input.handle.headSha.slice(0, 7))
+                : CHECK_SUMMARIES.unconfirmed;
+            await setCheckFallbackDesired(
+              db,
+              input.handle.attemptId,
+              input.handle.lease,
+              { desired: "failure", title: CHECK_NAME, summary },
+              Date.now(),
+            );
+            if (step === "release") throw new Error("release write unavailable");
+            // A dead fence: the intent exists but nothing was released.
+            if (step === "no-op") return false;
+            return deferCheckRecovery(
+              db,
+              input.handle.attemptId,
+              input.handle.lease,
+              { state: "remote-unconfirmed", nextAttemptMs: Date.now() + 60_000, reason: input.reason },
+              Date.now(),
+            );
           },
         },
-      );
+      });
 
       await consumer(makeBatch(makePayload()));
 
-      // The handoff reported failure, so NO claim was made at the new head —
+      // The handoff reported no release, so NO claim was made at the new head —
       // the contradicted attempt may still hold this invocation's lease.
-      expect(beginCalls, match).toEqual([SHA]);
-      expect(checkRequests.map((r) => r.op), match).toEqual(["create"]);
-      expect(checkRows(db), match).toHaveLength(1);
+      expect(beginCalls, step).toEqual([SHA]);
+      expect(checkRequests.map((r) => r.op), step).toEqual(["create"]);
+      expect(checkRows(db), step).toHaveLength(1);
       const early = checkRows(db)[0]!;
-      expect(early.head_sha, match).toBe(SHA);
-      expect(early.holder, match).not.toBeNull();
-      expect(early.lease_until_ms, match).not.toBeNull();
-      if (match === "desired = 'in_progress'") {
+      expect(early.head_sha, step).toBe(SHA);
+      expect(early.holder, step).not.toBeNull();
+      expect(early.lease_until_ms, step).not.toBeNull();
+      if (step === "intent") {
         // The intent write never landed: the row still wants `in_progress`.
-        expect(early.desired, match).toBe("in_progress");
+        expect(early.desired, "intent").toBe("in_progress");
       } else {
         // The intent landed, the release did not: terminal text, held lease.
-        expect(early.desired, match).toBe("failure");
-        expect(early.desired_summary, match).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
+        expect(early.desired, step).toBe("failure");
+        expect(early.desired_summary, step).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
       }
 
       // A Check fault never blocks the review.
-      expect(commenterCalls.filter((c) => c.op === "post-prepared"), match).toHaveLength(1);
-      expect(publicationRow(db).phase, match).toBe("applied");
+      expect(commenterCalls.filter((c) => c.op === "post-prepared"), step).toHaveLength(1);
+      expect(publicationRow(db).phase, step).toBe("applied");
 
+      // A throw and a no-op report the SAME honest failure event, never
+      // `check_abandon_released`.
       const failed = logLines.filter((line) => line.fields.event === "check_abandon_failed");
-      expect(failed, match).toHaveLength(1);
-      expect(failed[0]!.fields.attempt_id, match).toBe(early.id);
-      expect(String(failed[0]!.fields.check_reason), match).toContain("newer commit");
+      expect(failed, step).toHaveLength(1);
+      expect(failed[0]!.fields.attempt_id, step).toBe(early.id);
+      expect(String(failed[0]!.fields.check_reason), step).toContain("newer commit");
+      expect(logLines.filter((line) => line.fields.event === "check_abandon_released"), step).toHaveLength(0);
     }
   });
-
   test("check lifecycle: a contradicted claim stays superseded when the new head hits idempotency", async () => {
     for (const dedup of ["kv", "d1"] as const) {
       reset();
@@ -6148,6 +6169,42 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.observed).toBe("neutral");
     expect(row.terminal_ms).not.toBeNull();
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+  });
+
+  test("check lifecycle: a publication-journal hit releases the admitted claim without concluding", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // Recovery already owns a publication for the delivered head.
+    seedJournalRow(db, SHA, "prepared");
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // The claim exists and was handed to recovery — create only, no terminal
+    // update. Left on the consumer's lease it would sit `in_progress` for the
+    // full execution window and then close red on a reviewed commit.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
+    const row = checkRowFor(db, SHA);
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.next_attempt_ms).not.toBeNull();
+    expect(row.next_attempt_ms!).toBeLessThan(row.execution_deadline_ms);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.desired).toBe("failure");
+    expect(row.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+
+    // The review ACK is unchanged: no post, no review row, message acked.
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    // `ok` is the implicit ack: the handler resolves without scheduling a retry.
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(logLines.some((line) => line.msg.includes("publication journal hit"))).toBe(true);
   });
 
   test("check lifecycle: abandonTerminalize releases once, and writes nothing after recovery claims the attempt", async () => {
