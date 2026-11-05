@@ -45,6 +45,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, jest, mock, spyOn, t
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as realSdkRoot from "@oh-my-pi/pi-coding-agent";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import {
   buildOutputValidator,
@@ -189,6 +190,9 @@ function registerSeat(id: string): { isStreaming: boolean } & Record<string, unk
 }
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
+  // Additive: the registry is process-global, so the stub must keep the root's
+  // other exports (`AuthStorage`, …) for every sibling file that imports them.
+  ...realSdkRoot,
   createAgentSession: mock(async (options: Record<string, unknown>) => {
     createdOptions.push(options);
     disposeCalls = 0;
