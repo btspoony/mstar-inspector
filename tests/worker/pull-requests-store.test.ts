@@ -253,9 +253,11 @@ describe("listPullRequests", () => {
     };
     const { rows } = await createAppsStore(counted as never).listPullRequests(APP_ID);
     expect(rows.length).toBe(3);
-    // N+1 guard, not a query-plan freeze: a per-row statement would already
-    // exceed this bound at 3 rows.
-    expect(prepares).toBeLessThanOrEqual(4);
+    // N+1 guard, pinned to the four statements the store issues (rows, review
+    // window, failure counts, distinct repos): a per-row statement would
+    // already exceed this at 3 rows, and a dropped or doubled statement is a
+    // real change this pin must catch.
+    expect(prepares).toBe(4);
   });
 
   test("the aggregates are scoped to the window (mechanism, not just the payload)", async () => {
@@ -288,7 +290,7 @@ describe("listPullRequests", () => {
     };
     await createAppsStore(recording as never).listPullRequests(APP_ID);
 
-    expect(statements.length).toBeLessThanOrEqual(4);
+    expect(statements.length).toBe(4);
     const aggregates = statements.filter(
       (stmt) => stmt.sql.includes("FROM reviews") || stmt.sql.includes("FROM review_failures"),
     );
@@ -424,6 +426,10 @@ describe("listPullRequests repository filter + option set", () => {
     // Filtering runs BEFORE the cap, so it reaches rows the window dropped.
     const filtered = await store.listPullRequests(APP_ID, { owner: "acme", repo: "behind" });
     expect(filtered.rows.map((row) => row.number).sort()).toEqual([9001, 9002]);
+    // The option set never narrows with the selection: the filtered read still
+    // lists the App's whole distinct repository set — a predicate added to the
+    // option statement would strand the user in the current filter.
+    expect(filtered.repos).toEqual(["acme/behind", "acme/widgets"]);
     // …and the aggregates follow the same filtered window, so the tab's
     // verdict and failure count cannot disagree with the rows it shows.
     const newest = filtered.rows.find((row) => row.number === 9002)!;
@@ -444,8 +450,9 @@ describe("listPullRequests repository filter + option set", () => {
       batch: db.batch.bind(db),
     };
     await createAppsStore(counted as never).listPullRequests(APP_ID, { owner: "acme", repo: "widgets" });
-    // N+1 guard, not a query-plan freeze: four statements regardless of rows.
-    expect(prepares).toBeLessThanOrEqual(4);
+    // N+1 guard, pinned: the filtered read issues the same four statements —
+    // the repository predicate rides the existing statements, it adds none.
+    expect(prepares).toBe(4);
   });
 
   test("the option set is one App's ledger, never a sibling App's", async () => {

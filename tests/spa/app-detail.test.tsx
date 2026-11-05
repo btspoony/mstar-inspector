@@ -365,10 +365,10 @@ describe("installed tab configuration surface (static SSR)", () => {
     const start = manage.indexOf(t("en", "settings.installCopy"));
     const block = manage.slice(start, manage.indexOf(t("en", "settings.allowlist"), start));
     expect(block).toContain('<img src="https://avatars.example/demo.png"');
-    // AppAvatar's own fallback identity: the bg-muted wrapper renders only
-    // when there is no usable URL. Probing the component's markup — not a
-    // copy of the icon's path data, which an icon edit could vacuate.
-    expect(block).not.toContain("bg-muted");
+    // The block carries exactly one image — the App's avatar. The null-avatar
+    // fallback is AppAvatar's own mounted onError test; this static HTML slice
+    // cannot tell its wrapper from a sibling's class.
+    expect(block.match(/<img\b/g)?.length).toBe(1);
   });
 
   test("the installations table carries a per-row availability badge (allowlist enabled)", () => {
