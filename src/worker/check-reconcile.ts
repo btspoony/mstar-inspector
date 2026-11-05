@@ -769,6 +769,15 @@ async function reconcileCheckAttempt(
   // the execution deadline is ahead, the row is not concludable yet: claim it
   // (D1 only) and give the claim straight back, spending no attempt.
   if (now() < row.executionDeadlineMs) {
+    // The D1 half of the pair gate runs BEFORE the wait (spec §7.6): a waiting
+    // row whose App is disabled/deleted or whose installation mapping vanished
+    // must take the durable suspension path, never loop through the defer with
+    // its Check never converging.
+    const unusable = await pairUnusableReason(db, scope);
+    if (unusable !== null) {
+      await suspendUnusablePair(db, scope, unusable, undefined, now, log, summary);
+      return;
+    }
     const pending = await probePendingPublication(db, row);
     if (pending.kind !== "none") {
       const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now());
@@ -780,7 +789,11 @@ async function reconcileCheckAttempt(
         {
           event: "check_recovery_deferred_pending_publication",
           attempt_id: attemptId,
-          phase: pending.kind === "pending" ? pending.phase : "unknown",
+          // The PROBE's answer and the journal's phase are different facts: a
+          // readable journal whose phase is literally 'unknown' must not be
+          // confused with a failed read.
+          probe_state: pending.kind,
+          ...(pending.kind === "pending" ? { phase: pending.phase } : {}),
           next_attempt_ms: nextAttemptMs,
         },
         "check recovery waiting for the publication proof — claim given back, no attempt spent",
@@ -1164,22 +1177,56 @@ async function credentialsForPair(
     return { kind: "unavailable", reason: "decrypt-failed" };
   }
   if (settled.kind === "unavailable") {
-    const reason = `app ${UNAVAILABLE_REASON_TEXT[settled.reason]} — no Check mutation for (${scope.appId}, ${scope.installationId})`;
-    // Encode the KIND and the encrypted-envelope digest in the record
-    // (P68-QC-003): the kind is what lets a later pass tell a status-resumable
-    // `disabled` suspension from one that needs a live proof, and the digest is
-    // what lets it detect the operator's correction WITHOUT a probe. No
-    // plaintext credential is ever stored or logged.
-    const suspended = await suspendCheckRecovery(
-      db,
-      { appId: scope.appId, installationId: scope.installationId },
-      checkSuspensionReason(settled.reason, reason, settled.credentialFingerprint),
-      now(),
-    );
-    summary.suspended += suspended;
-    log.warn({ event: "ops_check_reconcile_pair_suspended", detail: reason }, "credential routing unavailable — pair suspended durably");
+    await suspendUnusablePair(db, scope, settled.reason, settled.credentialFingerprint, now, log, summary);
   }
   return settled;
+}
+
+/**
+ * The durable pair suspension (spec §7.6 / P68-QC-003), shared by the
+ * credential path and the pre-credential lifecycle gate: encode the KIND and
+ * the encrypted-envelope digest in the record so a later pass can tell a
+ * status-resumable `disabled` suspension from one that needs a live proof, and
+ * can detect the operator's correction WITHOUT a probe. No plaintext credential
+ * is ever stored or logged.
+ */
+async function suspendUnusablePair(
+  db: D1Like,
+  scope: Scope,
+  credentialReason: CheckCredentialReason,
+  credentialFingerprint: string | undefined,
+  now: () => number,
+  log: CheckReconcileLog,
+  summary: CheckReconcileSummary,
+): Promise<void> {
+  const detail = `app ${UNAVAILABLE_REASON_TEXT[credentialReason]} — no Check mutation for (${scope.appId}, ${scope.installationId})`;
+  const suspended = await suspendCheckRecovery(
+    db,
+    { appId: scope.appId, installationId: scope.installationId },
+    checkSuspensionReason(credentialReason, detail, credentialFingerprint),
+    now(),
+  );
+  summary.suspended += suspended;
+  log.warn({ event: "ops_check_reconcile_pair_suspended", detail }, "credential routing unavailable — pair suspended durably");
+}
+
+/**
+ * The D1-decidable half of the pair-usability gate (spec §7.6): the SAME
+ * predicate `productionCheckCredentials` applies before any GitHub work —
+ * missing installation mapping, soft-deleted App, or a disabled App. `null`
+ * means the pair is usable as far as D1 can tell.
+ *
+ * It exists so the publication-proof WAIT cannot swallow the lifecycle gate: a
+ * waiting row of an unusable pair must enter the durable `suspended` state,
+ * exactly as it does on the credential path. Pause (`review_enabled = 0`) is
+ * NOT part of this predicate — a paused App may still adopt and terminalize.
+ */
+async function pairUnusableReason(db: D1Like, scope: Scope): Promise<CheckCredentialReason | null> {
+  const routing = await checkRoutingRow(db, scope.appId, scope.installationId);
+  if (routing === null) return "missing";
+  if (routing.deleted_at !== null) return "deleted";
+  if (routing.status !== "active") return "disabled";
+  return null;
 }
 
 /**

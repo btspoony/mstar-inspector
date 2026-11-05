@@ -103,12 +103,19 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
 
       const firstStub = stubFetch();
       const calls = { adopt: 0, begin: 0, complete: 0 };
+      // The COUNTER is on the factory itself: adapter counters cannot tell
+      // "waited before the credential factory" from "waited after it".
+      let factoryCalls = 0;
+      const scripted = scriptedCredentials(db, countingScript(calls));
       const events: Array<Record<string, unknown>> = [];
       try {
         const first = await run(db, {
           now: () => T0 + 120_000, // due, far inside the execution deadline
           log: { warn: () => {}, info: (fields) => void events.push(fields) },
-          credentials: scriptedCredentials(db, countingScript(calls)),
+          credentials: async (input) => {
+            factoryCalls += 1;
+            return scripted(input);
+          },
         });
         expect(first.examined).toBe(1);
         expect(first.deferred).toBe(1);
@@ -117,8 +124,10 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
         firstStub.restore();
       }
 
-      // No remote operation ran at all, and the create mark never moved: a
-      // stray adopt/begin/create would leave the row no longer `not-sent`.
+      // The credential factory never ran, no remote operation happened at all,
+      // and the create mark never moved: a stray adopt/begin/create would leave
+      // the row no longer `not-sent`.
+      expect(factoryCalls).toBe(0);
       expect(calls).toEqual({ adopt: 0, begin: 0, complete: 0 });
       const waiting = await rawRow(db, id);
       expect(waiting.create_state).toBe("not-sent");
@@ -131,13 +140,16 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       expect(waiting.holder).toBeNull();
       expect(waiting.lease_until_ms).toBeNull();
 
-      const deferredLine = events.find(
+      const deferredLines = events.filter(
         (fields) => fields.event === "check_recovery_deferred_pending_publication",
       );
-      expect(deferredLine).toBeDefined();
-      expect(deferredLine!.attempt_id).toBe(id);
-      expect(deferredLine!.phase).toBe(phase);
-      expect(deferredLine!.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+      // ONE event per deferred row, carrying the probe's answer AND the phase.
+      expect(deferredLines).toHaveLength(1);
+      const deferredLine = deferredLines[0]!;
+      expect(deferredLine.attempt_id).toBe(id);
+      expect(deferredLine.probe_state).toBe("pending");
+      expect(deferredLine.phase).toBe(phase);
+      expect(deferredLine.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
 
       // The publication now proves itself: the SAME attempt concludes from it.
       const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
@@ -171,6 +183,52 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     });
   }
 
+  for (const lifecycle of ["disabled", "deleted"] as const) {
+    test(`a ${lifecycle} App enters suspension instead of the wait (the D1 gate leads)`, async () => {
+      const db = seededDb();
+      const { id } = await handedOverAttempt(db);
+      seedJournal(db, SCOPE, SHA, "prepared");
+      db.raw
+        .prepare(
+          lifecycle === "disabled"
+            ? `UPDATE github_apps SET status = 'disabled' WHERE id = ?`
+            : `UPDATE github_apps SET deleted_at = datetime('now') WHERE id = ?`,
+        )
+        .run("11111111-2222-3333-4444-555555555555");
+
+      const stub = stubFetch();
+      let factoryCalls = 0;
+      const warned: Array<Record<string, unknown>> = [];
+      try {
+        const summary = await run(db, {
+          now: () => T0 + 120_000,
+          log: { warn: (fields) => void warned.push(fields), info: () => {} },
+          credentials: async (input) => {
+            factoryCalls += 1;
+            return scriptedCredentials(db)(input);
+          },
+        });
+        // The lifecycle gate WINS over the wait: suspended, never deferred.
+        expect(summary.suspended).toBe(1);
+        expect(summary.deferred).toBe(0);
+      } finally {
+        stub.restore();
+      }
+
+      // No credential was minted and no Check work was produced.
+      expect(factoryCalls).toBe(0);
+      const row = await rawRow(db, id);
+      expect(row.recovery_state).toBe("suspended");
+      expect(row.terminal_ms).toBeNull();
+      expect(
+        warned.some((fields) => fields.event === "ops_check_reconcile_pair_suspended"),
+      ).toBe(true);
+      expect(
+        warned.some((fields) => fields.event === "check_recovery_deferred_pending_publication"),
+      ).toBe(false);
+    });
+  }
+
   test("an unreadable journal probe defers inside the window instead of terminalizing", async () => {
     const db = seededDb();
     const { id } = await handedOverAttempt(db);
@@ -180,9 +238,11 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     const unreadable = withFailingReads(db, /FROM review_publications/);
     const stub = stubFetch();
     const calls = { adopt: 0, begin: 0, complete: 0 };
+    const events: Array<Record<string, unknown>> = [];
     try {
       const summary = await run(unreadable, {
         now: () => T0 + 120_000,
+        log: { warn: () => {}, info: (fields) => void events.push(fields) },
         credentials: scriptedCredentials(db, countingScript(calls)),
       });
       expect(summary.deferred).toBe(1);
@@ -191,6 +251,15 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     } finally {
       stub.restore();
     }
+
+    // The probe's answer is `unknown`; the phase is absent because no journal
+    // was read — never the literal phase 'unknown'.
+    const deferredLines = events.filter(
+      (fields) => fields.event === "check_recovery_deferred_pending_publication",
+    );
+    expect(deferredLines).toHaveLength(1);
+    expect(deferredLines[0]!.probe_state).toBe("unknown");
+    expect("phase" in deferredLines[0]!).toBe(false);
 
     expect(calls).toEqual({ adopt: 0, begin: 0, complete: 0 });
     const row = await rawRow(db, id);
