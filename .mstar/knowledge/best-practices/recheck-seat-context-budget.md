@@ -11,17 +11,18 @@ count only grows. The runner's status document says `seat-failed` with an empty 
 row is counted `invalid-output`. No finding is ever closed, so the review never converges no matter
 how many fixes land.
 
-## Root cause
+## Cause: one confirmed defect, one observed correlation
 
-Two independent facts:
-
-1. The seat's ask was the whole recheck input serialized verbatim. At the documented input limits
-   (25 targets, up to four evidence slices per target) that is ~280 KB / ~130k–150k tokens, so the
-   structured yield never arrives: `structuredOutput.status = "unavailable"` with an empty stderr.
-2. The runner validated the yield against the ORIGINAL input while the seat had only been shown the
-   FITTED one. A seat that cites a slice it never received — the slice exists in the original
-   catalog and was omitted by the fit — passed validation and could be published `addressed` on
-   evidence it could not have read.
+1. **Confirmed defect.** The runner validated the yield against the ORIGINAL input while the seat had
+   only been shown the FITTED one. A seat that cites a slice it never received — the slice exists in
+   the original catalog and was omitted by the fit — passed validation and could be published
+   `addressed` on evidence it could not have read.
+2. **Observed correlation, cause unproven.** The seat's ask used to be the whole recheck input
+   serialized verbatim; at the documented input limits (25 targets, up to four evidence slices per
+   target) that is ~280 KB / ~130k–150k tokens, and the rounds it produced were lost with
+   `structuredOutput.status = "unavailable"` and an empty stderr. The RCA could NOT separate context
+   pressure from the seat's own time cap: both surface as an absent yield. Treat the size limit as a
+   mitigation for an observed failure shape, not as a proven root cause.
 
 ## Rule
 

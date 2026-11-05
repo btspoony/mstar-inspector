@@ -373,9 +373,11 @@ function addressedRow(rowId: string, slice: EvidenceSlice): Record<string, unkno
 
 describe("the ask fits the seat's context budget", () => {
   test("a max-size round is asked inside the budget, every row still reachable", async () => {
-    // The root cause: the max-size input is ~270 KB of JSON — a whole 128k
-    // window of prompt before the seat's own tools or its yield, so the
-    // one-shot yield never arrives. The ask must be FITTED instead.
+    // The observed failure mode: the max-size input is ~270 KB of JSON, which
+    // is a whole 128k window of prompt before the seat's own tools or its
+    // yield. The RCA could not separate that from the seat's own time cap, so
+    // this test does not claim a proven cause — it pins the mitigation: the ask
+    // is FITTED, and whatever the cause, no row is sent an unbounded document.
     seatResult = answerAll(INPUT);
     const { doc: seatDoc, status } = await run();
     expect(seatCalls).toHaveLength(1);
