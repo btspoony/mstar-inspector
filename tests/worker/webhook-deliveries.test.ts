@@ -501,6 +501,9 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       "0004_github_apps.sql",
       "0005_reviews_app_id.sql",
       "0008_github_apps_ops.sql",
+      // 0010: the derived tail's 0048 indexes review_failures, so the table
+      // this hand-listed shape skipped must exist before the tail runs.
+      "0010_review_failures.sql",
       // 0026: the webhook's slug lookup is the joined tenant read, so the
       // fixture carries the workspace plane and the App's mapping.
       "0026_workspaces.sql",

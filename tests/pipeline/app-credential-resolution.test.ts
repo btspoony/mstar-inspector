@@ -89,6 +89,9 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0006_app_provider_config.sql",
     "0008_github_apps_ops.sql",
     "0009_app_model_roles.sql",
+    // 0010: the derived tail's 0048 indexes review_failures, so the table this
+    // hand-listed shape skipped must exist before the tail runs.
+    "0010_review_failures.sql",
     // 0011: the delivery table — 0043 adds a column to it, so the fixture must
     // carry it before the derived tail runs. Listed here at its wrangler
     // position (after 0009/0010), not appended where the need was noticed.

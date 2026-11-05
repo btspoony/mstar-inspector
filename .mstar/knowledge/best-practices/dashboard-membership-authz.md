@@ -1,17 +1,17 @@
 ---
 module: dashboard / membership authz (B4)
 date: 2026-08-29
-last_updated: 2026-10-14
+last_updated: 2026-11-05
 problem_type: best_practice
 category: best-practices
 severity: high
 topic: dashboard access control
 tags:
   - oauth
-  - allowlist
+  - open-signin
   - guard-middleware
   - stateless-cookies
-  - invite-only
+  - removed-logins
   - hono
 related_components:
   - session.ts
@@ -19,7 +19,7 @@ related_components:
   - index.ts
 ---
 
-# Invite-only membership on top of stateless OAuth sessions (Workers dashboard)
+# Membership authz on top of stateless OAuth sessions (Workers dashboard)
 
 ## Context
 
@@ -27,24 +27,24 @@ v0.5 B4 added membership control to a dashboard whose sessions are stateless HMA
 
 ## Guidance
 
-- **Bootstrap precedence (exact order)**: user row exists → proceed; **login recorded as removed → deny** (migration 0023 — an operator's removal outranks the allowlist and is cleared only by a deliberate re-invite); GitHub login in `ADMIN_LOGINS` (comma-separated **var**) → create admin; table empty **and** `ADMIN_LOGINS` unset → first login becomes admin; otherwise deny (403 page, **zero Set-Cookie**, zero writes). Logins compare case-insensitively (`COLLATE NOCASE` lookup); migration 0016 adds a NOCASE UNIQUE index on `users.github_login` (the 0003 UNIQUE is BINARY), so a case-variant insert conflicts at the DDL layer — the store surfaces `DuplicateLoginError` and the invite route answers 409. The NOCASE pre-read remains the sequential-path friendly no-op; the index closes the concurrent window. Migration 0023 gives `removed_logins.github_login` the same NOCASE uniqueness, so a case-variant removal is the same removal.
+- **Sign-in precedence (current)**: user row exists → allow; **login recorded as removed → deny** (migration 0023, zero writes); otherwise create a `role = 'member'` row and allow, joined to no workspace. The deployment-level allowlist and the first-login-becomes-admin bootstrap are gone — sign-in is open unless the operator closes the `signup_open` flag, and authority is workspace-scoped. Logins compare case-insensitively (`COLLATE NOCASE` lookup); migration 0016 adds a NOCASE UNIQUE index on `users.github_login` (the 0003 UNIQUE is BINARY), so a case-variant insert conflicts at the DDL layer and the store surfaces `DuplicateLoginError`. No production route calls `createUser` at this head, so that error is only observed by tests; the invite route's own 409 for a tombstoned login is `invite.login_removed` (a `isLoginRemoved` read, not this error). The NOCASE pre-read remains the sequential-path friendly no-op; the index closes the concurrent window. Migration 0023 gives `removed_logins.github_login` the same NOCASE uniqueness, so a case-variant removal is the same removal.
 - **Removal is a transaction, not a flag**: `deleteUser` / `deleteUserUnlessLastAdmin` write the tombstone and delete the row in ONE D1 `batch` (a transaction) with the last-admin guard on BOTH statements — a removal can never be recorded without the row actually being gone, a refused removal writes nothing on either side, and the guard still does not ride a read-check-then-delete window (two concurrent removes of the last two admins cannot both land). `createUser` clears the record in the batch with its insert (deliberate re-admission only); read it back with `isLoginRemoved` (NOCASE). `removed_by` is the acting admin's login, NULL when the caller had no actor in scope.
-- **The removal check must be at the WRITE boundary, not a preceding read**: both `deleteUser`/`deleteUserUnlessLastAdmin` and bootstrap's creation take the OAuth callback's `allow` decision, so a read-then-insert window loses the race — a removal landing between bootstrap's reads and its insert was undone by the insert (SEC-01, reproduced with a DB double that fires the interleaving at the tombstone read). Bootstrap therefore has its own creation (`bootstrapCreateAdmin`, never `createUser`) whose single statement both tests the record and inserts: `INSERT … SELECT … WHERE NOT EXISTS (SELECT 1 FROM removed_logins WHERE github_login = ? COLLATE NOCASE) ON CONFLICT (github_login) DO NOTHING`. `changes === 0` is re-read to classify: an existing row (exact-case or case-variant race) is allowed, no row at all means the insert was refused → ordinary deny, zero writes, tombstone intact. `createUser` must never be reachable from the automatic path — clearing removal state there is exactly the SEC-01 bug.
+- **The removal check must be at the WRITE boundary, not a preceding read**: the OAuth callback reads the row and the tombstone before it inserts, so a read-then-insert window loses the race — a removal landing between those reads and the insert was undone by the insert (SEC-01, reproduced with a DB double that fires the interleaving at the tombstone read). Sign-in therefore has its own creation (`signInCreateUser`) whose single statement both tests the record and inserts: `INSERT … SELECT … WHERE NOT EXISTS (SELECT 1 FROM removed_logins WHERE github_login = ? COLLATE NOCASE) ON CONFLICT (github_login) DO NOTHING`. `changes === 0` is re-read to classify: an existing row (exact-case or case-variant race) is allowed, no row at all means the insert was refused → ordinary deny, zero writes, tombstone intact. `createUser` must never be reachable from the automatic path — clearing removal state there is exactly the SEC-01 bug.
 - **Single guard mount**: one Hono `app.use("*", guard)` before all route definitions; exempt set is exactly the login + OAuth callback paths (loop impossibility). The guard adds only the D1 membership check on top of each route's own session handling — removed members' existing cookies fail there, no session invalidation store needed. Logout is **session-gated but not membership-gated** (a removed member must be able to burn their cookie; a data route must not).
 - **Admin gates**: shared fail-closed `requireAdmin` before any membership read/write; refuse self-removal and last-admin removal; the last-admin delete stays a single conditional `DELETE ... WHERE` statement (read-check-delete is a TOCTOU) — it now rides inside the removal `batch` next to the tombstone insert, with the same guard on both.
 - **Fail closed on unbound D1**: 500, never silently treat as "no members" or "not a member".
 
 ## Why This Matters
 
-Stateless cookies are the cheap option on Workers, but they cannot be revoked — the per-request D1 check is the revocation mechanism. The bootstrap matrix is the security boundary of the whole deployment (first login on a public URL claims admin), so it is pinned by a four-case test matrix, not prose.
+Stateless cookies are the cheap option on Workers, but they cannot be revoked — the per-request D1 membership check is the revocation mechanism. There is no deployment-level admin bootstrap: sign-in creates a `role = 'member'` row for any GitHub-verified login that is not recorded as removed and not blocked by the `signup_open` flag, and authority is workspace-scoped. The sign-in precedence and the tombstone's write-boundary guard are the security boundary, so they are pinned by a test matrix (`signInDashboardUser precedence`), not prose.
 
 ## When to Apply
 
-Any multi-user dashboard on stateless sessions; any "first operator claims admin" bootstrap; any Hono sub-app where middleware order (guard before routes and catch-alls) matters.
+Any multi-user dashboard on stateless sessions; any tombstone-based removal that must outrun an in-flight sign-in; any Hono sub-app where middleware order (guard before routes and catch-alls) matters.
 
 ## Examples
 
-- `src/dashboard/users.ts` (store + `bootstrapDashboardAccess`), `src/dashboard/index.ts` (guard mount + `requireAdmin` + members routes), `tests/worker/dashboard.test.ts` (bootstrap matrix, removed-member 403 with zero-network assertion, conditional-delete matrix).
+- `src/dashboard/users.ts` (store + `signInDashboardUser`), `src/dashboard/index.ts` (guard mount + `requireAdmin` + members routes), `tests/worker/dashboard.test.ts` (`signInDashboardUser precedence`, removed-member 403 with zero-network assertion, conditional-delete matrix).
 
 
 ## Read-face visibility layer over membership (2026-09-18 refinement)

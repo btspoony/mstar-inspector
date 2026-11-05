@@ -521,6 +521,8 @@ export const zhCN: Dictionary = {
       templateMaterializeMax: "此 App 已达到 {limit} 个自定义 provider 的上限 — 请先移除一个再物化新模板（更新现有声明不受限制）。未存储任何内容。",
       runtimeHarnessUnknown: "未知或已停用的运行时 harness — 未存储任何内容。",
       triggerModeUnknown: "{mode} 不是有效的审查触发模式 — 可用值为 open、every_push、manual。未存储任何内容。",
+      reviewLevelUnknown:
+        "{level} 不是有效的评审深度 — 可用值为 quick、default、deep（或 inherit 表示跟随平台默认）。未存储任何内容。",
       checkScoreInvalid: "审查门禁分数必须是 0 到 100 之间的整数。未存储任何内容。",
       checkVerdictUnknown: "{verdict} 不是有效的审查结论 — 可用值为：{verdicts}。未存储任何内容。",
       allowlistToggleInvalid: "所有者白名单开关必须为开或关。未存储任何内容。",
@@ -542,12 +544,24 @@ export const zhCN: Dictionary = {
     opsDeleteCopy: "软删除 — App 从此列表移除，其所有安装都会被关闭。",
     // 评审触发模式（spec review-trigger-policy §2/§3）：分段标签本地化；
     // 线上取值（open / every_push / manual）与提及字符串保持原样。
-    triggerMode: "评审触发",
+    triggerMode: "审查触发",
     triggerModeOpen: "首次打开",
     triggerModeEveryPush: "每次推送",
     triggerModeManual: "仅手动",
-    triggerModeMention: "在 PR 评论中提及机器人即可（重新）启动审查 — 所有模式下均可用：",
-    triggerModeMentionAria: "机器人提及字符串：{mention}",
+
+    triggerModeMention: "PR 作者或仓库所有者：在 PR 评论中 @ 它即可（重新）启动审查：",
+    triggerModeMentionAria: "机器人提及：{mention}",
+    // 评审深度（migration 0047）：App 深度选择器的四个面孔。线上取值保持
+    // quick/default/deep（另有 inherit 面孔自有哨兵值），仅标签本地化。
+    reviewDepth: "评审深度",
+    reviewDepthCopy: "控制此 App 每次评审的深入程度。快速成本最低，深入最彻底。",
+    reviewDepthQuick: "快速",
+    reviewDepthQuickHint: "单轮快速评审",
+    reviewDepthStandard: "标准",
+    reviewDepthStandardHint: "均衡深度（推荐）",
+    reviewDepthDeep: "深入",
+    reviewDepthDeepHint: "最彻底，耗时更长",
+    reviewDepthInherit: "跟随平台默认（当前：{level}）",
     confirmPauseTitle: "暂停 {slug} 的审查？",
     confirmPauseBody: "Webhook 保持连接 — 投递会被应答并忽略，直到你恢复。",
     confirmResumeTitle: "恢复 {slug} 的审查？",
@@ -844,6 +858,43 @@ export const zhCN: Dictionary = {
       /** 所有已存储设置都无法读取——数字只是文档默认值。 */
       claimUnreadable:
         "无法读取已存储的评论触发恢复设置，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
+      /** App 未自行选择深度时继承的平台默认。 */
+      reviewLevelTitle: "评审深度",
+      reviewLevelDescription: "适用于尚未自行选择评审深度的 App。",
+      reviewLevelLabel: "默认评审深度",
+      reviewLevelQuick: "快速 — 单轮快速评审",
+      reviewLevelStandard: "标准 — 均衡深度（推荐）",
+      reviewLevelDeep: "深入 — 最彻底，耗时更长",
+      reviewLevelSave: "保存",
+      reviewLevelSaved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      reviewLevelFailed: "修改默认评审深度失败。",
+      /** 已存储的档位无法读取——显示的档位是文档默认值。 */
+      reviewLevelUnreadable:
+        "无法读取已存储的默认评审深度，因此未自行选择评审深度的 App 正在使用「标准」。选择档位可保存为新值，重新读取会重新检查该行。",
+      /** 历史发现重审席位的提问预算。 */
+      recheckTitle: "重审提问预算",
+      recheckDescription:
+        "历史发现重审席位单轮可索要的上下文大小（UTF-8 字节）。所有历史发现与讨论始终保留，证据切片在此预算内按序保留。",
+      recheckLabel: "提问预算（字节）",
+      recheckSave: "保存",
+      recheckSaved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      recheckFailed: "修改重审提问预算失败。",
+      /** {value} = 当前存储的预算（或文档默认值）。 */
+      recheckCurrent: "下一轮评审生效：{value} 字节。",
+      /** 已存储的预算无法读取——显示的数值是文档默认值。 */
+      recheckUnreadable:
+        "无法读取已存储的重审提问预算，因此正在使用文档默认值。输入范围内的数值可保存为新值，重新读取会重新检查该行。",
+      /** 流水线在最近 24 小时记录的准入拒绝。 */
+      admissionDropsTitle: "准入拒绝（最近 24 小时）",
+      admissionDropsDescription:
+        "流水线拒绝准入的审查数量，按原因统计。被拒绝的审查从未开始；计数读取流水线已写入的失败记录。",
+      /** 拒绝准入的原因：PR 锁、容量上限或存储故障。 */
+      admissionDropsPrHeld: "PR 正在审查",
+      admissionDropsSystemCap: "系统上限",
+      admissionDropsWorkspaceCap: "工作区上限",
+      admissionDropsError: "存储错误",
       // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
       // 与 /healthz 字段及 release tag 同形。
       version: "版本 {version}",

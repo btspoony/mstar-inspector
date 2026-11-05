@@ -25,6 +25,7 @@ import {
   providerFormKind,
   providerKeyRows,
   removeChanged,
+  REVIEW_LEVELS,
   REVIEW_TRIGGER_MODES,
   selectedCatalogProvider,
   type CatalogProvider,
@@ -268,6 +269,8 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        review_level: null,
+        default_review_level: "default",
         github_visibility: "unknown",
       },
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
@@ -316,6 +319,8 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        review_level: null,
+        default_review_level: "default",
         github_visibility: "unknown",
       },
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
@@ -348,7 +353,7 @@ describe("members/apps/settings parsers", () => {
     expect(ok && ok.can_manage && ok.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
   });
 
-  test("parseSettings requires the review trigger mode on the manage face; off-vocabulary fails the parse", () => {
+  test("parseSettings requires the review trigger mode and review depth on the manage face; off-vocabulary fails the parse", () => {
     const base = {
       can_manage: true,
       workspace_id: "ws_0123456789abcdefghijkl",
@@ -362,6 +367,8 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        review_level: null,
+        default_review_level: "default",
         github_visibility: "unknown",
       },
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
@@ -395,6 +402,20 @@ describe("members/apps/settings parsers", () => {
       const manage = parseSettings({ ...base, app: { ...base.app, review_trigger_mode: mode } });
       expect(manage && manage.can_manage && manage.app.review_trigger_mode).toBe(mode);
     }
+    // The review depth and the operator default it inherits (migration 0047)
+    // are the same class of required manager fields; `null` is the inherit
+    // face and `default_review_level` is never null.
+    const { review_level: _noLevel, ...withoutLevel } = base.app;
+    expect(parseSettings({ ...base, app: withoutLevel })).toBeNull();
+    expect(parseSettings({ ...base, app: { ...base.app, review_level: "turbo" } })).toBeNull();
+    expect(parseSettings({ ...base, app: { ...base.app, default_review_level: "turbo" } })).toBeNull();
+    expect(parseSettings({ ...base, app: { ...base.app, default_review_level: undefined } })).toBeNull();
+    for (const level of REVIEW_LEVELS) {
+      const manage = parseSettings({ ...base, app: { ...base.app, review_level: level } });
+      expect(manage && manage.can_manage && manage.app.review_level).toBe(level);
+    }
+    const inherit = parseSettings(base);
+    expect(inherit && inherit.can_manage && inherit.app.review_level).toBeNull();
   });
 
   test("parseSettings requires the review gate, allowlist and visibility on the manage face; malformed values fail the parse", () => {
@@ -411,6 +432,8 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        review_level: null,
+        default_review_level: "default",
         github_visibility: "public",
       },
       check_gate: { min_score: 90, pass_verdicts: ["ship it", "needs fixes"] },
@@ -518,6 +541,8 @@ describe("members/apps/settings parsers", () => {
         last_webhook_at: null,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
+        review_level: null,
+        default_review_level: "default",
         github_visibility: "unknown",
       },
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
@@ -670,6 +695,8 @@ describe("members/apps/settings parsers", () => {
           last_webhook_at: null,
           sandbox_image_id: "omp",
           review_trigger_mode: "every_push",
+          review_level: null,
+          default_review_level: "default",
         },
         installations: [],
         deliveries: [],
@@ -750,6 +777,8 @@ describe("provider catalog rows + add selection", () => {
       last_webhook_at: null,
       sandbox_image_id: "omp",
       review_trigger_mode: "every_push",
+      review_level: null,
+      default_review_level: "default",
       github_visibility: "unknown",
     },
     check_gate: { min_score: 80, pass_verdicts: ["ship it"] },

@@ -45,11 +45,13 @@ import { afterAll, afterEach, beforeEach, describe, expect, jest, mock, spyOn, t
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as realSdkRoot from "@oh-my-pi/pi-coding-agent";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import {
   buildOutputValidator,
   type OutputValidator,
 } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
+import * as realStructuredSubagent from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, validateMstarReviewV1 } from "@mstar-harness/engine";
 
 import type {
@@ -188,6 +190,9 @@ function registerSeat(id: string): { isStreaming: boolean } & Record<string, unk
 }
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
+  // Additive: the registry is process-global, so the stub must keep the root's
+  // other exports (`AuthStorage`, …) for every sibling file that imports them.
+  ...realSdkRoot,
   createAgentSession: mock(async (options: Record<string, unknown>) => {
     createdOptions.push(options);
     disposeCalls = 0;
@@ -361,7 +366,11 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   },
 }));
 
+// Additive: Bun's module-mock registry is process-global, so the stub must not
+// drop the SDK's other exports — a replacement that did broke every sibling
+// file importing them.
 mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
+  ...realStructuredSubagent,
   runStructuredSubagent: mock(async (request: Record<string, unknown>) => {
     subagentRequests.push(request);
     // The dispatch's reserved identity id — what the SDK registers the seat
@@ -2341,7 +2350,10 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   test("exhausted budget → the seat is skipped entirely (no child started), status reason budget", async () => {
-    anchorRecheckDeadline(Date.now() - 600_000, "quick"); // outer deadline already past → 0
+    // A frozen clock pins the skip's figures: the deadline is exactly 600,000ms
+    // in the past, so the whole durable status is comparable to a literal.
+    jest.useFakeTimers();
+    anchorRecheckDeadline(Date.now() - 600_000, "quick"); // outer deadline spent → 0
     seatResults = [{ data: seatPayload() }];
     const { recheck, recheckStatus } = await ompAgentRuntime.runReview({
       ...BASE_INPUT,
@@ -2358,7 +2370,8 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       rejected: 0,
       rejected_row_ids: [],
       rejected_unnamed: 0,
-      error: null,
+      // The tail skip names its cause AND the figures it decided on.
+      error: "recheck seat skipped (tail): the review's outer deadline left 0ms, the seat needs at least 35000ms",
     });
     // Only the review seat ran — no recheck child was dispatched.
     expect(subagentRequests).toHaveLength(1);

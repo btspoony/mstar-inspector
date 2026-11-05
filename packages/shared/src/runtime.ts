@@ -148,6 +148,14 @@ export type AgentRuntimeRunInput = {
    */
   recheck?: RecheckInput;
   /**
+   * The seat's ask budget in UTF-8 bytes, read once from the operator's
+   * `review.recheck.assignment_max_bytes` system row. ABSENT = the runner's
+   * documented default (`RECHECK_ASSIGNMENT_MAX_BYTES`), so a legacy input
+   * keeps its behaviour byte-identically. It rides the input, NOT the frozen
+   * `mstar.recheck-input/v1` document.
+   */
+  recheckAssignmentMaxBytes?: number;
+  /**
    * Optional PR context (the description plus its closing issues) for the
    * report seat. ABSENT = no report seat runs and the result's `report` is
    * null, so the legacy runner input stays byte-identical.

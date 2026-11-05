@@ -138,6 +138,34 @@ export type CommentClaimConfig = {
   degraded: boolean;
 };
 
+/** The operator default review depth as the operator API reports it. */
+export type ReviewLevelConfig = {
+  /** The tier Apps without a depth of their own inherit. */
+  value: string;
+  /** The closed vocabulary, in reading order — the console never hardcodes it. */
+  levels: string[];
+  /** The stored level could not be read: `value` is the documented default. */
+  degraded: boolean;
+};
+
+/** The recheck seat's ask budget as the operator API reports it. */
+export type RecheckAssignmentConfig = {
+  /** UTF-8 bytes of assignment the seat may be asked with. */
+  maxBytes: number;
+  min: number;
+  max: number;
+  /** The stored budget could not be read: `maxBytes` is the documented default. */
+  degraded: boolean;
+};
+
+/** Admission drops in the trailing 24h, one count per refusal reason. */
+export type AdmissionDropCounts = {
+  "pr-held": number;
+  "system-cap": number;
+  "workspace-cap": number;
+  error: number;
+};
+
 /** The runtime parameters (iteration spec §1.1, spec §7.10). */
 export type RuntimeConfig = {
   concurrency: number;
@@ -157,6 +185,12 @@ export type RuntimeConfig = {
    * `checkBudgets` (an older Worker behind a newer bundle).
    */
   commentClaim: CommentClaimConfig | null;
+  /** The default-review-depth surface; `null` under the same older-Worker rule. */
+  reviewLevel: ReviewLevelConfig | null;
+  /** The recheck ask-budget surface; `null` under the same older-Worker rule. */
+  recheckAssignment: RecheckAssignmentConfig | null;
+  /** The 24h admission-drop counts; `null` under the same older-Worker rule. */
+  admissionDrops24h: AdmissionDropCounts | null;
 };
 
 function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
@@ -192,6 +226,43 @@ function parseCommentClaim(row: Json): CommentClaimConfig | null {
   };
 }
 
+function parseReviewLevel(row: Json): ReviewLevelConfig | null {
+  const raw = row.reviewLevel;
+  if (raw === undefined) return null;
+  const level = map(raw, "runtime reviewLevel");
+  const levels = level.levels;
+  if (!Array.isArray(levels)) throw new Error("admin API: levels is not a list");
+  return {
+    value: text(level, "value"),
+    levels: levels.filter((entry): entry is string => typeof entry === "string"),
+    degraded: bool(level, "degraded"),
+  };
+}
+
+function parseRecheckAssignment(row: Json): RecheckAssignmentConfig | null {
+  const raw = row.recheckAssignment;
+  if (raw === undefined) return null;
+  const budget = map(raw, "runtime recheckAssignment");
+  return {
+    maxBytes: num(budget, "maxBytes"),
+    min: num(budget, "min"),
+    max: num(budget, "max"),
+    degraded: bool(budget, "degraded"),
+  };
+}
+
+function parseAdmissionDrops(row: Json): AdmissionDropCounts | null {
+  const raw = row.admissionDrops24h;
+  if (raw === undefined) return null;
+  const drops = map(raw, "runtime admissionDrops24h");
+  return {
+    "pr-held": num(drops, "pr-held"),
+    "system-cap": num(drops, "system-cap"),
+    "workspace-cap": num(drops, "workspace-cap"),
+    error: num(drops, "error"),
+  };
+}
+
 export async function readRuntime(): Promise<RuntimeConfig> {
   const body = map(await fetchJson(`${BASE}/runtime`), "runtime response");
   return {
@@ -201,6 +272,9 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     degraded: bool(body, "degraded"),
     checkBudgets: parseCheckBudgets(body),
     commentClaim: parseCommentClaim(body),
+    reviewLevel: parseReviewLevel(body),
+    recheckAssignment: parseRecheckAssignment(body),
+    admissionDrops24h: parseAdmissionDrops(body),
   };
 }
 
@@ -278,6 +352,47 @@ export async function setCommentClaimSettings(
     }
   }
   return { ...stored, ...value, degraded: false };
+}
+
+/**
+ * Save the operator default review depth, answering the level the server
+ * stored. A 2xx with an unreadable body still landed, so the request value
+ * stands in — the same rule as `setSystemConcurrency`.
+ */
+export async function setDefaultReviewLevel(
+  value: string,
+  stored: ReviewLevelConfig,
+): Promise<ReviewLevelConfig> {
+  const answer = await write("PATCH", "/runtime", { reviewLevel: value });
+  if (typeof answer === "object" && answer !== null && "reviewLevel" in answer) {
+    const saved = answer.reviewLevel;
+    if (typeof saved === "string") return { ...stored, value: saved, degraded: false };
+  }
+  return { ...stored, value, degraded: false };
+}
+
+/**
+ * Save the recheck ask budget, answering the value the server stored. A 2xx
+ * whose body is unreadable still landed the write, so the request value stands
+ * in — the same rule as `setSystemConcurrency`.
+ */
+export async function setRecheckAssignmentMaxBytes(
+  maxBytes: number,
+  stored: RecheckAssignmentConfig,
+): Promise<RecheckAssignmentConfig> {
+  const answer = await write("PATCH", "/runtime", { recheckAssignment: { maxBytes } });
+  if (typeof answer === "object" && answer !== null && "recheckAssignment" in answer) {
+    const saved = answer.recheckAssignment;
+    if (
+      typeof saved === "object" &&
+      saved !== null &&
+      "maxBytes" in saved &&
+      typeof saved.maxBytes === "number"
+    ) {
+      return { ...stored, maxBytes: saved.maxBytes, degraded: false };
+    }
+  }
+  return { ...stored, maxBytes, degraded: false };
 }
 
 export async function readWorkspaces(): Promise<WorkspaceRow[]> {

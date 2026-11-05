@@ -491,6 +491,49 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("the depth card shows the operator default and one save fires exactly one PATCH", async () => {
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ reviewLevel: "deep" })
+        : json({
+            concurrency: 24,
+            min: 1,
+            max: 256,
+            degraded: false,
+            checkBudgets: CHECK_BUDGETS,
+            reviewLevel: {
+              value: "default",
+              levels: ["quick", "default", "deep"],
+              degraded: false,
+            },
+          }),
+    );
+    // Labelled as the inheritance default, and the copy says whom it applies to.
+    expect(surface.text()).toContain("Default review depth");
+    expect(surface.text()).toContain("Applies to Apps that have not chosen their own review depth.");
+    const trigger = surface.container.querySelector("#default-review-level");
+    expect(trigger?.textContent).toContain("Standard");
+
+    await surface.openSelect(trigger);
+    await surface.pickOption("Deep — most thorough, slower");
+    await surface.click(trigger!.closest("form")!.querySelector('button[type="submit"]'));
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      { url: "/_internal_admin/api/runtime", method: "PATCH", body: { reviewLevel: "deep" } },
+    ]);
+    expect(surface.container.querySelector("#default-review-level")?.textContent).toContain("Deep");
+    expect(surface.text()).toContain("Saved.");
+    await surface.close();
+  });
+
+  test("an older server without reviewLevel hides only the depth card", async () => {
+    const surface = await runtimeScreen(() => json(RUNTIME));
+    expect(surface.container.querySelector("#default-review-level")).toBeNull();
+    expect(surface.container.querySelector("#system-concurrency")).not.toBeNull();
+    expect(surface.container.querySelector("#check-terminalize-budget")).not.toBeNull();
+    await surface.close();
+  });
+
   test("a zh_CN render shows the page's dictionary copy", async () => {
     const surface = await runtimeScreen(() => json(RUNTIME), "zh_CN");
     expect(surface.text()).toContain("运行时参数");
@@ -579,6 +622,29 @@ describe("Runtime screen", () => {
       (surface.container.querySelector("#claim-retry-budget") as unknown as HTMLInputElement).value,
     ).toBe("60000");
     expect(surface.text()).toContain("Saved.");
+    await surface.close();
+  });
+
+  test("the admission-drop card renders all four reasons and their 24h counts", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...RUNTIME,
+        admissionDrops24h: { "pr-held": 3, "system-cap": 1, "workspace-cap": 2, error: 0 },
+      }),
+    );
+    // The card names its window, so a number is never read as "all time".
+    expect(surface.text()).toContain("Admission drops (last 24 hours)");
+    const rendered = Object.fromEntries(
+      [...surface.container.querySelectorAll("[data-admission-drops]")].map((node) => [
+        node.getAttribute("data-admission-drops"),
+        node.textContent,
+      ]),
+    );
+    expect(rendered).toEqual({ "pr-held": "3", "system-cap": "1", "workspace-cap": "2", error: "0" });
+    // Every reason is labelled, not only numbered.
+    for (const label of ["PR in flight", "System cap", "Workspace cap", "Storage error"]) {
+      expect(surface.text()).toContain(label);
+    }
     await surface.close();
   });
 });
