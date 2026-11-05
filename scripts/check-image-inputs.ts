@@ -59,7 +59,7 @@ export function familyPattern(glob: string): RegExp {
   return new RegExp(`^${source}$`);
 }
 
-export const IMAGE_INPUT_PATTERNS: readonly RegExp[] = IMAGE_INPUT_FAMILIES.map(familyPattern);
+const IMAGE_INPUT_PATTERNS: readonly RegExp[] = IMAGE_INPUT_FAMILIES.map(familyPattern);
 
 /**
  * The instruction quoted on failure, read from `AGENTS.md` § Sandbox image

@@ -16,11 +16,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  changedFamilies,
   containerSignature,
   evaluateImageGate,
   familyPattern,
   IMAGE_INPUT_FAMILIES,
-  IMAGE_INPUT_PATTERNS,
   IMAGE_REBUILD_INSTRUCTION,
   readDockerfilePaths,
   touchesImageInput,
@@ -295,7 +295,12 @@ describe("touchesImageInput", () => {
 
   test("matches each declared path family", () => {
     for (const path of declared) expect(touchesImageInput([path])).toBe(true);
-    expect(IMAGE_INPUT_PATTERNS).toHaveLength(declared.length);
+    // Each family answers on a path it derives from itself, and answers with
+    // only itself — so a pattern that stops matching, or a new family, fails
+    // here even though the array length never moved.
+    for (const family of IMAGE_INPUT_FAMILIES) {
+      expect(changedFamilies([family.replace("**", "sample")]), family).toEqual([family]);
+    }
   });
 
   test("an untouched path list passes", () => {
