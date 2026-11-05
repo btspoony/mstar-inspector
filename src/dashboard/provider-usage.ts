@@ -17,7 +17,9 @@
  * a rejected credential is `unauthorized`, never a healthy bar.
  *
  * Catalog id → family. An unmapped id is `absent` + `no-probe` and NEVER a
- * guessed endpoint (the probe set is exactly the ten families below).
+ * guessed endpoint: the probe set is exactly ten families over fifteen catalog
+ * ids, listed below as twelve rows because the Z.AI/Zhipuai and MiniMax
+ * intl/CN families split by host.
  *
  * | catalog ids                                                        | endpoint (auth)                                                        | limits |
  * |--------------------------------------------------------------------|------------------------------------------------------------------------|--------|
@@ -310,6 +312,23 @@ function snapshotFromRead(
   return { status: "ok", fetchedAt, limits: extracted };
 }
 
+/**
+ * A 2xx whose BODY rejects the credential. Vendors that gate the route at the
+ * application layer answer 200 and put the verdict in the payload; that verdict
+ * is deterministic about the KEY, so it renders as `unauthorized` ("this key was
+ * rejected") instead of `error` ("could not read"). Each family passes its own
+ * documented code mapping; `undefined` means the body raised no such verdict and
+ * the caller continues with normal extraction.
+ */
+function bodyKeyRejection(
+  read: QuotaRead,
+  rejectionReason: (body: Record<string, unknown>) => string | undefined,
+): UsageSnapshot | undefined {
+  if (!read.ok) return undefined;
+  const reason = rejectionReason(read.body);
+  return reason === undefined ? undefined : { status: "unauthorized", fetchedAt: Date.now(), limits: [], reason };
+}
+
 /** One family's probe: GET its endpoint(s), normalize to limits. Never throws
  *  by contract (an escaping throw is caught by probeProviderUsage). */
 type UsageProbe = (input: ProbeInput, key: string) => Promise<UsageSnapshot>;
@@ -458,9 +477,20 @@ function zaiLimitUnit(type: unknown): UsageLimit["unit"] | undefined {
 }
 
 /**
+ * Z.AI's documented authentication-failure body code (the bigmodel error table:
+ * 401 — token expired or incorrect / "Authorization Token illegal"). Any other
+ * non-success code is account or service state — e.g. 500 for "the user has no
+ * coding plan" — and stays `error`.
+ */
+const ZAI_AUTH_FAILURE_CODE = 401;
+
+/**
  * GLM coding-plan quota. The key rides `Authorization` verbatim (no Bearer
  * prefix). `percentage` is a server-rounded USED percent, so the exact counter
- * pair wins when both absolutes are present.
+ * pair wins when both absolutes are present. The route answers HTTP 200 for an
+ * application-level failure, so a body carrying the documented auth code 401 is
+ * the CREDENTIAL's verdict (`unauthorized`); every other non-success body is
+ * `error` with its code in the diagnostic reason.
  */
 function zaiUsage(host: string): UsageProbe {
   return async (input, key) => {
@@ -468,8 +498,17 @@ function zaiUsage(host: string): UsageProbe {
       authorization: key,
       "content-type": "application/json",
     });
+    const rejection = bodyKeyRejection(read, (body) =>
+      body.success !== true && toNumber(body.code) === ZAI_AUTH_FAILURE_CODE
+        ? `zai rejected the key (${ZAI_AUTH_FAILURE_CODE})`
+        : undefined,
+    );
+    if (rejection !== undefined) return rejection;
     return snapshotFromRead(read, (body) => {
-      if (body.success !== true) return "usage request rejected";
+      if (body.success !== true) {
+        const code = toNumber(body.code);
+        return `usage request rejected${code === undefined ? "" : ` (${code})`}`;
+      }
       const data = asRecord(body.data) ?? {};
       const rows = Array.isArray(data.limits) ? data.limits : [];
       const limits = new Map<string, UsageLimit>();
@@ -519,6 +558,13 @@ const MINIMAX_REMAINS_PATH = "/v1/token_plan/remains";
 /** `current_*_status` enum: 2 = exhausted, 3 = unlimited. */
 const MINIMAX_STATUS_EXHAUSTED = 2;
 const MINIMAX_STATUS_UNLIMITED = 3;
+/**
+ * `base_resp.status_code` values that mean the KEY was rejected, per
+ * platform.minimax.io's error table: 1004 (not authorized — the token does not
+ * match the group, or the key is inactive) and 2049 (invalid API key). Any other
+ * non-zero code is a service-side failure and stays `error`.
+ */
+const MINIMAX_AUTH_STATUS_CODES: readonly number[] = [1004, 2049];
 
 /**
  * One bucket's window fraction. The endpoint's own status outranks any stale
@@ -550,12 +596,20 @@ function isUnavailableMinimaxPlan(row: Record<string, unknown>): boolean {
 }
 
 /** MiniMax Token Plan. The vendor answers HTTP 200 for a rejected credential,
- *  so `base_resp.status_code` is the real success signal. */
+ *  so `base_resp.status_code` is the real success signal: the documented auth
+ *  codes report `unauthorized`, every other non-zero code `error`. */
 function minimaxUsage(host: string): UsageProbe {
   return async (input, key) => {
     const read = await readQuotaJson(input, `${host}${MINIMAX_REMAINS_PATH}`, {
       authorization: `Bearer ${key}`,
     });
+    const rejection = bodyKeyRejection(read, (body) => {
+      const statusCode = toNumber(asRecord(body.base_resp)?.status_code);
+      return statusCode !== undefined && MINIMAX_AUTH_STATUS_CODES.includes(statusCode)
+        ? `minimax rejected the key (${statusCode})`
+        : undefined;
+    });
+    if (rejection !== undefined) return rejection;
     return snapshotFromRead(read, (body) => {
       const baseResp = asRecord(body.base_resp);
       const statusCode = toNumber(baseResp?.status_code);

@@ -569,6 +569,25 @@ describe("zai / zhipuai", () => {
       },
     ]);
   });
+
+  test("the documented auth failure (body code 401) is unauthorized; other non-success codes stay error", async () => {
+    const rejected = await probeProviderUsage(
+      { fetch: stubFetch(json(200, { success: false, code: 401, msg: "Authorization Token illegal" })) },
+      "zai",
+      "zai-key",
+    );
+    expect(rejected.status).toBe("unauthorized");
+    expect(rejected.limits).toEqual([]);
+
+    // 500 + "no coding plan" is ACCOUNT state, not a rejected credential.
+    const noPlan = await probeProviderUsage(
+      { fetch: stubFetch(json(200, { success: false, code: 500, msg: "no coding plan" })) },
+      "zai",
+      "zai-key",
+    );
+    expect(noPlan.status).toBe("error");
+    expect(noPlan.reason).toContain("500");
+  });
 });
 
 // --- family: minimax-code ---
@@ -655,13 +674,28 @@ describe("minimax-code", () => {
     expect(snapshot.limits[0]).toMatchObject({ id: "minimax:session", usedFraction: 1 });
   });
 
-  test("a non-zero base_resp status is an error even on HTTP 200", async () => {
-    const snapshot = await probeProviderUsage(
-      { fetch: stubFetch(json(200, { base_resp: { status_code: 1004 }, model_remains: [] })) },
+  test("a documented auth status_code is unauthorized; any other non-zero code is an error", async () => {
+    // platform.minimax.io documents 1004 (not authorized) and 2049 (invalid
+    // API key) as the CREDENTIAL's verdict — the dialog must say "key rejected",
+    // not "could not read".
+    for (const statusCode of [1004, 2049]) {
+      const rejected = await probeProviderUsage(
+        { fetch: stubFetch(json(200, { base_resp: { status_code: statusCode }, model_remains: [] })) },
+        "minimax-coding-plan",
+        "mm-key",
+      );
+      expect(rejected.status, String(statusCode)).toBe("unauthorized");
+      expect(rejected.limits).toEqual([]);
+      expect(rejected.reason, String(statusCode)).toContain(String(statusCode));
+    }
+    // 1002 is a rate-limit code: a service failure, never a rejected key.
+    const failed = await probeProviderUsage(
+      { fetch: stubFetch(json(200, { base_resp: { status_code: 1002 }, model_remains: [] })) },
       "minimax-coding-plan",
       "mm-key",
     );
-    expect(snapshot.status).toBe("error");
+    expect(failed.status).toBe("error");
+    expect(failed.reason).toContain("1002");
   });
 });
 
