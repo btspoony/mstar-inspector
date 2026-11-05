@@ -104,7 +104,7 @@ import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type Review
 import { remainingOuterMs, remainingSoftMinutes, runRecheckSeat, type RecheckSeatResult } from "./recheck";
 import { runReportSeat, revalidatedNotes } from "./report";
 import type { ReportDoc } from "../../shared/src/report-wire";
-import type { RecheckDoc } from "../../shared/src/recheck-wire";
+import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/recheck-wire";
 
 /**
  * Environment override for the mstar-harness plugin root — the primary,
@@ -1214,9 +1214,11 @@ const DEEP_NO_YIELD_CAUSE = "deep parent turn produced no structured yield (msta
  * same reason — its child must never ride the parent's stream. The shared
  * mstar-review-seat definition is installed before concurrent work — the
  * recheck seat and the report seat both dispatch against it — and removed with
- * the deep role files after all sessions settle; an unfinished seat is aborted
- * when the parent turn settles (success OR failure), and the seat itself never
- * throws — a failure resolves `recheck: null` without touching the envelope.
+ * the deep role files after all sessions settle; on a successful parent turn
+ * an unfinished seat is awaited on ITS OWN budget (anchored to the same outer
+ * deadline), and it is aborted only on parent-turn failure or when the outer
+ * deadline leaves no room — the seat itself never throws, so a failure
+ * resolves `recheck: null` without touching the envelope.
  */
 async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult> {
   const pluginRoot = resolveHarnessRoot();
@@ -1505,9 +1507,11 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         // can survive the review) and never masks its outcome.
         await supervision;
       }
-      // The review settled: use an already-completed recheck or abort the
-      // unfinished seat — never start or await a fresh budget after review.
-      recheckController.abort();
+      // The review settled: await the already-running recheck on ITS OWN
+      // budget. It started with this run's anchored outer deadline, so the
+      // await is bounded and is never a fresh 180s. Stop it only when the
+      // outer deadline leaves no room to finish, instead of blocking the tail.
+      if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
       // The narrative report runs after BOTH the parent turn and the recheck
       // seat settled (it cites their results), on its OWN session: the parent's
@@ -1689,10 +1693,11 @@ export const ompAgentRuntime: AgentRuntime = {
 
       // spec §7.8: the recheck seat runs CONCURRENTLY as one
       // more structured child on the SAME read-only ToolSession (separate
-      // result slot). runRecheckSeat never throws; when the review work
-      // settles, the controller aborts an unfinished seat and the result
-      // (already completed, or null) is reaped — never a fresh budget after
-      // review. A review failure aborts the seat too, then rethrows.
+      // result slot). runRecheckSeat never throws; once the review work
+      // settles the runner awaits that same seat on ITS OWN budget (derived
+      // from the anchored outer deadline) — never a fresh budget after
+      // review. A review failure aborts the seat too, then rethrows; an
+      // exhausted outer budget aborts it rather than blocking the run's tail.
       const recheckController = new AbortController();
       const recheckDoc = input.recheck;
       const recheckWork =
@@ -1796,7 +1801,10 @@ export const ompAgentRuntime: AgentRuntime = {
         // timer can survive the review) and never masks its outcome.
         await supervision;
       }
-      recheckController.abort();
+      // The review settled: await the already-running recheck on ITS OWN
+      // budget — bounded by the same anchored outer deadline, never a fresh
+      // 180s. Abort only when the outer deadline leaves no room to finish.
+      if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
 
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));

@@ -63,6 +63,7 @@ function input(overrides: Partial<RecheckInput> = {}): RecheckInput {
     discussion: {
       items: [],
       issueCoverage: "complete",
+      issueModelCoverage: "complete",
       issueDigest: "digest",
       capturedMs: 1,
       threads: [],

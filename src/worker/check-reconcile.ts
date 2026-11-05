@@ -583,7 +583,7 @@ async function reenableHealthyAppChecks(
   // The current credential digest per pair, so an unchanged envelope is
   // detectable WITHOUT touching the network. A pair whose digest cannot be read
   // yields a null the store's rule handles (F-005).
-  const candidates: { appId: string; installationId: number; currentFingerprint: string | null; proven: boolean }[] = [];
+  const candidates: { appId: string; installationId: number; currentFingerprint: string | null }[] = [];
   for (const pair of suspended) {
     const routing = await checkRoutingRow(db, pair.app_id, pair.installation_id);
     const currentFingerprint = routing === null ? null : await sha256Hex(routing.private_key_enc);
@@ -591,7 +591,6 @@ async function reenableHealthyAppChecks(
       appId: pair.app_id,
       installationId: pair.installation_id,
       currentFingerprint,
-      proven: false,
     });
   }
 
@@ -685,19 +684,33 @@ async function reenableProbe(
   | { kind: "refused" }
   | { kind: "resuspend"; reason: CheckCredentialReason; credentialFingerprint?: string }
 > {
-  const row = await db
+  const rows = await db
+    // shortcut: tenant-bypass — per-pair Check resume probe selecting the kill
+    // switch only; no tenant-facing field. Upgrade: tenant-filter it once the
+    // check store becomes workspace-scoped.
     .prepare(
-      `SELECT last_error FROM review_checks
-        WHERE app_id = ? AND installation_id = ? AND recovery_state = 'suspended' LIMIT 1`,
+      `SELECT rc.last_error, ga.review_enabled
+         FROM review_checks rc
+         JOIN github_apps ga ON ga.id = rc.app_id
+        WHERE rc.app_id = ? AND rc.installation_id = ? AND rc.recovery_state = 'suspended'`,
     )
     .bind(pair.appId, pair.installationId)
-    .first<{ last_error: string | null }>();
-  const kind = checkSuspensionKindOf(row?.last_error ?? null);
-  // Neither kind ever had a credential question, so neither owes a probe:
-  // `disabled` was proved by App status and `paused` by the kill switch. Both
-  // resume straight into the row loop, which resolves credentials afresh anyway
-  // before any request.
-  if (kind === "disabled" || kind === "paused") return { kind: "resume" };
+    .all<{ last_error: string | null; review_enabled: number }>();
+  // A pair may hold mixed suspension kinds (the kill-switch hold is per row, a
+  // credential suspension covers the pair). A row whose kill switch is STILL
+  // off blocks every path, including the credential probe below: resuming a
+  // held row because a sibling looks provable is exactly the mixed-kind
+  // mistake this pair read exists to prevent.
+  const kinds = rows.results.map((row) => checkSuspensionKindOf(row.last_error));
+  if (rows.results.some((row, index) => kinds[index] === "paused" && row.review_enabled === 0)) {
+    return { kind: "unchanged" };
+  }
+  // Only when EVERY suspended row is status-resumable may this skip the
+  // credential probe: `disabled` was proved by App status and a LIFTED
+  // `paused` by the switch, and neither owes a proof.
+  if (kinds.length > 0 && kinds.every((kind) => kind === "disabled" || kind === "paused")) {
+    return { kind: "resume" };
+  }
   // Admission BEFORE the factory (M8's discipline): an unaffordable probe must
   // not run at all, so nothing is written and the pair stays retryable.
   if (!canSpend(budget, now(), CREDENTIAL_REQUESTS, false)) return { kind: "refused" };

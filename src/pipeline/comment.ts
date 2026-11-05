@@ -395,7 +395,7 @@ function closureCoverageLine(coverage: ClosureCoverage): string {
 /**
  * The ONE prior-findings table (§7.10 columns: finding / disposition /
  * evidence / thread) plus its over-cap count, capped at `CLOSURE_MAX_ROWS`.
- * The body's `### Revalidated findings` section is its only renderer.
+ * `buildRevalidatedSection`'s folded block is its only renderer.
  * Leading blank line included: the callers join blocks.
  */
 function priorFindingLines(rows: ClosureRow[]): string[] {
@@ -439,20 +439,28 @@ function priorFindingLines(rows: ClosureRow[]): string[] {
 
 /** The engine's narrative heading — the overview's anchor. */
 const REVIEW_HEADING = "## 📋 Review";
-/** The engine's findings heading — the revalidated table's anchor. */
+/** The engine's findings heading — the revalidated block is appended after it. */
 const FINDINGS_HEADING = "### Findings";
+/** The folded prior-findings block: the summary IS its heading. */
+const REVALIDATED_OPEN = "<details><summary>Revalidated findings</summary>";
+const REVALIDATED_CLOSE = "</details>";
 
 /**
- * The body's ONE prior-findings rendering (the template mandates the heading):
- * the §7.10 coverage line, then the round's rows. `none` when the round had no
- * prior finding at all, so a first round's body stays clean.
+ * The body's ONE prior-findings rendering: a COLLAPSED `<details>` block (the
+ * section sits after `### Findings`, so an expanded table would push the
+ * current findings down) carrying the §7.10 coverage line and the round's
+ * rows. `none` when the round had no prior finding at all, so a first round's
+ * body stays clean.
  */
 export function buildRevalidatedSection(coverage: ClosureCoverage, rows: ClosureRow[]): string {
-  const heading = ["### Revalidated findings", ""];
+  const lines = [REVALIDATED_OPEN];
   if (rows.length === 0 && coverage.totalOpen === 0) {
-    return [...heading, "none"].join("\n");
+    lines.push("", "none");
+  } else {
+    lines.push("", closureCoverageLine(coverage), ...priorFindingLines(rows));
   }
-  return [...heading, closureCoverageLine(coverage), ...priorFindingLines(rows)].join("\n");
+  lines.push("", REVALIDATED_CLOSE);
+  return lines.join("\n");
 }
 
 /** The collapsible fix-plan block; markdown text must survive the outer fence. */
@@ -485,18 +493,37 @@ function insertAfterHeading(body: string, anchor: string, block: string): string
   return lines.join("\n");
 }
 
-/** Insert `block` before the line that equals `anchor` (first occurrence). */
-function insertBeforeHeading(body: string, anchor: string, block: string): string | null {
+/**
+ * Insert `block` AFTER the whole section opened by `anchor` (first heading
+ * match) — before the next heading at the same or a higher level, or at the
+ * end of the body when nothing follows. Used to place the revalidated block
+ * after the current findings rather than in front of them.
+ */
+function insertAfterSection(body: string, anchor: string, block: string): string | null {
   const lines = body.split("\n");
   const index = lines.indexOf(anchor);
   if (index < 0) return null;
-  lines.splice(index, 0, block, "");
-  return lines.join("\n");
+  const level = /^#+/.exec(anchor)?.[0].length ?? 3;
+  let end = lines.length;
+  for (let i = index + 1; i < lines.length; i += 1) {
+    const heading = /^(#{1,6})\s/.exec(lines[i]!);
+    if (heading !== null && heading[1]!.length <= level) {
+      end = i;
+      break;
+    }
+  }
+  const head = lines.slice(0, end).join("\n");
+  const tail = lines.slice(end).join("\n");
+  return tail === "" ? `${head}\n\n${block}` : `${head}\n\n${block}\n\n${tail}`;
 }
 
 /**
  * A report line markdown would read as STRUCTURE rather than text: an ATX
- * heading; a setext underline (the whole line is 1+ `=` or `-`, optionally
+ * heading (including a bare run of `#`); a GFM table delimiter row — a line
+ * made only of `|`, `-`, `:` and spaces that contains both a pipe and a dash,
+ * since pipes are optional at either end, a cell may be `:-:`, and one dash
+ * already qualifies; the two lookaheads keep it linear, with no nested
+ * quantifier to backtrack — which would turn the line above it into a header; a setext underline (the whole line is 1+ `=` or `-`, optionally
  * followed by spaces — it turns the line above it into a heading) or a
  * thematic break (any of `-`, `*`, `_` at least three times, optionally
  * spaced); or a code-fence opener (3+ backticks or tildes), which left
@@ -513,7 +540,7 @@ function insertBeforeHeading(body: string, anchor: string, block: string): strin
  * spaces is a code block, a structure no heading anchor can be forged in).
  */
 const REPORT_STRUCTURE_LINE =
-  /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|`{3,}|~{3,}|\||>|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/;
+  /^( {0,3})(#{1,6}(?:\s|$)|(?=[^\n]*\|)(?=[^\n]*-)[-|: \t]*$|(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|`{3,}|~{3,}|\||>|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/;
 
 /**
  * Neutralize a raw report field so markdown reads it as text, not structure.
@@ -576,8 +603,9 @@ function neutralizeReportText(text: string): string {
  * Compose the report fields into an engine-rendered review body; the tail
  * sections are appended by `buildReviewBody` through `buildReportTail`.
  *
- *   `## 📋 Review` → overview → (narrative) → `### Revalidated findings` →
- *   `### Findings` → `### Linked-issue AC` → `### ✅ Verified` →
+ *   `## 📋 Review` → overview → (narrative) → `### Findings` →
+ *   `<details>Revalidated findings</details>` (collapsed) →
+ *   `### Linked-issue AC` → `### ✅ Verified` →
  *   `### 🗑️ Considered & rejected` → `## 🛠️ Plan to fix`
  *
  * Anchors are matched on the FIRST line equal to the heading, and every raw
@@ -589,8 +617,8 @@ function neutralizeReportText(text: string): string {
  * markdown here. A body that carries no `## 📋 Review` line is not the engine's
  * layout: the overview is SKIPPED rather than prepended somewhere the reader
  * would not expect, and the remaining sections are still appended. A
- * zero-finding envelope omits `### Findings`; the empty heading is added so the
- * revalidated table keeps its position and the layout stays fixed. A missing
+ * zero-finding envelope omits `### Findings`; the empty heading is added first,
+ * then the fold, so the section order matches every other round. A missing
  * report writes `none` under every heading — the headings themselves are never
  * deleted.
  */
@@ -604,11 +632,12 @@ function insertReportFields(rendered: string, report: ReportDoc | null, revalida
     // skipped rather than prefixed somewhere the reader would not expect.
     body = insertAfterHeading(body, REVIEW_HEADING, overview) ?? body;
   }
-  const withRevalidated = insertBeforeHeading(body, FINDINGS_HEADING, revalidated);
+  const withRevalidated = insertAfterSection(body, FINDINGS_HEADING, revalidated);
   if (withRevalidated === null) {
     // Zero-finding envelope: the renderer omitted the heading, so this IS the
-    // template's self-add case — revalidated table, then the empty heading.
-    return `${body}\n\n${revalidated}\n\n${FINDINGS_HEADING}\n\nnone`;
+    // template's self-add case — the empty heading first, then the fold, so
+    // the section order matches a body that has findings.
+    return `${body}\n\n${FINDINGS_HEADING}\n\nnone\n\n${revalidated}`;
   }
   return withRevalidated;
 }

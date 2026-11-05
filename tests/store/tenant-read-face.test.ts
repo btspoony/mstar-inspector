@@ -177,7 +177,7 @@ function directReadFiles(): string[] {
 /** The maintenance face: every direct `github_apps` read outside apps-store. */
 const MAINTENANCE_SITES: Record<string, number> = {
   "worker/lifecycle-reconcile.ts": 1,
-  "worker/check-reconcile.ts": 2,
+  "worker/check-reconcile.ts": 3,
   "pipeline/review-threads.ts": 1,
   "store/review-checks.ts": 1,
 };

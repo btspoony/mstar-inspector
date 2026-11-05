@@ -645,7 +645,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       { title: "D", disposition: "unverifiable", reason: "no-evidence", evidenceKind: null, thread: "-" },
     ];
     const md = buildRevalidatedSection(coverage, rows);
-    expect(md.startsWith("### Revalidated findings\n\nReassessed 1/2 prior finding(s) this round")).toBe(true);
+    expect(md.startsWith("<details><summary>Revalidated findings</summary>\n\nReassessed 1/2 prior finding(s) this round")).toBe(true);
     expect(md).toContain("| finding | disposition | evidence | thread |");
     expect(md).toContain("| A \\| b | addressed (verified-fix) | current-code | not yet resolved |");
     expect(md).toContain("| C | dismissed (non-fix-dismissal) | - | - |");
@@ -670,7 +670,8 @@ describe("report sections (mstar.report/v1 side document)", () => {
     // The row text is escaped like a report field, so the cell stays text and
     // no tag can fold the rest of the comment.
     expect(revalidated).toContain("&lt;details>&lt;summary>prior&lt;/summary>");
-    expect(revalidated).not.toContain("<details>");
+    expect(revalidated.match(/<details>/g)).toHaveLength(1);
+    expect(revalidated).not.toContain("<details><summary>prior");
 
     // `planToFix: "none"` keeps the fix-plan fold out, so any raw `<details>`
     // left in the body would be the injected one.
@@ -693,13 +694,16 @@ describe("report sections (mstar.report/v1 side document)", () => {
       0,
       { report: { ...report, planToFix: "none" }, revalidated },
     );
-    expect(body).not.toContain("<details");
+    expect(body.match(/<details/g)).toHaveLength(1);
+    expect(body.match(/<\/details>/g)).toHaveLength(1);
     const injected = body.indexOf("&lt;details>");
     expect(injected).toBeGreaterThan(-1);
     // Every section that follows the table is still outside the (escaped)
     // fold text — the escape is in place, not just somewhere in the body.
+    expect(body.indexOf("### Findings")).toBeLessThan(
+      body.indexOf("<summary>Revalidated findings</summary>"),
+    );
     for (const section of [
-      "### Findings",
       "### Linked-issue AC",
       "### ✅ Verified",
       "### 🗑️ Considered & rejected",
@@ -744,7 +748,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       capped: 0,
       contextCoverage: "complete",
     };
-    expect(buildRevalidatedSection(firstRound, [])).toBe("### Revalidated findings\n\nnone");
+    expect(buildRevalidatedSection(firstRound, [])).toBe("<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>");
   });
 
   test("rows all over the cap still state the coverage, table or not", () => {
@@ -803,15 +807,15 @@ describe("report sections (mstar.report/v1 side document)", () => {
         ],
       },
       0,
-      { report, revalidated: "### Revalidated findings\n\nnone" },
+      { report, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" },
     );
     const order = [
       "## 📋 Review",
       "**What this PR does**",
       "Two issues found.",
-      "### Revalidated findings",
       "### Findings",
       "#### 🟠 Fractional expiry",
+      "<summary>Revalidated findings</summary>",
       "### Linked-issue AC",
       "### ✅ Verified",
       "### 🗑️ Considered & rejected",
@@ -839,10 +843,10 @@ describe("report sections (mstar.report/v1 side document)", () => {
   test("a zero-finding envelope: the revalidated table self-adds the empty `### Findings`", () => {
     const output: ReviewOutput = { schema: "mstar.review/v1", verdict: "ship it", findings: [] };
     expect(renderReviewMarkdown(output)).not.toContain("### Findings");
-    const body = buildReviewBody(output, 0, { report, revalidated: "### Revalidated findings\n\nnone" });
-    expect(body).toContain("### Revalidated findings");
+    const body = buildReviewBody(output, 0, { report, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" });
+    expect(body).toContain("<summary>Revalidated findings</summary>");
     // Revalidated FIRST, then the added heading — the fixed template order.
-    expect(body.indexOf("### Revalidated findings")).toBeLessThan(body.indexOf("### Findings"));
+    expect(body.indexOf("### Findings")).toBeLessThan(body.indexOf("<summary>Revalidated findings</summary>"));
     expect(body).toContain("### Linked-issue AC");
   });
 
@@ -850,7 +854,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     const body = buildReviewBody(
       { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
       0,
-      { report: null, revalidated: "### Revalidated findings\n\nnone" },
+      { report: null, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" },
     );
     expect(body).not.toContain("**What this PR does**");
     expect(body).toContain("### Linked-issue AC\n\nnone");
@@ -873,7 +877,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       0,
       {
         report: { ...report, overview: "Adds a guard.\n### Findings\n#### 🟠 Injected" },
-        revalidated: "### Revalidated findings\n\nnone",
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
       },
     );
     // Escaped in place, so the ONLY `### Findings` line is the engine's — the
@@ -884,7 +888,6 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(headings).toEqual([
       "## ⚠️ Verdict: `needs fixes`",
       "## 📋 Review",
-      "### Revalidated findings",
       "### Findings",
       "#### 🟠 Fractional expiry",
       "### Linked-issue AC",
@@ -900,7 +903,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       0,
       {
         report: { ...report, overview: "Adds a guard.\n   ### Findings\n   #### 🟠 Injected" },
-        revalidated: "### Revalidated findings\n\nnone",
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
       },
     );
     // The indent is kept and only the marker escaped, so the field stays text
@@ -911,7 +914,6 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(headings).toEqual([
       "## ✅ Verdict: `ship it`",
       "## 📋 Review",
-      "### Revalidated findings",
       "### Findings",
       "### Linked-issue AC",
       "### ✅ Verified",
@@ -926,7 +928,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       0,
       {
         report: { ...report, verified: "## 📋 Review\n---\nsuite green" },
-        revalidated: "### Revalidated findings\n\nnone",
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
       },
     );
     expect(body).toContain("\\## 📋 Review");
@@ -953,14 +955,14 @@ describe("report sections (mstar.report/v1 side document)", () => {
         publicationMarker,
         reportParts: {
           report: { ...report, verified: `- ${html}`, rejected: "R&D &lt;details&gt;" },
-          revalidated: "### Revalidated findings\n\nnone",
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
         },
       });
       expect(body).toContain("&lt;details");
-      // The plan block is the body's ONLY fold, and it is closed: nothing the
-      // field said can swallow the sections below it.
-      expect(body.match(/<details/g)).toHaveLength(1);
-      expect(body.match(/<\/details>/g)).toHaveLength(1);
+      // Two folds (revalidated + plan), both closed: nothing the field said
+      // can swallow the sections below it.
+      expect(body.match(/<details/g)).toHaveLength(2);
+      expect(body.match(/<\/details>/g)).toHaveLength(2);
       expect(body.indexOf("### 🗑️ Considered & rejected")).toBeGreaterThan(body.indexOf("&lt;details"));
       expect(body.indexOf("## 🛠️ Plan to fix")).toBeGreaterThan(body.indexOf("### 🗑️ Considered & rejected"));
       expect(body.trimEnd().endsWith(publicationMarker)).toBe(true);
@@ -979,7 +981,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
         0,
         {
           report: { ...report, verified: `- suite green\n${fence}\ntail`, planToFix: "none" },
-          revalidated: "### Revalidated findings\n\nnone",
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
         },
       );
       // Escaped in place: the opener stays text and the field is still readable.
@@ -993,6 +995,31 @@ describe("report sections (mstar.report/v1 side document)", () => {
     }
   });
 
+  test("a GFM delimiter row and a bare ATX heading are neutralized as structure", () => {
+    // One dash already delimits a cell; pipes are optional at either end. The
+    // escape must land on the marker so no header row can pair with it.
+    const cases: Array<[string, string]> = [
+      ["Name | Value\n-|-", "\\-|-"],
+      ["Name | Value\n--|--", "\\--|--"],
+      ["Name | Value\n:---|---:", "\\:---|---:"],
+      ["Name | Value\n--- | ---", "\\--- | ---"],
+      ["Name | Value\n| --- | --- |", "\\| --- | --- |"],
+      ["a | b\n---|---", "\\---|---"],
+      ["###", "\\###"],
+    ];
+    for (const [field, escaped] of cases) {
+      const body = buildReviewBody(
+        { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        0,
+        {
+          report: { ...report, verified: field },
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+        },
+      );
+      expect({ field, escaped: body.includes(escaped) }).toEqual({ field, escaped: true });
+    }
+  });
+
   test("every thematic-break form is neutralized: `***`, `___` and spaced runs", () => {
     for (const rule of ["***", "___", "- - -", "* * *", "_ _ _", "----", "==="]) {
       const body = buildReviewBody(
@@ -1000,7 +1027,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
         0,
         {
           report: { ...report, verified: `suite green\n${rule}\ntail` },
-          revalidated: "### Revalidated findings\n\nnone",
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
         },
       );
       expect(body).toContain(`\\${rule}`);
@@ -1011,7 +1038,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       0,
       {
         report: { ...report, verified: "suite green\n-- two dashes" },
-        revalidated: "### Revalidated findings\n\nnone",
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
       },
     );
     expect(safe).toContain("\n-- two dashes\n");
@@ -1034,7 +1061,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
         0,
         // `planToFix: "none"` keeps the fenced plan (whose own `1.` lines are
         // code, not markdown) out of the structural scan below.
-        { report: { ...report, verified: field, planToFix: "none" }, revalidated: "### Revalidated findings\n\nnone" },
+        { report: { ...report, verified: field, planToFix: "none" }, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" },
       );
       // Escaped in place: the field's text survives and opens no structure.
       expect(body).toContain(`\n${escaped}\ntail\n`);
@@ -1043,7 +1070,6 @@ describe("report sections (mstar.report/v1 side document)", () => {
       expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
         "## ✅ Verdict: `ship it`",
         "## 📋 Review",
-        "### Revalidated findings",
         "### Findings",
         "### Linked-issue AC",
         "### ✅ Verified",
@@ -1073,7 +1099,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
         0,
         {
           report: { ...report, verified: field, planToFix: "none" },
-          revalidated: "### Revalidated findings\n\nnone",
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
         },
       );
       // Escaped in place: the field's text survives and opens no block.
@@ -1084,7 +1110,6 @@ describe("report sections (mstar.report/v1 side document)", () => {
       expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
         "## ✅ Verdict: `ship it`",
         "## 📋 Review",
-        "### Revalidated findings",
         "### Findings",
         "### Linked-issue AC",
         "### ✅ Verified",
@@ -1103,7 +1128,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
         0,
         {
           report: { ...report, verified: `suite green\n${underline}\ntail` },
-          revalidated: "### Revalidated findings\n\nnone",
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
         },
       );
       // Escaped in place, indent kept: the divider stays text, never a heading.
@@ -1113,7 +1138,6 @@ describe("report sections (mstar.report/v1 side document)", () => {
       expect(body.split("\n").filter((line) => /^#{2,4} /.test(line))).toEqual([
         "## ✅ Verdict: `ship it`",
         "## 📋 Review",
-        "### Revalidated findings",
         "### Findings",
         "### Linked-issue AC",
         "### ✅ Verified",
@@ -1136,7 +1160,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       const body = buildReviewBody(
         { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
         0,
-        { report, revalidated: "### Revalidated findings\n\nnone" },
+        { report, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" },
       );
       expect(body.startsWith("## ✅ Verdict: `ship it`")).toBe(true);
       expect(body.indexOf("**What this PR does**")).toBeGreaterThan(body.indexOf("## 📋 Review"));
@@ -1169,7 +1193,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       round: 1,
       headSha: "0123456789abcdef0123456789abcdef01234567",
       publicationMarker,
-      reportParts: { report, revalidated: "### Revalidated findings\n\nnone" },
+      reportParts: { report, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" },
     });
     expect(body.startsWith("<!-- mstar-inspector:review:v1 round=1 -->")).toBe(true);
     expect(body.trimEnd().endsWith(publicationMarker)).toBe(true);
@@ -1192,7 +1216,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     } satisfies Parameters<typeof buildPreparedReviewBody>[0];
     const body = buildPreparedReviewBody(input);
     expect(body).not.toContain("### Linked-issue AC");
-    expect(body).not.toContain("### Revalidated findings");
+    expect(body).not.toContain("<summary>Revalidated findings</summary>");
     // `since` absent too: a full round's header is unchanged.
     expect(body).toContain("Review 1 · commit 0123456\n");
   });
@@ -1359,7 +1383,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     };
     const body = buildReviewBody(long, 0, {
       report: reportDoc,
-      revalidated: "### Revalidated findings\n\nnone",
+      revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
     });
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
     expect(body).toContain("…");
@@ -1372,7 +1396,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
     const body = buildReviewBody(small, 0, {
       report: { ...reportDoc, planToFix: "x".repeat(REVIEW_BODY_LIMIT * 2) },
-      revalidated: "### Revalidated findings\n\nnone",
+      revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
     });
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
     for (const heading of reportTailHeadings) expect(body).toContain(heading);
@@ -1397,7 +1421,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
           rejected: "c".repeat(400),
           planToFix: "x".repeat(REVIEW_BODY_LIMIT),
         },
-        revalidated: "### Revalidated findings\n\nnone",
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
       },
       limit,
     );

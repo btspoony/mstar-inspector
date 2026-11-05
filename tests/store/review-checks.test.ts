@@ -1592,19 +1592,63 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
 
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: DIGEST, proven: false },
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: DIGEST },
       ]),
     ).toEqual([]);
     expect(await listCheckReconcileBatch(db, T0)).toHaveLength(0);
 
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "c".repeat(64), proven: false },
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "c".repeat(64) },
       ]),
     ).toEqual([{ appId: APP_ID, installationId: SCOPE.installationId }]);
     // Resuming returns the SAME historical identity to the batch.
     await reenableChecksForApps(db, [{ appId: APP_ID, installationId: SCOPE.installationId }], T0 + 1);
     expect((await listCheckReconcileBatch(db, T0 + 1)).map((r) => r.identity.attemptId)).toEqual([id]);
+  });
+
+  test("the store read: a mixed-kind pair is resumable only when EVERY suspended row is releasable", async () => {
+    const db = seededDb();
+    // Two attempts under one pair: one credential-suspended, one held by the
+    // kill switch. The resume write flips both, so neither may speak for the
+    // other.
+    const first = await claim(db, { headSha: "a".repeat(40) });
+    const second = await claim(db, { headSha: "b".repeat(40) });
+    for (const attempt of [first, second]) {
+      await setCheckDesired(db, attempt.attempt.identity.attemptId, attempt.lease, CONCLUSION, null, T0);
+      await deferCheckRecovery(
+        db,
+        attempt.attempt.identity.attemptId,
+        attempt.lease,
+        { state: "pending", nextAttemptMs: T0, reason: "release" },
+        T0,
+      );
+    }
+    // Credential suspension covers the pair, then the kill-switch hold stamps
+    // the second row only.
+    await suspendCheckRecovery(
+      db,
+      { appId: APP_ID, installationId: SCOPE.installationId },
+      checkSuspensionReason("identity-mismatch", "suspended", DIGEST),
+      T0,
+    );
+    // The pair-wide suspension cleared the holders, so the per-row pause is
+    // written directly here: the fixture's job is the mixed STATE, not the
+    // lease fencing (that path has its own tests).
+    db.raw
+      .prepare(`UPDATE review_checks SET last_error = ? WHERE id = ?`)
+      .run(checkSuspensionReason("paused", "kill switch"), second.attempt.identity.attemptId);
+    const pair = { appId: APP_ID, installationId: SCOPE.installationId };
+    // The credential envelope is unchanged: the paused row alone must not lift
+    // the pair.
+    expect(
+      await listReenableableCheckPairs(db, [{ ...pair, currentFingerprint: DIGEST }]),
+    ).toEqual([]);
+
+    // A changed envelope makes the credential row releasable too.
+    expect(
+      await listReenableableCheckPairs(db, [{ ...pair, currentFingerprint: "e".repeat(64) }]),
+    ).toEqual([pair]);
   });
 
   test("a live holder is never resumed", async () => {
@@ -1615,7 +1659,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     db.raw.prepare(`UPDATE review_checks SET holder = 'other-run', lease_epoch = 5 WHERE id = ?`).run(id);
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "c".repeat(64), proven: false },
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "c".repeat(64) },
       ]),
     ).toEqual([]);
   });
@@ -1628,7 +1672,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     // proof, which this path never supplies.
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null, proven: false },
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null },
       ]),
     ).toEqual([]);
   });
@@ -1652,7 +1696,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     // a stored null as unequal, so the pair earns its one bounded proof.
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "f".repeat(64), proven: false },
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "f".repeat(64) },
       ]),
     ).toEqual([{ appId: APP_ID, installationId: SCOPE.installationId }]);
   });
@@ -1672,7 +1716,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     // Now an unchanged re-read is filtered out — no churn.
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: NEW, proven: false },
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: NEW },
       ]),
     ).toEqual([]);
   });
@@ -1683,7 +1727,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(APP_ID);
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null, proven: true },
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null },
       ]),
     ).toEqual([]);
   });
@@ -1699,14 +1743,14 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
 
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null, proven: false },
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null },
       ]),
     ).toEqual([]);
 
     db.raw.prepare(`UPDATE github_apps SET review_enabled = 1 WHERE id = ?`).run(APP_ID);
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null, proven: false },
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null },
       ]),
     ).toEqual([{ appId: APP_ID, installationId: SCOPE.installationId }]);
     await reenableChecksForApps(db, [{ appId: APP_ID, installationId: SCOPE.installationId }], T0 + 1);
