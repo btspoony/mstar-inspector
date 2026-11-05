@@ -494,15 +494,20 @@ function insertBeforeHeading(body: string, anchor: string, block: string): strin
  * followed by spaces — it turns the line above it into a heading) or a
  * thematic break (any of `-`, `*`, `_` at least three times, optionally
  * spaced); or a code-fence opener (3+ backticks or tildes), which left
- * unclosed runs to the end of the comment. The four raw
- * report fields are model/PR-echoed text, so a spoofed `### Findings` would
- * otherwise steal the anchor the revalidated table is inserted at, a
- * `## 📋 Review` would fork the layout, and a stray `~~~` would swallow every
- * section after it. Up to three leading spaces still count: markdown reads
- * those as the same structure, so the indent is part of the match (4+ spaces
- * is a code block, a structure no heading anchor can be forged in).
+ * unclosed runs to the end of the comment; or a line that opens a block and
+ * reshapes the lines under it — a table row (leading `|`), a blockquote
+ * (leading `>`), or a list item (bullet `-`/`*`/`+`, ordered `1.`/`1)`,
+ * followed by a space or the line end). The four raw report fields are
+ * model/PR-echoed text, so a spoofed `### Findings` would otherwise steal the
+ * anchor the revalidated table is inserted at, a `## 📋 Review` would fork the
+ * layout, and a stray `~~~` would swallow every section after it; a quote or
+ * list lazily absorbs the lines below it, and a table pulls the following
+ * delimiter row into a grid. Up to three leading spaces still count: markdown
+ * reads those as the same structure, so the indent is part of the match (4+
+ * spaces is a code block, a structure no heading anchor can be forged in).
  */
-const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|`{3,}|~{3,})/;
+const REPORT_STRUCTURE_LINE =
+  /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|`{3,}|~{3,}|\||>|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/;
 
 /**
  * Neutralize a raw report field so markdown reads it as text, not structure.
@@ -511,18 +516,30 @@ const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|(?:=+|-+)
  * re-escaped. Raw HTML is one structure channel: an unclosed `<details>` routes
  * everything after it on the comment into a collapsed block.
  *
- * The other channel is the line itself. Every line whose start
- * `REPORT_STRUCTURE_LINE` matches — an ATX heading, a setext underline, a
- * thematic break or a code-fence opener, after up to three leading spaces —
- * gets a backslash before its first non-space character, so `### Findings`
- * renders literally and is no longer an insertion anchor, and a stray `~~~`
- * cannot swallow every section after it. Block syntax that cannot forge an
- * anchor or open a fence (list items, quotes, table rows) is left as it is.
+ * The other channel is the line itself: one backslash in front of the marker
+ * makes the line text and stops it reshaping the lines under it. After up to
+ * three leading spaces (kept), the line is neutralized when it starts a
+ *
+ * - heading — ATX `#`…`###### `, or a setext underline of `=`/`-`;
+ * - thematic break — a whole line of three or more `-`/`*`/`_`, spaced or not;
+ * - code fence — three or more backticks or tildes, which left open runs to
+ *   the end of the comment;
+ * - table — a line starting `|`, the `|---|` delimiter row included;
+ * - quote — a line starting `>`;
+ * - list item — bullet `-`/`*`/`+`, or ordered `1.`/`1)`, followed by a space
+ *   or the line end.
+ *
+ * The escape goes before the marker character, except on an ordered item whose
+ * digits take no escape: there the `.`/`)` is escaped instead. `### Findings`
+ * therefore renders literally and is no longer an insertion anchor, a stray
+ * `~~~` cannot swallow the sections after it, and a quote, list or table
+ * cannot absorb the lines below it.
  *
  * Deliberate trade-off: `<https://…>` autolinks, and every other `<…>`, render
  * as literal text. That is the smaller risk: unescaped, `<` opens raw HTML and
  * a structure line re-heads the comment, and neither is recoverable once the
- * comment is published, while a literal URL still reads.
+ * comment is published, while a literal URL still reads. A list or quote the
+ * field carried on purpose loses its formatting the same way.
  *
  * `planToFix` is NOT passed through here — it is already fenced as code.
  */
@@ -532,8 +549,13 @@ function neutralizeReportText(text: string): string {
     .replaceAll("<", "&lt;")
     .split("\n")
     .map((line) => {
-      const indent = REPORT_STRUCTURE_LINE.exec(line)?.[1];
-      return indent === undefined ? line : `${indent}\\${line.slice(indent.length)}`;
+      const match = REPORT_STRUCTURE_LINE.exec(line);
+      if (match === null) return line;
+      const marker = match[2]!;
+      // An ordered marker's `.`/`)` is the escapable character — markdown only
+      // honours an escape on punctuation, so the digits take none.
+      const at = match[1]!.length + (/^\d/.test(marker) ? marker.length - 1 : 0);
+      return `${line.slice(0, at)}\\${line.slice(at)}`;
     })
     .join("\n");
 }

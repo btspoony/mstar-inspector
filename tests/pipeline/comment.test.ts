@@ -994,14 +994,52 @@ describe("report sections (mstar.report/v1 side document)", () => {
       );
       expect(body).toContain(`\\${rule}`);
     }
-    // A list item and a two-dash run are text, not breaks: they stay untouched.
+    // A two-dash run is text, not a break: it stays untouched.
     const safe = insertReportSections(
       rendered,
-      { ...report, verified: "- item\n-- two dashes" },
+      { ...report, verified: "suite green\n-- two dashes" },
       "### Revalidated findings\n\nnone",
     );
-    expect(safe).toContain("\n- item");
-    expect(safe).toContain("-- two dashes");
+    expect(safe).toContain("\n-- two dashes\n");
+  });
+
+  test("a block marker in a report field is text: a table row, quote or list item cannot absorb the lines under it", () => {
+    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
+    // The field STARTS with the marker, so the lines a block would absorb are
+    // the ones right below it: the field's own tail, then the engine's
+    // sections. `planToFix` stays out of the field so the body carries no
+    // other list line and the scan below is about the field alone.
+    const cases: Array<[string, string[]]> = [
+      ["| a | b |\n|---||---|\ntail", ["\\| a | b |", "\\|---||---|"]],
+      ["> quoted\nabsorbed", ["\\> quoted"]],
+      ["- bullet\nabsorbed", ["\\- bullet"]],
+      ["* bullet\nabsorbed", ["\\* bullet"]],
+      ["+ bullet\nabsorbed", ["\\+ bullet"]],
+      ["1. step\nabsorbed", ["1\\. step"]],
+      ["1) step\nabsorbed", ["1\\) step"]],
+    ];
+    for (const [field, escaped] of cases) {
+      const body = insertReportSections(
+        rendered,
+        { ...report, verified: field, planToFix: "none" },
+        "### Revalidated findings\n\nnone",
+      );
+      // Escaped in place: the field's text survives and opens no block.
+      for (const line of escaped) expect(body).toContain(`\n${line}\n`);
+      // No line of the body still starts a table row, quote or list item.
+      expect(body.split("\n").filter((line) => /^ {0,3}([|>]|[-*+][ \t]|\d{1,9}[.)][ \t])/.test(line))).toHaveLength(0);
+      // The engine's sections keep their structure: nothing was absorbed.
+      expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
+        "## ✅ Verdict: `ship it`",
+        "## 📋 Review",
+        "### Revalidated findings",
+        "### Findings",
+        "### Linked-issue AC",
+        "### ✅ Verified",
+        "### 🗑️ Considered & rejected",
+        "## 🛠️ Plan to fix",
+      ]);
+    }
   });
 
   test("every setext-underline form is neutralized — a lone `=` or `-` shapes the line above too", () => {
