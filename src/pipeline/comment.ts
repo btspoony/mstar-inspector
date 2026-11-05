@@ -513,7 +513,9 @@ function insertAfterSection(body: string, anchor: string, block: string): string
 
 /**
  * A report line markdown would read as STRUCTURE rather than text: an ATX
- * heading; a setext underline (the whole line is 1+ `=` or `-`, optionally
+ * heading (including a bare run of `#`); a GFM table delimiter row (pipes are
+ * optional at either end and a cell may be `:---:`), which would turn the line
+ * above it into a header; a setext underline (the whole line is 1+ `=` or `-`, optionally
  * followed by spaces — it turns the line above it into a heading) or a
  * thematic break (any of `-`, `*`, `_` at least three times, optionally
  * spaced); or a code-fence opener (3+ backticks or tildes), which left
@@ -530,7 +532,7 @@ function insertAfterSection(body: string, anchor: string, block: string): string
  * spaces is a code block, a structure no heading anchor can be forged in).
  */
 const REPORT_STRUCTURE_LINE =
-  /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|`{3,}|~{3,}|\||>|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/;
+  /^( {0,3})(#{1,6}(?:\s|$)|(?=[^\n]*\|)(?:[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$|(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|`{3,}|~{3,}|\||>|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/;
 
 /**
  * Neutralize a raw report field so markdown reads it as text, not structure.

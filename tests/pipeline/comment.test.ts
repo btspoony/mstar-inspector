@@ -996,6 +996,29 @@ describe("report sections (mstar.report/v1 side document)", () => {
     }
   });
 
+  test("a GFM delimiter row and a bare ATX heading are neutralized as structure", () => {
+    // `Name | Value` + `:---|---:` forms a grid even with no leading pipe, and a
+    // bare `###` renders an empty heading.
+    for (const line of ["Name | Value\n:---|---:", "--- | ---", "| --- | --- |", "a | b\n---|---", "###"]) {
+      const body = buildReviewBody(
+        { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        0,
+        {
+          report: { ...report, verified: line },
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+        },
+      );
+      const first = line.split("\n")[0]!;
+      if (line.includes("|")) {
+        // The header line itself gains a leading pipe arm only when it starts
+        // with one; the DELIMITER row is what must always be escaped.
+        expect(body).toContain(`\\${line.split("\n").at(-1)!}`);
+      } else {
+        expect(body).toContain(`\\${first}`);
+      }
+    }
+  });
+
   test("every thematic-break form is neutralized: `***`, `___` and spaced runs", () => {
     for (const rule of ["***", "___", "- - -", "* * *", "_ _ _", "----", "==="]) {
       const body = buildReviewBody(
