@@ -19,6 +19,11 @@
  *   (f) a round with no budget is `skipped`/`budget` and starts no seat;
  *   (g) a caller abort is `skipped`/`aborted`, not a blamed round.
  *
+ * Plan 036b Task 2 adds the budget cases: the ask fits
+ * `RECHECK_ASSIGNMENT_MAX_BYTES` at these documented limits with every row still
+ * reachable, the fit covers rows before it deepens any row, and a round whose
+ * target core cannot fit is `skipped`/`budget` with no seat started.
+ *
  * No case returns `doc: null` with `outcome: "ok"`/`reason: null` — a lost
  * round is always attributable. The consumer's row accounting for (c)/(e) is
  * pinned by tests/pipeline/consumer-recheck-status.test.ts ("a failed seat
@@ -51,10 +56,10 @@ type FakeSeatResult = {
 let seatResult: FakeSeatResult;
 /** Set to model a seat the caller's abort signal rejects before it settles. */
 let seatReject: Error | null = null;
-const seatCalls: unknown[] = [];
+const seatCalls: { assignment: string }[] = [];
 
 mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
-  runStructuredSubagent: mock(async (request: unknown) => {
+  runStructuredSubagent: mock(async (request: { assignment: string }) => {
     seatCalls.push(request);
     if (seatReject !== null) throw seatReject;
     return {
@@ -81,11 +86,13 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
 // structured-subagent import. The query suffix gives this file its own module
 // registry key, so a sibling that mocks the same runner path cannot bind here.
 const RECHECK_SPEC = "../../packages/runner/src/recheck.ts?test=recheck-seat-yield";
-const { anchorRecheckDeadline, OUTER_RUNNER_CAP_MS, resetRecheckAnchor, runRecheckSeat } = (await import(
+const { anchorRecheckDeadline, OUTER_RUNNER_CAP_MS, RECHECK_ASSIGNMENT_MAX_BYTES, resetRecheckAnchor, runRecheckSeat } = (await import(
   RECHECK_SPEC
 )) as {
   anchorRecheckDeadline: (startMs: number, level: "quick" | "default" | "deep") => void;
   OUTER_RUNNER_CAP_MS: Record<"quick" | "default" | "deep", number>;
+  /** The seat's assignment budget (plan 036b Task 2). */
+  RECHECK_ASSIGNMENT_MAX_BYTES: number;
   resetRecheckAnchor: () => void;
   runRecheckSeat: (input: {
     session: unknown;
@@ -321,5 +328,94 @@ describe("036b RCA — recheck seat yield at the documented input limits", () =>
       expect(status.outcome).toBe("failed");
       expect(status.reason).not.toBeNull();
     }
+  });
+});
+
+/** The input document the seat was actually asked with (between its prose markers). */
+function askedDocument(assignment: string): RecheckInput {
+  const header = "Input document (mstar.recheck-input/v1):\n\n";
+  const start = assignment.indexOf(header);
+  const end = assignment.indexOf("\n\nDocument sections:", start);
+  if (start < 0 || end < 0) throw new Error("the assignment embeds no recheck input document");
+  return JSON.parse(assignment.slice(start + header.length, end)) as RecheckInput;
+}
+
+/** An answer for every row the ask carries (no proof needed for `unverifiable`). */
+function answerAll(asked: RecheckInput): FakeSeatResult {
+  return {
+    stderr: "",
+    structuredOutput: {
+      source: "caller",
+      mode: "strict",
+      status: "valid",
+      data: doc(asked.targets.map((target) => row(target.rowId))),
+    },
+  };
+}
+
+describe("036b Task 2 — the ask fits the seat's context budget", () => {
+  test("a max-size round is asked inside the budget, every row still reachable", async () => {
+    // The RCA's cause: the max-size input is ~270 KB of JSON — a whole 128k
+    // window of prompt before the seat's own tools or its yield, so the
+    // one-shot yield never arrives. The ask must be FITTED instead.
+    seatResult = answerAll(INPUT);
+    const { doc: seatDoc, status } = await run();
+    expect(seatCalls).toHaveLength(1);
+    const assignment = seatCalls[0]!.assignment;
+
+    expect(Buffer.byteLength(assignment)).toBeLessThanOrEqual(RECHECK_ASSIGNMENT_MAX_BYTES);
+    const asked = askedDocument(assignment);
+    // No prior finding may vanish from the ask: every row is still named.
+    expect(asked.targets.map((target) => target.rowId)).toEqual(INPUT.targets.map((target) => target.rowId));
+    expect(asked.evidence.length).toBeGreaterThan(0);
+    expect(asked.evidence.length).toBeLessThan(INPUT.evidence.length);
+    // Retained slices ride UNMODIFIED (line numbers stay exact); dropped ones
+    // are omitted whole, never truncated.
+    for (const slice of asked.evidence) expect(INPUT.evidence).toContainEqual(slice);
+    // The seat answers every row it was asked: a fitted ask is a served round.
+    expect(seatDoc?.results).toHaveLength(RECHECK_MAX_TARGETS);
+    expect(status).toMatchObject({ outcome: "ok", reason: null });
+  });
+
+  test("the fit covers rows before it deepens any row — no row starves in row order", async () => {
+    seatResult = answerAll(INPUT);
+    await run();
+    const asked = askedDocument(seatCalls[0]!.assignment);
+    const coveredPaths = new Set(asked.evidence.map((slice) => slice.path)).size;
+    // One slice per row comes first, so distinct rows covered EQUAL the slice
+    // count until every row has one (25 rows, 4 slices each in this fixture).
+    expect(asked.evidence.length).toBeLessThan(RECHECK_MAX_TARGETS);
+    expect(coveredPaths).toBe(asked.evidence.length);
+  });
+
+  test("the ask tells the seat what a row without retained evidence is worth", async () => {
+    seatResult = answerAll(INPUT);
+    await run();
+    const assignment = seatCalls[0]!.assignment;
+    // The fitted catalog is a SUBSET: a row it no longer proves is
+    // `unverifiable`/`context-incomplete` — never a bare "no-evidence" and
+    // never an unproven `addressed`.
+    expect(assignment).toContain("PART");
+    expect(assignment).toContain("context-incomplete");
+    expect(assignment).toContain("never `no-evidence`");
+  });
+
+  test("a round whose targets alone overrun the budget is skipped, never a lost 180s seat", async () => {
+    const oversized = maxSizeInput();
+    oversized.targets[0]!.original.body = "x".repeat(RECHECK_ASSIGNMENT_MAX_BYTES);
+    seatResult = { stderr: "", structuredOutput: { source: "caller", mode: "strict", status: "unavailable" } };
+    const { doc: seatDoc, status } = await runRecheckSeat({
+      session: {} as never,
+      input: oversized,
+      model: ["test-model"],
+      signal: new AbortController().signal,
+    });
+    expect(seatCalls).toHaveLength(0);
+    expect(seatDoc).toBeNull();
+    // `budget` = the seat never got room (the same reason the outer deadline
+    // uses); the consumer accounts every sent row `unverifiable`/`budget`.
+    expect(status).toMatchObject({ outcome: "skipped", reason: "budget" });
+    expect(status.error).toContain("context budget");
+    expect(status.error!.length).toBeLessThanOrEqual(500);
   });
 });
