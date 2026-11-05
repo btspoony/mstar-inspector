@@ -353,6 +353,72 @@ describe("installed tab configuration surface (static SSR)", () => {
     expect(manage).toContain(t("en", "settings.installCopy"));
   });
 
+  test("the install block renders the App's avatar image", () => {
+    const manage = renderDetail(
+      {
+        ...managePayload,
+        app: { ...managePayload.app, github_avatar_url: "https://avatars.example/demo.png" },
+      },
+      true,
+    );
+    // The install block's copy line is unique to this section; slice to the
+    // allowlist heading so the App info card's own avatar cannot satisfy
+    // these assertions.
+    const start = manage.indexOf(t("en", "settings.installCopy"));
+    const block = manage.slice(start, manage.indexOf(t("en", "settings.allowlist"), start));
+    expect(block).toContain('<img src="https://avatars.example/demo.png"');
+    // The null-avatar fallback is the mounted test below, not this HTML slice.
+  });
+
+  test("the installations table carries a per-row availability badge (allowlist enabled)", () => {
+    const installed = renderDetail(
+      {
+        ...managePayload,
+        allowlist: { enabled: true, owners: ["acme"] },
+        installations: [
+          { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+          { installation_id: 456, account_login: "intruder", seen_at: "2026-01-01 00:00:00" },
+        ],
+      },
+      true,
+      "installations",
+    );
+    expect(installed).toContain(t("en", "settings.installationsAvailability"));
+    expect(installed).toContain(t("en", "settings.availabilityValid"));
+    expect(installed).toContain(t("en", "settings.availabilityInvalid"));
+    // Case-insensitive admission: the login matches the owner regardless of case.
+    const mixed = renderDetail(
+      {
+        ...managePayload,
+        allowlist: { enabled: true, owners: ["ACME"] },
+        installations: [
+          { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+        ],
+      },
+      true,
+      "installations",
+    );
+    expect(mixed).toContain('data-tone="success"');
+  });
+
+  test("allowlist disabled marks every installation available", () => {
+    const installed = renderDetail(
+      {
+        ...managePayload,
+        allowlist: { enabled: false, owners: ["someone-else"] },
+        installations: [
+          { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+          { installation_id: 456, account_login: null, seen_at: "2026-01-01 00:00:00" },
+        ],
+      },
+      true,
+      "installations",
+    );
+    expect(installed).not.toContain(t("en", "settings.availabilityInvalid"));
+    // Both rows wear the success tone (the identity pill adds one more).
+    expect(installed.split('data-tone="success"').length - 1).toBeGreaterThanOrEqual(2);
+  });
+
   test("a null slug keeps the block with explanations and offers no dead link", () => {
     const noSlug = renderDetail(
       { ...managePayload, app: { ...managePayload.app, github_slug: null } },
@@ -713,6 +779,54 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     } finally {
       await act(async () => root.unmount());
       globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("a null cached avatar renders AppAvatar's bg-muted fallback in the install block once the derived icon misses", async () => {
+    // The fallback swaps in only on a CDN miss (AppAvatar's onError), which a
+    // static render cannot fire — hence the mount, and the identity probed is
+    // the component's own bg-muted wrapper, not a copy of the icon's path
+    // data. The cached column is NULL here, so the icon URL derives from the
+    // numeric App id.
+    const payload = {
+      ...managePayload,
+      app: { ...managePayload.app, github_avatar_url: null },
+    };
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () =>
+        root.render(
+          createElement(AppDetailView, {
+            locale: "en",
+            appId: "1",
+            payload,
+            groups: [],
+            notice: null,
+            search: { ...search, tab: "settings" },
+            onReload: noReload,
+            onSearch: noSearch,
+          }),
+        ),
+      );
+      // The install block's avatar is the h-10 one (the identity card's is
+      // h-12); with a NULL cache its src is the id-derived CDN object.
+      const img = container.querySelector('img[class*="h-10 w-10"]');
+      expect(img?.getAttribute("src")).toBe("https://avatars.githubusercontent.com/in/1?s=120&v=4");
+
+      // The CDN miss: the octocat fallback takes the SAME box, inside the
+      // install block.
+      await act(async () => {
+        img!.dispatchEvent(new win.Event("error"));
+      });
+      const fallback = container.querySelector(".bg-muted.rounded-full");
+      expect(fallback?.getAttribute("class")).toContain("h-10 w-10");
+      expect(container.querySelector('img[class*="h-10 w-10"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
       cleanup();
     }
   });

@@ -102,7 +102,7 @@ describe("parseReviewOutput", () => {
   });
 
   test("accepts every merge class verbatim", () => {
-    for (const mergeClass of ["must-fix", "should-fix", "nit"] as const) {
+    for (const mergeClass of ["must-fix", "should-fix", "may-fix", "nit"] as const) {
       const r = parseReviewOutput(
         JSON.stringify({ ...VALID, findings: [{ ...VALID.findings[0]!, mergeClass }] }),
       );
@@ -306,7 +306,7 @@ describe("parseReviewOutput", () => {
       scorePct: 45,
       // Required since engine 4.0.0; scoreBand(45) === "fail" (< 60 floor).
       band: "fail",
-      tally: { mustFix: 0, shouldFix: 2, nit: 1, unverified: 1 },
+      tally: { mustFix: 0, shouldFix: 2, mayFix: 0, nit: 1, unverified: 1 },
       chatHeader: "**needs fixes** · 45%\n🔴 0 🟠 2 🔵 1 ❓ 1",
     };
 
@@ -320,6 +320,21 @@ describe("parseReviewOutput", () => {
         const { band: _band, ...roundTripped } = TALLY;
         expect(r.output.tally).toEqual(roundTripped);
       }
+    });
+
+    test("accepts a tally with and without mayFix (the engine field is optional)", () => {
+      // Pre-4.2 envelopes omit mayFix; readers treat absent as 0, so both
+      // shapes parse and a present one round-trips.
+      const { mayFix: _absent, ...withoutMayFix } = TALLY.tally;
+      const absent = parseReviewOutput(JSON.stringify({ ...VALID, tally: { ...TALLY, tally: withoutMayFix } }));
+      expect(absent.ok).toBe(true);
+      if (absent.ok) expect(absent.output.tally?.tally.mayFix).toBeUndefined();
+
+      const present = parseReviewOutput(
+        JSON.stringify({ ...VALID, tally: { ...TALLY, tally: { ...TALLY.tally, mayFix: 3 } } }),
+      );
+      expect(present.ok).toBe(true);
+      if (present.ok) expect(present.output.tally?.tally.mayFix).toBe(3);
     });
 
     test("accepts an envelope without a tally (optional)", () => {
@@ -498,7 +513,7 @@ describe("capFindings (Phase 5 B4, merge-class priority)", () => {
     findings: [],
   };
 
-  function finding(mergeClass: "must-fix" | "should-fix" | "nit", title: string) {
+  function finding(mergeClass: "must-fix" | "should-fix" | "may-fix" | "nit", title: string) {
     return {
       mergeClass,
       file_path: "f.ts",
@@ -534,6 +549,13 @@ describe("capFindings (Phase 5 B4, merge-class priority)", () => {
     expect(output.findings[2]!.title).toBe("F58");
     expect(output.findings[2]!.mergeClass).toBe("should-fix");
     expect(output.findings.slice(3).every((f) => f.mergeClass === "nit")).toBe(true);
+  });
+
+  test("ranks may-fix behind should-fix and ahead of nit when the cap forces a drop", () => {
+    const findings = [finding("nit", "N"), finding("may-fix", "M"), finding("should-fix", "S")];
+    const { output, omitted } = capFindings({ ...base, findings }, 2);
+    expect(omitted).toBe(1);
+    expect(output.findings.map((f) => f.mergeClass)).toEqual(["should-fix", "may-fix"]);
   });
 
   test("never returns more than the limit even with all must-fix findings", () => {

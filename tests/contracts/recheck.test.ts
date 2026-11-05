@@ -209,6 +209,16 @@ describe("validateRecheckDoc — acceptance", () => {
     }
   });
 
+  test("accepts a may-fix original finding on the input wire", () => {
+    // The class rides the trusted input's original finding; the wire type is
+    // closed at compile time, so a may-fix original must be part of it.
+    const mayFixTarget: RecheckTarget = { ...TARGET, original: { ...ORIGINAL, mergeClass: "may-fix" } };
+    const doc = { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult()] };
+    const result = validateRecheckDoc(doc, input({ targets: [mayFixTarget] }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.doc.results).toHaveLength(1);
+  });
+
   test("unverifiable with no evidence and dismissed with no evidence are valid", () => {
     const doc = {
       schema: "mstar.recheck/v1",

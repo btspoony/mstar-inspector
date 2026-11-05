@@ -112,6 +112,10 @@ export const zhCN: Dictionary = {
   /** Per-App 拉取请求标签页：App 收到的所有 PR 台账。详情以 owner/repo/number 寻址（同一 App 可能在多个仓库见到同一个编号），并以 `pr=owner/repo/number` 挂在 URL 上。 */
   pullRequests: {
     backToList: "返回列表",
+    /** 台账上方的工具行（仅列表面）。 */
+    filterRepo: "仓库",
+    filterRepoAll: "全部仓库",
+    refreshAria: "刷新拉取请求列表",
     /** 列表表格列——只含行自身的事实。 */
     columnPr: "拉取请求",
     columnState: "状态",
@@ -170,6 +174,7 @@ export const zhCN: Dictionary = {
     /** 严重度分组标题，按渲染顺序。 */
     severityMustFix: "必须修复",
     severityShouldFix: "建议修复",
+    severityMayFix: "可修复",
     severityNit: "可忽略",
     severityOther: "其他",
     /** 每条发现正文与审查摘要各有一个折叠控件。 */
@@ -435,6 +440,9 @@ export const zhCN: Dictionary = {
     installationsCount: "{count} 个安装",
     installationsCountOne: "{count} 个安装",
     installationsAccount: "账号",
+    installationsAvailability: "可用性",
+    availabilityValid: "有效",
+    availabilityInvalid: "无效",
     installationsId: "安装 ID",
     installationsLastSync: "最近同步",
     /** App 详情页指标带中 provider 密钥数的标签。 */
@@ -536,12 +544,13 @@ export const zhCN: Dictionary = {
     opsDeleteCopy: "软删除 — App 从此列表移除，其所有安装都会被关闭。",
     // 评审触发模式（spec review-trigger-policy §2/§3）：分段标签本地化；
     // 线上取值（open / every_push / manual）与提及字符串保持原样。
-    triggerMode: "评审触发",
+    triggerMode: "审查触发",
     triggerModeOpen: "首次打开",
     triggerModeEveryPush: "每次推送",
     triggerModeManual: "仅手动",
-    triggerModeMention: "在 PR 评论中提及机器人即可（重新）启动审查 — 所有模式下均可用：",
-    triggerModeMentionAria: "机器人提及字符串：{mention}",
+
+    triggerModeMention: "PR 作者或仓库所有者：在 PR 评论中 @ 它即可（重新）启动审查：",
+    triggerModeMentionAria: "机器人提及：{mention}",
     // 评审深度（migration 0047）：App 深度选择器的四个面孔。线上取值保持
     // quick/default/deep（另有 inherit 面孔自有哨兵值），仅标签本地化。
     reviewDepth: "评审深度",

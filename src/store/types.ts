@@ -43,10 +43,11 @@ export type ReviewRow = {
 
 /**
  * A row of the `findings` table (D1 column names, snake_case). For v1 rows
- * `severity` carries the harness merge class (`must-fix` | `should-fix` |
- * `nit` — the single vocab-switch mapping point lives in the ArtifactStore
- * adapter); M1 rows keep critical | warning | suggestion | info. Era is
- * disambiguated by the parent review row's `envelope IS NOT NULL`.
+ * `severity` carries the harness merge class — the shared vocabulary
+ * `FINDING_SEVERITIES` in `src/contracts/finding-severity.ts`, never
+ * restated here — and the single vocab-switch mapping point lives in the
+ * ArtifactStore adapter; M1 rows keep critical | warning | suggestion | info.
+ * Era is disambiguated by the parent review row's `envelope IS NOT NULL`.
  */
 export type FindingRow = {
   id: string;

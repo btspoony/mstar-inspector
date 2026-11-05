@@ -30,6 +30,7 @@ export type RecordFamily = "findings" | "reviews" | "failures";
 const SEVERITY_PRESENTATION = {
   "must-fix": { labelKey: "pullRequests.severityMustFix", tone: "danger" },
   "should-fix": { labelKey: "pullRequests.severityShouldFix", tone: "warn" },
+  "may-fix": { labelKey: "pullRequests.severityMayFix", tone: "warn" },
   nit: { labelKey: "pullRequests.severityNit", tone: "neutral" },
 } as const;
 

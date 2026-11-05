@@ -1121,7 +1121,7 @@ with **no compatibility path** — GitHub keeps delivering to it and gets a
 `0036` renames `github_apps.slug` to `webhook_path` (superseded by `0038`,
 which drops that column and re-keys the URL by workspace + app id — see the
 `0038` step above) and adds a nullable cached `github_slug`,
-which is the bot-mention target (`@<github_slug>[bot]`). It has **no
+which is the bot-mention target (`@<github_slug>`; a trailing `[bot]` is accepted but optional). It has **no
 backfill** — the GitHub-side slug is only knowable from GitHub. So right
 after the deploy, every App that predates this change answers to **no
 mention at all** until its metadata is synced once:
@@ -2191,7 +2191,10 @@ the Dockerfile cannot read the module) and derives `REVIEW_SKILL_VERSION` from
 the same source.
 
 Historical bumps, superseding chain, and digest provenance (records, not live
-values): mstar-harness **4.2.0** (2026-11-04, ref
+values): mstar-harness **4.2.2** (2026-11-05, ref
+`98504a71dcf09cfb551847b85e81d33e682e0bd9`, superseding the 4.2.0 pin; omp SDK
+18.13.3 unchanged, engine `^4.2.2` resolved to 4.2.2);
+mstar-harness **4.2.0** (2026-11-04, ref
 `dac1c781bad900f938d7a752222b9f139dc42222`, superseding the 4.1.6 pin; omp SDK
 18.13.3 unchanged, engine `^4.2.0` resolved to 4.2.0);
 mstar-harness **4.1.6** (2026-11-03, ref

@@ -136,6 +136,10 @@ export const en = {
    */
   pullRequests: {
     backToList: "Back to list",
+    /** Toolbar row above the ledger (list face only). */
+    filterRepo: "Repository",
+    filterRepoAll: "All repositories",
+    refreshAria: "Refresh the pull request list",
     /** The list table's columns — the row's own facts only. */
     columnPr: "Pull request",
     columnState: "State",
@@ -201,6 +205,7 @@ export const en = {
     /** Severity group headers, in the order the groups render. */
     severityMustFix: "Must fix",
     severityShouldFix: "Should fix",
+    severityMayFix: "May fix",
     severityNit: "Nit",
     severityOther: "Other",
     /** One fold control per finding body and per review summary. */
@@ -496,15 +501,19 @@ export const en = {
     lastWebhook: "Last webhook: {time}",
     /**
      * The installations section of the settings flow: heading, count subtitle
-     * and the table's three columns. `installations.length` is the only
-     * installation figure the product carries (compass D13); the settings
-     * payload has no per-installation repository count, so there is no
-     * repository column.
+     * and the table's four columns (the availability badge is derived from
+     * the stored owner allowlist, migration 0045). `installations.length`
+     * is the only installation figure the product carries (compass D13); the
+     * settings payload has no per-installation repository count, so there is
+     * no repository column.
      */
     installations: "Installations",
     installationsCount: "{count} installations",
     installationsCountOne: "{count} installation",
     installationsAccount: "Account",
+    installationsAvailability: "Availability",
+    availabilityValid: "Valid",
+    availabilityInvalid: "Invalid",
     installationsId: "Installation ID",
     installationsLastSync: "Last sync",
     /** Metric-band label for the provider-key count on the App detail face. */
@@ -643,7 +652,7 @@ export const en = {
     triggerModeOpen: "First open",
     triggerModeEveryPush: "Every push",
     triggerModeManual: "Manual",
-    triggerModeMention: "Mention the bot in a PR comment to (re-)start a review — works in every mode:",
+    triggerModeMention: "PR author or repo owner: comment this on the PR to (re-)start a review:",
     triggerModeMentionAria: "Bot mention: {mention}",
     // Review depth (migration 0047): the four faces of the App's depth select.
     // Wire values stay quick/default/deep (plus the inherit face's own

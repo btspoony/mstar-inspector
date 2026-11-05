@@ -54,8 +54,9 @@ export type InsightsSearch = { window: string; repo: string };
  * One per-bucket distribution row of `findings_distribution` (AD-652) —
  * structurally mirrors the store's FindingsDistributionBucket
  * (the dashboard leaf exports no types). `by_severity` is zero-filled over
- * the fixed merge-class set {must-fix, should-fix, nit} — identical key set
- * on every bucket, so the SPA's series vocabulary is stable per window.
+ * the fixed merge-class set {must-fix, should-fix, may-fix, nit} — identical
+ * key set on every bucket, so the SPA's series vocabulary is stable per
+ * window.
  */
 export type FindingsDistributionBucket = {
   /** UTC bucket start `YYYY-MM-DD` — a day, or a Monday for week buckets. */
@@ -977,10 +978,21 @@ function present<T>(value: T | null): value is T {
   return value !== null;
 }
 
-/** The list payload: `{ pull_requests: [...] }` — parsed per row, never all-or-nothing. */
-export function parsePullRequestList(data: unknown): PullRequestRow[] | null {
+/**
+ * The list payload: `{ pull_requests: [...], repos: [...] }` — rows parsed per
+ * entry, never all-or-nothing. `repos` is the App's whole distinct repository
+ * set (the server's option list), strings only; an ABSENT `repos` (an older
+ * payload) yields `[]`, so the toolbar offers just the all option — never a
+ * re-derivation from the loaded rows, which could not see past the row cap.
+ */
+export function parsePullRequestList(
+  data: unknown,
+): { rows: PullRequestRow[]; repos: string[] } | null {
   if (!isRecord(data) || !Array.isArray(data.pull_requests)) return null;
-  return data.pull_requests.map(parsePullRequestRow).filter(present);
+  const repos = Array.isArray(data.repos)
+    ? data.repos.filter((value): value is string => typeof value === "string")
+    : [];
+  return { rows: data.pull_requests.map(parsePullRequestRow).filter(present), repos };
 }
 
 /**
@@ -1054,8 +1066,11 @@ export function parseRecordPage<S extends RecordSection>(
   };
 }
 
-export function appPullRequestsUrl(base: string, appId: string): string {
-  return `${base}/api/apps/${encodeURIComponent(appId)}/pull-requests`;
+export function appPullRequestsUrl(base: string, appId: string, repo?: string): string {
+  const path = `${base}/api/apps/${encodeURIComponent(appId)}/pull-requests`;
+  // A selected repository filters on the server, BEFORE the row cap — no
+  // selection is exactly the unfiltered URL.
+  return repo ? `${path}?repo=${encodeURIComponent(repo)}` : path;
 }
 
 /**

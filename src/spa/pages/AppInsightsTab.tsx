@@ -31,6 +31,7 @@ import {
 } from "./data";
 import { StackedBarChart, type StackedSeries } from "@/components/charts/StackedBarChart";
 import type { ChartSlot } from "@/components/charts/chartSlots";
+import type { FindingSeverity } from "../../contracts/finding-severity";
 import { TrendChart } from "@/components/charts/TrendChart";
 
 /**
@@ -190,18 +191,20 @@ export function AppInsightsTab({
  * AD-561: severity → the D14 closed chart vocabulary, as slots — the page owns
  * the semantics, the chart owns the faces. Red/amber keep their hue families
  * (must-fix=4, should-fix=3); nit takes the blue family (5), the neutral
- * data-series tone the old gray-700 filled (gray is not in the palette). The
- * API zero-fills exactly these three merge-class keys per bucket, so unknown
- * severity keys never enter the series. Labels stay the raw engine slugs — the
- * aggregate card's visible face carried them unlocalized already.
+ * data-series tone the old gray-700 filled (gray is not in the palette), and
+ * may-fix takes the purple family (6), the slot the three-class stack left
+ * free. The API zero-fills exactly these four merge-class keys per bucket, so
+ * unknown severity keys never enter the series. Labels stay the raw engine
+ * slugs — the aggregate card's visible face carried them unlocalized already.
  */
-export const SEVERITY_SLOTS: Record<string, ChartSlot> = {
+export const SEVERITY_SLOTS: Record<FindingSeverity, ChartSlot> = {
   "must-fix": 4,
   "should-fix": 3,
+  "may-fix": 6,
   nit: 5,
 };
 
-/** The fixed severity stack, bottom → top: must-fix, should-fix, nit. */
+/** The fixed severity stack, bottom → top: must-fix, should-fix, may-fix, nit. */
 const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_SLOTS).map(([key, slot]) => ({
   key,
   label: key,

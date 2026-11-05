@@ -114,8 +114,9 @@ export type FindingsDistributionBucket = {
   /** "day" for clamped windowDays <= 30, "week" above (AD-652 mapping). */
   granularity: "day" | "week";
   /**
-   * Zero-filled per bucket over the FIXED v1 merge-class key set
-   * ({must-fix, should-fix, nit}) — page-level series vocabulary.
+   * Zero-filled per bucket over the shared merge-class key set
+   * (`FINDING_SEVERITIES` in `src/contracts/finding-severity.ts`) —
+   * page-level series vocabulary.
    */
   by_severity: Record<string, number>;
 };
