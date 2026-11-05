@@ -676,8 +676,8 @@ describe("runSweep — comment-claim outbox", () => {
 
   function claimRow(db: TestD1) {
     return db.raw
-      .query("SELECT state, attempts, queued_ms, consumed_ms FROM comment_trigger_claims")
-      .get() as { state: string; attempts: number; queued_ms: number; consumed_ms: number | null };
+      .query("SELECT state, attempts, queued_ms, consumed_ms, payload_json FROM comment_trigger_claims")
+      .get() as { state: string; attempts: number; queued_ms: number; consumed_ms: number | null; payload_json: string | null };
   }
 
   function fakeQueue(fail = false): { queue: SweepDeps["queue"]; sent: unknown[] } {
@@ -738,7 +738,9 @@ describe("runSweep — comment-claim outbox", () => {
     await runSweep(db, { log, queue });
 
     expect(sent).toHaveLength(0);
-    expect(claimRow(db)).toMatchObject({ state: "expired" });
+    // The tombstone survives (never deleted: it is the dedup proof) and drops
+    // the payload it no longer needs.
+    expect(claimRow(db)).toMatchObject({ state: "expired", payload_json: null });
     expect(calls.at(-1)?.fields).toEqual({ event: "comment_claim_outbox", resent: 0, expired: 1, failed: 0 });
   });
 

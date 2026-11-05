@@ -16,10 +16,17 @@
 --                comment, i.e. a new id).
 --   'expired'  — the outbox hit its attempt cap; the comment is abandoned.
 --
--- `payload_json` is the exact job payload the outbox re-sends, `attempts`
--- counts outbox re-sends, `created_ms` is the claim instant and `queued_ms`
--- the last send instant (both epoch milliseconds — integer columns compare and
--- order without string parsing).
+-- `payload_json` is the exact job payload the outbox re-sends — required while
+-- the row is 'queued' and cleared to NULL at the terminal transition, so a
+-- tombstone holds only scope keys, state and timestamps. `attempts` counts
+-- outbox attempts, `created_ms` is the claim instant and `queued_ms` the last
+-- send attempt (both epoch milliseconds — integer columns compare and order
+-- without string parsing).
+--
+-- Terminal rows are NEVER deleted: the row is the dedup proof, so deleting a
+-- 'consumed'/'expired' tombstone would let a late redelivery of the same
+-- comment re-insert and execute. The table is bounded by the number of
+-- bot-mention comments, one row each.
 CREATE TABLE IF NOT EXISTS comment_trigger_claims (
   installation_id INTEGER NOT NULL,
   owner TEXT NOT NULL,
@@ -27,7 +34,7 @@ CREATE TABLE IF NOT EXISTS comment_trigger_claims (
   pr_number INTEGER NOT NULL,
   comment_id INTEGER NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('queued', 'consumed', 'expired')),
-  payload_json TEXT NOT NULL,
+  payload_json TEXT,
   attempts INTEGER NOT NULL DEFAULT 0,
   created_ms INTEGER NOT NULL,
   queued_ms INTEGER NOT NULL,

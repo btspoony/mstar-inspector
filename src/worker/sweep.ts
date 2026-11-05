@@ -311,10 +311,14 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
     try {
       const nowMs = Date.now();
       // Rows at the cap have exhausted every re-send: flip them to `expired`
-      // FIRST, so the selection below can never pick them again.
+      // FIRST, so the selection below can never pick them again. The payload is
+      // dropped in the same statement — a terminal tombstone holds only scope
+      // keys, state and timestamps, and is never deleted (it is the dedup
+      // proof a late redelivery would otherwise re-open).
       const expired = await db
         .prepare(
-          `UPDATE comment_trigger_claims SET state = 'expired' WHERE state = 'queued' AND attempts >= ?`,
+          `UPDATE comment_trigger_claims SET state = 'expired', payload_json = NULL
+            WHERE state = 'queued' AND attempts >= ?`,
         )
         .bind(COMMENT_CLAIM_MAX_ATTEMPTS)
         .run();

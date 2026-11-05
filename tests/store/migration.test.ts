@@ -2127,10 +2127,11 @@ describe("migrations/0048_comment_trigger_claims.sql", () => {
       "pr_number",
       "comment_id",
     ]);
+    // Two nullable columns: `consumed_ms` is only set at consumption, and
+    // `payload_json` is cleared there (a tombstone keeps no payload).
+    const NULLABLE: Record<string, true> = { consumed_ms: true, payload_json: true };
     for (const column of columns) {
-      // `consumed_ms` is the only nullable column: a claim exists before
-      // anything consumes it.
-      expect(column.notnull, column.name).toBe(column.name === "consumed_ms" ? 0 : 1);
+      expect(column.notnull, column.name).toBe(NULLABLE[column.name] === true ? 0 : 1);
     }
     expect(columns.find((c) => c.name === "attempts")?.dflt_value).toBe("0");
   });

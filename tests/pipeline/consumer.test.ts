@@ -6129,10 +6129,11 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
       );
   }
 
-  function claimRows(db: TestD1): Array<{ state: string; consumed_ms: number | null }> {
-    return db.raw.query("SELECT state, consumed_ms FROM comment_trigger_claims").all() as Array<{
+  function claimRows(db: TestD1) {
+    return db.raw.query("SELECT state, consumed_ms, payload_json FROM comment_trigger_claims").all() as Array<{
       state: string;
       consumed_ms: number | null;
+      payload_json: string | null;
     }>;
   }
 
@@ -6151,7 +6152,11 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
       testOverrides,
     );
     await expect(consumer(makeBatch(payload))).rejects.toThrow();
-    expect(claimRows(db)).toEqual([{ state: "consumed", consumed_ms: expect.any(Number) }]);
+    // The claim row becomes a terminal tombstone: consumed, payload dropped,
+    // and never deleted — it is what refuses every later delivery.
+    expect(claimRows(db)).toEqual([
+      { state: "consumed", consumed_ms: expect.any(Number), payload_json: null },
+    ]);
 
     // The redelivery is refused BEFORE that same level read, so it neither
     // throws nor reaches the sandbox.
@@ -6159,6 +6164,8 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
 
     expect(logLines.some((l) => l.msg.includes("comment trigger already claimed"))).toBe(true);
     expect(sandbox.calls).toHaveLength(0);
+    // The tombstone survives the refused redelivery.
+    expect(claimRows(db)).toHaveLength(1);
   });
 
   test("a job without comment_id never touches the claim table", async () => {

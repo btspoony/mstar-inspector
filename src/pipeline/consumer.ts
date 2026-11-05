@@ -3305,9 +3305,13 @@ async function processMessage(
     // recorded even when the run itself fails, because a comment-triggered
     // review is re-run by posting a new comment (a new id), never by replaying
     // this one (the documented accepted limit).
+    //
+    // The payload is cleared in the same statement: it is only needed while
+    // `queued` (the outbox re-send), and the row itself lives on as the
+    // tombstone that refuses every later delivery of this comment.
     if (payload.comment_id !== undefined) {
       const claimed = await deps.env.DB.prepare(
-        `UPDATE comment_trigger_claims SET state = 'consumed', consumed_ms = ?
+        `UPDATE comment_trigger_claims SET state = 'consumed', consumed_ms = ?, payload_json = NULL
           WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
             AND state = 'queued'`,
       )
