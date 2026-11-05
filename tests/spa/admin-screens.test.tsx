@@ -494,7 +494,7 @@ describe("Runtime screen", () => {
   test("the depth card shows the operator default and one save fires exactly one PATCH", async () => {
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
-        ? json({ reviewLevel: "deep" })
+        ? json({ reviewLevel: { value: "deep" } })
         : json({
             concurrency: 24,
             min: 1,
@@ -519,7 +519,11 @@ describe("Runtime screen", () => {
     await surface.click(trigger!.closest("form")!.querySelector('button[type="submit"]'));
 
     expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
-      { url: "/_internal_admin/api/runtime", method: "PATCH", body: { reviewLevel: "deep" } },
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { reviewLevel: { value: "deep" } },
+      },
     ]);
     expect(surface.container.querySelector("#default-review-level")?.textContent).toContain("Deep");
     expect(surface.text()).toContain("Saved.");
