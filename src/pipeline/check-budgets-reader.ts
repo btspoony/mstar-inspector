@@ -19,6 +19,7 @@
  */
 import {
   getCheckBudgets,
+  getRecheckBacklogFill,
   type CheckBudgets,
 } from "../dashboard/runtime-config-store";
 import type { DashboardD1 } from "../dashboard/users";
@@ -60,4 +61,32 @@ export async function readCheckBudgets(
     );
   }
   return budgets;
+}
+
+/** The one warn payload a degraded backlog-fill read emits. */
+export type BacklogFillLogFields = {
+  event: "review_recheck_backlog_fill_degraded";
+  /** The refill the reader answered with — the documented default. */
+  rows: number;
+};
+
+/** Warn-only view of the consumer's log channel (same shape as `CheckBudgetsLog`). */
+export type BacklogFillLog = {
+  warn: (fields: BacklogFillLogFields, msg?: string) => void;
+};
+
+/**
+ * The §7.2 recheck backlog refill: ONE D1 read, no cache. An untrusted stored
+ * value or a read failure answers the documented default with one structured
+ * warn; an absent row answers its default silently.
+ */
+export async function readRecheckBacklogFill(db: DashboardD1, log: BacklogFillLog): Promise<number> {
+  const fill = await getRecheckBacklogFill(db);
+  if (fill.degraded) {
+    log.warn(
+      { event: "review_recheck_backlog_fill_degraded", rows: fill.rows },
+      "recheck backlog refill read degraded — using the documented default",
+    );
+  }
+  return fill.rows;
 }

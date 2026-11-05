@@ -970,6 +970,19 @@ export const en = {
       /** Neither stored budget could be read — the numbers are the documented defaults. */
       checkUnreadable:
         "The stored check budgets could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
+      backlogFillTitle: "Recheck backlog",
+      backlogFillDescription:
+        "How many older open findings may join a round's recheck set after the previous round's own findings. Each target costs the recheck seat budget; 0 turns the refill off.",
+      backlogFillLabel: "Older findings per round",
+      backlogFillSave: "Save",
+      backlogFillSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      backlogFillFailed: "Could not change the recheck backlog refill.",
+      /** {value} = the refill currently stored (or the documented default). */
+      backlogFillCurrent: "Effective on the next review: up to {value} older findings.",
+      /** The stored refill could not be read — the number is the documented default. */
+      backlogFillUnreadable:
+        "The stored recheck backlog refill could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
       /**
        * Deployment version footer. `{version}` carries the
        * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the

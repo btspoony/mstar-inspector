@@ -104,6 +104,7 @@ import {
   claimPublication,
   countOpenFindings,
   hasUnprovenDegradedPublication,
+  latestAppliedReviewPublicationId,
   markPublicationFailed,
   recordPublicationProof,
   selectAssessmentTargets,
@@ -211,6 +212,7 @@ import {
   CHECK_TERMINALIZE_DEFAULT,
   CHECK_UPDATE_DEFAULT,
   readCheckBudgets,
+  readRecheckBacklogFill,
   type CheckBudgets,
 } from "./check-budgets-reader";
 
@@ -350,7 +352,7 @@ export type ConsumerLogFields = {
    * `base...head` is genuinely empty — the prior round already covers this head,
    * so the delivery is acked without a new review body.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_no_increment";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_recheck_backlog_fill_degraded" | "review_no_increment";
   action: string;
   installation_id: number;
   owner: string;
@@ -1836,12 +1838,25 @@ function reconcileRecheckRound(input: {
   }
 
   // Resolution eligibility (§7.4/§7.5): addressed verdicts only, with the
-  // complete snapshot fences actually captured this round.
+  // snapshot fences actually captured this round. The ISSUE side needs its
+  // FETCH and its MODEL view complete plus a digest: a model that never saw
+  // part of the human discussion could miss a rebuttal or a still-open
+  // concern, so that evidence never authorizes a resolve. Reports this app
+  // published itself are excluded from the model view before the caps
+  // (`boundDiscussion`), so our own history no longer truncates it. The TARGET
+  // THREAD the verdict was proved against keeps BOTH its fetch and model
+  // coverage complete.
   const resolutions: { associationId: string; verified: VerifiedResolution }[] = [];
   for (const target of targets) {
     const assessment = outcomeByRowId.get(target.rowId);
     if (assessment === undefined || assessment.disposition !== "addressed") continue;
-    if (discussion.issueCoverage !== "complete" || discussion.issueDigest === "") continue;
+    if (
+      discussion.issueCoverage !== "complete" ||
+      discussion.issueModelCoverage !== "complete" ||
+      discussion.issueDigest === ""
+    ) {
+      continue;
+    }
     for (const associationId of target.associationIds) {
       const snapshot = discussion.threads.find((t) => t.associationId === associationId);
       if (
@@ -1894,18 +1909,25 @@ function reconcileRecheckRound(input: {
 
 /** The empty discussion for rounds with no open rows (nothing to capture). */
 function emptyDiscussion(nowMs: number): Discussion {
-  return { items: [], issueCoverage: "complete", issueDigest: "", capturedMs: nowMs, threads: [] };
+  return {
+    items: [],
+    issueCoverage: "complete",
+    issueModelCoverage: "complete",
+    issueDigest: "",
+    capturedMs: nowMs,
+    threads: [],
+  };
 }
 
 /**
- * The round's context coverage (§7.4): complete only when the issue capture
- * AND every captured thread snapshot (fetch AND model coverage) are
- * complete — a truncated or unavailable capture never labels a round
- * complete.
+ * The round's context coverage (§7.4): complete only when the issue FETCH and
+ * its MODEL view are both complete AND every captured thread snapshot (fetch
+ * AND model coverage) is complete — a truncated or unavailable capture view
+ * never labels a round complete.
  */
 function roundContextCoverage(discussion: Discussion): Coverage {
   if (discussion.issueCoverage === "unavailable") return "unavailable";
-  if (discussion.issueCoverage !== "complete") return "truncated";
+  if (discussion.issueCoverage !== "complete" || discussion.issueModelCoverage !== "complete") return "truncated";
   for (const thread of discussion.threads) {
     if (thread.coverage !== "complete" || thread.modelCoverage !== "complete") return "truncated";
   }
@@ -3757,9 +3779,31 @@ async function processMessage(
 
     let targets: RecheckTarget[] = [];
     let totalOpen = 0;
+    // The previous round's own rows this bound dropped (coverage line).
+    let previousCapped = 0;
     let captureFailed = false;
     try {
-      targets = await selectAssessmentTargets(deps.env.DB, lifecycleScope, ASSESSMENT_TARGET_CAP);
+      // The previous round is the newest APPLIED review publication: this
+      // round's own publication is staged only after the seat returns. A first
+      // round publishes nothing yet, so there is no finding set to reassess.
+      const previousPublicationId = await latestAppliedReviewPublicationId(deps.env.DB, lifecycleScope);
+      if (previousPublicationId !== null) {
+        // §7.2 breadth is an operator setting: how many older open rows may
+        // join the previous round's own findings (0 = no refill).
+        const backlogFill = await readRecheckBacklogFill(deps.env.DB, {
+          warn: (readerFields, msg) =>
+            deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
+        });
+        const selection = await selectAssessmentTargets(
+          deps.env.DB,
+          lifecycleScope,
+          ASSESSMENT_TARGET_CAP,
+          previousPublicationId,
+          backlogFill,
+        );
+        targets = selection.targets;
+        previousCapped = selection.capped;
+      }
       totalOpen = await countOpenFindings(deps.env.DB, lifecycleScope);
     } catch (err) {
       captureFailed = true;
@@ -3911,7 +3955,14 @@ async function processMessage(
         discussion = boundDiscussion(discussion);
       } catch (err) {
         captureFailed = true;
-        discussion = { items: [], issueCoverage: "unavailable", issueDigest: "", capturedMs: captureMs, threads: [] };
+        discussion = {
+          items: [],
+          issueCoverage: "unavailable",
+          issueModelCoverage: "unavailable",
+          issueDigest: "",
+          capturedMs: captureMs,
+          threads: [],
+        };
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(fields, `discussion capture failed — context-unavailable: ${detail}`);
       }
@@ -4354,10 +4405,10 @@ async function processMessage(
     if (targets.length > 0) {
       const status = recheck?.status ?? null;
       const recheckOutcome = status?.outcome ?? "absent";
-      // The runner cancels an unfinished seat when the main review settles
-      // (spec §7.8): the round answered nothing because it was STOPPED, not
-      // because it ran and lost. That is neither a failure row nor an
-      // `invalid-output` for a row the seat never answered.
+      // The runner stops an unfinished seat only on review failure or when the
+      // outer deadline leaves no room (spec §7.8): the round answered nothing
+      // because it was STOPPED, not because it ran and lost. That is neither a
+      // failure row nor an `invalid-output` for a row the seat never answered.
       const roundCancelled = recheckOutcome === "skipped" && status?.reason === "aborted";
       // The status document belongs to the SEAT; a round whose document was
       // lost has its real cause on the read side (absent / overflow /
@@ -4446,7 +4497,9 @@ async function processMessage(
       assessed: reconciled.assessedCount,
       invalidOutput: reconciled.invalidOutputCount,
       omitted: reconciled.unansweredCount,
-      capped: Math.max(0, totalOpen - targets.length),
+      // Only the previous round's own rows can be cap-dropped; the older
+      // backlog is reached through the bounded refill, not blamed on the cap.
+      capped: previousCapped,
       contextCoverage,
     };
     const queuedAssociations = new Set(reconciled.resolutions.map((r) => r.associationId));

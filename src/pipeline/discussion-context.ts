@@ -190,6 +190,9 @@ export async function listDiscussionWithOctokit(octokit: GraphqlOctokit, input: 
   return {
     items,
     issueCoverage,
+    // Nothing was dropped or clamped yet: the model-view pass (`boundDiscussion`)
+    // owns that bookkeeping and flips this only when its caps actually bite.
+    issueModelCoverage: "complete",
     issueDigest,
     capturedMs,
     threads,
@@ -264,21 +267,42 @@ function modelBodyOf(body: string, overCap: boolean): string {
  * Model-coverage bookkeeping (the reason the caller ships this view instead of
  * the capture): a thread snapshot whose items were dropped or whose bodies were
  * clamped gets `modelCoverage: "truncated"` mutated onto the shared snapshot
- * array, and a complete ISSUE capture that lost items or body text to the caps
- * becomes `issueCoverage: "truncated"` — "any omission/body truncation changes
- * relevant modelCoverage to truncated even if fetch completed" / "no
- * partial-context result is labelled complete" (spec §7.4/§7.8). The §7.5
- * resolve fences read exactly those flags, so a verdict that could not have
- * been based on the full conversation never auto-resolves. `issueDigest` and
- * the capture-time fields pass through unchanged; the caller's captured items
- * are never rewritten (their digests were computed over the raw bodies).
+ * array, and a complete ISSUE capture that lost HUMAN items or body text to the
+ * caps gets `issueModelCoverage: "truncated"` — "any omission/body truncation
+ * changes relevant modelCoverage to truncated even if fetch completed" / "no
+ * partial-context result is labelled complete" (spec §7.4/§7.8).
+ * `issueCoverage` stays the FETCH result. Reports this app published itself are
+ * excluded before the caps — bot author login AND its own marker prefix: the
+ * recheck input already carries each target's original finding text, so they
+ * are redundant context, not lost evidence, and counting them as "the model did
+ * not see everything" made every PR with review history truncate forever. A
+ * HUMAN body that copies the marker fails the authorship half and stays
+ * visible, so it still truncates the view and still blocks a resolve.
+ * `issueDigest` and the capture-time fields pass through unchanged; the
+ * caller's captured items are never rewritten (their digests were computed over
+ * the raw bodies).
  */
 export function boundDiscussion(discussion: Discussion): Discussion {
   // Chronological presentation order (oldest first), then apply the caps.
-  const ordered = [...discussion.items].sort((a, b) => {
-    if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
-    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-  });
+  // Bodies this app publishes itself begin with its own marker AND carry a bot
+  // author login: the recheck input already carries every target's original
+  // finding text, so spending the bounded view on our own history is what made
+  // every busy PR truncate. A human body can copy the marker, so authorship is
+  // part of the predicate — a spoofed marker stays visible and still blocks a
+  // resolve through the model-coverage fence.
+  const ordered = discussion.items
+    .filter(
+      (item) =>
+        !(
+          item.source === "issue" &&
+          item.author.endsWith("[bot]") &&
+          /^<!--\s*mstar-inspector:[a-zA-Z-]+:v1\b/.test(item.body.trimStart())
+        ),
+    )
+    .sort((a, b) => {
+      if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
 
   const truncatedThreads = new Set<string>();
   let issueContextTruncated = false;
@@ -329,8 +353,11 @@ export function boundDiscussion(discussion: Discussion): Discussion {
   }
   return {
     items: retained,
-    issueCoverage:
-      issueContextTruncated && discussion.issueCoverage === "complete" ? "truncated" : discussion.issueCoverage,
+    issueCoverage: discussion.issueCoverage,
+    issueModelCoverage:
+      issueContextTruncated && discussion.issueModelCoverage === "complete"
+        ? "truncated"
+        : discussion.issueModelCoverage,
     issueDigest: discussion.issueDigest,
     capturedMs: discussion.capturedMs,
     threads: discussion.threads,

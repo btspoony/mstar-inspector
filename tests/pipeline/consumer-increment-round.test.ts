@@ -693,7 +693,7 @@ describe("incremental review rounds", () => {
     // The linked issue was read (the issue number came from the PR body).
     expect(sandbox.calls.some((c) => c.cmd === issueView(7))).toBe(true);
     expect(body).toContain("**What this PR does**: Adds an expiry guard to the auth path.");
-    expect(body).toContain("### Revalidated findings");
+    expect(body).toContain("<summary>Revalidated findings</summary>");
     // ONE prior-findings rendering: the §7.10 coverage line + the row land
     // exactly once.
     expect(body.match(/\| finding \| disposition \| evidence \| thread \|/g)).toHaveLength(1);
@@ -705,7 +705,7 @@ describe("incremental review rounds", () => {
     // Template order: overview inside Review, revalidated before findings,
     // plan last.
     expect(body.indexOf("## 📋 Review")).toBeLessThan(body.indexOf("**What this PR does**"));
-    expect(body.indexOf("**What this PR does**")).toBeLessThan(body.indexOf("### Revalidated findings"));
+    expect(body.indexOf("**What this PR does**")).toBeLessThan(body.indexOf("<summary>Revalidated findings</summary>"));
     expect(body.indexOf("## 🛠️ Plan to fix")).toBeGreaterThan(body.indexOf("### ✅ Verified"));
   });
 

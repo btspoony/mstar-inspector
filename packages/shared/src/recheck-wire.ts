@@ -102,7 +102,11 @@ export type ThreadSnapshot = {
 export type Discussion = {
   items: { source: 'issue' | 'thread'; associationId: string | null;
     id: string; author: string; createdAt: string; updatedAt: string; body: string }[];
-  issueCoverage: Coverage; issueDigest: string; capturedMs: number;
+  /** FETCH coverage: what capture could read, before the model-view caps. */
+  issueCoverage: Coverage;
+  /** MODEL-view coverage: `truncated` when the item caps dropped or clamped issue items. */
+  issueModelCoverage: Coverage;
+  issueDigest: string; capturedMs: number;
   threads: ThreadSnapshot[];
 };
 

@@ -40,13 +40,18 @@ import {
   SYSTEM_CONCURRENCY_DEFAULT,
   SYSTEM_CONCURRENCY_KEY,
   SYSTEM_CONCURRENCY_MAX,
+  RECHECK_BACKLOG_FILL_DEFAULT,
+  RECHECK_BACKLOG_FILL_KEY,
+  RECHECK_BACKLOG_FILL_MAX,
   WORKSPACE_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_MAX,
   getCheckBudgets,
+  getRecheckBacklogFill,
   getEffectiveConcurrency,
   getSystemConcurrency,
   getWorkspaceConcurrency,
   setCheckBudgets,
+  setRecheckBacklogFill,
   setSystemConcurrency,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
@@ -485,6 +490,63 @@ describe("runtime-config-store", () => {
       },
       { actor_login: ACTOR, action: "workspace.concurrency.set", target_id: WS },
     ]);
+  });
+});
+
+describe("recheck backlog refill", () => {
+  test("an absent row answers the documented default without degrading", async () =>
+    expect(await getRecheckBacklogFill(fixture())).toEqual({
+      rows: RECHECK_BACKLOG_FILL_DEFAULT,
+      degraded: false,
+    }));
+
+  test("an untrusted or out-of-range stored value answers the default with degraded: true", async () => {
+    for (const value of ["not-a-number", "-1", String(RECHECK_BACKLOG_FILL_MAX + 1)]) {
+      const db = fixture();
+      db.raw
+        .prepare(
+          `INSERT INTO review_runtime_settings (key, value, updated_at)
+           VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+        )
+        .run(RECHECK_BACKLOG_FILL_KEY, value);
+      expect(await getRecheckBacklogFill(db), value).toEqual({
+        rows: RECHECK_BACKLOG_FILL_DEFAULT,
+        degraded: true,
+      });
+    }
+  });
+
+  test("a read failure answers the default with degraded: true and never throws", async () =>
+    expect(await getRecheckBacklogFill(failingDb)).toEqual({
+      rows: RECHECK_BACKLOG_FILL_DEFAULT,
+      degraded: true,
+    }));
+
+  test("an out-of-range write is refused and writes nothing", async () => {
+    const db = fixture();
+    for (const value of [-1, RECHECK_BACKLOG_FILL_MAX + 1, 2.5]) {
+      await expect(setRecheckBacklogFill(db, value, ACTOR)).rejects.toBeInstanceOf(RuntimeConfigError);
+    }
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("an accepted write lands the row with one audit row, and reads back", async () => {
+    const db = fixture();
+    expect(await setRecheckBacklogFill(db, 7, ACTOR)).toBe(7);
+    expect(await getRecheckBacklogFill(db)).toEqual({ rows: 7, degraded: false });
+    expect(auditRows(db)).toEqual([
+      { action: "runtime.recheck.backlog_fill.set", target_id: RECHECK_BACKLOG_FILL_KEY },
+    ]);
+    expect(auditDetails(db, "runtime.recheck.backlog_fill.set")).toEqual([
+      { before: null, after: 7 },
+    ]);
+    // A second save records the previous value as `before`.
+    await setRecheckBacklogFill(db, 0, ACTOR);
+    expect(await getRecheckBacklogFill(db)).toEqual({ rows: 0, degraded: false });
+    expect(auditDetails(db, "runtime.recheck.backlog_fill.set")[1]).toEqual({
+      before: 7,
+      after: 0,
+    });
   });
 });
 

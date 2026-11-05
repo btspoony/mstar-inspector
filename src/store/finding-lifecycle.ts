@@ -165,30 +165,87 @@ function threadScope(row: { id: string; app_id: string; installation_id: number;
 // ---------------------------------------------------------------------------
 
 /**
- * Open-row selection for the recheck seat: query OPEN rows only, ordered by
- * `COALESCE(last_scheduled_ms, created_ms), id` (oldest waiting first — no
- * newest-updated or permanent never-assessed priority), capped at
- * `ASSESSMENT_TARGET_CAP` (25) regardless of the caller's `limit` so a
- * misbehaving caller cannot break the rotation fairness. Association IDs
- * list the row's ACTIVE (non-superseded) thread associations — superseded
- * ones are dead and never offered again. Unselected rows are NOT returned
- * here; the caller represents them via the aggregate cap count in the
- * round coverage (spec §7.2).
+ * The most recent APPLIED review publication of the scope — the previous
+ * round, because the current publication is staged only after target
+ * selection. `null` on a first review (or when only degraded publications
+ * exist): there is then no prior finding set to reassess.
  */
-export async function selectAssessmentTargets(db: D1Like, scope: Scope, limit: number): Promise<RecheckTarget[]> {
+export async function latestAppliedReviewPublicationId(db: D1Like, scope: Scope): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT id FROM review_publications
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND kind = 'review' AND phase = 'applied'
+       ORDER BY created_ms DESC, id DESC LIMIT 1`,
+    )
+    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
+    .first<{ id: string }>();
+  return row?.id ?? null;
+}
+
+/**
+ * Open-row selection for the recheck seat. The rows the PREVIOUS round
+ * published (`last_publication_id`) that are still open come first — they are
+ * the findings this round's commits most plausibly fixed — ordered by
+ * `COALESCE(last_scheduled_ms, created_ms), id` (oldest waiting first).
+ *
+ * The remaining room up to `ASSESSMENT_TARGET_CAP` (25) is filled from older
+ * open rows by the same rotation, bounded by the caller's `backlogFill` (the
+ * operator's system setting; 0 disables it). That refill is what keeps a row
+ * from starving forever: a previous round larger than the cap, a seat that
+ * timed out, or a finding that stopped being re-reported all leave rows behind
+ * their own round's publication, and without a refill they would never be
+ * selected again.
+ *
+ * `capped` counts the previous round's own open rows this bound dropped, so the
+ * published coverage never blames the older backlog on the cap.
+ * Association IDs list the row's ACTIVE (non-superseded) thread associations —
+ * superseded ones are dead and never offered again (spec §7.2).
+ */
+export async function selectAssessmentTargets(
+  db: D1Like,
+  scope: Scope,
+  limit: number,
+  previousPublicationId: string,
+  backlogFill: number,
+): Promise<{ targets: RecheckTarget[]; capped: number }> {
   const capped = Math.max(0, Math.min(limit, ASSESSMENT_TARGET_CAP));
-  if (capped === 0) return [];
-  const rows = await db
+  if (capped === 0) return { targets: [], capped: 0 };
+  const scopeBinds = [scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber] as const;
+  const own = await db
     .prepare(
       `SELECT * FROM review_findings
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND state = 'open' AND last_publication_id = ?
        ORDER BY COALESCE(last_scheduled_ms, created_ms), id
        LIMIT ?`,
     )
-    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, capped)
+    .bind(...scopeBinds, previousPublicationId, capped)
     .all<ReviewFindingRow>();
-  const found = rows.results;
-  if (found.length === 0) return [];
+  const found = [...own.results];
+  const ownTotal = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM review_findings
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND state = 'open' AND last_publication_id = ?`,
+    )
+    .bind(...scopeBinds, previousPublicationId)
+    .first<{ n: number }>();
+  const room = capped - found.length;
+  if (room > 0 && backlogFill > 0) {
+    const backlog = await db
+      .prepare(
+        `SELECT * FROM review_findings
+         WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+           AND state = 'open' AND last_publication_id <> ?
+         ORDER BY COALESCE(last_scheduled_ms, created_ms), id
+         LIMIT ?`,
+      )
+      .bind(...scopeBinds, previousPublicationId, Math.min(room, backlogFill))
+      .all<ReviewFindingRow>();
+    found.push(...backlog.results);
+  }
+  if (found.length === 0) return { targets: [], capped: 0 };
 
   const placeholders = found.map(() => "?").join(",");
   const threads = await db
@@ -206,16 +263,19 @@ export async function selectAssessmentTargets(db: D1Like, scope: Scope, limit: n
     else list.push(thread.id);
   }
 
-  return found.map((row) => ({
-    rowId: row.id,
-    findingId: row.finding_id,
-    original: JSON.parse(row.original_json) as OriginalFinding,
-    firstSeenSha: row.first_seen_sha,
-    lastAssessment: row.last_assessment_json === null
-      ? null
-      : (JSON.parse(row.last_assessment_json) as Assessment),
-    associationIds: associations.get(row.id) ?? [],
-  }));
+  return {
+    targets: found.map((row) => ({
+      rowId: row.id,
+      findingId: row.finding_id,
+      original: JSON.parse(row.original_json) as OriginalFinding,
+      firstSeenSha: row.first_seen_sha,
+      lastAssessment: row.last_assessment_json === null
+        ? null
+        : (JSON.parse(row.last_assessment_json) as Assessment),
+      associationIds: associations.get(row.id) ?? [],
+    })),
+    capped: Math.max(0, (ownTotal?.n ?? 0) - own.results.length),
+  };
 }
 
 /** Aggregate count of open lifecycle rows for the scope (coverage line). */

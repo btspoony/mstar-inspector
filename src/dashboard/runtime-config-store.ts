@@ -51,9 +51,11 @@
  * `platform_audit_events` row in ONE `db.batch`, the `flag.set` pattern in
  * src/admin/index.ts — a failed write appends no audit row.
  *
- * Module boundary: a dashboard leaf whose only import is the `DashboardD1`
- * type from ./users — no store/pipeline/review code, no runtime dependency.
+ * Module boundary: a dashboard leaf whose only imports are the `DashboardD1`
+ * type and the zero-dependency wire constants — no store/pipeline/review code,
+ * no runtime dependency.
  */
+import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { DashboardD1 } from "./users";
 
 /** PK of the system row in `review_runtime_settings`. */
@@ -89,6 +91,14 @@ export const CHECK_UPDATE_MIN = 500;
 export const CHECK_UPDATE_MAX = 15_000;
 /** The audit ledger's target id for the pair (one operator save, one row). */
 const CHECK_BUDGETS_TARGET = "review.check.budgets";
+
+/** PK of the recheck backlog-refill row (spec §7.2). */
+export const RECHECK_BACKLOG_FILL_KEY = "review.recheck.backlog_fill";
+/** Absent row: five older open rows may join a round's previous-round set. */
+export const RECHECK_BACKLOG_FILL_DEFAULT = 5;
+/** 0 disables the refill entirely; the wire target cap bounds the other end. */
+export const RECHECK_BACKLOG_FILL_MIN = 0;
+export const RECHECK_BACKLOG_FILL_MAX = ASSESSMENT_TARGET_CAP;
 
 /** Integer in min..max — the one predicate every write and every read re-parses with. */
 function isIntegerIn(value: unknown, min: number, max: number): value is number {
@@ -550,4 +560,64 @@ export async function setCheckBudgets(
     db.prepare(SYSTEM_UPSERT_SQL).bind(CHECK_UPDATE_KEY, String(value.updateMs), now, actor),
   ]);
   return value;
+}
+
+/**
+ * The recheck backlog refill (spec §7.2): how many older open rows may join a
+ * round's previous-round target set. The question and `degraded` flag follow
+ * the Check-budget contract — an absent row answers the default silently, an
+ * untrusted value or a failed read answers it with `degraded: true` and never
+ * throws, because a settings fault must not stop the review.
+ */
+export type BacklogFillRead = { rows: number; degraded: boolean };
+
+/** The one recheck backlog-refill read: ONE statement, no cache. */
+export async function getRecheckBacklogFill(db: DashboardD1): Promise<BacklogFillRead> {
+  try {
+    const row = await db
+      .prepare(`SELECT value FROM review_runtime_settings WHERE key = ?`)
+      .bind(RECHECK_BACKLOG_FILL_KEY)
+      .first<{ value?: unknown }>();
+    if (row === null) return { rows: RECHECK_BACKLOG_FILL_DEFAULT, degraded: false };
+    const parsed = parseInRange(row.value, RECHECK_BACKLOG_FILL_MIN, RECHECK_BACKLOG_FILL_MAX);
+    if (Number.isNaN(parsed)) return { rows: RECHECK_BACKLOG_FILL_DEFAULT, degraded: true };
+    return { rows: parsed ?? RECHECK_BACKLOG_FILL_DEFAULT, degraded: false };
+  } catch {
+    return { rows: RECHECK_BACKLOG_FILL_DEFAULT, degraded: true };
+  }
+}
+
+/** One stored backlog refill as SQL — the audit `before` value. */
+const storedBacklogFillSql = (keyParam: string, untrusted: string) =>
+  `(SELECT ${trustedIntSql("value", untrusted, RECHECK_BACKLOG_FILL_MIN, RECHECK_BACKLOG_FILL_MAX)} FROM review_runtime_settings WHERE key = ${keyParam})`;
+
+/** Audit row + settings upsert for one backlog-refill save, in ONE batch. */
+const RECHECK_BACKLOG_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'runtime.recheck.backlog_fill.set', 'runtime', ?3,
+          json_object('before', ${storedBacklogFillSql("?6", "NULL")},
+                      'after', ?4),
+          ?5)`;
+
+/**
+ * Set the recheck backlog refill. An out-of-range value refuses the whole
+ * write (`invalid_value`) with no row and no audit entry; an accepted value is
+ * audited with the actor in ONE batch and returned.
+ */
+export async function setRecheckBacklogFill(db: DashboardD1, rows: number, actor: string): Promise<number> {
+  if (!isIntegerIn(rows, RECHECK_BACKLOG_FILL_MIN, RECHECK_BACKLOG_FILL_MAX)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `backlog refill must be an integer in ${RECHECK_BACKLOG_FILL_MIN}..${RECHECK_BACKLOG_FILL_MAX}`,
+    );
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(RECHECK_BACKLOG_AUDIT_SQL)
+      .bind(crypto.randomUUID(), actor, RECHECK_BACKLOG_FILL_KEY, rows, now, RECHECK_BACKLOG_FILL_KEY),
+    db.prepare(SYSTEM_UPSERT_SQL).bind(RECHECK_BACKLOG_FILL_KEY, String(rows), now, actor),
+  ]);
+  return rows;
 }

@@ -135,6 +135,9 @@ function seedSystemCap(db: TestD1, value: number): void {
 }
 
 /** The documented absent-row check budgets as the operator API reports them. */
+/** The §7.2 refill surface: absent row = 5, range 0..the wire target cap (25). */
+const DEFAULT_BACKLOG_FILL = { rows: 5, min: 0, max: 25, degraded: false };
+
 const DEFAULT_CHECK_BUDGETS = {
   terminalizeMs: 10_000,
   updateMs: 5_000,
@@ -262,6 +265,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       max: 256,
       degraded: true,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
+      recheckBacklogFill: DEFAULT_BACKLOG_FILL,
     });
   });
 
@@ -352,6 +356,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       max: 256,
       degraded: false,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
+      recheckBacklogFill: DEFAULT_BACKLOG_FILL,
     });
     await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ concurrency: 5 }) });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
@@ -360,6 +365,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       max: 256,
       degraded: false,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
+      recheckBacklogFill: DEFAULT_BACKLOG_FILL,
     });
   });
 
@@ -394,6 +400,46 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       expect(await res.json()).toHaveProperty("error");
     }
     expect(storedSystem(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("PATCH /_internal_admin/api/runtime recheckBacklogFill", () => {
+  test("writes the row with one audit row and reports the stored value", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ recheckBacklogFill: 0 }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ recheckBacklogFill: 0 });
+    expect(auditRows(db)).toEqual([
+      {
+        action: "runtime.recheck.backlog_fill.set",
+        actor_login: OPERATOR,
+        target_type: "runtime",
+        target_id: "review.recheck.backlog_fill",
+      },
+    ]);
+    const read = (await (await runtimeApi(db, { method: "GET" })).json()) as {
+      recheckBacklogFill: Record<string, unknown>;
+    };
+    expect(read.recheckBacklogFill).toEqual({ ...DEFAULT_BACKLOG_FILL, rows: 0 });
+  });
+
+  test("an out-of-range or non-integer value is a 400 that writes nothing", async () => {
+    const { db } = fixture();
+    for (const body of [
+      JSON.stringify({ recheckBacklogFill: -1 }),
+      JSON.stringify({ recheckBacklogFill: 26 }),
+      JSON.stringify({ recheckBacklogFill: 2.5 }),
+      JSON.stringify({ recheckBacklogFill: "5" }),
+      // Exactly one parameter per save.
+      JSON.stringify({ recheckBacklogFill: 5, concurrency: 8 }),
+    ]) {
+      const res = await runtimeApi(db, { method: "PATCH", body });
+      expect(res.status, body).toBe(400);
+    }
     expect(auditRows(db)).toEqual([]);
   });
 });

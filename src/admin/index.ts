@@ -19,12 +19,16 @@ import {
   CHECK_UPDATE_MAX,
   CHECK_UPDATE_MIN,
   CONCURRENCY_MIN,
+  RECHECK_BACKLOG_FILL_MAX,
+  RECHECK_BACKLOG_FILL_MIN,
   RuntimeConfigError,
   SYSTEM_CONCURRENCY_MAX,
   getCheckBudgets,
+  getRecheckBacklogFill,
   getSystemConcurrency,
   isConcurrencyValue,
   setCheckBudgets,
+  setRecheckBacklogFill,
   setSystemConcurrency,
   type CheckBudgetValues,
 } from "../dashboard/runtime-config-store";
@@ -136,7 +140,11 @@ async function readRuntime(c: AdminContext): Promise<Response> {
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
-  const [system, budgets] = await Promise.all([getSystemConcurrency(db), getCheckBudgets(db)]);
+  const [system, budgets, backlog] = await Promise.all([
+    getSystemConcurrency(db),
+    getCheckBudgets(db),
+    getRecheckBacklogFill(db),
+  ]);
   return c.json({
     concurrency: system.concurrency,
     min: CONCURRENCY_MIN,
@@ -151,6 +159,13 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       updateMin: CHECK_UPDATE_MIN,
       updateMax: CHECK_UPDATE_MAX,
       degraded: budgets.degraded,
+    },
+    // §7.2 recheck breadth: older open rows allowed to join a round's set.
+    recheckBacklogFill: {
+      rows: backlog.rows,
+      min: RECHECK_BACKLOG_FILL_MIN,
+      max: RECHECK_BACKLOG_FILL_MAX,
+      degraded: backlog.degraded,
     },
   });
 }
@@ -171,19 +186,43 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   if (!db) return c.notFound();
   let concurrency: unknown;
   let rawBudgets: unknown;
+  let rawBacklogFill: unknown;
   try {
-    const body = (await c.req.json()) as { concurrency?: unknown; checkBudgets?: unknown };
+    const body = (await c.req.json()) as {
+      concurrency?: unknown;
+      checkBudgets?: unknown;
+      recheckBacklogFill?: unknown;
+    };
     concurrency = body.concurrency;
     rawBudgets = body.checkBudgets;
+    rawBacklogFill = body.recheckBacklogFill;
   } catch {
     // malformed body → the shape gate's 400, never a 500
   }
-  // One save writes one parameter: a body carrying both is a shape error, so a
-  // refused half can never leave the other half written.
-  if (rawBudgets !== undefined) {
-    if (concurrency !== undefined) {
-      return c.json({ error: "body must carry exactly one of concurrency | checkBudgets" }, 400);
+  // One save writes one parameter: a body carrying more than one is a shape
+  // error, so a refused half can never leave the other half written.
+  const provided = [concurrency, rawBudgets, rawBacklogFill].filter((value) => value !== undefined).length;
+  if (provided !== 1) {
+    return c.json(
+      { error: "body must carry exactly one of concurrency | checkBudgets | recheckBacklogFill" },
+      400,
+    );
+  }
+  if (rawBacklogFill !== undefined) {
+    if (typeof rawBacklogFill !== "number") {
+      return c.json(
+        { error: `body must be { recheckBacklogFill: <integer in ${RECHECK_BACKLOG_FILL_MIN}..${RECHECK_BACKLOG_FILL_MAX}> }` },
+        400,
+      );
     }
+    try {
+      return c.json({ recheckBacklogFill: await setRecheckBacklogFill(db, rawBacklogFill, login) });
+    } catch (error) {
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawBudgets !== undefined) {
     const pair = checkBudgetsBody(rawBudgets);
     if (pair === null) {
       return c.json({ error: "body must be { checkBudgets: { terminalizeMs, updateMs } }" }, 400);

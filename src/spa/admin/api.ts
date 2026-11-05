@@ -123,6 +123,15 @@ export type CheckBudgetConfig = {
   degraded: boolean;
 };
 
+/** The §7.2 recheck backlog refill as the operator API reports it. */
+export type RecheckBacklogFillConfig = {
+  rows: number;
+  min: number;
+  max: number;
+  /** The stored row could not be read: `rows` is the documented default. */
+  degraded: boolean;
+};
+
 /** The runtime parameters (iteration spec §1.1, spec §7.10). */
 export type RuntimeConfig = {
   concurrency: number;
@@ -137,6 +146,8 @@ export type RuntimeConfig = {
    * field is absence, not an unreadable setting.
    */
   checkBudgets: CheckBudgetConfig | null;
+  /** The recheck-breadth surface; `null` when an older Worker omits it. */
+  recheckBacklogFill: RecheckBacklogFillConfig | null;
 };
 
 function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
@@ -154,6 +165,18 @@ function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
   };
 }
 
+function parseRecheckBacklogFill(row: Json): RecheckBacklogFillConfig | null {
+  const raw = row.recheckBacklogFill;
+  if (raw === undefined) return null;
+  const fill = map(raw, "runtime recheckBacklogFill");
+  return {
+    rows: num(fill, "rows"),
+    min: num(fill, "min"),
+    max: num(fill, "max"),
+    degraded: bool(fill, "degraded"),
+  };
+}
+
 export async function readRuntime(): Promise<RuntimeConfig> {
   const body = map(await fetchJson(`${BASE}/runtime`), "runtime response");
   return {
@@ -162,6 +185,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     max: num(body, "max"),
     degraded: bool(body, "degraded"),
     checkBudgets: parseCheckBudgets(body),
+    recheckBacklogFill: parseRecheckBacklogFill(body),
   };
 }
 
@@ -206,6 +230,22 @@ export async function setCheckBudgets(
     }
   }
   return { ...stored, ...value, degraded: false };
+}
+
+/**
+ * Save the recheck backlog refill, answering the stored value. A 2xx with an
+ * unreadable body still landed, so the request value stands in.
+ */
+export async function setRecheckBacklogFill(
+  rows: number,
+  stored: RecheckBacklogFillConfig,
+): Promise<RecheckBacklogFillConfig> {
+  const answer = await write("PATCH", "/runtime", { recheckBacklogFill: rows });
+  if (typeof answer === "object" && answer !== null && "recheckBacklogFill" in answer) {
+    const saved = answer.recheckBacklogFill;
+    if (typeof saved === "number") return { ...stored, rows: saved, degraded: false };
+  }
+  return { ...stored, rows, degraded: false };
 }
 
 export async function readWorkspaces(): Promise<WorkspaceRow[]> {

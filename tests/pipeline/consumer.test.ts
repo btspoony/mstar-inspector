@@ -428,7 +428,7 @@ describe("createReviewConsumer", () => {
     expect(prepared.body).toContain("## ⚠️ Verdict: `needs fixes`");
     expect(prepared.body).toContain("Two issues found in the diff.");
     // §7.10 prior-findings section: the report body carries exactly one.
-    expect(prepared.body).toContain("### Revalidated findings");
+    expect(prepared.body).toContain("<summary>Revalidated findings</summary>");
     expect(prepared.body).toMatch(
       /<!-- mstar-inspector:publication:v1 id=[0-9a-f-]+ sha=0123456789abcdef0123456789abcdef01234567 kind=review -->/,
     );
@@ -3194,6 +3194,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     commenterState.discussion = {
       items: [],
       issueCoverage: "complete",
+      issueModelCoverage: "complete",
       issueDigest: "issue-digest",
       capturedMs: 0,
       threads: [
@@ -3296,6 +3297,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       commenterState.discussion = {
         items: [],
         issueCoverage: "complete",
+        issueModelCoverage: "complete",
         issueDigest: "issue-digest",
         capturedMs: 0,
         threads: [
@@ -3349,6 +3351,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
         },
       ],
       issueCoverage: "complete",
+      issueModelCoverage: "complete",
       issueDigest: "issue-digest",
       capturedMs: 0,
       threads: [
@@ -3370,7 +3373,14 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     await consumer(makeBatch(makePayload()));
 
     const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
-      recheck?: { discussion: { items: Array<{ body: string }>; issueCoverage: string; threads: Array<{ modelCoverage: string }> } };
+      recheck?: {
+        discussion: {
+          items: Array<{ body: string }>;
+          issueCoverage: string;
+          issueModelCoverage: string;
+          threads: Array<{ modelCoverage: string }>;
+        };
+      };
     };
     const wire = runnerInput.recheck!.discussion;
     // The raw body never reaches the model: marker syntax, delimiter runs and
@@ -3381,13 +3391,14 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(wire.items[0]!.body).not.toContain("\x00");
     expect(wire.items[0]!.body.length).toBeLessThan(hostile.length);
     expect(wire.items[0]!.body).toContain("[... body truncated ...]");
-    // Coverage honesty: the model did not see the whole capture, so the round
-    // is not labelled complete and no auto-resolution may proceed on it.
-    expect(wire.issueCoverage).toBe("truncated");
+    // Coverage honesty: the FETCH was complete, the model-view caps clamped the
+    // body, and each fact stays on its own flag.
+    expect(wire.issueCoverage).toBe("complete");
+    expect(wire.issueModelCoverage).toBe("truncated");
     expect(wire.threads[0]!.modelCoverage).toBe("complete"); // its own items were untouched
-    // The consequence the caps exist for: a model that saw partial context may
-    // close its row, but the round is NOT labelled complete and the thread is
-    // never queued for auto-resolution (§7.4/§7.5).
+    // The round is NOT labelled complete, and a clamped HUMAN item is a
+    // resolution fence: the model never saw that body in full, so a digest
+    // alone must not authorize a resolve (§7.4/§7.5).
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("context coverage: truncated");
     expect(prepared.body).not.toContain("not yet resolved");
@@ -3633,6 +3644,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     commenterState.discussion = {
       items: [],
       issueCoverage: "complete",
+      issueModelCoverage: "complete",
       issueDigest: "issue-digest",
       capturedMs: 0,
       threads: [
@@ -3683,6 +3695,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       commenterState.discussion = {
         items: [],
         issueCoverage: "complete",
+        issueModelCoverage: "complete",
         issueDigest: "issue-digest",
         capturedMs: 0,
         threads: [
@@ -3725,6 +3738,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     commenterState.discussion = {
       items: [],
       issueCoverage: "complete",
+      issueModelCoverage: "complete",
       issueDigest: "issue-digest",
       capturedMs: 0,
       threads: [
@@ -4088,6 +4102,7 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
     return {
       items: [],
       issueCoverage: "complete" as const,
+      issueModelCoverage: "complete" as const,
       issueDigest: "issue-digest",
       capturedMs: 0,
       threads: seeded.map(({ assocId }) => ({

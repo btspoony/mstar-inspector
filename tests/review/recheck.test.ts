@@ -90,6 +90,7 @@ function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
         },
       ],
       issueCoverage: "truncated",
+      issueModelCoverage: "complete",
       issueDigest: "digest-1",
       capturedMs: 1727300000000,
       threads: [],

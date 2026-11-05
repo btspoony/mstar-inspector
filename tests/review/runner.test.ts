@@ -345,7 +345,7 @@ const RECHECK_INPUT_DOC = {
   headSha: "0123456789abcdef0123456789abcdef01234567",
   targets: [],
   evidence: [],
-  discussion: { items: [], issueCoverage: "complete", issueDigest: "d", capturedMs: 1, threads: [] },
+  discussion: { items: [], issueCoverage: "complete", issueModelCoverage: "complete", issueDigest: "d", capturedMs: 1, threads: [] },
 };
 
 /** The valid recheck OUTPUT document the fake runtime returns when set. */

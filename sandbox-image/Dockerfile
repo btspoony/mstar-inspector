@@ -99,6 +99,11 @@
 # the root install. Nothing in it changes at runtime — the import is erased —
 # but the container copies `packages/shared/src/**`, so this marker must move
 # with the module.
+# rebuild: the discussion wire shape splits the issue coverage into FETCH
+# (`issueCoverage`) and model-view (`issueModelCoverage`) — the Worker no
+# longer relabels a complete fetch as truncated when the model caps drop old
+# issue items. The container copies `packages/shared/src/**`, so a stale image
+# would run a runner built against the previous shape.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and

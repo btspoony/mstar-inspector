@@ -829,6 +829,19 @@ export const zhCN: Dictionary = {
       /** 两个已存储的预算都无法读取——数字只是文档默认值。 */
       checkUnreadable:
         "无法读取已存储的检查预算，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
+      backlogFillTitle: "复核积压补位",
+      backlogFillDescription:
+        "上一轮自身的发现之外，每轮最多再补多少条更早的未解决发现进入复检集合。每条都消耗复检座位的预算；0 表示关闭补位。",
+      backlogFillLabel: "每轮补位条数",
+      backlogFillSave: "保存",
+      backlogFillSaved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      backlogFillFailed: "修改复核积压补位失败。",
+      /** {value} = 当前存储的补位条数（或文档默认值）。 */
+      backlogFillCurrent: "下一次审查生效值：最多补 {value} 条更早的发现。",
+      /** 已存储的补位条数无法读取——数字只是文档默认值。 */
+      backlogFillUnreadable:
+        "无法读取已存储的复核积压补位，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查该行。",
       // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
       // 与 /healthz 字段及 release tag 同形。
       version: "版本 {version}",

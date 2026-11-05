@@ -15,7 +15,7 @@ import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { PageNotice } from "../pages/PageNotice";
 import { concurrencySubmitBlocked } from "../pages/data";
-import { AdminWriteError, readRuntime, setCheckBudgets, setSystemConcurrency, useLoaded, type CheckBudgetConfig } from "./api";
+import { AdminWriteError, readRuntime, setCheckBudgets, setRecheckBacklogFill, setSystemConcurrency, useLoaded, type CheckBudgetConfig, type RecheckBacklogFillConfig } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
 export function RuntimePage({ locale }: { locale: Locale }) {
@@ -24,6 +24,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [draft, setDraft] = useState<string | null>(null);
   const [terminalizeDraft, setTerminalizeDraft] = useState<string | null>(null);
   const [updateDraft, setUpdateDraft] = useState<string | null>(null);
+  const [backlogDraft, setBacklogDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
   // the terminalize/update relation included — reads as that field's error
@@ -31,7 +32,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [notice, setNotice] = useState<{
     kind: "success" | "error";
     message: string;
-    source: "concurrency" | "checkBudgets";
+    source: "concurrency" | "checkBudgets" | "backlogFill";
   } | null>(null);
 
   async function onSubmit(
@@ -119,6 +120,40 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
+  async function onSaveBacklogFill(
+    event: FormEvent<HTMLFormElement>,
+    stored: RecheckBacklogFillConfig,
+  ): Promise<void> {
+    event.preventDefault();
+    if (busy) return; // in-flight guard — no double submit
+    if (concurrencySubmitBlocked(stored.degraded, backlogDraft)) return;
+    const rows = Number((backlogDraft ?? String(stored.rows)).trim());
+    setBusy(true);
+    setNotice(null);
+    try {
+      const saved = await setRecheckBacklogFill(rows, stored);
+      update((data) => ({ ...data, recheckBacklogFill: saved }));
+      setBacklogDraft(null);
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.backlogFillSaved"),
+        source: "backlogFill",
+      });
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.backlogFillFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+        source: "backlogFill",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="flex flex-col gap-6">
       <PageHeader
@@ -138,6 +173,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           // concurrency card is exactly as before, and nothing renders a bare
           // `undefined`.
           const budgets = data.checkBudgets;
+          const backlogFill = data.recheckBacklogFill;
           return (
           <div className="flex flex-col gap-4">
             <SectionCard tier="secondary">
@@ -277,6 +313,62 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       terminalize: budgets.terminalizeMs,
                       update: budgets.updateMs,
                     })}
+                  </p>
+                )}
+              </CardContent>
+            </SectionCard>
+            )}
+            {backlogFill === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.backlogFillTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.backlogFillDescription")}
+                </p>
+                {notice?.source === "backlogFill" ? (
+                  <div className="mt-4">
+                    <PageNotice kind={notice.kind} message={notice.message} />
+                  </div>
+                ) : null}
+                {backlogFill.degraded ? (
+                  <div className="mt-4">
+                    <PageNotice kind="warn" message={t(locale, "admin.runtime.backlogFillUnreadable")} />
+                  </div>
+                ) : null}
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => void onSaveBacklogFill(event, backlogFill)}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="recheck-backlog-fill">
+                      {t(locale, "admin.runtime.backlogFillLabel")}
+                    </label>
+                    <Input
+                      id="recheck-backlog-fill"
+                      type="number"
+                      min={backlogFill.min}
+                      max={backlogFill.max}
+                      className="w-32"
+                      autoComplete="off"
+                      required
+                      value={backlogDraft ?? (backlogFill.degraded ? "" : String(backlogFill.rows))}
+                      onChange={(event) => setBacklogDraft(event.target.value)}
+                    />
+                  </div>
+                  <Button type="submit" disabled={busy}>
+                    {t(locale, "admin.runtime.backlogFillSave")}
+                  </Button>
+                  {backlogFill.degraded ? (
+                    <Button type="button" variant="secondary" onClick={reload}>
+                      {t(locale, "common.retry")}
+                    </Button>
+                  ) : null}
+                </form>
+                {backlogFill.degraded ? null : (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {t(locale, "admin.runtime.backlogFillCurrent", { value: backlogFill.rows })}
                   </p>
                 )}
               </CardContent>

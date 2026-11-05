@@ -43,6 +43,7 @@ import {
   claimPublication,
   countOpenFindings,
   hasUnprovenDegradedPublication,
+  latestAppliedReviewPublicationId,
   listPublicationRecovery,
   listResolutionRecovery,
   listSuspendedLifecycleApps,
@@ -77,6 +78,7 @@ const OTHER_APP_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const SCOPE: Scope = { appId: APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA2 = "ffffffffffffffffffffffffffffffffffffffff";
+const SHA3 = "3333333333333333333333333333333333333333";
 
 function seedAppRow(db: TestD1, id: string, githubAppId = 1001): void {
   db.raw
@@ -913,7 +915,7 @@ describe("recurrence reopen and identity drift (spec §7.2)", () => {
 });
 
 describe("fair rotation (spec §7.2)", () => {
-  test("open rows select oldest-waiting first, capped at 25; applying a confirmed publication advances past the cap", async () => {
+  test("open rows select oldest-waiting first, capped at 25; the next round reassesses exactly the published set", async () => {
     const db = createSeededTestD1();
     // A staged publication provides the FK parent for 26 raw lifecycle rows.
     await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
@@ -932,8 +934,10 @@ describe("fair rotation (spec §7.2)", () => {
     expect(await countOpenFindings(db, SCOPE)).toBe(26);
 
     // LIMIT caps at ASSESSMENT_TARGET_CAP even if a caller asks for more.
-    const selected = await selectAssessmentTargets(db, SCOPE, 500);
+    const firstSelection = await selectAssessmentTargets(db, SCOPE, 500, "pub-1", 5);
+    const selected = firstSelection.targets;
     expect(selected).toHaveLength(25);
+    expect(firstSelection.capped).toBe(1);
     expect(selected.map((t) => t.rowId)).toEqual(Array.from({ length: 25 }, (_, i) => `row-${i + 1}`));
     // Targets carry the ORIGINAL concern, not a title.
     expect(selected[0]!.original.body).toBe("Dereferencing possibly-null value.");
@@ -954,18 +958,76 @@ describe("fair rotation (spec §7.2)", () => {
     const lease = await stageClaimProve(db, "pub-2", pay, 100_000);
     expect(await applyPublishedLifecycle(db, "pub-2", lease, 100_000)).toBe(true);
 
-    // Still 26 open (omitted outputs stay open), but the queue rotated:
-    // the previously unselected row-26 is now first, and every later entry
-    // is one of the previously selected rows now waiting behind it (the
-    // cap still holds — one of the 25 rotated rows is truncated by LIMIT).
+    // Still 26 open (omitted outputs stay open), but reassessment is scoped to
+    // the rows the previous round published: row-26 was never published by
+    // pub-2, so it stays backlog, not a target (spec §7.2).
     expect(await countOpenFindings(db, SCOPE)).toBe(26);
-    const next = await selectAssessmentTargets(db, SCOPE, 25);
-    expect(next).toHaveLength(25);
-    expect(next[0]!.rowId).toBe("row-26");
-    const previouslySelected = new Set(selected.map((t) => t.rowId));
-    for (const target of next.slice(1)) {
-      expect(previouslySelected.has(target.rowId)).toBe(true);
+    const next = await selectAssessmentTargets(db, SCOPE, 25, "pub-2", 5);
+    expect(next.targets.map((t) => t.rowId).sort()).toEqual(selected.map((t) => t.rowId).sort());
+  });
+
+  test("a row behind its own publication is refilled from the backlog instead of starving", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
+    for (const id of ["row-a", "row-b", "row-c", "row-d", "row-e"]) {
+      db.raw
+        .prepare(
+          `INSERT INTO review_findings
+             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+              first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+              first_seen_round, last_seen_round, state, created_ms, updated_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pub-1', 'pub-1', ?, ?, 1, 1, 'open', 1000, 1000)`,
+        )
+        .run(id, APP_ID, 123, "acme", "widgets", 42, `f-${id}`, JSON.stringify(originalFinding()), SHA, SHA);
     }
+
+    // The next round re-reported only row-a and row-b: row-c/d/e still sit on
+    // pub-1, and without the bounded refill they would never be selected again.
+    const pay = payload({
+      headSha: SHA2,
+      round: 2,
+      artifact: artifactDoc({
+        key: idemKey({ installation_id: SCOPE.installationId, owner: SCOPE.owner, repo: SCOPE.repo, pr_number: SCOPE.prNumber, head_sha: SHA2 }),
+      }),
+      lifecycle: lifecycleRound({
+        seen: [seenEntry("row-a", "f-row-a"), seenEntry("row-b", "f-row-b")],
+      }),
+    });
+    const lease = await stageClaimProve(db, "pub-2", pay, 20_000);
+    await applyPublishedLifecycle(db, "pub-2", lease, 20_000);
+
+    const { targets } = await selectAssessmentTargets(db, SCOPE, 25, "pub-2", 5);
+    expect(targets.map((t) => t.rowId)).toEqual(["row-a", "row-b", "row-c", "row-d", "row-e"]);
+  });
+
+  test("the previous round is the newest APPLIED review publication; staged and degraded rows never count", async () => {
+    const db = createSeededTestD1();
+    expect(await latestAppliedReviewPublicationId(db, SCOPE)).toBeNull();
+
+    // Staged is not applied: no round has published yet.
+    await stagePublication(db, { id: "pub-staged", payload: payload(), nowMs: 1000 });
+    expect(await latestAppliedReviewPublicationId(db, SCOPE)).toBeNull();
+
+    const pay = payload({
+      headSha: SHA2,
+      artifact: artifactDoc({
+        key: idemKey({ installation_id: SCOPE.installationId, owner: SCOPE.owner, repo: SCOPE.repo, pr_number: SCOPE.prNumber, head_sha: SHA2 }),
+      }),
+    });
+    const lease = await stageClaimProve(db, "pub-applied", pay, 2000);
+    await applyPublishedLifecycle(db, "pub-applied", lease, 3000);
+    expect(await latestAppliedReviewPublicationId(db, SCOPE)).toBe("pub-applied");
+
+    // A later degraded publication is not a review round.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, created_ms, updated_ms, recovery_state)
+         VALUES ('pub-degraded', ?, 123, 'acme', 'widgets', 42, ?, 'degraded', 'applied', '{}', 9000, 9000, 'done')`,
+      )
+      .run(APP_ID, SHA3);
+    expect(await latestAppliedReviewPublicationId(db, SCOPE)).toBe("pub-applied");
   });
 
   test("a reopened row enters at the current time behind already-waiting rows", async () => {
@@ -1001,8 +1063,28 @@ describe("fair rotation (spec §7.2)", () => {
     const lease = await stageClaimProve(db, "pub-2", pay, 10_000);
     await applyPublishedLifecycle(db, "pub-2", lease, 10_000);
 
-    const order = await selectAssessmentTargets(db, SCOPE, 25);
-    expect(order.map((t) => t.rowId)).toEqual(["row-old", "row-newer", "row-closed"]);
+    // The next round publishes all three current findings, so its reassessment
+    // set holds every row and the reopened one sorts last — behind the rows
+    // that had been waiting since 1000 and 5000.
+    const pay3 = payload({
+      headSha: SHA3,
+      round: 3,
+      artifact: artifactDoc({
+        key: idemKey({ installation_id: SCOPE.installationId, owner: SCOPE.owner, repo: SCOPE.repo, pr_number: SCOPE.prNumber, head_sha: SHA3 }),
+      }),
+      lifecycle: lifecycleRound({
+        seen: [
+          seenEntry("row-old", "f-old"),
+          seenEntry("row-newer", "f-newer"),
+          seenEntry("row-closed", "f-closed"),
+        ],
+      }),
+    });
+    const lease3 = await stageClaimProve(db, "pub-3", pay3, 20_000);
+    await applyPublishedLifecycle(db, "pub-3", lease3, 20_000);
+
+    const order = await selectAssessmentTargets(db, SCOPE, 25, "pub-3", 5);
+    expect(order.targets.map((t) => t.rowId)).toEqual(["row-old", "row-newer", "row-closed"]);
   });
 });
 
@@ -1114,7 +1196,7 @@ describe("tenant/App isolation", () => {
       .run(APP_ID, 123, "acme", "other-repo", 42, JSON.stringify(originalFinding()), SHA, SHA);
 
     expect(await countOpenFindings(db, SCOPE)).toBe(0);
-    expect(await selectAssessmentTargets(db, SCOPE, 25)).toEqual([]);
+    expect((await selectAssessmentTargets(db, SCOPE, 25, "pub-1", 5)).targets).toEqual([]);
     expect(await readPublicationProof(db, { scope: { ...SCOPE, appId: OTHER_APP_ID }, headSha: SHA })).toBeNull();
     expect(await readPublicationProof(db, { scope: SCOPE, headSha: SHA })).toBeNull(); // staged ≠ proven
   });
