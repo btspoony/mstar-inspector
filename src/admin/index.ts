@@ -63,13 +63,6 @@ type AdminRoute = {
   handler: (c: AdminContext) => Response | Promise<Response>;
 };
 
-/** The operator's own identity — the read that proves gate → handler wiring. */
-async function readMe(c: AdminContext): Promise<Response> {
-  const login = await operatorLogin(c);
-  if (!login) return c.notFound();
-  return c.json({ login });
-}
-
 /** Every known flag with its effective value; an absent row reads as enabled. */
 async function readFlags(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
@@ -625,7 +618,6 @@ export function localizeDocument(html: string, locale: Locale): string {
 }
 
 const ADMIN_ROUTES: readonly AdminRoute[] = [
-  { method: "get", path: "/api/me", handler: readMe },
   { method: "get", path: "/api/flags", handler: readFlags },
   { method: "patch", path: "/api/flags", handler: setFlag },
   { method: "get", path: "/api/runtime", handler: readRuntime },
