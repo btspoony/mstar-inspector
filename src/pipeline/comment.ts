@@ -96,6 +96,12 @@ import {
   type ResolveOutcome,
 } from "./review-threads";
 import { createChecksAdapter, type ChecksAdapter, type ChecksOctokit } from "./checks";
+import {
+  DEGRADED_MARKER_PREFIX,
+  DEGRADED_MARKER_RE,
+  REVIEW_MARKER_PREFIX,
+  REVIEW_MARKER_RE,
+} from "./review-markers";
 
 export type { ListDiscussionInput };
 export type { DiscoveryResult, ResolveOutcome };
@@ -711,12 +717,6 @@ export function buildPreparedDegradedBody(input: {
 // Single-comment upsert
 // ---------------------------------------------------------------------------
 
-/** Hidden HTML marker prefix — the first line of every review comment body. */
-export const REVIEW_MARKER_PREFIX = "<!-- mstar-inspector:review:v1";
-
-/** Full marker regex: `<!-- mstar-inspector:review:v1 round=N -->`. */
-const REVIEW_MARKER_RE = /^<!-- mstar-inspector:review:v1 round=(\d+) -->/;
-
 /**
  * Parse the round number from a review comment body. Returns null when the
  * body does not start with a well-formed marker (malformed → treated as a
@@ -786,12 +786,6 @@ export function planUpsert(comments: ReviewComment[], excludeIds?: ReadonlySet<n
 // real chain is untouched). One degraded comment per PR, upserted with the
 // same create-on-miss / PATCH-on-hit mechanics.
 // ---------------------------------------------------------------------------
-
-/** Hidden HTML marker prefix — the first line of every degraded comment body. */
-export const DEGRADED_MARKER_PREFIX = "<!-- mstar-inspector:review-degraded:v1";
-
-/** Full marker regex: `<!-- mstar-inspector:review-degraded:v1 round=N -->`. */
-const DEGRADED_MARKER_RE = /^<!-- mstar-inspector:review-degraded:v1 round=(\d+) -->/;
 
 /**
  * Parse the round number from a degraded comment body. Returns null when the

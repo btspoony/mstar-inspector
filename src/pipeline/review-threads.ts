@@ -71,8 +71,9 @@ import {
   type Scope,
   type VerifiedResolution,
 } from "../store/finding-lifecycle";
-// Marker-prefix SSOT stays with the comment module (no duplicated literals).
-import { DEGRADED_MARKER_PREFIX, REVIEW_MARKER_PREFIX } from "./comment";
+// Marker-prefix SSOT is the leaf marker module (no duplicated literals, no
+// comment-module cycle).
+import { DEGRADED_MARKER_PREFIX, REVIEW_MARKER_PREFIX } from "./review-markers";
 
 // ---------------------------------------------------------------------------
 // Opaque marker wire (spec §7.5)
