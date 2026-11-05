@@ -7,9 +7,11 @@
 ## Symptom
 
 A recheck round reports `Reassessed 0/N open prior finding(s) this round` while the open-finding
-count only grows. The runner's status document says `seat-failed` with an empty `error`; every sent
-row is counted `invalid-output`. No finding is ever closed, so the review never converges no matter
-how many fixes land.
+count only grows. The runner's status document says `failed`/`seat-failed` and carries the thrown
+message as its `error` — for an absent yield, `recheck seat produced no valid structured output
+(status unavailable)`; the EMPTY stderr belongs to the SDK child result, not to that document. Every
+sent row is counted `invalid-output`. No finding is ever closed, so the review never converges no
+matter how many fixes land.
 
 ## Cause: one confirmed defect, one observed correlation
 
