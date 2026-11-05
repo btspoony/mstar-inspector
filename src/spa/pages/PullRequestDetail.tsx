@@ -797,11 +797,13 @@ export function PullRequestDetailView({
                         <span aria-hidden="true" className="h-px flex-1 self-center bg-(--border-subtle)" />
                       </h3>
                       <ul className="flex flex-col gap-2">
-                        {group.items.map(({ finding, index }) => {
+                        {group.items.map(({ finding, index }, position) => {
                           // One identity for the rendered row: a payload id
                           // two findings share would otherwise fold them
                           // together, so position joins it — and the fold
                           // state, the React key and the body id all read it.
+                          // The announced position, unlike the identity, is
+                          // the row's rendered order inside the group.
                           const findingKey = `${finding.finding_id || "finding"}-${index}`;
                           const open = openFindings[findingKey] ?? finding.severity === MUST_FIX_SEVERITY;
                           const location =
@@ -847,7 +849,7 @@ export function PullRequestDetailView({
                                 className="self-start text-(--text-muted)"
                                 aria-expanded={open}
                                 aria-controls={id}
-                                aria-label={foldLabel(locale, open, finding.title, index + 1)}
+                                aria-label={foldLabel(locale, open, finding.title, position + 1)}
                                 onClick={() =>
                                   setOpenFindings((previous) => ({ ...previous, [findingKey]: !open }))
                                 }

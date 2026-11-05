@@ -147,11 +147,13 @@ export function recordId(baseId: string, key: string): string {
 }
 
 /**
- * A fold control's accessible name: the action, the record it folds, and the
- * record's position. The position is the one identity every record has — the
- * same one its fold state is keyed by — so two records that share a title (or
- * a verdict and sha) still read as two controls, and a record with no identity
- * text (a coerced-empty title or verdict) is named by its position alone.
+ * A fold control's accessible name: the action, the record it folds, and
+ * the record's position. The position is the row's rendered order in its
+ * group, so two records that share a title (or a verdict and sha) still read
+ * as two controls, and a record with no identity text (a coerced-empty title
+ * or verdict) is named by its position alone. It need not be the identity
+ * the fold state is keyed by — findings key folding on the payload index
+ * while announcing the rendered position.
  * The sentence's punctuation belongs to the locale keys, not to this function.
  */
 export function foldLabel(
