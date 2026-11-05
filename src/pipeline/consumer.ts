@@ -103,7 +103,9 @@ import {
   applyPublishedLifecycle,
   claimPublication,
   countOpenFindings,
+  findPublicationJournal,
   hasUnprovenDegradedPublication,
+  PUBLICATION_HANDOFF_PHASES,
   markPublicationFailed,
   recordPublicationProof,
   selectAssessmentTargets,
@@ -351,8 +353,17 @@ export type ConsumerLogFields = {
    * `review_no_increment` (union widened ADDITIVELY): an incremental round whose
    * `base...head` is genuinely empty — the prior round already covers this head,
    * so the delivery is acked without a new review body.
+   * `check_terminalize_budget_exceeded` / `check_terminalize_failed` /
+   * `check_abandon_released` / `check_abandon_not_owned` /
+   * `check_abandon_failed` (spec §7.10/§7.11, union widened ADDITIVELY): the
+   * consumer gave the attempt up and handed it to the Check recovery lane.
+   * `check_abandon_released` = the fenced release changed the row;
+   * `check_abandon_not_owned` = it changed nothing because the attempt is no
+   * longer ours (recovery claimed it, the lease expired, or it already ended) —
+   * a legitimate no-op, not a fault; `check_abandon_failed` = the hand-off
+   * itself faulted (a store error).
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -365,6 +376,17 @@ export type ConsumerLogFields = {
   idempotency_key?: string;
   /** review_check_attempts.attempt_id — the Check attempt a line is about. */
   attempt_id?: string;
+  /**
+   * The Check attempt's attached remote run id, when a line knows it (spec
+   * §7.10 give-up events carry it "when known"). Absent while the create never
+   * attached a run — the give-up path itself keys on `attempt_id` alone.
+   */
+  check_run_id?: number | null;
+  /**
+   * Why the consumer stopped waiting on the Check hook (§7.10 give-up) — the
+   * free-form detail, distinct from `reason`'s closed admission vocabulary.
+   */
+  check_reason?: string;
   /**
    * The metered ledger identity (`usage_events.review_id`) and its workspace.
    * Carried on the usage-write failure lines so a dropped attempt can be
@@ -885,12 +907,29 @@ export type CheckLifecycleHooks = {
     inheritedHeadSha?: string;
     /** The operator-configured bound on the terminal `checks.update` (spec §7.10). */
     updateBudgetMs: number }): Promise<void>;
+  /**
+   * §7.10 give-up handoff (optional, additive): the consumer stopped waiting
+   * on `terminalize` — its budget elapsed, the hook threw, or the checkout
+   * contradicted the claim. The lifecycle freezes a terminal intent ONLY when
+   * none is frozen (the predicate is in the UPDATE, so a concurrent
+   * terminalize's text wins) and releases the lease to recovery WITHOUT a
+   * remote request, so the minute reconciler closes the run instead of waiting
+   * out the execution deadline. Resolves `true` only when the fenced release
+   * changed the row — a lease recovery already claimed, or an expired lease,
+   * changed nothing and resolves `false`; a store fault rejects.
+   */
+  abandonTerminalize?(input: { handle: CheckHandle; reason: string; outcome?: "superseded" }): Promise<boolean>;
 };
 
 /**
- * Check execution window (spec §7.9: the immutable execution deadline is
- * claim time + 900,000ms) — the consumer passes it to `begin`; the
- * lifecycle claim persists it as the lease/expiry anchor.
+ * Check execution window (spec §7.9): claim time + 900,000ms — the Cloudflare
+ * Queues per-invocation wall-clock cap (15 minutes, the same cap the deep tier
+ * is pinned under in `wrangler.jsonc`). It is therefore a PLATFORM INVARIANT,
+ * not a tuning knob: a longer deadline can never be used by the consumer and
+ * only delays the recovery lane that finally closes the run. The claim now
+ * happens near the START of that window (at admission, before the container
+ * and the clone) instead of after `rev-parse`, so the window covers the
+ * container phase without being widened.
  */
 export const CHECK_EXECUTION_WINDOW_MS = 900_000;
 
@@ -970,17 +1009,10 @@ async function journalHandoffRow(
   scope: Scope,
   headSha: string,
 ): Promise<{ id: string; phase: PublicationRow["phase"] } | null> {
-  const row = await db
-    .prepare(
-      `SELECT id, phase FROM review_publications
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-         AND head_sha = ? AND phase IN ('prepared','sending','unknown','confirmed')
-       ORDER BY created_ms, id LIMIT 1`,
-    )
-    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, headSha)
-    .first<{ id: string; phase: string }>();
-  if (row === null) return null;
-  return { id: row.id, phase: row.phase as PublicationRow["phase"] };
+  // The predicate is SHARED with the Check recovery lane's wait-for-proof probe
+  // (`findPublicationJournal`); only the phase set differs, because a delivery
+  // also hands off a `confirmed` row whose proof is about to be applied.
+  return findPublicationJournal(db, { scope, headSha, phases: PUBLICATION_HANDOFF_PHASES });
 }
 
 /**
@@ -3229,6 +3261,11 @@ async function processMessage(
   // isolated warns, and a hook timeout resolves without blocking the path.
   let checkHandle: CheckHandle | null = null;
   let checkTerminalized = false;
+  // Whether the ADMISSION-time claim ran. The post-`rev-parse` block is the
+  // fallback for a message whose SHA was not knowable then, so it must not
+  // claim a second time (a failed early claim included: the claim INSERT is the
+  // one race-decided gate, and the old code tried exactly once).
+  let checkClaimAttempted = false;
   // §7.10 Check budgets, filled by the ONE per-message runtime read (after the
   // level resolves, before the begin hook). Every terminal path runs after that
   // read; a path that somehow reached one without it is still bounded by the
@@ -3238,13 +3275,70 @@ async function processMessage(
   // this point is post-send uncertainty (publication-unknown), never a
   // clean pre-publication failure.
   let sendAttempt: { publicationId: string } | null = null;
-  const terminalizeCheck = async (
+  /**
+   * §7.10 give-up handoff: the consumer stopped waiting on the terminalize
+   * hook. The lifecycle freezes a terminal intent (only where none is frozen)
+   * and releases the lease to the Check recovery lane with NO remote request,
+   * so the minute reconciler closes the run instead of waiting out the
+   * execution deadline (spec §7.11). The promise is handed to the invocation
+   * context when one exists, so a Check write never adds a wait to the
+   * review's own return.
+   *
+   * Resolves `true` only when the handoff COMPLETED under this lease (intent +
+   * release, two fenced writes) and the release actually changed the row.
+   * `false` means the attempt may still hold this consumer's lease (or the
+   * no-op proved it was not ours to release), so a caller taking a second
+   * Check ownership must not do so — a Check fault never blocks the review,
+   * but it must not double-claim either.
+   */
+  const abandonCheck = (handle: CheckHandle, reason: string, outcome?: "superseded"): Promise<boolean> => {
+    const abandon = deps.checks?.abandonTerminalize;
+    // No give-up seam (test doubles only; production always supplies it):
+    // nothing can prove this attempt released, so report the handoff as failed.
+    if (abandon === undefined) return Promise.resolve(false);
+    const line = {
+      ...(baseFields ?? payloadIdentityFields(payload)),
+      sandbox_id: sandboxId,
+      attempt_id: handle.attemptId,
+      check_reason: reason,
+    };
+    const release = abandon({ handle, reason, ...(outcome === undefined ? {} : { outcome }) }).then(
+      (released) => {
+        if (released) {
+          deps.log.warn(
+            { ...line, event: "check_abandon_released" },
+            `check attempt released to the recovery lane (${reason})`,
+          );
+          return true;
+        }
+        // The fenced release wrote NOTHING: the attempt is no longer ours to
+        // hand over (recovery already claimed it, its lease expired, or it
+        // already ended). That is a legitimate no-op — never a fault.
+        deps.log.warn(
+          { ...line, event: "check_abandon_not_owned" },
+          `check attempt not released — recovery already owns it, or its lease is no longer live (${reason})`,
+        );
+        return false;
+      },
+      (err: unknown) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(
+          { ...line, event: "check_abandon_failed" },
+          `check attempt release failed (the hand-off itself faulted): ${detail}`,
+        );
+        return false;
+      },
+    );
+    deps.background?.waitUntil(release);
+    return release;
+  };
+
+  const runTerminalize = async (
+    handle: CheckHandle,
     publicationId: string | null,
     outcome: CheckTerminalOutcome,
     inheritedHeadSha?: string,
   ): Promise<void> => {
-    if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
-    checkTerminalized = true;
     // The per-message read always precedes every terminal path; the fallback
     // keeps a future caller bounded by the store's documented defaults.
     const budgets = checkBudgets ?? {
@@ -3255,15 +3349,17 @@ async function processMessage(
     // Set when the consumer stops waiting on the hook: only past that point is
     // a later rejection detached, so only then does the sink report it.
     let abandoned = false;
+    // The give-up handoff the overrun callback starts: awaited below when no
+    // invocation context can own it (spec §7.10's no-context fallback).
+    let giveUpRelease: Promise<boolean> | undefined;
     try {
-      const terminalize = deps.checks.terminalize({
-        handle: checkHandle,
+      const terminalize = deps.checks!.terminalize({
+        handle,
         publicationId,
         outcome,
         ...(inheritedHeadSha === undefined ? {} : { inheritedHeadSha }),
         updateBudgetMs: budgets.updateMs,
       });
-      const attemptId = checkHandle.attemptId;
       // The invocation owns the promise: if the budget below expires, the hook
       // still finishes after this consumer returns. A rejection landing after
       // that point has no inline waiter left to report it.
@@ -3275,7 +3371,7 @@ async function processMessage(
             {
               ...(baseFields ?? payloadIdentityFields(payload)),
               sandbox_id: sandboxId,
-              attempt_id: attemptId,
+              attempt_id: handle.attemptId,
             },
             `check terminalize hook failed after its budget (detached): ${detail}`,
           );
@@ -3291,24 +3387,93 @@ async function processMessage(
             {
               ...(baseFields ?? payloadIdentityFields(payload)),
               sandbox_id: sandboxId,
-              attempt_id: attemptId,
+              attempt_id: handle.attemptId,
+              event: "check_terminalize_budget_exceeded",
             },
             deps.background === undefined
               ? "check terminalize hook exceeded its budget (detached; no invocation context to finish it)"
               : "check terminalize hook exceeded its budget (left to the invocation context)",
           );
+          // Released at the instant we give up: the attempt would otherwise
+          // hold its lease until the immutable execution deadline, which is
+          // what made the Check terminalize up to 15 minutes late. The promise
+          // is awaited right below when no invocation context can own it.
+          giveUpRelease = abandonCheck(handle, `terminalize budget exceeded (${budgets.terminalizeMs}ms)`);
         },
       );
+      // The overrun path has the same no-context fallback as the throw path:
+      // one fenced D1 write, never a remote send, so the lease is released
+      // before this consumer returns even without `waitUntil`.
+      if (giveUpRelease !== undefined && deps.background === undefined) await giveUpRelease;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(
         {
           ...(baseFields ?? payloadIdentityFields(payload)),
           sandbox_id: sandboxId,
-          attempt_id: checkHandle?.attemptId,
+          attempt_id: handle.attemptId,
+          event: "check_terminalize_failed",
         },
         `check terminalize hook failed (isolated): ${detail}`,
       );
+      // Awaited only when no invocation context can own it (one fenced write).
+      const release = abandonCheck(handle, `terminalize hook threw: ${detail}`);
+      if (deps.background === undefined) await release;
+    }
+  };
+
+  const terminalizeCheck = async (
+    publicationId: string | null,
+    outcome: CheckTerminalOutcome,
+    inheritedHeadSha?: string,
+  ): Promise<void> => {
+    if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
+    checkTerminalized = true;
+    await runTerminalize(checkHandle, publicationId, outcome, inheritedHeadSha);
+  };
+
+  /**
+   * The §7.10 begin hook over one SHA, isolated exactly as before: its own
+   * latch (never shared or reset), the 2 s consumer bound, and a throw that
+   * only warns — a Check never prevents the review.
+   */
+  const beginCheck = async (scope: Scope, githubAppId: number, headSha: string): Promise<CheckHandle | null> => {
+    if (deps.checks === undefined) return null;
+    // One latch per `begin` call, created HERE and never stored anywhere: a
+    // later message cannot clear or reuse it, so a detached begin from this
+    // message stays abandoned for its whole lifetime (QC1-001 replacement
+    // race).
+    const beginLatch = createCheckBeginLatch();
+    try {
+      return await withHookTimeout(
+        deps.checks.begin({
+          scope,
+          githubAppId,
+          headSha,
+          triggeredBy: payload.triggered_by,
+          action: payload.action,
+          executionDeadlineMs: Date.now() + CHECK_EXECUTION_WINDOW_MS,
+          latch: beginLatch,
+        }),
+        null,
+        // The begin hook keeps §7.10's 2 s: it runs before model work.
+        CHECK_HOOK_TIMEOUT_MS,
+        // The consumer gave up waiting: a lifecycle that reads this call's
+        // latch stops attaching state on behalf of this abandoned invocation
+        // and leaves the created run with a terminal obligation (§7.10's
+        // budget is a consumer bound, not a licence to create an attempt
+        // nobody will ever terminalize).
+        () => {
+          beginLatch.abandon();
+        },
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        fields ?? baseFields ?? payloadIdentityFields(payload),
+        `check begin hook failed (isolated, no Check): ${detail}`,
+      );
+      return null;
     }
   };
 
@@ -3517,6 +3682,17 @@ async function processMessage(
       // side instead of widening the reader — its fields ride this channel.
       warn: (readerFields, msg) => deps.log.warn({ ...admissionFields, ...readerFields }, msg),
     });
+    // The Check lane's scope (§7.10) — the same App/PR identity the
+    // publication journal and the attempt key use, derivable from the payload
+    // alone. Declared HERE because the admission-time Check claim needs it
+    // before the container and the checkout.
+    const lifecycleScope: Scope = {
+      appId: payload.appRef.appId,
+      installationId: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      prNumber: payload.pr_number,
+    };
     const inflightKey: InflightKey = {
       installation_id: payload.installation_id,
       owner: payload.owner,
@@ -3572,6 +3748,25 @@ async function processMessage(
       };
     }
     inflight = { key: inflightKey, attemptId, ttlSeconds };
+    // §7.7 step 4 / §7.9: the Check attempt is claimed at ADMISSION — before
+    // the container, the token mint and the clone — so the run appears when the
+    // review starts working instead of minutes later. The SHA is the payload's
+    // (`pull_request`) or the PR head watermark (`issue_comment`); when neither
+    // is readable the post-`rev-parse` block below owns the claim exactly as
+    // before. The begin hook is isolated: a Check fault never costs a review.
+    if (deps.checks !== undefined) {
+      // §7.10 Check budgets: ONE read per message, taken only once this
+      // message can actually produce a Check; every terminal path shares it.
+      checkBudgets = await readCheckBudgets(deps.env.DB, {
+        warn: (readerFields, msg) =>
+          deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
+      });
+      const earlyHeadSha = payload.head_sha || (await readPrHead(deps, payload))?.headSha || null;
+      if (earlyHeadSha !== null) {
+        checkClaimAttempted = true;
+        checkHandle = await beginCheck(lifecycleScope, githubAppId, earlyHeadSha);
+      }
+    }
     // 1. Sandbox + installation token (created lazily; destroyed in finally).
     // AL-6 stage window: container acquisition + every in-sandbox step below
     // (clone/rev-parse/diff/numstat/input-write) classify "sandbox" until the
@@ -3645,6 +3840,43 @@ async function processMessage(
     }
     const headSha = rev.stdout.trim();
 
+    // §7.7 step 4 / §7.9: resolve a CONTRADICTED claim against the
+    // authoritative checkout HERE — before any dedup/journal early exit, so a
+    // delivery whose claimed SHA was disproved can never close the wrong head's
+    // run as `skipped`. (A message that had no knowable SHA at admission is a
+    // different case: its claim stays at the post-capture fallback below, so a
+    // duplicate or journal hand-off of a comment trigger never creates a run.)
+    if (checkHandle !== null && checkHandle.headSha !== headSha) {
+      const supersededHandle = checkHandle;
+      checkHandle = null;
+      deps.log.warn(
+        fields ?? baseFields ?? payloadIdentityFields(payload),
+        `check attempt superseded: claimed ${supersededHandle.headSha.slice(0, 7)}, checked out ${headSha.slice(0, 7)}`,
+      );
+      // Freeze the contradicted attempt's `superseded` intent and release it —
+      // TWO fenced D1 writes (intent + release), no remote request. Its remote
+      // send belongs to the minute recovery cron, so the new head's review
+      // never waits on the Check hook.
+      const handedOff = await abandonCheck(
+        supersededHandle,
+        "the checkout proved a newer commit than the claim",
+        "superseded",
+      );
+      if (handedOff) {
+        checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
+      } else {
+        // The handoff failed, so the old attempt may still hold this
+        // consumer's lease: claiming the new head anyway would put two live
+        // consumer-owned claims on one invocation. A Check fault never blocks
+        // the review — this message reviews the checked-out commit with NO
+        // Check, and the old attempt's own deadline hands it to recovery.
+        deps.log.warn(
+          fields ?? baseFields ?? payloadIdentityFields(payload),
+          `check supersede handoff failed — continuing the review for ${headSha.slice(0, 7)} with no Check`,
+        );
+      }
+    }
+
     const key: IdempotencyKey = {
       installation_id: payload.installation_id,
       owner: payload.owner,
@@ -3673,30 +3905,37 @@ async function processMessage(
     const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
     if (done) {
       deps.log.info(fields, "KV idempotency hit — ack");
+      // The claim now precedes this read, so the run it created must be closed
+      // — and it must carry THIS head's existing result (inherited like an
+      // empty increment), never a `neutral` that would mask a failing gate.
+      await terminalizeCheck(null, "skipped", headSha);
       return { kind: "ok" };
     }
     const existing = await deps.store.findByIdempotencyKey(key);
     if (existing) {
       deps.log.info(fields, "idempotency hit — ack");
+      await terminalizeCheck(null, "skipped", headSha);
       return { kind: "ok" };
     }
     // §7.7 step 2 (second half) — the publication journal: an existing
     // prepared/sending/unknown/confirmed row for this exact scope/SHA hands
     // off to recovery and ACKs without another paid review. Pending recovery
     // is never deleted by a same-SHA mention re-run.
-    const lifecycleScope: Scope = {
-      appId: payload.appRef.appId,
-      installationId: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      prNumber: payload.pr_number,
-    };
     const journalRow = await journalHandoffRow(deps.env.DB, lifecycleScope, headSha);
     if (journalRow !== null) {
       deps.log.info(
         fields,
         `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
       );
+      // Deliberately NOT terminalized: recovery already owns a publication for
+      // this head, and the honest Check conclusion is that publication's proof
+      // — a premature `neutral` here would outlive the proof that corrects it.
+      // The admitted claim is RELEASED instead (remote-unconfirmed + the first
+      // backoff rung), so the minute lane adopts this run and concludes from
+      // that proof; leaving it on the visitor's 15-minute lease would close it
+      // red on a commit whose review was published — the symptom this change
+      // exists to remove.
+      if (checkHandle !== null) await abandonCheck(checkHandle, "publication journal handoff");
       return { kind: "ok" };
     }
 
@@ -4029,51 +4268,18 @@ async function processMessage(
       }
     }
 
-    // 6. §7.7 step 4 — the fenced Check claim: after the authoritative SHA
-    // and dedup, BEFORE model work. Absent `checks` dep = no Checks, M8
-    // fully operational; hook failure is isolated and cannot prevent the
-    // review (step 5).
-    if (deps.checks !== undefined) {
-      // §7.10 Check budgets: ONE read per message, taken only once this
-      // message can actually produce a Check — a refused or duplicate delivery
-      // never pays for it. Every terminal path below shares this pair.
-      checkBudgets = await readCheckBudgets(deps.env.DB, {
-        warn: (readerFields, msg) =>
-          deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
-      });
-      // One latch per `begin` call, created HERE and never stored anywhere: a
-      // later message cannot clear or reuse it, so a detached begin from this
-      // message stays abandoned for its whole lifetime (QC1-001 replacement
-      // race).
-      const beginLatch = createCheckBeginLatch();
-      try {
-        checkHandle = await withHookTimeout(
-          deps.checks.begin({
-            scope: lifecycleScope,
-            githubAppId,
-            headSha,
-            triggeredBy: payload.triggered_by,
-            action: payload.action,
-            executionDeadlineMs: Date.now() + CHECK_EXECUTION_WINDOW_MS,
-            latch: beginLatch,
-          }),
-          null,
-          // The begin hook keeps §7.10's 2 s: it runs before model work.
-          CHECK_HOOK_TIMEOUT_MS,
-          // The consumer gave up waiting: a lifecycle that reads this call's
-          // latch stops attaching state on behalf of this abandoned invocation
-          // and leaves the created run with a terminal obligation (§7.10's
-          // budget is a consumer bound, not a licence to create an attempt
-          // nobody will ever terminalize).
-          () => {
-            beginLatch.abandon();
-          },
-        );
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        deps.log.warn(fields, `check begin hook failed (isolated, no Check): ${detail}`);
-        checkHandle = null;
-      }
+    // 6. §7.7 step 4 — the Check claim was made at ADMISSION. What remains is
+    // the FALLBACK (no SHA was knowable there) and the SUPERSEDE check: the
+    // authoritative checkout is the only SHA the review itself will use.
+
+    // 6. §7.7 step 4 — the fallback claim for a message whose SHA was not
+    // knowable at admission (a comment trigger with no readable head
+    // watermark): it lands here, after dedup/journal handed their duplicates
+    // off, BEFORE model work. Absent `checks` dep = no Checks; hook failure is
+    // isolated and cannot prevent the review (step 5).
+    if (deps.checks !== undefined && !checkClaimAttempted) {
+      checkClaimAttempted = true;
+      checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
     }
 
     // 6. Numstat of the PR diff — `git apply --numstat` reads the unified

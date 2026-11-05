@@ -71,6 +71,7 @@ import {
   type Scope,
   setCheckCreateState,
   setCheckDesired,
+  setCheckFallbackDesired,
   suspendCheckRecovery,
   suspensionCredentialOf,
 } from "../../src/store/review-checks";
@@ -690,6 +691,48 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(
       await recordCheckObservation(db, id, lease, remoteFor(attempt, { status: "in_progress", conclusion: null }), T0),
     ).toBe(false);
+  });
+});
+
+describe("setCheckFallbackDesired (give-up fallback, spec §7.9/§7.10)", () => {
+  /**
+   * The give-up fallback must never replace a frozen terminal intent. The two
+   * intent writers are exercised in BOTH orders: the guard lives inside the
+   * fallback's UPDATE, so there is no read-then-write window a concurrent
+   * terminalize could slip through.
+   */
+  const GATE_FAILURE: CheckConclusion = {
+    desired: "failure",
+    title: CHECK_NAME,
+    summary: `Review gate missed for ${SHA.slice(0, 7)}: verdict "needs fixes", score 40 (floor 80; allowed: ship it).`,
+  };
+
+  test("the frozen intent wins in either write order", async () => {
+    // (1) The fallback lands while the row still wants `in_progress`, then the
+    // terminalize freezes its precise gate failure — same `desired`, so the
+    // real decision replaces the fallback text.
+    {
+      const db = seededDb();
+      const { attempt, lease } = await claim(db);
+      const id = attempt.identity.attemptId;
+      expect(await setCheckFallbackDesired(db, id, lease, FAILURE, T0)).toBe(true);
+      expect(await setCheckDesired(db, id, lease, GATE_FAILURE, null, T0)).toBe(true);
+      const row = await rawRow(db, id);
+      expect(row.desired).toBe("failure");
+      expect(row.desired_summary).toBe(GATE_FAILURE.summary);
+    }
+    // (2) The terminalize freezes first: the fallback's own predicate refuses,
+    // so the exact text and the recovery state stay untouched.
+    {
+      const db = seededDb();
+      const { attempt, lease } = await claim(db);
+      const id = attempt.identity.attemptId;
+      expect(await setCheckDesired(db, id, lease, GATE_FAILURE, null, T0)).toBe(true);
+      expect(await setCheckFallbackDesired(db, id, lease, FAILURE, T0)).toBe(false);
+      const row = await rawRow(db, id);
+      expect(row.desired).toBe("failure");
+      expect(row.desired_summary).toBe(GATE_FAILURE.summary);
+    }
   });
 });
 
