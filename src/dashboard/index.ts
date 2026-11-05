@@ -193,11 +193,18 @@ import {
   CONCURRENCY_MIN,
   RuntimeConfigError,
   WORKSPACE_CONCURRENCY_MAX,
+  getWorkspaceCheckMinScore,
   getWorkspaceConcurrency,
   isConcurrencyValue,
   readDefaultReviewLevel,
+  setWorkspaceCheckMinScore,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
+import {
+  CHECK_MIN_SCORE_MAX,
+  CHECK_MIN_SCORE_MIN,
+  isCheckMinScoreValue,
+} from "../contracts/review-gate";
 import { isLocale, resolveLocale, serializeLocaleCookie, t, type DictionaryKey, type Locale } from "../i18n";
 import { RESERVED_WORKSPACE_SLUGS, WORKSPACE_FAMILY_SEGMENTS, wantsHtml } from "../spa/routes";
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-headers";
@@ -1586,8 +1593,22 @@ async function commitManifestApp(args: {
   // The remaining UNIQUE identity is github_app_id: the same GitHub App
   // cannot be connected twice, and a retry cannot help — the hold is burned.
   const apps = createAppsStore(db);
+  // The floor a new App starts at: the workspace's own default, else the
+  // platform default. A degraded read is refused above — it would otherwise
+  // seed a wider floor than the tenant configured.
+  const workspaceFloor = await getWorkspaceCheckMinScore(db, workspaceId);
+  if (workspaceFloor.degraded) {
+    // The workspace's own default is unreadable (a failed read, or a stored
+    // value no reader trusts). Seeding the platform default here would
+    // silently WIDEN a floor the tenant may have set higher, so the commit
+    // fails closed: the hold is kept and the operator retries once the stored
+    // value is repaired.
+    logManifestFailure("commit", "db_error", { error_type: "workspace_gate_unreadable" });
+    return { kind: "db_rejected" };
+  }
   try {
     const row = await apps.createApp({
+      defaultCheckMinScore: workspaceFloor.minScore,
       id: hold.appId,
       githubSlug: hold.slug,
       githubAppId: hold.id,
@@ -2368,6 +2389,54 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
     return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
       min: CONCURRENCY_MIN,
       max: WORKSPACE_CONCURRENCY_MAX,
+    });
+  }
+};
+
+// --- Workspace settings: the default review-gate score floor ---
+//
+// The floor a newly connected App of this workspace starts at. Existing Apps
+// keep their own stored floor (the per-App settings face writes that), so this
+// route never rewrites `github_apps`. Same role gate as the concurrency cap:
+// owner/admin read and write, a plain member gets the tenant 404.
+const workspaceCheckMinScoreReadRoute = async (c: DashboardContext) => {
+  const gate = await workspaceConcurrencyGate(c);
+  if (!gate.ok) return gate.response;
+  const read = await getWorkspaceCheckMinScore(gate.member.db, gate.member.scope.workspaceId);
+  return c.json({
+    min_score: read.minScore,
+    min: CHECK_MIN_SCORE_MIN,
+    max: CHECK_MIN_SCORE_MAX,
+    degraded: read.degraded,
+  });
+};
+
+const workspaceCheckMinScoreWriteRoute = async (c: DashboardContext) => {
+  const gate = await workspaceConcurrencyGate(c);
+  if (!gate.ok) return gate.response;
+  const { db, user, scope } = gate.member;
+  let value: unknown;
+  try {
+    const body = (await c.req.json()) as { min_score?: unknown };
+    value = body.min_score;
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  if (!isCheckMinScoreValue(value)) {
+    return keyed400(c, SETTINGS_400_KEYS.checkScoreInvalid, {
+      min: CHECK_MIN_SCORE_MIN,
+      max: CHECK_MIN_SCORE_MAX,
+    });
+  }
+  try {
+    const stored = await setWorkspaceCheckMinScore(db, scope.workspaceId, value, user.github_login);
+    return c.json({ min_score: stored });
+  } catch (err) {
+    if (!(err instanceof RuntimeConfigError)) throw err;
+    if (err.reason === "unknown_workspace") return await tenantNotFound(c);
+    return keyed400(c, SETTINGS_400_KEYS.checkScoreInvalid, {
+      min: CHECK_MIN_SCORE_MIN,
+      max: CHECK_MIN_SCORE_MAX,
     });
   }
 };
@@ -4981,6 +5050,14 @@ dashboardApp.get(
 dashboardApp.put(
   "/:workspaceRef/api/settings/concurrency",
   workspaceOnly(workspaceConcurrencyWriteRoute),
+);
+dashboardApp.get(
+  "/:workspaceRef/api/settings/check-min-score",
+  workspaceOnly(workspaceCheckMinScoreReadRoute),
+);
+dashboardApp.put(
+  "/:workspaceRef/api/settings/check-min-score",
+  workspaceOnly(workspaceCheckMinScoreWriteRoute),
 );
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is

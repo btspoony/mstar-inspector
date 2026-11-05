@@ -50,7 +50,9 @@ import {
   isReviewTriggerMode,
   concurrencySubmitBlocked,
   modelChainTabs,
+  parseCheckMinScoreSettings,
   parseConcurrencySettings,
+  parseStoredCheckMinScore,
   parseStoredConcurrency,
   PR_VERDICTS,
   removeChanged,
@@ -62,6 +64,7 @@ import {
   type ChainTab,
   type AllowlistSettings,
   type CheckGateSettings,
+  type CheckMinScoreSettings,
   type ConcurrencySettings,
   type ModelOptionGroup,
   type ReviewLevel,
@@ -1628,6 +1631,121 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         </div>
       )}
       <NoticeRegion notice={concurrencyNotice} />
+    </FlowSection>
+  );
+}
+
+/**
+ * The default review-gate floor for Apps connected later. Owner/admin only,
+ * same server gate as the concurrency card. Existing Apps are untouched: this
+ * is the value `createApp` seeds, not a backfill.
+ */
+export function WorkspaceCheckMinScoreCard({ locale }: { locale: SpaBoot["locale"] }) {
+  const [loaded, setLoaded] = useState<CheckMinScoreSettings | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [draft, setDraft] = useState<string | null>(null);
+  const [checkMinScoreNotice, setCheckMinScoreNotice] = useState<OpNotice | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    fetchJson(`${apiBase()}/api/settings/check-min-score`).then(
+      (data) => {
+        if (!live) return;
+        const parsed = parseCheckMinScoreSettings(data);
+        if (parsed === null) setFailed(true);
+        else {
+          setFailed(false);
+          setLoaded(parsed);
+        }
+      },
+      () => {
+        if (live) setFailed(true);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [attempt]);
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (busy || loaded === null) return;
+    // Same no-value rule as the concurrency form: a degraded read's fallback
+    // is not a value anyone stored, and an empty draft is not a repair.
+    if (concurrencySubmitBlocked(loaded.degraded, draft)) return;
+    setBusy(true);
+    const submitted = Number((draft ?? String(loaded.minScore)).trim());
+    try {
+      const { status, body } = await putJson(`${apiBase()}/api/settings/check-min-score`, {
+        min_score: submitted,
+      });
+      const outcome = settingsOpOutcome(locale, status, body, t(locale, "workspace.checkMinScoreSaved"));
+      if (outcome.kind === "success") {
+        const stored = parseStoredCheckMinScore(body) ?? submitted;
+        setLoaded((previous) => previous && { ...previous, minScore: stored, degraded: false });
+        setDraft(null);
+      }
+      setCheckMinScoreNotice(outcome);
+    } catch {
+      setCheckMinScoreNotice({ kind: "error", message: t(locale, "workspace.checkMinScoreFailed") });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <FlowSection
+      title={t(locale, "workspace.checkMinScoreHeading")}
+      subtitle={t(locale, "workspace.checkMinScoreDescription")}
+    >
+      {failed ? (
+        <LoadFailedNotice locale={locale} />
+      ) : loaded === null ? (
+        <LoadingNotice locale={locale} />
+      ) : (
+        <div className="flex flex-col gap-3">
+          {loaded.degraded ? (
+            <PageNotice
+              kind="warn"
+              message={t(locale, "workspace.checkMinScoreUnreadable", { max: loaded.max })}
+            />
+          ) : null}
+          <div className="flex flex-col gap-1.5">
+            <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium" htmlFor="workspace-check-min-score">
+                  {t(locale, "workspace.checkMinScoreLabel")}
+                </label>
+                <Input
+                  id="workspace-check-min-score"
+                  type="number"
+                  min={loaded.min}
+                  max={loaded.max}
+                  className="w-32"
+                  autoComplete="off"
+                  required
+                  value={draft ?? (loaded.degraded ? "" : String(loaded.minScore))}
+                  onChange={(event) => setDraft(event.target.value)}
+                />
+              </div>
+              <Button type="submit" disabled={busy}>
+                {t(locale, "workspace.checkMinScoreSave")}
+              </Button>
+              {loaded.degraded ? (
+                <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
+                  {t(locale, "common.retry")}
+                </Button>
+              ) : null}
+            </form>
+            <span className="text-xs text-muted-foreground">
+              {t(locale, "workspace.checkMinScoreRange", { max: loaded.max })}
+            </span>
+          </div>
+        </div>
+      )}
+      <NoticeRegion notice={checkMinScoreNotice} />
     </FlowSection>
   );
 }

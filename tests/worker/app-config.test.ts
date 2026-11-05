@@ -284,6 +284,34 @@ async function seedApp(
 }
 
 /**
+ * Seed a github_apps row on the PRE-POOL shape (0006 → 0038). That shape
+ * predates 0045's gate columns, but `createApp` writes `check_min_score`, so
+ * these migration tests seed the row raw instead of widening the historical
+ * shape with a production migration they do not test. The ciphertexts are
+ * opaque placeholders: every decrypt in these suites uses the PROVIDER row's
+ * own AAD, never the App's.
+ */
+function seedPrePoolApp(
+  db: ReturnType<typeof createTestD1>,
+  opts: { slug: string; createdBy: string; githubAppId?: number },
+): { id: string } {
+  const id = crypto.randomUUID();
+  rawRun(
+    db,
+    `INSERT INTO github_apps
+       (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+        created_by, status, deleted_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'enc', 'enc', ?, 'active', NULL, datetime('now'), datetime('now'))`,
+    id,
+    opts.slug,
+    opts.githubAppId ?? 1001,
+    opts.slug,
+    opts.createdBy,
+  );
+  return { id };
+}
+
+/**
  * Seed a github_apps row on a PRE-0038 shape (the migration-order tests below
  * stop before the rebuild, so the old local route key is still NOT NULL).
  * `createApp` writes the post-0038 column set and cannot be used there.
@@ -398,8 +426,8 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
     // The DDL this test pins belongs to 0006, so it runs on the PRE-pool
     // shape: 0024 rebuilds the table onto the (app_id, provider, key_id) PK.
     const db = createPreProviderPoolD1();
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    const other = await seedApp(db, { slug: "b", createdBy: "ada", githubAppId: 1002 });
+    const app = await seedPrePoolApp(db, { slug: "a", createdBy: "mallory" });
+    const other = await seedPrePoolApp(db, { slug: "b", createdBy: "ada", githubAppId: 1002 });
     rawRun(
       db,
       `INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at)
@@ -614,7 +642,7 @@ describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () =>
 
   test("rebuilds app_provider_keys onto (app_id, provider, key_id) and carries legacy rows over verbatim", async () => {
     const db = createPreProviderPoolD1();
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const app = await seedPrePoolApp(db, { slug: "a", createdBy: "mallory" });
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       LEGACY_KEY,
       `app_provider_keys.key_enc:${app.id}:anthropic`,
@@ -658,7 +686,7 @@ describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () =>
 
   test("moves custom-provider key material into app_custom_provider_keys and drops the key columns from the declaration table", async () => {
     const db = createPreProviderPoolD1();
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const app = await seedPrePoolApp(db, { slug: "a", createdBy: "mallory" });
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       LEGACY_CUSTOM_KEY,
       `app_custom_providers.api_key_enc:${app.id}:my-custom`,
@@ -707,7 +735,7 @@ describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () =>
 describe("migration 0025_provider_model_evidence.sql (per-key model evidence)", () => {
   test("rebuilds app_provider_models onto (app_id, provider, key_id) and carries NO aggregate row forward", async () => {
     const db = createPreProviderPoolD1();
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const app = await seedPrePoolApp(db, { slug: "a", createdBy: "mallory" });
     applyMigrations(db, ["0024_provider_multi_key.sql"]);
     // The pre-0025 aggregate: one un-attributable row per (App, provider).
     rawRun(
@@ -888,7 +916,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
 
   test("a legacy two-segment-AAD row still decrypts and is promoted to the three-segment form", async () => {
     const db = createPreProviderPoolD1();
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const app = await seedPrePoolApp(db, { slug: "a", createdBy: "mallory" });
     // The pre-pool row a live deployment carries across 0024.
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       PLAIN_ANTHROPIC_KEY,
@@ -1170,7 +1198,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
 
   test("deleteProviderKey removes a migrated (not-yet-promoted) key by its derived id — no prior read needed", async () => {
     const db = createPreProviderPoolD1();
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const app = await seedPrePoolApp(db, { slug: "a", createdBy: "mallory" });
     const legacy = sk("legacy-delete-me-4242");
     // The pre-pool row a live deployment carries across 0024.
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
@@ -1915,7 +1943,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("custom-provider keys resolve through the new pool table: ordered, maskable, deletable, legacy rows promoted", async () => {
     // A pre-pool DB: the declaration's key material still sits in the old column.
     const db = createPreProviderPoolD1();
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const app = await seedPrePoolApp(db, { slug: "a", createdBy: "mallory" });
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       PLAIN_CUSTOM_KEY,
       `app_custom_providers.api_key_enc:${app.id}:${CUSTOM.provider_id}`,
@@ -2269,7 +2297,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
 
   test("deleteCustomProviderKey removes a migrated (not-yet-promoted) key by its derived id — no prior read needed", async () => {
     const db = createPreProviderPoolD1();
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const app = await seedPrePoolApp(db, { slug: "a", createdBy: "mallory" });
     const legacy = sk("custom-legacy-delete-5151");
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       legacy,
@@ -2685,9 +2713,9 @@ describe("review gate + owner allowlist (payload and ops)", () => {
       app: { github_visibility: string | null };
     };
     expect(body.can_manage).toBe(true);
-    // Migration 0045 defaults: 80 points and "ship it"; the allowlist is off
-    // and empty; a never-probed App reads as 'unknown'.
-    expect(body.check_gate).toEqual({ min_score: 80, pass_verdicts: ["ship it"] });
+    // Migration 0049's default floor: 60 points and "ship it"; the allowlist is
+    // off and empty; a never-probed App reads as 'unknown'.
+    expect(body.check_gate).toEqual({ min_score: 60, pass_verdicts: ["ship it"] });
     expect(body.allowlist).toEqual({ enabled: false, owners: [] });
     expect(body.app.github_visibility).toBe("unknown");
 

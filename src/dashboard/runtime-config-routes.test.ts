@@ -236,6 +236,36 @@ async function getConcurrency(db: TestD1, ref: string, login: string | null): Pr
   );
 }
 
+async function putCheckMinScore(
+  db: TestD1,
+  ref: string,
+  login: string | null,
+  body: unknown,
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  if (login !== null) headers.Cookie = `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}`;
+  return worker.fetch(
+    new Request(`https://worker.local/dashboard/${ref}/api/settings/check-min-score`, {
+      method: "PUT",
+      headers,
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    }),
+    withSpaAssets(envFor(db)),
+  );
+}
+
+async function getCheckMinScore(db: TestD1, ref: string, login: string | null): Promise<Response> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (login !== null) headers.Cookie = `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}`;
+  return worker.fetch(
+    new Request(`https://worker.local/dashboard/${ref}/api/settings/check-min-score`, { headers }),
+    withSpaAssets(envFor(db)),
+  );
+}
+
 async function runtimeApi(
   db: TestD1,
   init: { method: "GET" | "PATCH"; body?: string; login?: string | null; mode?: "saas" | "self-hosted" },
@@ -721,6 +751,76 @@ describe("PATCH /_internal_admin/api/runtime recheckAssignment", () => {
       expect(await res.json()).toHaveProperty("error");
     }
     expect(storedRecheckBudget(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("workspace default review-gate floor", () => {
+  /** The workspace column, raw so a refused write is observable. */
+  const storedFloor = (db: TestD1): number | null =>
+    (
+      db.raw
+        .prepare("SELECT check_min_score AS value FROM workspaces WHERE id = 'ws-acme'")
+        .get() as { value: number | null } | null
+    )?.value ?? null;
+
+  test("an untouched workspace reads the platform default 60", async () => {
+    const { db } = fixture();
+    const res = await getCheckMinScore(db, "acme", "dana");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ min_score: 60, min: 0, max: 100, degraded: false });
+  });
+
+  test("owner and admin may set it; the accepted value is stored and audited", async () => {
+    const { db } = fixture();
+    const written = await putCheckMinScore(db, "acme", "dana", { min_score: 45 });
+    expect(written.status).toBe(200);
+    expect(await written.json()).toEqual({ min_score: 45 });
+    expect(storedFloor(db)).toBe(45);
+    expect(auditRows(db)).toEqual([
+      {
+        action: "workspace.check_min_score.set",
+        actor_login: "dana",
+        target_type: "workspace",
+        target_id: "ws-acme",
+      },
+    ]);
+
+    const viaAdmin = await putCheckMinScore(db, "acme", "erin", { min_score: 0 });
+    expect(viaAdmin.status).toBe(200);
+    const read = await getCheckMinScore(db, "acme", "dana");
+    expect(await read.json()).toMatchObject({ min_score: 0, degraded: false });
+  });
+
+  test("a plain member, an outsider and an unknown ref get the same 404 with no write", async () => {
+    const { db } = fixture();
+    for (const [ref, login, expected] of [
+      ["acme", "frank", 404],
+      ["acme", null, 302],
+      ["missing", "dana", 404],
+    ] as const) {
+      const res = await putCheckMinScore(db, ref, login, { min_score: 45 });
+      expect(res.status, `${ref}/${login}`).toBe(expected);
+    }
+    expect(storedFloor(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("an out-of-range or malformed value is a keyed 400 that writes nothing", async () => {
+    const { db } = fixture();
+    for (const body of [
+      { min_score: -1 },
+      { min_score: 101 },
+      { min_score: 60.5 },
+      { min_score: "60" },
+      { min_score: null },
+      {},
+    ]) {
+      const res = await putCheckMinScore(db, "acme", "dana", body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect(await res.json()).toMatchObject({ key: "settings.error.checkScoreInvalid" });
+    }
+    expect(storedFloor(db)).toBeNull();
     expect(auditRows(db)).toEqual([]);
   });
 });

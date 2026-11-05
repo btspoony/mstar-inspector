@@ -122,8 +122,8 @@ import {
   recheckDocWith,
 } from "../helpers/consumer-fixtures";
 
-/** The review gate the seeded test App carries (migration 0045's DDL default). */
-const GATE = { minScore: 80, passVerdicts: ["ship it"] } as const;
+/** The review gate the seeded test App carries (the product's default floor). */
+const GATE = { minScore: 60, passVerdicts: ["ship it"] } as const;
 
 // --- shared runtime doubles -------------------------------------------------
 // The sandbox/commenter/KV doubles, the payload + batch builders and `reset`
@@ -4785,7 +4785,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(update.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
     expect(update.summary).toContain('verdict "ship it"');
     expect(update.summary).toContain("score 85");
-    expect(update.summary).toContain("floor 80");
+    expect(update.summary).toContain(`floor ${GATE.minScore}`);
 
     // Order (spec §7.9): the claim lands at ADMISSION — before the container
     // runs a single command and long before the authoritative SHA — while the
@@ -5343,7 +5343,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.desired_summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
     expect(row.desired_summary).toContain('verdict "ship it"');
     expect(row.desired_summary).toContain("score 85");
-    expect(row.desired_summary).toContain("floor 80");
+    expect(row.desired_summary).toContain(`floor ${GATE.minScore}`);
     expect(row.desired_title).toBe(CHECK_NAME);
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
@@ -6300,7 +6300,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // The SAME head is the subject and the baseline, so the summary names it
     // once — `since <head>` would be nonsense.
     expect(update.summary).toBe(
-      `No new changes since the reviewed head ${SHA.slice(0, 7)}; its own gate result is inherited: verdict "ship it", score 85 (floor 80; allowed: ship it).`,
+      `No new changes since the reviewed head ${SHA.slice(0, 7)}; its own gate result is inherited: verdict "ship it", score 85 (floor ${GATE.minScore}; allowed: ship it).`,
     );
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("success");

@@ -1340,7 +1340,8 @@ review gate** — the applied review's verdict is one of the App's passing
 verdicts and its tally score is at least the App's floor. The gate is per-App
 configuration in the review gate section of that App's settings page
 (`/dashboard/apps/<appId>/settings`): the defaults are the verdict `ship it`
-and a floor of 80, and a change applies to the next Check with no deploy. A
+and a floor of 60 (seeded from the workspace's default when the App is
+connected), and a change applies to the next Check with no deploy. A
 confirmed degraded publication, an unconfirmed publication, an execution
 failure, or a published review that misses the gate is `failure`. It is not an
 approval, not a merge gate, and never a `REQUEST_CHANGES` equivalent; the app
@@ -2357,7 +2358,9 @@ tab (the owners arrive through that App's installations, so the control sits
 next to them). `0045` is additive: four `ADD COLUMN`s whose NOT NULL columns
 carry defaults — an existing row materializes the allowlist off, the gate at
 80 points on the verdict `ship it` — plus the new table, so the apply needs no
-backfill and no settings visit.
+backfill and no settings visit. Migration `0049` adds a nullable workspace
+default floor (`workspaces.check_min_score`); Apps connected afterwards start
+at it (platform default 60) and existing Apps keep their stored floor.
 
 - **Off by default: no owner is filtered.** Every owner is reviewed as before.
   What the switch does not govern is the read itself: admission reads the

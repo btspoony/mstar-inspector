@@ -383,6 +383,19 @@ export const zhCN: Dictionary = {
     nameSave: "保存名称",
     nameSaved: "工作区名称已更新。",
     nameFailed: "修改工作区名称失败，请重试。",
+    /** 所有者/管理员可见的“新 App 默认审查门禁”卡片。 */
+    checkMinScoreHeading: "审查门禁默认值",
+    checkMinScoreDescription:
+      "新接入 App 的分数下限起始值。已有 App 保留各自的分数下限，请在该 App 的设置页修改。",
+    checkMinScoreLabel: "默认分数下限",
+    checkMinScoreSave: "保存默认值",
+    checkMinScoreSaved: "审查门禁默认值已更新。",
+    checkMinScoreFailed: "无法修改审查门禁默认值——请重试。",
+    /** {max} = 可接受的最大值。 */
+    checkMinScoreRange: "接受 0–{max}。",
+    /** {max} = 可接受的最大值；显示的数字是兜底值。 */
+    checkMinScoreUnreadable:
+      "无法读取已存储的默认值，因此新 App 将使用平台默认值。保存 0–{max} 之间的值会设置本工作区的默认值，重新读取可刷新；若刷新后仍提示，请联系平台运维。",
     concurrencyHeading: "审查并发",
     concurrencyDescription: "此工作区最多同时运行的审查数量。平台可能进一步限制。",
     concurrencyLabel: "并发审查数",
