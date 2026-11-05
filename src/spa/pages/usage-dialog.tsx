@@ -56,6 +56,18 @@ export function UsageDialog({
   // key switches, so a probe that resolves late must not set state under
   // another key's label or after close. Closing also bumps the generation.
   const generation = useRef(0);
+  // Reset synchronously during render (the sanctioned adjust-state-on-prop-
+  // change pattern): the effect below only starts the probe AFTER paint, so
+  // without this the first reopened frame would paint the previous key's
+  // snapshot under the new key's title.
+  const [viewed, setViewed] = useState<{ open: boolean; keyId: string } | null>(null);
+  if (viewed === null || viewed.open !== open || viewed.keyId !== keyId) {
+    setViewed({ open, keyId });
+    if (open) {
+      setPhase("loading");
+      setSnapshot(null);
+    }
+  }
 
   const probe = useCallback(async () => {
     const mine = ++generation.current;
@@ -145,8 +157,8 @@ function UsageFace({ locale, snapshot }: { locale: SpaBoot["locale"]; snapshot: 
   }
   return (
     <ul className="flex flex-col gap-3">
-      {snapshot.limits.map((limit) => (
-        <UsageLimitRow key={limit.id} locale={locale} limit={limit} />
+      {snapshot.limits.map((limit, index) => (
+        <UsageLimitRow key={limit.id} locale={locale} limit={limit} index={index} total={snapshot.limits.length} />
       ))}
     </ul>
   );
@@ -154,17 +166,32 @@ function UsageFace({ locale, snapshot }: { locale: SpaBoot["locale"]; snapshot: 
 
 /**
  * The row's semantic label: the segment after the last ":" of the normalized
- * limit id (e.g. `cline-pass:session` → `session`, `umans:concurrency` →
- * `concurrency`). The id is this app's own normalized vocabulary, never
- * vendor payload text; an unknown segment renders verbatim as the fallback.
+ * limit id (e.g. `cline-pass:session` → `session`) mapped through the
+ * dictionary. The id segment itself is NEVER rendered — for some providers
+ * it is vendor bucket text (`cursor:planUsage`) — so an unknown segment
+ * gets a generic label, numbered only when the snapshot holds more than
+ * one limit.
  */
-function limitLabel(locale: SpaBoot["locale"], limit: UsageLimit): string {
+function limitLabel(locale: SpaBoot["locale"], limit: UsageLimit, index: number, total: number): string {
   const segment = limit.id.slice(limit.id.lastIndexOf(":") + 1);
   const key = `settings.providers.usage.window.${segment}`;
-  return isDictionaryKey(key) ? t(locale, key) : segment;
+  if (isDictionaryKey(key)) return t(locale, key);
+  return total > 1
+    ? t(locale, "settings.providers.usage.limit.generic", { index: index + 1 })
+    : t(locale, "settings.providers.usage.limit.genericSingle");
 }
 
-function UsageLimitRow({ locale, limit }: { locale: SpaBoot["locale"]; limit: UsageLimit }) {
+function UsageLimitRow({
+  locale,
+  limit,
+  index,
+  total,
+}: {
+  locale: SpaBoot["locale"];
+  limit: UsageLimit;
+  index: number;
+  total: number;
+}) {
   // The window's used share: the vendor's fraction wins; only when it is
   // absent do we derive one from stated remaining/limit counts.
   const fraction =
@@ -177,7 +204,7 @@ function UsageLimitRow({ locale, limit }: { locale: SpaBoot["locale"]; limit: Us
         ? 1 - limit.remaining / limit.limit
         : null;
   const suffix = limit.shared === true ? ` · ${t(locale, "settings.providers.usage.shared")}` : "";
-  const label = <p className="text-sm font-medium">{limitLabel(locale, limit)}</p>;
+  const label = <p className="text-sm font-medium">{limitLabel(locale, limit, index, total)}</p>;
   if (limit.kind === "window") {
     const remainingPct = fraction === null ? null : Math.max(0, Math.round((1 - fraction) * 100));
     const lines: string[] = [];

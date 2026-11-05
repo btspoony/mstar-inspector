@@ -756,6 +756,15 @@ export const en = {
           concurrency: "Concurrency",
           balance: "Balance",
         },
+        /**
+         * Fallback for a limit id whose segment is not a known semantic
+         * bucket — the id segment is never rendered (it can be vendor
+         * bucket text), so unknown rows get a numbered generic label.
+         */
+        limit: {
+          generic: "Allowance {index}",
+          genericSingle: "Allowance",
+        },
         unit: { requests: "requests", credits: "credits", usd: "USD", tokens: "tokens", percent: "%" },
       },
     },

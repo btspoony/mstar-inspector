@@ -433,7 +433,8 @@ describe("UsageDialog — probe on open and refresh", () => {
         { id: "cline-pass:month", kind: "window", usedFraction: 0.6, unit: "percent" },
         { id: "umans:concurrency", kind: "window", usedFraction: 0.5, unit: "percent" },
         { id: "hyper:balance", kind: "balance", remaining: 95, unit: "credits" },
-        // An unknown segment falls back to the raw id text, never vendor payload.
+        // An unknown segment gets the numbered generic label — the raw id
+        // text (possible vendor bucket name) never renders.
         { id: "vendor:rolling", kind: "window", usedFraction: 0.2, unit: "percent" },
       ],
     })));
@@ -451,7 +452,103 @@ describe("UsageDialog — probe on open and refresh", () => {
         const key = `settings.providers.usage.window.${segment}` as DictionaryKey;
         expect(labels).toContain(t(locale, key));
       }
-      expect(labels).toContain("rolling");
+      expect(labels).toContain(t(locale, "settings.providers.usage.limit.generic", { index: 6 }));
+      expect(rows.some((row) => row.textContent?.includes("rolling"))).toBe(false);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("cursor-shaped vendor bucket ids render no vendor text and stay distinguishable", async () => {
+    queue.push(() => new Response(snapshotBody({
+      limits: [
+        { id: "cursor:planUsage", kind: "window", usedFraction: 0.4, unit: "percent" },
+        { id: "cursor:billing", kind: "window", usedFraction: 0.8, unit: "percent" },
+      ],
+    })));
+    const view = await mount(probedPayload());
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const text = view.dialog()?.textContent ?? "";
+      expect(text).not.toContain("planUsage");
+      expect(text).not.toContain("billing");
+      const labels = [...(view.dialog()?.querySelectorAll("li > p.font-medium") ?? [])].map(
+        (node) => (node as HTMLElement).textContent,
+      );
+      expect(labels).toEqual([
+        t(locale, "settings.providers.usage.limit.generic", { index: 1 }),
+        t(locale, "settings.providers.usage.limit.generic", { index: 2 }),
+      ]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a single unknown-segment limit gets the unnumbered generic label", async () => {
+    queue.push(() => new Response(snapshotBody({
+      limits: [{ id: "cursor:planUsage", kind: "window", usedFraction: 0.4, unit: "percent" }],
+    })));
+    const view = await mount(probedPayload());
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const text = view.dialog()?.textContent ?? "";
+      expect(text).toContain(t(locale, "settings.providers.usage.limit.genericSingle"));
+      expect(text).not.toContain("planUsage");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("reopening for another key paints the loading face, not the previous key's snapshot", async () => {
+    queue.push(
+      () =>
+        new Response(snapshotBody({
+          limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.7, unit: "percent" }],
+        })),
+    );
+    const gateB = Promise.withResolvers<Response>();
+    queue.push(() => gateB.promise);
+    const keys = [
+      keyRow(probedProvider),
+      keyRow(probedProvider, { keyId: "bbbb9999dddd8888", last4: "1234" }),
+    ];
+    const view = await mount(probedPayload({}, keys));
+    const rowUsageButton = (last4: string): HTMLButtonElement | null => {
+      const row = [...(view.win.document.querySelectorAll('[data-slot="list-row"]') as unknown as HTMLElement[])].find(
+        (candidate) => candidate.textContent?.includes(last4),
+      );
+      return (row?.querySelector("button") as HTMLButtonElement | null) ?? null;
+    };
+    const remainingOf = (percent: number) => t(locale, "settings.providers.usage.windowRemaining", { percent });
+    try {
+      // Key A opens and resolves: 30% remaining.
+      await view.click(rowUsageButton("9f2c"));
+      await view.flush();
+      expect(view.dialog()?.textContent).toContain(remainingOf(30));
+
+      // Close, then open key B with its probe still gated: the first painted
+      // frame must be the loading face, never A's 30% under B's title.
+      const cancel = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent === t(locale, "common.cancel"),
+      ) as HTMLButtonElement | undefined;
+      await view.click(cancel ?? null);
+      expect(view.dialog()).toBeNull();
+      await view.click(rowUsageButton("1234"));
+      const firstFrame = view.dialog()?.textContent ?? "";
+      expect(firstFrame).toContain(t(locale, "common.loading"));
+      expect(firstFrame).not.toContain(remainingOf(30));
+
+      // B answers: its own snapshot replaces the loading face.
+      await act(async () => {
+        gateB.resolve(new Response(snapshotBody({
+          limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.2, unit: "percent" }],
+        })));
+      });
+      await view.flush();
+      expect(view.dialog()?.textContent).toContain(remainingOf(80));
+      expect(view.calls).toHaveLength(2);
     } finally {
       await view.cleanup();
     }

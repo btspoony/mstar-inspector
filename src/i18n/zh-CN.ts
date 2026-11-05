@@ -641,6 +641,14 @@ export const zhCN: Dictionary = {
           concurrency: "并发",
           balance: "余额",
         },
+        /**
+         * 未知语义段的兜底标签 — id 段从不直接渲染（可能是提供方的桶名），
+         * 未知行改用带序号的通用标签。
+         */
+        limit: {
+          generic: "额度 {index}",
+          genericSingle: "额度",
+        },
         unit: { requests: "次请求", credits: "点数", usd: "美元", tokens: "个令牌", percent: "%" },
       },
     },
