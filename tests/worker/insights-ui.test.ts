@@ -231,6 +231,22 @@ describe("GET /dashboard/api/apps/:appId/insights/summary", () => {
     expect(dayAt(25)).toEqual({ day_start: daysAgo(25).slice(0, 10), reviews: 1, findings: 2 });
   });
 
+  test("the distribution carries the shared four-class series map, zero-filled in class order", async () => {
+    const { env } = await insightsWorld();
+    const res = await appsInsightsGet(env, WIDGETS_APP_ID, await apiCookie(SESSION_SECRET_API, "mallory"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      findings_distribution: Array<{ by_severity: Record<string, number> }>;
+    };
+    // The stacked severity chart plots one series per key of this map, so the
+    // API must carry all four merge classes — may-fix included — in class
+    // order, rather than only the ones this window observed.
+    expect(body.findings_distribution.length).toBeGreaterThan(0);
+    for (const bucket of body.findings_distribution) {
+      expect(Object.keys(bucket.by_severity)).toEqual(["must-fix", "should-fix", "may-fix", "nit"]);
+    }
+  });
+
   test("include=repos is app-scoped: another App's repo never appears", async () => {
     const { env } = await insightsWorld();
     const res = await appsInsightsGet(env, WIDGETS_APP_ID, await apiCookie(SESSION_SECRET_API, "mallory"), "include=repos");
