@@ -840,7 +840,7 @@ export const zhCN: Dictionary = {
       checkFailed: "修改检查预算失败。",
       /** {terminalize}/{update} = 当前存储的预算（或文档默认值）。 */
       checkCurrent: "下一次审查生效值：terminalize {terminalize} 毫秒，update {update} 毫秒。",
-      /** 只有一侧被存储；另一侧由文档默认值派生并调整，以维持不变式。 */
+      /** 只存储了一行；另一侧取文档默认值，仅在会破坏不变式时才调整。 */
       checkDerived:
         "当前只存储了其中一个预算。另一个取文档默认值，仅当这一对会破坏「内联等待 > 检查更新」的关系时才调整到最近的合法值。要保存请显式输入两个值。",
       /** {terminalize}/{update} = 生效值（一侧为派生值，不是存储值）。 */

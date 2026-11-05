@@ -522,9 +522,9 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
     // with terminalize <= update would let the consumer abandon the inline wait
     // before the bounded send it handed off has finished. A pair BOTH stored
     // that violates it is untrusted and answers the defaults. When only one row
-    // is stored, the absent side is adjusted to the nearest legal value: the
-    // stored budget is never discarded, and the effective pair never violates
-    // the invariant.
+    // is stored, the absent side is adjusted to the nearest legal value ONLY
+    // when the pair would otherwise break the relation: the stored budget is
+    // never discarded, and the effective pair never violates the invariant.
     let effectiveTerminalize = terminalize ?? CHECK_TERMINALIZE_DEFAULT;
     let effectiveUpdate = update ?? CHECK_UPDATE_DEFAULT;
     // `derived` names a HALF-configured pair, not the adjustment: when exactly
