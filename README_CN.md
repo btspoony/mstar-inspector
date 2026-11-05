@@ -110,7 +110,7 @@ Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.revie
 7. **配置 App** —— 在该 App 的 dashboard Settings 页添加审查模型所需的 provider API key（BYOK，加密落
    D1）和模型链。缺这些的 App 审查会 fail-closed——见 [Per-App 配置](#per-app-配置)。
 
-8. **开启审查并提交 PR** —— 审查默认按 App 开启（dashboard 的 Pause/Resume 是唯一的审查开关；不存在部署级总闸），在安装了该 App 的仓库里开一个（或更新一个）PR：
+8. **开启审查并提交 PR** —— 审查默认按 App 开启（dashboard 的 Pause/Resume 与 App 的**审查触发**模式共同构成审查开关，默认 `every_push`；不存在部署级总闸），在安装了该 App 的仓库里开一个（或更新一个）PR。设为 `manual` 时开 PR 不会触发审查，但 PR 作者或仓库 owner 在 PR 评论中 @提及 App 仍会触发：
 
    审查在 sandbox 容器内运行，结果以单条评论出现在 PR 上（upsert——force-push 不会产生评论刷屏）。
 
@@ -183,7 +183,7 @@ Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.revie
 
 ## 运维
 
-- **审查控制**：per-App `review_enabled`（dashboard 的 Pause/Resume）是唯一的审查开关——不存在部署级总闸。暂停的 App 仍返回 2xx 且零入队，webhook 保持健康。
+- **审查控制**：per-App `review_enabled`（dashboard 的 Pause/Resume）与 App 的审查触发模式（首次打开 / 每次推送 / 仅手动）共同决定审查是否启动——不存在部署级总闸。暂停的 App 仍返回 2xx 且零入队，webhook 保持健康。
 - **失败语义、回滚、secrets 清单、完整 Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md)。
 - **切定版发版** → [`docs/release.md`](docs/release.md) 与 [Releases 页面](https://github.com/btspoony/mstar-inspector/releases)。
 

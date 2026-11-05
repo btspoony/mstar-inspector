@@ -542,11 +542,11 @@ export const zhCN: Dictionary = {
     opsDeleteCopy: "软删除 — App 从此列表移除，其所有安装都会被关闭。",
     // 评审触发模式（spec review-trigger-policy §2/§3）：分段标签本地化；
     // 线上取值（open / every_push / manual）与提及字符串保持原样。
-    triggerMode: "评审触发",
+    triggerMode: "审查触发",
     triggerModeOpen: "首次打开",
     triggerModeEveryPush: "每次推送",
     triggerModeManual: "仅手动",
-    triggerModeMention: "在 PR 评论中 @ 它即可（重新）启动审查：",
+    triggerModeMention: "仅 PR 作者或仓库 owner：在 PR 评论中 @ 它即可（重新）启动审查：",
     triggerModeMentionAria: "机器人提及：{mention}",
     confirmPauseTitle: "暂停 {slug} 的审查？",
     confirmPauseBody: "Webhook 保持连接 — 投递会被应答并忽略，直到你恢复。",

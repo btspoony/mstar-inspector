@@ -113,7 +113,7 @@ Deploy a pinned release to your own Cloudflare account:
 
 7. **Configure the App** — on the dashboard Settings page for the App, add the provider API key(s) the review model needs (BYOK, encrypted in D1) and a model chain. An App without these fails its reviews closed — see [Per-App configuration](#per-app-configuration).
 
-8. **Enable reviews and open a PR** — reviews are on per App by default (the dashboard Pause/Resume switch is the only review control), then open or update a PR in a repo where the App is installed.
+8. **Enable reviews and open a PR** — reviews are on per App by default (the dashboard Pause/Resume switch and the App's **Review trigger** mode are the review controls — `every_push` is the default), then open or update a PR in a repo where the App is installed. On `manual` the PR alone starts nothing; a PR comment by the PR author or a repo owner that @mentions the App still does.
 
    The review runs in a sandbox container and its result appears as one comment on the PR (upserted — no comment spam across force-pushes).
 

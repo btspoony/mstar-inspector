@@ -166,7 +166,7 @@ describe("trigger-mode segmented control (SSR)", () => {
     expect(en).toContain("Every push");
     expect(en).toContain("Manual");
     const zh = controlHtml("every_push", "zh_CN");
-    expect(zh).toContain("评审触发");
+    expect(zh).toContain("审查触发");
     expect(zh).toContain("首次打开");
     expect(zh).toContain("每次推送");
     expect(zh).toContain("仅手动");
@@ -199,9 +199,12 @@ describe("mention-string display (spec §3 operator visibility, SSR)", () => {
   test("no github_slug → no mention renders at all (D2 fail-safe; never a placeholder)", () => {
     // Before the first metadata sync there is no real mention target: the
     // hint paragraph stays off the face entirely, the mode control does not.
+    // Structural absence, not a copy literal: the hint paragraph owns this
+    // control's ONLY <code>/title="@…" node, so rewording the copy can never
+    // make the assertion pass vacuously.
     const html = controlHtml("every_push", "en", null);
-    expect(html).not.toContain("Bot mention");
-    expect(html).not.toContain("(re-)start a review");
+    expect(html).not.toContain("<code");
+    expect(html).not.toContain('title="@');
     expect(html).toContain('role="radiogroup"');
   });
 
@@ -348,7 +351,45 @@ describe("save flow + 400 fallback contract", () => {
     }
   });
 
-  test("the keyed 400 key is a registered dictionary key with both locale faces (the resolver's input)", () => {
+  test("a keyed 400 from the route resolves its dictionary key in the operator's locale", async () => {
+    // The server's mapped 400 body, driven through the REAL save path: if the
+    // wire key or the resolver's key-first preference breaks, the operator
+    // would see the raw English `message` fallback and this fails.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          key: "settings.error.triggerModeUnknown",
+          message: "unknown trigger mode",
+          params: { mode: "whenever" },
+        }),
+        { status: 400 },
+      )) as unknown as typeof fetch;
+    const scope = globalThis as { location?: { pathname: string } };
+    scope.location = { pathname: "/dashboard/apps/1" };
+    let reloads = 0;
+    try {
+      for (const locale of ["en", "zh_CN"] as const) {
+        const outcome = await submitTriggerMode("1", "manual", locale, async () => {
+          reloads += 1;
+          return true;
+        });
+        expect(outcome).toEqual({
+          kind: "error",
+          message: t(locale, "settings.error.triggerModeUnknown", { mode: "whenever" }),
+        });
+        // The mapped key wins over the body's English `message`.
+        expect(outcome.message).not.toContain("unknown trigger mode");
+      }
+      // A failed save still refetches: the stored row is read, never assumed.
+      expect(reloads).toBe(2);
+    } finally {
+      globalThis.fetch = realFetch;
+      delete scope.location;
+    }
+  });
+
+  test("the keyed 400 key is registered with both locale faces (the resolver's precondition)", () => {
     expect(isDictionaryKey("settings.error.triggerModeUnknown")).toBe(true);
     expect(t("en", "settings.error.triggerModeUnknown", { mode: "whenever" })).toContain("whenever");
     expect(t("en", "settings.error.triggerModeUnknown", { mode: "whenever" })).toContain("open, every_push, or manual");
@@ -358,15 +399,18 @@ describe("save flow + 400 fallback contract", () => {
 
   test("control copy is dictionary-backed in both locales", () => {
     expect(t("en", "settings.triggerMode")).toBe("Review trigger");
-    expect(t("zh_CN", "settings.triggerMode")).toBe("评审触发");
+    expect(t("zh_CN", "settings.triggerMode")).toBe("审查触发");
     expect(t("en", "settings.triggerModeOpen")).toBe("First open");
     expect(t("zh_CN", "settings.triggerModeOpen")).toBe("首次打开");
     expect(t("en", "settings.triggerModeEveryPush")).toBe("Every push");
     expect(t("zh_CN", "settings.triggerModeEveryPush")).toBe("每次推送");
     expect(t("en", "settings.triggerModeManual")).toBe("Manual");
     expect(t("zh_CN", "settings.triggerModeManual")).toBe("仅手动");
-    expect(t("en", "settings.triggerModeMention")).toContain("PR");
-    expect(t("zh_CN", "settings.triggerModeMention")).toContain("PR 评论");
+    // The hint names the actor allowlist — a teammate's comment is ignored.
+    expect(t("en", "settings.triggerModeMention")).toContain("PR author");
+    expect(t("en", "settings.triggerModeMention")).toContain("repo owner");
+    expect(t("zh_CN", "settings.triggerModeMention")).toContain("PR 作者");
+    expect(t("zh_CN", "settings.triggerModeMention")).toContain("仓库 owner");
     expect(t("en", "settings.triggerModeMentionAria", { mention: "@a" })).toBe("Bot mention: @a");
     expect(t("zh_CN", "settings.triggerModeMentionAria", { mention: "@a" })).toBe("机器人提及：@a");
   });
