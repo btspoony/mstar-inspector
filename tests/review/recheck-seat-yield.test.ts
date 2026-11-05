@@ -36,6 +36,7 @@
  */
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
+import * as realStructuredSubagent from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import {
   MODEL_ITEM_MAX_CHARS,
   MODEL_MAX_ITEMS,
@@ -64,7 +65,12 @@ let seatAnswer: ((asked: RecheckInput) => FakeSeatResult) | null = null;
 let seatReject: Error | null = null;
 const seatCalls: { assignment: string }[] = [];
 
+// The real namespace is spread into the stub: Bun's module-mock registry is
+// process-global, so a replacement that dropped the SDK's other exports made
+// every sibling importing them (the SDK barrel's
+// `buildStructuredSubagentRecoveryHint`) fail to link.
 mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
+  ...realStructuredSubagent,
   runStructuredSubagent: mock(async (request: { assignment: string }) => {
     seatCalls.push(request);
     if (seatReject !== null) throw seatReject;
