@@ -351,6 +351,75 @@ describe("installed tab configuration surface (static SSR)", () => {
     expect(manage).toContain(t("en", "settings.installCopy"));
   });
 
+  test("the install block shows the App's avatar image, not the octocat fallback", () => {
+    const manage = renderDetail(
+      {
+        ...managePayload,
+        app: { ...managePayload.app, github_avatar_url: "https://avatars.example/demo.png" },
+      },
+      true,
+    );
+    // The install block's copy line is unique to this section; slice to the
+    // allowlist heading so the App info card's own avatar cannot satisfy
+    // these assertions.
+    const start = manage.indexOf(t("en", "settings.installCopy"));
+    const block = manage.slice(start, manage.indexOf(t("en", "settings.allowlist"), start));
+    expect(block).toContain('<img src="https://avatars.example/demo.png"');
+    // The bare octocat fallback (the old hard-coded GitHubMark) never
+    // renders in this block when the avatar URL is set — its path data is
+    // the probe (the link's external-link icon is a legitimate <svg> here).
+    expect(block).not.toContain("M12 .297c-6.63");
+  });
+
+  test("the installations table carries a per-row availability badge (allowlist enabled)", () => {
+    const installed = renderDetail(
+      {
+        ...managePayload,
+        allowlist: { enabled: true, owners: ["acme"] },
+        installations: [
+          { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+          { installation_id: 456, account_login: "intruder", seen_at: "2026-01-01 00:00:00" },
+        ],
+      },
+      true,
+      "installations",
+    );
+    expect(installed).toContain(t("en", "settings.installationsAvailability"));
+    expect(installed).toContain(t("en", "settings.availabilityValid"));
+    expect(installed).toContain(t("en", "settings.availabilityInvalid"));
+    // Case-insensitive admission: the login matches the owner regardless of case.
+    const mixed = renderDetail(
+      {
+        ...managePayload,
+        allowlist: { enabled: true, owners: ["ACME"] },
+        installations: [
+          { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+        ],
+      },
+      true,
+      "installations",
+    );
+    expect(mixed).toContain('data-tone="success"');
+  });
+
+  test("allowlist disabled marks every installation available", () => {
+    const installed = renderDetail(
+      {
+        ...managePayload,
+        allowlist: { enabled: false, owners: ["someone-else"] },
+        installations: [
+          { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+          { installation_id: 456, account_login: null, seen_at: "2026-01-01 00:00:00" },
+        ],
+      },
+      true,
+      "installations",
+    );
+    expect(installed).not.toContain(t("en", "settings.availabilityInvalid"));
+    // Both rows wear the success tone (the identity pill adds one more).
+    expect(installed.split('data-tone="success"').length - 1).toBeGreaterThanOrEqual(2);
+  });
+
   test("a null slug keeps the block with explanations and offers no dead link", () => {
     const noSlug = renderDetail(
       { ...managePayload, app: { ...managePayload.app, github_slug: null } },

@@ -436,6 +436,9 @@ export const zhCN: Dictionary = {
     installationsCount: "{count} 个安装",
     installationsCountOne: "{count} 个安装",
     installationsAccount: "账号",
+    installationsAvailability: "可用性",
+    availabilityValid: "有效",
+    availabilityInvalid: "无效",
     installationsId: "安装 ID",
     installationsLastSync: "最近同步",
     /** App 详情页指标带中 provider 密钥数的标签。 */

@@ -497,7 +497,9 @@ export const en = {
     lastWebhook: "Last webhook: {time}",
     /**
      * The installations section of the settings flow: heading, count subtitle
-     * and the table's three columns. `installations.length` is the only
+     * and the table's four columns (the availability badge is derived from
+     * the stored owner allowlist, migration 0045). `installations.length` is
+     * the only
      * installation figure the product carries (compass D13); the settings
      * payload has no per-installation repository count, so there is no
      * repository column.
@@ -506,6 +508,9 @@ export const en = {
     installationsCount: "{count} installations",
     installationsCountOne: "{count} installation",
     installationsAccount: "Account",
+    installationsAvailability: "Availability",
+    availabilityValid: "Valid",
+    availabilityInvalid: "Invalid",
     installationsId: "Installation ID",
     installationsLastSync: "Last sync",
     /** Metric-band label for the provider-key count on the App detail face. */

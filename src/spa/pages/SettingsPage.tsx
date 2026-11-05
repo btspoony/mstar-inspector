@@ -22,6 +22,7 @@ import {
   SelectLabel,
   SelectTrigger,
   SelectValue,
+  StatusBadge,
   Tabs,
   TabsContent,
   TabsList,
@@ -31,7 +32,6 @@ import {
 } from "@design-system";
 import { AppAvatar } from "../components/AppAvatar";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
-import { GitHubMark } from "./LoginPage";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { fetchJson, postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
@@ -709,12 +709,14 @@ export function AppInfoSection({
  * Installations — the body of the App detail's 已安装 / Installed tab
  * (manager-only): the App's `installations[]` rows as a table, plus the
  * delivery health they explain: the last webhook and the recent deliveries.
- * One row is one installation, and its facts are exactly `account_login`,
- * `installation_id` and `seen_at` — the payload carries no per-installation
- * repository count, so no repository column exists (dashboard surface pass,
- * 2026-11-01; compass D13). Each delivery line leads with its source
- * repository (migration 0043), or the unknown-source label for rows written
- * before it.
+ * One row is one installation, and its stored facts are exactly
+ * `account_login`, `installation_id` and `seen_at` — the payload carries no
+ * per-installation repository count, so no repository column exists
+ * (dashboard surface pass, 2026-11-01; compass D13). The fourth column, the
+ * availability badge, is derived from the stored owner allowlist
+ * (migration 0045), not from the payload's per-row facts. Each delivery line
+ * leads with its source repository (migration 0043), or the unknown-source
+ * label for rows written before it.
  */
 export function InstallationsSection({
   locale,
@@ -723,11 +725,29 @@ export function InstallationsSection({
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
 }) {
-  const { app, installations } = payload;
+  const { app, installations, allowlist } = payload;
   const columns: DataTableColumn<SettingsManagePayload["installations"][number]>[] = [
     {
       header: t(locale, "settings.installationsAccount"),
       cell: (inst) => inst.account_login ?? t(locale, "common.time.unknown"),
+    },
+    {
+      header: t(locale, "settings.installationsAvailability"),
+      cell: (inst) => {
+        // Admission mirrors the server rule (migration 0045): the switch off
+        // admits everyone; on, only a login on the owners list (GitHub
+        // logins are case-insensitive) is admitted.
+        const login = inst.account_login;
+        const valid =
+          !allowlist.enabled ||
+          (login !== null &&
+            allowlist.owners.some((owner) => owner.toLowerCase() === login.toLowerCase()));
+        return (
+          <StatusBadge tone={valid ? "success" : "neutral"}>
+            {t(locale, valid ? "settings.availabilityValid" : "settings.availabilityInvalid")}
+          </StatusBadge>
+        );
+      },
     },
     {
       header: t(locale, "settings.installationsId"),
@@ -820,7 +840,11 @@ export function AppInstallSection({
   return (
     <FlowSection title={t(locale, "settings.install")} subtitle={slug ? t(locale, "settings.installCopy") : undefined}>
       <div className="flex items-start gap-4">
-        <GitHubMark className="size-10 shrink-0 text-(--text-muted)" />
+        <AppAvatar
+          src={app.github_avatar_url}
+          appId={app.github_app_id}
+          className="h-10 w-10 shrink-0 rounded-full border border-(--border-default) object-cover"
+        />
         <div className="flex min-w-0 flex-col gap-1">
           <p className="font-semibold">{name}</p>
           {href ? (
