@@ -395,10 +395,16 @@ export const PUBLICATION_HANDOFF_PHASES: readonly PublicationRow["phase"][] = [
 ];
 
 /**
- * The publication-journal row for this exact scope/head, oldest first, in any
- * of `phases`. ONE predicate, shared by the delivery hand-off (§7.7 step 2) and
- * the Check recovery lane's wait-for-proof probe (§7.11.2) — two copies of the
+ * The publication-journal row for this exact scope/head in any of `phases`,
+ * with whether that row's OWN proof is readable. ONE predicate, shared by the
+ * delivery hand-off (§7.7 step 2, `order: "oldest"`) and the Check recovery
+ * lane's wait-for-proof probe (§7.11.2, `order: "newest"`) — two copies of the
  * same SQL would be free to drift apart.
+ *
+ * `hasProof` is deliberately the STRICT condition (`proof_json` present AND
+ * valid JSON): a present-but-corrupt envelope must not end the wait, or the
+ * conclusion path would freeze the unconfirmed failure on a publication whose
+ * real proof is still arriving.
  */
 export async function findPublicationJournal(
   db: D1Like,
@@ -420,7 +426,7 @@ export async function findPublicationJournal(
   const order = input.order === "newest" ? "created_ms DESC, id DESC" : "created_ms, id";
   const row = await db
     .prepare(
-      `SELECT id, phase, proof_json IS NOT NULL AS has_proof FROM review_publications
+      `SELECT id, phase, (proof_json IS NOT NULL AND json_valid(proof_json)) AS has_proof FROM review_publications
        WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND head_sha = ? AND phase IN (${placeholders})
        ORDER BY ${order} LIMIT 1`,

@@ -325,6 +325,38 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(row.terminal_ms).toBeNull();
     expect(row.observed).toBe("unknown");
     expect(row.desired_summary).toBe(UNCONFIRMED);
+
+    // The NEWEST row now proves itself: the conclusion must come from THAT row
+    // (its publication id and round), not from the older degraded one.
+    const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ?, payload_json = ? WHERE id = ?`)
+      .run(JSON.stringify(proof), JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 85)), journalId);
+
+    const secondStub = stubFetch();
+    const settled: { desired: string | null } = { desired: null };
+    try {
+      const second = await run(db, {
+        now: () => T0 + 200_000,
+        credentials: scriptedCredentials(db, {
+          ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
+          complete: async (identity, _runId, conclusion) => {
+            settled.desired = conclusion.desired;
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+          },
+        }),
+      });
+      expect(second.completed).toBe(1);
+      expect(second.deferred).toBe(0);
+    } finally {
+      secondStub.restore();
+    }
+
+    expect(settled.desired).toBe("success");
+    const closed = await rawRow(db, id);
+    expect(closed.publication_id).toBe(journalId); // the NEWEST row's proof
+    expect(String(closed.desired_summary)).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
+    expect(closed.observed).toBe("success");
   });
 
   test("the journal's OWN proof ends the wait even while its phase is prepared", async () => {
@@ -362,6 +394,38 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     const row = await rawRow(db, id);
     expect(row.observed).toBe("success");
     expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("a present-but-corrupt proof does not end the wait", async () => {
+    const db = seededDb();
+    const { id } = await handedOverAttempt(db);
+    const journalId = seedJournal(db, SCOPE, SHA, "prepared");
+    // `proof_json` EXISTS but is not valid JSON: the proof is not READABLE, so
+    // the wait must continue rather than conclude on an unparseable envelope.
+    db.raw.prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`).run("{not json", journalId);
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    const scripted = scriptedCredentials(db, countingScript({ adopt: 0, begin: 0, complete: 0 }));
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scripted(input);
+        },
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+      expect(summary.unconfirmed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    expect(factoryCalls).toBe(0);
+    const row = await rawRow(db, id);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.desired_summary).toBe(UNCONFIRMED);
   });
 
   test("an unreadable journal probe defers inside the window instead of terminalizing", async () => {

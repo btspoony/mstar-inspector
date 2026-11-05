@@ -56,7 +56,7 @@ import {
   WORKSPACE_CONCURRENCY_DEFAULT,
 } from "../../src/dashboard/runtime-config-store";
 import { REDACTED } from "../../src/pipeline/redact";
-import type { CheckHandle, PipelineEnv } from "../../src/pipeline/consumer";
+import type { PipelineEnv } from "../../src/pipeline/consumer";
 import type { InstallationTokenGrant, ReviewCommenter, UpsertPlan } from "../../src/pipeline/comment";
 import type { CommenterCall } from "../helpers/review-commenter";
 // the Check lifecycle is driven through PRODUCTION code — the real
@@ -65,7 +65,6 @@ import { PreparedSendRejected } from "../../src/pipeline/comment";
 import {
   CHECK_SUMMARIES,
   createCheckLifecycle,
-  decideConclusion,
   createChecksAdapter,
   type CheckRunPayload,
   type ChecksAdapter,
@@ -80,10 +79,8 @@ import {
   attachCheckRunId,
   claimAttempt,
   claimCheckRecovery,
-  deferCheckRecovery,
   setCheckCreateState,
   setCheckDesired,
-  setCheckFallbackDesired,
 } from "../../src/store/review-checks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
