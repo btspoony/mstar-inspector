@@ -61,7 +61,7 @@ import {
   type CommenterFetch,
   type PostOctokit,
 } from "../../src/pipeline/comment";
-import type { ReviewFinding, ReviewOutput } from "../../src/review/schema";
+import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../../src/review/schema";
 import { testAppPem } from "../helpers/rsa-key";
 
 function finding(mergeClass: ReviewFinding["mergeClass"], title: string): ReviewFinding {
@@ -1392,6 +1392,54 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body.endsWith("</details>")).toBe(true);
   });
 
+  test("an over-budget body keeps the omitted-findings footer and the sections that disclose what was cut", () => {
+    // The fixture uses the product's own maxima: a narrative at
+    // SUMMARY_MD_LIMIT and finding bodies at FINDING_BODY_MAX (the consumer
+    // clamps each body to that; it never rejects the review). 27 findings at
+    // those sizes is the smallest set that fills the 65000-char body.
+    const findings: ReviewFinding[] = Array.from({ length: 27 }, (_, index) => ({
+      mergeClass: "should-fix",
+      category: "logic",
+      file_path: `src/module-${index}.ts`,
+      line_start: 1,
+      line_end: 2,
+      title: `Finding ${index}`,
+      body: "x".repeat(FINDING_BODY_MAX),
+    }));
+    const output: ReviewOutput = {
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      summary_md: "n".repeat(SUMMARY_MD_LIMIT),
+      findings,
+    };
+    const headSha = "0123456789abcdef0123456789abcdef01234567";
+    const body = buildPreparedReviewBody({
+      output,
+      omittedFindings: 3,
+      round: 9,
+      headSha,
+      publicationMarker: buildPublicationMarker({
+        publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        headSha,
+        kind: "review",
+      }),
+      reportParts: {
+        report: reportDoc,
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+      },
+    });
+    expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
+    // The cut happened, so the fixture really is over budget.
+    expect(body).toContain("…");
+    // The finding tail is what the head clamp drops; the footer is the only
+    // line that says the review is a Top-N subset, so it must survive.
+    expect(body).toContain("*(+3 more findings omitted)*");
+    // The closure is reserved with the other preserved parts, so the cut
+    // cannot take it.
+    expect(body).toContain("<summary>Revalidated findings</summary>");
+    for (const heading of reportTailHeadings) expect(body).toContain(heading);
+  });
+
   test("an oversized plan is truncated before any report section is dropped", () => {
     const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
     const body = buildReviewBody(small, 0, {
@@ -1403,8 +1451,12 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body).toContain("…");
     // Fence and fold stay balanced: opener plus closer each, nothing swallowed.
     expect(fenceLines(body)).toHaveLength(2);
-    expect((body.match(/<details>/g) ?? []).length).toBe(1);
-    expect((body.match(/<\/details>/g) ?? []).length).toBe(1);
+    expect((body.match(/<details>/g) ?? []).length).toBe(
+      (body.match(/<\/details>/g) ?? []).length,
+    );
+    // The closure and the plan fold both survive the oversized plan.
+    expect(body).toContain("<summary>Revalidated findings</summary>");
+    expect(body).toContain("<summary>Expand fix plan</summary>");
   });
 
   test("a limit that forces degradation keeps every heading, marks each dropped body, and stays inside it", () => {
