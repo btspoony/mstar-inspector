@@ -166,7 +166,6 @@ describe("commandcode", () => {
         kind: "window",
         usedFraction: 0.3,
         unit: "credits",
-        shared: true,
         resetsAt: 1_760_000_000_000,
         limit: 100,
       },
@@ -175,7 +174,6 @@ describe("commandcode", () => {
         kind: "window",
         usedFraction: 0.5,
         unit: "credits",
-        shared: true,
         resetsAt: 1_760_604_800_000,
         limit: 500,
       },
@@ -255,7 +253,6 @@ describe("opencode-go", () => {
         kind: "window",
         usedFraction: 0.32,
         unit: "percent",
-        shared: true,
         resetsAt: Date.parse("2026-11-05T10:00:00.000Z"),
       },
       {
@@ -263,7 +260,6 @@ describe("opencode-go", () => {
         kind: "window",
         usedFraction: 1,
         unit: "percent",
-        shared: true,
         resetsAt: Date.parse("2026-11-10T10:00:00.000Z"),
       },
     ]);
@@ -302,7 +298,6 @@ describe("zai / zhipuai", () => {
         kind: "window",
         usedFraction: 0.2,
         unit: "requests",
-        shared: true,
         resetsAt: 1_760_000_000_000,
         limit: 600,
         remaining: 480,
@@ -312,7 +307,6 @@ describe("zai / zhipuai", () => {
         kind: "window",
         usedFraction: 0.3,
         unit: "requests",
-        shared: true,
         resetsAt: 1_760_604_800_000,
         limit: 1000,
       },
@@ -343,7 +337,6 @@ describe("zai / zhipuai", () => {
         kind: "window",
         usedFraction: 0.4,
         unit: "tokens",
-        shared: true,
         resetsAt: 1_760_000_000_000,
       },
     ]);
@@ -392,7 +385,6 @@ describe("minimax-code", () => {
         kind: "window",
         usedFraction: 0.75,
         unit: "percent",
-        shared: true,
         resetsAt: 1_760_018_000_000,
       },
       {
@@ -400,7 +392,6 @@ describe("minimax-code", () => {
         kind: "window",
         usedFraction: 0.4,
         unit: "percent",
-        shared: true,
         resetsAt: 1_760_604_800_000,
       },
     ]);
@@ -475,9 +466,9 @@ describe("cline-pass", () => {
     expect(calls[0]!.headers["x-client-type"]).toBe("cline-desktop");
     expect(calls[0]!.headers["user-agent"]).toBe("Cline/3.5.54");
     expect(snapshot.limits).toEqual([
-      { id: "cline-pass:session", kind: "window", usedFraction: 0.12, unit: "percent", shared: true, resetsAt: Date.parse("2026-11-05T10:00:00.000Z") },
-      { id: "cline-pass:week", kind: "window", usedFraction: 0.45, unit: "percent", shared: true, resetsAt: Date.parse("2026-11-10T00:00:00.000Z") },
-      { id: "cline-pass:month", kind: "window", usedFraction: 0.7, unit: "percent", shared: true, resetsAt: Date.parse("2026-12-01T00:00:00.000Z") },
+      { id: "cline-pass:session", kind: "window", usedFraction: 0.12, unit: "percent", resetsAt: Date.parse("2026-11-05T10:00:00.000Z") },
+      { id: "cline-pass:week", kind: "window", usedFraction: 0.45, unit: "percent", resetsAt: Date.parse("2026-11-10T00:00:00.000Z") },
+      { id: "cline-pass:month", kind: "window", usedFraction: 0.7, unit: "percent", resetsAt: Date.parse("2026-12-01T00:00:00.000Z") },
     ]);
   });
 
@@ -569,12 +560,11 @@ describe("umans", () => {
         kind: "window",
         usedFraction: 0.25,
         unit: "requests",
-        shared: true,
         resetsAt: Date.parse("2026-11-05T10:00:00.000Z"),
         limit: 1000,
         remaining: 750,
       },
-      { id: "umans:concurrency", kind: "window", usedFraction: 0.5, unit: "requests", shared: true, limit: 4 },
+      { id: "umans:concurrency", kind: "window", usedFraction: 0.5, unit: "requests", limit: 4 },
     ]);
   });
 });
@@ -595,7 +585,6 @@ describe("hyper", () => {
 });
 
 // --- family: kimi-for-coding ---
-
 describe("kimi-for-coding", () => {
   test("aggregate weekly window plus limits[] classified by span, tighter wins", async () => {
     const calls: FetchCall[] = [];
@@ -624,7 +613,6 @@ describe("kimi-for-coding", () => {
         kind: "window",
         usedFraction: 0.25,
         unit: "requests",
-        shared: true,
         resetsAt: Date.parse("2026-11-10T00:00:00.000Z"),
         limit: 1000,
       },
@@ -635,10 +623,41 @@ describe("kimi-for-coding", () => {
         kind: "window",
         usedFraction: 0.8,
         unit: "requests",
-        shared: true,
         resetsAt: Date.parse("2026-11-06T00:00:00.000Z"),
         limit: 500,
       },
     ]);
+  });
+});
+
+// --- shared flag scope ---
+
+describe("shared flag scope", () => {
+  test("a per-key family window carries no shared flag; Synthetic's two pools do", async () => {
+    const umans = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, { limits: { requests: { limit: 100 } }, usage: { requests_in_window: 10 } }),
+        ),
+      },
+      "umans",
+      "umans-key",
+    );
+    expect(umans.limits).toHaveLength(1);
+    expect("shared" in umans.limits[0]!).toBe(false);
+
+    const synthetic = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            rollingFiveHourLimit: { remaining: 1, max: 2 },
+            weeklyTokenLimit: { remainingCredits: "$1.00", maxCredits: "$4.00" },
+          }),
+        ),
+      },
+      "synthetic",
+      "syn-key",
+    );
+    expect(synthetic.limits.map((limit) => limit.shared)).toEqual([true, true]);
   });
 });

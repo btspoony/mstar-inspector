@@ -178,6 +178,8 @@ function windowLimit(args: {
   resetsAt?: number;
   limit?: number;
   remaining?: number;
+  /** Only where the vendor states one account-wide pool behind every key. */
+  shared?: boolean;
 }): UsageLimit {
   // Absent fields are omitted, not emitted as `undefined` keys.
   return {
@@ -185,7 +187,7 @@ function windowLimit(args: {
     kind: "window",
     usedFraction: args.usedFraction,
     unit: args.unit,
-    shared: true,
+    ...(args.shared === true ? { shared: true } : {}),
     ...(args.resetsAt !== undefined ? { resetsAt: args.resetsAt } : {}),
     ...(args.limit !== undefined ? { limit: args.limit } : {}),
     ...(args.remaining !== undefined ? { remaining: args.remaining } : {}),
@@ -637,6 +639,7 @@ const syntheticUsage: UsageProbe = async (input, key) => {
             resetsAt: resetOf(fiveHour, ["nextTickAt", "next_tick_at"]),
             limit: max,
             remaining,
+            shared: true,
           }),
         );
       }
@@ -663,6 +666,7 @@ const syntheticUsage: UsageProbe = async (input, key) => {
             resetsAt: resetOf(weekly, ["nextRegenAt", "next_regen_at"]),
             limit: max,
             remaining,
+            shared: true,
           }),
         );
       }
