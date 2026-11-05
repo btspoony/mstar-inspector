@@ -11,12 +11,12 @@ category: Changed
   (`POST /dashboard/api/workspaces`), which mints a lowercase `ws_…` workspace and
   makes the creator its `owner` in one transaction. The form always renders; when
   the operator has closed workspace creation (`workspace_creation_open`) the
-  submit is refused 409 `WORKSPACE_CREATION_CLOSED_REFUSAL` and the setup page
-  shows its generic create-failure notice; the top-bar workspace switcher is the
-  surface that renders the reason while the entry is disabled. Creating is the only way for an
-  uninvited login to get into a workspace — the same setup page also lists any
-  pending invite and accepts it — and ownership can be transferred afterwards by
-  a role change. A successful create lands directly inside the new workspace
+  submit is refused 409 `WORKSPACE_CREATION_CLOSED_REFUSAL` (a saas deployment
+  can also refuse it with `FREE_SLOT_REFUSAL`), and the setup page shows only a
+  generic create-failure notice. Creating is the only way for an uninvited login
+  to get into a workspace — the same setup page also lists any pending invite
+  and accepts it — and ownership can be transferred afterwards by a role
+  change. A successful create lands directly inside the new workspace
   (the `201` names `/dashboard/<ref>/apps`), so the creator never depends on
   sole-workspace resolution finding a second workspace. There is no
   auto-join and no first-user-becomes-admin fallback; authority is
@@ -34,7 +34,7 @@ category: Changed
   （`POST /dashboard/api/workspaces`）：它生成小写的 `ws_…` 工作区，并在同一事务内把
   创建者设为该工作区的 `owner`。该表单始终渲染；当运维者关闭了工作区创建
   （`workspace_creation_open`）时，提交会被 409 `WORKSPACE_CREATION_CLOSED_REFUSAL` 拒绝，
-  设置页只显示通用的创建失败提示；渲染禁用原因的是顶栏的工作区切换器。
+  设置页只显示通用的创建失败提示。
   创建工作区是没有待接受邀请的登录进入工作区的唯一途径——同一个设置页也会列出待接受邀请
   并接受它——之后还可以通过角色变更转移所有权。创建成功后直接落在新工作区内（`201` 会给出
   `/dashboard/<ref>/apps`），因此不依赖「唯一工作区」解析能否在存在第二个工作区时命中。
