@@ -5743,7 +5743,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // BUDGET is what ends this path — the adapter has not answered yet.
     seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
     seedCheckBudget(db, "review.check.update_timeout_ms", "1500");
-    checkRequestOverrides.update = () => new Promise<CheckRunPayload>(() => {});
+    checkRequestOverrides.update = () => Promise.withResolvers<CheckRunPayload>().promise;
     const adapter = checksAdapterFor(db);
     const handed: Promise<unknown>[] = [];
     const consumer = createReviewConsumer(
@@ -5812,6 +5812,45 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(publicationRow(db).phase).toBe("applied");
   }, 10_000);
 
+  test("check lifecycle: an overrun handoff is awaited inline when the invocation has no context", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
+    const parked = Promise.withResolvers<void>();
+    // A SLOW store write. Real 150 ms on purpose: the consumer's hook budget
+    // runs on the platform clock and no clock is injectable here, so "the
+    // release landed before this consumer returned" is only observable in real
+    // time (fake timers cannot drive the D1 awaits around it).
+    let releaseLanded = false;
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: async () => ({
+          attemptId: "attempt-w3",
+          scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+          githubAppId: 424242,
+          headSha: SHA,
+          lease: { holder: "h", epoch: 1, untilMs: 1 },
+        }),
+        terminalize: async () => {
+          await parked.promise;
+        },
+        abandonTerminalize: async () => {
+          await Bun.sleep(150);
+          releaseLanded = true;
+        },
+      },
+    }); // NO invocation context: §7.10's inline fallback is the only owner
+
+    await consumer(makeBatch(makePayload()));
+
+    // The consumer could only have returned after the slow write landed.
+    expect(releaseLanded).toBe(true);
+    expect(logLines.filter((line) => line.fields.event === "check_abandon_released")).toHaveLength(1);
+    parked.resolve();
+  }, 20_000);
+
   test("check lifecycle: the Check is claimed BEFORE the container starts, and a matching checkout reuses it", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
@@ -5860,22 +5899,110 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(makeBatch(makePayload())); // payload head_sha = SHA
 
-    // create + terminalize the early claim, then create + terminalize the
-    // authoritative one: the early run is never left in progress.
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "create", "update"]);
-    expect((checkRequests[1]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    // create(A) — then create(B) + its terminal update. A's `superseded` send
+    // is owned by the minute recovery cron, so nothing on the new head's path
+    // waits for it; the early run is still local-terminal immediately.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "create", "update"]);
+    expect((checkRequests[2]!.params as ChecksUpdateParams).check_run_id).toBe(FIRST_CHECK_RUN_ID + 2);
 
     const early = checkRowFor(db, SHA);
     expect(early.desired).toBe("failure");
     expect(early.desired_summary).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
-    expect(early.observed).toBe("failure");
-    expect(early.terminal_ms).not.toBeNull();
+    // Terminal intent + released: never left `in_progress` holding its lease.
+    expect(early.observed).toBe("unknown");
+    expect(early.terminal_ms).toBeNull();
+    expect(early.holder).toBeNull();
+    expect(early.lease_until_ms).toBeNull();
+    expect(early.recovery_state).toBe("remote-unconfirmed");
+    expect(early.next_attempt_ms).not.toBeNull();
+    expect(early.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
 
     const authoritative = checkRowFor(db, SHA2);
     expect(authoritative.desired).toBe("success");
     expect(authoritative.observed).toBe("success");
     // The review itself still landed once, for the checked-out commit.
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+  });
+
+  test("check lifecycle: superseding a contradicted claim never waits on the old run's terminal send", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    sandbox.resolvedSha = SHA2;
+    const db = await createSeededTestD1();
+    // The operator terminalize wait is 5 s: if the supersede path used it, this
+    // case would take at least that long.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "5000");
+    // The EARLY run's update parks forever. The supersede path must never send
+    // it (recovery does), so this override is never even reached.
+    let earlyUpdateSent = false;
+    checkRequestOverrides.update = (params) => {
+      if (params.check_run_id === FIRST_CHECK_RUN_ID + 1) {
+        earlyUpdateSent = true;
+        return Promise.withResolvers<CheckRunPayload>().promise;
+      }
+      const run = checkRuns.get(params.check_run_id)!;
+      const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
+      checkRuns.set(params.check_run_id, completed);
+      return completed;
+    };
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    const startedAt = Date.now();
+    await consumer(makeBatch(makePayload()));
+    const elapsed = Date.now() - startedAt;
+
+    expect(earlyUpdateSent).toBe(false);
+    expect(elapsed).toBeLessThan(3_000);
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "create", "update"]);
+    expect(checkRowFor(db, SHA).holder).toBeNull();
+    expect(checkRowFor(db, SHA2).observed).toBe("success");
+    expect(publicationRow(db).phase).toBe("applied");
+  }, 20_000);
+
+  test("check lifecycle: a contradicted claim stays superseded when the new head hits idempotency", async () => {
+    for (const dedup of ["kv", "d1"] as const) {
+      reset();
+      sandbox.resolvedSha = SHA2; // the checkout moved to a NEWER commit
+      const db = await createSeededTestD1();
+      const key = idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA2 });
+      if (dedup === "kv") {
+        kvState.entries.set(key, "done");
+      } else {
+        await createArtifactStore(db).put({
+          kind: "review",
+          key,
+          schema: "mstar.review/v1",
+          payload: VALID_OUTPUT,
+          appId: TEST_APP_ID,
+        });
+      }
+      const adapter = checksAdapterFor(db);
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+        ...testOverrides,
+        createAppCommenter: () => commenterWithChecks(adapter),
+      });
+
+      await consumer(makeBatch(makePayload())); // payload head_sha = SHA
+
+      // The contradicted claim is decided BEFORE the dedup read, so it stays
+      // superseded; only the new head's admitted run is closed by the hit.
+      expect(checkRequests.map((r) => r.op), dedup).toEqual(["create", "create", "update"]);
+      expect((checkRequests[2]!.params as ChecksUpdateParams).conclusion, dedup).toBe("neutral");
+
+      const early = checkRowFor(db, SHA);
+      expect(early.desired, dedup).toBe("failure");
+      expect(early.desired_summary, dedup).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
+      expect(early.holder, dedup).toBeNull();
+
+      const newHead = checkRowFor(db, SHA2);
+      expect(newHead.desired, dedup).toBe("neutral");
+      expect(newHead.terminal_ms, dedup).not.toBeNull();
+      expect(commenterCalls.filter((c) => c.op === "post-prepared"), dedup).toHaveLength(0);
+    }
   });
 
   test("check lifecycle: an idempotency hit closes the admitted run before acking", async () => {
@@ -5914,14 +6041,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = lifecycleFor(db, checkClock);
     const handle = await hooks.begin(beginInput(SHA, checkState.clockMs + CHECK_LEASE_MS));
     expect(handle).not.toBeNull();
-    // The interrupted terminalize had already frozen its intent: the give-up
-    // replays it (idempotent) and releases.
+    // The interrupted terminalize had already frozen a PRECISE gate failure:
+    // the give-up must release it AS-IS, never replace it with the generic
+    // `failure/unconfirmed` text (the persisted row is what recovery sends).
+    const gateSummary = CHECK_SUMMARIES.gateMissed(SHA.slice(0, 7), "needs fixes", 40, GATE);
     expect(
       await setCheckDesired(
         db,
         handle!.attemptId,
         handle!.lease,
-        { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed },
+        { desired: "failure", title: CHECK_NAME, summary: gateSummary },
         null,
         checkState.clockMs,
       ),
@@ -5937,6 +6066,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(released.attempts).toBe(1);
     expect(released.last_error).toContain("terminalize budget exceeded");
     expect(released.desired).toBe("failure");
+    expect(released.desired_summary).toBe(gateSummary);
     expect(released.observed).toBe("unknown");
     expect(released.terminal_ms).toBeNull();
     // NO remote request: the create is the only one this attempt ever sent.
@@ -5947,6 +6077,38 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const owned = checkRowFor(db, SHA);
     await hooks.abandonTerminalize({ handle: handle!, reason: "second give-up" });
     expect(checkRowFor(db, SHA)).toEqual(owned);
+  });
+
+  test("check lifecycle: a give-up after a proof-derived success neither rewrites the intent nor keeps the lease", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const hooks = lifecycleFor(db, checkClock);
+    const handle = await hooks.begin(beginInput(SHA, checkState.clockMs + CHECK_LEASE_MS));
+    expect(handle).not.toBeNull();
+    const successSummary = CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE);
+    expect(
+      await setCheckDesired(
+        db,
+        handle!.attemptId,
+        handle!.lease,
+        { desired: "success", title: CHECK_NAME, summary: successSummary },
+        null,
+        checkState.clockMs,
+      ),
+    ).toBe(true);
+
+    await hooks.abandonTerminalize({ handle: handle!, reason: "terminalize budget exceeded (1000ms)" });
+
+    const released = checkRowFor(db, SHA);
+    // The proof-derived conclusion stands; only the lease and the recovery
+    // bookkeeping moved.
+    expect(released.desired).toBe("success");
+    expect(released.desired_summary).toBe(successSummary);
+    expect(released.holder).toBeNull();
+    expect(released.lease_until_ms).toBeNull();
+    expect(released.recovery_state).toBe("remote-unconfirmed");
+    expect(released.next_attempt_ms).toBe(checkState.clockMs + 60_000);
+    expect(released.attempts).toBe(1);
   });
 });
 

@@ -972,6 +972,37 @@ export async function setCheckDesired(
 }
 
 /**
+ * The GIVE-UP fallback intent: written ONLY while the row still wants
+ * `in_progress`. The guard lives in the UPDATE (spec §7.9's fence), never in a
+ * read-then-write, so a terminalize that froze proof-derived text — a success,
+ * or the precise failure its proof produced — keeps BOTH its conclusion and its
+ * summary even when the two writes interleave inside the same live lease.
+ *
+ * Used by `abandonTerminalize` only; every other intent write goes through
+ * `setCheckDesired` and its monotonicity rule.
+ */
+export async function setCheckFallbackDesired(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  conclusion: CheckConclusion,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const title = frozenTitle(conclusion.title);
+  const summary = boundText(conclusion.summary, CHECK_SUMMARY_MAX_CHARS);
+  return runFenced(
+    db,
+    id,
+    lease,
+    `desired = ?, desired_title = ?, desired_summary = ?,
+            recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL`,
+    [conclusion.desired, title, summary],
+    nowMs,
+    "desired = 'in_progress'",
+  );
+}
+
+/**
  * Advance `observed` from a remote payload whose identity ALREADY matches the
  * persisted row (spec §7.9: "Mark observed only when the response (or a
  * subsequent GET) has matching identity, status=completed and the intended

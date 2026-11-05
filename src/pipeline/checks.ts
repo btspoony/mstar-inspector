@@ -60,6 +60,7 @@ import {
   rollbackCheckCreateDispatch,
   setCheckCreateState,
   setCheckDesired,
+  setCheckFallbackDesired,
   type CheckAttempt,
   type CheckConclusion,
   type CheckIdentity,
@@ -1147,14 +1148,29 @@ export type CheckLifecycle = {
   }): Promise<void>;
   /**
    * The consumer gave up on `terminalize` (its bounded wait elapsed, or the
-   * hook threw): re-write the frozen terminal intent under this lease — an
-   * idempotent replay, refused when the terminalize already froze a different
-   * one — and hand the attempt to recovery NOW with `remote-unconfirmed`, so
-   * the minute Check reconciler closes the run instead of waiting out the
+   * hook threw): hand the attempt to recovery NOW with `remote-unconfirmed`,
+   * so the minute Check reconciler closes the run instead of waiting out the
    * execution deadline. Sends NO remote request, and sends none twice: a fence
    * already claimed by recovery refuses every write here (a silent no-op).
+   *
+   * The frozen terminal intent is NEVER replaced. A row that already carries
+   * one (a proof-derived success, a precise gate failure) is released as-is and
+   * recovery sends exactly that text; only a row still wanting `in_progress`
+   * receives the fallback, and that condition is the UPDATE's predicate — so a
+   * terminalize freezing its conclusion concurrently wins.
    */
-  abandonTerminalize(input: { handle: CheckLifecycleHandle; reason: string }): Promise<void>;
+  abandonTerminalize(input: {
+    handle: CheckLifecycleHandle;
+    reason: string;
+    /**
+     * The terminal outcome this give-up owes when nothing is frozen yet.
+     * Omitted → the generic `failure/unconfirmed` of an interrupted
+     * terminalize. `superseded` is the one outcome the consumer decides with
+     * no proof read: the checkout contradicted the claim, so that run
+     * reviewed nothing for its own SHA.
+     */
+    outcome?: "superseded";
+  }): Promise<void>;
 };
 
 /**
@@ -1457,24 +1473,25 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     async abandonTerminalize(input) {
       const { handle } = input;
       const fence = fenceFor(handle.lease);
-      // Replay the frozen terminal intent. The interrupted terminalize may
-      // already have written one: re-writing the SAME text is the documented
-      // idempotent case, while a DIFFERENT terminal intent is refused by
-      // `setCheckDesired`'s monotonicity rule and kept — either way the row
-      // ends terminal-desired, which is what makes it due for recovery. A dead
-      // fence (recovery already claimed the attempt) refuses both statements
-      // below, which is the silent no-op this path is allowed to be.
-      await setCheckDesired(
-        deps.db,
-        handle.attemptId,
-        fence.lease,
-        { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed },
-        null,
-        fence.nowMs,
-      );
-      // `requestsSpent: true`: the interrupted terminalize may already have
-      // sent its update, so the row stays `remote-unconfirmed` — recovery
-      // ADOPTS that run instead of creating a second one (RL-12).
+      const conclusion: CheckConclusion =
+        input.outcome === undefined
+          ? { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed }
+          : decideConclusion({
+              proof: null,
+              outcome: input.outcome,
+              gate: null,
+              review: null,
+              headSha: handle.headSha,
+            });
+      // The fallback lands ONLY where nothing is frozen yet: the state
+      // predicate is part of the UPDATE, so a concurrent terminalize's
+      // proof-derived conclusion and its exact summary survive this write.
+      await setCheckFallbackDesired(deps.db, handle.attemptId, fence.lease, conclusion, fence.nowMs);
+      // Released on BOTH branches — an already-frozen intent is sent by
+      // recovery exactly as it stands. `requestsSpent: true` keeps the row
+      // `remote-unconfirmed`, so recovery ADOPTS the run the interrupted
+      // terminalize may already have updated (RL-12). A dead fence (recovery
+      // claimed the attempt) refuses both statements: the silent no-op.
       await releaseForRecovery(handle.attemptId, fence.lease, input.reason, true);
     },
   };

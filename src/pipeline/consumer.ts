@@ -903,12 +903,14 @@ export type CheckLifecycleHooks = {
     updateBudgetMs: number }): Promise<void>;
   /**
    * §7.10 give-up handoff (optional, additive): the consumer stopped waiting
-   * on `terminalize` — its budget elapsed or the hook threw. The lifecycle
-   * re-writes the frozen intent and releases the lease to recovery WITHOUT a
+   * on `terminalize` — its budget elapsed, the hook threw, or the checkout
+   * contradicted the claim. The lifecycle freezes a terminal intent ONLY when
+   * none is frozen (the predicate is in the UPDATE, so a concurrent
+   * terminalize's text wins) and releases the lease to recovery WITHOUT a
    * remote request, so the minute reconciler closes the run instead of waiting
    * out the execution deadline. A lease recovery already claimed is a no-op.
    */
-  abandonTerminalize?(input: { handle: CheckHandle; reason: string }): Promise<void>;
+  abandonTerminalize?(input: { handle: CheckHandle; reason: string; outcome?: "superseded" }): Promise<void>;
 };
 
 /**
@@ -3278,7 +3280,7 @@ async function processMessage(
    * The promise is handed to the invocation context when one exists, so a
    * Check write never adds a wait to the review's own return.
    */
-  const abandonCheck = (handle: CheckHandle, reason: string): Promise<void> => {
+  const abandonCheck = (handle: CheckHandle, reason: string, outcome?: "superseded"): Promise<void> => {
     const abandon = deps.checks?.abandonTerminalize;
     if (abandon === undefined) return Promise.resolve();
     const line = {
@@ -3287,7 +3289,7 @@ async function processMessage(
       attempt_id: handle.attemptId,
       check_reason: reason,
     };
-    const release = abandon({ handle, reason }).then(
+    const release = abandon({ handle, reason, ...(outcome === undefined ? {} : { outcome }) }).then(
       () => {
         deps.log.warn(
           { ...line, event: "check_abandon_released" },
@@ -3322,6 +3324,9 @@ async function processMessage(
     // Set when the consumer stops waiting on the hook: only past that point is
     // a later rejection detached, so only then does the sink report it.
     let abandoned = false;
+    // The give-up handoff the overrun callback starts: awaited below when no
+    // invocation context can own it (spec §7.10's no-context fallback).
+    let giveUpRelease: Promise<void> | undefined;
     try {
       const terminalize = deps.checks!.terminalize({
         handle,
@@ -3366,10 +3371,15 @@ async function processMessage(
           );
           // Released at the instant we give up: the attempt would otherwise
           // hold its lease until the immutable execution deadline, which is
-          // what made the Check terminalize up to 15 minutes late.
-          void abandonCheck(handle, `terminalize budget exceeded (${budgets.terminalizeMs}ms)`);
+          // what made the Check terminalize up to 15 minutes late. The promise
+          // is awaited right below when no invocation context can own it.
+          giveUpRelease = abandonCheck(handle, `terminalize budget exceeded (${budgets.terminalizeMs}ms)`);
         },
       );
+      // The overrun path has the same no-context fallback as the throw path:
+      // one fenced D1 write, never a remote send, so the lease is released
+      // before this consumer returns even without `waitUntil`.
+      if (giveUpRelease !== undefined && deps.background === undefined) await giveUpRelease;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(
@@ -3805,6 +3815,32 @@ async function processMessage(
     }
     const headSha = rev.stdout.trim();
 
+    // §7.7 step 4 / §7.9: resolve a CONTRADICTED claim against the
+    // authoritative checkout HERE — before any dedup/journal early exit, so a
+    // delivery whose claimed SHA was disproved can never close the wrong head's
+    // run as `skipped`. (A message that had no knowable SHA at admission is a
+    // different case: its claim stays at the post-capture fallback below, so a
+    // duplicate or journal hand-off of a comment trigger never creates a run.)
+    if (checkHandle !== null && checkHandle.headSha !== headSha) {
+      const supersededHandle = checkHandle;
+      checkHandle = null;
+      deps.log.warn(
+        fields ?? baseFields ?? payloadIdentityFields(payload),
+        `check attempt superseded: claimed ${supersededHandle.headSha.slice(0, 7)}, checked out ${headSha.slice(0, 7)}`,
+      );
+      // Freeze the contradicted attempt's `superseded` intent and release it —
+      // ONE fenced D1 write, awaited so the old row is terminal-intent +
+      // released BEFORE the new claim (no two live local leases) and never
+      // left `in_progress`. Its remote send belongs to the minute recovery
+      // cron, so the new head's review never waits on the Check hook.
+      await abandonCheck(
+        supersededHandle,
+        "the checkout proved a newer commit than the claim",
+        "superseded",
+      );
+      checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
+    }
+
     const key: IdempotencyKey = {
       installation_id: payload.installation_id,
       owner: payload.owner,
@@ -4192,19 +4228,14 @@ async function processMessage(
     // 6. §7.7 step 4 — the Check claim was made at ADMISSION. What remains is
     // the FALLBACK (no SHA was knowable there) and the SUPERSEDE check: the
     // authoritative checkout is the only SHA the review itself will use.
+
+    // 6. §7.7 step 4 — the fallback claim for a message whose SHA was not
+    // knowable at admission (a comment trigger with no readable head
+    // watermark): it lands here, after dedup/journal handed their duplicates
+    // off, BEFORE model work. Absent `checks` dep = no Checks; hook failure is
+    // isolated and cannot prevent the review (step 5).
     if (deps.checks !== undefined && !checkClaimAttempted) {
       checkClaimAttempted = true;
-      checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
-    } else if (checkHandle !== null && checkHandle.headSha !== headSha) {
-      // The early claim covered a commit the checkout disproved (a force-push
-      // between delivery and clone): that run reviewed nothing, so it is
-      // CLOSED rather than left in progress, and this message claims the
-      // authoritative head under a fresh attempt.
-      deps.log.warn(
-        fields,
-        `check attempt superseded: claimed ${checkHandle.headSha.slice(0, 7)}, checked out ${headSha.slice(0, 7)}`,
-      );
-      await runTerminalize(checkHandle, null, "superseded");
       checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
     }
 
