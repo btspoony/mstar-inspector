@@ -443,6 +443,70 @@ export async function readPublicationProof(
 }
 
 /**
+ * The journal phases a DELIVERY hands off (spec §7.7 step 2): everything that
+ * is not terminal for this scope/head, `confirmed` included — its proof is
+ * about to be applied and this delivery still must not re-review the head.
+ */
+export const PUBLICATION_HANDOFF_PHASES: readonly PublicationRow["phase"][] = [
+  "prepared",
+  "sending",
+  "unknown",
+  "confirmed",
+];
+
+/**
+ * The publication-journal row for this exact scope/head in any of `phases`,
+ * with whether that row's OWN proof is readable. ONE predicate, shared by the
+ * delivery hand-off (§7.7 step 2, `order: "oldest"`) and the Check recovery
+ * lane's wait-for-proof probe (§7.11.2, `order: "newest"`) — two copies of the
+ * same SQL would be free to drift apart.
+ *
+ * `hasProof` is deliberately the STRICT condition (`proof_json` present AND
+ * valid JSON): a present-but-corrupt envelope must not end the wait, or the
+ * conclusion path would freeze the unconfirmed failure on a publication whose
+ * real proof is still arriving.
+ */
+export async function findPublicationJournal(
+  db: D1Like,
+  input: {
+    scope: Scope;
+    headSha: string;
+    phases: readonly PublicationRow["phase"][];
+    /**
+     * Which row wins when the head holds more than one (a normal row plus a
+     * degraded one). `oldest` is the delivery hand-off's order (first in flight
+     * wins); `newest` is the Check wait's (the LATEST publication is the one
+     * whose proof is still owed).
+     */
+    order?: "oldest" | "newest";
+  },
+): Promise<{ id: string; phase: PublicationRow["phase"]; hasProof: boolean } | null> {
+  if (input.phases.length === 0) return null;
+  const placeholders = input.phases.map(() => "?").join(", ");
+  const order = input.order === "newest" ? "created_ms DESC, id DESC" : "created_ms, id";
+  const row = await db
+    .prepare(
+      `SELECT id, phase, (proof_json IS NOT NULL AND json_valid(proof_json)) AS has_proof FROM review_publications
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND head_sha = ? AND phase IN (${placeholders})
+       ORDER BY ${order} LIMIT 1`,
+    )
+    .bind(
+      input.scope.appId,
+      input.scope.installationId,
+      input.scope.owner,
+      input.scope.repo,
+      input.scope.prNumber,
+      input.headSha,
+      ...input.phases,
+    )
+    .first<{ id: string; phase: string; has_proof: number }>();
+  return row === null
+    ? null
+    : { id: row.id, phase: row.phase as PublicationRow["phase"], hasProof: row.has_proof === 1 };
+}
+
+/**
  * Proof-gated idempotent apply — the frozen §7.7 step 9 local sequence:
  * (1) the existing atomic `store.put` for the review artifact (idempotent
  * UNIQUE no-op — a replay after store.put but before the lifecycle apply
