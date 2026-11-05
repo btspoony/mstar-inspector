@@ -3848,7 +3848,99 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
       status: "ok",
       limits: [{ id: "commandcode:balance", kind: "balance", remaining: 10, unit: "credits", shared: true }],
     });
+    // The credential went to the vendor's own two routes, carrying this key.
     expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const calls = fetchSpy.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      "https://api.commandcode.ai/alpha/whoami",
+      "https://api.commandcode.ai/alpha/billing/credits",
+    ]);
+    for (const [, init] of calls) {
+      expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${plainKey}`);
+    }
+  });
+
+  test("a built-in pool key is not judged by a same-id declaration, while a declaration-pool key is", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    const builtinKey = sk("usage-builtin-9999");
+    const declarationKey = sk("usage-declaration-0000");
+    // The App holds BOTH: a built-in-pool row and a same-id declaration on a
+    // foreign host. The pool that answered decides which endpoint applies.
+    await store.addProviderKey(app.id, "commandcode", builtinKey);
+    await store.upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "commandcode",
+        base_url: "https://proxy.example/v1",
+        api: "openai-completions",
+        model_ids: ["deepseek-v4-flash"],
+      },
+      declarationKey,
+    );
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async (input: string | URL | Request) => {
+        const body = String(input).endsWith("/alpha/whoami")
+          ? { user: { id: "user-1" } }
+          : { data: { credits: { monthlyCredits: 10 } } };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    );
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+    const builtin = await postForm(USAGE, cookie, makeEnv(db), {
+      provider: "commandcode",
+      keyId: await keyIdOf(builtinKey),
+    });
+    expect(builtin.status).toBe(200);
+    expect(await builtin.json()).toMatchObject({ ok: true, status: "ok" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    // The same App, same provider, but the DECLARATION pool's key: it belongs
+    // to the off-vendor declaration and is refused with no further request.
+    const declared = await postForm(USAGE, cookie, makeEnv(db), {
+      provider: "commandcode",
+      keyId: await keyIdOf(declarationKey),
+    });
+    expect(declared.status).toBe(400);
+    expect(await declared.json()).toMatchObject({ ok: false, reason: "unsupported_provider" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  test("a corrupt neighbour declaration does not fail an unrelated probe", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "broken",
+        base_url: "https://broken.example/v1",
+        api: "openai-completions",
+        model_ids: ["m"],
+      },
+      sk("usage-broken-1111"),
+    );
+    // Tamper ONE declaration's model_ids: the usage path reads only base_url,
+    // so a neighbour's corruption must not become `unexpected`.
+    rawRun(db, "UPDATE app_custom_providers SET model_ids = '{not json' WHERE app_id = ? AND provider_id = 'broken'", app.id);
+    const plainKey = sk("usage-zai-neighbour-2222");
+    await store.addProviderKey(app.id, "zai", plainKey);
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(
+          JSON.stringify({
+            success: true,
+            data: { limits: [{ type: "TOKENS_LIMIT", unit: 6, number: 1, currentValue: 10, usage: 100 }] },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )) as unknown as typeof fetch,
+    );
+    const res = await postForm(USAGE, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      provider: "zai",
+      keyId: await keyIdOf(plainKey),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, status: "ok" });
   });
 });
 

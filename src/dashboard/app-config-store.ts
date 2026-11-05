@@ -2052,6 +2052,20 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
+     * ONE declaration's base URL, by id: the usage probe only needs to know
+     * WHERE a declaration points, so this read is decrypt-free AND parse-free —
+     * unlike listCustomProviders, it never parses model_ids, so a corrupt
+     * neighbour declaration cannot fail it. `null` = no declaration row.
+     */
+    async getCustomProviderBaseUrl(appId: string, providerId: string): Promise<string | null> {
+      const row = await db
+        .prepare(`SELECT base_url FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+        .bind(appId, providerId)
+        .first<{ base_url: string }>();
+      return row?.base_url ?? null;
+    },
+
+    /**
      * The settings-page declaration list: every declaration for the
      * App, provider_id-ascending, as the decrypt-free AppCustomProviderRead
      * shape. model_ids is parsed from the stored TEXT JSON array; a malformed

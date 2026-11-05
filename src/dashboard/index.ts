@@ -159,7 +159,7 @@ import {
   verifyProviderKey,
   type VerifyFailureReason,
 } from "./provider-verify";
-import { hasUsageProbe, probeProviderUsage, usageProbeHosts } from "./provider-usage";
+import { endpointHost, hasUsageProbe, probeProviderUsage, usageProbeHosts } from "./provider-usage";
 import {
   countUsers,
   deleteWorkspaceMember,
@@ -3519,24 +3519,14 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
  * Per-key usage probe: `POST
  * /api/apps/:appId/keys/usage` with form fields `provider` + `keyId` asks the
  * provider's own quota endpoint with ONE stored key and answers the normalized
- * snapshot. Refusals are ordered by cost: a provider with no probe is refused
- * BEFORE any store read or outbound request (`unsupported_provider`), and so is
- * a declaration whose base URL points at a host the probe never calls; an id
- * neither pool holds for THIS App — another App's id, or a deleted one — is
- * `unknown_key`. The plaintext only ever reaches the probe's request header:
- * it is never in the response, and a store/decrypt throw is the closed
- * `unexpected` reason rather than a 5xx.
+ * snapshot. A provider with no probe is refused BEFORE any store read or
+ * outbound request (`unsupported_provider`); an id neither pool holds for THIS
+ * App — another App's id, or a deleted one — is `unknown_key`; a
+ * DECLARATION-pool key whose declaration points at a host the probe never calls
+ * is refused the same way, still before any outbound request. The plaintext
+ * only ever reaches the probe's request header: it is never in the response,
+ * and a store/decrypt throw is the closed `unexpected` reason rather than a 5xx.
  */
-
-/** A stored declaration's host, or null when its base URL does not parse. */
-function declarationHost(baseUrl: string): string | null {
-  try {
-    return new URL(baseUrl).host;
-  } catch {
-    return null;
-  }
-}
-
 const appKeyUsageRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
@@ -3549,17 +3539,19 @@ const appKeyUsageRoute = async (c: DashboardContext) => {
   }
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
-    // A template provider's key lives in the declaration pool, and that
-    // declaration carries an operator-chosen base URL. The probe always calls
-    // the vendor's OWN quota host, so a declaration pointing anywhere else is
-    // refused before the key is decrypted or a request leaves the Worker.
-    const declaration = (await store.listCustomProviders(gate.app.id)).find(
-      (row) => row.provider_id === provider,
-    );
-    if (declaration !== undefined) {
-      const declaredHost = declarationHost(declaration.base_url);
+    const stored = await store.getProviderKeyPlaintext(gate.app.id, provider, keyId);
+    if (stored === null) return c.json({ ok: false, reason: "unknown_key" as const }, 400);
+    // The key's POOL decides whose endpoint matters. A built-in-pool row was
+    // stored against the catalog endpoint and is never judged by a same-id
+    // declaration; only a declaration-pool key carries an operator-chosen base
+    // URL, and the probe always calls the vendor's OWN quota host — so a
+    // declaration pointing elsewhere is refused before any request leaves the
+    // Worker.
+    if (stored.custom) {
+      const declaredBaseUrl = await store.getCustomProviderBaseUrl(gate.app.id, provider);
+      const declaredHost = declaredBaseUrl === null ? null : endpointHost(declaredBaseUrl);
       if (declaredHost === null || !probeHosts.includes(declaredHost)) {
-        const host = declaredHost ?? declaration.base_url;
+        const host = declaredHost ?? declaredBaseUrl ?? "an unreadable endpoint";
         return c.json(
           {
             ok: false,
@@ -3571,8 +3563,6 @@ const appKeyUsageRoute = async (c: DashboardContext) => {
         );
       }
     }
-    const stored = await store.getProviderKeyPlaintext(gate.app.id, provider, keyId);
-    if (stored === null) return c.json({ ok: false, reason: "unknown_key" as const }, 400);
     const snapshot = await probeProviderUsage({ fetch: verifyFetch }, provider, stored.plainKey);
     c.header("Cache-Control", "private, no-store");
     return c.json({ ok: true, ...snapshot });

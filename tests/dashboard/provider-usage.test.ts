@@ -104,13 +104,67 @@ describe("usage probe table", () => {
     }
   });
 
-  test("every mapped id advertises the vendor host its probe calls; an unmapped id has none", () => {
-    for (const id of covered) expect(usageProbeHosts(id)?.length ?? 0, id).toBeGreaterThan(0);
+  test("every mapped id advertises exactly the hosts its probe calls; an unmapped id has none", async () => {
+    // One entry per family: the endpoints its probe GETs, the canned answers
+    // that let it run, and the catalog ids sharing it. The probe executes, so
+    // the advertised set is checked against REAL call sites — never a second
+    // hand-kept list that could drift from the request code.
+    const families: Array<{ ids: string[]; urls: string[]; responses: () => Response[] }> = [
+      {
+        ids: ["commandcode", "commandcode-anthropic"],
+        urls: ["https://api.commandcode.ai/alpha/whoami", "https://api.commandcode.ai/alpha/billing/credits"],
+        responses: () => [json(200, { user: { id: "user-1" } }), json(200, {})],
+      },
+      { ids: ["opencode-go"], urls: ["https://opencode.ai/zen/go/v1/usage"], responses: () => [json(200, {})] },
+      {
+        ids: ["zai", "zai-coding-plan"],
+        urls: ["https://api.z.ai/api/monitor/usage/quota/limit"],
+        responses: () => [json(200, {})],
+      },
+      {
+        ids: ["zhipuai", "zhipuai-coding-plan"],
+        urls: ["https://open.bigmodel.cn/api/monitor/usage/quota/limit"],
+        responses: () => [json(200, {})],
+      },
+      {
+        ids: ["minimax-coding-plan"],
+        urls: ["https://api.minimax.io/v1/token_plan/remains"],
+        responses: () => [json(200, {})],
+      },
+      {
+        ids: ["minimax-cn-coding-plan"],
+        urls: ["https://api.minimaxi.com/v1/token_plan/remains"],
+        responses: () => [json(200, {})],
+      },
+      {
+        ids: ["cline-pass"],
+        urls: ["https://api.cline.bot/api/v1/users/me/plan/usage-limits"],
+        responses: () => [json(200, {})],
+      },
+      { ids: ["synthetic"], urls: ["https://api.synthetic.new/v2/quotas"], responses: () => [json(200, {})] },
+      { ids: ["umans"], urls: ["https://api.code.umans.ai/v1/usage"], responses: () => [json(200, {})] },
+      { ids: ["hyper"], urls: ["https://hyper.charm.land/credits"], responses: () => [json(200, {})] },
+      {
+        ids: ["kimi-for-coding"],
+        urls: ["https://api.kimi.com/coding/v1/usages"],
+        responses: () => [json(200, {})],
+      },
+      { ids: ["cursor"], urls: ["https://api2.cursor.sh/auth/usage"], responses: () => [json(200, {})] },
+    ];
+
+    // The table above must cover the whole probe set, not a subset.
+    expect(families.flatMap((family) => family.ids).sort()).toEqual([...covered].sort());
+
+    for (const family of families) {
+      const expectedHosts = [...new Set(family.urls.map((url) => new URL(url).host))].sort();
+      for (const id of family.ids) {
+        const calls: FetchCall[] = [];
+        await probeProviderUsage({ fetch: queueFetch(family.responses(), calls) }, id, "key-123");
+        expect(calls.map((call) => call.url), id).toEqual([...family.urls]);
+        expect([...(usageProbeHosts(id) ?? [])].sort(), id).toEqual(expectedHosts);
+      }
+    }
     expect(usageProbeHosts("anthropic")).toBeNull();
-    // Pinned samples of the declaration gate's comparison unit.
-    expect(usageProbeHosts("commandcode")).toEqual(["api.commandcode.ai"]);
-    expect(usageProbeHosts("minimax-cn-coding-plan")).toEqual(["api.minimaxi.com"]);
-    expect(usageProbeHosts("cursor")).toEqual(["api2.cursor.sh"]);
   });
 
   test("an unmapped provider is absent + no-probe with zero outbound requests", async () => {

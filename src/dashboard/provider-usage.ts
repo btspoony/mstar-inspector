@@ -930,36 +930,55 @@ const cursorUsage: UsageProbe = async (input, key) => {
  * minimax-code, zhipu-coding-plan, kimi-code) are not this product's ids.
  *
  * Each entry also carries the vendor hosts its probe reaches, derived from the
- * SAME endpoint constants the probe calls, so the set can never drift from
- * where the credential actually travels: a stored declaration may only point
- * at one of them.
+ * SAME endpoint constants the probe calls (and asserted so by the suite), so
+ * the set can never drift from where the credential actually travels: a stored
+ * declaration may only point at one of them.
  */
 type UsageProbeEntry = {
   probe: UsageProbe;
   hosts: readonly string[];
 };
 
-/** An endpoint constant's host — the unit a declaration's base URL is compared by. */
-function hostOfEndpoint(url: string): string {
-  return new URL(url).host;
+/**
+ * A URL's host — the unit a declaration's base URL is compared by. `null` when
+ * the value does not parse, so an unreadable endpoint fails closed. One helper
+ * serves both sides of that comparison: the probe table's advertised hosts here
+ * and the route's stored declaration, which must agree by construction.
+ */
+export function endpointHost(url: string): string | null {
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
+}
+
+/** The distinct hosts a family's own endpoint constants name. */
+function hostsOf(...urls: string[]): readonly string[] {
+  const hosts = new Set<string>();
+  for (const url of urls) {
+    const host = endpointHost(url);
+    if (host !== null) hosts.add(host);
+  }
+  return [...hosts];
 }
 
 const USAGE_PROBES: Readonly<Record<string, UsageProbeEntry>> = Object.freeze({
-  commandcode: { probe: commandCodeUsage, hosts: [hostOfEndpoint(COMMANDCODE_ORIGIN)] },
-  "commandcode-anthropic": { probe: commandCodeUsage, hosts: [hostOfEndpoint(COMMANDCODE_ORIGIN)] },
-  "opencode-go": { probe: opencodeGoUsage, hosts: [hostOfEndpoint(OPENCODE_GO_USAGE_URL)] },
-  zai: { probe: zaiUsage(ZAI_HOST), hosts: [hostOfEndpoint(ZAI_HOST)] },
-  "zai-coding-plan": { probe: zaiUsage(ZAI_HOST), hosts: [hostOfEndpoint(ZAI_HOST)] },
-  zhipuai: { probe: zaiUsage(ZHIPU_HOST), hosts: [hostOfEndpoint(ZHIPU_HOST)] },
-  "zhipuai-coding-plan": { probe: zaiUsage(ZHIPU_HOST), hosts: [hostOfEndpoint(ZHIPU_HOST)] },
-  "minimax-coding-plan": { probe: minimaxUsage(MINIMAX_INTL_HOST), hosts: [hostOfEndpoint(MINIMAX_INTL_HOST)] },
-  "minimax-cn-coding-plan": { probe: minimaxUsage(MINIMAX_CN_HOST), hosts: [hostOfEndpoint(MINIMAX_CN_HOST)] },
-  "cline-pass": { probe: clineUsage, hosts: [hostOfEndpoint(CLINE_USAGE_URL)] },
-  synthetic: { probe: syntheticUsage, hosts: [hostOfEndpoint(SYNTHETIC_QUOTAS_URL)] },
-  umans: { probe: umansUsage, hosts: [hostOfEndpoint(UMANS_USAGE_URL)] },
-  hyper: { probe: hyperUsage, hosts: [hostOfEndpoint(HYPER_CREDITS_URL)] },
-  "kimi-for-coding": { probe: kimiUsage, hosts: [hostOfEndpoint(KIMI_USAGE_URL)] },
-  cursor: { probe: cursorUsage, hosts: [hostOfEndpoint(CURSOR_USAGE_URL)] },
+  commandcode: { probe: commandCodeUsage, hosts: hostsOf(COMMANDCODE_ORIGIN) },
+  "commandcode-anthropic": { probe: commandCodeUsage, hosts: hostsOf(COMMANDCODE_ORIGIN) },
+  "opencode-go": { probe: opencodeGoUsage, hosts: hostsOf(OPENCODE_GO_USAGE_URL) },
+  zai: { probe: zaiUsage(ZAI_HOST), hosts: hostsOf(ZAI_HOST) },
+  "zai-coding-plan": { probe: zaiUsage(ZAI_HOST), hosts: hostsOf(ZAI_HOST) },
+  zhipuai: { probe: zaiUsage(ZHIPU_HOST), hosts: hostsOf(ZHIPU_HOST) },
+  "zhipuai-coding-plan": { probe: zaiUsage(ZHIPU_HOST), hosts: hostsOf(ZHIPU_HOST) },
+  "minimax-coding-plan": { probe: minimaxUsage(MINIMAX_INTL_HOST), hosts: hostsOf(MINIMAX_INTL_HOST) },
+  "minimax-cn-coding-plan": { probe: minimaxUsage(MINIMAX_CN_HOST), hosts: hostsOf(MINIMAX_CN_HOST) },
+  "cline-pass": { probe: clineUsage, hosts: hostsOf(CLINE_USAGE_URL) },
+  synthetic: { probe: syntheticUsage, hosts: hostsOf(SYNTHETIC_QUOTAS_URL) },
+  umans: { probe: umansUsage, hosts: hostsOf(UMANS_USAGE_URL) },
+  hyper: { probe: hyperUsage, hosts: hostsOf(HYPER_CREDITS_URL) },
+  "kimi-for-coding": { probe: kimiUsage, hosts: hostsOf(KIMI_USAGE_URL) },
+  cursor: { probe: cursorUsage, hosts: hostsOf(CURSOR_USAGE_URL) },
 });
 
 /**
