@@ -546,6 +546,8 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
           line
           originalLine
           comments(first: 1) {
+            # viewerDidAuthor keeps entryOf's provenance field REAL for stub
+            # roots too — never a fabricated false on our own comments.
             nodes { id fullDatabaseId body author { __typename login } viewerDidAuthor pullRequestReview { id fullDatabaseId } }
           }
         }

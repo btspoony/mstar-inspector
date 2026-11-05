@@ -344,8 +344,9 @@ export function boundDiscussion(discussion: Discussion): Discussion {
       createdAt: metaValue(item.createdAt),
       updatedAt: metaValue(item.updatedAt),
       body,
-      // Thread items keep their real provenance; issue items that reached here
-      // already failed the own-report predicate.
+      // Provenance passes through unchanged: thread items keep theirs, and an
+      // ISSUE item that reached here either lacks the marker or was not
+      // authored by this App (the predicate needs both).
       ownAuthor: item.ownAuthor,
     });
   }

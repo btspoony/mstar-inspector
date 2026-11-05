@@ -368,13 +368,16 @@ describe("boundDiscussion — §7.8 model context", () => {
     ownButPlain.ownAuthor = true;
     const bounded = boundDiscussion(discussionWith([ownButPlain]));
     expect(bounded.items).toHaveLength(1);
+    // The retained item keeps its provenance; hard-coding false would regress
+    // the wire contract this change adds.
+    expect(bounded.items[0]!.ownAuthor).toBe(true);
   });
 
   test("a HUMAN body copying the bot marker is kept and still truncates the view", () => {
     // Authorship is half the predicate: a human can copy the marker, and that
     // text may be a rebuttal the model must see before anything resolves.
     const spoofed = item(1, `<!-- mstar-inspector:review:v1 round=7 -->\n${"r".repeat(MODEL_TOTAL_MAX_CHARS + 500)}`);
-    // Another App's bot login: it can copy the marker, but provenance is false.
+    // A third party can copy the marker; the provenance half is what keeps it.
     const bounded = boundDiscussion(discussionWith([spoofed]));
     expect(bounded.items).toHaveLength(1);
     expect(bounded.issueModelCoverage).toBe("truncated");

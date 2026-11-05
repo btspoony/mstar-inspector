@@ -36,8 +36,8 @@ function db(): DashboardD1 {
   return createMigratedTestD1() as unknown as DashboardD1;
 }
 
-function seed(target: DashboardD1, key: string, value: string): void {
-  void target
+async function seed(target: DashboardD1, key: string, value: string): Promise<void> {
+  await target
     .prepare(
       `INSERT INTO review_runtime_settings (key, value, updated_at)
        VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
@@ -60,7 +60,7 @@ describe("readCheckBudgets", () => {
   test("a degraded read emits exactly ONE warn with both defaults", async () => {
     const log = spyLog<CheckBudgetsLogFields>();
     const target = db();
-    seed(target, CHECK_TERMINALIZE_KEY, "not-a-number");
+    await seed(target, CHECK_TERMINALIZE_KEY, "not-a-number");
     expect(await readCheckBudgets(target, log)).toEqual({
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
@@ -85,7 +85,7 @@ describe("readRecheckBacklogFill", () => {
   test("a degraded read emits exactly ONE warn with the default", async () => {
     const log = spyLog<BacklogFillLogFields>();
     const target = db();
-    seed(target, RECHECK_BACKLOG_FILL_KEY, "-1");
+    await seed(target, RECHECK_BACKLOG_FILL_KEY, "-1");
     expect(await readRecheckBacklogFill(target, log)).toBe(RECHECK_BACKLOG_FILL_DEFAULT);
     expect(log.calls).toHaveLength(1);
     expect(log.calls[0]!.fields).toEqual({

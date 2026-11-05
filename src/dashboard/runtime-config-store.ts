@@ -487,13 +487,18 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
     if (Number.isNaN(terminalize) || Number.isNaN(update)) return degradedCheckBudgets();
     // The writer's cross-field rule must hold on this side too: a stored pair
     // with terminalize <= update would let the consumer abandon the inline wait
-    // before the bounded send it handed off has finished.
-    const pair = {
+    // before the bounded send it handed off has finished. The rule is applied
+    // only when BOTH values were stored: an absent row is the documented
+    // default, not a pair the operator wrote, so one stored budget is honored
+    // alone rather than downgrading the other to its default.
+    if (terminalize !== undefined && update !== undefined && terminalize <= update) {
+      return degradedCheckBudgets();
+    }
+    return {
       terminalizeMs: terminalize ?? CHECK_TERMINALIZE_DEFAULT,
       updateMs: update ?? CHECK_UPDATE_DEFAULT,
+      degraded: false,
     };
-    if (pair.terminalizeMs <= pair.updateMs) return degradedCheckBudgets();
-    return { ...pair, degraded: false };
   } catch {
     return degradedCheckBudgets();
   }

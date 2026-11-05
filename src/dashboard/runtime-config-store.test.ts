@@ -592,7 +592,6 @@ describe("check budgets", () => {
 
   test("a stored pair that breaks the writer's relation degrades the read", async () => {
     // Only an out-of-band write can produce this; the reader is the last fence.
-    const db = fixture();
     const pairs: Array<[string, string]> = [["5000", "5000"], ["4000", "5000"]];
     for (const [terminalize, update] of pairs) {
       const scoped = fixture();
@@ -614,9 +613,21 @@ describe("check budgets", () => {
         degraded: true,
       });
     }
-    // The loop's own fixture stays untouched.
+  });
+
+  test("a single stored budget is honored alone, not downgraded by the relation", async () => {
+    // The operator wrote only the wait, below the default send budget. The
+    // relation rule guards a pair the writer produced, so an absent row must
+    // not silently widen the stored value to the 10 s default.
+    const db = fixture();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at)
+         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+      )
+      .run(CHECK_TERMINALIZE_KEY, "1000");
     expect(await getCheckBudgets(db)).toEqual({
-      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+      terminalizeMs: 1_000,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: false,
     });
