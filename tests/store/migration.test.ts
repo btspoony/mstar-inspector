@@ -22,6 +22,8 @@ import {
   WORKSPACE_CONCURRENCY_MAX,
   getEffectiveConcurrency,
 } from "../../src/dashboard/runtime-config-store";
+import { selectAssessmentTargets } from "../../src/store/finding-lifecycle";
+import { COMMENT_CLAIM_OUTBOX_SQL } from "../../src/worker/sweep";
 import type { TestD1 } from "./helpers";
 import type { D1Like } from "../../src/store/types";
 
@@ -2088,6 +2090,103 @@ describe("migrations/0046_reviews_context_incomplete.sql", () => {
 });
 
 /**
+ * The recheck rotation's PR-scoped thread probe (migration 0047).
+ *
+ * `selectAssessmentTargets` (spec §7.2) also selects ADDRESSED findings that
+ * own a non-terminal association, so every rotation pass probes
+ * `review_threads` by PR scope. `review_threads` is cross-installation, so
+ * without this index that probe scans the whole table on every round. The
+ * index is identified BY NAME: 0047 is already carried by two merged
+ * migrations, so the filename is not a stable locator.
+ */
+describe("idx_thread_pr_scope (migration 0047_thread_pr_scope.sql)", () => {
+  const SCOPE = { appId: "scope-app", installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+
+  /** The scope/publication rows the lifecycle FKs require, plus two findings. */
+  function seedRotationFixture(): TestD1 {
+    const db = createMigratedTestD1();
+    insertGithubAppRow(db, { id: SCOPE.appId, githubAppId: 9003, name: "scope-app" });
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, created_ms, updated_ms)
+         VALUES ('pub-1', ?, ?, ?, ?, ?, ?, 'review', 'applied', '{}', 1, 1)`,
+      )
+      .run(SCOPE.appId, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA);
+    const insertFinding = (id: string, state: string, createdMs: number): void => {
+      db.raw
+        .prepare(
+          `INSERT INTO review_findings
+             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+              first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+              first_seen_round, last_seen_round, state, created_ms, updated_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '{}', 'pub-1', 'pub-1', ?, ?, 1, 1, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          SCOPE.appId,
+          SCOPE.installationId,
+          SCOPE.owner,
+          SCOPE.repo,
+          SCOPE.prNumber,
+          `f-${id}`,
+          SHA,
+          SHA,
+          state,
+          createdMs,
+          createdMs,
+        );
+    };
+    insertFinding("row-open", "open", 1000);
+    insertFinding("row-addressed", "addressed", 2000);
+    // An addressed row with no association: the probe must not select it.
+    insertFinding("row-untracked", "addressed", 3000);
+    db.raw
+      .prepare(
+        `INSERT INTO review_threads
+           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+            original_sha, round, intent_json, resolution_state, created_ms, updated_ms)
+         VALUES ('t-1', 'row-addressed', 'pub-1', ?, ?, ?, ?, ?, ?, 1, '{}', 'pending', 1000, 1000)`,
+      )
+      .run(SCOPE.appId, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA);
+    return db;
+  }
+
+  test("declares the PR scope followed by resolution_state", () => {
+    const db = createMigratedTestD1();
+    const columns = (
+      db.raw.query("PRAGMA index_info(idx_thread_pr_scope)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    expect(columns).toEqual(["app_id", "installation_id", "owner", "repo", "pr_number", "resolution_state"]);
+  });
+
+  test("the selector's association probe rides the index instead of scanning review_threads", async () => {
+    const db = seedRotationFixture();
+    // Record the statement the REAL selector prepares — never a copy.
+    const prepared: string[] = [];
+    const recording: D1Like = {
+      prepare(sql: string) {
+        prepared.push(sql);
+        return db.prepare(sql);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    const selected = await selectAssessmentTargets(recording, SCOPE, 25);
+    expect(selected.map((target) => target.rowId)).toEqual(["row-open", "row-addressed"]);
+
+    const probe = prepared.find((sql) => sql.includes("EXISTS"))!;
+    const plan = (db.raw.query(`EXPLAIN QUERY PLAN ${probe}`).all() as Array<{ detail: string }>)
+      .map((row) => row.detail)
+      .join("\n");
+    expect(plan).toContain("SEARCH t USING INDEX idx_thread_pr_scope");
+    // A full scan of the cross-installation table is the regression this pins.
+    expect(plan.split("\n").some((line) => line.startsWith("SCAN t"))).toBe(false);
+  });
+});
+
+/**
  * migration 0048 — the durable comment-trigger claim.
  *
  * The table is the at-most-once proof for a bot-mention comment: the worker
@@ -2167,21 +2266,18 @@ describe("migrations/0048_comment_trigger_claims.sql", () => {
     }
   });
 
-  test("the outbox index covers (state, queued_ms) and serves the sweep's scan", () => {
+  test("the outbox index serves the sweep's own scan", () => {
     const db = createMigratedTestD1();
     const indexColumns = (
       db.raw.query("PRAGMA index_info(idx_comment_claim_outbox)").all() as Array<{ name: string }>
     ).map((c) => c.name);
     expect(indexColumns).toEqual(["state", "queued_ms"]);
 
+    // The statement the sweep prepares — projection, `attempts` predicate and
+    // the operator LIMIT included — never a hand-written twin that can drift.
     const plan = (
       db.raw
-        .query(
-          `EXPLAIN QUERY PLAN
-             SELECT comment_id FROM comment_trigger_claims
-              WHERE state = 'queued' AND queued_ms <= 5
-              ORDER BY queued_ms LIMIT 20`,
-        )
+        .query(`EXPLAIN QUERY PLAN ${COMMENT_CLAIM_OUTBOX_SQL}`)
         .all() as Array<{ detail: string }>
     )
       .map((p) => p.detail)

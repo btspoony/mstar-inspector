@@ -48,6 +48,18 @@ import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../store/failure-store";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
 
+/**
+ * The comment-claim outbox scan (migration 0048). Exported so the index/plan
+ * test asserts THIS statement — projection, the `attempts` predicate and the
+ * operator `LIMIT` included — instead of a copy that can drift away from it.
+ * Binds: `maxAttempts`, `nowMs - retryMs`, `outboxCap`.
+ */
+export const COMMENT_CLAIM_OUTBOX_SQL = `SELECT installation_id, owner, repo, pr_number, comment_id, payload_json
+             FROM comment_trigger_claims
+            WHERE state = 'queued' AND attempts < ? AND queued_ms <= ?
+            ORDER BY queued_ms
+            LIMIT ?`;
+
 /** Breach when `failures_24h > SWEEP_FAILURE_THRESHOLD` (AL-6). */
 export const SWEEP_FAILURE_THRESHOLD = 5;
 
@@ -316,13 +328,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         .bind(settings.maxAttempts)
         .run();
       const stale = await db
-        .prepare(
-          `SELECT installation_id, owner, repo, pr_number, comment_id, payload_json
-             FROM comment_trigger_claims
-            WHERE state = 'queued' AND attempts < ? AND queued_ms <= ?
-            ORDER BY queued_ms
-            LIMIT ?`,
-        )
+        .prepare(COMMENT_CLAIM_OUTBOX_SQL)
         .bind(settings.maxAttempts, nowMs - settings.retryMs, settings.outboxCap)
         .all<{
           installation_id: number;
