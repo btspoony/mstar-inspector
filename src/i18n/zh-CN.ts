@@ -748,6 +748,7 @@ export const zhCN: Dictionary = {
     reviewGateSave: "保存审查门禁",
     reviewGateUnreadable:
       "无法读取此 App 已存储的审查门禁，因此无法在此编辑。在存储的配置被修复之前，Check 会持续按失败处理。",
+    reviewGateReset: "重置为默认门禁（分数 {score}+，结论：{verdicts}）",
   },
   manifest: {
     title: "创建 GitHub App",

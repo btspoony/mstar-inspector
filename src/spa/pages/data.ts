@@ -422,6 +422,27 @@ export type CheckGateSettings = {
 };
 
 /**
+ * The review gate's DDL default (migration 0045): a floor of 80 and
+ * `["ship it"]`. The columns are written only by `saveCheckGate`, whose UPDATE
+ * never reads the old value — so this is the value the unreadable-gate
+ * recovery writes back over a row it cannot read.
+ */
+export const DEFAULT_CHECK_GATE: CheckGateSettings = { min_score: 80, pass_verdicts: ["ship it"] };
+
+/**
+ * The one `save-check-gate` submission body. The score rides as submitted —
+ * the route owns its validation, so a blank field must reach it as a keyed 400
+ * rather than becoming 0 — and each verdict is one repeated `pass_verdicts`
+ * field, the shape the route aggregates. The gate editor and the
+ * unreadable-gate recovery are its two callers; neither may invent a second op.
+ */
+export function checkGateSaveFields(gate: { min_score: string; pass_verdicts: readonly string[] }): URLSearchParams {
+  const fields = new URLSearchParams({ op: "save-check-gate", min_score: gate.min_score });
+  for (const verdict of gate.pass_verdicts) fields.append("pass_verdicts", verdict);
+  return fields;
+}
+
+/**
  * The per-App owner allowlist (migration 0045): `enabled` off behaves exactly
  * as before this App configuration existed; on with an empty `owners` refuses
  * every owner (fail closed).

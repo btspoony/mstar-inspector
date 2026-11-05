@@ -879,6 +879,7 @@ export const en = {
     reviewGateSave: "Save review gate",
     reviewGateUnreadable:
       "This App's stored review gate could not be read, so it cannot be edited here. The Check keeps failing closed until the stored configuration is repaired.",
+    reviewGateReset: "Reset to the default gate (score {score}+, verdicts: {verdicts})",
   },
   manifest: {
     title: "Create GitHub App",
