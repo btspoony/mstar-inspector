@@ -495,6 +495,39 @@ describe("pull requests tab (mounted)", () => {
     }
   });
 
+  test("the repo filter resets to all when the tab switches Apps (I-001)", async () => {
+    const { container, win, switchApp, resolve, unmount } = await mountTabWithGatedFetch("");
+    try {
+      await act(async () =>
+        resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN, ROW_CLOSED] })),
+      );
+      await act(async () => {});
+      // Select a repo: the ledger narrows to its rows.
+      await press(win, container.querySelector('[role="combobox"]'));
+      const option = [...win.document.querySelectorAll('[role="option"]')].find(
+        (row) => row.textContent === "acme/api",
+      );
+      await press(win, option as unknown as Element);
+      expect(container.textContent ?? "").toContain("Revert the cache change");
+      expect(container.textContent ?? "").not.toContain("Add the export button");
+
+      // The tab instance survives the App switch, but the filter does not:
+      // the new App's ledger renders unfiltered and the select is back on
+      // the all option.
+      await switchApp("2");
+      await act(async () =>
+        resolve("/apps/2/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })),
+      );
+      await act(async () => {});
+      expect(container.textContent ?? "").toContain("Add the export button");
+      expect(container.querySelector('[role="combobox"]')?.textContent ?? "").toContain(
+        t("en", "pullRequests.filterRepoAll"),
+      );
+    } finally {
+      await unmount();
+    }
+  });
+
   test("the refresh button re-reads the list and is disabled while the read is in flight", async () => {
     const { container, fetches, win, resolve, unmount } = await mountTabWithGatedFetch("");
     const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));

@@ -502,11 +502,10 @@ export const en = {
     /**
      * The installations section of the settings flow: heading, count subtitle
      * and the table's four columns (the availability badge is derived from
-     * the stored owner allowlist, migration 0045). `installations.length` is
-     * the only
-     * installation figure the product carries (compass D13); the settings
-     * payload has no per-installation repository count, so there is no
-     * repository column.
+     * the stored owner allowlist, migration 0045). `installations.length`
+     * is the only installation figure the product carries (compass D13); the
+     * settings payload has no per-installation repository count, so there is
+     * no repository column.
      */
     installations: "Installations",
     installationsCount: "{count} installations",

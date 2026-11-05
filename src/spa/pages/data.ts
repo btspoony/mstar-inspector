@@ -54,8 +54,9 @@ export type InsightsSearch = { window: string; repo: string };
  * One per-bucket distribution row of `findings_distribution` (AD-652) —
  * structurally mirrors the store's FindingsDistributionBucket
  * (the dashboard leaf exports no types). `by_severity` is zero-filled over
- * the fixed merge-class set {must-fix, should-fix, nit} — identical key set
- * on every bucket, so the SPA's series vocabulary is stable per window.
+ * the fixed merge-class set {must-fix, should-fix, may-fix, nit} — identical
+ * key set on every bucket, so the SPA's series vocabulary is stable per
+ * window.
  */
 export type FindingsDistributionBucket = {
   /** UTC bucket start `YYYY-MM-DD` — a day, or a Monday for week buckets. */

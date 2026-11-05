@@ -91,7 +91,15 @@ export function AppPullRequestsTab({
   const [reloadNonce, setReloadNonce] = useState(0);
   // Local state, not URL state: `search.repo` belongs to the insights tab,
   // and sharing one search param would leak each tab's filter into the other.
-  const [repoFilter, setRepoFilter] = useState("");
+  // The filter is scoped to one App: the tab instance survives an App switch,
+  // so the choice is stamped with the App it was made for — another App
+  // derives to "all" instead of inheriting a value that names none of its
+  // rows (a coincidental name match would silently filter the new ledger).
+  const [repoFilter, setRepoFilter] = useState<{ app: string; value: string }>({
+    app: appId,
+    value: "",
+  });
+  const repoFilterValue = repoFilter.app === appId ? repoFilter.value : "";
   // The server caps the ledger at PULL_REQUEST_LIST_LIMIT rows, so the filter
   // is client-side over the already-loaded rows; a filter with no match
   // leaves the table to its normal empty state.
@@ -100,8 +108,8 @@ export function AppPullRequestsTab({
       ? [...new Set(current.rows.map((row) => `${row.owner}/${row.repo}`))].sort()
       : [];
   const visibleRows =
-    current.rows !== null && repoFilter !== ""
-      ? current.rows.filter((row) => `${row.owner}/${row.repo}` === repoFilter)
+    current.rows !== null && repoFilterValue !== ""
+      ? current.rows.filter((row) => `${row.owner}/${row.repo}` === repoFilterValue)
       : current.rows;
 
   // A malformed pr param resolves to null and falls back to the list face, so
@@ -181,8 +189,8 @@ export function AppPullRequestsTab({
             {/* The Select primitive rejects "" as an item value, so the "all"
                 choice reuses the shared insights sentinel (data.ts). */}
             <Select
-              value={insightsRepoSelectValue(repoFilter)}
-              onValueChange={(next) => setRepoFilter(insightsRepoFromSelect(next))}
+              value={insightsRepoSelectValue(repoFilterValue)}
+              onValueChange={(next) => setRepoFilter({ app: appId, value: insightsRepoFromSelect(next) })}
             >
               <SelectTrigger
                 className="min-w-48"
