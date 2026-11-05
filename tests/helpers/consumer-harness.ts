@@ -199,7 +199,7 @@ export function coverageLineNumbers(body: string): {
   omitted: number;
 } | null {
   const match =
-    /Reassessed (\d+)\/(\d+) open prior finding\(s\) this round · (\d+) invalid-output · (\d+) omitted/.exec(body);
+    /Reassessed (\d+)\/(\d+) prior finding\(s\) this round · (\d+) invalid-output · (\d+) omitted/.exec(body);
   if (match === null) return null;
   return {
     assessed: Number(match[1]),

@@ -119,7 +119,7 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     // Every sent row is answered-nothing, so all 25 land in `invalid-output`
     // and none is mistaken for a row the round never attempted.
-    expect(prepared.body).toContain("Reassessed 0/25 open prior finding(s) this round");
+    expect(prepared.body).toContain("Reassessed 0/25 prior finding(s) this round");
     expect(prepared.body).toContain("25 invalid-output · 0 omitted");
     // The line's identity, read back from the published text: every selected
     // row is accounted exactly once.
