@@ -175,6 +175,9 @@ describe("worker entry scheduled wiring", () => {
       "ops_sweep_failed",
       "pull_request_retention_swept_failed",
       "retention_swept_failed",
+      // The claim budgets are an operator setting: an unreadable settings row
+      // degrades to the documented defaults with its own line.
+      "review_comment_claim_settings_degraded",
     ]);
     const sweepFailure = warnCalls.find((call) => call.fields.event === "ops_sweep_failed");
     expect(sweepFailure?.fields.detail).toContain("d1 down");

@@ -36,6 +36,10 @@
 
 import type { Queue } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
+import {
+  readCommentClaimSettings,
+  type CommentClaimSettingsLogFields,
+} from "../pipeline/comment-claim-settings-reader";
 import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createAppsStore } from "../dashboard/apps-store";
@@ -64,25 +68,6 @@ export const SWEEP_RETENTION_CAP = 500;
 
 /** Invite-lapse row cap per run (I-000096): same bounded-work rule as retention. */
 export const SWEEP_INVITE_LAPSE_CAP = 500;
-
-/**
- * Comment-claim outbox retry window (migration 0048) — the age at which a
- * still-`queued` claim is re-sent.
- *
- * Protocol retry window, not a tunable: it must comfortably exceed one queue
- * send (the webhook face's 5s budget) so a send in flight is never duplicated,
- * and stay below the cron interval so the next sweep recovers the claim.
- */
-export const COMMENT_CLAIM_RETRY_MS = 300_000;
-
-/**
- * Outbox attempt cap: a claim re-sent this many times without the pipeline
- * consuming it is abandoned (`expired`) instead of retried forever.
- */
-export const COMMENT_CLAIM_MAX_ATTEMPTS = 3;
-
-/** Claims re-sent per sweep — the same bounded-work rule as the retention caps. */
-export const COMMENT_CLAIM_OUTBOX_CAP = 20;
 
 /**
  * The structured breach event — a JSON line on the consumer-derived log
@@ -169,7 +154,9 @@ export type SweepLog = {
       | SweepRetentionFields
       | SweepLedgerRetentionFields
       | SweepInviteLapseFields
-      | SweepCommentClaimFields,
+      | SweepCommentClaimFields
+      // The comment-claim settings reader owns its own degraded warn shape.
+      | CommentClaimSettingsLogFields,
     msg?: Parameters<ConsumerLog["warn"]>[1],
   ) => void;
 };
@@ -309,6 +296,12 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // every janitor above: a failure warns and never breaks the failure sweep.
   if (deps.queue !== undefined) {
     try {
+      // The three budgets are operator settings on the global runtime-config
+      // surface (`review.comment_claim.*`, AGENTS.md 「Configuration surfaces」):
+      // read once per sweep. A degraded read answers the documented defaults
+      // with one structured warn and never throws, so a broken settings row
+      // cannot stop claim recovery.
+      const settings = await readCommentClaimSettings(db, log);
       const nowMs = Date.now();
       // Rows at the cap have exhausted every re-send: flip them to `expired`
       // FIRST, so the selection below can never pick them again. The payload is
@@ -320,7 +313,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
           `UPDATE comment_trigger_claims SET state = 'expired', payload_json = NULL
             WHERE state = 'queued' AND attempts >= ?`,
         )
-        .bind(COMMENT_CLAIM_MAX_ATTEMPTS)
+        .bind(settings.maxAttempts)
         .run();
       const stale = await db
         .prepare(
@@ -330,7 +323,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
             ORDER BY queued_ms
             LIMIT ?`,
         )
-        .bind(COMMENT_CLAIM_MAX_ATTEMPTS, nowMs - COMMENT_CLAIM_RETRY_MS, COMMENT_CLAIM_OUTBOX_CAP)
+        .bind(settings.maxAttempts, nowMs - settings.retryMs, settings.outboxCap)
         .all<{
           installation_id: number;
           owner: string;

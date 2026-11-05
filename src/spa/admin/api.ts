@@ -123,6 +123,21 @@ export type CheckBudgetConfig = {
   degraded: boolean;
 };
 
+/** The migration-0048 comment-claim outbox budgets as the operator API reports them. */
+export type CommentClaimConfig = {
+  retryMs: number;
+  maxAttempts: number;
+  outboxCap: number;
+  retryMin: number;
+  retryMax: number;
+  attemptsMin: number;
+  attemptsMax: number;
+  outboxMin: number;
+  outboxMax: number;
+  /** A stored setting could not be read: every number is the documented default. */
+  degraded: boolean;
+};
+
 /** The runtime parameters (iteration spec §1.1, spec §7.10). */
 export type RuntimeConfig = {
   concurrency: number;
@@ -137,6 +152,11 @@ export type RuntimeConfig = {
    * field is absence, not an unreadable setting.
    */
   checkBudgets: CheckBudgetConfig | null;
+  /**
+   * The comment-claim outbox surface; `null` under the same absence rule as
+   * `checkBudgets` (an older Worker behind a newer bundle).
+   */
+  commentClaim: CommentClaimConfig | null;
 };
 
 function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
@@ -154,6 +174,24 @@ function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
   };
 }
 
+function parseCommentClaim(row: Json): CommentClaimConfig | null {
+  const raw = row.commentClaim;
+  if (raw === undefined) return null;
+  const claim = map(raw, "runtime commentClaim");
+  return {
+    retryMs: num(claim, "retryMs"),
+    maxAttempts: num(claim, "maxAttempts"),
+    outboxCap: num(claim, "outboxCap"),
+    retryMin: num(claim, "retryMin"),
+    retryMax: num(claim, "retryMax"),
+    attemptsMin: num(claim, "attemptsMin"),
+    attemptsMax: num(claim, "attemptsMax"),
+    outboxMin: num(claim, "outboxMin"),
+    outboxMax: num(claim, "outboxMax"),
+    degraded: bool(claim, "degraded"),
+  };
+}
+
 export async function readRuntime(): Promise<RuntimeConfig> {
   const body = map(await fetchJson(`${BASE}/runtime`), "runtime response");
   return {
@@ -162,6 +200,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     max: num(body, "max"),
     degraded: bool(body, "degraded"),
     checkBudgets: parseCheckBudgets(body),
+    commentClaim: parseCommentClaim(body),
   };
 }
 
@@ -202,6 +241,39 @@ export async function setCheckBudgets(
       const { terminalizeMs, updateMs } = saved;
       if (typeof terminalizeMs === "number" && typeof updateMs === "number") {
         return { ...stored, terminalizeMs, updateMs, degraded: false };
+      }
+    }
+  }
+  return { ...stored, ...value, degraded: false };
+}
+
+/**
+ * Save the three comment-claim outbox settings, answering the trio the server
+ * stored. The range fields ride the loaded config (the echo is the stored
+ * values only); a 2xx with an unreadable body still landed, so the request
+ * value stands in — the same rule as `setSystemConcurrency`.
+ */
+export async function setCommentClaimSettings(
+  value: { retryMs: number; maxAttempts: number; outboxCap: number },
+  stored: CommentClaimConfig,
+): Promise<CommentClaimConfig> {
+  const answer = await write("PATCH", "/runtime", { commentClaim: value });
+  if (typeof answer === "object" && answer !== null && "commentClaim" in answer) {
+    const saved = answer.commentClaim;
+    if (
+      typeof saved === "object" &&
+      saved !== null &&
+      "retryMs" in saved &&
+      "maxAttempts" in saved &&
+      "outboxCap" in saved
+    ) {
+      const { retryMs, maxAttempts, outboxCap } = saved;
+      if (
+        typeof retryMs === "number" &&
+        typeof maxAttempts === "number" &&
+        typeof outboxCap === "number"
+      ) {
+        return { ...stored, retryMs, maxAttempts, outboxCap, degraded: false };
       }
     }
   }

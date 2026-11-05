@@ -343,12 +343,25 @@ describe("Runtime screen", () => {
     updateMax: 15_000,
     degraded: false,
   };
+  const COMMENT_CLAIM = {
+    retryMs: 300_000,
+    maxAttempts: 3,
+    outboxCap: 20,
+    retryMin: 30_000,
+    retryMax: 3_600_000,
+    attemptsMin: 1,
+    attemptsMax: 10,
+    outboxMin: 1,
+    outboxMax: 100,
+    degraded: false,
+  };
   const RUNTIME = {
     concurrency: 24,
     min: 1,
     max: 256,
     degraded: false,
     checkBudgets: CHECK_BUDGETS,
+    commentClaim: COMMENT_CLAIM,
   };
 
   test("a failed read renders the error with a retry that reloads", async () => {
@@ -536,6 +549,36 @@ describe("Runtime screen", () => {
     expect(surface.text()).toContain("the terminalize timeout must be greater than the check update budget");
     // The rejected write never replaced the stored pair.
     expect(surface.text()).toContain("Effective on the next review: terminalize 10000 ms, update 5000 ms.");
+    await surface.close();
+  });
+
+  test("the comment-trigger card shows the stored trio and one save fires exactly one PATCH", async () => {
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ commentClaim: { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 } })
+        : json(RUNTIME),
+    );
+    const retry = surface.container.querySelector("#claim-retry-budget") as unknown as HTMLInputElement;
+    expect(retry.value).toBe("300000");
+
+    await surface.type("#claim-retry-budget", "60000");
+    await surface.type("#claim-attempts-budget", "5");
+    await surface.type("#claim-outbox-budget", "10");
+    // The third form's submit button is the claim save.
+    const claimForm = surface.container.querySelector("#claim-retry-budget")!.closest("form")!;
+    await surface.click(claimForm.querySelector('button[type="submit"]'));
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { commentClaim: { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 } },
+      },
+    ]);
+    expect(
+      (surface.container.querySelector("#claim-retry-budget") as unknown as HTMLInputElement).value,
+    ).toBe("60000");
+    expect(surface.text()).toContain("Saved.");
     await surface.close();
   });
 });

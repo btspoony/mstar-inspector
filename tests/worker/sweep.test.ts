@@ -16,8 +16,6 @@ import { createFailureStore } from "../../src/store/failure-store";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
   runSweep,
-  COMMENT_CLAIM_MAX_ATTEMPTS,
-  COMMENT_CLAIM_RETRY_MS,
   SWEEP_FAILURE_THRESHOLD,
   SWEEP_INVITE_LAPSE_CAP,
   SWEEP_LOG_DETAIL_MAX,
@@ -34,6 +32,12 @@ import {
   type SweepLedgerRetentionFields,
   type SweepWarnFields,
 } from "../../src/worker/sweep";
+import {
+  COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+  COMMENT_CLAIM_OUTBOX_DEFAULT,
+  COMMENT_CLAIM_RETRY_DEFAULT,
+  type CommentClaimSettingsLogFields,
+} from "../../src/pipeline/comment-claim-settings-reader";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const BASE = {
@@ -51,7 +55,8 @@ type WarnCall = {
     | SweepRetentionFields
     | SweepLedgerRetentionFields
     | SweepInviteLapseFields
-    | SweepCommentClaimFields;
+    | SweepCommentClaimFields
+    | CommentClaimSettingsLogFields;
   msg?: string;
 };
 
@@ -649,7 +654,7 @@ describe("runSweep — comment-claim outbox", () => {
     db: TestD1,
     overrides: { state?: "queued" | "consumed" | "expired"; attempts?: number; ageMs?: number; commentId?: number } = {},
   ): void {
-    const { state = "queued", attempts = 0, ageMs = COMMENT_CLAIM_RETRY_MS + 1_000, commentId = 9001 } = overrides;
+    const { state = "queued", attempts = 0, ageMs = COMMENT_CLAIM_RETRY_DEFAULT + 1_000, commentId = 9001 } = overrides;
     const queuedMs = Date.now() - ageMs;
     db.raw
       .prepare(
@@ -693,6 +698,24 @@ describe("runSweep — comment-claim outbox", () => {
     };
   }
 
+  /** Write the operator budgets straight into the runtime-config table. */
+  function seedSettings(
+    db: TestD1,
+    values: Partial<{ retryMs: number; maxAttempts: number; outboxCap: number }>,
+  ): void {
+    const rows: Array<[string, number]> = [];
+    if (values.retryMs !== undefined) rows.push(["review.comment_claim.retry_ms", values.retryMs]);
+    if (values.maxAttempts !== undefined) {
+      rows.push(["review.comment_claim.max_attempts", values.maxAttempts]);
+    }
+    if (values.outboxCap !== undefined) rows.push(["review.comment_claim.outbox_cap", values.outboxCap]);
+    const insert = db.raw.prepare(
+      `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+       VALUES (?, ?, '2026-11-05T00:00:00.000Z', 'fixture')`,
+    );
+    for (const [key, value] of rows) insert.run(key, String(value));
+  }
+
   test("re-sends a stale claim with its stored payload and bumps the attempt", async () => {
     const db = createMigratedTestD1();
     seedClaim(db);
@@ -729,9 +752,12 @@ describe("runSweep — comment-claim outbox", () => {
     expect(claimRow(db)).toMatchObject({ state: "queued", attempts: 0 });
   });
 
-  test("a claim at the attempt cap expires instead of being re-sent", async () => {
+  test("a claim at the stored attempt cap expires instead of being re-sent", async () => {
     const db = createMigratedTestD1();
-    seedClaim(db, { attempts: COMMENT_CLAIM_MAX_ATTEMPTS });
+    // The cap is an operator setting on the runtime-config surface, not a
+    // source constant: a stored 1 expires a claim one attempt in.
+    seedSettings(db, { maxAttempts: 1 });
+    seedClaim(db, { attempts: 1 });
     const { queue, sent } = fakeQueue();
     const { log, calls } = captureLog();
 
@@ -746,7 +772,7 @@ describe("runSweep — comment-claim outbox", () => {
 
   test("a consumed row is never re-sent, however old", async () => {
     const db = createMigratedTestD1();
-    seedClaim(db, { state: "consumed", ageMs: 10 * COMMENT_CLAIM_RETRY_MS });
+    seedClaim(db, { state: "consumed", ageMs: 10 * COMMENT_CLAIM_RETRY_DEFAULT });
     const { queue, sent } = fakeQueue();
 
     await runSweep(db, { log: captureLog().log, queue });
@@ -768,5 +794,66 @@ describe("runSweep — comment-claim outbox", () => {
     // being retried on every sweep.
     expect(claimRow(db)).toMatchObject({ state: "queued", attempts: 1 });
     expect(calls.at(-1)?.fields).toEqual({ event: "comment_claim_outbox", resent: 0, expired: 0, failed: 1 });
+  });
+
+  test("the stored retry window drives the scan, not a source constant", async () => {
+    const db = createMigratedTestD1();
+    // 60 s old: fresh under the 300 s absent-row default, stale under a stored
+    // 30 s window.
+    seedClaim(db, { ageMs: 60_000 });
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+    expect(sent).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+
+    seedSettings(db, { retryMs: 30_000 });
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(1);
+    expect(calls.some((call) => call.fields.event === "comment_claim_outbox")).toBe(true);
+  });
+
+  test("the stored outbox cap bounds one sweep", async () => {
+    const db = createMigratedTestD1();
+    seedSettings(db, { outboxCap: 1 });
+    seedClaim(db, { commentId: 9001 });
+    seedClaim(db, { commentId: 9002 });
+    const { queue, sent } = fakeQueue();
+
+    await runSweep(db, { log: captureLog().log, queue });
+    expect(sent).toHaveLength(1);
+
+    // The second claim is drained by the next sweep, never dropped.
+    await runSweep(db, { log: captureLog().log, queue });
+    expect(sent).toHaveLength(2);
+  });
+
+  test("a degraded settings read falls back to the documented defaults with ONE warn", async () => {
+    const db = createMigratedTestD1();
+    // One corrupt stored value degrades the whole trio (the store's trust rule).
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.retry_ms', 'abc', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    seedClaim(db, { ageMs: 60_000 }); // still inside the documented 300 s window
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(0);
+    const degraded = calls.filter(
+      (call) => call.fields.event === "review_comment_claim_settings_degraded",
+    );
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0]?.fields).toMatchObject({
+      retry_ms: COMMENT_CLAIM_RETRY_DEFAULT,
+      max_attempts: COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+      outbox_cap: COMMENT_CLAIM_OUTBOX_DEFAULT,
+    });
   });
 });

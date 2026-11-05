@@ -41,6 +41,13 @@
  * stored value answers the default with `degraded: true` and never throws,
  * because a Check never blocks or delays the review.
  *
+ * Comment-claim outbox settings (migration 0048) are the same table and the
+ * same rule, one tier further out: `review.comment_claim.retry_ms`,
+ * `.max_attempts` and `.outbox_cap` bound the cron's recovery of a
+ * comment-trigger claim whose queue send never happened. They are operator
+ * budgets, not protocol constants — the absent-row defaults below are the
+ * documented behaviour, and the admin `/runtime` surface is the only writer.
+ *
  * Write discipline: the system value is an integer in 1..SYSTEM_CONCURRENCY_MAX
  * (the platform-wide quota; Cloudflare Queues delivers at most 250 of it at
  * once); the workspace value is an integer in 1..WORKSPACE_CONCURRENCY_MAX.
@@ -89,6 +96,30 @@ export const CHECK_UPDATE_MIN = 500;
 export const CHECK_UPDATE_MAX = 15_000;
 /** The audit ledger's target id for the pair (one operator save, one row). */
 const CHECK_BUDGETS_TARGET = "review.check.budgets";
+
+/** PK of the comment-claim outbox retry window (migration 0048). */
+export const COMMENT_CLAIM_RETRY_KEY = "review.comment_claim.retry_ms";
+/** PK of the comment-claim outbox attempt cap. */
+export const COMMENT_CLAIM_ATTEMPTS_KEY = "review.comment_claim.max_attempts";
+/** PK of the comment-claim outbox batch size. */
+export const COMMENT_CLAIM_OUTBOX_KEY = "review.comment_claim.outbox_cap";
+/** Absent retry row: the 5-minute protocol window (well under one sweep interval). */
+export const COMMENT_CLAIM_RETRY_DEFAULT = 300_000;
+/** Absent attempts row: three outbox attempts before a claim expires. */
+export const COMMENT_CLAIM_ATTEMPTS_DEFAULT = 3;
+/** Absent outbox row: twenty claims re-sent per sweep. */
+export const COMMENT_CLAIM_OUTBOX_DEFAULT = 20;
+/** Range of a stored retry window: under 30 s would duplicate an in-flight send. */
+export const COMMENT_CLAIM_RETRY_MIN = 30_000;
+export const COMMENT_CLAIM_RETRY_MAX = 3_600_000;
+/** Range of a stored attempt cap. */
+export const COMMENT_CLAIM_ATTEMPTS_MIN = 1;
+export const COMMENT_CLAIM_ATTEMPTS_MAX = 10;
+/** Range of a stored outbox batch size. */
+export const COMMENT_CLAIM_OUTBOX_MIN = 1;
+export const COMMENT_CLAIM_OUTBOX_MAX = 100;
+/** The audit ledger's target id for the trio (one operator save, one row). */
+const COMMENT_CLAIM_TARGET = "review.comment_claim.budgets";
 
 /** Integer in min..max — the one predicate every write and every read re-parses with. */
 function isIntegerIn(value: unknown, min: number, max: number): value is number {
@@ -548,6 +579,147 @@ export async function setCheckBudgets(
       .prepare(SYSTEM_UPSERT_SQL)
       .bind(CHECK_TERMINALIZE_KEY, String(value.terminalizeMs), now, actor),
     db.prepare(SYSTEM_UPSERT_SQL).bind(CHECK_UPDATE_KEY, String(value.updateMs), now, actor),
+  ]);
+  return value;
+}
+
+/**
+ * The comment-claim outbox settings (migration 0048) and whether the stored
+ * rows could be trusted. Global like the check budgets — one outbox per
+ * deployment. `degraded: true` means at least one stored value was untrusted
+ * or the read failed, so ALL answers are the documented defaults.
+ */
+export type CommentClaimSettings = {
+  retryMs: number;
+  maxAttempts: number;
+  outboxCap: number;
+  degraded: boolean;
+};
+
+/** The trio an accepted write carries. */
+export type CommentClaimValues = { retryMs: number; maxAttempts: number; outboxCap: number };
+
+/** The untrusted/failed-read answer: the documented defaults, flagged. */
+function degradedCommentClaimSettings(): CommentClaimSettings {
+  return {
+    retryMs: COMMENT_CLAIM_RETRY_DEFAULT,
+    maxAttempts: COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+    outboxCap: COMMENT_CLAIM_OUTBOX_DEFAULT,
+    degraded: true,
+  };
+}
+
+/**
+ * All three comment-claim settings in ONE statement (one read per sweep).
+ * Only an absent row is the default; a present value the parse cannot trust, a
+ * malformed result row or a read failure answers the defaults with
+ * `degraded: true` and never throws — a broken settings read must not stop the
+ * cron from recovering a claim, and there is no safer fallback than the
+ * documented window/cap.
+ */
+export async function getCommentClaimSettings(db: DashboardD1): Promise<CommentClaimSettings> {
+  try {
+    const row = await db
+      .prepare(
+        `SELECT (SELECT value FROM review_runtime_settings WHERE key = ?1) AS retry_value,
+                (SELECT value FROM review_runtime_settings WHERE key = ?2) AS attempts_value,
+                (SELECT value FROM review_runtime_settings WHERE key = ?3) AS outbox_value`,
+      )
+      .bind(COMMENT_CLAIM_RETRY_KEY, COMMENT_CLAIM_ATTEMPTS_KEY, COMMENT_CLAIM_OUTBOX_KEY)
+      .first<{ retry_value?: unknown; attempts_value?: unknown; outbox_value?: unknown }>();
+    // This query always yields exactly one row; no row means the answer itself
+    // is untrustworthy, and a missing field is malformed rather than absent.
+    if (row === null) return degradedCommentClaimSettings();
+    if (
+      row.retry_value === undefined ||
+      row.attempts_value === undefined ||
+      row.outbox_value === undefined
+    ) {
+      return degradedCommentClaimSettings();
+    }
+    const retryMs = parseInRange(row.retry_value, COMMENT_CLAIM_RETRY_MIN, COMMENT_CLAIM_RETRY_MAX);
+    const maxAttempts = parseInRange(
+      row.attempts_value,
+      COMMENT_CLAIM_ATTEMPTS_MIN,
+      COMMENT_CLAIM_ATTEMPTS_MAX,
+    );
+    const outboxCap = parseInRange(row.outbox_value, COMMENT_CLAIM_OUTBOX_MIN, COMMENT_CLAIM_OUTBOX_MAX);
+    if (Number.isNaN(retryMs) || Number.isNaN(maxAttempts) || Number.isNaN(outboxCap)) {
+      return degradedCommentClaimSettings();
+    }
+    return {
+      retryMs: retryMs ?? COMMENT_CLAIM_RETRY_DEFAULT,
+      maxAttempts: maxAttempts ?? COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+      outboxCap: outboxCap ?? COMMENT_CLAIM_OUTBOX_DEFAULT,
+      degraded: false,
+    };
+  } catch {
+    return degradedCommentClaimSettings();
+  }
+}
+
+/**
+ * One operator save, one audit row: `before` carries each stored value under
+ * the readers' trust rule (a corrupt row is `null`), `after` the accepted trio.
+ * The three upserts share this batch, so a refused write appends nothing.
+ */
+const COMMENT_CLAIM_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'runtime.comment_claim.set', 'runtime', '${COMMENT_CLAIM_TARGET}',
+          json_object('before', json_object(
+                      'retryMs', ${storedBudgetSql("?7", "NULL", COMMENT_CLAIM_RETRY_MIN, COMMENT_CLAIM_RETRY_MAX)},
+                      'maxAttempts', ${storedBudgetSql("?8", "NULL", COMMENT_CLAIM_ATTEMPTS_MIN, COMMENT_CLAIM_ATTEMPTS_MAX)},
+                      'outboxCap', ${storedBudgetSql("?9", "NULL", COMMENT_CLAIM_OUTBOX_MIN, COMMENT_CLAIM_OUTBOX_MAX)}),
+                      'after', json_object('retryMs', ?3, 'maxAttempts', ?4, 'outboxCap', ?5)),
+          ?6)`;
+
+/**
+ * Write all three comment-claim settings. A value outside its own range
+ * refuses the whole write (`invalid_value`) with no row and no audit entry; an
+ * accepted trio is audited with the actor in ONE batch and returned. There is
+ * no cross-field relation to enforce: unlike the Check pair, these three bound
+ * independent resources (wait, attempts, batch size).
+ */
+export async function setCommentClaimSettings(
+  db: DashboardD1,
+  value: CommentClaimValues,
+  actor: string,
+): Promise<CommentClaimValues> {
+  if (!isIntegerIn(value.retryMs, COMMENT_CLAIM_RETRY_MIN, COMMENT_CLAIM_RETRY_MAX)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `comment claim retry window must be an integer in ${COMMENT_CLAIM_RETRY_MIN}..${COMMENT_CLAIM_RETRY_MAX}`,
+    );
+  }
+  if (!isIntegerIn(value.maxAttempts, COMMENT_CLAIM_ATTEMPTS_MIN, COMMENT_CLAIM_ATTEMPTS_MAX)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `comment claim attempts must be an integer in ${COMMENT_CLAIM_ATTEMPTS_MIN}..${COMMENT_CLAIM_ATTEMPTS_MAX}`,
+    );
+  }
+  if (!isIntegerIn(value.outboxCap, COMMENT_CLAIM_OUTBOX_MIN, COMMENT_CLAIM_OUTBOX_MAX)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `comment claim outbox cap must be an integer in ${COMMENT_CLAIM_OUTBOX_MIN}..${COMMENT_CLAIM_OUTBOX_MAX}`,
+    );
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db.prepare(COMMENT_CLAIM_AUDIT_SQL).bind(
+      crypto.randomUUID(),
+      actor,
+      value.retryMs,
+      value.maxAttempts,
+      value.outboxCap,
+      now,
+      COMMENT_CLAIM_RETRY_KEY,
+      COMMENT_CLAIM_ATTEMPTS_KEY,
+      COMMENT_CLAIM_OUTBOX_KEY,
+    ),
+    db.prepare(SYSTEM_UPSERT_SQL).bind(COMMENT_CLAIM_RETRY_KEY, String(value.retryMs), now, actor),
+    db.prepare(SYSTEM_UPSERT_SQL).bind(COMMENT_CLAIM_ATTEMPTS_KEY, String(value.maxAttempts), now, actor),
+    db.prepare(SYSTEM_UPSERT_SQL).bind(COMMENT_CLAIM_OUTBOX_KEY, String(value.outboxCap), now, actor),
   ]);
   return value;
 }

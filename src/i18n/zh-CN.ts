@@ -829,6 +829,21 @@ export const zhCN: Dictionary = {
       /** 两个已存储的预算都无法读取——数字只是文档默认值。 */
       checkUnreadable:
         "无法读取已存储的检查预算，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
+      claimTitle: "评论触发恢复",
+      claimDescription:
+        "cron 如何恢复「已声明但队列发送从未发生」的机器人提及评论：声明后等待多久才重发、允许多少次尝试，以及一次扫描最多重发多少条。",
+      retryLabel: "重试窗口（毫秒）",
+      attemptsLabel: "最大尝试次数",
+      outboxLabel: "每批重发数",
+      claimSave: "保存",
+      claimSaved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      claimFailed: "修改评论触发恢复设置失败。",
+      /** {retry}/{attempts}/{outbox} = 当前存储的设置（或文档默认值）。 */
+      claimCurrent: "下一次扫描生效值：{retry} 毫秒后重试，最多 {attempts} 次，每次最多 {outbox} 条。",
+      /** 所有已存储设置都无法读取——数字只是文档默认值。 */
+      claimUnreadable:
+        "无法读取已存储的评论触发恢复设置，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
       // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
       // 与 /healthz 字段及 release tag 同形。
       version: "版本 {version}",

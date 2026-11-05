@@ -35,6 +35,12 @@ import {
   CHECK_TERMINALIZE_KEY,
   CHECK_UPDATE_DEFAULT,
   CHECK_UPDATE_KEY,
+  COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+  COMMENT_CLAIM_ATTEMPTS_KEY,
+  COMMENT_CLAIM_OUTBOX_DEFAULT,
+  COMMENT_CLAIM_OUTBOX_KEY,
+  COMMENT_CLAIM_RETRY_DEFAULT,
+  COMMENT_CLAIM_RETRY_KEY,
   CONCURRENCY_MIN,
   RuntimeConfigError,
   SYSTEM_CONCURRENCY_DEFAULT,
@@ -43,10 +49,12 @@ import {
   WORKSPACE_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_MAX,
   getCheckBudgets,
+  getCommentClaimSettings,
   getEffectiveConcurrency,
   getSystemConcurrency,
   getWorkspaceConcurrency,
   setCheckBudgets,
+  setCommentClaimSettings,
   setSystemConcurrency,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
@@ -590,6 +598,111 @@ describe("check budgets", () => {
     expect(auditDetails(db, "runtime.check_budgets.set")[1]).toEqual({
       before: { terminalizeMs: 12_000, updateMs: 7_000 },
       after: { terminalizeMs: 9_000, updateMs: 6_000 },
+    });
+  });
+});
+
+describe("comment-claim settings", () => {
+  /** Every stored runtime-config row, raw, keyed by PK. */
+  function storedRows(db: TestD1): Record<string, string> {
+    const rows = db.raw
+      .prepare("SELECT key, value FROM review_runtime_settings ORDER BY key")
+      .all() as Array<{ key: string; value: string }>;
+    return Object.fromEntries(rows.map((row) => [row.key, row.value]));
+  }
+
+  test("absent rows fall back to the documented defaults without degrading", async () =>
+    expect(await getCommentClaimSettings(fixture())).toEqual({
+      retryMs: COMMENT_CLAIM_RETRY_DEFAULT,
+      maxAttempts: COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+      outboxCap: COMMENT_CLAIM_OUTBOX_DEFAULT,
+      degraded: false,
+    }));
+
+  test("an untrusted or out-of-range stored value answers the defaults with degraded: true", async () => {
+    for (const [key, value] of [
+      [COMMENT_CLAIM_RETRY_KEY, "fast"],
+      // Below the 30 s floor: a window that short would duplicate an in-flight send.
+      [COMMENT_CLAIM_RETRY_KEY, "1000"],
+      [COMMENT_CLAIM_ATTEMPTS_KEY, "0"],
+      [COMMENT_CLAIM_ATTEMPTS_KEY, "11"],
+      [COMMENT_CLAIM_OUTBOX_KEY, "0"],
+      [COMMENT_CLAIM_OUTBOX_KEY, "101"],
+    ] as const) {
+      const db = fixture();
+      db.raw
+        .prepare(
+          `INSERT INTO review_runtime_settings (key, value, updated_at)
+           VALUES (?1, ?2, '2026-11-05T00:00:00.000Z')`,
+        )
+        .run(key, value);
+      expect(await getCommentClaimSettings(db), `${key}=${value}`).toEqual({
+        retryMs: COMMENT_CLAIM_RETRY_DEFAULT,
+        maxAttempts: COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+        outboxCap: COMMENT_CLAIM_OUTBOX_DEFAULT,
+        degraded: true,
+      });
+    }
+  });
+
+  test("a read failure answers the defaults with degraded: true and never throws", async () =>
+    expect(await getCommentClaimSettings(failingDb)).toEqual({
+      retryMs: COMMENT_CLAIM_RETRY_DEFAULT,
+      maxAttempts: COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+      outboxCap: COMMENT_CLAIM_OUTBOX_DEFAULT,
+      degraded: true,
+    }));
+
+  test("an out-of-range value is refused and writes nothing", async () => {
+    const db = fixture();
+    for (const value of [
+      { retryMs: 29_999, maxAttempts: 3, outboxCap: 20 },
+      { retryMs: 3_600_001, maxAttempts: 3, outboxCap: 20 },
+      { retryMs: 300_000.5, maxAttempts: 3, outboxCap: 20 },
+      { retryMs: 300_000, maxAttempts: 0, outboxCap: 20 },
+      { retryMs: 300_000, maxAttempts: 11, outboxCap: 20 },
+      { retryMs: 300_000, maxAttempts: 3, outboxCap: 0 },
+      { retryMs: 300_000, maxAttempts: 3, outboxCap: 101 },
+    ]) {
+      await expect(setCommentClaimSettings(db, value, ACTOR)).rejects.toBeInstanceOf(
+        RuntimeConfigError,
+      );
+    }
+    expect(storedRows(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("an accepted trio lands three rows with one audit row, and reads back", async () => {
+    const db = fixture();
+    expect(
+      await setCommentClaimSettings(db, { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 }, ACTOR),
+    ).toEqual({ retryMs: 60_000, maxAttempts: 5, outboxCap: 10 });
+    expect(storedRows(db)).toEqual({
+      [COMMENT_CLAIM_RETRY_KEY]: "60000",
+      [COMMENT_CLAIM_ATTEMPTS_KEY]: "5",
+      [COMMENT_CLAIM_OUTBOX_KEY]: "10",
+    });
+    expect(await getCommentClaimSettings(db)).toEqual({
+      retryMs: 60_000,
+      maxAttempts: 5,
+      outboxCap: 10,
+      degraded: false,
+    });
+    expect(auditRows(db)).toEqual([
+      { action: "runtime.comment_claim.set", target_id: "review.comment_claim.budgets" },
+    ]);
+    expect(auditDetails(db, "runtime.comment_claim.set")).toEqual([
+      {
+        before: { retryMs: null, maxAttempts: null, outboxCap: null },
+        after: { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 },
+      },
+    ]);
+
+    // A second save records the previous trio as `before`.
+    await setCommentClaimSettings(db, { retryMs: 45_000, maxAttempts: 2, outboxCap: 4 }, ACTOR);
+    expect(auditDetails(db, "runtime.comment_claim.set")[1]).toEqual({
+      before: { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 },
+      after: { retryMs: 45_000, maxAttempts: 2, outboxCap: 4 },
     });
   });
 });

@@ -18,15 +18,24 @@ import {
   CHECK_TERMINALIZE_MIN,
   CHECK_UPDATE_MAX,
   CHECK_UPDATE_MIN,
+  COMMENT_CLAIM_ATTEMPTS_MAX,
+  COMMENT_CLAIM_ATTEMPTS_MIN,
+  COMMENT_CLAIM_OUTBOX_MAX,
+  COMMENT_CLAIM_OUTBOX_MIN,
+  COMMENT_CLAIM_RETRY_MAX,
+  COMMENT_CLAIM_RETRY_MIN,
   CONCURRENCY_MIN,
   RuntimeConfigError,
   SYSTEM_CONCURRENCY_MAX,
   getCheckBudgets,
+  getCommentClaimSettings,
   getSystemConcurrency,
   isConcurrencyValue,
   setCheckBudgets,
+  setCommentClaimSettings,
   setSystemConcurrency,
   type CheckBudgetValues,
+  type CommentClaimValues,
 } from "../dashboard/runtime-config-store";
 import { resolveLocale, t, type Locale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
@@ -136,7 +145,11 @@ async function readRuntime(c: AdminContext): Promise<Response> {
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
-  const [system, budgets] = await Promise.all([getSystemConcurrency(db), getCheckBudgets(db)]);
+  const [system, budgets, claim] = await Promise.all([
+    getSystemConcurrency(db),
+    getCheckBudgets(db),
+    getCommentClaimSettings(db),
+  ]);
   return c.json({
     concurrency: system.concurrency,
     min: CONCURRENCY_MIN,
@@ -152,7 +165,33 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       updateMax: CHECK_UPDATE_MAX,
       degraded: budgets.degraded,
     },
+    // Migration 0048 comment-claim outbox budgets: the same global surface.
+    commentClaim: {
+      retryMs: claim.retryMs,
+      maxAttempts: claim.maxAttempts,
+      outboxCap: claim.outboxCap,
+      retryMin: COMMENT_CLAIM_RETRY_MIN,
+      retryMax: COMMENT_CLAIM_RETRY_MAX,
+      attemptsMin: COMMENT_CLAIM_ATTEMPTS_MIN,
+      attemptsMax: COMMENT_CLAIM_ATTEMPTS_MAX,
+      outboxMin: COMMENT_CLAIM_OUTBOX_MIN,
+      outboxMax: COMMENT_CLAIM_OUTBOX_MAX,
+      degraded: claim.degraded,
+    },
   });
+}
+
+/** The accepted `commentClaim` body shape; the store owns the accepted ranges. */
+function commentClaimBody(value: unknown): CommentClaimValues | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { retryMs, maxAttempts, outboxCap } = value as {
+    retryMs?: unknown;
+    maxAttempts?: unknown;
+    outboxCap?: unknown;
+  };
+  return typeof retryMs === "number" && typeof maxAttempts === "number" && typeof outboxCap === "number"
+    ? { retryMs, maxAttempts, outboxCap }
+    : null;
 }
 
 /** The accepted `checkBudgets` body shape; the store owns the accepted ranges. */
@@ -171,19 +210,44 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   if (!db) return c.notFound();
   let concurrency: unknown;
   let rawBudgets: unknown;
+  let rawClaim: unknown;
   try {
-    const body = (await c.req.json()) as { concurrency?: unknown; checkBudgets?: unknown };
+    const body = (await c.req.json()) as {
+      concurrency?: unknown;
+      checkBudgets?: unknown;
+      commentClaim?: unknown;
+    };
     concurrency = body.concurrency;
     rawBudgets = body.checkBudgets;
+    rawClaim = body.commentClaim;
   } catch {
     // malformed body → the shape gate's 400, never a 500
   }
-  // One save writes one parameter: a body carrying both is a shape error, so a
+  // One save writes one parameter: a body carrying two is a shape error, so a
   // refused half can never leave the other half written.
-  if (rawBudgets !== undefined) {
-    if (concurrency !== undefined) {
-      return c.json({ error: "body must carry exactly one of concurrency | checkBudgets" }, 400);
+  if ([concurrency, rawBudgets, rawClaim].filter((value) => value !== undefined).length > 1) {
+    return c.json(
+      { error: "body must carry exactly one of concurrency | checkBudgets | commentClaim" },
+      400,
+    );
+  }
+  if (rawClaim !== undefined) {
+    const trio = commentClaimBody(rawClaim);
+    if (trio === null) {
+      return c.json(
+        { error: "body must be { commentClaim: { retryMs, maxAttempts, outboxCap } }" },
+        400,
+      );
     }
+    try {
+      return c.json({ commentClaim: await setCommentClaimSettings(db, trio, login) });
+    } catch (error) {
+      // Out of range: the store owns the ranges and the message.
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawBudgets !== undefined) {
     const pair = checkBudgetsBody(rawBudgets);
     if (pair === null) {
       return c.json({ error: "body must be { checkBudgets: { terminalizeMs, updateMs } }" }, 400);
