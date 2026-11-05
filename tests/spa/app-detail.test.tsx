@@ -365,10 +365,10 @@ describe("installed tab configuration surface (static SSR)", () => {
     const start = manage.indexOf(t("en", "settings.installCopy"));
     const block = manage.slice(start, manage.indexOf(t("en", "settings.allowlist"), start));
     expect(block).toContain('<img src="https://avatars.example/demo.png"');
-    // The bare octocat fallback (the old hard-coded GitHubMark) never
-    // renders in this block when the avatar URL is set — its path data is
-    // the probe (the link's external-link icon is a legitimate <svg> here).
-    expect(block).not.toContain("M12 .297c-6.63");
+    // AppAvatar's own fallback identity: the bg-muted wrapper renders only
+    // when there is no usable URL. Probing the component's markup — not a
+    // copy of the icon's path data, which an icon edit could vacuate.
+    expect(block).not.toContain("bg-muted");
   });
 
   test("the installations table carries a per-row availability badge (allowlist enabled)", () => {
@@ -780,6 +780,54 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     } finally {
       await act(async () => root.unmount());
       globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("a null cached avatar renders AppAvatar's bg-muted fallback in the install block once the derived icon misses", async () => {
+    // The fallback swaps in only on a CDN miss (AppAvatar's onError), which a
+    // static render cannot fire — hence the mount, and the identity probed is
+    // the component's own bg-muted wrapper, not a copy of the icon's path
+    // data. The cached column is NULL here, so the icon URL derives from the
+    // numeric App id.
+    const payload = {
+      ...managePayload,
+      app: { ...managePayload.app, github_avatar_url: null },
+    };
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () =>
+        root.render(
+          createElement(AppDetailView, {
+            locale: "en",
+            appId: "1",
+            payload,
+            groups: [],
+            notice: null,
+            search: { ...search, tab: "settings" },
+            onReload: noReload,
+            onSearch: noSearch,
+          }),
+        ),
+      );
+      // The install block's avatar is the h-10 one (the identity card's is
+      // h-12); with a NULL cache its src is the id-derived CDN object.
+      const img = container.querySelector('img[class*="h-10 w-10"]');
+      expect(img?.getAttribute("src")).toBe("https://avatars.githubusercontent.com/in/1?s=120&v=4");
+
+      // The CDN miss: the octocat fallback takes the SAME box, inside the
+      // install block.
+      await act(async () => {
+        img!.dispatchEvent(new win.Event("error"));
+      });
+      const fallback = container.querySelector(".bg-muted.rounded-full");
+      expect(fallback?.getAttribute("class")).toContain("h-10 w-10");
+      expect(container.querySelector('img[class*="h-10 w-10"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
       cleanup();
     }
   });

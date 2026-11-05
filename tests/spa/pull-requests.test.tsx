@@ -556,6 +556,55 @@ describe("pull requests tab (mounted)", () => {
     }
   });
 
+  test("a failed filtered read keeps the toolbar reachable; choosing all re-reads unfiltered", async () => {
+    const { container, fetches, win, resolve, unmount } = await mountTabWithGatedFetch("");
+    const repoParamReads = () => fetches.filter((url) => url.includes("repo=acme%2Fapi"));
+    const unfilteredReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
+    const payload = { pull_requests: [ROW_OPEN], repos: ["acme/api", "acme/web"] };
+    try {
+      await act(async () => resolve("/pull-requests", jsonResponse(payload)));
+      await act(async () => {});
+      expect(unfilteredReads()).toHaveLength(1);
+
+      // Select acme/api: the filtered read is issued…
+      await press(win, container.querySelector('[role="combobox"]'));
+      const option = [...win.document.querySelectorAll('[role="option"]')].find(
+        (row) => row.textContent === "acme/api",
+      );
+      await press(win, option as unknown as Element);
+      expect(repoParamReads()).toHaveLength(1);
+      // …and fails. The error face owns the content area, but the toolbar
+      // must not disappear with it: the operator is stranded otherwise,
+      // and ErrorState's retry would only re-issue the same failing URL.
+      await act(async () => resolve("repo=acme%2Fapi", new Response("boom", { status: 500 })));
+      await act(async () => {});
+      expect(container.querySelector('[role="alert"]')).not.toBeNull();
+      expect(container.querySelector('[role="combobox"]')).not.toBeNull();
+      const refresh = [...container.querySelectorAll("button")].find(
+        (button) => button.getAttribute("aria-label") === t("en", "pullRequests.refreshAria"),
+      );
+      expect(refresh).toBeDefined();
+      expect((refresh as HTMLButtonElement | undefined)?.disabled).toBe(false);
+
+      // The carried option list still names the selection — no dead entry —
+      // and choosing the all option issues the unfiltered URL.
+      await press(win, container.querySelector('[role="combobox"]'));
+      const options = [...win.document.querySelectorAll('[role="option"]')];
+      expect(options.map((row) => row.textContent)).toEqual([
+        t("en", "pullRequests.filterRepoAll"),
+        "acme/api",
+        "acme/web",
+      ]);
+      await press(win, options[0] as unknown as Element);
+      expect(unfilteredReads()).toHaveLength(2);
+      await act(async () => resolve("/pull-requests", jsonResponse(payload)));
+      await act(async () => {});
+      expect(container.textContent ?? "").toContain("Add the export button");
+    } finally {
+      await unmount();
+    }
+  });
+
   test("the repo filter resets to all when the tab switches Apps (I-001)", async () => {
     const { container, fetches, win, switchApp, resolve, unmount } = await mountTabWithGatedFetch("");
     const payload = { pull_requests: [ROW_OPEN, ROW_CLOSED], repos: ["acme/api", "acme/web"] };

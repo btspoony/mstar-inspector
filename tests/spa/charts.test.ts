@@ -192,12 +192,15 @@ describe("StackedBarChart SSR (stacked face)", () => {
     {
       bucket_start: "2026-08-17",
       granularity: "day",
-      by_severity: { "must-fix": 7, "should-fix": 5, nit: 3 },
+      by_severity: { "must-fix": 7, "should-fix": 5, "may-fix": 4, nit: 3 },
     },
   ];
+  // The production severity stack (AppInsightsTab SEVERITY_SLOTS): must-fix,
+  // should-fix, may-fix, nit — slots 4, 3, 6, 5.
   const severitySeries: StackedSeries[] = [
     { key: "must-fix", label: "must-fix", slot: 4 },
     { key: "should-fix", label: "should-fix", slot: 3 },
+    { key: "may-fix", label: "may-fix", slot: 6 },
     { key: "nit", label: "nit", slot: 5 },
   ];
 
@@ -235,7 +238,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
     // HTML legend row above the chart — the TrendChart face), and each swatch
     // resolves to its slot's mark token.
     const swatches = swatchClasses(html);
-    const labels = severitySeries.map((series) => series.label);
+    const labels = ["must-fix", "should-fix", "may-fix", "nit"];
     expect(swatches).toHaveLength(labels.length);
     let cursor = -1;
     for (const [index, label] of labels.entries()) {
@@ -262,6 +265,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
     // name so the hover face can name the number it holds.
     expect(html).toContain('name="must-fix"');
     expect(html).toContain('name="should-fix"');
+    expect(html).toContain('name="may-fix"');
     expect(html).toContain('name="nit"');
   });
 
@@ -269,16 +273,19 @@ describe("StackedBarChart SSR (stacked face)", () => {
     const html = stackedChart(severityBuckets, severitySeries);
     const must = segment(html, 4);
     const should = segment(html, 3);
+    const may = segment(html, 6);
     const nit = segment(html, 5);
     // The first series sits on the axis (plot bottom = 166 - 20 axis) and
     // every next series starts exactly where the previous one ends.
     expect(must.y + must.height).toBeCloseTo(146);
     expect(should.y + should.height).toBeCloseTo(must.y);
-    expect(nit.y + nit.height).toBeCloseTo(should.y);
-    // Heights track the values (7/5/3), not the stack order — a segment
+    expect(may.y + may.height).toBeCloseTo(should.y);
+    expect(nit.y + nit.height).toBeCloseTo(may.y);
+    // Heights track the values (7/5/4/3), not the stack order — a segment
     // carrying the wrong key's count cannot satisfy both ratios.
     expect(must.height / nit.height).toBeCloseTo(7 / 3);
     expect(should.height / nit.height).toBeCloseTo(5 / 3);
+    expect(may.height / nit.height).toBeCloseTo(4 / 3);
   });
 
   test("zero-count buckets stay on the axis (time continuity) without geometry", () => {
@@ -286,12 +293,12 @@ describe("StackedBarChart SSR (stacked face)", () => {
       {
         bucket_start: "2026-08-17",
         granularity: "day",
-        by_severity: { "must-fix": 0, "should-fix": 0, nit: 0 },
+        by_severity: { "must-fix": 0, "should-fix": 0, "may-fix": 0, nit: 0 },
       },
       {
         bucket_start: "2026-08-18",
         granularity: "day",
-        by_severity: { "must-fix": 2, "should-fix": 1, nit: 1 },
+        by_severity: { "must-fix": 2, "should-fix": 1, "may-fix": 1, nit: 1 },
       },
     ];
     const html = stackedChart(buckets, severitySeries);
@@ -299,9 +306,9 @@ describe("StackedBarChart SSR (stacked face)", () => {
     // never filtered off the axis (AC-C).
     expect(html).toContain(">8/17</tspan>");
     expect(html).toContain(">8/18</tspan>");
-    // Geometry only where counts exist: one column × three stacked
+    // Geometry only where counts exist: one column × four stacked
     // segments (zero-height rects never render).
-    expect(html.split("<path").length - 1).toBe(3);
+    expect(html.split("<path").length - 1).toBe(4);
   });
 
   test("day and week buckets share one axis face; the pinned M/D label holds for both", () => {
@@ -311,7 +318,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
       {
         bucket_start: "2026-08-17",
         granularity: "week",
-        by_severity: { "must-fix": 1, "should-fix": 0, nit: 0 },
+        by_severity: { "must-fix": 1, "should-fix": 0, "may-fix": 0, nit: 0 },
       },
     ];
     expect(stackedChart(weekBuckets, severitySeries)).toContain("8/17");
@@ -327,7 +334,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
     const bucket = (bucket_start: string): DistributionBucket => ({
       bucket_start,
       granularity: "day",
-      by_severity: { "must-fix": 1, "should-fix": 0, nit: 0 },
+      by_severity: { "must-fix": 1, "should-fix": 0, "may-fix": 0, nit: 0 },
     });
     const dense = stackedChart(days.map((day) => bucket(`2026-${day}`)), severitySeries);
     // Even indices labeled (8/10 .. 8/18); odd days dropped.
@@ -382,7 +389,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
         {
           bucket_start: "<script>alert(1)</script>",
           granularity: "day",
-          by_severity: { "must-fix": 2, "should-fix": 0, nit: 0 },
+          by_severity: { "must-fix": 2, "should-fix": 0, "may-fix": 0, nit: 0 },
         },
       ],
       severitySeries,

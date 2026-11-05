@@ -22,6 +22,7 @@ import {
   INSIGHTS_REPO_ALL,
   appPullRequestsUrl,
   insightsRepoFromSelect,
+  insightsRepoOptions,
   insightsRepoSelectValue,
   parsePullRequestList,
   pullRequestRefOf,
@@ -113,8 +114,11 @@ export function AppPullRequestsTab({
   // The option set is the payload's `repos` — the App's whole repository set,
   // including repositories whose rows sit behind the server's row cap. It is
   // NOT derived from the loaded rows: a capped window would silently drop
-  // repositories from the toolbar.
-  const repoOptions = current.repos !== null ? [...current.repos].sort() : [];
+  // repositories from the toolbar. The current filter rides along even when
+  // the errored payload carried no option list, so the select never shows a
+  // dead entry; the "all" sentinel is always rendered (data.ts helper, the
+  // AppInsightsTab pattern).
+  const repoOptions = insightsRepoOptions(current.repos ?? [], repoFilterValue);
 
   // A malformed pr param resolves to null and falls back to the list face, so
   // "the detail owns the face" is the parsed ref, not the raw search value.
@@ -185,51 +189,53 @@ export function AppPullRequestsTab({
           {t(locale, "common.loading")}
         </p>
       ) : null}
+      {/* The toolbar rides the list face regardless of the read state: an
+          errored read (or the first load) must not strand the operator
+          without the repository filter or the refresh — the content area
+          below owns the loading / error / rows ternary. */}
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        {/* The Select primitive rejects "" as an item value, so the "all"
+            choice reuses the shared insights sentinel (data.ts). */}
+        <Select
+          value={insightsRepoSelectValue(repoFilterValue)}
+          onValueChange={(next) => setRepoFilter({ app: appId, value: insightsRepoFromSelect(next) })}
+        >
+          <SelectTrigger
+            className="min-w-48"
+            size="sm"
+            aria-label={t(locale, "pullRequests.filterRepo")}
+          >
+            <SelectValue placeholder={t(locale, "pullRequests.filterRepoAll")} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={INSIGHTS_REPO_ALL}>
+              {t(locale, "pullRequests.filterRepoAll")}
+            </SelectItem>
+            {repoOptions.map((repo) => (
+              <SelectItem key={repo} value={repo}>
+                {repo}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          aria-label={t(locale, "pullRequests.refreshAria")}
+          disabled={current.kind === "loading"}
+          onClick={() => setReloadNonce((nonce) => nonce + 1)}
+        >
+          <RefreshCw aria-hidden="true" />
+        </Button>
+      </div>
       {/* A failed read replaces the ledger rather than sitting above it: rows
           from an earlier read would read as the current list. Covers the close
           of a detail, whose list read is this tab's own. */}
       {current.kind === "error" ? (
         <ErrorState locale={locale} onRetry={() => setReloadNonce((nonce) => nonce + 1)} />
       ) : current.rows !== null ? (
-        <>
-          <div className="flex flex-wrap items-center justify-end gap-3">
-            {/* The Select primitive rejects "" as an item value, so the "all"
-                choice reuses the shared insights sentinel (data.ts). */}
-            <Select
-              value={insightsRepoSelectValue(repoFilterValue)}
-              onValueChange={(next) => setRepoFilter({ app: appId, value: insightsRepoFromSelect(next) })}
-            >
-              <SelectTrigger
-                className="min-w-48"
-                size="sm"
-                aria-label={t(locale, "pullRequests.filterRepo")}
-              >
-                <SelectValue placeholder={t(locale, "pullRequests.filterRepoAll")} />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={INSIGHTS_REPO_ALL}>
-                  {t(locale, "pullRequests.filterRepoAll")}
-                </SelectItem>
-                {repoOptions.map((repo) => (
-                  <SelectItem key={repo} value={repo}>
-                    {repo}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-label={t(locale, "pullRequests.refreshAria")}
-              disabled={current.kind === "loading"}
-              onClick={() => setReloadNonce((nonce) => nonce + 1)}
-            >
-              <RefreshCw aria-hidden="true" />
-            </Button>
-          </div>
-          <PullRequestsListView locale={locale} rows={current.rows ?? []} onOpen={openPr} />
-        </>
+        <PullRequestsListView locale={locale} rows={current.rows} onOpen={openPr} />
       ) : null}
     </div>
   );
