@@ -3505,8 +3505,8 @@ async function processMessage(
     // ONE conditional D1 insert is both the per-PR lock and the capacity
     // reservation, so a duplicate for this PR or a reached cap returns the
     // DISTINCT guard-held outcome — NOT a throw. The consumer schedules a
-    // per-message delayed retry (per level: 60/300/1200s quick/default,
-    // 90/480/1200s deep); after the final delayed attempt the job is acked
+    // per-message delayed retry (per level: 60/300/2040s quick/default,
+    // 90/480/2040s deep); after the final delayed attempt the job is acked
     // with a warning — guard-held is not an error state and never goes to the
     // DLQ. Admission precedes EVERY sandbox step, so a refused message costs
     // no container.
