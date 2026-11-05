@@ -6,9 +6,6 @@
   "compatibility_date": "2026-08-20",
   // 06: nodejs_compat required by the Sandbox container binding (T1-verified).
   "compatibility_flags": ["nodejs_compat"],
-  // Bugbot #14: keep dashboard-managed plaintext vars (e.g. REVIEW_LEVEL)
-  // across automated `wrangler deploy` — without keep_vars, deploy wipes them.
-  "keep_vars": true,
   "kv_namespaces": [
     {
       "binding": "IDEMPOTENCY_KV",
@@ -23,7 +20,7 @@
       }
     ],
     // 06: consumer + DLQ. max_batch_size 1 — one review per batch (wall-clock
-    // budget per REVIEW_LEVEL: 10 min runner quick/default, 14 min deep
+    // budget per review depth: 10 min runner quick/default, 14 min deep
     // in-flight — deep is pinned under the 15 min CF Queue consumer wall-clock
     // cap, src/pipeline/consumer.ts runnerTimeoutMs); failures retry
     // up to max_retries then land in review-dlq. Requires `wrangler queues create review-dlq` before
