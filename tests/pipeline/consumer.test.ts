@@ -6212,12 +6212,17 @@ describe("usage ledger (migration 0031)", () => {
  * running anything: at-least-once queue delivery, at-most-once execution.
  */
 describe("comment-trigger claim consumption (migration 0048)", () => {
-  function seedQueuedClaim(db: TestD1, payload: ReviewJobPayload, commentId: number): void {
+  function seedClaim(
+    db: TestD1,
+    payload: ReviewJobPayload,
+    commentId: number,
+    state: "queued" | "expired",
+  ): void {
     db.raw
       .prepare(
         `INSERT INTO comment_trigger_claims
            (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
-         VALUES (?, ?, ?, ?, ?, 'queued', ?, 0, 1, 1)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, 1)`,
       )
       .run(
         payload.installation_id,
@@ -6225,6 +6230,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
         payload.repo,
         payload.pr_number,
         commentId,
+        state,
         JSON.stringify(payload),
       );
   }
@@ -6241,7 +6247,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     reset();
     const db = await createSeededTestD1();
     const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9001 });
-    seedQueuedClaim(db, payload, 9001);
+    seedClaim(db, payload, 9001, "queued");
 
     // An unresolvable App throws AFTER the claim: the row must already be
     // `consumed`, because a failed comment-triggered run is re-run by posting a
@@ -6286,4 +6292,38 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     expect(claimRows(db)).toEqual([]);
     expect(logLines.some((l) => l.msg.includes("comment trigger already claimed"))).toBe(false);
   });
+
+  // Fail-closed consume: a delivery whose row is gone (the worker's
+  // send-failure release) or terminal (the outbox attempt cap) must ack
+  // WITHOUT running — it must never execute the same comment a second time.
+  for (const [label, state] of [
+    ["the claim row is gone (send-failure release)", null],
+    ["the claim row is expired (outbox attempt cap)", "expired"],
+  ] as const) {
+    test(`${label} → ack without running`, async () => {
+      reset();
+      const db = await createSeededTestD1();
+      const payload = makePayload({
+        head_sha: null,
+        action: "created",
+        triggered_by: "issue_comment",
+        comment_id: 9100,
+      });
+      if (state !== null) seedClaim(db, payload, 9100, state);
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(payload));
+
+      // `{kind:"ok"}` = no retry, so the queue auto-acks: nothing is retried
+      // or dead-lettered, and nothing costly runs.
+      expect(messageRetryCalls).toHaveLength(0);
+      expect(messageAckCalls).toHaveLength(0);
+      expect(
+        logLines.some((l) => l.msg.includes("comment trigger already claimed — ack without running")),
+      ).toBe(true);
+      // Nothing costly ran: no sandbox, no GitHub write.
+      expect(sandbox.calls).toHaveLength(0);
+      expect(commenterCalls).toHaveLength(0);
+    });
+  }
 });
