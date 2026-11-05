@@ -402,16 +402,28 @@ export const PUBLICATION_HANDOFF_PHASES: readonly PublicationRow["phase"][] = [
  */
 export async function findPublicationJournal(
   db: D1Like,
-  input: { scope: Scope; headSha: string; phases: readonly PublicationRow["phase"][] },
-): Promise<{ id: string; phase: PublicationRow["phase"] } | null> {
+  input: {
+    scope: Scope;
+    headSha: string;
+    phases: readonly PublicationRow["phase"][];
+    /**
+     * Which row wins when the head holds more than one (a normal row plus a
+     * degraded one). `oldest` is the delivery hand-off's order (first in flight
+     * wins); `newest` is the Check wait's (the LATEST publication is the one
+     * whose proof is still owed).
+     */
+    order?: "oldest" | "newest";
+  },
+): Promise<{ id: string; phase: PublicationRow["phase"]; hasProof: boolean } | null> {
   if (input.phases.length === 0) return null;
   const placeholders = input.phases.map(() => "?").join(", ");
+  const order = input.order === "newest" ? "created_ms DESC, id DESC" : "created_ms, id";
   const row = await db
     .prepare(
-      `SELECT id, phase FROM review_publications
+      `SELECT id, phase, proof_json IS NOT NULL AS has_proof FROM review_publications
        WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND head_sha = ? AND phase IN (${placeholders})
-       ORDER BY created_ms, id LIMIT 1`,
+       ORDER BY ${order} LIMIT 1`,
     )
     .bind(
       input.scope.appId,
@@ -422,8 +434,10 @@ export async function findPublicationJournal(
       input.headSha,
       ...input.phases,
     )
-    .first<{ id: string; phase: string }>();
-  return row === null ? null : { id: row.id, phase: row.phase as PublicationRow["phase"] };
+    .first<{ id: string; phase: string; has_proof: number }>();
+  return row === null
+    ? null
+    : { id: row.id, phase: row.phase as PublicationRow["phase"], hasProof: row.has_proof === 1 };
 }
 
 /**

@@ -845,6 +845,19 @@ export const CHECK_SUMMARIES = {
   inheritedGateUnreadable: (head7: string, base7: string, reason: string) =>
     `No new changes at ${head7} (since ${base7}); the review gate for ${base7} could not be evaluated — ${reason}.`,
   /**
+   * The SAME head is both the subject and the baseline (a duplicate delivery
+   * whose own review already exists): `since <head>` would be nonsense, so the
+   * wording names the reviewed head once.
+   */
+  sameHeadInheritedGateMet: (sha7: string, verdict: string, score: number, gate: ReviewGate) =>
+    `No new changes since the reviewed head ${sha7}; its own gate result is inherited: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
+  sameHeadInheritedGateMissed: (sha7: string, verdict: string, score: number, gate: ReviewGate) =>
+    `No new changes since the reviewed head ${sha7}; its own gate was missed: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
+  sameHeadInheritedGateUnreadable: (sha7: string, reason: string) =>
+    `No new changes since the reviewed head ${sha7}; its own gate could not be evaluated — ${reason}.`,
+  sameHeadInheritedUnreadable: (sha7: string) =>
+    `No new changes since the reviewed head ${sha7}; its own review result could not be read, so no gate result could be inherited and the check is failing closed.`,
+  /**
    * The reviewed head itself has no readable result: nothing can be inherited,
    * so the check fails closed rather than going neutral and shedding the
    * required check an empty commit did not earn.
@@ -969,21 +982,36 @@ export function decideConclusion(input: {
   if (inherited !== undefined) {
     const head7 = inherited.headSha.slice(0, 7);
     const base7 = inherited.reviewedHeadSha.slice(0, 7);
+    // A duplicate delivery inherits from the head ITSELF: "since <head>" would
+    // be nonsense, so that case gets its own wording.
+    const sameHead = inherited.headSha === inherited.reviewedHeadSha;
     if (review === null) {
-      return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.inheritedUnreadable(head7, base7) };
-    }
-    if (gate === null) {
       return {
         desired: "failure",
         title: CHECK_NAME,
-        summary: CHECK_SUMMARIES.inheritedGateUnreadable(head7, base7, "the App's gate configuration could not be read"),
+        summary: sameHead
+          ? CHECK_SUMMARIES.sameHeadInheritedUnreadable(head7)
+          : CHECK_SUMMARIES.inheritedUnreadable(head7, base7),
+      };
+    }
+    if (gate === null) {
+      const reason = "the App's gate configuration could not be read";
+      return {
+        desired: "failure",
+        title: CHECK_NAME,
+        summary: sameHead
+          ? CHECK_SUMMARIES.sameHeadInheritedGateUnreadable(head7, reason)
+          : CHECK_SUMMARIES.inheritedGateUnreadable(head7, base7, reason),
       };
     }
     if (review.scorePct === null) {
+      const reason = "the inherited review carries no readable score";
       return {
         desired: "failure",
         title: CHECK_NAME,
-        summary: CHECK_SUMMARIES.inheritedGateUnreadable(head7, base7, "the inherited review carries no readable score"),
+        summary: sameHead
+          ? CHECK_SUMMARIES.sameHeadInheritedGateUnreadable(head7, reason)
+          : CHECK_SUMMARIES.inheritedGateUnreadable(head7, base7, reason),
       };
     }
     const met = review.scorePct >= gate.minScore && gate.passVerdicts.includes(review.verdict);
@@ -991,12 +1019,16 @@ export function decideConclusion(input: {
       ? {
           desired: "success",
           title: CHECK_NAME,
-          summary: CHECK_SUMMARIES.inheritedGateMet(head7, base7, review.verdict, review.scorePct, gate),
+          summary: sameHead
+            ? CHECK_SUMMARIES.sameHeadInheritedGateMet(head7, review.verdict, review.scorePct, gate)
+            : CHECK_SUMMARIES.inheritedGateMet(head7, base7, review.verdict, review.scorePct, gate),
         }
       : {
           desired: "failure",
           title: CHECK_NAME,
-          summary: CHECK_SUMMARIES.inheritedGateMissed(head7, base7, review.verdict, review.scorePct, gate),
+          summary: sameHead
+            ? CHECK_SUMMARIES.sameHeadInheritedGateMissed(head7, review.verdict, review.scorePct, gate)
+            : CHECK_SUMMARIES.inheritedGateMissed(head7, base7, review.verdict, review.scorePct, gate),
         };
   }
   // A round with nothing to review and no inheritable baseline never had a

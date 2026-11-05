@@ -733,10 +733,11 @@ export default {
   // handler just retries into alert noise). The sweep reads D1 only; the
   // reconciler additionally reads the DASHBOARD_ENCRYPTION_KEY binding to route
   // per-App recovery credentials (§7.6). The Check lane is deliberately NOT
-  // part of this composition: both expressions fire on :00/:15/:30/:45, and the
-  // minute expression covers that minute too, so running it here would spend
-  // one run's request budget twice for no extra work. All stages are awaited
-  // directly, so no ctx.waitUntil is needed.
+  // part of this composition: both expressions fire on :00/:15/:30/:45 and the
+  // minute expression already covers that minute, so a second pass would only
+  // duplicate work — including its suspension and backoff writes — against its
+  // own per-invocation budget. All stages are awaited directly, so no
+  // ctx.waitUntil is needed.
   async scheduled(controller: ScheduledController, env: ScheduledEnv, _ctx: ExecutionContext): Promise<void> {
     if (controller.cron === CHECK_RECOVERY_CRON) {
       await runCheckReconcileStage(env);

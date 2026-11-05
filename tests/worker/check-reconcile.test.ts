@@ -1160,9 +1160,8 @@ async function captureComposition(env: ScheduledEnv, cron = ""): Promise<string[
 describe("scheduled composition (spec §7.11)", () => {
   test("the quarter-hour expression composes runSweep → reconcileReviewLifecycle, WITHOUT the Check lane", async () => {
     const db = seededDb();
-    // A breached failure window makes the sweep stage emit its alert line, and
-    // a due Check row of an App with NO installation mapping makes the real
-    // Checks lane suspend it — a durable, network-free stage effect.
+    // A breached failure window makes the sweep stage emit its alert line; the
+    // Check lane must leave no trace at all in this expression.
     const store = db.raw;
     for (let i = 0; i < 6; i += 1) {
       store
@@ -1172,8 +1171,8 @@ describe("scheduled composition (spec §7.11)", () => {
         )
         .run(`boom-${i}`);
     }
+    // A due Check row exists, yet this expression must not touch it.
     const { attempt } = await claim(db);
-    store.prepare(`DELETE FROM app_installations WHERE app_id = ?`).run(APP);
 
     const events = await captureComposition({ DB: db as unknown as ScheduledEnv["DB"] });
 
@@ -1181,9 +1180,9 @@ describe("scheduled composition (spec §7.11)", () => {
     const lifecycleAt = events.indexOf("ops_lifecycle_reconcile");
     expect(sweepAt).toBeGreaterThanOrEqual(0);
     expect(lifecycleAt).toBeGreaterThan(sweepAt);
-    // The Check lane belongs to the MINUTE expression alone: both expressions
-    // fire on :00/:15/:30/:45, so running it here would spend one run's
-    // request budget twice for no extra work.
+    // The Check lane belongs to the MINUTE expression alone: both fire on
+    // :00/:15/:30/:45, so running it here would duplicate every pass (and its
+    // suspension/backoff writes) in that minute.
     expect(events).not.toContain("ops_check_reconcile");
     // This pass therefore touched nothing Check-side.
     const row = await rawRow(db, attempt.identity.attemptId);

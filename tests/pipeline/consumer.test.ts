@@ -332,41 +332,31 @@ function dbFailingOn(db: TestD1, match: string) {
 }
 
 /**
- * The real D1 double with ONE of the give-up hand-off's two store writes
- * faulting: `setCheckFallbackDesired` (the intent) or `deferCheckRecovery`
- * (the release). The lifecycle itself runs unchanged over it, so the failure
- * travels the real path into the seam's rejection — unlike a seam fake that
- * would re-implement the writes it is supposed to test.
+ * The REAL lifecycle over a store wrapper that faults ONE of the give-up's two
+ * fenced writes by CALL ORDINAL (1 = the intent, 2 = the release). The fault is
+ * armed the moment the seam is entered and is chosen by ORDER — no SQL text and
+ * no re-implementation — so the consumer ↔ lifecycle integration for a store
+ * fault stays under test.
  */
-function failingHandoff(db: TestD1, step: "intent" | "release") {
-  // Ordinal 1 is the intent write, ordinal 2 the release write — the fault is
-  // chosen by ORDER, never by SQL text.
-  const failAt = step === "intent" ? 1 : 2;
-  let call = 0;
-  return async (input: {
-    handle: CheckHandle;
-    reason: string;
-    outcome?: "superseded";
-  }): Promise<boolean> => {
-    const conclusion = decideConclusion({
-      proof: null,
-      outcome: input.outcome ?? "superseded",
-      gate: null,
-      review: null,
-      headSha: input.handle.headSha,
-    });
-    call += 1; // the INTENT write
-    if (call === failAt) throw new Error(`hand-off store call ${failAt} unavailable`);
-    await setCheckFallbackDesired(db, input.handle.attemptId, input.handle.lease, conclusion, Date.now());
-    call += 1; // the RELEASE write
-    if (call === failAt) throw new Error(`hand-off store call ${failAt} unavailable`);
-    return deferCheckRecovery(
-      db,
-      input.handle.attemptId,
-      input.handle.lease,
-      { state: "remote-unconfirmed", nextAttemptMs: Date.now() + 60_000, reason: input.reason },
-      Date.now(),
-    );
+function handoffFaultStore(db: TestD1, failAt: 1 | 2) {
+  const state = { armed: false, calls: 0 };
+  const faulty = {
+    prepare: (sql: string) => {
+      if (state.armed) {
+        state.calls += 1;
+        if (state.calls === failAt) throw new Error(`hand-off store call ${failAt} unavailable`);
+      }
+      return db.prepare(sql);
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+  } as unknown as TestD1;
+  return {
+    db: faulty,
+    /** Arm the fault for the next hand-off: the only writer at that point. */
+    arm: () => {
+      state.armed = true;
+      state.calls = 0;
+    },
   };
 }
 
@@ -6102,9 +6092,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
       sandbox.resolvedSha = SHA2; // the checkout moved on from the payload sha
       const db = await createSeededTestD1();
-      const real = lifecycleFor(db);
+      // A faulting store is only needed for the two failure steps; `no-op`
+      // keeps the seam fake because it has to answer `false` without writing.
+      const fault = step === "no-op" ? null : handoffFaultStore(db, step === "intent" ? 1 : 2);
+      const real = lifecycleFor((fault?.db ?? db) as never);
       const beginCalls: string[] = [];
-      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      const consumer = createReviewConsumer(await makeEnv({ DB: (fault?.db ?? db) as never }), testLog, {
         ...testOverrides,
         checks: {
           begin: (input) => {
@@ -6112,7 +6105,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             return real.begin(input);
           },
           terminalize: (input) => real.terminalize(input),
-          abandonTerminalize: step === "no-op" ? async () => false : failingHandoff(db, step),
+          abandonTerminalize:
+            step === "no-op"
+              ? async () => false
+              : (input) => {
+                  fault!.arm();
+                  return real.abandonTerminalize(input);
+                },
         },
       });
 
@@ -6229,9 +6228,11 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const update = checkRequests[1]!.params as ChecksUpdateParams;
     expect(update.conclusion).toBe("success");
-    expect(update.summary).toContain("is inherited");
-    expect(update.summary).toContain('verdict "ship it"');
-    expect(update.summary).toContain("score 85");
+    // The SAME head is the subject and the baseline, so the summary names it
+    // once — `since <head>` would be nonsense.
+    expect(update.summary).toBe(
+      `No new changes since the reviewed head ${SHA.slice(0, 7)}; its own gate result is inherited: verdict "ship it", score 85 (floor 80; allowed: ship it).`,
+    );
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("success");
     expect(row.observed).toBe("success");

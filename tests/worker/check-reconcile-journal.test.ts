@@ -33,6 +33,7 @@ import {
   run,
   scriptedCredentials,
   seedJournal,
+  seedPublication,
   seededDb,
   stubFetch,
   withFailingReads,
@@ -288,12 +289,88 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(settled.terminal_ms).not.toBeNull();
   });
 
+  test("an OLDER proof on another journal row never ends the wait", async () => {
+    const db = seededDb();
+    const { attempt, id } = await handedOverAttempt(db);
+    // An older DEGRADED publication for the same head already has proof; a
+    // newer NORMAL publication is still prepared. Only the newest hand-off
+    // row's own proof may end the wait — an older one would freeze a degraded
+    // failure while the normal review was still in flight.
+    const degraded = proofFor(attempt.identity, "degraded");
+    seedPublication(db, SCOPE, SHA, degraded, "confirmed", reviewPayload(SCOPE, SHA, "needs fixes", 40));
+    db.raw.prepare(`UPDATE review_publications SET created_ms = ? WHERE id = ?`).run(T0 - 30_000, degraded.publicationId);
+    const journalId = seedJournal(db, SCOPE, SHA, "prepared");
+    db.raw.prepare(`UPDATE review_publications SET created_ms = ? WHERE id = ?`).run(T0 - 10_000, journalId);
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    const scripted = scriptedCredentials(db, countingScript({ adopt: 0, begin: 0, complete: 0 }));
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scripted(input);
+        },
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+      expect(summary.unconfirmed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    expect(factoryCalls).toBe(0);
+    const row = await rawRow(db, id);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.observed).toBe("unknown");
+    expect(row.desired_summary).toBe(UNCONFIRMED);
+  });
+
+  test("the journal's OWN proof ends the wait even while its phase is prepared", async () => {
+    const db = seededDb();
+    const { attempt, id } = await handedOverAttempt(db);
+    const journalId = seedJournal(db, SCOPE, SHA, "prepared");
+    // The proof is readable on the waiting row itself, so the conclusion can be
+    // decided now — the phase alone does not keep the wait alive.
+    const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ?, payload_json = ? WHERE id = ?`)
+      .run(JSON.stringify(proof), JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 85)), journalId);
+
+    const stub = stubFetch();
+    const sent: { desired: string | null } = { desired: null };
+    let deferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: scriptedCredentials(db, {
+          ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
+          complete: async (identity, _runId, conclusion) => {
+            sent.desired = conclusion.desired;
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+          },
+        }),
+      });
+      deferred = summary.deferred;
+    } finally {
+      stub.restore();
+    }
+
+    expect(deferred).toBe(0);
+    expect(sent.desired).toBe("success");
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("success");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
   test("an unreadable journal probe defers inside the window instead of terminalizing", async () => {
     const db = seededDb();
     const { id } = await handedOverAttempt(db);
-    // The probe's own read fails. "Unknown" is NOT "nothing pending": the
-    // publication may still be in flight, and this attempt is inside its
-    // window, so the lane must wait exactly as it does for a readable journal.
+    // The journal probe's OWN read fails (it is the only journal query the
+    // probe makes now). "Unknown" is NOT "nothing pending": the publication may
+    // still be in flight, and this attempt is inside its window, so the lane
+    // must wait exactly as it does for a readable journal.
     const unreadable = withFailingReads(db, /FROM review_publications/);
     const stub = stubFetch();
     const calls = { adopt: 0, begin: 0, complete: 0 };

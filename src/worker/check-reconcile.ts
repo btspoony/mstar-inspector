@@ -1299,17 +1299,11 @@ type PendingPublication =
   | { kind: "unknown" };
 
 async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promise<PendingPublication> {
-  // A readable proof ENDS the wait whatever the journal says: the conclusion
-  // can be decided now.
-  try {
-    const proof = await readPublicationProof(db, {
-      scope: attempt.identity.scope,
-      headSha: attempt.identity.headSha,
-    });
-    if (proof !== null) return { kind: "none" };
-  } catch {
-    return { kind: "unknown" };
-  }
+  // The wait is bound to ONE journal row — the NEWEST hand-off row for this
+  // head — because that is the publication whose proof is still owed. A proof
+  // on some other row (an older degraded publication, say) proves nothing about
+  // this one: letting it end the wait would freeze a degraded failure while a
+  // newer normal publication was still in flight.
   try {
     const journal = await findPublicationJournal(db, {
       scope: attempt.identity.scope,
@@ -1319,8 +1313,12 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
       // concluding there would freeze an unconfirmed failure that the arriving
       // proof could no longer correct. The execution deadline bounds the wait.
       phases: PUBLICATION_HANDOFF_PHASES,
+      order: "newest",
     });
-    return journal === null ? { kind: "none" } : { kind: "pending", phase: journal.phase };
+    // No journal at all: nothing is in flight, so the wait is over.
+    if (journal === null) return { kind: "none" };
+    // THIS row's own proof ends the wait; anything else keeps waiting.
+    return journal.hasProof ? { kind: "none" } : { kind: "pending", phase: journal.phase };
   } catch {
     return { kind: "unknown" };
   }
