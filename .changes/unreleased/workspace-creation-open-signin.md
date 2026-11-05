@@ -13,11 +13,11 @@ category: Changed
   `/<new ref>/apps`), so the creator never depends on sole-workspace resolution
   finding a second workspace. There is no auto-join and no
   first-user-becomes-admin fallback; authority is workspace-scoped from then on.
-- **Deploy wiring loses the allowlist**: the `Verify required ADMIN_LOGINS
-  variable` gate, the post-deploy settings assertion and the `--var
-  ADMIN_LOGINS:…` plumbing are removed from both workflows, and a bare
-  `wrangler deploy` is the supported manual path. **Upgrade note:** delete the
-  now-unused `ADMIN_LOGINS` GitHub Actions variable; nothing reads it.
+- **Deploy wiring loses the allowlist**: the required-variable gate, the
+  post-deploy settings assertion and the `--var` plumbing are removed from
+  both workflows, and a bare `wrangler deploy` is the supported manual path.
+  **Upgrade note:** delete the now-unused deployment-level admin allowlist
+  repository variable; nothing reads it.
 
 <!-- CN -->
 - **登录开放；工作区是创建出来的，不是被分配的。** 部署级的登录名名单已删除：任何完成
@@ -29,7 +29,6 @@ category: Changed
   「唯一工作区」解析能否在存在第二个工作区时命中。没有自动加入，也没有「首位用户成为唯一
   工作区管理员」的
   回退；此后权限一律按工作区判定。
-- **部署接线去掉名单**：两个 workflow 删除 `Verify required ADMIN_LOGINS variable`
-  门禁、部署后设置断言与 `--var ADMIN_LOGINS:…` 传参；手工部署直接用
-  `wrangler deploy`。**升级提示：** 请删除已无用的 GitHub Actions 变量
-  `ADMIN_LOGINS`，已无任何代码读取它。
+- **部署接线去掉名单**：两个 workflow 删除必填变量门禁、部署后设置断言与
+  `--var` 传参；手工部署直接用 `wrangler deploy`。**升级提示：** 请删除已无用的
+  部署级管理员白名单仓库变量，已无任何代码读取它。

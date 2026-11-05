@@ -2,8 +2,8 @@
 category: Changed
 ---
 
-- **The deployment operator no longer holds tenant rights.** `ADMIN_LOGINS`
-  (deployment-level admin) is gone from the authorization path; the new
+- **The deployment operator no longer holds tenant rights.** There is no
+  deployment-level admin allowlist any more; the new
   `PLATFORM_OPERATORS` var is a pure allowlist that grants nothing by default.
   The workspace gate classifies `member → invitee → operator-granted →
   operator-denied → outsider`: an operator who is a member keeps ordinary
@@ -27,7 +27,7 @@ category: Changed
   (or appears) is gone (or shown) as soon as the tenant moves between pages.
 
 <!-- CN -->
-- **部署运维者不再自动获得租户权限。** 部署级管理员 `ADMIN_LOGINS` 已从授权路径中移除；
+- **部署运维者不再自动获得租户权限。** 部署级管理员白名单已从授权路径中移除；
   新的 `PLATFORM_OPERATORS` 变量只是一个白名单，默认不授予任何权限。工作区网关按
   `member → invitee → operator-granted → operator-denied → outsider` 分类：本身是成员的
   运维者仍享有普通成员权限；没有有效 `support_grants` 行的运维者得到与外部人完全相同的
