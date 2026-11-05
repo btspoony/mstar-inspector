@@ -12,6 +12,7 @@
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { createAppsStore, PULL_REQUEST_LIST_LIMIT } from "../../src/dashboard/apps-store";
+import { releaseInflight } from "../../src/store/inflight-store";
 
 const APP_ID = "app-pr-ledger";
 
@@ -253,11 +254,11 @@ describe("listPullRequests", () => {
     };
     const { rows } = await createAppsStore(counted as never).listPullRequests(APP_ID);
     expect(rows.length).toBe(3);
-    // N+1 guard, pinned to the four statements the store issues (rows, review
-    // window, failure counts, distinct repos): a per-row statement would
-    // already exceed this at 3 rows, and a dropped or doubled statement is a
-    // real change this pin must catch.
-    expect(prepares).toBe(4);
+    // N+1 guard, pinned to the five statements the store issues (rows, review
+    // window, failure counts, distinct repos, and the App's live review
+    // locks): a per-row statement would already exceed this at 3 rows, and a
+    // dropped or doubled statement is a real change this pin must catch.
+    expect(prepares).toBe(5);
   });
 
   test("the aggregates are scoped to the window (mechanism, not just the payload)", async () => {
@@ -290,7 +291,10 @@ describe("listPullRequests", () => {
     };
     await createAppsStore(recording as never).listPullRequests(APP_ID);
 
-    expect(statements.length).toBe(4);
+    // Five statements: the four ledger statements above plus the App-wide live
+    // lock read (`review_inflight`), which carries no window — it is bounded by
+    // the concurrency caps, not by the row page.
+    expect(statements.length).toBe(5);
     const aggregates = statements.filter(
       (stmt) => stmt.sql.includes("FROM reviews") || stmt.sql.includes("FROM review_failures"),
     );
@@ -450,9 +454,9 @@ describe("listPullRequests repository filter + option set", () => {
       batch: db.batch.bind(db),
     };
     await createAppsStore(counted as never).listPullRequests(APP_ID, { owner: "acme", repo: "widgets" });
-    // N+1 guard, pinned: the filtered read issues the same four statements —
+    // N+1 guard, pinned: the filtered read issues the same five statements —
     // the repository predicate rides the existing statements, it adds none.
-    expect(prepares).toBe(4);
+    expect(prepares).toBe(5);
   });
 
   test("the option set is one App's ledger, never a sibling App's", async () => {
@@ -825,3 +829,184 @@ function seedFinding(
       state,
     );
 }
+
+/**
+ * Reviewing-now (compass D11/D16): the badge is a LIVE `review_inflight` row
+ * for that PR — the pipeline's own `expires_at > now` predicate, evaluated
+ * server-side. One case per disposition D11 names, plus both faces and the
+ * degraded read. The fixtures are the state each disposition actually leaves
+ * in the database, so the disposition→projection mapping is what these pin.
+ */
+describe("reviewing-now projection (D11/D16)", () => {
+  const INSTALLATION_ID = 77;
+  const KEY = {
+    installation_id: INSTALLATION_ID,
+    owner: "acme",
+    repo: "widgets",
+    pr_number: 131,
+    workspace_id: "default",
+  };
+
+  /** The App's installation mapping — the same join the failure count reads. */
+  function seedInstallation(db: TestD1): void {
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i-lock', ?, ?, 'acme', datetime('now'))",
+      )
+      .run(APP_ID, INSTALLATION_ID);
+  }
+
+  /**
+   * One `review_inflight` row in the form the pipeline writes it
+   * (ISO-8601-with-milliseconds). A negative `expiresInMs` is an expired row;
+   * `headSha: ""` is a comment trigger, which carries none.
+   */
+  function seedLock(
+    db: TestD1,
+    over: { owner?: string; repo?: string; headSha?: string; expiresInMs?: number } = {},
+  ): { acquiredAt: string; attemptId: string } {
+    const acquiredAt = new Date(Date.now() - 60_000).toISOString();
+    const attemptId = crypto.randomUUID();
+    db.raw
+      .prepare(
+        `INSERT INTO review_inflight
+           (installation_id, owner, repo, pr_number, workspace_id, attempt_id, head_sha, acquired_at, expires_at)
+         VALUES (?, ?, ?, ?, 'default', ?, ?, ?, ?)`,
+      )
+      .run(
+        INSTALLATION_ID,
+        over.owner ?? "acme",
+        over.repo ?? "widgets",
+        KEY.pr_number,
+        attemptId,
+        over.headSha ?? "sha-live",
+        acquiredAt,
+        new Date(Date.now() + (over.expiresInMs ?? 60 * 60_000)).toISOString(),
+      );
+    return { acquiredAt, attemptId };
+  }
+
+  /** The ledger row + installation mapping every case starts from. */
+  async function seedLedger(db: TestD1): Promise<void> {
+    seedApp(db);
+    seedInstallation(db);
+    await createAppsStore(db).upsertPullRequest(PR);
+  }
+
+  test("a still-held row is live on both faces, with its head sha and acquisition time", async () => {
+    const db = createMigratedTestD1();
+    await seedLedger(db);
+    const { acquiredAt } = seedLock(db);
+    const store = createAppsStore(db);
+    const live = { state: "live", head_sha: "sha-live", acquired_at: acquiredAt } as const;
+
+    expect((await store.listPullRequests(APP_ID)).rows[0]!.reviewing).toEqual(live);
+    expect((await store.getPullRequestHead(APP_ID, "acme", "widgets", 131))!.reviewing).toEqual(live);
+    // Still held: the projection is a point-in-time read, not a release latch.
+    expect((await store.listPullRequests(APP_ID)).rows[0]!.reviewing.state).toBe("live");
+  });
+
+  test("a comment-triggered attempt carries no head sha but still reads live", async () => {
+    const db = createMigratedTestD1();
+    await seedLedger(db);
+    const { acquiredAt } = seedLock(db, { headSha: "" });
+    expect((await createAppsStore(db).listPullRequests(APP_ID)).rows[0]!.reviewing).toEqual({
+      state: "live",
+      head_sha: "",
+      acquired_at: acquiredAt,
+    });
+  });
+
+  test("the ledger's GitHub spelling still matches the lowercase lock row", async () => {
+    const db = createMigratedTestD1();
+    await seedLedger(db);
+    // `review_inflight` folds owner/repo to lower case; the ledger keeps the
+    // delivery's spelling. The projection must join those two, not trust case.
+    db.raw
+      .prepare("UPDATE pull_requests SET owner = 'Acme', repo = 'Widgets' WHERE app_id = ? AND pr_number = 131")
+      .run(APP_ID);
+    seedLock(db);
+    const rows = (await createAppsStore(db).listPullRequests(APP_ID)).rows;
+    expect(rows[0]!.owner).toBe("Acme");
+    expect(rows[0]!.reviewing.state).toBe("live");
+  });
+
+  // Every disposition that must NOT light the badge. The released pair shares
+  // its final state on purpose: a completion release and the give-up path's
+  // fenced release both delete the row, and the projection sees one absence.
+  const idle: Array<[string, (db: TestD1) => Promise<void>]> = [
+    ["no row", async () => {}],
+    ["expired row", async (db) => void seedLock(db, { expiresInMs: -60_000 })],
+    [
+      "released row",
+      async (db) => {
+        const { attemptId } = seedLock(db);
+        await releaseInflight(db, KEY, attemptId);
+      },
+    ],
+    [
+      "queued without a lock",
+      async (db) => {
+        // The guard refused before any acquire: the attempt survives only as
+        // its terminal drop row, and holds no lock.
+        db.raw
+          .prepare(
+            `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+             VALUES ('queued', ?, 'acme', 'widgets', 131, 'sha-1', 'pipeline',
+                     'review dropped after 3 refused retries: system-cap (system cap reached)')`,
+          )
+          .run(INSTALLATION_ID);
+      },
+    ],
+    [
+      "superseded before admission",
+      async (db) => {
+        // Acked before the guard because the ledger already held a newer
+        // commit: no lock and no failure row.
+        db.raw
+          .prepare("UPDATE pull_requests SET head_sha = 'sha-new', head_at = ? WHERE app_id = ? AND pr_number = 131")
+          .run(new Date().toISOString(), APP_ID);
+      },
+    ],
+    [
+      "abandoned after release",
+      async (db) => {
+        const { attemptId } = seedLock(db);
+        await releaseInflight(db, KEY, attemptId);
+      },
+    ],
+  ];
+
+  for (const [disposition, seed] of idle) {
+    test(`${disposition} reads none on both faces`, async () => {
+      const db = createMigratedTestD1();
+      await seedLedger(db);
+      await seed(db);
+      const store = createAppsStore(db);
+      expect((await store.listPullRequests(APP_ID)).rows[0]!.reviewing).toEqual({ state: "none" });
+      expect((await store.getPullRequestHead(APP_ID, "acme", "widgets", 131))!.reviewing).toEqual({
+        state: "none",
+      });
+    });
+  }
+
+  test("a failed inflight read is unknown on both faces, never idle", async () => {
+    const db = createMigratedTestD1();
+    await seedLedger(db);
+    seedLock(db);
+    // Only the LOCK read faults: the rest of the face still answers, so the
+    // failure must degrade that one field instead of failing the payload.
+    const failing = {
+      prepare(sql: string) {
+        if (sql.includes("review_inflight")) throw new Error("D1_ERROR: dead binding");
+        return db.prepare(sql);
+      },
+      batch: db.batch.bind(db),
+    };
+    const store = createAppsStore(failing as never);
+    expect((await store.listPullRequests(APP_ID)).rows[0]!.reviewing).toEqual({ state: "unknown" });
+    expect((await store.getPullRequestHead(APP_ID, "acme", "widgets", 131))!.reviewing).toEqual({
+      state: "unknown",
+    });
+  });
+});

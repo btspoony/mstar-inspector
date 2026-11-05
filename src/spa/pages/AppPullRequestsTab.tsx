@@ -18,6 +18,7 @@ import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import { apiBase } from "../workspace-base";
 import { PullRequestDetail } from "./PullRequestDetail";
+import { ReviewingBadge } from "./ReviewingBadge";
 import {
   INSIGHTS_REPO_ALL,
   appPullRequestsUrl,
@@ -283,9 +284,17 @@ export function PullRequestsListView({
     },
     {
       header: t(locale, "pullRequests.columnState"),
+      // The row's state and its D11 reviewing marker share one cell: the badge
+      // is a live-lock fact about this PR, not a second state column (its
+      // quiet face sits beside the filled state pill).
       cell: (row) => {
         const pill = pullRequestStatePill(locale, row.state);
-        return <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>;
+        return (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
+            <ReviewingBadge locale={locale} reviewing={row.reviewing} />
+          </div>
+        );
       },
     },
     {

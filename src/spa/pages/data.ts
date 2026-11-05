@@ -786,6 +786,20 @@ export function appInsightsSummaryUrl(
 export type PullRequestState = "open" | "closed" | "merged";
 
 /**
+ * The PR's reviewing-now projection (compass D11/D16), as the server decides
+ * it: `live` = that PR's `review_inflight` row is held right now, carrying the
+ * holding attempt's head sha (`""` for a comment trigger) and its acquisition
+ * instant; `none` = a successful read with no live row, which is also every
+ * queued / superseded / released / abandoned / expired attempt; `unknown` = the
+ * read failed, and the client renders it as neither reviewing nor idle. The
+ * client never infers this field from anything else.
+ */
+export type PullRequestReviewing =
+  | { state: "live"; head_sha: string; acquired_at: string }
+  | { state: "none" }
+  | { state: "unknown" };
+
+/**
  * The per-App pull-request ledger's head row — the list's rows and the
  * detail's `pull_request` are ONE shape: the list adds its two aggregates, the
  * detail its record totals. `failure_count` is the list's alone; the detail
@@ -800,6 +814,7 @@ export type PullRequestHead = {
   head_sha: string;
   first_seen_at: string;
   last_seen_at: string;
+  reviewing: PullRequestReviewing;
 };
 
 export type PullRequestRow = PullRequestHead & {
@@ -898,7 +913,28 @@ function parsePullRequestHead(value: unknown): PullRequestHead | null {
     head_sha: typeof value.head_sha === "string" ? value.head_sha : "",
     first_seen_at: value.first_seen_at,
     last_seen_at: value.last_seen_at,
+    reviewing: parsePullRequestReviewing(value.reviewing),
   };
+}
+
+/**
+ * The reviewing-now projection. A payload that does not carry a well-formed
+ * three-state value reads `unknown`: an older server or a truncated read must
+ * never let the client claim the PR is idle, and it must not claim it is
+ * reviewing either. `live` without its two anchors is not a live lock, so it
+ * degrades to `unknown` rather than to the idle `none`.
+ */
+function parsePullRequestReviewing(value: unknown): PullRequestReviewing {
+  if (!isRecord(value)) return { state: "unknown" };
+  if (value.state === "none") return { state: "none" };
+  if (
+    value.state === "live" &&
+    typeof value.head_sha === "string" &&
+    typeof value.acquired_at === "string"
+  ) {
+    return { state: "live", head_sha: value.head_sha, acquired_at: value.acquired_at };
+  }
+  return { state: "unknown" };
 }
 
 /**

@@ -14,6 +14,7 @@ import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t, type DictionaryKey } from "../../src/i18n";
+import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   appPullRequestDetailUrl,
   appPullRequestRecordsUrl,
@@ -37,6 +38,7 @@ import {
   FINDINGS,
   RECORDS,
   REVIEWS,
+  ROW_HEAD,
   page,
   recordsOf,
   scene,
@@ -1379,5 +1381,45 @@ describe("pull request detail face (static SSR)", () => {
       t("en", "pullRequests.timelineFirstSeen"),
     ]);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+});
+
+/**
+ * The reviewing-now badge on the DETAIL header (compass D11/D16). The header
+ * reads the projection the payload carries — it never derives it — so these
+ * pin the three states the wire can hand it: a live lock with its anchor, an
+ * idle PR with no badge at all, and a failed read that must not pass as idle.
+ */
+describe("reviewing-now badge on the detail header (D11)", () => {
+  const IDLE_HEAD = ROW_HEAD.head_sha.slice(0, 7);
+
+  test("a live lock carries the holding attempt's head sha", () => {
+    const markup = face(
+      {},
+      { reviewing: { state: "live", head_sha: "abc1234def567", acquired_at: "2026-11-01T10:00:00.000Z" } },
+    );
+    expect(markup).toContain(t("en", "pullRequests.reviewingHead", { head: "abc1234" }));
+  });
+
+  test("a live lock with no head sha carries its acquisition time instead", () => {
+    const acquiredAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const markup = face({}, { reviewing: { state: "live", head_sha: "", acquired_at: acquiredAt } });
+    expect(markup).toContain(
+      t("en", "pullRequests.reviewingSince", { time: formatRelativeTime(acquiredAt, "en") }),
+    );
+  });
+
+  test("no live lock paints no badge — and no unknown note either", () => {
+    const markup = face({}, { reviewing: { state: "none" } });
+    // The header really rendered (its own state pill is there).
+    expect(markup).toContain(t("en", "pullRequests.state.merged"));
+    expect(markup).not.toContain(t("en", "pullRequests.reviewingUnknown"));
+    expect(markup).not.toContain(t("en", "pullRequests.reviewingHead", { head: IDLE_HEAD }));
+  });
+
+  test("an unreadable inflight read paints unknown, never the reviewing badge", () => {
+    const markup = face({}, { reviewing: { state: "unknown" } });
+    expect(markup).toContain(t("en", "pullRequests.reviewingUnknown"));
+    expect(markup).not.toContain(t("en", "pullRequests.reviewingHead", { head: IDLE_HEAD }));
   });
 });

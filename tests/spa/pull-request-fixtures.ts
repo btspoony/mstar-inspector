@@ -40,6 +40,8 @@ export const ROW_HEAD: PullRequestHead = {
   head_sha: "aaa111bbb222",
   first_seen_at: "2026-10-28 08:00:00",
   last_seen_at: "2026-11-01 10:00:00",
+  // The base fixture is an idle PR; the reviewing-now suites override it.
+  reviewing: { state: "none" },
 };
 
 export const ROW_OPEN: PullRequestRow = {

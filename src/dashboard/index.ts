@@ -69,6 +69,7 @@ import {
   REVIEW_TRIGGER_MODES,
   type DeliverySummary,
   type GithubAppRow,
+  type PullRequestReviewing,
   type ReviewTriggerMode,
 } from "./apps-store";
 import {
@@ -4648,14 +4649,23 @@ async function requireAppManagerJson(
  * its nullable columns twice. The store reports what the tables hold; here the
  * payload becomes total: `title` / `head_sha` are genuinely optional and
  * become "", and `state` is GitHub's own domain — an unexpected value reads as
- * the only state a client knows how to render.
+ * the only state a client knows how to render. `reviewing` rides unchanged:
+ * it is already the explicit three-state projection (compass D16), and an
+ * `unknown` from a failed inflight read must reach the client as such — a
+ * default here would render a read failure as idle.
  */
-function pullRequestWireColumns(row: { title: string | null; state: string; head_sha: string | null }) {
+function pullRequestWireColumns(row: {
+  title: string | null;
+  state: string;
+  head_sha: string | null;
+  reviewing: PullRequestReviewing;
+}) {
   return {
     title: row.title ?? "",
     // The three states a client renders; anything else reads as 'open'.
     state: row.state === "merged" || row.state === "closed" ? row.state : "open",
     head_sha: row.head_sha ?? "",
+    reviewing: row.reviewing,
   };
 }
 

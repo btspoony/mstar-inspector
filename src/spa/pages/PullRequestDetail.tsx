@@ -22,6 +22,7 @@ import { formatRelativeTime } from "../relative-time";
 import { apiBase } from "../workspace-base";
 import { MetricBand, type Metric } from "../components/MetricBand";
 import { ErrorState } from "../components/state/ErrorState";
+import { ReviewingBadge } from "./ReviewingBadge";
 import {
   appPullRequestDetailUrl,
   appPullRequestRecordsUrl,
@@ -631,6 +632,7 @@ export function PullRequestDetailView({
             <ExternalLink aria-hidden="true" className="size-3" />
           </a>
           <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
+          <ReviewingBadge locale={locale} reviewing={pr.reviewing} />
           {pr.head_sha === "" ? null : (
             <span
               data-slot="head-sha"
@@ -723,7 +725,7 @@ export function PullRequestDetailView({
           </TabsTrigger>
         </TabsList>
 
-        <div className="mt-(--spacing-5) flex flex-col gap-(--spacing-6) xl:flex-row xl:items-start xl:gap-(--spacing-8)">
+        <div className="mt-(--spacing-6) flex flex-col gap-(--spacing-6) xl:flex-row xl:items-start xl:gap-(--spacing-8)">
           <div className="min-w-0 flex-1">
             <TabsContent value="findings">
               {/* The filter sits above the list; changing it reloads from page

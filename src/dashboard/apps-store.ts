@@ -632,6 +632,21 @@ export type UpsertPullRequestInput = {
   updatedAt?: string | null;
 };
 
+/**
+ * The per-PR live-inflight projection (compass D11/D16). `live` means the
+ * PR's `review_inflight` row is held right now — the pipeline's own
+ * `expires_at > now` predicate, evaluated HERE — and carries the holding
+ * attempt's head sha (`""` for a comment trigger) and its acquisition
+ * instant. `none` is a successful read with no live row: no row, released,
+ * expired, queued or superseded before admission, abandoned after release.
+ * `unknown` is a failed read, which a client must never render as idle. No
+ * stage, attempt id or expiry crosses this boundary.
+ */
+export type PullRequestReviewing =
+  | { state: "live"; head_sha: string; acquired_at: string }
+  | { state: "none" }
+  | { state: "unknown" };
+
 /** The PR-ledger read row (`pull_requests` + its newest review, migration 0039). */
 export type PullRequestRow = {
   number: number;
@@ -644,6 +659,7 @@ export type PullRequestRow = {
   last_seen_at: string;
   latest_review: { verdict: string; reviewed_at: string } | null;
   failure_count: number;
+  reviewing: PullRequestReviewing;
 };
 
 /**
@@ -825,6 +841,36 @@ export function createAppsStore(db: AppsStoreD1) {
       if (entry) entry.rejected24h = row.n;
     }
     return byApp;
+  }
+
+  /**
+   * The App's live review locks, keyed by (owner, repo, pr_number) — or `null`
+   * when the read failed, because a failed read IS the `unknown` wire value
+   * (D16) and must not fail the whole PR face. ONE statement regardless of N:
+   * the live set is bounded by the concurrency caps, and the join keeps it
+   * inside this App's installations (the same attribution the failure count
+   * uses). `expires_at > now` is the pipeline's own acquire predicate, and the
+   * bound instant uses the ISO-8601-with-milliseconds form that column is
+   * written in — the one form it orders correctly as text. Keys fold case
+   * because the lock stores lowercase while the ledger keeps GitHub's spelling.
+   */
+  async function liveReviewLocks(
+    appId: string,
+  ): Promise<Map<string, PullRequestLockRow> | null> {
+    try {
+      const { results } = await db
+        .prepare(
+          `SELECT r.owner, r.repo, r.pr_number, r.head_sha, r.acquired_at
+           FROM review_inflight r
+           JOIN app_installations i ON i.installation_id = r.installation_id AND i.app_id = ?
+           WHERE r.expires_at > ?`,
+        )
+        .bind(appId, new Date().toISOString())
+        .all<PullRequestLockRow>();
+      return new Map(results.map((row) => [pullRequestKey(row.owner, row.repo, row.pr_number), row]));
+    } catch {
+      return null;
+    }
   }
 
   return {
@@ -1560,12 +1606,14 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * PR-ledger list face: the App's most recently active pull requests,
-     * newest first, plus the face's whole repository option set. FOUR
-     * statements per call regardless of N — the rows, the newest review per
-     * (owner, repo, pr_number) via a ROW_NUMBER() window (the
-     * deliverySummaries shape), the failure count joined through
-     * `app_installations`, and the option set — never one query per row, and
-     * never a second round trip for the option set.
+     * newest first, plus the face's whole repository option set, plus each
+     * row's D11 reviewing projection. FIVE statements per call regardless of
+     * N — the rows, the newest review per (owner, repo, pr_number) via a
+     * ROW_NUMBER() window (the deliverySummaries shape), the failure count
+     * joined through `app_installations`, the option set, and the App's live
+     * review locks (`liveReviewLocks`) — never one query per row, and never a
+     * second round trip for any of them (the lock read is issued beside the
+     * batch, not after it).
      *
      * Capped at PULL_REQUEST_LIST_LIMIT: any third party who opens a PR mints
      * a row and the retention sweep only drains TERMINAL rows, so the table's
@@ -1620,49 +1668,56 @@ export function createAppsStore(db: AppsStoreD1) {
       // window helper cannot leave the rows filtering after the cap.
       const repoPredicate = filter === undefined ? "" : PULL_REQUEST_REPO_PREDICATE;
       const window = pullRequestWindowSql(repoPredicate);
-      const results = await db.batch([
-        db
-          .prepare(
-            `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-             FROM pull_requests WHERE app_id = ?${repoPredicate}
-             ORDER BY ${PULL_REQUEST_LEDGER_ORDER}
-             LIMIT ?`,
-          )
-          .bind(...scope, PULL_REQUEST_LIST_LIMIT),
-        db
-          .prepare(
-            `SELECT owner, repo, pr_number, verdict, reviewed_at FROM (
-               SELECT owner, repo, pr_number, verdict, reviewed_at,
-                      ROW_NUMBER() OVER (PARTITION BY owner, repo, pr_number
-                        ORDER BY reviewed_at DESC, rowid DESC) AS rn
-               FROM reviews
-               WHERE app_id = ?
-                 AND (owner, repo, pr_number) IN (${window})
-             ) WHERE rn = 1`,
-          )
-          .bind(appId, ...scope, PULL_REQUEST_LIST_LIMIT),
-        db
-          .prepare(
-            `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
-             FROM review_failures f
-             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
-               AND (f.owner, f.repo, f.pr_number) IN (${window})
-             GROUP BY f.owner, f.repo, f.pr_number`,
-          )
-          .bind(appId, ...scope, PULL_REQUEST_LIST_LIMIT),
-        db
-          .prepare(
-            `SELECT DISTINCT owner, repo FROM pull_requests WHERE app_id = ?
-             ORDER BY owner, repo`,
-          )
-          .bind(appId),
+      // The lock projection rides the same round trip: the ledger batch and
+      // the App's live locks are independent reads, and only the first may
+      // fail the payload.
+      const [results, locks] = await Promise.all([
+        db.batch([
+          db
+            .prepare(
+              `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
+               FROM pull_requests WHERE app_id = ?${repoPredicate}
+               ORDER BY ${PULL_REQUEST_LEDGER_ORDER}
+               LIMIT ?`,
+            )
+            .bind(...scope, PULL_REQUEST_LIST_LIMIT),
+          db
+            .prepare(
+              `SELECT owner, repo, pr_number, verdict, reviewed_at FROM (
+                 SELECT owner, repo, pr_number, verdict, reviewed_at,
+                        ROW_NUMBER() OVER (PARTITION BY owner, repo, pr_number
+                          ORDER BY reviewed_at DESC, rowid DESC) AS rn
+                 FROM reviews
+                 WHERE app_id = ?
+                   AND (owner, repo, pr_number) IN (${window})
+               ) WHERE rn = 1`,
+            )
+            .bind(appId, ...scope, PULL_REQUEST_LIST_LIMIT),
+          db
+            .prepare(
+              `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
+               FROM review_failures f
+               JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+               WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+                 AND (f.owner, f.repo, f.pr_number) IN (${window})
+               GROUP BY f.owner, f.repo, f.pr_number`,
+            )
+            .bind(appId, ...scope, PULL_REQUEST_LIST_LIMIT),
+          db
+            .prepare(
+              `SELECT DISTINCT owner, repo FROM pull_requests WHERE app_id = ?
+               ORDER BY owner, repo`,
+            )
+            .bind(appId),
+        ]),
+        liveReviewLocks(appId),
       ]);
       return {
         rows: assemblePullRequests(
           results[0]!.results as PullRequestBaseRow[],
           results[1]!.results as PullRequestReviewRow[],
           results[2]!.results as PullRequestFailureCountRow[],
+          locks,
         ),
         repos: (results[3]!.results as Array<{ owner: string; repo: string }>).map(
           (row) => `${row.owner}/${row.repo}`,
@@ -1681,6 +1736,9 @@ export function createAppsStore(db: AppsStoreD1) {
      * authoritative verdict/attribution source, so paging the reviews section
      * can never rewrite the headline. The counts are a separate read
      * (`countPullRequestRecords`), so the head stays one row plus one lookup.
+     * The live-inflight projection is a second independent read on the same
+     * round trip — the detail face's D11 badge — and its failure degrades that
+     * one field to `unknown` rather than failing the head.
      */
     async getPullRequestHead(
       appId: string,
@@ -1688,26 +1746,30 @@ export function createAppsStore(db: AppsStoreD1) {
       repo: string,
       prNumber: number,
     ): Promise<PullRequestHeadRow | null> {
-      const results = await db.batch([
-        db
-          .prepare(
-            `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-             FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
-          )
-          .bind(appId, owner, repo, prNumber),
-        db
-          .prepare(
-            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha FROM reviews
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-             ORDER BY reviewed_at DESC, rowid DESC LIMIT 1`,
-          )
-          .bind(appId, owner, repo, prNumber),
+      const [results, locks] = await Promise.all([
+        db.batch([
+          db
+            .prepare(
+              `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
+               FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+            )
+            .bind(appId, owner, repo, prNumber),
+          db
+            .prepare(
+              `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha FROM reviews
+               WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+               ORDER BY reviewed_at DESC, rowid DESC LIMIT 1`,
+            )
+            .bind(appId, owner, repo, prNumber),
+        ]),
+        liveReviewLocks(appId),
       ]);
       const row = results[0]!.results[0] as PullRequestBaseRow | undefined;
       if (row === undefined) return null;
       return {
         ...row,
         latest_review: (results[1]!.results[0] as PullRequestReviewDetailRow | undefined) ?? null,
+        reviewing: reviewingOf(locks, owner, repo, prNumber),
       };
     },
 
@@ -1961,11 +2023,44 @@ export type PullRequestFailureDetailRow = { stage: string; error: string; create
 
 /**
  * The detail head: the ledger row plus its newest review (whole row, nullable)
- * — the header's authoritative verdict and attribution.
+ * — the header's authoritative verdict and attribution — and the D11
+ * live-inflight projection.
  */
 export type PullRequestHeadRow = PullRequestBaseRow & {
   latest_review: PullRequestReviewDetailRow | null;
+  reviewing: PullRequestReviewing;
 };
+
+/** One live `review_inflight` row, narrowed to what the projection carries. */
+type PullRequestLockRow = {
+  owner: string;
+  repo: string;
+  pr_number: number;
+  head_sha: string;
+  acquired_at: string;
+};
+
+/** The lock map's key. Folded: the lock stores lowercase, the ledger does not. */
+function pullRequestKey(owner: string, repo: string, prNumber: number): string {
+  return `${owner.toLowerCase()}\u0000${repo.toLowerCase()}\u0000${prNumber}`;
+}
+
+/**
+ * One PR's projection from the App-wide lock map. A `null` map is the failed
+ * read, so the row reads `unknown` — never the idle `none`.
+ */
+function reviewingOf(
+  locks: Map<string, PullRequestLockRow> | null,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): PullRequestReviewing {
+  if (locks === null) return { state: "unknown" };
+  const lock = locks.get(pullRequestKey(owner, repo, prNumber));
+  return lock === undefined
+    ? { state: "none" }
+    : { state: "live", head_sha: lock.head_sha, acquired_at: lock.acquired_at };
+}
 
 /**
  * The record totals (the detail payload's `counts`), plus the PR's own
@@ -1991,14 +2086,17 @@ export type PullRequestPageRequest = {
 export type PullRequestRecordPage<T> = { items: T[]; total: number };
 
 /**
- * Join the ledger list's three result sets in memory — the tuple
+ * Join the ledger list's result sets in memory — the tuple
  * (owner, repo, pr_number) is the key, and a PR with no review / no failure
- * reads `latest_review: null`, `failure_count: 0`.
+ * reads `latest_review: null`, `failure_count: 0`. The live-inflight
+ * projection joins the same tuple; its map being `null` (a failed read) reads
+ * `unknown` on every row.
  */
 function assemblePullRequests(
   rows: PullRequestBaseRow[],
   reviews: PullRequestReviewRow[],
   failures: PullRequestFailureCountRow[],
+  locks: Map<string, PullRequestLockRow> | null,
 ): PullRequestRow[] {
   const key = (owner: string, repo: string, pr: number): string => `${owner}\u0000${repo}\u0000${pr}`;
   const reviewByKey = new Map(reviews.map((row) => [key(row.owner, row.repo, row.pr_number), row]));
@@ -2017,6 +2115,7 @@ function assemblePullRequests(
       last_seen_at: row.last_seen_at,
       latest_review: review ? { verdict: review.verdict, reviewed_at: review.reviewed_at } : null,
       failure_count: failureByKey.get(k) ?? 0,
+      reviewing: reviewingOf(locks, row.owner, row.repo, row.pr_number),
     };
   });
 }
