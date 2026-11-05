@@ -30,10 +30,11 @@ const BASE = {
 };
 
 /**
- * Byte-for-byte the `review_failures.error` the consumer writes for a terminal
- * admission drop (`handleGuardHeld`, src/pipeline/consumer.ts). The consumer
- * test pins the real writer's output against this same shape, so a prefix
- * drift on either side fails a test instead of silently zeroing the count.
+ * The `review_failures.error` shape a terminal admission drop carries
+ * (`handleGuardHeld`, src/pipeline/consumer.ts), with an arbitrary retry count
+ * and cap pair — these tests own the reader's grouping. The producer→reader
+ * contract is pinned by the consumer test, which feeds the REAL writer row
+ * through `countAdmissionDrops24h()` over the same database.
  */
 function dropError(reason: AdmissionDropReason): string {
   return `review dropped after 3 refused retries: ${reason} (system_cap 32, workspace_cap 4) — PR acme/widgets#42, head_sha ${BASE.head_sha}`;

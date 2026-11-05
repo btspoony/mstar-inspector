@@ -45,6 +45,7 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
 import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
 import { createArtifactStore } from "../../src/store/artifact-store";
+import { createFailureStore } from "../../src/store/failure-store";
 import { acquireInflight } from "../../src/store/inflight-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
@@ -2367,9 +2368,15 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)[0]).toMatchObject({ pr_number: 42, stage: "pipeline", head_sha: newer });
     const dropped = String(failureRows(db)[0]!.error);
     expect(dropped).toContain("pr-held");
-    // The admission-drop read derives the reason from this exact prefix; a
-    // writer that rewords it would zero the operator count silently.
-    expect(dropped).toContain("review dropped after 3 refused retries: pr-held (");
+    // Producer→reader contract: the row the REAL drop path just wrote, read
+    // through the production reader, lands in its own operator bucket and
+    // nowhere else. A writer reword the reader stops matching fails HERE.
+    expect(await createFailureStore(db).countAdmissionDrops24h()).toEqual({
+      "pr-held": 1,
+      "system-cap": 0,
+      "workspace-cap": 0,
+      error: 0,
+    });
     // Both shas are named: the skipped commit and the one the review holds.
     expect(dropped).toContain(newer);
     expect(dropped).toContain(SHA);
