@@ -1005,6 +1005,15 @@ export const en = {
       /** The stored budget could not be read — the number is the documented default. */
       recheckUnreadable:
         "The stored recheck assignment budget could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
+      /** Admission refusals the pipeline recorded over the trailing 24h. */
+      admissionDropsTitle: "Admission drops (last 24 hours)",
+      admissionDropsDescription:
+        "Reviews the pipeline refused to admit, counted by reason. A dropped review never started; the counts read the failure rows the pipeline already writes.",
+      /** Why an admission was refused: the PR lock, a cap, or a storage fault. */
+      admissionDropsPrHeld: "PR in flight",
+      admissionDropsSystemCap: "System cap",
+      admissionDropsWorkspaceCap: "Workspace cap",
+      admissionDropsError: "Storage error",
       /**
        * Deployment version footer. `{version}` carries the
        * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the

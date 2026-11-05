@@ -20,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@design-system";
-import { t, type Locale } from "../../i18n";
+import { t, type DictionaryKey, type Locale } from "../../i18n";
 import { APP_VERSION } from "../../version";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
@@ -34,6 +34,7 @@ import {
   setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
   useLoaded,
+  type AdmissionDropCounts,
   type CheckBudgetConfig,
   type RecheckAssignmentConfig,
   type ReviewLevelConfig,
@@ -47,6 +48,14 @@ function levelLabel(locale: Locale, level: string): string {
   if (level === "default") return t(locale, "admin.runtime.reviewLevelStandard");
   return level;
 }
+
+/** The admission-drop card's fixed reason order and its label per reason. */
+const ADMISSION_DROP_FIELDS = [
+  { reason: "pr-held", label: "admin.runtime.admissionDropsPrHeld" },
+  { reason: "system-cap", label: "admin.runtime.admissionDropsSystemCap" },
+  { reason: "workspace-cap", label: "admin.runtime.admissionDropsWorkspaceCap" },
+  { reason: "error", label: "admin.runtime.admissionDropsError" },
+] as const satisfies ReadonlyArray<{ reason: keyof AdmissionDropCounts; label: DictionaryKey }>;
 
 export function RuntimePage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readRuntime);
@@ -244,6 +253,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const level = data.reviewLevel;
           // And for the recheck seat's ask budget.
           const recheck = data.recheckAssignment;
+          // And for the admission-drop counts.
+          const drops = data.admissionDrops24h;
           return (
           <div className="flex flex-col gap-4">
             <SectionCard tier="secondary">
@@ -506,6 +517,28 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     {t(locale, "admin.runtime.recheckCurrent", { value: recheck.maxBytes })}
                   </p>
                 )}
+              </CardContent>
+            </SectionCard>
+            )}
+            {drops === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.admissionDropsTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.admissionDropsDescription")}
+                </p>
+                <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-4">
+                  {ADMISSION_DROP_FIELDS.map(({ reason, label }) => (
+                    <div key={reason} className="flex flex-col gap-1">
+                      <dt className="text-muted-foreground">{t(locale, label)}</dt>
+                      <dd className="text-lg font-medium" data-admission-drops={reason}>
+                        {drops[reason]}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
               </CardContent>
             </SectionCard>
             )}

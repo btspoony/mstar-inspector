@@ -143,6 +143,14 @@ export type RecheckAssignmentConfig = {
   degraded: boolean;
 };
 
+/** Admission drops in the trailing 24h, one count per refusal reason. */
+export type AdmissionDropCounts = {
+  "pr-held": number;
+  "system-cap": number;
+  "workspace-cap": number;
+  error: number;
+};
+
 /** The runtime parameters (iteration spec §1.1, spec §7.10). */
 export type RuntimeConfig = {
   concurrency: number;
@@ -161,6 +169,8 @@ export type RuntimeConfig = {
   reviewLevel: ReviewLevelConfig | null;
   /** The recheck ask-budget surface; `null` under the same older-Worker rule. */
   recheckAssignment: RecheckAssignmentConfig | null;
+  /** The 24h admission-drop counts; `null` under the same older-Worker rule. */
+  admissionDrops24h: AdmissionDropCounts | null;
 };
 
 function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
@@ -203,6 +213,18 @@ function parseRecheckAssignment(row: Json): RecheckAssignmentConfig | null {
   };
 }
 
+function parseAdmissionDrops(row: Json): AdmissionDropCounts | null {
+  const raw = row.admissionDrops24h;
+  if (raw === undefined) return null;
+  const drops = map(raw, "runtime admissionDrops24h");
+  return {
+    "pr-held": num(drops, "pr-held"),
+    "system-cap": num(drops, "system-cap"),
+    "workspace-cap": num(drops, "workspace-cap"),
+    error: num(drops, "error"),
+  };
+}
+
 export async function readRuntime(): Promise<RuntimeConfig> {
   const body = map(await fetchJson(`${BASE}/runtime`), "runtime response");
   return {
@@ -213,6 +235,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     checkBudgets: parseCheckBudgets(body),
     reviewLevel: parseReviewLevel(body),
     recheckAssignment: parseRecheckAssignment(body),
+    admissionDrops24h: parseAdmissionDrops(body),
   };
 }
 
