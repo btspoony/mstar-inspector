@@ -26,8 +26,9 @@
  * throws and never loses the review. The status document is the attributable
  * record (outcome + reason + error) the runner writes for D1; the stderr
  * event stays for container logs. Validation is `validateRecheckDoc`
- * (fail-closed at document level, row-level drops named in
- * `status.rejected_row_ids` and counted by `status.rejected`); the strict
+ * against the FITTED assignment the seat received (a slice the fit omitted
+ * is not citable proof), fail-closed at document level, row-level drops named
+ * in `status.rejected_row_ids` and counted by `status.rejected`; the strict
  * outputSchema only enforces shape.
  *
  * Shared soft clock: the same `anchorRecheckDeadline` call also anchors the
@@ -526,7 +527,10 @@ export async function runRecheckSeat(input: {
       maxRuntimeMs,
       signal: input.signal,
     });
-    gate = validateRecheckDoc(recheckStructuredData(result), input.input);
+    // Validate against the catalog the seat was ASKED with, not the round's
+    // full one: a slice the fit omitted is proof the seat never received, so
+    // citing it must drop that row here rather than count it `addressed`.
+    gate = validateRecheckDoc(recheckStructuredData(result), ask.input);
   } catch (error) {
     // A by-design abort is a CONTRACT exit, not a lost round: the caller
     // cancels this seat when the main review settles (spec §7.8), so the
