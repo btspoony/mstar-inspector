@@ -200,6 +200,17 @@ describe("parseUsageSnapshot — field-by-field validation", () => {
     expect(parseUsageSnapshot({ status: "ok", fetchedAt: 1, limits: [], absentCause: "ghost" })).toBeNull();
   });
 
+  test("non-finite numbers (NaN / Infinity) fail the parse instead of rendering NaN%", () => {
+    const limit = { id: "x", kind: "window", unit: "percent" };
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      expect(parseUsageSnapshot({ status: "ok", fetchedAt: 1, limits: [{ ...limit, usedFraction: bad }] })).toBeNull();
+      expect(
+        parseUsageSnapshot({ status: "ok", fetchedAt: 1, limits: [{ id: "x", kind: "balance", unit: "credits", remaining: bad }] }),
+      ).toBeNull();
+      expect(parseUsageSnapshot({ status: "ok", fetchedAt: 1, limits: [{ ...limit, resetsAt: bad }] })).toBeNull();
+    }
+  });
+
   test("a valid snapshot parses with its limits and optional fields", () => {
     const parsed = parseUsageSnapshot({
       status: "ok",
@@ -334,6 +345,22 @@ describe("UsageDialog — probe on open and refresh", () => {
       expect(text).toContain("12.5 credits remaining");
       expect(text).toContain(t(locale, "settings.providers.usage.shared"));
       expect(view.dialog()?.querySelector('[data-slot="usage-bar"]')).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a balance limit without a remaining amount renders no fabricated zero", async () => {
+    queue.push(() => new Response(snapshotBody({
+      limits: [{ id: "hyper:credits", kind: "balance", unit: "credits" }],
+    })));
+    const view = await mount(probedPayload());
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const text = view.dialog()?.textContent ?? "";
+      expect(text).not.toContain("0 credits remaining");
+      expect(text).toContain(t(locale, "settings.providers.usage.absentNothing"));
     } finally {
       await view.cleanup();
     }

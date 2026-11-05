@@ -1571,20 +1571,22 @@ function parseUsageLimit(raw: unknown): UsageLimit | null {
   const limit: UsageLimit = { id: raw.id, kind: raw.kind, unit: raw.unit };
   // Every optional field is validated before it is trusted: an off-shape
   // snapshot fails the parse instead of rendering a fabricated 0 %.
+  // Number.isFinite — typeof NaN/Infinity is "number" and would render as
+  // "NaN%" / "NaN credits".
   if (raw.usedFraction !== undefined) {
-    if (typeof raw.usedFraction !== "number") return null;
+    if (typeof raw.usedFraction !== "number" || !Number.isFinite(raw.usedFraction)) return null;
     limit.usedFraction = raw.usedFraction;
   }
   if (raw.remaining !== undefined) {
-    if (typeof raw.remaining !== "number") return null;
+    if (typeof raw.remaining !== "number" || !Number.isFinite(raw.remaining)) return null;
     limit.remaining = raw.remaining;
   }
   if (raw.limit !== undefined) {
-    if (typeof raw.limit !== "number") return null;
+    if (typeof raw.limit !== "number" || !Number.isFinite(raw.limit)) return null;
     limit.limit = raw.limit;
   }
   if (raw.resetsAt !== undefined) {
-    if (typeof raw.resetsAt !== "number") return null;
+    if (typeof raw.resetsAt !== "number" || !Number.isFinite(raw.resetsAt)) return null;
     limit.resetsAt = raw.resetsAt;
   }
   if (raw.shared !== undefined) {

@@ -190,10 +190,19 @@ function UsageLimitRow({ locale, limit }: { locale: SpaBoot["locale"]; limit: Us
       </li>
     );
   }
+  // A balance the vendor stated without an amount has nothing truthful to
+  // render — the muted absent copy, never a fabricated "0 credits remaining".
+  if (typeof limit.remaining !== "number") {
+    return (
+      <li className="text-sm text-muted-foreground">
+        {t(locale, "settings.providers.usage.absentNothing")}
+      </li>
+    );
+  }
   return (
     <li className="text-sm text-muted-foreground">
       {t(locale, "settings.providers.usage.balanceRemaining", {
-        amount: limit.remaining ?? 0,
+        amount: limit.remaining,
         unit: t(locale, `settings.providers.usage.unit.${limit.unit}`),
       })}
       {suffix}
