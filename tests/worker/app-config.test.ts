@@ -152,6 +152,9 @@ function createPreProviderPoolD1(): TestD1 {
   applyMigration(db, "0006_app_provider_config.sql");
   applyMigration(db, "0008_github_apps_ops.sql");
   applyMigration(db, "0009_app_model_roles.sql");
+  // 0010: the derived tail's 0048 indexes review_failures — the table must
+  // exist before `migrationsAfter(0038)` runs.
+  applyMigration(db, "0010_review_failures.sql");
   // 0011: the settings page now renders the recent-deliveries
   // panel from webhook_deliveries on every render — the fixture must carry
   // the table or every settings route 500s.
