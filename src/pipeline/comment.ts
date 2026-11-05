@@ -567,7 +567,8 @@ function neutralizeReportText(text: string): string {
 }
 
 /**
- * Compose the report sections into an engine-rendered review body:
+ * Compose the report fields into an engine-rendered review body; the tail
+ * sections are appended by `buildReviewBody` through `buildReportTail`.
  *
  *   `## 📋 Review` → overview → (narrative) → `### Revalidated findings` →
  *   `### Findings` → `### Linked-issue AC` → `### ✅ Verified` →
@@ -586,14 +587,6 @@ function neutralizeReportText(text: string): string {
  * revalidated table keeps its position and the layout stays fixed. A missing
  * report writes `none` under every heading — the headings themselves are never
  * deleted.
- */
-export function insertReportSections(rendered: string, report: ReportDoc | null, revalidated: string): string {
-  return `${insertReportFields(rendered, report, revalidated)}\n\n${buildReportTail(report)}`;
-}
-
-/**
- * Compose the report fields INTO the engine layout — the overview and the
- * revalidated table only. The tail is built separately by `buildReportTail`.
  */
 function insertReportFields(rendered: string, report: ReportDoc | null, revalidated: string): string {
   let body = rendered;
