@@ -155,6 +155,8 @@ export type CatalogProvider = {
   api: string | null;
   models: string[];
   verifiable: boolean;
+  /** The provider answers a per-key usage probe (`/keys/usage`). */
+  usage_probe: boolean;
   /** Usability vs the App's selected runtime image. */
   eligibility: ProviderEligibility;
   /**
@@ -1486,6 +1488,7 @@ function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
         (row.base_url === null || typeof row.base_url === "string") &&
         (row.api === null || typeof row.api === "string") &&
         typeof row.verifiable === "boolean" &&
+        typeof row.usage_probe === "boolean" &&
         isStringArray(row.models),
     )
   );

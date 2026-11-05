@@ -27,6 +27,7 @@ const catalogEntry = (id: string, overrides: Partial<CatalogProvider> = {}): Cat
   api: null,
   models: [],
   verifiable: true,
+  usage_probe: false,
   eligibility: "builtin",
   display_group: "catalog",
   ...overrides,

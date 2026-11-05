@@ -104,6 +104,7 @@ const providersPayload = (): SettingsManagePayload => ({
       api: null,
       models: [],
       verifiable: true,
+      usage_probe: false,
       eligibility: "builtin",
       display_group: "common",
     },

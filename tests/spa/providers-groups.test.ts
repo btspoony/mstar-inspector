@@ -21,6 +21,7 @@ const catalogEntry = (id: string, tier: "builtin" | "template"): CatalogProvider
   api: null,
   models: [],
   verifiable: true,
+  usage_probe: false,
   eligibility: "builtin",
   display_group: "catalog",
 });

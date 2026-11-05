@@ -474,6 +474,7 @@ describe("provider combobox", () => {
     api: null,
     models: ["m1"],
     verifiable: true,
+    usage_probe: false,
     eligibility: "builtin",
     display_group: "common",
     ...overrides,
@@ -486,6 +487,7 @@ describe("provider combobox", () => {
     api: null,
     models: ["m1"],
     verifiable: true,
+    usage_probe: false,
     eligibility: "builtin",
     display_group: "catalog",
     ...overrides,
@@ -842,6 +844,7 @@ describe("add-entry visibility + picker usability at breadth", () => {
       api: "openai-completions",
       models: ["m1"],
       verifiable: false,
+      usage_probe: false,
       eligibility: "template",
       display_group: "catalog",
     };
@@ -877,6 +880,7 @@ describe("add-entry visibility + picker usability at breadth", () => {
       api: "openai-completions",
       models: ["m1"],
       verifiable: false,
+      usage_probe: false,
       eligibility: "template",
       display_group: "catalog",
     };

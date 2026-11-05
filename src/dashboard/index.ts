@@ -159,6 +159,7 @@ import {
   verifyProviderKey,
   type VerifyFailureReason,
 } from "./provider-verify";
+import { hasUsageProbe, probeProviderUsage } from "./provider-usage";
 import {
   countUsers,
   deleteWorkspaceMember,
@@ -3335,6 +3336,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // everything else, in both tiers). Array order is unchanged and the
       // field drives ONLY picker grouping — the add/verify/save mechanics
       // keep branching on `tier`/`eligibility`, never on `display_group`.
+      // `usage_probe` marks the providers whose own quota endpoint the
+      // per-key usage action can ask (the probe table's catalog ids); it is
+      // derived, never a second hand-kept list.
       provider_catalog: [
         ...PROVIDER_IDS.map((id) => {
           const meta = PROVIDER_META[id];
@@ -3347,6 +3351,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
             api: meta.api,
             models: [...meta.models],
             verifiable: PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported",
+            usage_probe: hasUsageProbe(id),
             eligibility: ompRuntime ? meta.tier : "unavailable",
             display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
           };
@@ -3361,6 +3366,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
             api: meta.api,
             models: [...meta.models],
             verifiable: true,
+            usage_probe: hasUsageProbe(id),
             eligibility: ompRuntime ? meta.tier : "unavailable",
             display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
           })),
@@ -3506,6 +3512,39 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
       );
     }
     return c.json({ ok: false, reason: "unexpected" as const }, 500);
+  }
+};
+
+/**
+ * Per-key usage probe (plan api-key-usage-probe): `POST
+ * /api/apps/:appId/keys/usage` with form fields `provider` + `keyId` asks the
+ * provider's own quota endpoint with ONE stored key and answers the normalized
+ * snapshot. Refusals are ordered by cost: a provider with no probe is refused
+ * BEFORE any store read or outbound request (`unsupported_provider`), an id
+ * neither pool holds for THIS App — another App's id, or a deleted one — is
+ * `unknown_key`. The plaintext only ever reaches the probe's request header:
+ * it is never in the response, and a store/decrypt throw is the closed
+ * `unexpected` reason rather than a 5xx.
+ */
+const appKeyUsageRoute = async (c: DashboardContext) => {
+  const gate = await requireAppSettings(c);
+  if (!gate.ok) return gate.response;
+  const form = await c.req.parseBody();
+  const provider = typeof form.provider === "string" ? form.provider.trim() : "";
+  const keyId = typeof form.keyId === "string" ? form.keyId.trim() : "";
+  if (!hasUsageProbe(provider)) {
+    return c.json({ ok: false, reason: "unsupported_provider" as const }, 400);
+  }
+  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+  try {
+    const stored = await store.getProviderKeyPlaintext(gate.app.id, provider, keyId);
+    if (stored === null) return c.json({ ok: false, reason: "unknown_key" as const }, 400);
+    const snapshot = await probeProviderUsage({ fetch: verifyFetch }, provider, stored.plainKey);
+    c.header("Cache-Control", "private, no-store");
+    return c.json({ ok: true, ...snapshot });
+  } catch (err) {
+    logSettingsFailure("key_usage", gate.app.id, err);
+    return c.json({ ok: false, reason: "unexpected" as const }, 400);
   }
 };
 
@@ -4850,6 +4889,7 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/keys/verify", handler: appKeyVerifyRoute, access: "write" },
+  { method: "post", path: "/api/apps/:appId/keys/usage", handler: appKeyUsageRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/insights/summary", handler: appInsightsRoute, access: "write" },

@@ -27,6 +27,7 @@ const catalogEntry = (id: string, tier: "builtin" | "template", extra: Partial<C
   api: null,
   models: [],
   verifiable: true,
+  usage_probe: false,
   eligibility: "builtin",
   display_group: "catalog",
   ...extra,
