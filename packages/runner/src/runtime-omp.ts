@@ -101,7 +101,13 @@ import {
   type MstarReviewV1,
 } from "@mstar-harness/engine";
 import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../shared/src/runtime";
-import { remainingOuterMs, remainingSoftMinutes, runRecheckSeat, type RecheckSeatResult } from "./recheck";
+import {
+  RECHECK_PUBLICATION_TAIL_MS,
+  remainingOuterMs,
+  remainingSoftMinutes,
+  runRecheckSeat,
+  type RecheckSeatResult,
+} from "./recheck";
 import { runReportSeat, revalidatedNotes } from "./report";
 import type { ReportDoc } from "../../shared/src/report-wire";
 import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/recheck-wire";
@@ -550,13 +556,6 @@ function dispatchBudgetMinutes(level: ReviewLevel): number {
 }
 
 /**
- * Tail of the outer exec guard held clear of the seats: once the last seat
- * stops, the runner still has to merge, synthesize and validate the envelope,
- * so no seat may claim the whole remaining budget.
- */
-const SEAT_CAP_TAIL_MS = 60_000;
-
-/**
  * Hard wall-clock cap for one fan-out seat: twice the tier's SOFT cap, never
  * beyond the remaining OUTER exec budget less the reserved tail. The two clocks
  * are distinct by construction — the soft cap is a convergence target that
@@ -566,7 +565,7 @@ const SEAT_CAP_TAIL_MS = 60_000;
  */
 function seatMaxRuntimeMs(nowMs: number, level: ReviewLevel): number {
   const softCapMs = PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes * 60_000;
-  return Math.max(1, Math.min(softCapMs * 2, remainingOuterMs(nowMs, level) - SEAT_CAP_TAIL_MS));
+  return Math.max(1, Math.min(softCapMs * 2, remainingOuterMs(nowMs, level) - RECHECK_PUBLICATION_TAIL_MS));
 }
 
 /**
@@ -1402,7 +1401,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           // stop. An unbounded wait would hang the review on a session that
           // never comes back.
           if (resuming && yielded === undefined && gathered === undefined) {
-            await waitTick(Math.max(1, remainingOuterMs(Date.now(), input.level) - SEAT_CAP_TAIL_MS), outcome);
+            await waitTick(Math.max(1, remainingOuterMs(Date.now(), input.level) - RECHECK_PUBLICATION_TAIL_MS), outcome);
           }
           unsubscribe();
         }
@@ -1509,7 +1508,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       }
       // The review settled: await the already-running recheck on ITS OWN
       // budget. It started with this run's anchored outer deadline, so the
-      // await is bounded and is never a fresh 180s. Stop it only when the
+      // await is bounded and is never a fresh cap. Stop it only when the
       // outer deadline leaves no room to finish, instead of blocking the tail.
       if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
@@ -1803,7 +1802,7 @@ export const ompAgentRuntime: AgentRuntime = {
       }
       // The review settled: await the already-running recheck on ITS OWN
       // budget — bounded by the same anchored outer deadline, never a fresh
-      // 180s. Abort only when the outer deadline leaves no room to finish.
+      // cap. Abort only when the outer deadline leaves no room to finish.
       if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
 

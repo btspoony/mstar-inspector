@@ -2270,10 +2270,10 @@ function staleRecheckDoc(): RecheckDoc {
 
 describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   beforeEach(() => {
-    // Fresh far-future anchor per test: budget-equivalent to the unset state
-    // (full 180s cap) AND immune to anchor state leaked from other test
-    // files (bun's module registry is process-global — the runner's
-    // anchorRecheckDeadline state is shared).
+    // A fresh far-future anchor per test: an hour of outer guard left, so the
+    // TIER's clock (deep, 15 min) is the whole budget — and immune to anchor
+    // state leaked from other test files (bun's module registry is
+    // process-global — the runner's anchorRecheckDeadline state is shared).
     anchorRecheckDeadline(Date.now() + 3_600_000, "deep");
   });
 
@@ -2303,9 +2303,9 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(request.schemaMode).toBe("strict");
     expect(request.enableLsp).toBe(false);
     expect(request.enableIrc).toBe(false);
-    // Unset (fresh far-future) anchor → the full 180s cap; the SDK abort
-    // signal is wired.
-    expect(request.maxRuntimeMs).toBe(180_000);
+    // The cap is the anchored tier's own clock (deep: 15 min), never the
+    // retired fixed 180s; the SDK abort signal is wired.
+    expect(request.maxRuntimeMs).toBe(PR_REVIEW_TIER_BUDGETS.deep.wallClockMinutes * 60_000);
     expect(request.signal).toBeInstanceOf(AbortSignal);
     expect(request.model).toEqual([...BASE_INPUT.modelSelectors]);
     // The assignment labels the discussion untrusted and carries the
@@ -2374,8 +2374,9 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       rejected: 0,
       rejected_row_ids: [],
       rejected_unnamed: 0,
-      // The tail skip names its cause AND the figures it decided on.
-      error: "recheck seat skipped (tail): the review's outer deadline left 0ms, the seat needs at least 35000ms",
+      // The tail skip names its cause AND the figures it decided on: the outer
+      // time the seat's 30s floor plus the 60s publication tail needs.
+      error: "recheck seat skipped (tail): the review's outer deadline left 0ms, the seat needs at least 90000ms",
     });
     // Only the review seat ran — no recheck child was dispatched.
     expect(subagentRequests).toHaveLength(1);
@@ -2428,10 +2429,11 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   test("the settle-time gate stays open near the floor: a seat that started is awaited, not aborted", async () => {
-    // 45 s of outer budget left: recheckBudget floors out at the 30 s minimum,
-    // so the seat starts with 40 s and the settle-time gate (remaining <= 30 s)
-    // does NOT abort it. The old unconditional abort would have.
-    anchorRecheckDeadline(Date.now() - 600_000 + 45_000, "quick");
+    // 100 s of outer budget left: the 60 s publication tail leaves 40 s, above
+    // the 30 s floor, so the seat starts — and the settle-time gate
+    // (remaining <= 30 s) does NOT abort it. The old unconditional abort would
+    // have.
+    anchorRecheckDeadline(Date.now() - 600_000 + 100_000, "quick");
     holdSeats = true;
     const dispatched = [deferred(), deferred(), deferred()];
     seatDispatchQueue = dispatched.map((entry) => entry.resolve);
