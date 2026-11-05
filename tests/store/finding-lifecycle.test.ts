@@ -1063,8 +1063,12 @@ describe("fair rotation (spec §7.2)", () => {
     expect(selected.map((t) => t.rowId)).toEqual([
       "row-open", "row-pending", "row-retry", "row-needs-recheck", "row-local-error",
     ]);
-    // The coverage total mirrors the extended selection (honest `capped`).
-    expect(await countRecheckableFindings(db, SCOPE)).toBe(5);
+    // The coverage total binds the SAME predicate as the selector, so the
+    // invariant the published coverage line depends on (`capped` = the honest
+    // remainder) holds with addressed rows in the selection.
+    const totalOpen = await countRecheckableFindings(db, SCOPE);
+    expect(totalOpen).toBe(5);
+    expect(selected.length).toBeLessThanOrEqual(totalOpen);
   });
 
   test("a re-selected addressed row advances last_scheduled_ms, so it cannot starve the rows behind it", async () => {

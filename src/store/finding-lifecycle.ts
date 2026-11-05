@@ -165,6 +165,35 @@ function threadScope(row: { id: string; app_id: string; installation_id: number;
 // ---------------------------------------------------------------------------
 
 /**
+ * The RECHECKABLE predicate (spec §7.2/§7.4) — ONE copy shared by the
+ * selector and the coverage count, so `selected <= totalOpen` cannot drift
+ * into a lying `capped` remainder. Binds the scope tuple TWICE (the finding
+ * row, then its association probe): bind it with `recheckableScopeBinds`.
+ */
+const RECHECKABLE_WHERE_SQL = `f.app_id = ? AND f.installation_id = ? AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
+         AND (
+           f.state = 'open'
+           OR (
+             f.state = 'addressed'
+             AND EXISTS (
+               SELECT 1 FROM review_threads t
+               WHERE t.app_id = ? AND t.installation_id = ? AND t.owner = ? AND t.repo = ? AND t.pr_number = ?
+                 AND t.finding_row_id = f.id
+                 AND t.superseded_by_publication_id IS NULL
+                 AND t.resolution_state IN ('pending','retry','needs-recheck','local-error')
+             )
+           )
+         )`;
+
+/** The ten binds `RECHECKABLE_WHERE_SQL` expects, in placeholder order. */
+function recheckableScopeBinds(scope: Scope): [string, number, string, string, number, string, number, string, string, number] {
+  return [
+    scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
+    scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
+  ];
+}
+
+/**
  * Recheckable-row selection for the recheck seat (spec §7.2): OPEN rows plus
  * ADDRESSED rows that still own a non-superseded association in a non-terminal
  * state (`pending`/`retry`/`needs-recheck`/`local-error`). The second class is
@@ -191,27 +220,11 @@ export async function selectAssessmentTargets(db: D1Like, scope: Scope, limit: n
   const rows = await db
     .prepare(
       `SELECT f.* FROM review_findings f
-       WHERE f.app_id = ? AND f.installation_id = ? AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
-         AND (
-           f.state = 'open'
-           OR (
-             f.state = 'addressed'
-             AND EXISTS (
-               SELECT 1 FROM review_threads t
-               WHERE t.app_id = ? AND t.installation_id = ? AND t.owner = ? AND t.repo = ? AND t.pr_number = ?
-                 AND t.finding_row_id = f.id
-                 AND t.superseded_by_publication_id IS NULL
-                 AND t.resolution_state IN ('pending','retry','needs-recheck','local-error')
-             )
-           )
-         )
+       WHERE ${RECHECKABLE_WHERE_SQL}
        ORDER BY COALESCE(f.last_scheduled_ms, f.created_ms), f.id
        LIMIT ?`,
     )
-    .bind(
-      scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
-      scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, capped,
-    )
+    .bind(...recheckableScopeBinds(scope), capped)
     .all<ReviewFindingRow>();
   const found = rows.results;
   if (found.length === 0) return [];
@@ -246,34 +259,14 @@ export async function selectAssessmentTargets(db: D1Like, scope: Scope, limit: n
 
 /**
  * Aggregate count of RECHECKABLE rows for the scope — the `totalOpen` the
- * round coverage reports (spec §7.4). It mirrors `selectAssessmentTargets`
- * exactly (open rows plus addressed rows owning a non-terminal association),
- * so `selected <= totalOpen` always holds and `capped` stays the honest
- * remainder instead of going negative.
+ * round coverage reports (spec §7.4). It binds the SAME predicate as
+ * `selectAssessmentTargets`, so `selected <= totalOpen` always holds and
+ * `capped` stays the honest remainder instead of going negative.
  */
 export async function countRecheckableFindings(db: D1Like, scope: Scope): Promise<number> {
   const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM review_findings f
-       WHERE f.app_id = ? AND f.installation_id = ? AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
-         AND (
-           f.state = 'open'
-           OR (
-             f.state = 'addressed'
-             AND EXISTS (
-               SELECT 1 FROM review_threads t
-               WHERE t.app_id = ? AND t.installation_id = ? AND t.owner = ? AND t.repo = ? AND t.pr_number = ?
-                 AND t.finding_row_id = f.id
-                 AND t.superseded_by_publication_id IS NULL
-                 AND t.resolution_state IN ('pending','retry','needs-recheck','local-error')
-             )
-           )
-         )`,
-    )
-    .bind(
-      scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
-      scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
-    )
+    .prepare(`SELECT COUNT(*) AS n FROM review_findings f WHERE ${RECHECKABLE_WHERE_SQL}`)
+    .bind(...recheckableScopeBinds(scope))
     .first<{ n: number }>();
   return row?.n ?? 0;
 }
