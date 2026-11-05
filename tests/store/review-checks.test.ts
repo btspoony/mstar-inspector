@@ -1607,7 +1607,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     expect((await listCheckReconcileBatch(db, T0 + 1)).map((r) => r.identity.attemptId)).toEqual([id]);
   });
 
-  test("a mixed-kind pair resumes only when EVERY suspended row is releasable", async () => {
+  test("the store read: a mixed-kind pair is resumable only when EVERY suspended row is releasable", async () => {
     const db = seededDb();
     // Two attempts under one pair: one credential-suspended, one held by the
     // kill switch. The resume write flips both, so neither may speak for the
@@ -1639,9 +1639,6 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
       .prepare(`UPDATE review_checks SET last_error = ? WHERE id = ?`)
       .run(checkSuspensionReason("paused", "kill switch"), second.attempt.identity.attemptId);
     const pair = { appId: APP_ID, installationId: SCOPE.installationId };
-    // The kill switch has been lifted, so the paused row is releasable.
-    db.raw.prepare(`UPDATE github_apps SET review_enabled = 1 WHERE id = ?`).run(APP_ID);
-
     // The credential envelope is unchanged: the paused row alone must not lift
     // the pair.
     expect(

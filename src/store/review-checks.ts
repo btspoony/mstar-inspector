@@ -1245,12 +1245,11 @@ export async function reenableChecksForApps(
  * demonstrably unchanged.
  *
  * `currentFingerprint` is the digest of the encrypted envelope currently stored
- * for the pair, re-read by the caller. The rule is M8's own comparison
+ * for the pair, re-read by the caller. The probe reads EVERY suspended row of
+ * the pair, because the resume write flips them all: one row of an unreleasable
+ * kind keeps the pair suspended. The rule is M8's own comparison
  * (`currentFingerprint !== recorded`), and it is deliberately asymmetric about
  * which side may be absent:
- *
- * The probe reads EVERY suspended row of the pair, because the resume write
- * flips them all: one row of an unreleasable kind keeps the pair suspended.
  *
  *  - a READABLE current digest that differs from the recorded one — INCLUDING
  *    the "recorded digest absent" case, where a stored null compares unequal —
@@ -1268,7 +1267,8 @@ export async function reenableChecksForApps(
  * Without the first case a suspension recorded with no digest — a `missing`
  * installation mapping, or a row written before this encoding existed — could
  * never be resumed by anything: not by comparison, and not by the operator
- * retry (which refuses suspended rows). Repairing the mapping would leave the rows durably stranded with no
+ * retry (which refuses suspended rows). Repairing the mapping would leave the
+ * rows durably stranded with no
  * operator path, which is the defect F-005 names.
  */
 export async function listReenableableCheckPairs(

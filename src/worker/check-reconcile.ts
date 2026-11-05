@@ -685,20 +685,32 @@ async function reenableProbe(
   | { kind: "resuspend"; reason: CheckCredentialReason; credentialFingerprint?: string }
 > {
   const rows = await db
+    // shortcut: tenant-bypass — per-pair Check resume probe selecting the kill
+    // switch only; no tenant-facing field. Upgrade: tenant-filter it once the
+    // check store becomes workspace-scoped.
     .prepare(
-      `SELECT last_error FROM review_checks
-        WHERE app_id = ? AND installation_id = ? AND recovery_state = 'suspended'`,
+      `SELECT rc.last_error, ga.review_enabled
+         FROM review_checks rc
+         JOIN github_apps ga ON ga.id = rc.app_id
+        WHERE rc.app_id = ? AND rc.installation_id = ? AND rc.recovery_state = 'suspended'`,
     )
     .bind(pair.appId, pair.installationId)
-    .all<{ last_error: string | null }>();
-  const kinds = rows.results.map((row) => checkSuspensionKindOf(row.last_error));
+    .all<{ last_error: string | null; review_enabled: number }>();
   // A pair may hold mixed suspension kinds (the kill-switch hold is per row, a
   // credential suspension covers the pair). Only when EVERY suspended row is
-  // status-resumable may this skip the credential probe: `disabled` was proved
-  // by App status and `paused` by the kill switch, and neither owes a proof.
-  if (kinds.length > 0 && kinds.every((kind) => kind === "disabled" || kind === "paused")) {
-    return { kind: "resume" };
-  }
+  // status-resumable may this skip the credential probe. The `paused` half
+  // repeats the store's own `review_enabled !== 0` gate instead of treating the
+  // kind as self-proving, so a switch that re-engaged between the two reads
+  // cannot resume through this path.
+  const statusResumable =
+    rows.results.length > 0 &&
+    rows.results.every((row) => {
+      const kind = checkSuspensionKindOf(row.last_error);
+      if (kind === "disabled") return true;
+      if (kind === "paused") return row.review_enabled !== 0;
+      return false;
+    });
+  if (statusResumable) return { kind: "resume" };
   // Admission BEFORE the factory (M8's discipline): an unaffordable probe must
   // not run at all, so nothing is written and the pair stays retryable.
   if (!canSpend(budget, now(), CREDENTIAL_REQUESTS, false)) return { kind: "refused" };
