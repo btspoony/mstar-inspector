@@ -1,0 +1,644 @@
+/**
+ * Per-key usage probe tests: the nine families' payload normalization, the
+ * shared failure vocabulary, the catalog-id table, and the "never invent a
+ * limit" rules (negative counters drop, balance-only stays balance-only).
+ *
+ * Every family is fixture-backed: a canned body on the family's own endpoint,
+ * then an exact assertion on the extracted limits (kind, unit, values, reset).
+ * Classification is exercised through the public `probeProviderUsage`, so the
+ * tests pin what a caller actually sees.
+ */
+import { describe, expect, test } from "bun:test";
+import {
+  fractionFromCounts,
+  fractionFromUsed,
+  hasUsageProbe,
+  probeProviderUsage,
+  resetFrom,
+  type UsageDeps,
+} from "../../src/dashboard/provider-usage";
+
+type FetchCall = { url: string; headers: Record<string, string> };
+
+/** Canned responses served in order; every call records its URL + headers. */
+function queueFetch(responses: Response[], calls: FetchCall[] = []): UsageDeps["fetch"] {
+  return (async (input, init) => {
+    calls.push({ url: String(input), headers: (init?.headers ?? {}) as Record<string, string> });
+    const next = responses.shift();
+    if (next === undefined) throw new Error(`unexpected fetch: ${String(input)}`);
+    return next;
+  }) as UsageDeps["fetch"];
+}
+
+function stubFetch(response: Response, calls: FetchCall[] = []): UsageDeps["fetch"] {
+  return queueFetch([response], calls);
+}
+
+function json(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+// --- shared normalizers ---
+
+describe("shared normalizers", () => {
+  test("fractionFromUsed drops a negative count and clamps an over-100 percent", () => {
+    expect(fractionFromUsed(32)).toBe(0.32);
+    expect(fractionFromUsed(150)).toBe(1);
+    expect(fractionFromUsed(-5)).toBeUndefined();
+    expect(fractionFromUsed(Number.NaN)).toBeUndefined();
+  });
+
+  test("fractionFromCounts requires a positive limit and a non-negative used", () => {
+    expect(fractionFromCounts(30, 100)).toBe(0.3);
+    expect(fractionFromCounts(150, 100)).toBe(1);
+    expect(fractionFromCounts(-5, 100)).toBeUndefined();
+    expect(fractionFromCounts(30, 0)).toBeUndefined();
+    expect(fractionFromCounts(undefined, 100)).toBeUndefined();
+    expect(fractionFromCounts(30, undefined)).toBeUndefined();
+  });
+
+  test("resetFrom accepts ISO, epoch seconds, epoch ms and numeric strings", () => {
+    expect(resetFrom("2026-11-05T10:00:00.000Z")).toBe(Date.parse("2026-11-05T10:00:00.000Z"));
+    expect(resetFrom(1_760_000_000)).toBe(1_760_000_000_000);
+    expect(resetFrom(1_760_000_000_000)).toBe(1_760_000_000_000);
+    expect(resetFrom("1760000000")).toBe(1_760_000_000_000);
+    expect(resetFrom("not a time")).toBeUndefined();
+    expect(resetFrom(null)).toBeUndefined();
+  });
+});
+
+// --- probe table ---
+
+describe("usage probe table", () => {
+  const covered = [
+    "commandcode",
+    "commandcode-anthropic",
+    "opencode-go",
+    "zai",
+    "zai-coding-plan",
+    "zhipuai",
+    "zhipuai-coding-plan",
+    "minimax-coding-plan",
+    "minimax-cn-coding-plan",
+    "cline-pass",
+    "synthetic",
+    "umans",
+    "hyper",
+    "kimi-for-coding",
+  ];
+
+  test("covers exactly the nine families' fourteen catalog ids", () => {
+    expect(covered.filter((id) => hasUsageProbe(id))).toEqual(covered);
+  });
+
+  test("every other id has no probe (own-property lookup, no proto leak)", () => {
+    for (const id of ["anthropic", "openai", "cursor", "ollama-cloud", "moonshotai", "minimax", "constructor"]) {
+      expect(hasUsageProbe(id)).toBe(false);
+    }
+  });
+
+  test("an unmapped provider is absent + no-probe with zero outbound requests", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage({ fetch: stubFetch(json(200, {}), calls) }, "anthropic", "sk-test");
+    expect(snapshot).toMatchObject({ status: "absent", limits: [], absentCause: "no-probe" });
+    expect(calls).toHaveLength(0);
+  });
+});
+
+// --- shared failure vocabulary ---
+
+describe("failure classification", () => {
+  const cases: Array<{ name: string; response: Response | Error; status: string; cause?: string }> = [
+    { name: "401 → unauthorized", response: json(401, {}), status: "unauthorized" },
+    { name: "403 → unauthorized", response: json(403, {}), status: "unauthorized" },
+    { name: "404 → absent (probe ran, account has no plan row)", response: json(404, {}), status: "absent", cause: "reported-nothing" },
+    { name: "500 → error", response: json(500, { balance: 1 }), status: "error" },
+    { name: "unparseable JSON → error", response: new Response("<html>gateway</html>", { status: 200 }), status: "error" },
+    { name: "no recognizable limit → error", response: json(200, { unexpected: true }), status: "error" },
+    { name: "transport failure → error", response: new Error("fetch failed"), status: "error" },
+  ];
+
+  for (const testCase of cases) {
+    test(testCase.name, async () => {
+      const fetchImpl: UsageDeps["fetch"] =
+        testCase.response instanceof Error
+          ? (async () => {
+              throw testCase.response;
+            }) as unknown as UsageDeps["fetch"]
+          : stubFetch(testCase.response);
+      const snapshot = await probeProviderUsage({ fetch: fetchImpl }, "hyper", "key-123");
+      expect(snapshot.status).toBe(testCase.status as never);
+      expect(snapshot.limits).toEqual([]);
+      if (testCase.cause !== undefined) expect(snapshot.absentCause).toBe(testCase.cause as never);
+      else expect(snapshot.absentCause).toBeUndefined();
+    });
+  }
+});
+
+// --- family: commandcode ---
+
+describe("commandcode", () => {
+  const whoami = json(200, { user: { id: "user-1" }, org: { id: "org-9" } });
+  const credits = json(200, {
+    data: {
+      credits: { monthlyCredits: 100, purchasedCredits: 20, freeCredits: 5 },
+      windowLimits: {
+        fiveHour: { used: 30, cap: 100, resetAt: 1_760_000_000 },
+        weekly: { used: 250, cap: 500, resetAt: 1_760_604_800 },
+      },
+    },
+  });
+
+  test("reads whoami then the org credit pool: windows + balance", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      { fetch: queueFetch([whoami, credits], calls) },
+      "commandcode-anthropic",
+      "cc-key",
+    );
+    expect(calls[0]!.url).toBe("https://api.commandcode.ai/alpha/whoami");
+    expect(calls[0]!.headers.authorization).toBe("Bearer cc-key");
+    expect(calls[1]!.url).toBe("https://api.commandcode.ai/alpha/billing/credits?orgId=org-9");
+    expect(snapshot.status).toBe("ok");
+    expect(snapshot.limits).toEqual([
+      {
+        id: "commandcode:session",
+        kind: "window",
+        usedFraction: 0.3,
+        unit: "credits",
+        shared: true,
+        resetsAt: 1_760_000_000_000,
+        limit: 100,
+      },
+      {
+        id: "commandcode:week",
+        kind: "window",
+        usedFraction: 0.5,
+        unit: "credits",
+        shared: true,
+        resetsAt: 1_760_604_800_000,
+        limit: 500,
+      },
+      { id: "commandcode:balance", kind: "balance", remaining: 125, unit: "credits", shared: true },
+    ]);
+  });
+
+  test("a balance-only (pay-as-you-go) account yields one balance limit, never a window", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      { fetch: queueFetch([json(200, { user: { id: "user-1" } }), json(200, { data: { credits: { monthlyCredits: 42 } } })], calls) },
+      "commandcode",
+      "cc-key",
+    );
+    expect(calls[1]!.url).toBe("https://api.commandcode.ai/alpha/billing/credits");
+    expect(snapshot.status).toBe("ok");
+    expect(snapshot.limits).toEqual([
+      { id: "commandcode:balance", kind: "balance", remaining: 42, unit: "credits", shared: true },
+    ]);
+  });
+
+  test("a negative used count drops that window instead of rendering 0 %", async () => {
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: queueFetch([
+          json(200, { user: { id: "user-1" } }),
+          json(200, {
+            data: {
+              credits: { monthlyCredits: 10 },
+              windowLimits: {
+                fiveHour: { used: -5, cap: 100, resetAt: 1_760_000_000 },
+                weekly: { used: 250, cap: 500, resetAt: 1_760_604_800 },
+              },
+            },
+          }),
+        ]),
+      },
+      "commandcode",
+      "cc-key",
+    );
+    expect(snapshot.status).toBe("ok");
+    expect(snapshot.limits.map((limit) => limit.id)).toEqual(["commandcode:week", "commandcode:balance"]);
+  });
+
+  test("a rejected credential on whoami is unauthorized", async () => {
+    const snapshot = await probeProviderUsage({ fetch: stubFetch(json(401, {})) }, "commandcode", "cc-key");
+    expect(snapshot.status).toBe("unauthorized");
+  });
+});
+
+// --- family: opencode-go ---
+
+describe("opencode-go", () => {
+  test("keeps the rolling and weekly windows and drops the monthly bucket", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            usage: {
+              rolling: { percent: 32, status: "ok", resetsAt: "2026-11-05T10:00:00.000Z" },
+              weekly: { percent: 80, status: "rate-limited", resetsAt: "2026-11-10T10:00:00.000Z" },
+              monthly: { percent: 10, status: "ok", resetsAt: "2026-12-01T00:00:00.000Z" },
+            },
+          }),
+          calls,
+        ),
+      },
+      "opencode-go",
+      "zen-key",
+    );
+    expect(calls[0]!.url).toBe("https://opencode.ai/zen/go/v1/usage");
+    expect(calls[0]!.headers.authorization).toBe("Bearer zen-key");
+    expect(snapshot.limits).toEqual([
+      {
+        id: "opencode-go:session",
+        kind: "window",
+        usedFraction: 0.32,
+        unit: "percent",
+        shared: true,
+        resetsAt: Date.parse("2026-11-05T10:00:00.000Z"),
+      },
+      {
+        id: "opencode-go:week",
+        kind: "window",
+        usedFraction: 1,
+        unit: "percent",
+        shared: true,
+        resetsAt: Date.parse("2026-11-10T10:00:00.000Z"),
+      },
+    ]);
+  });
+});
+
+// --- family: zai / zhipuai ---
+
+describe("zai / zhipuai", () => {
+  test("maps hour/week units to windows, sends the key verbatim, and drops the month bucket", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            success: true,
+            data: {
+              limits: [
+                { type: "TIME_LIMIT", unit: 3, number: 5, currentValue: 120, usage: 600, remaining: 480, nextResetTime: 1_760_000_000 },
+                { type: "TIME_LIMIT", unit: 6, number: 1, currentValue: 300, usage: 1000, nextResetTime: 1_760_604_800 },
+                { type: "TIME_LIMIT", unit: 5, number: 1, currentValue: 5, usage: 10, nextResetTime: 1_762_000_000 },
+              ],
+            },
+          }),
+          calls,
+        ),
+      },
+      "zai-coding-plan",
+      "zai-key",
+    );
+    expect(calls[0]!.url).toBe("https://api.z.ai/api/monitor/usage/quota/limit");
+    expect(calls[0]!.headers.authorization).toBe("zai-key");
+    expect(snapshot.limits).toEqual([
+      {
+        id: "zai:session",
+        kind: "window",
+        usedFraction: 0.2,
+        unit: "requests",
+        shared: true,
+        resetsAt: 1_760_000_000_000,
+        limit: 600,
+        remaining: 480,
+      },
+      {
+        id: "zai:week",
+        kind: "window",
+        usedFraction: 0.3,
+        unit: "requests",
+        shared: true,
+        resetsAt: 1_760_604_800_000,
+        limit: 1000,
+      },
+    ]);
+  });
+
+  test("zhipuai ids use the bigmodel host and fall back to the rounded percentage", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            success: true,
+            data: {
+              limits: [{ type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 40, nextResetTime: 1_760_000_000 }],
+            },
+          }),
+          calls,
+        ),
+      },
+      "zhipuai",
+      "zp-key",
+    );
+    expect(calls[0]!.url).toBe("https://open.bigmodel.cn/api/monitor/usage/quota/limit");
+    expect(snapshot.limits).toEqual([
+      {
+        id: "zai:session",
+        kind: "window",
+        usedFraction: 0.4,
+        unit: "tokens",
+        shared: true,
+        resetsAt: 1_760_000_000_000,
+      },
+    ]);
+  });
+});
+
+// --- family: minimax-code ---
+
+describe("minimax-code", () => {
+  const payload = json(200, {
+    base_resp: { status_code: 0 },
+    model_remains: [
+      {
+        model_name: "general",
+        start_time: 1_760_000_000,
+        end_time: 1_760_018_000,
+        current_interval_remaining_percent: 25,
+        current_interval_status: 1,
+        current_weekly_remaining_percent: 60,
+        weekly_end_time: 1_760_604_800,
+        current_weekly_status: 1,
+      },
+      {
+        // Not in the plan: both windows unlimited with zero totals.
+        model_name: "video",
+        current_interval_total_count: 0,
+        current_weekly_total_count: 0,
+        current_interval_status: 3,
+        current_weekly_status: 3,
+      },
+    ],
+  });
+
+  test("interval + weekly windows from the remaining percentages; unavailable buckets skipped", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      { fetch: stubFetch(payload, calls) },
+      "minimax-coding-plan",
+      "mm-key",
+    );
+    expect(calls[0]!.url).toBe("https://api.minimax.io/v1/token_plan/remains");
+    expect(calls[0]!.headers.authorization).toBe("Bearer mm-key");
+    expect(snapshot.limits).toEqual([
+      {
+        id: "minimax:session",
+        kind: "window",
+        usedFraction: 0.75,
+        unit: "percent",
+        shared: true,
+        resetsAt: 1_760_018_000_000,
+      },
+      {
+        id: "minimax:week",
+        kind: "window",
+        usedFraction: 0.4,
+        unit: "percent",
+        shared: true,
+        resetsAt: 1_760_604_800_000,
+      },
+    ]);
+  });
+
+  test("the CN id probes the CN host; an exhausted status outranks a stale percent", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            base_resp: { status_code: 0 },
+            model_remains: [
+              {
+                model_name: "general",
+                start_time: 1_760_000_000,
+                end_time: 1_760_018_000,
+                current_interval_remaining_percent: 90,
+                current_interval_status: 2,
+                current_weekly_remaining_percent: 60,
+                weekly_end_time: 1_760_604_800,
+                current_weekly_status: 1,
+              },
+            ],
+          }),
+          calls,
+        ),
+      },
+      "minimax-cn-coding-plan",
+      "mm-key",
+    );
+    expect(calls[0]!.url).toBe("https://api.minimaxi.com/v1/token_plan/remains");
+    expect(snapshot.limits[0]).toMatchObject({ id: "minimax:session", usedFraction: 1 });
+  });
+
+  test("a non-zero base_resp status is an error even on HTTP 200", async () => {
+    const snapshot = await probeProviderUsage(
+      { fetch: stubFetch(json(200, { base_resp: { status_code: 1004 }, model_remains: [] })) },
+      "minimax-coding-plan",
+      "mm-key",
+    );
+    expect(snapshot.status).toBe("error");
+  });
+});
+
+// --- family: cline-pass ---
+
+describe("cline-pass", () => {
+  test("sends the desktop headers and keeps the 5h / weekly / monthly windows", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            success: true,
+            data: {
+              limits: [
+                { type: "five_hour", percentUsed: 12, resetsAt: "2026-11-05T10:00:00.000Z" },
+                { type: "weekly", percentUsed: 45, resetsAt: "2026-11-10T00:00:00.000Z" },
+                { type: "monthly", percentUsed: 70, resetsAt: "2026-12-01T00:00:00.000Z" },
+              ],
+            },
+          }),
+          calls,
+        ),
+      },
+      "cline-pass",
+      "cline-key",
+    );
+    expect(calls[0]!.url).toBe("https://api.cline.bot/api/v1/users/me/plan/usage-limits");
+    expect(calls[0]!.headers.authorization).toBe("Bearer cline-key");
+    expect(calls[0]!.headers["x-client-type"]).toBe("cline-desktop");
+    expect(calls[0]!.headers["user-agent"]).toBe("Cline/3.5.54");
+    expect(snapshot.limits).toEqual([
+      { id: "cline-pass:session", kind: "window", usedFraction: 0.12, unit: "percent", shared: true, resetsAt: Date.parse("2026-11-05T10:00:00.000Z") },
+      { id: "cline-pass:week", kind: "window", usedFraction: 0.45, unit: "percent", shared: true, resetsAt: Date.parse("2026-11-10T00:00:00.000Z") },
+      { id: "cline-pass:month", kind: "window", usedFraction: 0.7, unit: "percent", shared: true, resetsAt: Date.parse("2026-12-01T00:00:00.000Z") },
+    ]);
+  });
+
+  test("404 is absent (no ClinePass on this account), not a failed read", async () => {
+    const snapshot = await probeProviderUsage({ fetch: stubFetch(json(404, {})) }, "cline-pass", "cline-key");
+    expect(snapshot).toMatchObject({ status: "absent", absentCause: "reported-nothing" });
+  });
+});
+
+// --- family: synthetic ---
+
+describe("synthetic", () => {
+  test("rolling 5h requests plus the weekly USD pool, both account-wide", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            rollingFiveHourLimit: { remaining: 60, max: 200, limited: false, nextTickAt: "2026-11-05T09:30:00.000Z" },
+            weeklyTokenLimit: {
+              remainingCredits: "$12.50",
+              maxCredits: "$50.00",
+              percentRemaining: 25,
+              nextRegenAt: "2026-11-12T00:00:00.000Z",
+            },
+          }),
+          calls,
+        ),
+      },
+      "synthetic",
+      "syn-key",
+    );
+    expect(calls[0]!.url).toBe("https://api.synthetic.new/v2/quotas");
+    expect(calls[0]!.headers.authorization).toBe("Bearer syn-key");
+    expect(snapshot.limits).toEqual([
+      {
+        id: "synthetic:session",
+        kind: "window",
+        usedFraction: 0.7,
+        unit: "requests",
+        shared: true,
+        resetsAt: Date.parse("2026-11-05T09:30:00.000Z"),
+        limit: 200,
+        remaining: 60,
+      },
+      {
+        id: "synthetic:week",
+        kind: "window",
+        usedFraction: 0.75,
+        unit: "usd",
+        shared: true,
+        resetsAt: Date.parse("2026-11-12T00:00:00.000Z"),
+        limit: 50,
+        remaining: 12.5,
+      },
+    ]);
+  });
+});
+
+// --- family: umans ---
+
+describe("umans", () => {
+  test("weighted request window plus the concurrency ceiling", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            limits: { requests: { limit: 1000, hard_cap: 1500, window_seconds: 18000 }, concurrency: { limit: 4 } },
+            usage: {
+              requests_in_window: 400,
+              remaining_requests: 600,
+              weighted_in_window: 250,
+              weighted_remaining_requests: 750,
+              concurrent_sessions: 2,
+            },
+            window: { resets_at: "2026-11-05T10:00:00.000Z" },
+          }),
+          calls,
+        ),
+      },
+      "umans",
+      "umans-key",
+    );
+    expect(calls[0]!.url).toBe("https://api.code.umans.ai/v1/usage");
+    expect(snapshot.limits).toEqual([
+      {
+        id: "umans:session",
+        kind: "window",
+        usedFraction: 0.25,
+        unit: "requests",
+        shared: true,
+        resetsAt: Date.parse("2026-11-05T10:00:00.000Z"),
+        limit: 1000,
+        remaining: 750,
+      },
+      { id: "umans:concurrency", kind: "window", usedFraction: 0.5, unit: "requests", shared: true, limit: 4 },
+    ]);
+  });
+});
+
+// --- family: charm-hyper ---
+
+describe("hyper", () => {
+  test("a balance-only account yields one credits balance, shared across keys", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage({ fetch: stubFetch(json(200, { balance: 95 }), calls) }, "hyper", "hyper-key");
+    expect(calls[0]!.url).toBe("https://hyper.charm.land/credits");
+    expect(calls[0]!.headers.authorization).toBe("Bearer hyper-key");
+    expect(snapshot.status).toBe("ok");
+    expect(snapshot.limits).toEqual([
+      { id: "hyper:balance", kind: "balance", remaining: 95, unit: "credits", shared: true },
+    ]);
+  });
+});
+
+// --- family: kimi-for-coding ---
+
+describe("kimi-for-coding", () => {
+  test("aggregate weekly window plus limits[] classified by span, tighter wins", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            usage: { limit: "1000", used: "250", resetTime: "2026-11-10T00:00:00.000Z" },
+            limits: [
+              { window: { duration: "300", time_unit: "minute" }, detail: { limit: "200", used: "50", resetTime: "2026-11-05T10:00:00.000Z" } },
+              { window: { duration: "12", time_unit: "hour" }, detail: { limit: "500", remaining: "100", resetTime: "2026-11-06T00:00:00.000Z" } },
+              { window: { duration: "1", time_unit: "month" }, detail: { limit: "900", used: "100" } },
+            ],
+          }),
+          calls,
+        ),
+      },
+      "kimi-for-coding",
+      "kimi-key",
+    );
+    expect(calls[0]!.url).toBe("https://api.kimi.com/coding/v1/usages");
+    expect(calls[0]!.headers.authorization).toBe("Bearer kimi-key");
+    expect(snapshot.limits).toEqual([
+      {
+        id: "kimi:week",
+        kind: "window",
+        usedFraction: 0.25,
+        unit: "requests",
+        shared: true,
+        resetsAt: Date.parse("2026-11-10T00:00:00.000Z"),
+        limit: 1000,
+      },
+      {
+        // Both 5h and 12h rows classify as the session window; the tighter
+        // (12h, remaining-derived 400/500) wins.
+        id: "kimi:session",
+        kind: "window",
+        usedFraction: 0.8,
+        unit: "requests",
+        shared: true,
+        resetsAt: Date.parse("2026-11-06T00:00:00.000Z"),
+        limit: 500,
+      },
+    ]);
+  });
+});
