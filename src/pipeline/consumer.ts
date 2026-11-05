@@ -914,14 +914,16 @@ export type CheckLifecycleHooks = {
 };
 
 /**
- * Check execution window (spec §7.9: the immutable execution deadline is
- * claim time + 1,200,000ms) — the consumer passes it to `begin`, and the
- * claim now happens at ADMISSION (before the container and the clone), so the
- * window also has to cover the container/clone phase the old post-`rev-parse`
- * claim used to sit after. 20 minutes still clears the slowest observed
- * begin-to-publication (11.34 min) with margin.
+ * Check execution window (spec §7.9): claim time + 900,000ms — the Cloudflare
+ * Queues per-invocation wall-clock cap (15 minutes, the same cap the deep tier
+ * is pinned under in `wrangler.jsonc`). It is therefore a PLATFORM INVARIANT,
+ * not a tuning knob: a longer deadline can never be used by the consumer and
+ * only delays the recovery lane that finally closes the run. The claim now
+ * happens near the START of that window (at admission, before the container
+ * and the clone) instead of after `rev-parse`, so the window covers the
+ * container phase without being widened.
  */
-export const CHECK_EXECUTION_WINDOW_MS = 1_200_000;
+export const CHECK_EXECUTION_WINDOW_MS = 900_000;
 
 /**
  * Begin-hook budget (spec §7.10: "The begin hook has ≤2 requests / 2 seconds

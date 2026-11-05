@@ -3915,7 +3915,11 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(beginInput.githubAppId).toBe(424242);
     expect(beginInput.headSha).toBe(SHA);
     expect(beginInput.triggeredBy).toBe("pull_request");
-    expect(beginInput.executionDeadlineMs).toBeGreaterThan(Date.now() + 800_000);
+    // §7.9: claim time + 900,000ms — the Queues per-invocation cap, not a
+    // tunable (a wider window would only delay recovery).
+    const claimedWindowMs = beginInput.executionDeadlineMs - Date.now();
+    expect(claimedWindowMs).toBeGreaterThan(895_000);
+    expect(claimedWindowMs).toBeLessThanOrEqual(900_000);
     const shaIdx = sandbox.calls.findIndex((c) => c.cmd.includes("rev-parse"));
     const runnerIdx = sandbox.calls.findIndex((c) => c.cmd.includes("--input"));
     expect(beginCalls).toHaveLength(1);
@@ -5898,6 +5902,43 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     expect(checkRows(db)).toHaveLength(1);
     expect(checkRowFor(db, SHA).observed).toBe("success");
+  });
+
+  test("check lifecycle: a comment trigger claims the Check from the PR head watermark, before the container", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    // A mention carries no head_sha: the ledger watermark is the ONLY SHA
+    // knowable at admission, so it is what the early claim must use.
+    await seedPrHead(db, { headSha: SHA, headAt: new Date().toISOString() });
+    const real = lifecycleFor(db);
+    const beginOrder: Array<{ headSha: string; afterSandbox: boolean }> = [];
+    let sandboxAcquired = false;
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      getSandbox: async () => {
+        sandboxAcquired = true;
+        return fakeSandbox;
+      },
+      checks: {
+        begin: async (input) => {
+          beginOrder.push({ headSha: input.headSha, afterSandbox: sandboxAcquired });
+          return real.begin(input);
+        },
+        terminalize: (input) => real.terminalize(input),
+      },
+    });
+
+    await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" })));
+
+    // ONE claim, from the watermark, before the container. The authoritative
+    // checkout agrees, so the post-`rev-parse` fallback claims nothing and a
+    // second begin never happens.
+    expect(beginOrder).toEqual([{ headSha: SHA, afterSandbox: false }]);
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    const row = checkRowFor(db, SHA);
+    expect(row.head_sha).toBe(SHA);
+    expect(row.observed).toBe("success");
   });
 
   test("check lifecycle: a claim the checkout contradicts is closed as superseded, then re-claimed at the authoritative sha", async () => {
