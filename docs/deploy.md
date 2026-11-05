@@ -1119,7 +1119,7 @@ with **no compatibility path** — GitHub keeps delivering to it and gets a
 `0036` renames `github_apps.slug` to `webhook_path` (superseded by `0038`,
 which drops that column and re-keys the URL by workspace + app id — see the
 `0038` step above) and adds a nullable cached `github_slug`,
-which is the bot-mention target (`@<github_slug>[bot]`). It has **no
+which is the bot-mention target (`@<github_slug>`; a trailing `[bot]` is accepted but optional). It has **no
 backfill** — the GitHub-side slug is only knowable from GitHub. So right
 after the deploy, every App that predates this change answers to **no
 mention at all** until its metadata is synced once:

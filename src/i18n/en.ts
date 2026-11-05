@@ -650,7 +650,7 @@ export const en = {
     triggerModeOpen: "First open",
     triggerModeEveryPush: "Every push",
     triggerModeManual: "Manual",
-    triggerModeMention: "Mention the bot in a PR comment to (re-)start a review — works in every mode:",
+    triggerModeMention: "PR author or repo owner: comment this on the PR to (re-)start a review:",
     triggerModeMentionAria: "Bot mention: {mention}",
     confirmPauseTitle: "Pause reviews for {slug}?",
     confirmPauseBody: "Webhooks stay connected — deliveries are answered and ignored until you resume.",

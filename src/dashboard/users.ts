@@ -106,8 +106,8 @@ export async function getUserByLogin(
 
 /**
  * Thrown by createUser when a concurrent case-variant row wins the insert
- * (migration 0016 NOCASE unique index) — the invite route maps it to 409
- * duplicate-invite semantics; bootstrap re-reads and allows.
+ * (migration 0016 NOCASE unique index). createUser has no production caller
+ * at this head: only fixtures and tests observe this error.
  */
 export class DuplicateLoginError extends Error {
   constructor(login: string) {
@@ -173,10 +173,9 @@ export async function createUser(
         .bind(row.id, row.github_login, row.role, row.created_at, row.invited_by),
       // A deliberate (re-)creation is the ONLY thing that may undo a removal:
       // clearing the tombstone in the SAME batch as the insert is what makes a
-      // re-admitted login bootstrappable again (migration 0023). Bootstrap has
-      // its own creation path (bootstrapCreateAdmin) that never clears removal
-      // state — an in-flight OAuth callback must not be able to undo a removal
-      // that landed after its reads.
+      // re-admitted login admissible again (migration 0023). The sign-in path
+      // (signInCreateUser) never clears removal state — an in-flight OAuth
+      // callback must not be able to undo a removal that landed after its reads.
       db
         .prepare("DELETE FROM removed_logins WHERE github_login = ? COLLATE NOCASE")
         .bind(user.login),
@@ -197,8 +196,8 @@ export async function createUser(
       // Case-variant conflict (migration 0016 NOCASE unique index): the row
       // exists under a different casing. The 0003 BINARY UNIQUE does not
       // fire across cases, so ON CONFLICT (github_login) absorbed the
-      // NOCASE-index conflict here — surface it as DuplicateLoginError so
-      // the invite route can answer 409 duplicate-invite semantics (W-1).
+      // NOCASE-index conflict here — surface it as DuplicateLoginError so a
+      // caller can tell a case-variant conflict from a fresh insert (W-1).
       throw new DuplicateLoginError(user.login);
     }
     return existing;
