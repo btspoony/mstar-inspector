@@ -2167,12 +2167,20 @@ against `github.event.pull_request.base.sha` and a push (CI runs on `main`)
 against `github.event.before`, the ref's previous tip; the job checkout
 therefore carries `fetch-depth: 0`. A branch's first push reports the all-zeros
 sha, which has nothing to diff against — the step skips that case and exits
-successfully rather than failing on a diff it cannot compute. `deploy.yml` does
-not run the gate itself yet; wiring it into the deploy job is tracked as
-`I-000342`, so until then a push straight to `main` that lands between the CI
-run and the deploy still relies on the manual check in
-[`AGENTS.md`](../AGENTS.md) § Sandbox image rebuild, which also carries the
-marker instruction the gate prints on failure.
+successfully rather than failing on a diff it cannot compute.
+
+The `deploy` job in
+[`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) runs the same
+gate again, after `Setup Bun` and before `Install dependencies` and every
+version-creating step, so a push that lands between the CI run and the deploy
+cannot ship the Worker against the previous image. It has no
+`pull_request` trigger: a push diffs `github.event.before` (the all-zeros
+first push is the same printed skip), and a `workflow_dispatch` has no previous
+tip — the push that landed that SHA already ran the gate in CI — so the step
+prints a skip naming the trigger instead of failing. The failure output names
+the input families the diff actually touched and the `# rebuild:` line to add;
+the marker instruction is the one in
+[`AGENTS.md`](../AGENTS.md) § Sandbox image rebuild.
 
 The same gate runs locally against any base rev:
 

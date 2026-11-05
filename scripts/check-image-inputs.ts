@@ -217,10 +217,19 @@ export function containerSignature(configText: string): string | undefined {
   );
 }
 
-export type ImageGateVerdict = { ok: true } | { ok: false; reason: "image-input-without-marker" };
+export type ImageGateVerdict =
+  | { ok: true }
+  | { ok: false; reason: "image-input-without-marker"; families: readonly string[] };
 
 export function touchesImageInput(paths: string[]): boolean {
-  return paths.some((path) => IMAGE_INPUT_PATTERNS.some((pattern) => pattern.test(path)));
+  return changedFamilies(paths).length > 0;
+}
+
+/** The declared families this diff touches — the failure message's actionable subset. */
+export function changedFamilies(paths: string[]): string[] {
+  return IMAGE_INPUT_FAMILIES.filter((_, i) =>
+    paths.some((path) => IMAGE_INPUT_PATTERNS[i]!.test(path)),
+  );
 }
 
 /** `# rebuild:` at a line's comment start, indentation and the hash gap tolerated. */
@@ -251,10 +260,16 @@ export function evaluateImageGate(
   paths: string[],
   dockerfileDiff: string,
   containersChanged: boolean,
+  configPath = "wrangler.jsonc",
 ): ImageGateVerdict {
-  if (!touchesImageInput(paths) && !containersChanged) return { ok: true };
+  const families = changedFamilies(paths);
+  if (families.length === 0 && !containersChanged) return { ok: true };
   if (touchesRebuildMarker(dockerfileDiff)) return { ok: true };
-  return { ok: false, reason: "image-input-without-marker" };
+  return {
+    ok: false,
+    reason: "image-input-without-marker",
+    families: containersChanged ? [...families, `${configPath} containers block`] : families,
+  };
 }
 
 /** `git diff --name-only -z` output: NUL-separated, never quoted or escaped. */
@@ -341,11 +356,22 @@ if (import.meta.main) {
   }
 
   const paths = parseNameOnly(nameOnly);
-  const verdict = evaluateImageGate(paths, dockerfileDiff, baseSignature !== headSignature);
+  const verdict = evaluateImageGate(
+    paths,
+    dockerfileDiff,
+    baseSignature !== headSignature,
+    configPath,
+  );
   if (!verdict.ok) {
     console.error(
       `::error::${verdict.reason}: this diff changes image inputs but not the rebuild marker in ${dockerfileLabel}.`,
     );
+    console.error("Changed image inputs:");
+    for (const family of verdict.families) console.error(`- ${family}`);
+    console.error(
+      `Repair: add a \`# rebuild: <what changed>\` comment line to ${dockerfileLabel} in this same diff — an added or removed line at the comment start — so the next deploy rebuilds the image.`,
+    );
+    console.error("");
     console.error(IMAGE_REBUILD_INSTRUCTION);
     process.exit(1);
   }

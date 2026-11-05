@@ -136,6 +136,7 @@ describe("image gate", () => {
     expect(evaluateImageGate(["packages/runner/src/index.ts"], "", false)).toEqual({
       ok: false,
       reason: "image-input-without-marker",
+      families: ["packages/runner/src/**"],
     }));
 
   test("the same change with a rebuild marker diff passes", () =>
@@ -150,18 +151,36 @@ describe("image gate", () => {
     expect(evaluateImageGate(["sandbox-image/entry.sh"], "", false)).toEqual({
       ok: false,
       reason: "image-input-without-marker",
+      families: ["sandbox-image/**"],
     }));
 
   test("a verify-synthesis.sh change alone fails without the marker", () =>
     expect(evaluateImageGate(["packages/runner/verify-synthesis.sh"], "", false)).toEqual({
       ok: false,
       reason: "image-input-without-marker",
+      families: ["packages/runner/verify-synthesis.sh"],
     }));
 
   test("a Dockerfile change that does not touch the marker fails", () =>
     expect(evaluateImageGate(["sandbox-image/Dockerfile"], "-FROM old\n+FROM new", false)).toEqual({
       ok: false,
       reason: "image-input-without-marker",
+      families: ["sandbox-image/**"],
+    }));
+
+  test("the verdict names only the families the diff touches", () =>
+    // The whole vocabulary printed for every failure tells an operator nothing
+    // about which input moved; the verdict carries the diff-derived subset.
+    expect(
+      evaluateImageGate(
+        ["packages/runner/src/pipeline/sandbox.ts", ".dockerignore", "docs/deploy.md"],
+        "",
+        false,
+      ),
+    ).toEqual({
+      ok: false,
+      reason: "image-input-without-marker",
+      families: ["packages/runner/src/**", ".dockerignore"],
     }));
 
   test("a container-block change alone fails without the marker", () =>
@@ -169,6 +188,14 @@ describe("image gate", () => {
     expect(evaluateImageGate([], "", true)).toEqual({
       ok: false,
       reason: "image-input-without-marker",
+      families: ["wrangler.jsonc containers block"],
+    }));
+
+  test("a config path override names that file's container block", () =>
+    expect(evaluateImageGate([], "", true, "wrangler.staging.jsonc")).toEqual({
+      ok: false,
+      reason: "image-input-without-marker",
+      families: ["wrangler.staging.jsonc containers block"],
     }));
 
   test("a container-block change with the marker passes", () =>
@@ -342,12 +369,13 @@ function write(dir: string, path: string, content = "export const x = 1;\n"): vo
 }
 
 /** The gate's actual CLI, run against `dir` for `base...HEAD`. */
-function runGate(dir: string, base: string, script: string): number {
-  return Bun.spawnSync(["bun", script, "--base", base], {
+function runGate(dir: string, base: string, script: string): { code: number; out: string } {
+  const proc = Bun.spawnSync(["bun", script, "--base", base], {
     cwd: dir,
     stdout: "pipe",
     stderr: "pipe",
-  }).exitCode!;
+  });
+  return { code: proc.exitCode!, out: proc.stdout.toString() + proc.stderr.toString() };
 }
 
 describe("image gate CLI", () => {
@@ -365,7 +393,7 @@ describe("image gate CLI", () => {
       git("mv", "packages/runner/src/moved.ts", "docs/moved.ts");
       git("commit", "-qm", "move it out of the image inputs");
 
-      expect(runGate(dir, base, script)).toBe(1);
+      expect(runGate(dir, base, script).code).toBe(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -383,7 +411,7 @@ describe("image gate CLI", () => {
       git("add", "-A");
       git("commit", "-qm", "marker");
 
-      expect(runGate(dir, base, script)).toBe(0);
+      expect(runGate(dir, base, script).code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -401,7 +429,7 @@ describe("image gate CLI", () => {
       git("add", "-A");
       git("commit", "-qm", "non-ASCII runner source");
 
-      expect(runGate(dir, base, script)).toBe(1);
+      expect(runGate(dir, base, script).code).toBe(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -423,7 +451,7 @@ describe("image gate CLI", () => {
       git("add", "-A");
       git("commit", "-qm", "vars only");
 
-      expect(runGate(dir, base, script)).toBe(0);
+      expect(runGate(dir, base, script).code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -442,7 +470,7 @@ describe("image gate CLI", () => {
       write(dir, "wrangler.jsonc", repointed);
       git("add", "-A");
       git("commit", "-qm", "repoint the build context");
-      expect(runGate(dir, base, script)).toBe(1);
+      expect(runGate(dir, base, script).code).toBe(1);
 
       write(
         dir,
@@ -451,7 +479,7 @@ describe("image gate CLI", () => {
       );
       git("add", "-A");
       git("commit", "-qm", "marker");
-      expect(runGate(dir, base, script)).toBe(0);
+      expect(runGate(dir, base, script).code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -477,14 +505,42 @@ describe("image gate CLI", () => {
       write(dir, "wrangler.jsonc", config("./sandbox-image"));
       git("add", "-A");
       git("commit", "-qm", "repoint only the production build context");
-      expect(runGate(dir, base, script)).toBe(1);
+      expect(runGate(dir, base, script).code).toBe(1);
 
       // Marked in the production file: either file's marker line clears the
       // gate, and this is the file the production deploy hashes.
       write(dir, "sandbox-image/Prod.Dockerfile", "# rebuild: production\n# rebuild: prod context\nFROM scratch\n");
       git("add", "-A");
       git("commit", "-qm", "production marker");
-      expect(runGate(dir, base, script)).toBe(0);
+      expect(runGate(dir, base, script).code).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the failure names the CHANGED families and the marker repair", () => {
+    const { dir, git } = tempRepo();
+    try {
+      write(dir, "packages/runner/src/gate.ts");
+      write(dir, "sandbox-image/entry.sh", "#!/bin/sh\n");
+      git("add", "-A");
+      git("commit", "-qm", "image inputs");
+      const base = git("rev-parse", "HEAD");
+
+      write(dir, "packages/runner/src/gate.ts", "export const changed = true;\n");
+      git("add", "-A");
+      git("commit", "-qm", "touch one image input");
+
+      const { code, out } = runGate(dir, base, script);
+      expect(code).toBe(1);
+      expect(out).toContain("::error::image-input-without-marker");
+      expect(out).toContain("Changed image inputs:");
+      expect(out).toContain("- packages/runner/src/**");
+      // `sandbox-image/entry.sh` did not change in this range, so its family
+      // must not be listed as a changed input (the doc's own bullets stay).
+      expect(out).not.toContain("- sandbox-image/**");
+      expect(out).toContain("# rebuild:");
+      expect(out).toContain("sandbox-image/Dockerfile");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

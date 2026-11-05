@@ -8,11 +8,14 @@
  *
  * Also pinned here: the ref-identity assertion still runs before every
  * deploy-capable step (the tenant-mode rollout that needed a replay binding is
- * gone; a moved tag/branch must never deploy), the container-digest comparison
- * is reported, the last version-creating step binds `DEPLOYMENT_MODE` (the one
- * remaining deployment-shape switch), no deploy command passes the retired
- * tenant-mode var, and the always-run summary derives its status keys from the
- * deploy steps' outcomes — never from the non-fatal version-id capture. The
+ * gone; a moved tag/branch must never deploy), the deploy job's image rebuild
+ * gate runs before the install and every version-creating step (a push diffs
+ * `github.event.before`; a dispatch or the all-zeros first push is a printed
+ * skip), the container-digest comparison is reported, the last version-creating
+ * step binds `DEPLOYMENT_MODE` (the one remaining deployment-shape switch), no
+ * deploy command passes the retired tenant-mode var, and the always-run summary
+ * derives its status keys from the deploy steps' outcomes — never from the
+ * non-fatal version-id capture. The
  * summary pins assert the CONTENT the step actually writes into
  * `$GITHUB_STEP_SUMMARY` (the step body is executed), not the markdown source
  * shape.
@@ -441,6 +444,48 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving } of
         expect(capture.if).toBeUndefined();
         expect(capture.run).toContain("unreported");
         expect(deploy.name).not.toBe(capture.name);
+      });
+
+      test("the image rebuild gate runs after Setup Bun, before install and every version-creating step", () => {
+        const gate = steps.findIndex((s) => s.name === "Image rebuild gate");
+        expect(gate, "deploy.yml: image rebuild gate is missing").toBeGreaterThan(-1);
+        expect(gate, "deploy.yml: the gate must follow Setup Bun").toBeGreaterThan(
+          steps.findIndex((s) => (s.name ?? "").includes("Setup Bun")),
+        );
+        expect(gate, "deploy.yml: the gate must precede Install dependencies").toBeLessThan(
+          steps.findIndex((s) => (s.name ?? "").includes("Install dependencies")),
+        );
+        const versionCreating = steps
+          .map((s, i) => (VERSION_CREATING.test(s.run ?? "") ? i : -1))
+          .filter((i) => i >= 0);
+        expect(versionCreating.length, "deploy.yml: no version-creating step found").toBeGreaterThan(0);
+        for (const i of versionCreating) {
+          expect(i, `deploy.yml: "${steps[i]!.name}" runs before the image rebuild gate`).toBeGreaterThan(gate);
+        }
+      });
+
+      test("the image rebuild gate mirrors CI's base rule for this job's triggers", () => {
+        const gate = steps.find((s) => s.name === "Image rebuild gate")!;
+        expect(gate, "deploy.yml: image rebuild gate is missing").toBeDefined();
+        expect(gate.env?.EVENT_NAME, "deploy.yml: the gate must read the trigger").toBe("${{ github.event_name }}");
+        expect(gate.env?.BASE_SHA, "deploy.yml: the gate must diff the push's previous tip").toBe(
+          "${{ github.event.before }}",
+        );
+        expect(gate.run).toContain('bun scripts/check-image-inputs.ts --base "$BASE_SHA"');
+        // The job fails only through the script's exit 1: both no-base cases
+        // print a named skip and exit 0.
+        expect(gate.run).not.toContain("exit 1");
+
+        const skipped = (event: string, base: string) =>
+          runStep(gate, { EVENT_NAME: event, BASE_SHA: base, REF_NAME: "main" });
+
+        const dispatch = skipped("workflow_dispatch", "");
+        expect(dispatch.code, `deploy.yml: a dispatch must not fail\n${dispatch.out}`).toBe(0);
+        expect(dispatch.out, "deploy.yml: a dispatch skip must name the trigger").toContain("workflow_dispatch");
+
+        const firstPush = skipped("push", "0".repeat(40));
+        expect(firstPush.code, `deploy.yml: the all-zeros base must not fail\n${firstPush.out}`).toBe(0);
+        expect(firstPush.out, "deploy.yml: the first-push skip must say why").toContain("no previous commit");
       });
     }
   });
