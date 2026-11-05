@@ -550,6 +550,36 @@ describe("createReviewConsumer", () => {
     expect(sandbox.destroyCalls).toBe(1);
   });
 
+  test("the round's own wall clock rides the staged artifact into reviews.duration_ms", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    // Script only the wall clock (timers stay real): the round starts, the
+    // runner parks, and the clock advances 5 s before it releases. The stored
+    // duration must be exactly that elapsed 5 s from `roundStartedAt` — a
+    // dropped measurement is NULL, a second clock taken at the runner or at
+    // the staging reads 0, and an absolute clock is ~1.7e12.
+    const realNow = Date.now;
+    let clock = realNow();
+    const gate = holdFirstRunner();
+    let durationMs: number | null = null;
+    try {
+      Date.now = () => clock;
+      const round = consumer(makeBatch(makePayload()));
+      await gate.reached;
+      clock += 5_000;
+      gate.release();
+      await round;
+      const row = db.raw.query("SELECT duration_ms FROM reviews").get() as { duration_ms: number | null };
+      durationMs = row.duration_ms;
+    } finally {
+      Date.now = realNow;
+    }
+
+    expect(durationMs).toBe(5_000);
+  });
+
   test("a runner input past Linux's 128 KiB argv cap rides stdin, never an argument", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -2097,6 +2127,29 @@ describe("createReviewConsumer", () => {
       value: "superseded",
       options: { expirationTtl: IDEMPOTENCY_SECONDS },
     });
+  });
+
+  test("a superseded delivery never reads the operator default depth (I-000411)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    kvState.entries.set(ENQUEUED_KEY(NEW_SHA), "1");
+    const counted = countDefaultLevelReads(db);
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: counted.db as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    // The App row's depth is NULL, so a delivery that went on to review WOULD
+    // consult the operator default (the sibling cases above pin that read).
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
+    // A superseded delivery is not the live review: it resolves nothing, so it
+    // pays no settings read and cannot degrade the skip on one.
+    expect(counted.reads()).toBe(0);
   });
 
   test("a newer ledger commit with NO queued job is reviewed, not skipped (open mode / ignored delivery)", async () => {

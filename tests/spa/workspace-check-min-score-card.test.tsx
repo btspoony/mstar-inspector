@@ -33,11 +33,13 @@ const json = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 describe("workspace default review-gate floor card", () => {
-  test("shows the stored floor and saves the typed value", async () => {
+  test("shows the stored floor and settles on the server's answer after a save", async () => {
     const { win, cleanup } = installDom("http://localhost/dashboard/ws_acme/settings");
     const realFetch = globalThis.fetch;
+    // The PUT answers a normalized 40 for a typed 45, so the field can only
+    // settle on 40 by reading the server's body — echoing the draft cannot.
     const calls = stubFetch((call) =>
-      call.method === "PUT" ? json(200, { min_score: 45 }) : json(200, { min_score: 60, min: 0, max: 100, degraded: false }),
+      call.method === "PUT" ? json(200, { min_score: 40 }) : json(200, { min_score: 60, min: 0, max: 100, degraded: false }),
     );
     try {
       const container = win.document.createElement("div");
@@ -63,7 +65,8 @@ describe("workspace default review-gate floor card", () => {
         { url: "/dashboard/ws_acme/api/settings/check-min-score", method: "PUT", body: JSON.stringify({ min_score: 45 }) },
       ]);
       expect(container.textContent).toContain(t("en", "workspace.checkMinScoreSaved"));
-      expect((win.document.querySelector("#workspace-check-min-score") as unknown as HTMLInputElement).value).toBe("45");
+      // The server's stored answer, not the typed draft (45).
+      expect((win.document.querySelector("#workspace-check-min-score") as unknown as HTMLInputElement).value).toBe("40");
 
       await act(async () => root.unmount());
     } finally {

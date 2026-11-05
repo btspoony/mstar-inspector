@@ -14,9 +14,11 @@ import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t, type DictionaryKey } from "../../src/i18n";
+import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   appPullRequestDetailUrl,
   appPullRequestRecordsUrl,
+  CATCH_ALL_SEVERITY,
   githubPullRequestUrl,
   githubRepoUrl,
   parsePullRequestDetail,
@@ -37,6 +39,7 @@ import {
   FINDINGS,
   RECORDS,
   REVIEWS,
+  ROW_HEAD,
   page,
   recordsOf,
   scene,
@@ -108,6 +111,15 @@ describe("pull request detail data plane (pure helpers)", () => {
         severity: "",
       }),
     ).toBe("/dashboard/api/apps/1/pull-requests/acme/web/42/reviews?offset=0&limit=10");
+    // The catch-all choice is a filter MODE, not a severity spelling: it rides
+    // the route's `unclassified` flag so `severity` keeps its closed vocabulary.
+    expect(
+      appPullRequestRecordsUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 }, "findings", {
+        offset: 0,
+        limit: 10,
+        severity: CATCH_ALL_SEVERITY,
+      }),
+    ).toBe("/dashboard/api/apps/1/pull-requests/acme/web/42/findings?offset=0&limit=10&unclassified=1");
   });
 
   test("the GitHub builders encode each segment and cannot escape the path", () => {
@@ -768,9 +780,11 @@ describe("pull request detail face (static SSR)", () => {
       { expanded: false, hidden: true },
       { expanded: false, hidden: true },
     ]);
+    // The position is the rendered one inside the `other` group, not the
+    // payload array index.
     expect(read.otherLabels).toEqual([
-      `${t("en", "pullRequests.expand")} — Drop the unsafe default · #4`,
-      `${t("en", "pullRequests.expand")} — #5`,
+      `${t("en", "pullRequests.expand")} — Drop the unsafe default · #1`,
+      `${t("en", "pullRequests.expand")} — #2`,
     ]);
 
     // A legacy severity still renders, still opens the findings family (a
@@ -807,11 +821,12 @@ describe("pull request detail face (static SSR)", () => {
     expect(pairs.filter((pair) => pair.expanded)).toHaveLength(1);
     expect(pairs.filter((pair) => !pair.expanded)).toHaveLength(2);
     // Each toggle names the record it folds and its position, so identical
-    // "Expand" labels do not leave several controls indistinguishable.
+    // "Expand" labels do not leave several controls indistinguishable. The
+    // position is per group: each finding is the first row of its own bucket.
     expect(labels).toEqual([
       `${t("en", "pullRequests.collapse")} — Use a parameterized query · #1`,
-      `${t("en", "pullRequests.expand")} — Session cookie lacks HttpOnly · #2`,
-      `${t("en", "pullRequests.expand")} — Rename tmp to pending · #3`,
+      `${t("en", "pullRequests.expand")} — Session cookie lacks HttpOnly · #1`,
+      `${t("en", "pullRequests.expand")} — Rename tmp to pending · #1`,
     ]);
   });
 
@@ -867,9 +882,11 @@ describe("pull request detail face (static SSR)", () => {
         (control) => control.getAttribute("aria-label") ?? "",
       ),
     );
+    // The position is per group: each untitled finding is the first row of
+    // its own bucket.
     expect(findingLabels).toEqual([
       `${t("en", "pullRequests.collapse")} — #1`,
-      `${t("en", "pullRequests.expand")} — #2`,
+      `${t("en", "pullRequests.expand")} — #1`,
     ]);
   });
 
@@ -1534,5 +1551,45 @@ describe("pull request detail face (static SSR)", () => {
       t("en", "pullRequests.timelineFirstSeen"),
     ]);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+});
+
+/**
+ * The reviewing-now badge on the DETAIL header (compass D11/D16). The header
+ * reads the projection the payload carries — it never derives it — so these
+ * pin the three states the wire can hand it: a live lock with its anchor, an
+ * idle PR with no badge at all, and a failed read that must not pass as idle.
+ */
+describe("reviewing-now badge on the detail header (D11)", () => {
+  const IDLE_HEAD = ROW_HEAD.head_sha.slice(0, 7);
+
+  test("a live lock carries the holding attempt's head sha", () => {
+    const markup = face(
+      {},
+      { reviewing: { state: "live", head_sha: "abc1234def567", acquired_at: "2026-11-01T10:00:00.000Z" } },
+    );
+    expect(markup).toContain(t("en", "pullRequests.reviewingHead", { head: "abc1234" }));
+  });
+
+  test("a live lock with no head sha carries its acquisition time instead", () => {
+    const acquiredAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const markup = face({}, { reviewing: { state: "live", head_sha: "", acquired_at: acquiredAt } });
+    expect(markup).toContain(
+      t("en", "pullRequests.reviewingSince", { time: formatRelativeTime(acquiredAt, "en") }),
+    );
+  });
+
+  test("no live lock paints no badge — and no unknown note either", () => {
+    const markup = face({}, { reviewing: { state: "none" } });
+    // The header really rendered (its own state pill is there).
+    expect(markup).toContain(t("en", "pullRequests.state.merged"));
+    expect(markup).not.toContain(t("en", "pullRequests.reviewingUnknown"));
+    expect(markup).not.toContain(t("en", "pullRequests.reviewingHead", { head: IDLE_HEAD }));
+  });
+
+  test("an unreadable inflight read paints unknown, never the reviewing badge", () => {
+    const markup = face({}, { reviewing: { state: "unknown" } });
+    expect(markup).toContain(t("en", "pullRequests.reviewingUnknown"));
+    expect(markup).not.toContain(t("en", "pullRequests.reviewingHead", { head: IDLE_HEAD }));
   });
 });

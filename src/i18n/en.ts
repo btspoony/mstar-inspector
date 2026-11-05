@@ -195,6 +195,13 @@ export const en = {
     latestReview: "Latest review",
     /** The verdict metric's screen-reader text when no review exists yet. */
     noVerdict: "no verdict yet",
+    /** The D11 reviewing marker: a LIVE review lock, carrying the attempt's
+        head sha, or its acquisition time when a comment trigger carried none. */
+    reviewingHead: "Reviewing now · {head}",
+    reviewingSince: "Reviewing now · {time}",
+    /** A failed inflight read: neither the reviewing badge nor a confident idle. */
+    reviewingUnknown: "Review state unknown",
+    reviewingUnknownHint: "The review state could not be read.",
     /** The segmented pill over the three record families. */
     recordsLabel: "Pull request records",
     /** A family trigger's accessible name: its label and the count it paints. */
@@ -895,6 +902,7 @@ export const en = {
     reviewGateSave: "Save review gate",
     reviewGateUnreadable:
       "This App's stored review gate could not be read, so it cannot be edited here. The Check keeps failing closed until the stored configuration is repaired.",
+    reviewGateReset: "Reset to the default gate (score {score}+, verdicts: {verdicts})",
   },
   manifest: {
     title: "Create GitHub App",

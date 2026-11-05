@@ -60,7 +60,7 @@ export function StatCard({
           className="mt-1 h-1 overflow-hidden rounded-(--radius-pill) bg-(--surface-overlay)"
         >
           <div
-            className={cn("h-full rounded-(--radius-pill) bg-(--primary)", FILL_WIDTHS[step])}
+            className={cn("h-full rounded-(--radius-pill) bg-(--button-primary-bg)", FILL_WIDTHS[step])}
           />
         </div>
       )}

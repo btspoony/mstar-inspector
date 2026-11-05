@@ -121,6 +121,9 @@ describe("report publication", () => {
   });
 
   for (const [cause, arrange] of [
+    // The read command's own absence flag: the seat wrote no document. This
+    // must NOT read like `unreadable`, which is a broken read of the file.
+    ["absent", () => { sandbox.reportFileOverflow = "2"; }],
     ["unreadable", () => { sandbox.reportFileExitCode = 1; }],
     ["overflow", () => { sandbox.reportFileOverflow = "1"; }],
     ["empty", () => { sandbox.reportFileContent = ""; }],
@@ -226,5 +229,11 @@ describe("extractIssueRefs", () => {
     }
     // The bare forms keep the standalone-keyword and positive-number rules.
     expect(extractIssueRefs("unfixes #3, fix #abc, fix #0, mentions #9")).toEqual([]);
+  });
+
+  test("whitespace before the optional colon is not a closing spelling", () => {
+    // I-000421: GitHub does not close from `fix : #12`, so prose with a spaced
+    // colon before a number must not be read as a resolve instruction.
+    expect(extractIssueRefs("fix : #12, closes : #7, resolve\t: #9")).toEqual([]);
   });
 });

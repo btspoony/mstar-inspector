@@ -10,11 +10,12 @@
  * back with checkedOutShaCommand, so clone/diff/commit_id always agree.
  */
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
+  BOUNDED_READ_ABSENT_FLAG,
   boundedFileReadCommand,
   buildGitOpsCommands,
   checkedOutShaCommand,
@@ -35,7 +36,7 @@ import {
 } from "../../src/pipeline/gitops";
 import { shellCommand } from "../../src/pipeline/shell-command";
 import { RECHECK_FILE_MAX_BYTES } from "../../packages/shared/src/recheck-wire";
-import { REPORT_FILE_MAX_BYTES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
+import { REPORT_FILE_MAX_BYTES } from "../../packages/shared/src/report-wire";
 
 describe("gitops command builders", () => {
   test("valid inputs produce single-quoted, allowlisted commands", () => {
@@ -157,6 +158,14 @@ describe("gitops command builders", () => {
           command: (path: string) => boundedFileReadCommand(path, DIFF_PREFETCH_MAX_BYTES),
           fit: "diff --git a/src/auth.ts b/src/auth.ts\n@@ -1,2 +1,3 @@\n+a\n b\n",
         },
+        {
+          // The report read wraps the same transport in its absence probe: an
+          // EXISTING file must still take the unchanged bounded read.
+          name: "report",
+          maxBytes: REPORT_FILE_MAX_BYTES,
+          command: (path: string) => readReportCommand(path),
+          fit: JSON.stringify({ schema: "mstar.report/v1" }),
+        },
       ]) {
         const overflowText = "b".repeat(read.maxBytes + 1);
         // The bound ITSELF is still a fit: the probe starts at byte bound+1, so
@@ -230,18 +239,38 @@ describe("gitops command builders", () => {
     expect(() => prBodyCommand("acme;rm", "widgets", 42)).toThrow(/unsafe owner/);
   });
 
-  test("readReportCommand shares the bounded-read transport with its own byte bound", () => {
-    expect(readReportCommand()).toBe(
-      shellCommand(
-        `head -c '${REPORT_FILE_MAX_BYTES}' '${REPORT_OUTPUT_PATH}' && printf '\\n' && ` +
-          `tail -c '+${REPORT_FILE_MAX_BYTES + 1}' '${REPORT_OUTPUT_PATH}' | head -c '1' | wc -c`,
-      ),
-    );
-    // Same path allowlist as the other reads: no metacharacters, absolute only.
-    // The rejection is the shared bounded-read guard's, so the assertion is the
-    // rejection itself, not the label it happens to carry.
-    expect(() => readReportCommand("/tmp/a b")).toThrow(/unsafe/);
-    expect(() => readReportCommand("relative/report.json")).toThrow(/unsafe/);
+  test("readReportCommand proves an absent document — a missing file is not a broken read", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mstar-report-read-"));
+    try {
+      const path = join(dir, "report.json");
+      // Nothing written: the seat produced no document. The command's own
+      // probe answers with the absent flag line and a ZERO exit, so this can
+      // never be confused with a read that failed (which exits non-zero).
+      const absent = Bun.spawn(["sh", "-c", readReportCommand(path)]);
+      const absentStdout = await new Response(absent.stdout).text();
+      expect(await absent.exited).toBe(0);
+      const lines = absentStdout.trimEnd().split("\n");
+      expect(lines.pop()?.trim()).toBe(BOUNDED_READ_ABSENT_FLAG);
+      expect(lines.join("\n")).toBe("");
+
+      // A path that EXISTS but cannot be read as a file (here: a directory)
+      // keeps failing closed — no flag line, non-zero exit — so a read fault
+      // is never reported as an absence.
+      const dirPath = join(dir, "as-directory");
+      await mkdir(dirPath);
+      const broken = Bun.spawn(["sh", "-c", readReportCommand(dirPath)], { stderr: "pipe" });
+      expect(await broken.exited).not.toBe(0);
+      expect(await new Response(broken.stdout).text()).toBe("");
+      expect(await new Response(broken.stderr).text()).not.toBe("");
+
+      // Same path allowlist as the other reads: no metacharacters, absolute only.
+      // The rejection is the shared bounded-read guard's, so the assertion is the
+      // rejection itself, not the label it happens to carry.
+      expect(() => readReportCommand("/tmp/a b")).toThrow(/unsafe/);
+      expect(() => readReportCommand("relative/report.json")).toThrow(/unsafe/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("runnerCommand appends --report-out after --recheck-out (both optional, both quoted)", () => {

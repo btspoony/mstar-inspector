@@ -9,6 +9,7 @@
 import { FINDING_SEVERITIES } from "../../contracts/finding-severity";
 import { t, type Locale } from "../../i18n";
 import { formatRelativeTime } from "../relative-time";
+import { CATCH_ALL_SEVERITY } from "./data";
 import type {
   PullRequestCounts,
   PullRequestFailure,
@@ -41,10 +42,21 @@ export const SEVERITY_GROUPS = FINDING_SEVERITIES.map((severity) => ({
 
 /** The bucket every spelling outside the table lands in, rendered last. */
 const OTHER_BUCKET = {
-  key: "other",
+  key: CATCH_ALL_SEVERITY,
   labelKey: "pullRequests.severityOther",
   tone: "neutral",
 } as const;
+
+/**
+ * The findings filter's choices: the merge-class vocabulary, then the
+ * catch-all bucket. The catch-all is a filter mode of its own (the route's
+ * `unclassified` flag), so offering it here never asks the route to accept a
+ * fifth severity spelling.
+ */
+export const SEVERITY_FILTER_OPTIONS = [
+  ...SEVERITY_GROUPS.map(({ severity, labelKey }) => ({ key: severity, labelKey })),
+  { key: OTHER_BUCKET.key, labelKey: OTHER_BUCKET.labelKey },
+];
 
 /** A tone a severity bucket can wear. */
 export type SeverityTone = "danger" | "warn" | "neutral";
@@ -166,11 +178,13 @@ export function recordId(baseId: string, key: string): string {
 }
 
 /**
- * A fold control's accessible name: the action, the record it folds, and the
- * record's position. The position is the one identity every record has — the
- * same one its fold state is keyed by — so two records that share a title (or
- * a verdict and sha) still read as two controls, and a record with no identity
- * text (a coerced-empty title or verdict) is named by its position alone.
+ * A fold control's accessible name: the action, the record it folds, and
+ * the record's position. The position is the row's rendered order in its
+ * group, so two records that share a title (or a verdict and sha) still read
+ * as two controls, and a record with no identity text (a coerced-empty title
+ * or verdict) is named by its position alone. It need not be the identity
+ * the fold state is keyed by — findings key folding on the payload index
+ * while announcing the rendered position.
  * The sentence's punctuation belongs to the locale keys, not to this function.
  */
 export function foldLabel(

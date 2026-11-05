@@ -171,6 +171,13 @@ export const zhCN: Dictionary = {
     latestReview: "最新审查",
     /** 尚无审查时，结论指标的读屏文本。 */
     noVerdict: "暂无结论",
+    /** D11 的“正在审查”标记：存在活的审查锁，携带该次尝试的头部 SHA；
+        评论触发没有 SHA 时则携带获取时间。 */
+    reviewingHead: "正在审查 · {head}",
+    reviewingSince: "正在审查 · {time}",
+    /** inflight 读取失败：既不是审查中，也不是确定的空闲。 */
+    reviewingUnknown: "审查状态未知",
+    reviewingUnknownHint: "无法读取审查状态。",
     /** 三个记录类别上的分段胶囊。 */
     recordsLabel: "拉取请求记录",
     /** 类别触发按钮的可访问名称：标签与它绘制的计数。 */
@@ -764,6 +771,7 @@ export const zhCN: Dictionary = {
     reviewGateSave: "保存审查门禁",
     reviewGateUnreadable:
       "无法读取此 App 已存储的审查门禁，因此无法在此编辑。在存储的配置被修复之前，Check 会持续按失败处理。",
+    reviewGateReset: "重置为默认门禁（分数 {score}+，结论：{verdicts}）",
   },
   manifest: {
     title: "创建 GitHub App",

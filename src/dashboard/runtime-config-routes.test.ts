@@ -662,10 +662,10 @@ describe("PATCH /_internal_admin/api/runtime reviewLevel", () => {
     const { db } = fixture();
     const res = await runtimeApi(db, {
       method: "PATCH",
-      body: JSON.stringify({ reviewLevel: "deep" }),
+      body: JSON.stringify({ reviewLevel: { value: "deep" } }),
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ reviewLevel: "deep" });
+    expect(await res.json()).toEqual({ reviewLevel: { value: "deep" } });
     expect(storedLevel(db)).toBe("deep");
     expect(auditRows(db)).toEqual([
       {
@@ -681,13 +681,37 @@ describe("PATCH /_internal_admin/api/runtime reviewLevel", () => {
     expect(read.reviewLevel).toEqual({ ...DEFAULT_REVIEW_LEVEL, value: "deep" });
   });
 
+  test("the group the GET reports is a valid save body", async () => {
+    // The console saves what it displayed: the read group also carries `levels`
+    // and `degraded`, and a save must not refuse it for saying so.
+    const { db } = fixture();
+    const read = (await (await runtimeApi(db, { method: "GET" })).json()) as {
+      reviewLevel: Record<string, unknown>;
+    };
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ reviewLevel: { ...read.reviewLevel, value: "quick" } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ reviewLevel: { value: "quick" } });
+    expect(storedLevel(db)).toBe("quick");
+    const again = (await (await runtimeApi(db, { method: "GET" })).json()) as {
+      reviewLevel: Record<string, unknown>;
+    };
+    expect(again.reviewLevel).toEqual({ ...DEFAULT_REVIEW_LEVEL, value: "quick" });
+  });
+
   test("an off-vocabulary or malformed value is a 400 that writes nothing", async () => {
     const { db } = fixture();
     for (const body of [
-      JSON.stringify({ reviewLevel: "turbo" }),
-      JSON.stringify({ reviewLevel: "QUICK" }),
-      JSON.stringify({ reviewLevel: 5 }),
-      JSON.stringify({ reviewLevel: "" }),
+      JSON.stringify({ reviewLevel: { value: "turbo" } }),
+      JSON.stringify({ reviewLevel: { value: "QUICK" } }),
+      JSON.stringify({ reviewLevel: { value: 5 } }),
+      JSON.stringify({ reviewLevel: { value: "" } }),
+      // The bare string is the shape the two sides used to disagree on.
+      JSON.stringify({ reviewLevel: "deep" }),
+      JSON.stringify({ reviewLevel: {} }),
+      JSON.stringify({ reviewLevel: null }),
     ]) {
       const res = await runtimeApi(db, { method: "PATCH", body });
       expect(res.status, body).toBe(400);
@@ -701,7 +725,7 @@ describe("PATCH /_internal_admin/api/runtime reviewLevel", () => {
     const { db } = fixture();
     const res = await runtimeApi(db, {
       method: "PATCH",
-      body: JSON.stringify({ concurrency: 8, reviewLevel: "quick" }),
+      body: JSON.stringify({ concurrency: 8, reviewLevel: { value: "quick" } }),
     });
     expect(res.status).toBe(400);
     expect(storedSystem(db)).toBeNull();

@@ -2160,7 +2160,10 @@ The Dockerfile path is not written into the script: the gate reads
 overrides the file), so it diffs exactly the file a deploy hashes. The gate
 reads git output plus the two revisions of that config — it never builds the
 image — and an unreadable diff, config or container block fails the run rather
-than passing unverified.
+than passing unverified. A config that is absent at the base revision is not a
+truncated checkout: its containers block is new in this diff, so the gate fails
+with the changed families and the marker repair, exactly as for any other new
+image input.
 
 **Pull requests and pushes.** The `Image rebuild gate` step in
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) diffs a pull request
@@ -2168,12 +2171,30 @@ against `github.event.pull_request.base.sha` and a push (CI runs on `main`)
 against `github.event.before`, the ref's previous tip; the job checkout
 therefore carries `fetch-depth: 0`. A branch's first push reports the all-zeros
 sha, which has nothing to diff against — the step skips that case and exits
-successfully rather than failing on a diff it cannot compute. `deploy.yml` does
-not run the gate itself yet; wiring it into the deploy job is tracked as
-`I-000342`, so until then a push straight to `main` that lands between the CI
-run and the deploy still relies on the manual check in
-[`AGENTS.md`](../AGENTS.md) § Sandbox image rebuild, which also carries the
-marker instruction the gate prints on failure.
+successfully rather than failing on a diff it cannot compute.
+
+The `deploy` job in
+[`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) runs the same
+gate again, after `Setup Bun` and before `Install dependencies` and every
+version-creating step, so a push that lands between the CI run and the deploy
+cannot ship the Worker against the previous image. It has no
+`pull_request` trigger: a push diffs `github.event.before` (the all-zeros
+first push is the same printed skip), and a `workflow_dispatch` has no previous
+tip — the push that landed that SHA already ran the gate in CI — so the step
+prints a skip naming the trigger instead of failing. A dispatch that passes its
+`base_sha` input runs the gate against that commit instead of skipping it.
+
+**When the base is gone.** A force-push orphans the previous tip: the depth-0
+checkout fetched only what the new ref points at. The script resolves a usable
+base rather than blaming the config — the named commit, the same commit fetched
+from `origin`, or the merge base with the target branch (where the rewritten
+history actually diverged) — emits a `::warning::` naming what it used, and
+still evaluates the diff. Only when none of those resolves does it fail closed,
+with `::error::image-gate-base-unreachable` naming the unreachable commit and
+the `--base` recovery; pass the deploy dispatch's `base_sha` then. The failure output names
+the input families the diff actually touched and the `# rebuild:` line to add;
+the marker instruction is the one in
+[`AGENTS.md`](../AGENTS.md) § Sandbox image rebuild.
 
 The same gate runs locally against any base rev:
 
@@ -2339,8 +2360,10 @@ treated as absent, never a throw — a review must still run.
 
 The operator default sits on the `/_internal_admin` runtime page, on the same
 call as the caps: `PATCH /_internal_admin/api/runtime` with
-`{"reviewLevel": "quick" | "default" | "deep"}` (one save writes one
-parameter). It applies only to Apps that have not chosen a depth of their own.
+`{"reviewLevel": {"value": "quick" | "default" | "deep"}}` (one save writes one
+parameter). The body takes the same `reviewLevel` group the GET reports, so the
+read result is a valid save body. It applies only to Apps that have not chosen a
+depth of their own.
 
 The tier decides three bounds, all defined in `src/pipeline/consumer.ts`:
 `runnerTimeoutMs` (600 s for `quick`/`default`, 840 s for `deep`),

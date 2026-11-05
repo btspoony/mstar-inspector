@@ -491,6 +491,39 @@ describe("pull request detail (mounted)", () => {
     }
   });
 
+  test("the catch-all bucket is selectable and reads the route's unclassified filter", async () => {
+    const corpus: PullRequestFinding[] = [
+      { finding_id: "m-1", severity: "must-fix", title: "Must 1", file_path: "", line: null, body: "", review_round: null },
+      { finding_id: "x-1", severity: "blocker", title: "Blocker 1", file_path: "", line: null, body: "", review_round: null },
+      { finding_id: "x-2", severity: "critical", title: "Critical 1", file_path: "", line: null, body: "", review_round: null },
+    ];
+    const { container, win, fetches, unmount } = await mountDetailView(scene({ findings: page(corpus) }));
+    try {
+      // Both out-of-vocabulary rows render under the catch-all bucket.
+      expect(container.textContent ?? "").toContain("Blocker 1");
+      expect(container.textContent ?? "").toContain("Critical 1");
+
+      // The filter offers that bucket, and choosing it narrows to those rows.
+      await press(win, container.querySelector('[role="combobox"]'));
+      const option = [...win.document.querySelectorAll('[role="option"]')].find(
+        (row) => row.textContent === t("en", "pullRequests.severityOther"),
+      );
+      expect(option).toBeDefined();
+      await press(win, option as unknown as Element);
+      const last = fetches.at(-1) ?? "";
+      expect(last).toContain("offset=0");
+      // The bucket is a filter MODE: it must not be sent as a severity
+      // spelling, which the route refuses.
+      expect(last).toContain("unclassified=1");
+      expect(last).not.toContain("severity=");
+      expect(container.textContent ?? "").toContain("Blocker 1");
+      expect(container.textContent ?? "").toContain("Critical 1");
+      expect(container.textContent ?? "").not.toContain("Must 1");
+    } finally {
+      await unmount();
+    }
+  });
+
   test("two findings sharing a payload id fold independently", async () => {
     // The payload can repeat an id; the rendered rows must not share a fold.
     const duplicated: PullRequestFinding[] = [

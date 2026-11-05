@@ -1,7 +1,7 @@
 ---
 module: design-system + SPA guards (tests and check scripts)
 date: 2026-11-01
-last_updated: 2026-11-01
+last_updated: 2026-11-06
 problem_type: best_practice
 category: best-practices
 severity: high
@@ -123,6 +123,9 @@ Ask of any new check:
 3. If that input arrived, would anything else catch it?
 4. Does my fixture fail under the pre-change rule? If I have not run the old
    revision over it, I do not know that the fix changed anything.
+5. Does the check's own preprocessing delete bytes before matching? If so, what
+   is it allowed to lose — see
+   [`guard-preprocessing-fails-toward-reporting.md`](guard-preprocessing-fails-toward-reporting.md).
 
 A check whose answers are "the things I listed", "one I cannot think of", "no",
 and "I did not try" is a comment with a test wrapper.

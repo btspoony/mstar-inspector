@@ -69,6 +69,7 @@ import {
   REVIEW_TRIGGER_MODES,
   type DeliverySummary,
   type GithubAppRow,
+  type PullRequestReviewing,
   type ReviewTriggerMode,
 } from "./apps-store";
 import {
@@ -1324,7 +1325,14 @@ async function manifestStartRoute(c: DashboardContext, workspaceRef: string | un
     appId,
   );
   return c.html(
-    manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state), requestLocale(c)),
+    manifestStartPage(
+      session,
+      manifest.name,
+      JSON.stringify(manifest),
+      buildManifestCreateUrl(state),
+      requestLocale(c),
+      target.workspaceRef,
+    ),
   );
 }
 
@@ -1665,6 +1673,10 @@ dashboardApp.get("/manifest/confirm", async (c) => {
         webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.workspaceId}/${hold.appId}`,
       },
       requestLocale(c),
+      // The hold names the workspace the App commits into; a store failure
+      // (`db_unbound`) left the target unresolved, so the page keeps the
+      // deployment-level links.
+      target.kind === "ok" ? target.workspaceRef : null,
     ),
   );
 });
@@ -4720,14 +4732,23 @@ async function requireAppManagerJson(
  * its nullable columns twice. The store reports what the tables hold; here the
  * payload becomes total: `title` / `head_sha` are genuinely optional and
  * become "", and `state` is GitHub's own domain — an unexpected value reads as
- * the only state a client knows how to render.
+ * the only state a client knows how to render. `reviewing` rides unchanged:
+ * it is already the explicit three-state projection (compass D16), and an
+ * `unknown` from a failed inflight read must reach the client as such — a
+ * default here would render a read failure as idle.
  */
-function pullRequestWireColumns(row: { title: string | null; state: string; head_sha: string | null }) {
+function pullRequestWireColumns(row: {
+  title: string | null;
+  state: string;
+  head_sha: string | null;
+  reviewing: PullRequestReviewing;
+}) {
   return {
     title: row.title ?? "",
     // The three states a client renders; anything else reads as 'open'.
     state: row.state === "merged" || row.state === "closed" ? row.state : "open",
     head_sha: row.head_sha ?? "",
+    reviewing: row.reviewing,
   };
 }
 
@@ -4871,7 +4892,9 @@ type PullRequestRecordSection = "findings" | "reviews" | "failures";
  * `mergeClass` spelling from the shared `FINDING_SEVERITIES` contract, where
  * empty or absent is no filter and the returned `total` is filtered. A
  * spelling outside that set is a 400: it has no predicate, so an empty page
- * would claim a filter that never ran.
+ * would claim a filter that never ran. `unclassified=1` is that filter's
+ * complement — the SPA's catch-all bucket — and is a mode of its own, not a
+ * fifth severity spelling; combining it with `severity` is a 400.
  * A miss is the detail's 404 on every family (decided inside the family's own
  * batch, so a section read stays one roundtrip); malformed paging is a 400, and
  * an out-of-bounds `limit` is clamped into `[1, 50]`. Every page echoes the
@@ -4898,20 +4921,32 @@ const appPullRequestRecordsRoute = async (
   const { offset, limit } = paging;
   if (section === "findings") {
     const rawSeverity = c.req.query("severity") ?? "";
+    const rawUnclassified = c.req.query("unclassified") ?? "";
+    // `unclassified=1` is the catch-all predicate: the rows whose `mergeClass`
+    // is outside `FINDING_SEVERITIES` (the SPA's "Other" bucket). It is a
+    // filter MODE, not a fifth severity spelling — `severity` keeps admitting
+    // the vocabulary only — and the two never combine.
+    const unclassified = rawUnclassified === "1";
+    const malformed =
+      (rawUnclassified !== "" && !unclassified) ||
+      (unclassified && rawSeverity !== "") ||
+      (rawSeverity !== "" && !isFindingSeverity(rawSeverity));
     // A spelling the route refuses must not drive the read: decide it BEFORE
     // the page query, so the 400 never pays for the count + paged scan it
     // discards. 404 still outranks 400 — a PR this App never received beats a
     // malformed filter on it — so the refusal keeps one head probe instead of
     // the family's batch.
-    if (rawSeverity !== "" && !isFindingSeverity(rawSeverity)) {
+    if (malformed) {
       const head = await gate.store.getPullRequestHead(gate.app.id, owner, repo, number);
       if (head === null) return c.json({ error: "unknown pull request" }, 404);
-      return c.json({ error: "invalid severity" }, 400);
+      const outsideVocabulary = rawSeverity !== "" && !isFindingSeverity(rawSeverity);
+      return c.json({ error: outsideVocabulary ? "invalid severity" : "invalid filter" }, 400);
     }
     const page = await gate.store.listPullRequestFindings(gate.app.id, owner, repo, number, {
       offset,
       limit,
       severity: rawSeverity === "" ? null : rawSeverity,
+      unclassified,
     });
     if (page === null) return c.json({ error: "unknown pull request" }, 404);
     return c.json({

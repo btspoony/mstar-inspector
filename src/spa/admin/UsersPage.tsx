@@ -86,7 +86,8 @@ export function UsersPage({ locale }: { locale: Locale }) {
                 rows={filtered}
                 rowKey={(row) => row.login}
                 empty={
-                  query ? (
+                  // No-match copy is only true when there were rows to match.
+                  query && users.length > 0 ? (
                     <EmptyState
                       title={t(locale, "admin.search.emptyTitle")}
                       description={t(locale, "admin.search.emptyDescription")}

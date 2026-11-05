@@ -410,8 +410,8 @@ describe("StackedBarChart SSR (stacked face)", () => {
     const html = stackedChart(severityBuckets, severitySeries);
     expect(html).toContain("recharts-default-tooltip");
     const tooltip = html.slice(html.indexOf("recharts-default-tooltip"));
-    expect(tooltip).toContain("background-color:var(--card)");
-    expect(tooltip).toContain("border:1px solid var(--border)");
+    expect(tooltip).toContain("background-color:var(--surface-card)");
+    expect(tooltip).toContain("border:1px solid var(--border-default)");
     expect(tooltip).toContain("border-radius:6px");
     expect(tooltip).toContain(
       'class="recharts-tooltip-label" style="margin:0;color:var(--text-primary);font-weight:500"',
