@@ -168,6 +168,14 @@ const DEFAULT_RECHECK_ASSIGNMENT = {
   degraded: false,
 };
 
+/** The empty trailing-24h admission-drop read: every reason present at zero. */
+const DEFAULT_ADMISSION_DROPS = {
+  "pr-held": 0,
+  "system-cap": 0,
+  "workspace-cap": 0,
+  error: 0,
+};
+
 /** The stored recheck ask-budget row, raw so a refused write is observable. */
 function storedRecheckBudget(db: TestD1): string | null {
   const row = db.raw
@@ -295,6 +303,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
+      admissionDrops24h: DEFAULT_ADMISSION_DROPS,
     });
   });
 
@@ -387,6 +396,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
+      admissionDrops24h: DEFAULT_ADMISSION_DROPS,
     });
     await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ concurrency: 5 }) });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
@@ -397,6 +407,33 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
+      admissionDrops24h: DEFAULT_ADMISSION_DROPS,
+    });
+  });
+
+  test("GET reports the last 24h admission drops by reason", async () => {
+    const { db } = fixture();
+    for (const reason of ["pr-held", "workspace-cap"] as const) {
+      seed(
+        db,
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        crypto.randomUUID(),
+        1,
+        "acme",
+        "widgets",
+        42,
+        "a".repeat(40),
+        "pipeline",
+        `review dropped after 3 refused retries: ${reason} (system_cap 2, workspace_cap 4) — PR acme/widgets#42, head_sha ${"a".repeat(40)}`,
+      );
+    }
+    const body = (await (await runtimeApi(db, { method: "GET" })).json()) as Record<string, unknown>;
+    expect(body.admissionDrops24h).toEqual({
+      "pr-held": 1,
+      "system-cap": 0,
+      "workspace-cap": 1,
+      error: 0,
     });
   });
 

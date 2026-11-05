@@ -39,6 +39,7 @@ import { resolveLocale, t, type Locale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
 import { ADMIN_PAGES } from "../spa/admin/pages";
 import { RESERVED_WORKSPACE_SLUGS } from "../spa/routes";
+import { createFailureStore } from "../store/failure-store";
 import type { Env } from "../worker/env";
 import { isServerFlagKey, listFlags } from "./flags";
 import { operatorLogin, type AdminContext } from "./gate";
@@ -144,11 +145,12 @@ async function readRuntime(c: AdminContext): Promise<Response> {
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
-  const [system, budgets, level, recheck] = await Promise.all([
+  const [system, budgets, level, recheck, admissionDrops24h] = await Promise.all([
     getSystemConcurrency(db),
     getCheckBudgets(db),
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
+    createFailureStore(db).countAdmissionDrops24h(),
   ]);
   return c.json({
     concurrency: system.concurrency,
@@ -175,6 +177,10 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       max: RECHECK_ASSIGNMENT_MAX,
       degraded: recheck.degraded,
     },
+    // Admission drops the pipeline already records as `review_failures` rows,
+    // grouped by the reason token of the drop prefix over the last 24h — the
+    // sub-threshold signal the failure sweep cannot page on.
+    admissionDrops24h,
   });
 }
 

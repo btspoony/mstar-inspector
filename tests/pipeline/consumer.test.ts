@@ -692,6 +692,7 @@ describe("createReviewConsumer", () => {
           throw new Error("d1 down");
         },
         listRecent: async () => [],
+        countAdmissionDrops24h: async () => ({ "pr-held": 0, "system-cap": 0, "workspace-cap": 0, error: 0 }),
       },
     });
 
@@ -869,6 +870,7 @@ describe("createReviewConsumer", () => {
           throw new Error("d1 down");
         },
         listRecent: async () => [],
+        countAdmissionDrops24h: async () => ({ "pr-held": 0, "system-cap": 0, "workspace-cap": 0, error: 0 }),
       },
     });
 
@@ -2365,6 +2367,9 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)[0]).toMatchObject({ pr_number: 42, stage: "pipeline", head_sha: newer });
     const dropped = String(failureRows(db)[0]!.error);
     expect(dropped).toContain("pr-held");
+    // The admission-drop read derives the reason from this exact prefix; a
+    // writer that rewords it would zero the operator count silently.
+    expect(dropped).toContain("review dropped after 3 refused retries: pr-held (");
     // Both shas are named: the skipped commit and the one the review holds.
     expect(dropped).toContain(newer);
     expect(dropped).toContain(SHA);
