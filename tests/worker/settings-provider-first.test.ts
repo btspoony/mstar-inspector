@@ -13,7 +13,8 @@ import {
 } from "../../src/dashboard/app-config-store";
 import { composeModelOptions, findFailingSelector, selectorBase } from "../../src/dashboard/model-membership";
 import { PROVIDER_IDS } from "../../src/dashboard/app-config-store";
-import { PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
+import { PROVIDER_CATALOG, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
+import { hasUsageProbe } from "../../src/dashboard/provider-usage";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
@@ -1799,5 +1800,59 @@ describe("GET settings provider_catalog display_group (AD-547)", () => {
     const builtinCount = catalog.filter((p) => p.tier === "builtin").length;
     expect(catalog.slice(0, builtinCount).map((p) => p.id)).toEqual([...PROVIDER_IDS]);
     expect(catalog.slice(builtinCount).every((p) => p.tier === "template")).toBe(true);
+  });
+});
+
+describe("GET settings provider_catalog usage_probe (per-key usage action)", () => {
+  /** Every catalog id with a usage endpoint — the explicit contract the stamp must match. */
+  const MAPPED = [
+    "commandcode",
+    "commandcode-anthropic",
+    "opencode-go",
+    "zai",
+    "zai-coding-plan",
+    "zhipuai",
+    "zhipuai-coding-plan",
+    "minimax-coding-plan",
+    "minimax-cn-coding-plan",
+    "cline-pass",
+    "synthetic",
+    "umans",
+    "hyper",
+    "kimi-for-coding",
+    "cursor",
+  ];
+
+  type StampRow = { id: string; tier: string; usage_probe: boolean };
+
+  async function getCatalogRows(env: Env): Promise<StampRow[]> {
+    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { provider_catalog: StampRow[] };
+    return body.provider_catalog;
+  }
+
+  test("both branches stamp usage_probe from the probe table — true exactly for the mapped ids", async () => {
+    const { db } = await seededWorld();
+    const rows = await getCatalogRows(makeEnv(db));
+
+    // No second hand-kept list: every row's stamp IS hasUsageProbe(id), so a
+    // catalog row can never advertise (or hide) a probe the table disagrees on.
+    for (const row of rows) expect(row.usage_probe, row.id).toBe(hasUsageProbe(row.id));
+    // Two-way: each mapped id is a real catalog row…
+    for (const id of MAPPED) expect(Object.hasOwn(PROVIDER_CATALOG, id), id).toBe(true);
+    // …and exactly these rows come back stamped true.
+    expect(rows.filter((row) => row.usage_probe).map((row) => row.id).sort()).toEqual([...MAPPED].sort());
+
+    // BOTH branches carry the stamp: the builtin-tier mapped ids…
+    expect(rows.filter((row) => row.tier === "builtin" && row.usage_probe).map((row) => row.id).sort()).toEqual(
+      MAPPED.filter((id) => PROVIDER_CATALOG[id]?.tier === "builtin").sort(),
+    );
+    // …and the template-tier ones.
+    expect(rows.filter((row) => row.tier === "template" && row.usage_probe).map((row) => row.id).sort()).toEqual(
+      MAPPED.filter((id) => PROVIDER_CATALOG[id]?.tier === "template").sort(),
+    );
+    // An unmapped provider is stamped false, never left undefined.
+    expect(rows.find((row) => row.id === "anthropic")?.usage_probe).toBe(false);
   });
 });

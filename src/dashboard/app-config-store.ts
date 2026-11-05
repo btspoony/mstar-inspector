@@ -1510,6 +1510,35 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
+     * ONE stored key's plaintext, for the per-key usage probe: the built-in
+     * pool first, then the declaration pool (a template provider's keys live
+     * in `app_custom_provider_keys`). Each row decrypts with ITS OWN AAD, so
+     * one slot's ciphertext can never answer for another. `null` when neither
+     * pool holds that id for THIS App — an id of another App and a deleted id
+     * are deliberately indistinguishable. The plaintext exists for the
+     * caller's single outbound request header: it is never returned to a
+     * client and never logged.
+     */
+    async getProviderKeyPlaintext(
+      appId: string,
+      provider: string,
+      keyId: string,
+    ): Promise<{ plainKey: string; custom: boolean } | null> {
+      for (const { spec, custom } of [
+        { spec: PROVIDER_KEY_TABLE, custom: false },
+        { spec: CUSTOM_KEY_TABLE, custom: true },
+      ]) {
+        const row = (await readKeyRows(spec, appId, provider)).find((candidate) => candidate.key_id === keyId);
+        if (row === undefined) continue;
+        return {
+          plainKey: await box.decryptSecret(row.key_enc, spec.aad(row.app_id, row.provider, row.key_id)),
+          custom,
+        };
+      }
+      return null;
+    },
+
+    /**
      * Store the App's default model chain VERBATIM (the route has already
      * validated ≥1 selector), or clear it: `null` AND any blank chain
      * (empty or whitespace-only — the route's 空 = 清除 semantics)
@@ -2020,6 +2049,20 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         db.prepare(`DELETE FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`).bind(appId, providerId),
       ]);
       return res[1]!.meta.changes > 0;
+    },
+
+    /**
+     * ONE declaration's base URL, by id: the usage probe only needs to know
+     * WHERE a declaration points, so this read is decrypt-free AND parse-free —
+     * unlike listCustomProviders, it never parses model_ids, so a corrupt
+     * neighbour declaration cannot fail it. `null` = no declaration row.
+     */
+    async getCustomProviderBaseUrl(appId: string, providerId: string): Promise<string | null> {
+      const row = await db
+        .prepare(`SELECT base_url FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+        .bind(appId, providerId)
+        .first<{ base_url: string }>();
+      return row?.base_url ?? null;
     },
 
     /**

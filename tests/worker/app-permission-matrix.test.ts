@@ -3,8 +3,8 @@
  *
  * The T1b audit confirmed every App write route — config (settings family:
  * add-key / save-chain / save-roles / add-custom-provider /
- * add-template-provider / remove-custom-provider / key/delete / keys/verify,
- * plus the chain ops add-chain / remove-chain) and ops
+ * add-template-provider / remove-custom-provider / key/delete / keys/verify /
+ * keys/usage, plus the chain ops add-chain / remove-chain) and ops
  * (pause / resume / disable / enable / delete) — funnels through the SAME
  * server-side workspace owner/admin gate (`canManageApp` in
  * src/dashboard/index.ts,
@@ -35,10 +35,21 @@ const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].j
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const PLAIN_KEY = sk("ant-matrix-9988");
 
+/**
+ * The pool id the store derives from PLAIN_KEY (first 16 hex of SHA-256) — the
+ * `keyId` the usage route takes, so the manager sweep can reach its 200 face.
+ */
+async function keyIdOf(plainKey: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plainKey));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 16);
+}
+const PLAIN_KEY_ID = await keyIdOf(PLAIN_KEY);
+
 /** The App's immutable GitHub App id — the only App address form (D0). */
 const APP_ID = 1001;
 const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
 const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
+const USAGE = `/dashboard/default/api/apps/${APP_ID}/keys/usage`;
 
 /**
  * Seeded world (spec §2 actors): octocat = workspace `owner`; mallory created
@@ -175,7 +186,9 @@ type MatrixRoute = {
  */
 const MATRIX_ROUTES: MatrixRoute[] = [
   // --- edit family: settings POST (config) ---
-  { name: "settings add-key", path: SETTINGS, fields: { op: "add-key", provider: "anthropic", key: PLAIN_KEY }, verifies: true },
+  // A provider with a usage probe, so the keys/usage entry below finds a stored
+  // key and reaches its 200 face from this same sweep.
+  { name: "settings add-key", path: SETTINGS, fields: { op: "add-key", provider: "zai", key: PLAIN_KEY }, verifies: true },
   { name: "settings save-chain (clear)", path: SETTINGS, fields: { op: "save-chain", model_chain: "" } },
   // QC wave (F-002): save-roles is a FULL-map save — every seat key is
   // required (blanks = default chain), so the matrix must post all four.
@@ -216,8 +229,12 @@ const MATRIX_ROUTES: MatrixRoute[] = [
     verifies: true,
   },
   { name: "settings remove-custom-provider", path: SETTINGS, fields: { op: "remove-custom-provider", provider_id: "nope" } },
-  { name: "settings key/delete", path: `${SETTINGS}/key/delete`, fields: { provider: "anthropic" } },
   { name: "keys/verify", path: VERIFY, fields: { provider: "anthropic", key: PLAIN_KEY }, verifies: true },
+  { name: "keys/usage", path: USAGE, fields: { provider: "zai", keyId: PLAIN_KEY_ID }, verifies: true },
+  // Removes the row `settings add-key` seeded (zai + PLAIN_KEY). It runs after
+  // keys/usage — which still needs that row — so the 200 face deletes a REAL
+  // row instead of finding nothing.
+  { name: "settings key/delete", path: `${SETTINGS}/key/delete`, fields: { provider: "zai", key_id: PLAIN_KEY_ID } },
   // (D5) The manager's forced metadata refresh — a manager-only write whose 200
   // side additionally calls api.github.com (GET /app + the bot avatar leg), so
   // the sweep's stub answers those URLs too.
@@ -311,7 +328,15 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
       } finally {
         fetchSpy.mockRestore();
       }
-      if (!allowed) {
+      if (allowed) {
+        // `settings key/delete` removed the row `settings add-key` seeded (zai):
+        // the delete's 200 face did real work rather than matching nothing, and
+        // only the row `keys/verify` stored (anthropic) is left in the pool.
+        expect(
+          db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys WHERE provider = 'zai'").get(),
+        ).toEqual({ n: 0 });
+        expect(rawCount(db, "app_provider_keys")).toBe(1);
+      } else {
         // Zero mutation on every deny path: the app row is untouched and no
         // config table gained a row.
         expectZeroAppMutations(db);

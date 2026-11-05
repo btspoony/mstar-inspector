@@ -155,6 +155,8 @@ export type CatalogProvider = {
   api: string | null;
   models: string[];
   verifiable: boolean;
+  /** The provider answers a per-key usage probe (`/keys/usage`). */
+  usage_probe: boolean;
   /** Usability vs the App's selected runtime image. */
   eligibility: ProviderEligibility;
   /**
@@ -1486,6 +1488,7 @@ function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
         (row.base_url === null || typeof row.base_url === "string") &&
         (row.api === null || typeof row.api === "string") &&
         typeof row.verifiable === "boolean" &&
+        typeof row.usage_probe === "boolean" &&
         isStringArray(row.models),
     )
   );
@@ -1513,6 +1516,108 @@ export function providerFormKind(provider: CatalogProvider): ProviderFormKind {
   if (provider.tier === "template") return "template";
   if (!provider.verifiable) return "console";
   return "key";
+}
+
+/** One allowance of the usage-probe snapshot (the usage route's fixed wire contract). */
+export type UsageLimit = {
+  id: string;
+  kind: "window" | "balance";
+  /** Window only, 0..1 — the share of the window already used. */
+  usedFraction?: number;
+  /** Balance amount; a window states it only when the vendor does. */
+  remaining?: number;
+  limit?: number;
+  unit: "percent" | "requests" | "credits" | "usd" | "tokens";
+  /** Epoch ms, always a future stamp. */
+  resetsAt?: number;
+  /** One account-wide pool behind several keys — the UI says "account-wide". */
+  shared?: boolean;
+};
+
+export type UsageSnapshot = {
+  status: "ok" | "absent" | "unauthorized" | "error";
+  fetchedAt: number;
+  limits: UsageLimit[];
+  /** Diagnostic only — the dialog never renders it verbatim. */
+  reason?: string;
+  absentCause?: "no-probe" | "reported-nothing";
+};
+
+const USAGE_STATUSES = ["ok", "absent", "unauthorized", "error"] as const;
+const USAGE_LIMIT_KINDS = ["window", "balance"] as const;
+const USAGE_UNITS = ["percent", "requests", "credits", "usd", "tokens"] as const;
+
+function isUsageStatus(value: unknown): value is UsageSnapshot["status"] {
+  return typeof value === "string" && (USAGE_STATUSES as readonly string[]).includes(value);
+}
+
+function isUsageLimitKind(value: unknown): value is UsageLimit["kind"] {
+  return typeof value === "string" && (USAGE_LIMIT_KINDS as readonly string[]).includes(value);
+}
+
+function isUsageUnit(value: unknown): value is UsageLimit["unit"] {
+  return typeof value === "string" && (USAGE_UNITS as readonly string[]).includes(value);
+}
+
+function isAbsentCause(value: unknown): value is NonNullable<UsageSnapshot["absentCause"]> {
+  return value === "no-probe" || value === "reported-nothing";
+}
+
+function parseUsageLimit(raw: unknown): UsageLimit | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.id !== "string") return null;
+  if (!isUsageLimitKind(raw.kind)) return null;
+  if (!isUsageUnit(raw.unit)) return null;
+  const limit: UsageLimit = { id: raw.id, kind: raw.kind, unit: raw.unit };
+  // Every optional field is validated before it is trusted: an off-shape
+  // snapshot fails the parse instead of rendering a fabricated 0 %.
+  // Number.isFinite — typeof NaN/Infinity is "number" and would render as
+  // "NaN%" / "NaN credits".
+  if (raw.usedFraction !== undefined) {
+    if (typeof raw.usedFraction !== "number" || !Number.isFinite(raw.usedFraction)) return null;
+    limit.usedFraction = raw.usedFraction;
+  }
+  if (raw.remaining !== undefined) {
+    if (typeof raw.remaining !== "number" || !Number.isFinite(raw.remaining)) return null;
+    limit.remaining = raw.remaining;
+  }
+  if (raw.limit !== undefined) {
+    if (typeof raw.limit !== "number" || !Number.isFinite(raw.limit)) return null;
+    limit.limit = raw.limit;
+  }
+  if (raw.resetsAt !== undefined) {
+    if (typeof raw.resetsAt !== "number" || !Number.isFinite(raw.resetsAt)) return null;
+    limit.resetsAt = raw.resetsAt;
+  }
+  if (raw.shared !== undefined) {
+    if (typeof raw.shared !== "boolean") return null;
+    limit.shared = raw.shared;
+  }
+  return limit;
+}
+
+/** `POST /keys/usage`'s 200 body, validated field by field — unknown shapes → null. */
+export function parseUsageSnapshot(raw: unknown): UsageSnapshot | null {
+  if (!isRecord(raw)) return null;
+  if (!isUsageStatus(raw.status)) return null;
+  if (typeof raw.fetchedAt !== "number") return null;
+  if (!Array.isArray(raw.limits)) return null;
+  const limits: UsageLimit[] = [];
+  for (const row of raw.limits) {
+    const limit = parseUsageLimit(row);
+    if (limit === null) return null;
+    limits.push(limit);
+  }
+  const snapshot: UsageSnapshot = { status: raw.status, fetchedAt: raw.fetchedAt, limits };
+  if (raw.reason !== undefined) {
+    if (typeof raw.reason !== "string") return null;
+    snapshot.reason = raw.reason;
+  }
+  if (raw.absentCause !== undefined) {
+    if (!isAbsentCause(raw.absentCause)) return null;
+    snapshot.absentCause = raw.absentCause;
+  }
+  return snapshot;
 }
 
 /** `string | null` presence check — the cached GitHub profile columns are nullable (NULL = never synced). */

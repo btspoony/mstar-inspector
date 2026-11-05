@@ -36,3 +36,25 @@ export function formatRelativeTime(value: string | null, locale: Locale, nowMs =
   const days = Math.floor(diffMs / 86_400_000);
   return t(locale, days === 1 ? "common.time.dayAgo" : "common.time.daysAgo", { count: days });
 }
+
+/**
+ * Future-aware counterpart of {@link formatRelativeTime} for the usage
+ * dialog's reset stamps (`resetsAt` is an epoch-ms time AHEAD of now):
+ * "in 40 minutes" / "in 3 hours" / "in 2 days". A past or sub-minute stamp
+ * collapses to `justNow`, mirroring the past tense's under-a-minute bucket.
+ * `formatRelativeTime` itself stays past-tense — its callers render history.
+ */
+export function formatUntil(valueMs: number, locale: Locale, nowMs = Date.now()): string {
+  const diffMs = valueMs - nowMs;
+  if (diffMs < 60_000) return t(locale, "common.time.justNow");
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) {
+    return t(locale, minutes === 1 ? "common.time.inMinute" : "common.time.inMinutes", { count: minutes });
+  }
+  const hours = Math.floor(diffMs / 3_600_000);
+  if (hours < 24) {
+    return t(locale, hours === 1 ? "common.time.inHour" : "common.time.inHours", { count: hours });
+  }
+  const days = Math.floor(diffMs / 86_400_000);
+  return t(locale, days === 1 ? "common.time.inDay" : "common.time.inDays", { count: days });
+}

@@ -1308,6 +1308,40 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     ).rejects.toThrow(ProviderKeyTooLongError);
     expect(rawCount(db, "app_provider_keys")).toBe(0);
   });
+
+  test("getProviderKeyPlaintext reads both pools with each row's own AAD; cross-App and deleted ids are null", async () => {
+    const { db, app, otherApp } = await seededWorld();
+    const store = configStore(db);
+    const custom: AppCustomProvider = {
+      provider_id: "my-custom",
+      base_url: "https://ark.example.com/api/v3",
+      api: "openai-completions",
+      model_ids: ["deepseek-v4-flash"],
+    };
+    const builtinKey = sk("zai-usage-1111");
+    const customKey = sk("custom-usage-2222");
+    const foreignKey = sk("foreign-usage-3333");
+    await store.addProviderKey(app.id, "zai", builtinKey);
+    await store.upsertCustomProvider(app.id, custom, customKey);
+    await store.addProviderKey(otherApp.id, "zai", foreignKey);
+
+    // Built-in pool: the row decrypts under its own three-segment AAD.
+    await expect(store.getProviderKeyPlaintext(app.id, "zai", await keyIdOf(builtinKey))).resolves.toEqual({
+      plainKey: builtinKey,
+      custom: false,
+    });
+    // Declaration pool: a template provider's keys live in the other table,
+    // with the other AAD form.
+    await expect(store.getProviderKeyPlaintext(app.id, custom.provider_id, await keyIdOf(customKey))).resolves.toEqual({
+      plainKey: customKey,
+      custom: true,
+    });
+    // Cross-App: another App's key id is not this App's.
+    await expect(store.getProviderKeyPlaintext(app.id, "zai", await keyIdOf(foreignKey))).resolves.toBeNull();
+    // A deleted key is gone, not stale.
+    await store.deleteProviderKey(app.id, "zai", await keyIdOf(builtinKey));
+    await expect(store.getProviderKeyPlaintext(app.id, "zai", await keyIdOf(builtinKey))).resolves.toBeNull();
+  });
 });
 
 // --- store: model chain + full config ---
@@ -3651,6 +3685,270 @@ describe("POST /dashboard/default/apps/:appId/settings/key/delete (per-key delet
     });
     expect(res.status).toBe(200);
     expect(rawCount(db, "app_provider_keys")).toBe(0);
+  });
+});
+
+// --- per-key usage probe ---
+
+describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage probe)", () => {
+  const USAGE = `/dashboard/default/api/apps/${APP_ID}/keys/usage`;
+  let fetchSpy: ReturnType<typeof spyOn> | undefined;
+
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    fetchSpy = undefined;
+  });
+
+  /**
+   * D1 double that REFUSES every provider-key statement: the no-probe refusal
+   * must land before any pool read, so a route that decrypted first would
+   * answer `unexpected` (or 500) instead of `unsupported_provider`.
+   */
+  function denyProviderKeyReads(inner: ReturnType<typeof createAppConfigD1>): unknown {
+    return {
+      prepare: (query: string) => {
+        if (query.includes("app_provider_keys") || query.includes("app_custom_provider_keys")) {
+          throw new Error(`unexpected key read: ${query}`);
+        }
+        return inner.prepare(query);
+      },
+      batch: (statements: Parameters<typeof inner.batch>[0]) => inner.batch(statements),
+    };
+  }
+
+  test("a provider without a probe is unsupported_provider — zero outbound requests, zero key reads", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
+      // Fail fast: no outbound request may leave the Worker on a denied path,
+      // and a regression must fail here instead of timing out on the network.
+      throw new Error("unexpected outbound request");
+    }) as unknown as typeof fetch);
+    const res = await postForm(
+      USAGE,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(denyProviderKeyReads(db)),
+      { provider: "anthropic", keyId: "0".repeat(16) },
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ ok: false, reason: "unsupported_provider" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("an id neither pool holds for THIS App is unknown_key (cross-App and deleted ids alike)", async () => {
+    const { db, app, otherApp } = await seededWorld();
+    const store = configStore(db);
+    const foreignKey = sk("usage-foreign-4444");
+    await store.addProviderKey(otherApp.id, "zai", foreignKey);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+    const crossApp = await postForm(USAGE, cookie, makeEnv(db), {
+      provider: "zai",
+      keyId: await keyIdOf(foreignKey),
+    });
+    expect(crossApp.status).toBe(400);
+    expect(await crossApp.json()).toEqual({ ok: false, reason: "unknown_key" });
+
+    const ownKey = sk("usage-own-5555");
+    await store.addProviderKey(app.id, "zai", ownKey);
+    await store.deleteProviderKey(app.id, "zai", await keyIdOf(ownKey));
+    const deleted = await postForm(USAGE, cookie, makeEnv(db), {
+      provider: "zai",
+      keyId: await keyIdOf(ownKey),
+    });
+    expect(deleted.status).toBe(400);
+    expect(await deleted.json()).toEqual({ ok: false, reason: "unknown_key" });
+  });
+
+  test("a stored key answers the provider snapshot — 200 with the limits and NO key material", async () => {
+    const { db, app } = await seededWorld();
+    const plainKey = sk("usage-zai-6666");
+    await configStore(db).addProviderKey(app.id, "zai", plainKey);
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(
+          JSON.stringify({
+            success: true,
+            data: { limits: [{ type: "TOKENS_LIMIT", unit: 6, number: 1, currentValue: 25, usage: 200, remaining: 175 }] },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )) as unknown as typeof fetch,
+    );
+    const res = await postForm(USAGE, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      provider: "zai",
+      keyId: await keyIdOf(plainKey),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; status: string; limits: Array<Record<string, unknown>> };
+    expect(body.ok).toBe(true);
+    expect(body.status).toBe("ok");
+    expect(body.limits).toEqual([
+      expect.objectContaining({ id: "zai:week", kind: "window", usedFraction: 0.125, unit: "tokens" }),
+    ]);
+    // The plaintext travelled as ONE outbound header — never into the response.
+    expect(JSON.stringify(body)).not.toContain(plainKey);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://api.z.ai/api/monitor/usage/quota/limit");
+    expect((init.headers as Record<string, string>).authorization).toBe(plainKey);
+  });
+
+  test("a declaration pointing away from the vendor's quota host is refused — zero outbound requests", async () => {
+    const { db, app } = await seededWorld();
+    const plainKey = sk("usage-proxy-7777");
+    await configStore(db).upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "commandcode",
+        base_url: "https://proxy.example/v1",
+        api: "openai-completions",
+        model_ids: ["deepseek-v4-flash"],
+      },
+      plainKey,
+    );
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
+      // Fail fast: no outbound request may leave the Worker on a denied path,
+      // and a regression must fail here instead of timing out on the network.
+      throw new Error("unexpected outbound request");
+    }) as unknown as typeof fetch);
+    const res = await postForm(USAGE, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      provider: "commandcode",
+      keyId: await keyIdOf(plainKey),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      ok: false,
+      reason: "unsupported_provider",
+      message: expect.stringContaining("proxy.example"),
+      params: { provider: "commandcode", host: "proxy.example" },
+    });
+    // The credential never left the Worker.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("the same declaration on the vendor's own host runs the probe", async () => {
+    const { db, app } = await seededWorld();
+    const plainKey = sk("usage-vendor-8888");
+    await configStore(db).upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "commandcode",
+        base_url: "https://api.commandcode.ai/v1",
+        api: "openai-completions",
+        model_ids: ["deepseek-v4-flash"],
+      },
+      plainKey,
+    );
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async (input: string | URL | Request) => {
+        const body = String(input).endsWith("/alpha/whoami")
+          ? { user: { id: "user-1" } }
+          : { data: { credits: { monthlyCredits: 10 } } };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    );
+    const res = await postForm(USAGE, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      provider: "commandcode",
+      keyId: await keyIdOf(plainKey),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      status: "ok",
+      limits: [{ id: "commandcode:balance", kind: "balance", remaining: 10, unit: "credits", shared: true }],
+    });
+    // The credential went to the vendor's own two routes, carrying this key.
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const calls = fetchSpy.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      "https://api.commandcode.ai/alpha/whoami",
+      "https://api.commandcode.ai/alpha/billing/credits",
+    ]);
+    for (const [, init] of calls) {
+      expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${plainKey}`);
+    }
+  });
+
+  test("a built-in pool key is not judged by a same-id declaration, while a declaration-pool key is", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    const builtinKey = sk("usage-builtin-9999");
+    const declarationKey = sk("usage-declaration-0000");
+    // The App holds BOTH: a built-in-pool row and a same-id declaration on a
+    // foreign host. The pool that answered decides which endpoint applies.
+    await store.addProviderKey(app.id, "commandcode", builtinKey);
+    await store.upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "commandcode",
+        base_url: "https://proxy.example/v1",
+        api: "openai-completions",
+        model_ids: ["deepseek-v4-flash"],
+      },
+      declarationKey,
+    );
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async (input: string | URL | Request) => {
+        const body = String(input).endsWith("/alpha/whoami")
+          ? { user: { id: "user-1" } }
+          : { data: { credits: { monthlyCredits: 10 } } };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    );
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+    const builtin = await postForm(USAGE, cookie, makeEnv(db), {
+      provider: "commandcode",
+      keyId: await keyIdOf(builtinKey),
+    });
+    expect(builtin.status).toBe(200);
+    expect(await builtin.json()).toMatchObject({ ok: true, status: "ok" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    // The same App, same provider, but the DECLARATION pool's key: it belongs
+    // to the off-vendor declaration and is refused with no further request.
+    const declared = await postForm(USAGE, cookie, makeEnv(db), {
+      provider: "commandcode",
+      keyId: await keyIdOf(declarationKey),
+    });
+    expect(declared.status).toBe(400);
+    expect(await declared.json()).toMatchObject({ ok: false, reason: "unsupported_provider" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  test("a corrupt neighbour declaration does not fail an unrelated probe", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "broken",
+        base_url: "https://broken.example/v1",
+        api: "openai-completions",
+        model_ids: ["m"],
+      },
+      sk("usage-broken-1111"),
+    );
+    // Tamper ONE declaration's model_ids: the usage path reads only base_url,
+    // so a neighbour's corruption must not become `unexpected`.
+    rawRun(db, "UPDATE app_custom_providers SET model_ids = '{not json' WHERE app_id = ? AND provider_id = 'broken'", app.id);
+    const plainKey = sk("usage-zai-neighbour-2222");
+    await store.addProviderKey(app.id, "zai", plainKey);
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(
+          JSON.stringify({
+            success: true,
+            data: { limits: [{ type: "TOKENS_LIMIT", unit: 6, number: 1, currentValue: 10, usage: 100 }] },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )) as unknown as typeof fetch,
+    );
+    const res = await postForm(USAGE, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      provider: "zai",
+      keyId: await keyIdOf(plainKey),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, status: "ok" });
   });
 });
 

@@ -282,6 +282,7 @@ async function openPickerPopover(): Promise<string> {
               api: null,
               models: [],
               verifiable: true,
+              usage_probe: false,
               eligibility: "builtin",
               display_group: "common",
             },

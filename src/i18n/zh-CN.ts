@@ -45,6 +45,13 @@ export const zhCN: Dictionary = {
       hoursAgo: "{count} 小时前",
       dayAgo: "{count} 天前",
       daysAgo: "{count} 天前",
+      /** 将来时（formatUntil）— 用量对话框的重置时间。 */
+      inMinute: "{count} 分钟后",
+      inMinutes: "{count} 分钟后",
+      inHour: "{count} 小时后",
+      inHours: "{count} 小时后",
+      inDay: "{count} 天后",
+      inDays: "{count} 天后",
       never: "从未",
       unknown: "未知",
     },
@@ -608,6 +615,42 @@ export const zhCN: Dictionary = {
         "{provider} 的内置 id 已被保留 — 自定义端点需要使用自己的 id。点此打开声明表单，已填入该提供方的 API 协议与 Base URL 形态。",
       customIdRequired: "{provider} 已被占用 — 请为此声明填写新的 id。",
       submitFailed: "该请求未到达服务端即失败 — 未存储任何内容。",
+      /**
+       * 每密钥用量探测：密钥行的操作按钮、其打开的对话框，以及四种形态
+       * — ok（窗口条 / 余额）、unauthorized、absent、error。线上的诊断
+       * reason 从不原样渲染。
+       */
+      usage: {
+        action: "用量",
+        title: "{label} 用量",
+        refresh: "刷新",
+        error: "暂时无法读取该密钥的用量。",
+        unauthorized: "提供方拒绝了该密钥 — 可能已撤销或过期。",
+        absentNoProbe: "该提供方没有用量探测。",
+        absentNothing: "提供方未报告该密钥的用量窗口。",
+        windowRemaining: "剩余 {percent}%",
+        resets: "{time} 重置",
+        balanceRemaining: "剩余 {amount} {unit}",
+        /** 多个密钥共享同一个账户级额度池，而非每密钥独立额度。 */
+        shared: "账户级共享",
+        /** 每行标签：取自规范化 limit id 最后一个 ":" 后的语义段。 */
+        window: {
+          session: "会话",
+          week: "每周",
+          month: "每月",
+          concurrency: "并发",
+          balance: "余额",
+        },
+        /**
+         * 未知语义段的兜底标签 — id 段从不直接渲染（可能是提供方的桶名），
+         * 未知行改用带序号的通用标签。
+         */
+        limit: {
+          generic: "额度 {index}",
+          genericSingle: "额度",
+        },
+        unit: { requests: "次请求", credits: "点数", usd: "美元", tokens: "个令牌", percent: "%" },
+      },
     },
     providersCopy:
       "此 App 已配置的模型提供方 — 存储的密钥仅显示掩码尾号，自定义声明显示其 Base URL 与模型。添加模型提供方从目录选择开始；密钥仅在验证成功后存储。",

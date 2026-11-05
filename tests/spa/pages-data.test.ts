@@ -568,6 +568,7 @@ describe("members/apps/settings parsers", () => {
       api: null,
       models: ["claude-fable-5"],
       verifiable: true,
+      usage_probe: false,
       eligibility: "builtin",
       display_group: "common",
     };
@@ -804,6 +805,7 @@ describe("provider catalog rows + add selection", () => {
     api: null,
     models: ["claude-fable-5"],
     verifiable: true,
+    usage_probe: false,
     eligibility: "builtin",
     display_group: "common",
   };
@@ -819,6 +821,9 @@ describe("provider catalog rows + add selection", () => {
     // verifiable decides the form kind — non-boolean is a contract breach.
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, verifiable: "yes" }] })).toBeNull();
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, verifiable: null }] })).toBeNull();
+    // `usage_probe` decides whether the row renders the usage action — a
+    // non-boolean stamp is a contract breach, not a silent `false`.
+    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, usage_probe: "yes" }] })).toBeNull();
     // base_url / api are string-or-null.
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, base_url: 5 }] })).toBeNull();
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, api: [] }] })).toBeNull();
