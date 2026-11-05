@@ -12,6 +12,10 @@
  * their old slot and the tail references them (only 0047/0048 do), so a shape
  * applies the pair at the first one's old position and still produces the
  * identical schema.
+ *
+ * `tests/store/helpers.test.ts` enforces that coverage: it parses every tail
+ * migration's `CREATE INDEX … ON <table>` / `ALTER TABLE <table>` targets and
+ * asserts each table exists when the tail reaches it.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -31,11 +35,16 @@ const TAIL_ANCHOR = "0038_webhook_path_drop.sql";
 export const TAIL_PREREQUISITES = ["0010_review_failures.sql", "0020_finding_lifecycle.sql"] as const;
 
 /** The directory-derived tail after the shared anchor. */
-const DERIVED_TAIL = migrationsAfter(TAIL_ANCHOR);
+export const DERIVED_TAIL = migrationsAfter(TAIL_ANCHOR);
+
+/** One migration's DDL — the single place the fixture migrations path is resolved. */
+export function migrationSql(name: string): string {
+  return readFileSync(join(MIGRATIONS_DIR, name), "utf8");
+}
 
 /** Apply migration files verbatim, in the given order (wrangler order = filename order). */
 export function applyMigrations(db: TestD1, names: readonly string[]): void {
-  for (const name of names) db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  for (const name of names) db.raw.exec(migrationSql(name));
 }
 
 /** `tests/worker/apps-ui.test.ts` — the Apps management UI world. */
@@ -197,11 +206,15 @@ export const APP_CONFIG_BASE_MIGRATIONS: readonly string[] = [
 ];
 
 /**
- * `app-config`'s pre-pool shape (0006 → 0022, filename order): app_provider_keys
- * still carries ONE row per (App, provider) under the two-segment AAD and
- * app_custom_providers still carries its key column. The 0024 migration tests
- * seed this shape, then apply the migration, exactly like the wrangler order on
- * a live deployment.
+ * `app-config`'s pre-pool shape (0006 → 0038): app_provider_keys still carries
+ * ONE row per (App, provider) under the two-segment AAD and app_custom_providers
+ * still carries its key column. The sequence is 0006, 0008, 0009, the
+ * `TAIL_PREREQUISITES` (0010, 0020), 0011, 0012, 0015, 0017, 0018, 0019, 0022,
+ * 0023, 0037, 0038 — so 0010/0020 land before 0011–0019. That early slot is
+ * deliberate: 0020 only needs `github_apps(id)` from 0004 and nothing between
+ * it and the tail references it, so the produced schema is identical. The 0024
+ * migration tests seed this shape, then apply the migration, exactly like the
+ * wrangler order on a live deployment.
  */
 export const APP_CONFIG_PRE_POOL_MIGRATIONS: readonly string[] = [
   "0006_app_provider_config.sql",

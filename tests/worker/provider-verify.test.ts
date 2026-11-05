@@ -16,8 +16,6 @@
  * get an explicit verify entry).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
 import { PROVIDER_VERIFY_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
@@ -48,7 +46,6 @@ import ompApiKeyProviders from "../../scripts/provider-catalog/omp-api-key-provi
 import ompProviderVerify from "../../scripts/provider-catalog/omp-provider-verify.json";
 import { sk } from "../helpers/fake-secrets";
 
-const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const PLAIN_KEY = sk("ant-test-provider-1234");
@@ -56,11 +53,6 @@ const PLAIN_KEY = sk("ant-test-provider-1234");
 const SQLITE_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
 // --- fixtures ---
-
-/** Apply one migration file verbatim (filename order = wrangler order). */
-function applyMigration(db: TestD1, name: string): void {
-  db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
-}
 
 /** Synchronous parameterized write on the raw bun:sqlite handle. */
 function rawRun(db: TestD1, sql: string, ...params: (string | number | null)[]): void {
@@ -174,7 +166,7 @@ const REJECT_FETCH: VerifyDeps["fetch"] = (async () => {
 describe("migration 0015_provider_verification.sql (on a seeded production-shaped DB)", () => {
   test("applies cleanly after 0012 over existing key AND custom rows; pre-0015 rows carry NULL verification columns", async () => {
     const db = await createPopulatedPre0015D1();
-    expect(() => applyMigration(db, "0015_provider_verification.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0015_provider_verification.sql"])).not.toThrow();
     // Append-only: both pre-existing rows survive with NULL verification fields.
     const keyRow = db.raw
       .query("SELECT verified_at, verified_status FROM app_provider_keys WHERE provider = 'anthropic'")

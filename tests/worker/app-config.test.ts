@@ -7,7 +7,8 @@
  *
  * Production-shaped sequence (the 0004/0005 test precedent): the bun:sqlite
  * double applies 0001/0002, a row is SEEDED into the existing reviews table,
- * and only then do 0003 → 0006 apply in filename order — the append-only
+ * and only then does `APP_CONFIG_BASE_MIGRATIONS` apply — 0003, 0004, 0036
+ * (early: it only touches github_apps), 0005, 0026, 0028 — the append-only
  * assumption is exercised against a DB that already holds data, exactly like
  * `wrangler d1 migrations apply` on production.
  *
@@ -74,7 +75,6 @@ import type { D1StatementLike } from "../../src/store/types";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
-const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -109,17 +109,12 @@ function rawCount(db: ReturnType<typeof createTestD1>, table: string): number {
   return row.n;
 }
 
-/** Apply one migration file verbatim (filename order = wrangler order). */
-function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void {
-  db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
-}
-
 /**
  * Production-shaped DB: 0001/0002 + a seeded review row, then the later
- * migrations in filename order (0006 is applied SEPARATELY by the migration
- * test so an app row can exist before it — the wrangler sequence).
+ * migrations — `APP_CONFIG_BASE_MIGRATIONS` (0006 is applied SEPARATELY by the
+ * migration test so an app row can exist before it — the wrangler sequence).
  */
-function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
+function createPopulatedPre0006D1(): TestD1 {
   const db = createTestD1();
   rawRun(
     db,
@@ -130,7 +125,7 @@ function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
   return db;
 }
 
-/** The pre-pool shape (0006 → 0038, filename order) the 0024/0025 tests seed. */
+/** The pre-pool shape (`APP_CONFIG_PRE_POOL_MIGRATIONS`, 0006 → 0038) the 0024/0025 tests seed. */
 function createPreProviderPoolD1(): TestD1 {
   const db = createPopulatedPre0006D1();
   applyMigrations(db, APP_CONFIG_PRE_POOL_MIGRATIONS);
@@ -390,7 +385,7 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
     // exactly the wrangler order on a live deployment.
     seedPreMigrationAppRow(db, "app-pre-0006", "pre-existing");
     return Promise.resolve().then(() => {
-      expect(() => applyMigration(db, "0006_app_provider_config.sql")).not.toThrow();
+      expect(() => applyMigrations(db, ["0006_app_provider_config.sql"])).not.toThrow();
       // Append-only: the seeded review row (app_id NULL = legacy) is untouched.
       const row = db.raw.query("SELECT app_id FROM reviews WHERE id = 'review-1'").get() as {
         app_id: string | null;
@@ -493,7 +488,7 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
     const db = createPopulatedPre0006D1();
     seedPreMigrationAppRow(db, "app-pre-0012", "a");
     const app = { id: "app-pre-0012" };
-    applyMigration(db, "0006_app_provider_config.sql");
+    applyMigrations(db, ["0006_app_provider_config.sql"]);
     // A key row written BEFORE 0012 (the pre-migration column set), under the
     // pre-pool two-segment AAD — what a live deployment carries across.
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
@@ -507,12 +502,12 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
       app.id,
       legacyEnc,
     );
-    expect(() => applyMigration(db, "0012_custom_providers_and_key_updated_at.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0012_custom_providers_and_key_updated_at.sql"])).not.toThrow();
     // 0015 next (the real sequence for these tables): the store's key writes
     // maintain the verified_* columns, so the re-set below must run on the
     // 0015-shaped schema; 0024 last — the pool shape the store now writes to.
-    applyMigration(db, "0015_provider_verification.sql");
-    applyMigration(db, "0024_provider_multi_key.sql");
+    applyMigrations(db, ["0015_provider_verification.sql"]);
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
     const row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
       created_at: string;
       updated_at: string | null;
@@ -533,7 +528,7 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
   });
 
   test("full-file direct run (0001→0012 order) creates app_custom_providers with the AL-23-1 DDL shape", async () => {
-    const db = createPreProviderPoolD1(); // 0001→0022 in filename order (index skips are harmless)
+    const db = createPreProviderPoolD1(); // 0006 → 0038 via APP_CONFIG_PRE_POOL_MIGRATIONS
     const cols = db.raw.query("PRAGMA table_info(app_custom_providers)").all() as Array<{
       name: string;
       type: string;
@@ -562,7 +557,7 @@ describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
     // A pre-0017 DB (0001–0016) with the pre-chains shape seeded RAW —
     // exactly the wrangler order on a live deployment.
     const db = createPopulatedPre0006D1();
-    for (const name of [
+    applyMigrations(db, [
       "0006_app_provider_config.sql",
       "0008_github_apps_ops.sql",
       "0009_app_model_roles.sql",
@@ -570,9 +565,7 @@ describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
       "0012_custom_providers_and_key_updated_at.sql",
       "0015_provider_verification.sql",
       "0016_users_login_nocase_unique.sql",
-    ]) {
-      applyMigration(db, name);
-    }
+    ]);
     seedPreMigrationAppRow(db, "app-pre-0017", "a");
     const app = { id: "app-pre-0017" };
     rawRun(
@@ -586,7 +579,7 @@ describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
       `INSERT INTO app_model_roles (app_id, role, selector) VALUES (?, 'code-reviewer', 'openai/gpt-5:thinking')`,
       app.id,
     );
-    expect(() => applyMigration(db, "0017_app_model_chains.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0017_app_model_chains.sql"])).not.toThrow();
     // The backfill produced the chains shape from the pre-chains rows:
     // default row (verbatim chain) + seat-<role> named chain + seat ref.
     const chains = db.raw
@@ -633,7 +626,7 @@ describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () =>
       app.id,
       legacyEnc,
     );
-    expect(() => applyMigration(db, "0024_provider_multi_key.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0024_provider_multi_key.sql"])).not.toThrow();
     const cols = db.raw.query("PRAGMA table_info(app_provider_keys)").all() as Array<{ name: string; pk: number }>;
     expect(cols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(["app_id", "provider", "key_id"]);
     // The row is carried over UNCHANGED: D1 migrations are SQL, and SQL cannot
@@ -679,7 +672,7 @@ describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () =>
       app.id,
       legacyEnc,
     );
-    expect(() => applyMigration(db, "0024_provider_multi_key.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0024_provider_multi_key.sql"])).not.toThrow();
     // The declaration keeps its shape MINUS the key material and its
     // verification bookkeeping (both now belong to the key row).
     const declCols = (db.raw.query("PRAGMA table_info(app_custom_providers)").all() as Array<{ name: string }>).map(
@@ -715,7 +708,7 @@ describe("migration 0025_provider_model_evidence.sql (per-key model evidence)", 
   test("rebuilds app_provider_models onto (app_id, provider, key_id) and carries NO aggregate row forward", async () => {
     const db = createPreProviderPoolD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    applyMigration(db, "0024_provider_multi_key.sql");
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
     // The pre-0025 aggregate: one un-attributable row per (App, provider).
     rawRun(
       db,
@@ -723,7 +716,7 @@ describe("migration 0025_provider_model_evidence.sql (per-key model evidence)", 
        VALUES (?, 'anthropic', '["m1","m2"]', '2026-01-01 00:00:00')`,
       app.id,
     );
-    expect(() => applyMigration(db, "0025_provider_model_evidence.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0025_provider_model_evidence.sql"])).not.toThrow();
     const cols = db.raw.query("PRAGMA table_info(app_provider_models)").all() as Array<{ name: string; pk: number }>;
     expect(cols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(["app_id", "provider", "key_id"]);
     // The copy is deliberately EMPTY: an aggregate cannot say which key
@@ -908,7 +901,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       app.id,
       legacyEnc,
     );
-    applyMigration(db, "0024_provider_multi_key.sql");
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
     const store = configStore(db);
     // The first read decrypts with the OLD AAD and serves the plaintext …
     expect(await store.getAppConfig(app.id)).toEqual({
@@ -1191,8 +1184,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       app.id,
       legacyEnc,
     );
-    applyMigration(db, "0024_provider_multi_key.sql");
-    applyMigration(db, "0025_provider_model_evidence.sql");
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
+    applyMigrations(db, ["0025_provider_model_evidence.sql"]);
     // Carried verbatim under the sentinel id: only the DELETE's OWN promotion
     // can make the derived id addressable — no list/config call ran before it.
     const carried = db.raw.query("SELECT key_id FROM app_provider_keys").get() as { key_id: string };
@@ -1905,7 +1898,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       JSON.stringify(CUSTOM.model_ids),
       legacyEnc,
     );
-    applyMigration(db, "0024_provider_multi_key.sql");
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
     const store = configStore(db);
     // The legacy row still decrypts through the consumer face and is promoted
     // to the three-segment AAD under its derived id.
@@ -2260,7 +2253,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       JSON.stringify(CUSTOM.model_ids),
       legacyEnc,
     );
-    applyMigration(db, "0024_provider_multi_key.sql");
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
     const carried = db.raw.query("SELECT key_id FROM app_custom_provider_keys").get() as { key_id: string };
     expect(carried.key_id).toBe("");
     expect(

@@ -271,7 +271,9 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
-    expect(String(rows[0]!.error)).toBe("skipped: budget: null");
+    // Attributable to the budget skip: the row is skipped for `budget`, and the
+    // third segment (the seat's own error) is the producer's to format.
+    expect(String(rows[0]!.error)).toMatch(/^skipped: budget:/);
     const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
     expect(line.fields).toMatchObject({ recheck_outcome: "skipped", recheck_reason: "budget", assessed: 0 });
     const findingRow = db.raw.query("SELECT state, last_assessed_ms FROM review_findings").get() as {

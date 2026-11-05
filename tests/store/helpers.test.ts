@@ -5,7 +5,20 @@
  * unchanged and a plain read changing nothing.
  */
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, migrationNumber, migrationsAfter } from "./helpers";
+import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter } from "./helpers";
+import {
+  APP_CONFIG_BASE_MIGRATIONS,
+  APP_CONFIG_MIGRATIONS,
+  APP_CONFIG_PRE_POOL_MIGRATIONS,
+  APPS_UI_MIGRATIONS,
+  DERIVED_TAIL,
+  PROVIDER_VERIFY_MIGRATIONS,
+  SPA_PAGE_APIS_MIGRATIONS,
+  WEBHOOK_DELIVERIES_MIGRATIONS,
+  WEBHOOK_DELIVERIES_TAIL,
+  applyMigrations,
+  migrationSql,
+} from "../helpers/migration-shapes";
 
 const AT = "2026-10-27T00:00:00.000Z";
 /** Same shape as the operator store's guarded audit append. */
@@ -48,4 +61,55 @@ describe("test D1 double", () => {
     expect(migrationsAfter("0036_app_identity.sql")).toEqual(migrationsAfter(36));
     expect(() => migrationsAfter("add_index.sql")).toThrow(/no numeric prefix/);
   });
+});
+
+// --- derived tail prerequisites ---
+
+/**
+ * Every table a migration indexes or alters but does NOT create in the same
+ * file, read from the file itself so a new tail migration extends the check
+ * with no edit here.
+ */
+function touchedTables(sql: string): string[] {
+  const ddl = sql.replace(/--.*$/gm, "");
+  const created = new Set(
+    [...ddl.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)/gi)].map((match) => match[1]!),
+  );
+  const targets: string[] = [];
+  for (const pattern of [
+    /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+ON\s+"?(\w+)/gi,
+    /ALTER\s+TABLE\s+"?(\w+)/gi,
+  ]) {
+    for (const match of ddl.matchAll(pattern)) targets.push(match[1]!);
+  }
+  return targets.filter((table) => !created.has(table));
+}
+
+describe("derived-tail prerequisites (TAIL_PREREQUISITES)", () => {
+  // The five fixtures, each as the full ordered list it replays.
+  const SHAPES: Record<string, readonly string[]> = {
+    "apps-ui": APPS_UI_MIGRATIONS,
+    "provider-verify": PROVIDER_VERIFY_MIGRATIONS,
+    "spa-page-apis": SPA_PAGE_APIS_MIGRATIONS,
+    "webhook-deliveries": [...WEBHOOK_DELIVERIES_MIGRATIONS, ...WEBHOOK_DELIVERIES_TAIL],
+    "app-config": [...APP_CONFIG_BASE_MIGRATIONS, ...APP_CONFIG_PRE_POOL_MIGRATIONS, ...APP_CONFIG_MIGRATIONS],
+  };
+
+  for (const [shape, migrations] of Object.entries(SHAPES)) {
+    test(`${shape}: every table the derived tail touches exists when the tail reaches it`, () => {
+      const db = createTestD1();
+      for (const name of migrations) {
+        if (DERIVED_TAIL.includes(name)) {
+          for (const table of touchedTables(migrationSql(name))) {
+            const exists = db.raw.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+            expect(
+              exists,
+              `${shape}: ${name} touches "${table}", which no migration applied before it creates — add the migration that creates "${table}" to TAIL_PREREQUISITES`,
+            ).not.toBeNull();
+          }
+        }
+        applyMigrations(db, [name]);
+      }
+    });
+  }
 });

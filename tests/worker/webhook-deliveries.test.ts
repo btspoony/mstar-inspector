@@ -24,8 +24,6 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { Webhooks } from "@octokit/webhooks";
 import worker, { deliveryOutcomeFromWebhook } from "../../src/worker/index";
 import { webhookRepositoryFullName } from "../../src/worker/webhooks";
@@ -42,16 +40,10 @@ import {
 } from "../helpers/migration-shapes";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
-const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
 describe("migrations/0011_webhook_deliveries.sql", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
-  function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
-  }
-
   /**
    * Raw-insert one github_apps row (dummy envelopes — no decryption here).
    * The local route key exists only on the pre-0038 shapes this describe
@@ -105,7 +97,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
          VALUES ('review-1', 123, 'acme', 'widgets', 42, '0123456789abcdef0123456789abcdef01234567', 'comment', 'ok')`,
       )
       .run();
-    for (const name of [
+    applyMigrations(db, [
       "0003_dashboard_users.sql",
       "0004_github_apps.sql",
       "0005_reviews_app_id.sql",
@@ -116,13 +108,11 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
       "0010_review_failures.sql",
       // 0036: the fixture row carries webhook_path + github_slug.
       "0036_app_identity.sql",
-    ]) {
-      applyMigrationFile(db, name);
-    }
+    ]);
     seedAppRow(db); // the FK parent exists before 0011
 
     // Append-only CREATE TABLE over the live rows — nothing existing changes.
-    expect(() => applyMigrationFile(db, "0011_webhook_deliveries.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0011_webhook_deliveries.sql"])).not.toThrow();
     const reviewCount = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     expect(reviewCount.n).toBe(1);
     const index = db.raw
@@ -195,11 +185,9 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
 
 describe("migrations/0043_webhook_delivery_repository.sql", () => {
   /** The delivery table's pre-0043 shape: github_apps (post-0036) + 0011. */
-  function preSourceDb(): ReturnType<typeof createTestD1> {
+  function preSourceDb(): TestD1 {
     const db = createTestD1();
-    for (const name of ["0004_github_apps.sql", "0036_app_identity.sql", "0011_webhook_deliveries.sql"]) {
-      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
-    }
+    applyMigrations(db, ["0004_github_apps.sql", "0036_app_identity.sql", "0011_webhook_deliveries.sql"]);
     return db;
   }
 
@@ -224,9 +212,7 @@ describe("migrations/0043_webhook_delivery_repository.sql", () => {
       .run();
 
     // Forward-only ALTER: no table rewrite, so the old row is still there.
-    expect(() =>
-      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0043_webhook_delivery_repository.sql"), "utf8")),
-    ).not.toThrow();
+    expect(() => applyMigrations(db, ["0043_webhook_delivery_repository.sql"])).not.toThrow();
     expect(db.raw.query("SELECT id, repository_full_name FROM webhook_deliveries").all()).toEqual([
       { id: "delivery-old", repository_full_name: null },
     ]);
