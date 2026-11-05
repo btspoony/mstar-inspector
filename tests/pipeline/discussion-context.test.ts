@@ -373,6 +373,16 @@ describe("boundDiscussion — §7.8 model context", () => {
     expect(bounded.items[0]!.ownAuthor).toBe(true);
   });
 
+  test("thread items keep their provenance and are never excluded by the issue-only rule", () => {
+    // A thread reply this App wrote: the exclusion is ISSUE-scoped, so the
+    // thread lane keeps it, and its provenance survives the bounding pass.
+    const ownThread = item(1, "<!-- mstar-inspector:thread:v1 x -->\nthread reply", "thread", "assoc-1");
+    ownThread.ownAuthor = true;
+    const bounded = boundDiscussion(discussionWith([ownThread], threadSnapshot("assoc-1")));
+    expect(bounded.items).toHaveLength(1);
+    expect(bounded.items[0]!.ownAuthor).toBe(true);
+  });
+
   test("a HUMAN body copying the bot marker is kept and still truncates the view", () => {
     // Authorship is half the predicate: a human can copy the marker, and that
     // text may be a rebuttal the model must see before anything resolves.

@@ -615,20 +615,35 @@ describe("check budgets", () => {
     }
   });
 
-  test("a single stored budget is honored alone, not downgraded by the relation", async () => {
+  test("a single stored budget keeps its value; the absent side is adjusted to the invariant", async () => {
     // The operator wrote only the wait, below the default send budget. The
-    // relation rule guards a pair the writer produced, so an absent row must
-    // not silently widen the stored value to the 10 s default.
-    const db = fixture();
-    db.raw
+    // stored value stays; the absent side is tightened so the effective pair
+    // still contains the send (never a trusted 1 s wait over a 5 s send, and
+    // never a silent widening to the 10 s default).
+    const waitOnly = fixture();
+    waitOnly.raw
       .prepare(
         `INSERT INTO review_runtime_settings (key, value, updated_at)
          VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
       )
       .run(CHECK_TERMINALIZE_KEY, "1000");
-    expect(await getCheckBudgets(db)).toEqual({
+    expect(await getCheckBudgets(waitOnly)).toEqual({
       terminalizeMs: 1_000,
-      updateMs: CHECK_UPDATE_DEFAULT,
+      updateMs: 999,
+      degraded: false,
+    });
+
+    // The mirror case: only the send is stored, above the default wait.
+    const sendOnly = fixture();
+    sendOnly.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at)
+         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+      )
+      .run(CHECK_UPDATE_KEY, "12000");
+    expect(await getCheckBudgets(sendOnly)).toEqual({
+      terminalizeMs: 12_001,
+      updateMs: 12_000,
       degraded: false,
     });
   });

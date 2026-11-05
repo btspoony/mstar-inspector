@@ -485,20 +485,27 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
     );
     const update = parseInRange(row.update_value, CHECK_UPDATE_MIN, CHECK_UPDATE_MAX);
     if (Number.isNaN(terminalize) || Number.isNaN(update)) return degradedCheckBudgets();
-    // The writer's cross-field rule must hold on this side too: a stored pair
+    // The writer's cross-field rule must hold for the EFFECTIVE pair: a pair
     // with terminalize <= update would let the consumer abandon the inline wait
-    // before the bounded send it handed off has finished. The rule is applied
-    // only when BOTH values were stored: an absent row is the documented
-    // default, not a pair the operator wrote, so one stored budget is honored
-    // alone rather than downgrading the other to its default.
-    if (terminalize !== undefined && update !== undefined && terminalize <= update) {
-      return degradedCheckBudgets();
+    // before the bounded send it handed off has finished. A pair BOTH stored
+    // that violates it is untrusted and answers the defaults. When only one row
+    // is stored, the absent side is adjusted to the nearest legal value: the
+    // stored budget is never discarded, and the effective pair never violates
+    // the invariant.
+    let effectiveTerminalize = terminalize ?? CHECK_TERMINALIZE_DEFAULT;
+    let effectiveUpdate = update ?? CHECK_UPDATE_DEFAULT;
+    if (effectiveTerminalize <= effectiveUpdate) {
+      if (terminalize !== undefined && update !== undefined) return degradedCheckBudgets();
+      if (terminalize === undefined) {
+        effectiveTerminalize = Math.max(
+          CHECK_TERMINALIZE_MIN,
+          Math.min(CHECK_TERMINALIZE_MAX, effectiveUpdate + 1),
+        );
+      } else {
+        effectiveUpdate = Math.max(CHECK_UPDATE_MIN, effectiveTerminalize - 1);
+      }
     }
-    return {
-      terminalizeMs: terminalize ?? CHECK_TERMINALIZE_DEFAULT,
-      updateMs: update ?? CHECK_UPDATE_DEFAULT,
-      degraded: false,
-    };
+    return { terminalizeMs: effectiveTerminalize, updateMs: effectiveUpdate, degraded: false };
   } catch {
     return degradedCheckBudgets();
   }
