@@ -1563,12 +1563,12 @@ export function submitTriggerMode(
 }
 
 /**
- * The App's exact bot-mention string (spec review-trigger-policy §3):
- * the canonical GitHub form `@{slug}[bot]`. Typing this in a PR comment
- * (re-)starts a review in every trigger mode.
+ * The App's bot-mention string (spec review-trigger-policy §3): the bare
+ * `@{slug}` form. The webhook matcher accepts an optional `[bot]` suffix but
+ * never requires it, so the hint shows the shortest string that works.
  */
 export function botMention(slug: string): string {
-  return `@${slug}[bot]`;
+  return `@${slug}`;
 }
 
 /** Localized segment labels; the wire values stay verbatim (spec §2). */
@@ -1600,7 +1600,7 @@ export function ReviewTriggerControl({
   /**
    * The cached GitHub slug — the ONLY mention target (D2). Null before the
    * first metadata sync: no real target exists, so no mention renders
-   * (fail-safe — an invented `@[bot]` could never trigger a review).
+   * (fail-safe — an invented `@` target could never trigger a review).
    */
   slug: string | null;
   mode: ReviewTriggerMode;
@@ -1639,8 +1639,8 @@ export function ReviewTriggerControl({
     }
   }
 
-  // The mention exists only when GitHub's slug cache does — the string is
-  // the canonical `@{slug}[bot]` form (spec §3), never a local value.
+  // The mention exists only when GitHub's slug cache does — the bare
+  // `@{slug}` form (spec §3), never a local value.
   const mention = slug ? botMention(slug) : null;
 
   return (

@@ -126,10 +126,10 @@ describe("review trigger vocabulary (duplication lock + mention grammar)", () =>
     expect(isReviewTriggerMode("whenever")).toBe(false);
   });
 
-  test("botMention is the exact canonical string @{slug}[bot] (spec §3 operator visibility)", () => {
-    expect(botMention("acme")).toBe("@acme[bot]");
+  test("botMention is the bare @{slug} form (spec §3 operator visibility)", () => {
+    expect(botMention("acme")).toBe("@acme");
     // GitHub login continuation: hyphens ride the slug verbatim.
-    expect(botMention("mstar-review")).toBe("@mstar-review[bot]");
+    expect(botMention("mstar-review")).toBe("@mstar-review");
   });
 });
 
@@ -173,7 +173,7 @@ describe("trigger-mode segmented control (SSR)", () => {
     // Both locales keep the same verbatim value set + mention form.
     for (const html of [en, zh]) {
       expect(html).toContain('title="every_push"');
-      expect(html).toContain("@acme[bot]");
+      expect(html).toContain("@acme");
     }
   });
 });
@@ -182,35 +182,35 @@ describe("mention-string display (spec §3 operator visibility, SSR)", () => {
   test("the exact string renders as one code node with the plain form in title + aria", () => {
     const en = controlHtml("every_push");
     // ONE text node — click-drag copies the exact string.
-    expect(en).toContain(">@acme[bot]</code>");
+    expect(en).toContain(">@acme</code>");
     // Copy-friendly plain form in the title and the localized aria label.
-    expect(en).toContain('title="@acme[bot]"');
-    expect(en).toContain('aria-label="Bot mention: @acme[bot]"');
-    expect(controlHtml("every_push", "zh_CN")).toContain('aria-label="机器人提及字符串：@acme[bot]"');
+    expect(en).toContain('title="@acme"');
+    expect(en).toContain('aria-label="Bot mention: @acme"');
+    expect(controlHtml("every_push", "zh_CN")).toContain('aria-label="机器人提及：@acme"');
   });
 
   test("the mention derives from the App slug (one App's string never leaks to another)", () => {
     const html = controlHtml("every_push", "en", "mstar-review");
-    expect(html).toContain(">@mstar-review[bot]</code>");
-    expect(html).toContain('title="@mstar-review[bot]"');
-    expect(html).not.toContain("@acme[bot]");
+    expect(html).toContain(">@mstar-review</code>");
+    expect(html).toContain('title="@mstar-review"');
+    expect(html).not.toContain("@acme");
   });
 
-  test("no github_slug → no mention renders at all (D2 fail-safe; never an @[bot] placeholder)", () => {
+  test("no github_slug → no mention renders at all (D2 fail-safe; never a placeholder)", () => {
     // Before the first metadata sync there is no real mention target: the
     // hint paragraph stays off the face entirely, the mode control does not.
     const html = controlHtml("every_push", "en", null);
-    expect(html).not.toContain("[bot]");
-    expect(html).not.toContain("works in every mode");
+    expect(html).not.toContain("Bot mention");
+    expect(html).not.toContain("(re-)start a review");
     expect(html).toContain('role="radiogroup"');
   });
 
   test("the mention copy sits in the control (near the mode segments, per the assignment)", () => {
     const html = controlHtml("every_push");
     expect(html.indexOf('role="radiogroup"')).toBeGreaterThan(-1);
-    expect(html.indexOf("@acme[bot]")).toBeGreaterThan(html.indexOf('role="radiogroup"'));
-    // The every-mode hint rides it (the spec's "works in every mode" face).
-    expect(html).toContain("works in every mode");
+    expect(html.indexOf("@acme")).toBeGreaterThan(html.indexOf('role="radiogroup"'));
+    // The hint rides it ("(re-)start a review" is the copy fragment).
+    expect(html).toContain("(re-)start a review");
   });
 });
 
@@ -365,9 +365,9 @@ describe("save flow + 400 fallback contract", () => {
     expect(t("zh_CN", "settings.triggerModeEveryPush")).toBe("每次推送");
     expect(t("en", "settings.triggerModeManual")).toBe("Manual");
     expect(t("zh_CN", "settings.triggerModeManual")).toBe("仅手动");
-    expect(t("en", "settings.triggerModeMention")).toContain("PR comment");
+    expect(t("en", "settings.triggerModeMention")).toContain("PR");
     expect(t("zh_CN", "settings.triggerModeMention")).toContain("PR 评论");
-    expect(t("en", "settings.triggerModeMentionAria", { mention: "@a[bot]" })).toBe("Bot mention: @a[bot]");
-    expect(t("zh_CN", "settings.triggerModeMentionAria", { mention: "@a[bot]" })).toBe("机器人提及字符串：@a[bot]");
+    expect(t("en", "settings.triggerModeMentionAria", { mention: "@a" })).toBe("Bot mention: @a");
+    expect(t("zh_CN", "settings.triggerModeMentionAria", { mention: "@a" })).toBe("机器人提及：@a");
   });
 });
