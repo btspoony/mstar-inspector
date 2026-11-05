@@ -44,7 +44,7 @@ import {
   foldLabel,
   recordId,
   reviewAttribution,
-  SEVERITY_GROUPS,
+  SEVERITY_FILTER_OPTIONS,
   severityGroups,
   timelineRows,
   verdictTone,
@@ -447,12 +447,12 @@ export function PullRequestDetailView({
   // tab count. Name the severity the operator chose instead; an out-of-set
   // value names itself, as the severity buckets already do.
   const activeSeverity = records.findings.severity;
-  const severityGroup = SEVERITY_GROUPS.find((group) => group.severity === activeSeverity);
+  const severityOption = SEVERITY_FILTER_OPTIONS.find((option) => option.key === activeSeverity);
   const emptyFindingsCopy =
     activeSeverity === ""
       ? t(locale, "pullRequests.noFindings")
       : t(locale, "pullRequests.noFindingsForSeverity", {
-          severity: severityGroup === undefined ? activeSeverity : t(locale, severityGroup.labelKey),
+          severity: severityOption === undefined ? activeSeverity : t(locale, severityOption.labelKey),
         });
   // The PR's newest review comes from the head payload, never the loaded page:
   // paging the reviews list must not rewrite the headline verdict, its tone or
@@ -750,9 +750,9 @@ export function PullRequestDetailView({
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value={SEVERITY_ALL}>{t(locale, "pullRequests.filterAll")}</SelectItem>
-                      {SEVERITY_GROUPS.map((group) => (
-                        <SelectItem key={group.severity} value={group.severity}>
-                          {t(locale, group.labelKey)}
+                      {SEVERITY_FILTER_OPTIONS.map((option) => (
+                        <SelectItem key={option.key} value={option.key}>
+                          {t(locale, option.labelKey)}
                         </SelectItem>
                       ))}
                     </SelectContent>

@@ -18,6 +18,7 @@ import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   appPullRequestDetailUrl,
   appPullRequestRecordsUrl,
+  CATCH_ALL_SEVERITY,
   githubPullRequestUrl,
   githubRepoUrl,
   parsePullRequestDetail,
@@ -110,6 +111,15 @@ describe("pull request detail data plane (pure helpers)", () => {
         severity: "",
       }),
     ).toBe("/dashboard/api/apps/1/pull-requests/acme/web/42/reviews?offset=0&limit=10");
+    // The catch-all choice is a filter MODE, not a severity spelling: it rides
+    // the route's `unclassified` flag so `severity` keeps its closed vocabulary.
+    expect(
+      appPullRequestRecordsUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 }, "findings", {
+        offset: 0,
+        limit: 10,
+        severity: CATCH_ALL_SEVERITY,
+      }),
+    ).toBe("/dashboard/api/apps/1/pull-requests/acme/web/42/findings?offset=0&limit=10&unclassified=1");
   });
 
   test("the GitHub builders encode each segment and cannot escape the path", () => {

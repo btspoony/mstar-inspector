@@ -288,7 +288,9 @@ export async function mountView(
  * vocabulary is the documented 400 — a stub that answered an unknown spelling
  * with an empty 200 would let a mounted test believe in a contract the API does
  * not have, and a hand copy of the vocabulary would answer a set the route no
- * longer enforces.
+ * longer enforces. `unclassified=1` is the filter's complement (the catch-all
+ * bucket), refused when combined with `severity` exactly as the route refuses
+ * it.
  */
 export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: typeof globalThis.fetch; fetches: string[] } {
   const fetches: string[] = [];
@@ -298,15 +300,22 @@ export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: 
     // `/api/apps/<appId>/pull-requests/...`: the App the read answers for.
     const sceneValue = sceneFor(/\/apps\/([^/]+)\//.exec(url.pathname)?.[1] ?? "");
     const severity = url.searchParams.get("severity") ?? "";
+    const unclassified = url.searchParams.get("unclassified") === "1";
     for (const section of ["findings", "reviews", "failures"] as const) {
       if (!url.pathname.endsWith(`/${section}`)) continue;
       if (section === "findings" && severity !== "" && !isFindingSeverity(severity)) {
         return jsonResponse({ error: "invalid severity" }, 400);
       }
+      // The catch-all is a mode of its own; the two filters never combine.
+      if (section === "findings" && unclassified && severity !== "") {
+        return jsonResponse({ error: "invalid filter" }, 400);
+      }
       const rows =
         section === "findings"
-          ? sceneValue.pages.findings.items.filter(
-              (finding) => severity === "" || finding.severity === severity,
+          ? sceneValue.pages.findings.items.filter((finding) =>
+              unclassified
+                ? !isFindingSeverity(finding.severity)
+                : severity === "" || finding.severity === severity,
             )
           : section === "reviews"
             ? sceneValue.pages.reviews.items
@@ -319,9 +328,9 @@ export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: 
       const applied = Math.min(limit, sceneValue.pages[section].limit ?? limit);
       // The page's declared `total` is authoritative: the head was built from
       // it, so a scene can state a total its served window never reaches. A
-      // severity filter has no declared total of its own — like the route, it
+      // findings filter has no declared total of its own — like the route, it
       // reports the rows it filtered.
-      const filtered = section === "findings" && severity !== "";
+      const filtered = section === "findings" && (severity !== "" || unclassified);
       return jsonResponse({
         items: rows.slice(offset, offset + applied),
         total: filtered ? rows.length : sceneValue.pages[section].total,

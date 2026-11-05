@@ -1146,6 +1146,14 @@ export function appPullRequestDetailUrl(base: string, appId: string, ref: PullRe
 }
 
 /**
+ * The findings filter's catch-all choice: the rows whose `mergeClass` is
+ * outside the merge-class vocabulary. It maps to the record route's
+ * `unclassified` flag, never to a `severity` spelling — the route admits only
+ * the vocabulary there, and a fifth spelling would be a rejected filter.
+ */
+export const CATCH_ALL_SEVERITY = "other";
+
+/**
  * One record section's page URL. `offset`/`limit` ride every request — the
  * server's bounds are the contract — and `severity` only when the findings
  * filter is set; the query is encoded, so a free-form value cannot break out
@@ -1159,7 +1167,8 @@ export function appPullRequestRecordsUrl(
   page: { offset: number; limit: number; severity?: string },
 ): string {
   const params = new URLSearchParams({ offset: String(page.offset), limit: String(page.limit) });
-  if (page.severity !== undefined && page.severity !== "") params.set("severity", page.severity);
+  if (page.severity === CATCH_ALL_SEVERITY) params.set("unclassified", "1");
+  else if (page.severity !== undefined && page.severity !== "") params.set("severity", page.severity);
   return `${appPullRequestDetailUrl(base, appId, ref)}/${section}?${params.toString()}`;
 }
 

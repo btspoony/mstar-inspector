@@ -466,6 +466,45 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(await unknownPr.json()).toEqual({ error: "unknown pull request" });
   });
 
+  test("the catch-all filter selects rows outside the merge-class vocabulary", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    seedFindings(db, [
+      { id: "row-1", findingId: "F-1", mergeClass: "must-fix", filePath: null, lineStart: null },
+      { id: "row-2", findingId: "F-2", mergeClass: "blocker", filePath: null, lineStart: null },
+      { id: "row-3", findingId: "F-3", mergeClass: "critical", filePath: null, lineStart: null },
+    ]);
+
+    // The complement of the vocabulary, newest first — the same rows the SPA
+    // renders under its catch-all bucket.
+    const body = (await (await getFace(`${sectionPath("findings")}?unclassified=1`, db)).json()) as {
+      items: Array<{ finding_id: string }>;
+      total: number;
+    };
+    expect(body.items.map((item) => item.finding_id)).toEqual(["F-3", "F-2"]);
+    expect(body.total).toBe(2);
+
+    // It is a filter MODE, not a fifth severity spelling: `severity` still
+    // refuses the bucket name, and the two filters never combine.
+    const asSeverity = await getFace(`${sectionPath("findings")}?severity=other`, db);
+    expect(asSeverity.status).toBe(400);
+    expect(await asSeverity.json()).toEqual({ error: "invalid severity" });
+    const combined = await getFace(`${sectionPath("findings")}?unclassified=1&severity=must-fix`, db);
+    expect(combined.status).toBe(400);
+    expect(await combined.json()).toEqual({ error: "invalid filter" });
+    const malformed = await getFace(`${sectionPath("findings")}?unclassified=yes`, db);
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({ error: "invalid filter" });
+
+    // The same 404-outranks-400 rule the severity guard keeps.
+    const unknownPr = await getFace(
+      `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/999/findings?unclassified=yes`,
+      db,
+    );
+    expect(unknownPr.status).toBe(404);
+    expect(await unknownPr.json()).toEqual({ error: "unknown pull request" });
+  });
+
   test("malformed paging is a 400 on every section", async () => {
     const db = await fixture();
     seedInstallation(db);

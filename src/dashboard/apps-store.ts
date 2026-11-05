@@ -137,7 +137,7 @@ import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
-import { MUST_FIX_SEVERITY } from "../contracts/finding-severity";
+import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
 
 /** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
@@ -1866,11 +1866,21 @@ export function createAppsStore(db: AppsStoreD1) {
       prNumber: number,
       page: PullRequestPageRequest,
     ): Promise<PullRequestRecordPage<PullRequestFindingRow> | null> {
-      const filter =
-        page.severity === undefined || page.severity === null
+      const unclassified = page.unclassified === true;
+      // `NOT IN` never matches a NULL column, yet a finding with no
+      // `mergeClass` lands in the catch-all bucket too (the SPA reads it as
+      // ""), so the complement must admit NULL explicitly.
+      const filter = unclassified
+        ? ` AND (json_extract(original_json, '$.mergeClass') IS NULL
+                 OR json_extract(original_json, '$.mergeClass') NOT IN (${FINDING_SEVERITIES.map(() => "?").join(", ")}))`
+        : page.severity === undefined || page.severity === null
           ? ""
           : " AND json_extract(original_json, '$.mergeClass') = ?";
-      const filterBinds = filter === "" ? [] : [page.severity];
+      const filterBinds: string[] = unclassified
+        ? [...FINDING_SEVERITIES]
+        : page.severity === undefined || page.severity === null
+          ? []
+          : [page.severity];
       const results = await db.batch([
         db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
         db
@@ -2080,6 +2090,12 @@ export type PullRequestPageRequest = {
   limit: number;
   /** `findings` only: exact `mergeClass`; absent/`null` is no filter. */
   severity?: string | null;
+  /**
+   * `findings` only: the complement of `severity` — rows whose `mergeClass` is
+   * outside `FINDING_SEVERITIES` (or absent). The route decides the
+   * vocabulary; this store only excludes it.
+   */
+  unclassified?: boolean;
 };
 
 /** One record section's page: the rows plus the total the pager counts against. */

@@ -695,6 +695,31 @@ describe("pull request detail reads", () => {
     expect(missing).toEqual({ items: [], total: 0 });
   });
 
+  test("an unclassified filter selects the findings outside the vocabulary", async () => {
+    const db = await detailFixture();
+    seedFinding(
+      db,
+      { findingId: "F-9", mergeClass: "blocker", title: "Unmapped class", filePath: "src/c.ts", lineStart: 1, body: "" },
+      "row-9",
+    );
+    const store = createAppsStore(db);
+    const page = { offset: 0, limit: 10 };
+    // The complement of the vocabulary: the row a `severity` filter can never
+    // name, while the must-fix row the fixture seeds is excluded.
+    const unclassified = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
+      ...page,
+      unclassified: true,
+    });
+    expect(unclassified!.total).toBe(1);
+    expect(unclassified!.items.map((finding) => finding.finding_id)).toEqual(["F-9"]);
+    // The exact-match filter keeps its meaning beside the mode.
+    const mustFix = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
+      ...page,
+      severity: "must-fix",
+    });
+    expect(mustFix!.items.map((finding) => finding.finding_id)).toEqual(["F-1"]);
+  });
+
   test("findings keep their insert order when a re-report advances updated_ms", async () => {
     const db = await detailFixture();
     seedFinding(
