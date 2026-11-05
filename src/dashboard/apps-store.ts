@@ -1880,10 +1880,13 @@ export function createAppsStore(db: AppsStoreD1) {
      * count, the dot and the pager must agree with the list.
      *
      * Each row also carries `review_round`: the ordinal of the round that FIRST
-     * reported it — `first_seen_sha` matched against the PR's reviews ordered
-     * oldest-first (`reviews` oldest → 1). A finding whose sha no review row
-     * carries (history outside the ledger, or a comment-only round) reports
-     * NULL, and the client omits the chip.
+     * reported it, read from `review_findings.first_seen_round` — the value
+     * the lifecycle write stamped when the row was inserted. It is stored, not
+     * derived from `reviews`: a round that failed or carried only comments has
+     * no `reviews` row, and a round counter that advances without one would
+     * shift every later derived ordinal. Migration 0020 creates the table with
+     * `first_seen_round INTEGER NOT NULL` and no predecessor, so every row has
+     * one and the read needs no COALESCE.
      *
      * The page is ordered by `rowid`, the immutable insert order — `updated_ms`
      * advances every time a review round re-reports an open finding, so
@@ -1929,18 +1932,13 @@ export function createAppsStore(db: AppsStoreD1) {
                     json_extract(rf.original_json, '$.filePath') AS file_path,
                     json_extract(rf.original_json, '$.lineStart') AS line,
                     json_extract(rf.original_json, '$.body') AS body,
-                    (SELECT rr.rn
-                     FROM (SELECT head_sha,
-                                  ROW_NUMBER() OVER (ORDER BY reviewed_at ASC, rowid ASC) AS rn
-                           FROM reviews
-                           WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?) rr
-                     WHERE rr.head_sha = rf.first_seen_sha) AS review_round
+                    rf.first_seen_round AS review_round
              FROM review_findings rf
              WHERE rf.app_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}
              ORDER BY rf.rowid DESC
              LIMIT ? OFFSET ?`,
           )
-          .bind(appId, owner, repo, prNumber, appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
+          .bind(appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
       ]);
       if (results[0]!.results.length === 0) return null;
       return {
@@ -2070,8 +2068,8 @@ export type PullRequestFindingRow = {
   file_path: string | null;
   line: number | null;
   body: string | null;
-  /** The PR round that first reported it (`reviews` ordered oldest-first); NULL when no review carries its `first_seen_sha`. */
-  review_round: number | null;
+  /** The stored ordinal of the round that first reported it (`review_findings.first_seen_round`). */
+  review_round: number;
 };
 
 /** One `reviews` row as the detail face reads it — nullable columns honest. */
