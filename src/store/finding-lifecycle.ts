@@ -383,6 +383,61 @@ export async function readPublicationProof(
 }
 
 /**
+ * The journal phases a DELIVERY hands off (spec §7.7 step 2): everything that
+ * is not terminal for this scope/head, `confirmed` included — its proof is
+ * about to be applied and this delivery still must not re-review the head.
+ */
+export const PUBLICATION_HANDOFF_PHASES: readonly PublicationRow["phase"][] = [
+  "prepared",
+  "sending",
+  "unknown",
+  "confirmed",
+];
+
+/**
+ * The journal phases whose proof is still being PRODUCED (spec §7.9/§7.11.2):
+ * a Check waiting for that proof must not conclude yet, and must not be
+ * terminalized by the recovery lane while the publication can still land.
+ */
+export const PUBLICATION_IN_FLIGHT_PHASES: readonly PublicationRow["phase"][] = [
+  "prepared",
+  "sending",
+  "unknown",
+];
+
+/**
+ * The publication-journal row for this exact scope/head, oldest first, in any
+ * of `phases`. ONE predicate, shared by the delivery hand-off (§7.7 step 2) and
+ * the Check recovery lane's wait-for-proof probe (§7.11.2) — two copies of the
+ * same SQL would be free to drift apart.
+ */
+export async function findPublicationJournal(
+  db: D1Like,
+  input: { scope: Scope; headSha: string; phases: readonly PublicationRow["phase"][] },
+): Promise<{ id: string; phase: PublicationRow["phase"] } | null> {
+  if (input.phases.length === 0) return null;
+  const placeholders = input.phases.map(() => "?").join(", ");
+  const row = await db
+    .prepare(
+      `SELECT id, phase FROM review_publications
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND head_sha = ? AND phase IN (${placeholders})
+       ORDER BY created_ms, id LIMIT 1`,
+    )
+    .bind(
+      input.scope.appId,
+      input.scope.installationId,
+      input.scope.owner,
+      input.scope.repo,
+      input.scope.prNumber,
+      input.headSha,
+      ...input.phases,
+    )
+    .first<{ id: string; phase: string }>();
+  return row === null ? null : { id: row.id, phase: row.phase as PublicationRow["phase"] };
+}
+
+/**
  * Proof-gated idempotent apply — the frozen §7.7 step 9 local sequence:
  * (1) the existing atomic `store.put` for the review artifact (idempotent
  * UNIQUE no-op — a replay after store.put but before the lifecycle apply

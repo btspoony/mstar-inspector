@@ -59,6 +59,7 @@ import {
   type CheckAttempt,
   type CheckConclusion,
   type CheckRemote,
+  deferCheckForPendingPublication,
   deferCheckRecovery,
   getCheckAttempt,
   getCheckOwnership,
@@ -76,6 +77,7 @@ import {
   suspendCheckRecovery,
 } from "../store/review-checks";
 import type { CheckOwnership, Lease, PublicationProof, PublishedReview } from "../store/review-checks";
+import { findPublicationJournal, PUBLICATION_IN_FLIGHT_PHASES } from "../store/finding-lifecycle";
 import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
@@ -789,6 +791,20 @@ async function reconcileCheckAttempt(
   //    lane only ever READS what that lane persisted — never a send, replay
   //    or paid re-review.
   const proof = await readProof(db, owned);
+  // No proof yet can mean "still being produced", not "failed": while this
+  // exact scope/head owns an in-flight publication journal, the M8 lane is
+  // still working on it. Terminalizing the unconfirmed fallback now would mark
+  // the run `done` for good — nothing re-opens it when that publication lands —
+  // so the claim is given back with no send and no attempt spent, and the next
+  // tick re-checks. The execution deadline is the HARD STOP: past it the wait
+  // is over and the unconfirmed failure is the honest answer.
+  if (proof === null) {
+    const pending = await findPendingPublicationJournal(db, owned);
+    if (pending !== null && now() < current.executionDeadlineMs) {
+      await deferCheckForPendingPublication(db, attemptId, lease, now() + CHECK_BACKOFF_MS[0]!, now());
+      return;
+    }
+  }
   // The gate decision needs the App's stored gate and the review THIS proof
   // published. A missing or corrupt gate row, or a tallies-free review, is
   // unreadable, so it can never be corrected into a success (spec §7.9).
@@ -1201,6 +1217,26 @@ async function readRecoveryReview(
       scope: owned.identity.scope,
       headSha: owned.identity.headSha,
       ...(publicationId === null ? {} : { publicationId }),
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Does this exact scope/head still own an IN-FLIGHT publication journal? A read
+ * failure answers `null` — the caller then keeps today's behaviour (deadline →
+ * unconfirmed failure) rather than deferring forever on an unreadable table.
+ */
+async function findPendingPublicationJournal(
+  db: D1Like,
+  owned: CheckOwnership,
+): Promise<{ id: string; phase: string } | null> {
+  try {
+    return await findPublicationJournal(db, {
+      scope: owned.identity.scope,
+      headSha: owned.identity.headSha,
+      phases: PUBLICATION_IN_FLIGHT_PHASES,
     });
   } catch {
     return null;

@@ -754,6 +754,24 @@ export async function releaseCheckClaim(
 }
 
 /**
+ * Give the recovery claim back while WAITING for a publication proof: the row
+ * keeps its frozen intent and its `recovery_state`, spends NO attempt, and is
+ * due again after `nextAttemptMs`. Used when the exact scope/head still owns an
+ * in-flight publication journal (spec §7.11.2): terminalizing the unconfirmed
+ * fallback before that publication proves itself would close the run for good,
+ * and burning the attempt budget while it waits would exhaust it for no reason.
+ */
+export async function deferCheckForPendingPublication(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nextAttemptMs: number,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  return runFenced(db, id, lease, `holder = NULL, lease_until_ms = NULL, next_attempt_ms = ?`, [nextAttemptMs], nowMs);
+}
+
+/**
  * The identity-fenced twin of `releaseCheckClaim`, for the one caller that
  * reports a refusal WITHOUT counting a request: `beginCheck` answering
  * `requests: 0`.

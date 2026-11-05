@@ -103,7 +103,9 @@ import {
   applyPublishedLifecycle,
   claimPublication,
   countOpenFindings,
+  findPublicationJournal,
   hasUnprovenDegradedPublication,
+  PUBLICATION_HANDOFF_PHASES,
   markPublicationFailed,
   recordPublicationProof,
   selectAssessmentTargets,
@@ -1003,17 +1005,10 @@ async function journalHandoffRow(
   scope: Scope,
   headSha: string,
 ): Promise<{ id: string; phase: PublicationRow["phase"] } | null> {
-  const row = await db
-    .prepare(
-      `SELECT id, phase FROM review_publications
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-         AND head_sha = ? AND phase IN ('prepared','sending','unknown','confirmed')
-       ORDER BY created_ms, id LIMIT 1`,
-    )
-    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, headSha)
-    .first<{ id: string; phase: string }>();
-  if (row === null) return null;
-  return { id: row.id, phase: row.phase as PublicationRow["phase"] };
+  // The predicate is SHARED with the Check recovery lane's wait-for-proof probe
+  // (`findPublicationJournal`); only the phase set differs, because a delivery
+  // also hands off a `confirmed` row whose proof is about to be applied.
+  return findPublicationJournal(db, { scope, headSha, phases: PUBLICATION_HANDOFF_PHASES });
 }
 
 /**

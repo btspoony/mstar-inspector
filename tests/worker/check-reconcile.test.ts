@@ -90,6 +90,9 @@ const EXPIRED_DEADLINE = T0 - 1_800_000;
 
 const SILENT_LOG = { warn: () => {}, info: () => {} };
 
+/** `CHECK_SUMMARIES.unconfirmed` — the give-up fallback the consumer freezes. */
+const UNCONFIRMED = "Review attempt could not be confirmed complete; publication status is unknown.";
+
 function asEnv(db: TestD1): ScheduledEnv {
   return { DB: db as unknown as ScheduledEnv["DB"] };
 }
@@ -208,6 +211,34 @@ function seedPublication(
       T0 - 10_000,
       T0 - 10_000,
     );
+}
+
+/**
+ * An in-flight (or given-phase) publication-journal row for the exact
+ * scope/head with NO persisted proof — the journal hand-off state.
+ */
+function seedJournal(db: TestD1, scope: Scope, headSha: string, phase: string): string {
+  const id = `journal-${phase}`;
+  db.raw
+    .prepare(
+      `INSERT INTO review_publications
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+          payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'review', ?, '{}', NULL, 0, 'pending', ?, ?)`,
+    )
+    .run(
+      id,
+      scope.appId,
+      scope.installationId,
+      scope.owner,
+      scope.repo,
+      scope.prNumber,
+      headSha,
+      phase,
+      T0 - 20_000,
+      T0 - 10_000,
+    );
+  return id;
 }
 
 /** An `mstar.review/v1` envelope with the given verdict and tally score. */
@@ -680,6 +711,167 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.recovery_state).toBe("done");
     expect(row.terminal_ms).toBe(T0);
     expect(row.publication_id).toBe(proof.publicationId);
+  });
+
+  test("a no-proof attempt whose publication is still in flight WAITS, then concludes from that proof", async () => {
+    const db = seededDb();
+    const deadline = T0 + 900_000;
+    const { attempt, lease } = await claim(db, { nowMs: T0, executionDeadlineMs: deadline });
+    const id = attempt.identity.attemptId;
+    // The consumer's journal hand-off: the unconfirmed fallback is frozen and
+    // the attempt released at the first backoff rung. The publication exists
+    // but has not proved itself yet.
+    const journalId = seedJournal(db, SCOPE, SHA, "prepared");
+    expect(
+      await setCheckDesired(
+        db,
+        id,
+        lease,
+        { desired: "failure", title: CHECK_NAME, summary: UNCONFIRMED },
+        null,
+        T0,
+      ),
+    ).toBe(true);
+    expect(
+      await deferCheckRecovery(
+        db,
+        id,
+        lease,
+        { state: "remote-unconfirmed", nextAttemptMs: T0 + 60_000, reason: "publication journal handoff" },
+        T0,
+      ),
+    ).toBe(true);
+
+    const firstStub = stubFetch();
+    let sends = 0;
+    try {
+      const first = await run(db, {
+        now: () => T0 + 120_000, // due, but far inside the execution deadline
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({
+            kind: "ready",
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+          }),
+          complete: async (identity) => {
+            sends += 1;
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+          },
+        }),
+      });
+      expect(first.examined).toBe(1);
+      expect(first.completed).toBe(0);
+      expect(first.unconfirmed).toBe(0);
+    } finally {
+      firstStub.restore();
+    }
+
+    // NOTHING was sent or concluded: the run keeps waiting for its proof, and
+    // the wait spends no attempt.
+    expect(sends).toBe(0);
+    const waiting = await rawRow(db, id);
+    expect(waiting.terminal_ms).toBeNull();
+    expect(waiting.observed).toBe("unknown");
+    expect(waiting.desired).toBe("failure");
+    expect(waiting.desired_summary).toBe(UNCONFIRMED);
+    expect(waiting.attempts).toBe(1);
+    expect(waiting.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+    expect(waiting.holder).toBeNull();
+    expect(waiting.lease_until_ms).toBeNull();
+
+    // The publication now proves itself: the same attempt concludes from it.
+    // The proof must name the journal row that actually exists (the Check
+    // row's `publication_id` is FK-bound to it).
+    const proof: PublicationProof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
+    const payload = reviewPayload(SCOPE, SHA, "ship it", 85);
+    db.raw
+      .prepare(`UPDATE review_publications SET phase = 'confirmed', proof_json = ?, payload_json = ? WHERE id = ?`)
+      .run(JSON.stringify(proof), JSON.stringify(payload), journalId);
+
+    const secondStub = stubFetch();
+    let sent: CheckConclusion | null = null;
+    try {
+      const second = await run(db, {
+        now: () => T0 + 200_000,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({
+            kind: "ready",
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+          }),
+          fetch: async (identity, checkRunId) => ({
+            kind: "found",
+            remote: remoteFor(identity, { id: checkRunId, status: "in_progress", conclusion: null }),
+          }),
+          complete: async (identity, _runId, conclusion) => {
+            sent = conclusion;
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+          },
+        }),
+      });
+      expect(second.completed).toBe(1);
+    } finally {
+      secondStub.restore();
+    }
+
+    expect(sent).not.toBeNull();
+    expect(sent!.desired).toBe("success");
+    expect(sent!.summary).toContain("Review gate met");
+    const settled = await rawRow(db, id);
+    expect(settled.observed).toBe("success");
+    expect(settled.terminal_ms).not.toBeNull();
+  });
+
+  test("the execution deadline is the hard stop: past it a pending journal no longer defers the failure", async () => {
+    const db = seededDb();
+    const deadline = T0 + 900_000;
+    const { attempt, lease } = await claim(db, { nowMs: T0, executionDeadlineMs: deadline });
+    const id = attempt.identity.attemptId;
+    seedJournal(db, SCOPE, SHA, "prepared");
+    expect(
+      await setCheckDesired(db, id, lease, { desired: "failure", title: CHECK_NAME, summary: UNCONFIRMED }, null, T0),
+    ).toBe(true);
+    expect(
+      await deferCheckRecovery(
+        db,
+        id,
+        lease,
+        { state: "remote-unconfirmed", nextAttemptMs: deadline, reason: "publication journal handoff" },
+        T0,
+      ),
+    ).toBe(true);
+
+    const fetchStub = stubFetch();
+    let sent: CheckConclusion | null = null;
+    try {
+      await run(db, {
+        now: () => deadline,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({
+            kind: "ready",
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+          }),
+          fetch: async (identity, checkRunId) => ({
+            kind: "found",
+            remote: remoteFor(identity, { id: checkRunId, status: "in_progress", conclusion: null }),
+          }),
+          complete: async (identity, _runId, conclusion) => {
+            sent = conclusion;
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+          },
+        }),
+      });
+    } finally {
+      fetchStub.restore();
+    }
+
+    expect(sent).not.toBeNull();
+    expect(sent!.desired).toBe("failure");
+    expect(sent!.summary).toBe(UNCONFIRMED);
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
   });
 
   test("a confirmed degraded publication concludes failure, not neutral", async () => {
