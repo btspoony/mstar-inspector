@@ -710,7 +710,10 @@ export async function getRecheckAssignmentMaxBytes(db: DashboardD1): Promise<Rec
       return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: true };
     }
     const parsed = parseInRange(row.value, RECHECK_ASSIGNMENT_MIN, RECHECK_ASSIGNMENT_MAX);
-    if (Number.isNaN(parsed)) return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: true };
+    // A present row with a NULL/missing value is malformed, not absent.
+    if (Number.isNaN(parsed) || parsed === undefined) {
+      return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: true };
+    }
     return { maxBytes: parsed ?? RECHECK_ASSIGNMENT_DEFAULT, degraded: false };
   } catch {
     return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: true };

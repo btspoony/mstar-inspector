@@ -224,10 +224,12 @@ function parseReviewLevel(row: Json): ReviewLevelConfig | null {
   if (raw === undefined) return null;
   const level = map(raw, "runtime reviewLevel");
   const levels = level.levels;
-  if (!Array.isArray(levels)) throw new Error("admin API: levels is not a list");
+  if (!Array.isArray(levels) || levels.some((entry) => typeof entry !== "string")) {
+    throw new Error("admin API: levels is not a string list");
+  }
   return {
     value: text(level, "value"),
-    levels: levels.filter((entry): entry is string => typeof entry === "string"),
+    levels,
     degraded: bool(level, "degraded"),
   };
 }

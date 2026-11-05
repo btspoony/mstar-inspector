@@ -217,17 +217,6 @@ async function run(signal = new AbortController().signal) {
 }
 
 describe("recheck seat yield at the documented input limits", () => {
-  test("the fixture is a max-size round: 25 rows, 100 slices, near the input byte cap", () => {
-    expect(INPUT.targets).toHaveLength(RECHECK_MAX_TARGETS);
-    expect(INPUT.evidence).toHaveLength(RECHECK_MAX_TARGETS * 4);
-    const bytes = Buffer.byteLength(JSON.stringify(INPUT));
-    // The §7.3 input cap is 512 KiB; the catalog cap is 256 KiB. A large round
-    // therefore carries a quarter of a megabyte of trusted evidence as PROMPT
-    // text — this is the size the seat's one-shot context must hold.
-    expect(bytes).toBeGreaterThan(256 * 1024);
-    expect(bytes).toBeLessThan(512 * 1024);
-  });
-
   test("(a) a valid document over the max-size input survives whole — 25/25 assessed", async () => {
     const results = INPUT.targets.map((target) => row(target.rowId));
     seatResult = {

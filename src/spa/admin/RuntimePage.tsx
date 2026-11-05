@@ -171,6 +171,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   ): Promise<void> {
     event.preventDefault();
     if (busy) return; // in-flight guard — no double submit
+    // An unreadable row shows the documented fallback; saving it untouched
+    // would launder that fallback into an explicit operator choice.
+    if (stored.degraded && levelDraft === null) return;
     setBusy(true);
     setNotice(null);
     try {

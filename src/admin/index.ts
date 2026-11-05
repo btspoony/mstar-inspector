@@ -155,7 +155,9 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     getRecheckBacklogFill(db),
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
-    createFailureStore(db).countAdmissionDrops24h(),
+    // Auxiliary telemetry: a D1 fault must never blank the whole console, so
+    // this member answers `null` (the SPA hides that card) like a degraded read.
+    createFailureStore(db).countAdmissionDrops24h().catch(() => null),
   ]);
   return c.json({
     concurrency: system.concurrency,
