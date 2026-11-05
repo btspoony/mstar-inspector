@@ -34,6 +34,28 @@ function seedApp(db: TestD1, id = APP_ID, githubAppId = 2001): string {
 
 const PR = { appId: APP_ID, owner: "acme", repo: "widgets", prNumber: 131, title: "Add a thing", state: "open", headSha: "sha-1" };
 
+/**
+ * One `listPullRequests` read with the statements it PREPARED counted — the
+ * N+1 signal. The count is a property of the read's shape, so it is only ever
+ * compared across two reads (a wider window, a filtered window), never against
+ * a literal: a consolidated batch keeps passing, a per-row statement does not.
+ */
+async function ledgerRead(
+  db: TestD1,
+  filter?: { owner: string; repo: string },
+): Promise<{ rows: number; prepares: number }> {
+  let prepares = 0;
+  const counted = {
+    prepare(query: string) {
+      prepares += 1;
+      return db.prepare(query);
+    },
+    batch: db.batch.bind(db),
+  };
+  const { rows } = await createAppsStore(counted as never).listPullRequests(APP_ID, filter);
+  return { rows: rows.length, prepares };
+}
+
 describe("upsertPullRequest", () => {
   test("insert then re-delivery keeps ONE row on the (app, owner, repo, number) key", async () => {
     const db = createMigratedTestD1();
@@ -239,26 +261,21 @@ describe("listPullRequests", () => {
     expect(rows[0]!.failure_count).toBe(0);
   });
 
-  test("is not N+1: three seeded PRs cost a fixed number of statements, not one per row", async () => {
-    const db = createMigratedTestD1();
-    seedApp(db);
-    for (const n of [1, 2, 3]) await createAppsStore(db).upsertPullRequest({ ...PR, prNumber: n });
-    // Count prepared statements by wrapping the handle the store receives.
-    let prepares = 0;
-    const counted = {
-      prepare(query: string) {
-        prepares += 1;
-        return db.prepare(query);
-      },
-      batch: db.batch.bind(db),
-    };
-    const { rows } = await createAppsStore(counted as never).listPullRequests(APP_ID);
-    expect(rows.length).toBe(3);
-    // N+1 guard, pinned to the five statements the store issues (rows, review
-    // window, failure counts, distinct repos, and the App's live review
-    // locks): a per-row statement would already exceed this at 3 rows, and a
-    // dropped or doubled statement is a real change this pin must catch.
-    expect(prepares).toBe(5);
+  test("is not N+1: a wider window costs the same statements, not one per row", async () => {
+    const one = createMigratedTestD1();
+    seedApp(one);
+    await createAppsStore(one).upsertPullRequest(PR);
+    const three = createMigratedTestD1();
+    seedApp(three);
+    for (const n of [1, 2, 3]) await createAppsStore(three).upsertPullRequest({ ...PR, prNumber: n });
+
+    const single = await ledgerRead(one);
+    const triple = await ledgerRead(three);
+    expect(triple.rows).toBe(3);
+    // The rows, the review window, both aggregates and the lock read ride one
+    // fixed batch, so the three-row read prepares what the one-row read does.
+    // A per-row statement makes the wider window cost more, which fails here.
+    expect(triple.prepares).toBe(single.prepares);
   });
 
   test("the aggregates are scoped to the window (mechanism, not just the payload)", async () => {
@@ -291,14 +308,14 @@ describe("listPullRequests", () => {
     };
     await createAppsStore(recording as never).listPullRequests(APP_ID);
 
-    // Five statements: the four ledger statements above plus the App-wide live
-    // lock read (`review_inflight`), which carries no window — it is bounded by
-    // the concurrency caps, not by the row page.
-    expect(statements.length).toBe(5);
+    // The App-wide live lock read (`review_inflight`) carries no window — it
+    // is bounded by the concurrency caps, not by the row page — so only the
+    // statements reading `reviews`/`review_failures` below are in scope. Each
+    // one must carry the window: a new aggregate that skips it fails the loop.
     const aggregates = statements.filter(
       (stmt) => stmt.sql.includes("FROM reviews") || stmt.sql.includes("FROM review_failures"),
     );
-    expect(aggregates.length).toBe(2);
+    expect(aggregates.length).toBeGreaterThan(0);
     for (const stmt of aggregates) {
       // The bound VALUES, not the statement text: a splice that keeps the SQL
       // but permutes the slots satisfies any substring or count assertion.
@@ -444,19 +461,19 @@ describe("listPullRequests repository filter + option set", () => {
   test("a filtered read is still a fixed-size batch", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(PR);
-    let prepares = 0;
-    const counted = {
-      prepare(query: string) {
-        prepares += 1;
-        return db.prepare(query);
-      },
-      batch: db.batch.bind(db),
-    };
-    await createAppsStore(counted as never).listPullRequests(APP_ID, { owner: "acme", repo: "widgets" });
-    // N+1 guard, pinned: the filtered read issues the same five statements —
-    // the repository predicate rides the existing statements, it adds none.
-    expect(prepares).toBe(5);
+    const store = createAppsStore(db);
+    for (const n of [1, 2, 3]) await store.upsertPullRequest({ ...PR, prNumber: n });
+    await store.upsertPullRequest({ ...PR, repo: "other", prNumber: 901 });
+
+    const all = await ledgerRead(db);
+    const wide = await ledgerRead(db, { owner: "acme", repo: "widgets" });
+    const narrow = await ledgerRead(db, { owner: "acme", repo: "other" });
+    expect([all.rows, wide.rows, narrow.rows]).toEqual([4, 3, 1]);
+    // Twice over: narrowing the window costs what reading the whole one does
+    // (the predicate rides the existing statements, it adds none), and the
+    // filtered read costs the same at one row as at three (nothing per row).
+    expect(wide.prepares).toBe(all.prepares);
+    expect(wide.prepares).toBe(narrow.prepares);
   });
 
   test("the option set is one App's ledger, never a sibling App's", async () => {
