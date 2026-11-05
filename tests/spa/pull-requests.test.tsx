@@ -203,18 +203,28 @@ describe("pull requests data plane (pure helpers)", () => {
     );
   });
 
+  test("a selected repository becomes a request parameter, encoded", () => {
+    expect(appPullRequestsUrl("/dashboard", "1", "acme/web")).toBe(
+      "/dashboard/api/apps/1/pull-requests?repo=acme%2Fweb",
+    );
+    // No selection is exactly today's unfiltered URL.
+    expect(appPullRequestsUrl("/dashboard", "1")).toBe("/dashboard/api/apps/1/pull-requests");
+  });
+
   test("a ledger read stamped for another App derives to a clean loading face", () => {
-    // App 1's answered read: rows, ok state, App 1's stamp.
-    const appOne: ListRead = { app: "1", rows: [ROW_OPEN], kind: "ok" };
-    // Under App 2 the rows and the ok state are gone — nothing survives the
-    // switch, so the operator's first frame cannot be another App's ledger.
-    expect(currentListRead(appOne, "2")).toEqual({ app: "2", rows: null, kind: "loading" });
+    // App 1's answered read: rows, option list, ok state, App 1's stamp.
+    const appOne: ListRead = { app: "1", rows: [ROW_OPEN], repos: ["acme/web"], kind: "ok" };
+    // Under App 2 the rows, the option list and the ok state are gone —
+    // nothing survives the switch, so the operator's first frame cannot be
+    // another App's ledger.
+    expect(currentListRead(appOne, "2")).toEqual({ app: "2", rows: null, repos: null, kind: "loading" });
     // The same stamp under its own App passes through untouched.
     expect(currentListRead(appOne, "1")).toBe(appOne);
     // An error is App-scoped too: App 1's failure must not announce on App 2.
-    expect(currentListRead({ app: "1", rows: null, kind: "error" }, "2")).toEqual({
+    expect(currentListRead({ app: "1", rows: null, repos: null, kind: "error" }, "2")).toEqual({
       app: "2",
       rows: null,
+      repos: null,
       kind: "loading",
     });
   });
@@ -231,28 +241,47 @@ describe("pull requests data plane (pure helpers)", () => {
   });
 
   test("the list parser coerces a drifted row instead of blanking the list (QC)", () => {
-    expect(parsePullRequestList({ pull_requests: [ROW_OPEN] })).toEqual([ROW_OPEN]);
+    expect(parsePullRequestList({ pull_requests: [ROW_OPEN] })).toEqual({
+      rows: [ROW_OPEN],
+      repos: [],
+    });
     // Nullable display fields coerce to ""; an unknown state clamps to open.
     const drifted = { ...ROW_OPEN, title: null, head_sha: undefined, state: "draft" };
-    expect(parsePullRequestList({ pull_requests: [drifted] })).toEqual([
-      { ...ROW_OPEN, title: "", head_sha: "", state: "open" },
-    ]);
+    expect(parsePullRequestList({ pull_requests: [drifted] })).toEqual({
+      rows: [{ ...ROW_OPEN, title: "", head_sha: "", state: "open" }],
+      repos: [],
+    });
     // A row without its address is dropped individually — the rest stay.
     const noAddress = { ...ROW_OPEN, owner: null };
-    expect(parsePullRequestList({ pull_requests: [noAddress, ROW_CLOSED] })).toEqual([ROW_CLOSED]);
+    expect(parsePullRequestList({ pull_requests: [noAddress, ROW_CLOSED] })).toEqual({
+      rows: [ROW_CLOSED],
+      repos: [],
+    });
     // A malformed latest_review coerces to null, not a failed row.
-    expect(parsePullRequestList({ pull_requests: [{ ...ROW_OPEN, latest_review: "ship it" }] })).toEqual([
-      { ...ROW_OPEN, latest_review: null },
-    ]);
+    expect(
+      parsePullRequestList({ pull_requests: [{ ...ROW_OPEN, latest_review: "ship it" }] }),
+    ).toEqual({ rows: [{ ...ROW_OPEN, latest_review: null }], repos: [] });
     // The envelope keeps its shape.
     expect(parsePullRequestList({})).toBeNull();
   });
 
+  test("the list parser carries the payload's repository option set, strings only", () => {
+    const parsed = parsePullRequestList({
+      pull_requests: [ROW_OPEN],
+      repos: ["acme/web", "acme/api", 7, null, { owner: "x" }],
+    });
+    expect(parsed?.repos).toEqual(["acme/web", "acme/api"]);
+    // An absent repos field (an older payload) yields an empty option set —
+    // the toolbar then offers just the all option, never a re-derivation
+    // from the loaded rows.
+    expect(parsePullRequestList({ pull_requests: [ROW_OPEN] })?.repos).toEqual([]);
+  });
+
   test("a null title on one row still returns the other rows", () => {
     const parsed = parsePullRequestList({ pull_requests: [{ ...ROW_OPEN, title: null }, ROW_CLOSED] });
-    expect(parsed).toHaveLength(2);
-    expect(parsed?.[0]?.title).toBe("");
-    expect(parsed?.[1]).toEqual(ROW_CLOSED);
+    expect(parsed?.rows).toHaveLength(2);
+    expect(parsed?.rows[0]?.title).toBe("");
+    expect(parsed?.rows[1]).toEqual(ROW_CLOSED);
   });
 });
 
@@ -467,57 +496,94 @@ describe("pull requests tab (mounted)", () => {
     }
   });
 
-  test("the toolbar offers one option per distinct owner/repo plus all, and a selection filters the rows", async () => {
-    const { container, win, resolve, unmount } = await mountTabWithGatedFetch("");
-    try {
-      await act(async () =>
-        resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN, ROW_CLOSED] })),
-      );
-      await act(async () => {});
-      expect(container.textContent ?? "").toContain("Add the export button");
-      expect(container.textContent ?? "").toContain("Revert the cache change");
-
+  test("the toolbar offers payload repos absent from the window; a selection drives the request, all returns to it, refresh keeps the filter", async () => {
+    const { container, fetches, win, resolve, unmount } = await mountTabWithGatedFetch("");
+    const repoParamReads = () => fetches.filter((url) => url.includes("repo=acme%2Fapi"));
+    const unfilteredReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
+    const openOptions = async () => {
       await press(win, container.querySelector('[role="combobox"]'));
-      const options = [...win.document.querySelectorAll('[role="option"]')];
+      return [...win.document.querySelectorAll('[role="option"]')];
+    };
+    const payload = { pull_requests: [ROW_OPEN], repos: ["acme/api", "acme/web"] };
+    try {
+      await act(async () => resolve("/pull-requests", jsonResponse(payload)));
+      await act(async () => {});
+      expect(unfilteredReads()).toHaveLength(1);
+
+      // acme/api has NO rows in the current window — it is still an option,
+      // proving the option set comes from the payload, not the rows.
+      const options = await openOptions();
       expect(options.map((option) => option.textContent)).toEqual([
         t("en", "pullRequests.filterRepoAll"),
         "acme/api",
         "acme/web",
       ]);
-      await press(
-        win,
-        options.find((option) => option.textContent === "acme/api") as unknown as Element,
+
+      // Selecting it issues the filtered request and renders the rows it
+      // returns — the filter is server-side, not a local array filter.
+      await press(win, options.find((option) => option.textContent === "acme/api") as unknown as Element);
+      expect(repoParamReads()).toHaveLength(1);
+      await act(async () =>
+        resolve("repo=acme%2Fapi", jsonResponse({ pull_requests: [ROW_CLOSED], repos: ["acme/api", "acme/web"] })),
       );
+      await act(async () => {});
       expect(container.textContent ?? "").toContain("Revert the cache change");
       expect(container.textContent ?? "").not.toContain("Add the export button");
+
+      // Refresh re-reads WITH the current filter.
+      await press(
+        win,
+        [...container.querySelectorAll("button")].find(
+          (button) => button.getAttribute("aria-label") === t("en", "pullRequests.refreshAria"),
+        ),
+      );
+      expect(repoParamReads()).toHaveLength(2);
+      await act(async () =>
+        resolve("repo=acme%2Fapi", jsonResponse({ pull_requests: [ROW_CLOSED], repos: ["acme/api", "acme/web"] })),
+      );
+      await act(async () => {});
+      expect(container.textContent ?? "").toContain("Revert the cache change");
+
+      // Back to the all option: the unfiltered URL is requested again.
+      const allOptions = await openOptions();
+      await press(win, allOptions[0] as unknown as Element);
+      expect(unfilteredReads()).toHaveLength(2);
+      await act(async () => resolve("/pull-requests", jsonResponse(payload)));
+      await act(async () => {});
+      expect(container.textContent ?? "").toContain("Add the export button");
     } finally {
       await unmount();
     }
   });
 
   test("the repo filter resets to all when the tab switches Apps (I-001)", async () => {
-    const { container, win, switchApp, resolve, unmount } = await mountTabWithGatedFetch("");
+    const { container, fetches, win, switchApp, resolve, unmount } = await mountTabWithGatedFetch("");
+    const payload = { pull_requests: [ROW_OPEN, ROW_CLOSED], repos: ["acme/api", "acme/web"] };
     try {
-      await act(async () =>
-        resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN, ROW_CLOSED] })),
-      );
+      await act(async () => resolve("/pull-requests", jsonResponse(payload)));
       await act(async () => {});
-      // Select a repo: the ledger narrows to its rows.
+      // Select a repo: the ledger is re-read with the repo request parameter.
       await press(win, container.querySelector('[role="combobox"]'));
       const option = [...win.document.querySelectorAll('[role="option"]')].find(
         (row) => row.textContent === "acme/api",
       );
       await press(win, option as unknown as Element);
+      expect(fetches.filter((url) => url.includes("repo=acme%2Fapi"))).toHaveLength(1);
+      await act(async () =>
+        resolve("repo=acme%2Fapi", jsonResponse({ pull_requests: [ROW_CLOSED], repos: ["acme/api", "acme/web"] })),
+      );
+      await act(async () => {});
       expect(container.textContent ?? "").toContain("Revert the cache change");
       expect(container.textContent ?? "").not.toContain("Add the export button");
 
       // The tab instance survives the App switch, but the filter does not:
-      // the new App's ledger renders unfiltered and the select is back on
+      // the new App's ledger is read unfiltered and the select is back on
       // the all option.
       await switchApp("2");
-      await act(async () =>
-        resolve("/apps/2/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })),
-      );
+      const appTwoReads = fetches.filter((url) => url.includes("/apps/2/"));
+      expect(appTwoReads).toHaveLength(1);
+      expect(appTwoReads[0]).not.toContain("repo=");
+      await act(async () => resolve("/apps/2/pull-requests", jsonResponse(payload)));
       await act(async () => {});
       expect(container.textContent ?? "").toContain("Add the export button");
       expect(container.querySelector('[role="combobox"]')?.textContent ?? "").toContain(

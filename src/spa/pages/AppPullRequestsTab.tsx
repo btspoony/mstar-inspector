@@ -36,7 +36,13 @@ import {
  * unstamped read would paint the previous App's rows or error under the new
  * one until the new read landed.
  */
-export type ListRead = { app: string; rows: PullRequestRow[] | null; kind: "loading" | "ok" | "error" };
+export type ListRead = {
+  app: string;
+  rows: PullRequestRow[] | null;
+  /** The payload's repository option set — kept across an in-flight re-read. */
+  repos: string[] | null;
+  kind: "loading" | "ok" | "error";
+};
 
 /**
  * The read for the ACTIVE App — the loading face when the stamp names another
@@ -45,7 +51,7 @@ export type ListRead = { app: string; rows: PullRequestRow[] | null; kind: "load
  * still be the frame the operator saw.
  */
 export function currentListRead(read: ListRead, appId: string): ListRead {
-  return read.app === appId ? read : { app: appId, rows: null, kind: "loading" };
+  return read.app === appId ? read : { app: appId, rows: null, repos: null, kind: "loading" };
 }
 
 /**
@@ -85,12 +91,16 @@ export function AppPullRequestsTab({
   // this tab instance, so an unstamped ledger would paint the previous App's
   // rows (or its error) until the new read landed. A read for another App
   // derives to `loading` with no rows.
-  const [read, setRead] = useState<ListRead>({ app: appId, rows: null, kind: "loading" });
+  const [read, setRead] = useState<ListRead>({ app: appId, rows: null, repos: null, kind: "loading" });
   const current = currentListRead(read, appId);
   // ErrorState retry: bumping the nonce re-runs the load effect below.
   const [reloadNonce, setReloadNonce] = useState(0);
   // Local state, not URL state: `search.repo` belongs to the insights tab,
   // and sharing one search param would leak each tab's filter into the other.
+  // The choice is a REQUEST parameter now: the selection re-reads the ledger
+  // through `?repo=owner/name`, so the server filters BEFORE its row cap
+  // instead of the tab hiding rows it already holds.
+  //
   // The filter is scoped to one App: the tab instance survives an App switch,
   // so the choice is stamped with the App it was made for — another App
   // derives to "all" instead of inheriting a value that names none of its
@@ -100,17 +110,11 @@ export function AppPullRequestsTab({
     value: "",
   });
   const repoFilterValue = repoFilter.app === appId ? repoFilter.value : "";
-  // The server caps the ledger at PULL_REQUEST_LIST_LIMIT rows, so the filter
-  // is client-side over the already-loaded rows; a filter with no match
-  // leaves the table to its normal empty state.
-  const repoOptions =
-    current.rows !== null
-      ? [...new Set(current.rows.map((row) => `${row.owner}/${row.repo}`))].sort()
-      : [];
-  const visibleRows =
-    current.rows !== null && repoFilterValue !== ""
-      ? current.rows.filter((row) => `${row.owner}/${row.repo}` === repoFilterValue)
-      : current.rows;
+  // The option set is the payload's `repos` — the App's whole repository set,
+  // including repositories whose rows sit behind the server's row cap. It is
+  // NOT derived from the loaded rows: a capped window would silently drop
+  // repositories from the toolbar.
+  const repoOptions = current.repos !== null ? [...current.repos].sort() : [];
 
   // A malformed pr param resolves to null and falls back to the list face, so
   // "the detail owns the face" is the parsed ref, not the raw search value.
@@ -123,28 +127,31 @@ export function AppPullRequestsTab({
     // re-runs on the emptied search value.
     if (detailOpen) return;
     let cancelled = false;
-    // Rows survive a re-read of the SAME App, so a retry does not blank the
-    // ledger; an App switch drops them with the stamp.
-    const carry = (previous: ListRead): PullRequestRow[] | null =>
-      previous.app === appId ? previous.rows : null;
-    setRead((previous) => ({ app: appId, rows: carry(previous), kind: "loading" }));
-    fetchJson(appPullRequestsUrl(apiBase(), appId))
+    // Rows and the option list survive a re-read of the SAME App (a retry, a
+    // filter switch), so the frame keeps its content while the new read is in
+    // flight; an App switch drops them with the stamp.
+    const carry = (previous: ListRead): Pick<ListRead, "rows" | "repos"> =>
+      previous.app === appId
+        ? { rows: previous.rows, repos: previous.repos }
+        : { rows: null, repos: null };
+    setRead((previous) => ({ app: appId, ...carry(previous), kind: "loading" }));
+    fetchJson(appPullRequestsUrl(apiBase(), appId, repoFilterValue === "" ? undefined : repoFilterValue))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parsePullRequestList(raw);
         if (!parsed) {
-          setRead((previous) => ({ app: appId, rows: carry(previous), kind: "error" }));
+          setRead((previous) => ({ app: appId, ...carry(previous), kind: "error" }));
           return;
         }
-        setRead({ app: appId, rows: parsed, kind: "ok" });
+        setRead({ app: appId, rows: parsed.rows, repos: parsed.repos, kind: "ok" });
       })
       .catch(() => {
-        if (!cancelled) setRead((previous) => ({ app: appId, rows: carry(previous), kind: "error" }));
+        if (!cancelled) setRead((previous) => ({ app: appId, ...carry(previous), kind: "error" }));
       });
     return () => {
       cancelled = true;
     };
-  }, [appId, detailOpen, reloadNonce]);
+  }, [appId, detailOpen, reloadNonce, repoFilterValue]);
 
   function openPr(row: PullRequestRow): void {
     onSearch({ ...search, pr: `${row.owner}/${row.repo}/${row.number}` });
@@ -221,7 +228,7 @@ export function AppPullRequestsTab({
               <RefreshCw aria-hidden="true" />
             </Button>
           </div>
-          <PullRequestsListView locale={locale} rows={visibleRows ?? []} onOpen={openPr} />
+          <PullRequestsListView locale={locale} rows={current.rows ?? []} onOpen={openPr} />
         </>
       ) : null}
     </div>
