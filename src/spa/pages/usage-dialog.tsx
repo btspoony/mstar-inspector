@@ -1,10 +1,12 @@
 /**
- * The per-key usage dialog (plan api-key-usage-probe T3): probes the
- * provider's own quota endpoint with this one key and reports whether the
- * key is still accepted and what remains of its allowance. The probe POSTs
- * `provider` + `keyId` as form data to `/api/apps/:appId/keys/usage` on open
- * and on Refresh — the refresh IS the cache (the plan forbids a polling or
- * server-cache layer), so a key that just went dead never shows a stale bar.
+ * The per-key usage dialog: probes the provider's own quota endpoint with
+ * this one key and reports whether the key is still accepted and what
+ * remains of its allowance. The probe POSTs `provider` + `keyId` as form
+ * data to `/api/apps/:appId/keys/usage` on open and on Refresh — the
+ * refresh IS the cache (there is deliberately no polling or server-side
+ * cache layer), so a key that just went dead never shows a stale bar. A
+ * generation guard discards responses that resolve after the dialog closed
+ * or moved on to another key.
  *
  * Four faces on the snapshot: `ok` renders every limit — a window as a
  * hairline bar (`--surface-inset` track, `--tone-accent-solid` fill) with
@@ -14,8 +16,8 @@
  * rendered verbatim. A transport/HTTP/parse failure renders the same danger
  * notice as the wire's `error` face.
  */
-import { useCallback, useEffect, useState } from "react";
-import { t } from "../../i18n";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { t, isDictionaryKey } from "../../i18n";
 import { Button } from "@design-system";
 import type { SpaBoot } from "../boot";
 import { postForm } from "../api";
@@ -50,35 +52,37 @@ export function UsageDialog({
 }) {
   const [phase, setPhase] = useState<UsagePhase>("loading");
   const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null);
+  // Generation guard: the dialog stays mounted across open/close and across
+  // key switches, so a probe that resolves late must not set state under
+  // another key's label or after close. Closing also bumps the generation.
+  const generation = useRef(0);
 
   const probe = useCallback(async () => {
+    const mine = ++generation.current;
     setPhase("loading");
+    let ready: UsageSnapshot | null = null;
     try {
       const { status, body } = await postForm(
         `${apiBase()}/api/apps/${encodeURIComponent(String(appId))}/keys/usage`,
         { provider, keyId },
       );
-      if (status !== 200) {
-        setPhase("failed");
-        return;
+      if (status === 200) {
+        try {
+          ready = parseUsageSnapshot(JSON.parse(body));
+        } catch {
+          /* body is not JSON */
+        }
       }
-      let raw: unknown;
-      try {
-        raw = JSON.parse(body);
-      } catch {
-        setPhase("failed");
-        return;
-      }
-      const parsed = parseUsageSnapshot(raw);
-      if (parsed === null) {
-        setPhase("failed");
-        return;
-      }
-      setSnapshot(parsed);
-      setPhase("ready");
     } catch {
-      setPhase("failed");
+      /* transport failure — the failure face below covers it */
     }
+    if (mine !== generation.current) return;
+    if (ready === null) {
+      setPhase("failed");
+      return;
+    }
+    setSnapshot(ready);
+    setPhase("ready");
   }, [appId, provider, keyId]);
 
   // Probe on open; Refresh re-posts through the same path and replaces the
@@ -91,7 +95,9 @@ export function UsageDialog({
     <StepDialog
       open={open}
       onOpenChange={(next) => {
-        if (!next) onClose();
+        if (next) return;
+        generation.current += 1;
+        onClose();
       }}
       title={t(locale, "settings.providers.usage.title", { label })}
       description={t(locale, "settings.keyEnding", { last4 })}
@@ -146,6 +152,18 @@ function UsageFace({ locale, snapshot }: { locale: SpaBoot["locale"]; snapshot: 
   );
 }
 
+/**
+ * The row's semantic label: the segment after the last ":" of the normalized
+ * limit id (e.g. `cline-pass:session` → `session`, `umans:concurrency` →
+ * `concurrency`). The id is this app's own normalized vocabulary, never
+ * vendor payload text; an unknown segment renders verbatim as the fallback.
+ */
+function limitLabel(locale: SpaBoot["locale"], limit: UsageLimit): string {
+  const segment = limit.id.slice(limit.id.lastIndexOf(":") + 1);
+  const key = `settings.providers.usage.window.${segment}`;
+  return isDictionaryKey(key) ? t(locale, key) : segment;
+}
+
 function UsageLimitRow({ locale, limit }: { locale: SpaBoot["locale"]; limit: UsageLimit }) {
   // The window's used share: the vendor's fraction wins; only when it is
   // absent do we derive one from stated remaining/limit counts.
@@ -159,6 +177,7 @@ function UsageLimitRow({ locale, limit }: { locale: SpaBoot["locale"]; limit: Us
         ? 1 - limit.remaining / limit.limit
         : null;
   const suffix = limit.shared === true ? ` · ${t(locale, "settings.providers.usage.shared")}` : "";
+  const label = <p className="text-sm font-medium">{limitLabel(locale, limit)}</p>;
   if (limit.kind === "window") {
     const remainingPct = fraction === null ? null : Math.max(0, Math.round((1 - fraction) * 100));
     const lines: string[] = [];
@@ -173,6 +192,7 @@ function UsageLimitRow({ locale, limit }: { locale: SpaBoot["locale"]; limit: Us
     if (limit.shared === true) lines.push(t(locale, "settings.providers.usage.shared"));
     return (
       <li className="flex flex-col gap-1.5">
+        {label}
         {remainingPct !== null ? (
           <>
             {/* The hairline bar: inset track, accent fill sized by the REMAINING share. */}
@@ -194,18 +214,24 @@ function UsageLimitRow({ locale, limit }: { locale: SpaBoot["locale"]; limit: Us
   // render — the muted absent copy, never a fabricated "0 credits remaining".
   if (typeof limit.remaining !== "number") {
     return (
-      <li className="text-sm text-muted-foreground">
-        {t(locale, "settings.providers.usage.absentNothing")}
+      <li className="flex flex-col gap-1.5">
+        {label}
+        <p className="text-sm text-muted-foreground">
+          {t(locale, "settings.providers.usage.absentNothing")}
+        </p>
       </li>
     );
   }
   return (
-    <li className="text-sm text-muted-foreground">
-      {t(locale, "settings.providers.usage.balanceRemaining", {
-        amount: limit.remaining,
-        unit: t(locale, `settings.providers.usage.unit.${limit.unit}`),
-      })}
-      {suffix}
+    <li className="flex flex-col gap-1.5">
+      {label}
+      <p className="text-sm text-muted-foreground">
+        {t(locale, "settings.providers.usage.balanceRemaining", {
+          amount: limit.remaining,
+          unit: t(locale, `settings.providers.usage.unit.${limit.unit}`),
+        })}
+        {suffix}
+      </p>
     </li>
   );
 }

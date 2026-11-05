@@ -1518,7 +1518,7 @@ export function providerFormKind(provider: CatalogProvider): ProviderFormKind {
   return "key";
 }
 
-/** One allowance of the usage-probe snapshot (the plan's fixed wire contract). */
+/** One allowance of the usage-probe snapshot (the usage route's fixed wire contract). */
 export type UsageLimit = {
   id: string;
   kind: "window" | "balance";

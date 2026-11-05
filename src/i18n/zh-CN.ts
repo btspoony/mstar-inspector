@@ -616,9 +616,9 @@ export const zhCN: Dictionary = {
       customIdRequired: "{provider} 已被占用 — 请为此声明填写新的 id。",
       submitFailed: "该请求未到达服务端即失败 — 未存储任何内容。",
       /**
-       * 每密钥用量探测（plan api-key-usage-probe T3）：密钥行的操作按钮、
-       * 其打开的对话框，以及四种形态 — ok（窗口条 / 余额）、unauthorized、
-       * absent、error。线上的诊断 reason 从不原样渲染。
+       * 每密钥用量探测：密钥行的操作按钮、其打开的对话框，以及四种形态
+       * — ok（窗口条 / 余额）、unauthorized、absent、error。线上的诊断
+       * reason 从不原样渲染。
        */
       usage: {
         action: "用量",
@@ -633,6 +633,14 @@ export const zhCN: Dictionary = {
         balanceRemaining: "剩余 {amount} {unit}",
         /** 多个密钥共享同一个账户级额度池，而非每密钥独立额度。 */
         shared: "账户级共享",
+        /** 每行标签：取自规范化 limit id 最后一个 ":" 后的语义段。 */
+        window: {
+          session: "会话",
+          week: "每周",
+          month: "每月",
+          concurrency: "并发",
+          balance: "余额",
+        },
         unit: { requests: "次请求", credits: "点数", usd: "美元", tokens: "个令牌", percent: "%" },
       },
     },

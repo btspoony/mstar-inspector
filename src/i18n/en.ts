@@ -731,10 +731,9 @@ export const en = {
       customIdRequired: "{provider} is taken — enter a new id for this declaration.",
       submitFailed: "That request failed before it reached the server — nothing was stored.",
       /**
-       * The per-key usage probe (plan api-key-usage-probe T3): the key-row
-       * action, the dialog it opens, and the four faces — ok (window bar /
-       * balance), unauthorized, absent, error. The wire's diagnostic
-       * `reason` never renders verbatim.
+       * The per-key usage probe: the key-row action, the dialog it opens,
+       * and the four faces — ok (window bar / balance), unauthorized,
+       * absent, error. The wire's diagnostic `reason` never renders verbatim.
        */
       usage: {
         action: "Usage",
@@ -749,6 +748,14 @@ export const en = {
         balanceRemaining: "{amount} {unit} remaining",
         /** One account-wide pool behind several keys, never a per-key allowance. */
         shared: "account-wide",
+        /** Semantic per-row labels derived from the normalized limit id's segment after the last ":". */
+        window: {
+          session: "Session",
+          week: "Weekly",
+          month: "Monthly",
+          concurrency: "Concurrency",
+          balance: "Balance",
+        },
         unit: { requests: "requests", credits: "credits", usd: "USD", tokens: "tokens", percent: "%" },
       },
     },

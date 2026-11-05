@@ -1,5 +1,5 @@
 /**
- * The per-key usage action and dialog (plan api-key-usage-probe T3):
+ * The per-key usage action and dialog:
  *
  * - a key row whose catalog entry lacks `usage_probe` renders no usage
  *   control (DoD 1);
@@ -16,7 +16,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
-import { t } from "../../src/i18n";
+import { t, type DictionaryKey } from "../../src/i18n";
 import type { SpaBoot } from "../../src/spa/boot";
 import {
   parseUsageSnapshot,
@@ -175,9 +175,12 @@ async function mount(payload: SettingsManagePayload) {
 const probedProvider = "commandcode";
 
 /** Payload with one probed key row and its catalog entry. */
-function probedPayload(catalogOverrides: Partial<CatalogProvider> = {}): SettingsManagePayload {
+function probedPayload(
+  catalogOverrides: Partial<CatalogProvider> = {},
+  keys: ProviderKeyRow[] = [keyRow(probedProvider)],
+): SettingsManagePayload {
   return managePayload({
-    keys: [keyRow(probedProvider)],
+    keys,
     provider_catalog: [
       catalogEntry(probedProvider, { label: "Command Code", usage_probe: true, ...catalogOverrides }),
     ],
@@ -417,6 +420,96 @@ describe("UsageDialog — probe on open and refresh", () => {
         view.win.document.dispatchEvent(new view.win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       });
       expect(view.dialog()).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("each limit row carries a distinguishable semantic label from its id segment", async () => {
+    queue.push(() => new Response(snapshotBody({
+      limits: [
+        { id: "cline-pass:session", kind: "window", usedFraction: 0.12, unit: "percent" },
+        { id: "cline-pass:week", kind: "window", usedFraction: 0.45, unit: "percent" },
+        { id: "cline-pass:month", kind: "window", usedFraction: 0.6, unit: "percent" },
+        { id: "umans:concurrency", kind: "window", usedFraction: 0.5, unit: "percent" },
+        { id: "hyper:balance", kind: "balance", remaining: 95, unit: "credits" },
+        // An unknown segment falls back to the raw id text, never vendor payload.
+        { id: "vendor:rolling", kind: "window", usedFraction: 0.2, unit: "percent" },
+      ],
+    })));
+    const view = await mount(probedPayload());
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const rows = [...(view.dialog()?.querySelectorAll("li") ?? [])] as HTMLElement[];
+      const labels = rows.map((row) => (row.querySelector("p") as HTMLElement | null)?.textContent ?? "");
+      // Distinguishable: every row's label is unique and the known segments
+      // map through the dictionary.
+      expect(new Set(labels).size).toBe(labels.length);
+      const segments = ["session", "week", "month", "concurrency", "balance"] as const;
+      for (const segment of segments) {
+        const key = `settings.providers.usage.window.${segment}` as DictionaryKey;
+        expect(labels).toContain(t(locale, key));
+      }
+      expect(labels).toContain("rolling");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a probe that resolves after close or under another key is discarded", async () => {
+    const gateA = Promise.withResolvers<Response>();
+    const gateB = Promise.withResolvers<Response>();
+    queue.push(() => gateA.promise);
+    queue.push(() => gateB.promise);
+    const keys = [
+      keyRow(probedProvider),
+      keyRow(probedProvider, { keyId: "bbbb9999dddd8888", last4: "1234" }),
+    ];
+    const view = await mount(probedPayload({}, keys));
+    /** The usage button of the key row whose identity names `last4`. */
+    const rowUsageButton = (last4: string): HTMLButtonElement | null => {
+      const row = [...(view.win.document.querySelectorAll('[data-slot="list-row"]') as unknown as HTMLElement[])].find(
+        (candidate) => candidate.textContent?.includes(last4),
+      );
+      return (row?.querySelector("button") as HTMLButtonElement | null) ?? null;
+    };
+    try {
+      // Key A opens; its probe stays in flight.
+      await view.click(rowUsageButton("9f2c"));
+      expect(view.dialog()?.textContent).toContain(t(locale, "common.loading"));
+      const cancel = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent === t(locale, "common.cancel"),
+      ) as HTMLButtonElement | undefined;
+      await view.click(cancel ?? null);
+      expect(view.dialog()).toBeNull();
+
+      // Key B opens; its probe also stays in flight.
+      await view.click(rowUsageButton("1234"));
+      expect(view.dialog()?.textContent).toContain(t(locale, "common.loading"));
+
+      // B answers first under its own key: 30% remaining sticks.
+      await act(async () => {
+        gateB.resolve(new Response(snapshotBody({
+          limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.7, unit: "percent" }],
+        })));
+      });
+      await view.flush();
+      expect(view.dialog()?.textContent).toContain(
+        t(locale, "settings.providers.usage.windowRemaining", { percent: 30 }),
+      );
+
+      // A's late answer must not replace B's snapshot (no 70% from key A).
+      await act(async () => {
+        gateA.resolve(new Response(snapshotBody({
+          limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" }],
+        })));
+      });
+      await view.flush();
+      const text = view.dialog()?.textContent ?? "";
+      expect(text).toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 30 }));
+      expect(text).not.toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 70 }));
+      expect(view.calls).toHaveLength(2);
     } finally {
       await view.cleanup();
     }
