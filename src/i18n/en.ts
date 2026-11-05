@@ -961,6 +961,20 @@ export const en = {
       /** Neither stored budget could be read — the numbers are the documented defaults. */
       checkUnreadable:
         "The stored check budgets could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
+      /** The operator default an App without its own depth inherits (plan 036a). */
+      reviewLevelTitle: "Review depth",
+      reviewLevelDescription: "Applies to Apps that have not chosen their own review depth.",
+      reviewLevelLabel: "Default review depth",
+      reviewLevelQuick: "Quick — fast, single-pass review",
+      reviewLevelStandard: "Standard — balanced depth (recommended)",
+      reviewLevelDeep: "Deep — most thorough, slower",
+      reviewLevelSave: "Save",
+      reviewLevelSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      reviewLevelFailed: "Could not change the default review depth.",
+      /** The stored level could not be read — the shown tier is the documented default. */
+      reviewLevelUnreadable:
+        "The stored default review depth could not be read, so Apps without their own depth run Standard. Choosing a level saves a new one, and retrying the read re-checks the row.",
       /**
        * Deployment version footer. `{version}` carries the
        * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the

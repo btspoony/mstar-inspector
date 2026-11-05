@@ -821,6 +821,20 @@ export const zhCN: Dictionary = {
       /** 两个已存储的预算都无法读取——数字只是文档默认值。 */
       checkUnreadable:
         "无法读取已存储的检查预算，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
+      /** App 未自行选择深度时继承的平台默认（plan 036a）。 */
+      reviewLevelTitle: "评审深度",
+      reviewLevelDescription: "适用于尚未自行选择评审深度的 App。",
+      reviewLevelLabel: "默认评审深度",
+      reviewLevelQuick: "快速 — 单轮快速评审",
+      reviewLevelStandard: "标准 — 均衡深度（推荐）",
+      reviewLevelDeep: "深入 — 最彻底，耗时更长",
+      reviewLevelSave: "保存",
+      reviewLevelSaved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      reviewLevelFailed: "修改默认评审深度失败。",
+      /** 已存储的档位无法读取——显示的档位是文档默认值。 */
+      reviewLevelUnreadable:
+        "无法读取已存储的默认评审深度，因此未自行选择评审深度的 App 正在使用「标准」。选择档位可保存为新值，重新读取会重新检查该行。",
       // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
       // 与 /healthz 字段及 release tag 同形。
       version: "版本 {version}",

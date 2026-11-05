@@ -123,6 +123,16 @@ export type CheckBudgetConfig = {
   degraded: boolean;
 };
 
+/** The operator default review depth as the operator API reports it (plan 036a). */
+export type ReviewLevelConfig = {
+  /** The tier Apps without a depth of their own inherit. */
+  value: string;
+  /** The closed vocabulary, in reading order — the console never hardcodes it. */
+  levels: string[];
+  /** The stored level could not be read: `value` is the documented default. */
+  degraded: boolean;
+};
+
 /** The runtime parameters (iteration spec §1.1, spec §7.10). */
 export type RuntimeConfig = {
   concurrency: number;
@@ -137,6 +147,8 @@ export type RuntimeConfig = {
    * field is absence, not an unreadable setting.
    */
   checkBudgets: CheckBudgetConfig | null;
+  /** The default-review-depth surface; `null` under the same older-Worker rule. */
+  reviewLevel: ReviewLevelConfig | null;
 };
 
 function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
@@ -154,6 +166,19 @@ function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
   };
 }
 
+function parseReviewLevel(row: Json): ReviewLevelConfig | null {
+  const raw = row.reviewLevel;
+  if (raw === undefined) return null;
+  const level = map(raw, "runtime reviewLevel");
+  const levels = level.levels;
+  if (!Array.isArray(levels)) throw new Error("admin API: levels is not a list");
+  return {
+    value: text(level, "value"),
+    levels: levels.filter((entry): entry is string => typeof entry === "string"),
+    degraded: bool(level, "degraded"),
+  };
+}
+
 export async function readRuntime(): Promise<RuntimeConfig> {
   const body = map(await fetchJson(`${BASE}/runtime`), "runtime response");
   return {
@@ -162,6 +187,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     max: num(body, "max"),
     degraded: bool(body, "degraded"),
     checkBudgets: parseCheckBudgets(body),
+    reviewLevel: parseReviewLevel(body),
   };
 }
 
@@ -206,6 +232,23 @@ export async function setCheckBudgets(
     }
   }
   return { ...stored, ...value, degraded: false };
+}
+
+/**
+ * Save the operator default review depth, answering the level the server
+ * stored. A 2xx with an unreadable body still landed, so the request value
+ * stands in — the same rule as `setSystemConcurrency`.
+ */
+export async function setDefaultReviewLevel(
+  value: string,
+  stored: ReviewLevelConfig,
+): Promise<ReviewLevelConfig> {
+  const answer = await write("PATCH", "/runtime", { reviewLevel: value });
+  if (typeof answer === "object" && answer !== null && "reviewLevel" in answer) {
+    const saved = answer.reviewLevel;
+    if (typeof saved === "string") return { ...stored, value: saved, degraded: false };
+  }
+  return { ...stored, value, degraded: false };
 }
 
 export async function readWorkspaces(): Promise<WorkspaceRow[]> {

@@ -1,22 +1,50 @@
 /**
  * Runtime parameters — the non-secret values an operator changes without a
- * redeploy (iteration spec §1.1, §2.4). Today that is one knob: the system
- * review-concurrency cap, which bounds every workspace cap.
+ * redeploy (iteration spec §1.1, §2.4): the system review-concurrency cap,
+ * the §7.10 Check budgets and the default review depth Apps without their own
+ * depth inherit (plan 036a).
  *
  * One save writes ONE `PATCH /api/runtime`; the server pairs the write with its
- * audit row, so this screen owns no ledger logic. The field is a local draft
- * over the loaded value, so a reload cannot leave a stale number on screen.
+ * audit row, so this screen owns no ledger logic. Each field is a local draft
+ * over the loaded value, so a reload cannot leave a stale value on screen.
  */
 import { useState, type FormEvent } from "react";
-import { Button, CardContent, CardHeader, Input } from "@design-system";
+import {
+  Button,
+  CardContent,
+  CardHeader,
+  Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@design-system";
 import { t, type Locale } from "../../i18n";
 import { APP_VERSION } from "../../version";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { PageNotice } from "../pages/PageNotice";
 import { concurrencySubmitBlocked } from "../pages/data";
-import { AdminWriteError, readRuntime, setCheckBudgets, setSystemConcurrency, useLoaded, type CheckBudgetConfig } from "./api";
+import {
+  AdminWriteError,
+  readRuntime,
+  setCheckBudgets,
+  setDefaultReviewLevel,
+  setSystemConcurrency,
+  useLoaded,
+  type CheckBudgetConfig,
+  type ReviewLevelConfig,
+} from "./api";
 import { ConsolePath, Screen } from "./screen";
+
+/** The operator's label for a stored tier; an unknown id stays untranslated. */
+function levelLabel(locale: Locale, level: string): string {
+  if (level === "quick") return t(locale, "admin.runtime.reviewLevelQuick");
+  if (level === "deep") return t(locale, "admin.runtime.reviewLevelDeep");
+  if (level === "default") return t(locale, "admin.runtime.reviewLevelStandard");
+  return level;
+}
 
 export function RuntimePage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readRuntime);
@@ -24,6 +52,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [draft, setDraft] = useState<string | null>(null);
   const [terminalizeDraft, setTerminalizeDraft] = useState<string | null>(null);
   const [updateDraft, setUpdateDraft] = useState<string | null>(null);
+  const [levelDraft, setLevelDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
   // the terminalize/update relation included — reads as that field's error
@@ -31,7 +60,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [notice, setNotice] = useState<{
     kind: "success" | "error";
     message: string;
-    source: "concurrency" | "checkBudgets";
+    source: "concurrency" | "checkBudgets" | "reviewLevel";
   } | null>(null);
 
   async function onSubmit(
@@ -119,6 +148,39 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
+  async function onSaveLevel(
+    event: FormEvent<HTMLFormElement>,
+    stored: ReviewLevelConfig,
+  ): Promise<void> {
+    event.preventDefault();
+    if (busy) return; // in-flight guard — no double submit
+    setBusy(true);
+    setNotice(null);
+    try {
+      const saved = await setDefaultReviewLevel(levelDraft ?? stored.value, stored);
+      // A 2xx rewrote the row, so it reads as trusted again.
+      update((data) => ({ ...data, reviewLevel: saved }));
+      setLevelDraft(null);
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.reviewLevelSaved"),
+        source: "reviewLevel",
+      });
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.reviewLevelFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+        source: "reviewLevel",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="flex flex-col gap-6">
       <PageHeader
@@ -138,6 +200,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           // concurrency card is exactly as before, and nothing renders a bare
           // `undefined`.
           const budgets = data.checkBudgets;
+          // Same older-Worker rule for the default review depth.
+          const level = data.reviewLevel;
           return (
           <div className="flex flex-col gap-4">
             <SectionCard tier="secondary">
@@ -279,6 +343,69 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     })}
                   </p>
                 )}
+              </CardContent>
+            </SectionCard>
+            )}
+            {level === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.reviewLevelTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.reviewLevelDescription")}
+                </p>
+                {notice?.source === "reviewLevel" ? (
+                  <div className="mt-4">
+                    <PageNotice kind={notice.kind} message={notice.message} />
+                  </div>
+                ) : null}
+                {level.degraded ? (
+                  // The stored row is unreadable, so the tier shown is the
+                  // documented default — the same tier a review already runs.
+                  <div className="mt-4">
+                    <PageNotice
+                      kind="warn"
+                      message={t(locale, "admin.runtime.reviewLevelUnreadable")}
+                    />
+                  </div>
+                ) : null}
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => void onSaveLevel(event, level)}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="default-review-level">
+                      {t(locale, "admin.runtime.reviewLevelLabel")}
+                    </label>
+                    <div className="w-64">
+                      <Select
+                        value={levelDraft ?? level.value}
+                        onValueChange={setLevelDraft}
+                        disabled={busy}
+                      >
+                        <SelectTrigger id="default-review-level">
+                          <SelectValue>{levelLabel(locale, levelDraft ?? level.value)}</SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          {level.levels.map((option) => (
+                            <SelectItem key={option} value={option}>
+                              {levelLabel(locale, option)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <Button type="submit" disabled={busy}>
+                    {t(locale, "admin.runtime.reviewLevelSave")}
+                  </Button>
+                  {level.degraded ? (
+                    <Button type="button" variant="secondary" onClick={reload}>
+                      {t(locale, "common.retry")}
+                    </Button>
+                  ) : null}
+                </form>
               </CardContent>
             </SectionCard>
             )}
