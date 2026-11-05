@@ -11,7 +11,8 @@ category: Changed
   membership rights, one without a live `support_grants` row gets the same 404
   an outsider does, and one **with** a live grant may read only the workspace
   identity fields, the member list (login + role) and `GET
-  /dashboard/<ref>/api/support/grants` (the rows behind the tenant notice). App list, App settings,
+  /dashboard/<ref>/api/support/grants` — where the operator sees only their own
+  grant row, while the tenant notice carries the whole live set. App list, App settings,
   credentials, model chains, settings writes, role changes, member removal,
   invites and the audit list all answer 403 to a granted operator.
 - **Every grant decision is audited by the gate.** The workspace middleware
@@ -35,10 +36,10 @@ category: Changed
 - **部署运维者不再自动获得租户权限。** 已没有任何部署级白名单会授予租户权限；
   新的 `PLATFORM_OPERATORS` 变量只是运维控制台与 support 授权视图的白名单，默认不授予任何权限。
   拥有有效授权的运维者能读取工作区身份字段、成员名单，以及 `GET
-  /dashboard/<ref>/api/support/grants`（租户通知背后的授权行）。工作区网关按
+  /dashboard/<ref>/api/support/grants`——在该路径上运维者只能看到自己的授予行，而租户通知包含全部有效授权。工作区网关按
   `member → invitee → operator-granted → operator-denied → outsider` 分类：本身是成员的
   运维者仍享有普通成员权限；没有有效 `support_grants` 行的运维者得到与外部人完全相同的
-  404；**拥有**有效授权的运维者只能读取工作区身份字段与成员名单（登录名 + 角色）。App
+  404；**拥有**有效授权的运维者只能读取上述三项。App
   列表、App 设置、凭据、模型链、设置写入、角色变更、移除成员、邀请与审计列表对已授权
   运维者一律返回 403。
 - **每一次授权判定都在网关内留痕。** 当请求被分类为 operator-granted 或 operator-denied 时，
