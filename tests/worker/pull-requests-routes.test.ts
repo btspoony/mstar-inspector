@@ -22,7 +22,7 @@ import type { Env } from "../../src/worker/env";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
-import { parsePullRequestDetail } from "../../src/spa/pages/data";
+import { parsePullRequestDetail, parseRecordPage } from "../../src/spa/pages/data";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -391,7 +391,7 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(body.counts).toEqual({ findings: 2, reviews: 2, failures: 1, must_fix: 1 });
   });
 
-  test("the SPA parser reads this route's own body: the headline keeps its model and provider", async () => {
+  test("the SPA parser reads this route's own body: attribution on the head, the tally on the reviews page", async () => {
     // Cross-boundary: the real route body through the real parser. A field
     // moved to the other end of the envelope re-drifting fails HERE, not only
     // in a component test that feeds a hand-built payload.
@@ -403,24 +403,31 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
          VALUES ('r-attributed', 77, 'acme', 'widgets', 131, 'sha-1', 'needs fixes', 'The race is reachable.', 'kimi-for-coding', 'openrouter', '2026-01-02 00:00:00', 'app-acme')`,
       )
       .run();
+    // The reviewed round reported two findings.
+    db.raw
+      .prepare(
+        `INSERT INTO findings (id, review_id, severity, title)
+         VALUES ('f-1', 'r-attributed', 'must-fix', 'a'), ('f-2', 'r-attributed', 'nit', 'b')`,
+      )
+      .run();
 
     const res = await getFace(detailPath, db);
     expect(res.status).toBe(200);
     const parsed = parsePullRequestDetail(await res.json());
     expect(parsed).not.toBeNull();
+    // The head is the attribution only: no round ordinal, tally or clock —
+    // those belong to the paged section, which is the one place that counts.
     expect(parsed?.latest_review).toEqual({
       verdict: "needs fixes",
       model: "kimi-for-coding",
       provider: "openrouter",
       reviewed_at: "2026-01-02 00:00:00",
       head_sha: "sha-1",
-      // The head's review omits the round ordinal and the measured clock: the
-      // parser reads those as "nothing recorded". Its tally is the producer's
-      // COUNT(*), so a review without findings reads 0, not absent.
-      round: null,
-      findings: 0,
-      duration_ms: null,
     });
+    expect(parsed?.latest_review).not.toHaveProperty("findings");
+    // Same round, read from the page that carries its tally.
+    const reviewsPage = parseRecordPage("reviews", await (await getFace(sectionPath("reviews"), db)).json());
+    expect(reviewsPage?.items[0]).toMatchObject({ round: 1, findings: 2 });
   });
 
   test("each section pages with limit and offset, and defaults to 10 rows", async () => {

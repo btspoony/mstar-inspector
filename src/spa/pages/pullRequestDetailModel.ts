@@ -120,8 +120,15 @@ export function verdictTone(verdict: string): ActivityTone {
   return VERDICT_TONES[verdict] ?? "neutral";
 }
 
-/** `model · provider`, the separator dropped when the payload records no provider. */
-export function reviewAttribution(locale: Locale, review: PullRequestReview): string {
+/**
+ * `model · provider`, the separator dropped when the payload records no
+ * provider. Takes the attribution fields alone: the paged rows and the head's
+ * newest review share them, and nothing else here.
+ */
+export function reviewAttribution(
+  locale: Locale,
+  review: { model: string; provider: string },
+): string {
   if (review.provider === "") return review.model;
   if (review.model === "") return review.provider;
   return t(locale, "pullRequests.reviewMeta", { model: review.model, provider: review.provider });

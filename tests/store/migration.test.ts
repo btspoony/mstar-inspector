@@ -2121,13 +2121,14 @@ describe("migrations/0049_reviews_duration_ms.sql", () => {
     const column = (
       db.raw.query("PRAGMA table_info(reviews)").all() as Array<{
         name: string;
+        type: string;
         notnull: number;
         dflt_value: string | null;
       }>
-    ).find((c) => c.name === "duration_ms");
-    expect(column).toBeDefined();
-    expect(column!.notnull).toBe(0);
-    expect(column!.dflt_value).toBeNull();
+    )
+      .map(({ name, type, notnull, dflt_value }) => ({ name, type, notnull, dflt_value }))
+      .find((c) => c.name === "duration_ms");
+    expect(column).toEqual({ name: "duration_ms", type: "INTEGER", notnull: 0, dflt_value: null });
   });
 });
 

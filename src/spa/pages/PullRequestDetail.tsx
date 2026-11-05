@@ -908,6 +908,7 @@ export function PullRequestDetailView({
                   <ul className="flex flex-col gap-2">
                     {reviewsPage.items.map((review, index) => {
                       const attribution = reviewAttribution(locale, review);
+                      const durationLabel = t(locale, "pullRequests.reviewDurationLabel");
                       return (
                         <li
                           key={`${review.reviewed_at}-${review.head_sha}-${index}`}
@@ -948,13 +949,16 @@ export function PullRequestDetailView({
                               )}
                             </span>
                             {/* Historical rows carry no measured clock: the
-                                row simply omits the time. */}
+                                row simply omits the time. The label is real
+                                text: the span carries no role, so a tooltip
+                                alone would leave the value announced bare. */}
                             {review.duration_ms === null ? null : (
                               <span
                                 data-slot="review-duration"
                                 className="tabular-nums text-(--text-muted)"
-                                title={t(locale, "pullRequests.reviewDurationLabel")}
+                                title={durationLabel}
                               >
+                                <span className="sr-only">{durationLabel}</span>
                                 {formatReviewDuration(locale, review.duration_ms)}
                               </span>
                             )}

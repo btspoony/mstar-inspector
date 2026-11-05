@@ -21,6 +21,7 @@ import type {
   PullRequestFailure,
   PullRequestFinding,
   PullRequestHead,
+  PullRequestLatestReview,
   PullRequestReview,
   PullRequestRow,
   RecordPage,
@@ -135,6 +136,18 @@ export const RECORDS: RecordPages = {
  */
 const MUST_FIX = FINDINGS.filter((finding) => finding.severity === "must-fix").length;
 
+/**
+ * The head's authoritative newest review — the same round as `REVIEWS[0]`, in
+ * the shape the detail read actually sends: the five attribution fields, with
+ * the round ordinal, clock and tally left to the paged reviews section.
+ */
+const LATEST_REVIEW: PullRequestLatestReview | null = (() => {
+  const newest = REVIEWS[0];
+  if (newest === undefined) return null;
+  const { verdict, model, provider, reviewed_at, head_sha } = newest;
+  return { verdict, model, provider, reviewed_at, head_sha };
+})();
+
 /** The detail head for `RECORDS`: the same PR, its totals derived from the pages. */
 export const DETAIL: PullRequestDetailPayload = {
   pull_request: {
@@ -151,7 +164,7 @@ export const DETAIL: PullRequestDetailPayload = {
   },
   // The head's authoritative newest review — what the headline reads, whatever
   // page the reviews section has loaded.
-  latest_review: REVIEWS[0] ?? null,
+  latest_review: LATEST_REVIEW,
 };
 
 /** A head and the pages it describes, as both mount helpers take them. */
@@ -175,7 +188,7 @@ export type DetailScene = { detail: PullRequestDetailPayload; pages: RecordPages
 export function scene(
   over: Partial<RecordPages> = {},
   row: Partial<PullRequestHead> = {},
-  latest: Partial<PullRequestReview> | null = DETAIL.latest_review,
+  latest: Partial<PullRequestLatestReview> | null = DETAIL.latest_review,
   mustFix: number = MUST_FIX,
 ): DetailScene {
   const pages: RecordPages = { ...RECORDS, ...over };

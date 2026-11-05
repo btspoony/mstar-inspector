@@ -332,7 +332,9 @@ describe("pull request detail (mounted)", () => {
       findings: 0,
       duration_ms: null,
     }));
-    const newest = corpus[0]!;
+    // The head read's newest review carries the attribution alone.
+    const { verdict, model, provider, reviewed_at, head_sha } = corpus[0]!;
+    const newest = { verdict, model, provider, reviewed_at, head_sha };
     const { container, win, unmount } = await mountDetailView(
       scene({ reviews: page(corpus) }, {}, newest),
     );

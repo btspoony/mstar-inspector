@@ -22,7 +22,7 @@ import {
   parsePullRequestDetail,
   parseRecordPage,
   type PullRequestDetail,
-  type PullRequestReview,
+  type PullRequestLatestReview,
   type PullRequestHead,
 } from "../../src/spa/pages/data";
 import {
@@ -58,7 +58,7 @@ const render = (detail: PullRequestDetail, records = recordsOf()) =>
 const face = (
   over: Partial<RecordPages> = {},
   row: Partial<PullRequestHead> = {},
-  latest: Partial<PullRequestReview> | null = DETAIL.latest_review,
+  latest: Partial<PullRequestLatestReview> | null = DETAIL.latest_review,
   // The head's own must-fix tally — stated, never read off the page under
   // test; defaults to the fixture PR's.
   mustFix?: number,
@@ -187,7 +187,7 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(defaultFamily({ findings: 0, reviews: 2, failures: 0, must_fix: 0 })).toBe("reviews");
   });
 
-  test("a review with provider null parses and renders without a null leak", async () => {
+  test("a review with provider null parses without a null leak, and a row without a real tally is refused", async () => {
     const reviews = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], verdict: null, model: null, provider: null }],
       total: 1,
@@ -218,32 +218,62 @@ describe("pull request detail data plane (pure helpers)", () => {
       body: "",
       review_round: 1,
     });
-    // A payload that predates the round fields still renders its rows: the
-    // ordinal and clock are "no value" (`null`), and a missing tally folds to
-    // 0 — never NaN in the rendered count.
+    // A payload that predates the round fields still renders its row: the
+    // ordinal and clock are "no value" (`null`), and the row keeps its real
+    // tally.
     const legacyRound = parseRecordPage("reviews", {
-      items: [{ ...REVIEWS[0], round: "2", findings: "2", duration_ms: -1 }],
+      items: [{ ...REVIEWS[0], round: "2", duration_ms: -1 }],
       total: 1,
     })?.items[0];
-    expect(legacyRound).toMatchObject({ round: null, findings: 0, duration_ms: null });
+    expect(legacyRound).toMatchObject({ round: null, findings: 2, duration_ms: null });
     // Round 0 is not a round either: the history numbers from 1.
     const zeroRound = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], round: 0 }],
       total: 1,
     })?.items[0];
     expect(zeroRound?.round).toBeNull();
-    // A fractional or negative tally is not a count: it folds to 0 rather than
-    // reaching the rendered count as "2.5 findings".
-    const fractional = parseRecordPage("reviews", {
-      items: [{ ...REVIEWS[0], findings: 2.5 }],
+    // The tally is REQUIRED: the paged route counts it with `COUNT(*)`, so a
+    // row without one is refused (and reported in `dropped`) rather than
+    // printed as a fabricated "0 findings".
+    const withoutTally = parseRecordPage("reviews", {
+      items: [{ ...REVIEWS[0], findings: undefined }],
       total: 1,
-    })?.items[0];
-    expect(fractional?.findings).toBe(0);
-    const negative = parseRecordPage("reviews", {
-      items: [{ ...REVIEWS[0], findings: -3 }],
-      total: 1,
-    })?.items[0];
-    expect(negative?.findings).toBe(0);
+    });
+    expect(withoutTally?.items).toEqual([]);
+    expect(withoutTally?.dropped).toBe(1);
+    // Present-but-malformed is not a count either: a string, a fraction or a
+    // negative number all refuse the row.
+    for (const findings of ["2", 2.5, -3]) {
+      const refused = parseRecordPage("reviews", { items: [{ ...REVIEWS[0], findings }], total: 1 });
+      expect(refused?.items).toEqual([]);
+      expect(refused?.dropped).toBe(1);
+    }
+    // A real zero is a count, and the label branches on exactly one: 0 and 3
+    // print their own number, only 1 takes the singular form.
+    const tallies = parseRecordPage("reviews", {
+      items: [
+        { ...REVIEWS[0], findings: 0 },
+        { ...REVIEWS[0], findings: 1 },
+        { ...REVIEWS[0], findings: 3 },
+      ],
+      total: 3,
+    });
+    expect(tallies?.items.map((review) => review.findings)).toEqual([0, 1, 3]);
+    // Rendered: a zero tally is a figure, and the 1-vs-N branch shows on the
+    // row that reported exactly one.
+    const tallyMarkup = render(
+      { ...DETAIL, counts: { ...DETAIL.counts, findings: 0, reviews: 3, failures: 0, must_fix: 0 } },
+      recordsOf({ ...RECORDS, findings: page([]), failures: page([]), reviews: tallies ?? page([]) }),
+    );
+    expect(
+      await withMarkup(tallyMarkup, (container) =>
+        [...container.querySelectorAll('[data-slot="review-findings"]')].map((count) => count.textContent ?? ""),
+      ),
+    ).toEqual([
+      t("en", "pullRequests.reviewFindings", { count: 0 }),
+      t("en", "pullRequests.reviewFindingsOne", { count: 1 }),
+      t("en", "pullRequests.reviewFindings", { count: 3 }),
+    ]);
     const legacyFinding = parseRecordPage("findings", {
       items: [{ ...FINDINGS[0], review_round: 1.5 }],
       total: 1,
@@ -254,11 +284,22 @@ describe("pull request detail data plane (pure helpers)", () => {
       total: 1,
     })?.items[0];
     expect(zeroFindingRound?.review_round).toBeNull();
+    // The head carries the same unattributed review the page holds, in the
+    // shape the head read sends: no round ordinal, clock or tally.
+    const [headReview] = reviews?.items ?? [];
     const detail: PullRequestDetail = {
       ...DETAIL,
       counts: { ...DETAIL.counts, reviews: 1, findings: 1 },
-      // The head carries the same unattributed review the page holds.
-      latest_review: reviews?.items[0] ?? null,
+      latest_review:
+        headReview === undefined
+          ? null
+          : {
+              verdict: headReview.verdict,
+              model: headReview.model,
+              provider: headReview.provider,
+              reviewed_at: headReview.reviewed_at,
+              head_sha: headReview.head_sha,
+            },
     };
     const markup = render(
       detail,
@@ -973,9 +1014,12 @@ describe("pull request detail face (static SSR)", () => {
       rounds: [...container.querySelectorAll('[data-slot="review-round"]')].map((chip) => chip.textContent ?? ""),
       counts: [...container.querySelectorAll('[data-slot="review-findings"]')].map((count) => count.textContent ?? ""),
       // Only the measured round prints a time; the historical rows omit it.
-      durations: [...container.querySelectorAll('[data-slot="review-duration"]')].map(
-        (duration) => duration.textContent ?? "",
-      ),
+      // The label must be real TEXT inside the span (its accessible name) —
+      // a null here fails the assertion below, so removing it cannot pass.
+      durations: [...container.querySelectorAll('[data-slot="review-duration"]')].map((duration) => ({
+        label: duration.querySelector(".sr-only")?.textContent ?? null,
+        value: duration.lastChild?.textContent ?? "",
+      })),
       durationTitles: [...container.querySelectorAll('[data-slot="review-duration"]')].map((duration) =>
         duration.getAttribute("title"),
       ),
@@ -1000,10 +1044,15 @@ describe("pull request detail face (static SSR)", () => {
       t("en", "pullRequests.reviewFindingsOne", { count: 1 }),
       t("en", "pullRequests.reviewFindings", { count: 0 }),
     ]);
-    expect(read.durations).toEqual([t("en", "pullRequests.reviewDurationMinutes", { minutes: 1, seconds: 5 })]);
-    // The bare value is not self-describing: the span's tooltip says what the
-    // clock measures.
-    expect(read.durationTitles).toEqual([t("en", "pullRequests.reviewDurationLabel")]);
+    const durationLabel = t("en", "pullRequests.reviewDurationLabel");
+    expect(read.durations).toEqual([
+      {
+        label: durationLabel,
+        value: t("en", "pullRequests.reviewDurationMinutes", { minutes: 1, seconds: 5 }),
+      },
+    ]);
+    // The same words ride the tooltip, still the hover affordance.
+    expect(read.durationTitles).toEqual([durationLabel]);
     expect(read.foldControls).toBe(0);
     expect(read.bodies).toEqual([]);
     expect(read.latestHead).toContain(
