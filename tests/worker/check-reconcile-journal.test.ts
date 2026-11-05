@@ -124,9 +124,10 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
         firstStub.restore();
       }
 
-      // The credential factory never ran, no remote operation happened at all,
-      // and the create mark never moved: a stray adopt/begin/create would leave
-      // the row no longer `not-sent`.
+      // The credential factory never ran — the readable `unknown` PHASE
+      // included, which is a real journal state, not a failed read — and no
+      // remote operation happened at all. A stray adopt/begin/create would leave
+      // the create mark no longer `not-sent`.
       expect(factoryCalls).toBe(0);
       expect(calls).toEqual({ adopt: 0, begin: 0, complete: 0 });
       const waiting = await rawRow(db, id);
@@ -266,6 +267,39 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(row.terminal_ms).toBeNull();
     expect(row.observed).toBe("unknown");
     expect(row.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+  });
+
+  test("an unreadable journal probe at the deadline still fails closed", async () => {
+    const db = seededDb();
+    const { id } = await handedOverAttempt(db);
+    // The same unreadable probe as the case above, but the wait is over: the
+    // `now() < execution_deadline_ms` guard, not the probe's answer, is what
+    // decides here — past the deadline the lane must conclude.
+    const unreadable = withFailingReads(db, /FROM review_publications/);
+    const stub = stubFetch();
+    const sent: { desired: string | null } = { desired: null };
+    let deferred = -1;
+    try {
+      const summary = await run(unreadable, {
+        now: () => DEADLINE,
+        credentials: scriptedCredentials(db, {
+          ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
+          complete: async (identity, _runId, conclusion) => {
+            sent.desired = conclusion.desired;
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+          },
+        }),
+      });
+      deferred = summary.deferred;
+    } finally {
+      stub.restore();
+    }
+
+    expect(deferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
   });
 
   test("the execution deadline is the hard stop: a pending journal no longer defers there", async () => {
