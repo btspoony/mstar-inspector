@@ -44,7 +44,7 @@ export type Coverage = 'complete' | 'truncated' | 'unavailable';
 export type OriginalFinding = {
   title: string; body: string; filePath: string | null;
   lineStart: number | null; lineEnd: number | null;
-  mergeClass: 'must-fix' | 'should-fix' | 'nit'; category: string | null;
+  mergeClass: 'must-fix' | 'should-fix' | 'may-fix' | 'nit'; category: string | null;
   fingerprintHint: string | null;
 };
 

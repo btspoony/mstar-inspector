@@ -235,7 +235,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
     // HTML legend row above the chart — the TrendChart face), and each swatch
     // resolves to its slot's mark token.
     const swatches = swatchClasses(html);
-    const labels = ["must-fix", "should-fix", "nit"];
+    const labels = severitySeries.map((series) => series.label);
     expect(swatches).toHaveLength(labels.length);
     let cursor = -1;
     for (const [index, label] of labels.entries()) {

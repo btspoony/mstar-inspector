@@ -201,6 +201,7 @@ export const en = {
     /** Severity group headers, in the order the groups render. */
     severityMustFix: "Must fix",
     severityShouldFix: "Should fix",
+    severityMayFix: "May fix",
     severityNit: "Nit",
     severityOther: "Other",
     /** One fold control per finding body and per review summary. */

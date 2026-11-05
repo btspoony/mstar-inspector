@@ -12,7 +12,7 @@
  *   - incomplete fact:      reason + unscanned (single-line, non-blank; an empty
  *     unscanned list is legal) — required exactly by the `incomplete` verdict,
  *     rejected for every other verdict, and echoed by a provided tally
- *   - findings[].mergeClass: MERGE_CLASSES = "must-fix" | "should-fix" | "nit"
+ *   - findings[].mergeClass: MERGE_CLASSES = "must-fix" | "should-fix" | "may-fix" | "nit"
  * The M1 inspector vocab (verdict comment|request_changes|approve, severity
  * critical|warning|suggestion|info) is rejected on the write path: an M1
  * document fails the required `schema: "mstar.review/v1"` literal and the
@@ -104,6 +104,8 @@ const tallySchema = z.object({
   tally: z.object({
     mustFix: z.number().int().min(0),
     shouldFix: z.number().int().min(0),
+    /** Absent on envelopes written before engine 4.2; readers treat it as 0. */
+    mayFix: z.number().int().min(0).optional(),
     nit: z.number().int().min(0),
     unverified: z.number().int().min(0),
   }),
@@ -191,15 +193,16 @@ const outputSchema: z.ZodType<ReviewOutput> = z
  * Cap on findings per review (Phase 5 B4): 50. The GitHub review body and
  * the D1 findings write both have practical limits; beyond that the
  * highest-priority findings are kept and the rest are omitted (body footer
- * notes the count). Priority: must-fix > should-fix > nit; ties keep their
- * original order (stable sort).
+ * notes the count). Priority: must-fix > should-fix > may-fix > nit; ties keep
+ * their original order (stable sort).
  */
 export const FINDINGS_MAX = 50;
 
 const MERGE_CLASS_RANK: Record<MergeClass, number> = {
   "must-fix": 0,
   "should-fix": 1,
-  nit: 2,
+  "may-fix": 2,
+  nit: 3,
 };
 
 /**

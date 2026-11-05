@@ -170,6 +170,7 @@ export const zhCN: Dictionary = {
     /** 严重度分组标题，按渲染顺序。 */
     severityMustFix: "必须修复",
     severityShouldFix: "建议修复",
+    severityMayFix: "可修复",
     severityNit: "可忽略",
     severityOther: "其他",
     /** 每条发现正文与审查摘要各有一个折叠控件。 */
