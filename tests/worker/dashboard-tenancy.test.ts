@@ -1110,6 +1110,89 @@ describe("the onboarding CTA stays inside the workspace", () => {
   });
 });
 
+/** Every href the SSR page emits (the same extraction the Members render uses). */
+function hrefsOf(html: string): string[] {
+  return [...html.matchAll(/href="([^"]+)"/g)].map((match) => match[1] ?? "");
+}
+
+/**
+ * The manifest pages are reached through a workspace, so their own navigation
+ * must stay there: the pre-workspace target (`/dashboard`) sends the operator
+ * back out of the workspace on every chrome link.
+ */
+describe("the manifest chrome stays inside the workspace", () => {
+  test("the start page's brand, Apps and cancel links name the addressed workspace", async () => {
+    // Two workspaces and one owner of both: only the address decides where the
+    // App lands, so the chrome must follow the same ref.
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-acme", "acme");
+    seedWorkspace(db, "ws-other", "other");
+    const dana = seedUser(db, "dana", "member");
+    seedMembership(db, "ws-acme", dana, "owner");
+    seedMembership(db, "ws-other", dana, "owner");
+
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/other/manifest/start", "dana", { method: "POST" }),
+      envFor(db),
+    );
+    expect(res.status).toBe(200);
+    const hrefs = hrefsOf(await res.text());
+    // Brand, Apps and Cancel are the page's in-app navigation; Logout is
+    // session-level and stays at the mount.
+    expect([...new Set(hrefs.filter((href) => href !== "/dashboard/logout"))]).toEqual([
+      "/dashboard/ws-other/apps",
+    ]);
+    expect(hrefs).not.toContain("/dashboard");
+  });
+
+  test("the confirm page's chrome targets the workspace the hold names", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-acme", "acme");
+    seedWorkspace(db, "ws-other", "other");
+    const dana = seedUser(db, "dana", "member");
+    seedMembership(db, "ws-acme", dana, "owner");
+    seedMembership(db, "ws-other", dana, "owner");
+    const hold = await createHoldValue(
+      {
+        id: 987654,
+        name: "mstar-inspector-dana",
+        slug: "mstar-inspector-dana",
+        pem: "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----",
+        webhook_secret: "not-a-real-webhook-secret",
+      },
+      "dana",
+      SESSION_SECRET,
+      "mstar-inspector-dana",
+      "ws-other",
+    );
+
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/manifest/confirm", "dana", {
+        extraCookies: { [MANIFEST_HOLD_COOKIE]: hold },
+      }),
+      envFor(db),
+    );
+    expect(res.status).toBe(200);
+    const hrefs = hrefsOf(await res.text());
+    expect([...new Set(hrefs.filter((href) => href !== "/dashboard/logout"))]).toEqual([
+      "/dashboard/ws-other/apps",
+    ]);
+    expect(hrefs).not.toContain("/dashboard");
+  });
+
+  test("the onboarding page's dashboard link is the workspace Apps page it was reached through", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest(`/dashboard/acme/apps/${ACME_APP_ID}/onboarding`, "dana"),
+      envFor(db),
+    );
+    expect(res.status).toBe(200);
+    const hrefs = hrefsOf(await res.text());
+    expect(hrefs).toContain("/dashboard/acme/apps");
+    expect(hrefs).not.toContain("/dashboard");
+  });
+});
+
 describe("App creation is owner/admin", () => {
   /**
    * ONE live workspace (`default`, 0026's seed) — the M1 shape the gate judges

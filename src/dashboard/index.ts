@@ -1318,7 +1318,14 @@ async function manifestStartRoute(c: DashboardContext, workspaceRef: string | un
     appId,
   );
   return c.html(
-    manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state), requestLocale(c)),
+    manifestStartPage(
+      session,
+      manifest.name,
+      JSON.stringify(manifest),
+      buildManifestCreateUrl(state),
+      requestLocale(c),
+      target.workspaceRef,
+    ),
   );
 }
 
@@ -1645,6 +1652,10 @@ dashboardApp.get("/manifest/confirm", async (c) => {
         webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.workspaceId}/${hold.appId}`,
       },
       requestLocale(c),
+      // The hold names the workspace the App commits into; a store failure
+      // (`db_unbound`) left the target unresolved, so the page keeps the
+      // deployment-level links.
+      target.kind === "ok" ? target.workspaceRef : null,
     ),
   );
 });
