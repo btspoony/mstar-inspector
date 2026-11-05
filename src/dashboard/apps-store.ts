@@ -1697,7 +1697,7 @@ export function createAppsStore(db: AppsStoreD1) {
           .bind(appId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha FROM reviews
+            `SELECT verdict, model, provider, reviewed_at, head_sha FROM reviews
              WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
              ORDER BY reviewed_at DESC, rowid DESC LIMIT 1`,
           )
@@ -1707,7 +1707,8 @@ export function createAppsStore(db: AppsStoreD1) {
       if (row === undefined) return null;
       return {
         ...row,
-        latest_review: (results[1]!.results[0] as PullRequestReviewDetailRow | undefined) ?? null,
+        latest_review:
+          (results[1]!.results[0] as PullRequestHeadRow["latest_review"] | undefined) ?? null,
       };
     },
 
@@ -1791,6 +1792,12 @@ export function createAppsStore(db: AppsStoreD1) {
      * finding is history, not a record the operator still acts on, and the tab
      * count, the dot and the pager must agree with the list.
      *
+     * Each row also carries `review_round`: the ordinal of the round that FIRST
+     * reported it — `first_seen_sha` matched against the PR's reviews ordered
+     * oldest-first (`reviews` oldest → 1). A finding whose sha no review row
+     * carries (history outside the ledger, or a comment-only round) reports
+     * NULL, and the client omits the chip.
+     *
      * The page is ordered by `rowid`, the immutable insert order — `updated_ms`
      * advances every time a review round re-reports an open finding, so
      * ordering by it would move a row between an offset page read and the next
@@ -1807,30 +1814,36 @@ export function createAppsStore(db: AppsStoreD1) {
       const filter =
         page.severity === undefined || page.severity === null
           ? ""
-          : " AND json_extract(original_json, '$.mergeClass') = ?";
+          : " AND json_extract(rf.original_json, '$.mergeClass') = ?";
       const filterBinds = filter === "" ? [] : [page.severity];
       const results = await db.batch([
         db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT COUNT(*) AS n FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'${filter}`,
+            `SELECT COUNT(*) AS n FROM review_findings rf
+             WHERE rf.app_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}`,
           )
           .bind(appId, owner, repo, prNumber, ...filterBinds),
         db
           .prepare(
-            `SELECT finding_id,
-                    json_extract(original_json, '$.mergeClass') AS severity,
-                    json_extract(original_json, '$.title') AS title,
-                    json_extract(original_json, '$.filePath') AS file_path,
-                    json_extract(original_json, '$.lineStart') AS line,
-                    json_extract(original_json, '$.body') AS body
-             FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'${filter}
-             ORDER BY rowid DESC
+            `SELECT rf.finding_id,
+                    json_extract(rf.original_json, '$.mergeClass') AS severity,
+                    json_extract(rf.original_json, '$.title') AS title,
+                    json_extract(rf.original_json, '$.filePath') AS file_path,
+                    json_extract(rf.original_json, '$.lineStart') AS line,
+                    json_extract(rf.original_json, '$.body') AS body,
+                    (SELECT rr.rn
+                     FROM (SELECT head_sha,
+                                  ROW_NUMBER() OVER (ORDER BY reviewed_at ASC, rowid ASC) AS rn
+                           FROM reviews
+                           WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?) rr
+                     WHERE rr.head_sha = rf.first_seen_sha) AS review_round
+             FROM review_findings rf
+             WHERE rf.app_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}
+             ORDER BY rf.rowid DESC
              LIMIT ? OFFSET ?`,
           )
-          .bind(appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
+          .bind(appId, owner, repo, prNumber, appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
       ]);
       if (results[0]!.results.length === 0) return null;
       return {
@@ -1842,6 +1855,15 @@ export function createAppsStore(db: AppsStoreD1) {
     /**
      * One page of a PR's reviews, newest first — the history's first page is
      * its latest verdict. `null` = the App's ledger does not hold this PR.
+     *
+     * Each row carries the round ORDINAL and that round's run facts. The
+     * ordinal is the PR's `reviews` ordered oldest-first (`reviewed_at ASC,
+     * rowid ASC`, numbered from 1), computed at read time so historical rows
+     * need no backfill; paging never renumbers, because the window function
+     * covers the whole PR before the newest-first page slice. `duration_ms` is
+     * NULL for rows written before the measurement. `findings` counts the
+     * legacy `findings` rows attributed to that review, across every lifecycle
+     * state — the number of findings that round reported.
      */
     async listPullRequestReviews(
       appId: string,
@@ -1860,9 +1882,15 @@ export function createAppsStore(db: AppsStoreD1) {
           .bind(appId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha
-             FROM reviews WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-             ORDER BY reviewed_at DESC, rowid DESC
+            `SELECT x.verdict, x.model, x.provider, x.reviewed_at, x.head_sha,
+                    x.round, x.duration_ms,
+                    (SELECT COUNT(*) FROM findings f WHERE f.review_id = x.id) AS findings
+             FROM (SELECT id, rowid AS rid, verdict, model, provider, reviewed_at,
+                          head_sha, duration_ms,
+                          ROW_NUMBER() OVER (ORDER BY reviewed_at ASC, rowid ASC) AS round
+                   FROM reviews
+                   WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?) x
+             ORDER BY x.reviewed_at DESC, x.rid DESC
              LIMIT ? OFFSET ?`,
           )
           .bind(appId, owner, repo, prNumber, page.limit, page.offset),
@@ -1945,26 +1973,35 @@ export type PullRequestFindingRow = {
   file_path: string | null;
   line: number | null;
   body: string | null;
+  /** The PR round that first reported it (`reviews` ordered oldest-first); NULL when no review carries its `first_seen_sha`. */
+  review_round: number | null;
 };
 
 /** One `reviews` row as the detail face reads it — nullable columns honest. */
 export type PullRequestReviewDetailRow = {
   verdict: string;
-  summary_md: string | null;
   model: string | null;
   provider: string | null;
   reviewed_at: string;
   head_sha: string;
+  /** The round's ordinal in the PR's oldest-first review history (1 = first published round). */
+  round: number;
+  /** Wall clock of the round in ms; NULL for rows written before the measurement. */
+  duration_ms: number | null;
+  /** Findings this round reported, in every lifecycle state. */
+  findings: number;
 };
 
 export type PullRequestFailureDetailRow = { stage: string; error: string; created_at: string };
 
 /**
  * The detail head: the ledger row plus its newest review (whole row, nullable)
- * — the header's authoritative verdict and attribution.
+ * — the header's authoritative verdict and attribution. The head read is ONE
+ * row plus one lookup, so it carries the review columns alone: the round
+ * ordinal/findings tally belong to the paged reviews section.
  */
 export type PullRequestHeadRow = PullRequestBaseRow & {
-  latest_review: PullRequestReviewDetailRow | null;
+  latest_review: Omit<PullRequestReviewDetailRow, "round" | "duration_ms" | "findings"> | null;
 };
 
 /**

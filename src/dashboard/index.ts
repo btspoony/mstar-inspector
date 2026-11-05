@@ -4783,7 +4783,6 @@ const appPullRequestRoute = async (c: DashboardContext) => {
         ? null
         : {
             verdict: head.latest_review.verdict,
-            summary_md: head.latest_review.summary_md ?? "",
             model: head.latest_review.model ?? "",
             provider: head.latest_review.provider ?? "",
             reviewed_at: head.latest_review.reviewed_at,
@@ -4851,6 +4850,7 @@ const appPullRequestRecordsRoute = async (
         file_path: finding.file_path ?? "",
         line: finding.line,
         body: finding.body ?? "",
+        review_round: finding.review_round,
       })),
       total: page.total,
       limit,
@@ -4862,11 +4862,13 @@ const appPullRequestRecordsRoute = async (
     return c.json({
       items: page.items.map((review) => ({
         verdict: review.verdict,
-        summary_md: review.summary_md ?? "",
         model: review.model ?? "",
         provider: review.provider ?? "",
         reviewed_at: review.reviewed_at,
         head_sha: review.head_sha,
+        round: review.round,
+        findings: review.findings,
+        duration_ms: review.duration_ms,
       })),
       total: page.total,
       limit,

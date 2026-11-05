@@ -148,6 +148,16 @@ export const zhCN: Dictionary = {
     reviews: "审查",
     noReviews: "此拉取请求还没有审查。",
     reviewMeta: "{model} · {provider}",
+    /** 审查行的轮次序号；发现行复用同一文案标明首次报告该发现的轮次。 */
+    reviewRound: "第 {round} 轮",
+    /** 单轮审查报告的发现数（英文区分为单复数两式）。 */
+    reviewFindings: "{count} 项发现",
+    reviewFindingsOne: "{count} 项发现",
+    /** 单轮审查耗时：不足一分钟按秒显示，否则按分秒显示。 */
+    reviewDurationSeconds: "{seconds} 秒",
+    reviewDurationMinutes: "{minutes} 分 {seconds} 秒",
+    /** 耗时 span 的 tooltip（与 head-sha chip 同）：说明这个数值是本轮耗时。 */
+    reviewDurationLabel: "本轮运行耗时",
     failures: "失败",
     noFailures: "此拉取请求没有失败记录。",
     findings: "发现",
@@ -184,7 +194,7 @@ export const zhCN: Dictionary = {
     severityMayFix: "可修复",
     severityNit: "可忽略",
     severityOther: "其他",
-    /** 每条发现正文与审查摘要各有一个折叠控件。 */
+    /** 每条发现正文有一个折叠控件。 */
     expand: "展开",
     collapse: "收起",
     /** 折叠控件的无障碍名称：动作、记录与位置。 */

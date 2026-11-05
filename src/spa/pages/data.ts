@@ -809,7 +809,26 @@ export type PullRequestRow = PullRequestHead & {
 
 export type PullRequestReview = {
   verdict: string;
-  summary_md: string;
+  model: string;
+  provider: string;
+  reviewed_at: string;
+  head_sha: string;
+  /** Ordinal of this round in the PR's oldest-first review history; `null` when the payload carries none. */
+  round: number | null;
+  /** Findings this round reported; the parser refuses a row without a real tally. */
+  findings: number;
+  /** Wall clock of the round in ms; `null` for rows written before the measurement. */
+  duration_ms: number | null;
+};
+
+/**
+ * The detail head's newest review. The head read carries the attribution
+ * columns alone — the round ordinal, its run clock and its finding tally
+ * belong to the paged reviews section, which is the only payload that counts
+ * them.
+ */
+export type PullRequestLatestReview = {
+  verdict: string;
   model: string;
   provider: string;
   reviewed_at: string;
@@ -827,6 +846,8 @@ export type PullRequestFinding = {
   /** `null` on file-level findings with no line anchor. */
   line: number | null;
   body: string;
+  /** The review round that first reported it; `null` when no review carries its first-seen sha. */
+  review_round: number | null;
 };
 
 /** The PR detail payload's record totals — one number per record family, plus
@@ -847,7 +868,7 @@ export type PullRequestCounts = {
 export type PullRequestDetail = {
   pull_request: PullRequestHead;
   counts: PullRequestCounts;
-  latest_review: PullRequestReview | null;
+  latest_review: PullRequestLatestReview | null;
 };
 
 /** The three record families, one paged read each. */
@@ -912,13 +933,13 @@ function parsePullRequestRow(value: unknown): PullRequestRow | null {
   if (typeof value.failure_count !== "number") return null;
   return {
     ...head,
-    latest_review: parseLatestReview(value.latest_review),
+    latest_review: parseRowLatestReview(value.latest_review),
     failure_count: value.failure_count,
   };
 }
 
-/** The row's latest-review slot: coerced to null unless it is a real review. */
-function parseLatestReview(value: unknown): { verdict: string; reviewed_at: string } | null {
+/** The LIST row's latest-review slot: coerced to null unless it is a real review. */
+function parseRowLatestReview(value: unknown): { verdict: string; reviewed_at: string } | null {
   if (!isRecord(value) || typeof value.reviewed_at !== "string") return null;
   return {
     verdict: typeof value.verdict === "string" ? value.verdict : "",
@@ -927,21 +948,45 @@ function parseLatestReview(value: unknown): { verdict: string; reviewed_at: stri
 }
 
 /**
+ * A round ordinal: the PR's history numbers rounds from 1 (oldest first), so a
+ * zero or negative ordinal never exists and reads as "no value" (`null`).
+ */
+function positiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null;
+}
+
+/**
+ * A wall clock: a finite non-negative integer passes, and anything else is
+ * "no value" (`null`) rather than a coerced zero — 0 is a real duration, an
+ * absent one is not.
+ */
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/**
  * One review entry (QC: the pipeline persists `provider: null`, and
- * model/summary/verdict can be absent too). The nullable text fields
- * coerce to "" at this boundary so the view never renders null; the
- * entry is dropped only when its timestamp/head anchor is missing.
+ * model/verdict can be absent too). The nullable text fields
+ * coerce to "" at this boundary so the view never renders null; the round
+ * ordinal and clock coerce to `null`. The tally is REQUIRED: the paged route
+ * counts it with `COUNT(*)`, so a row without a real count would have to
+ * print a fabricated 0 — a claim the round reported nothing. The row is
+ * refused instead and the page reports it in `dropped`.
  */
 function parsePullRequestReview(value: unknown): PullRequestReview | null {
   if (!isRecord(value)) return null;
   if (typeof value.reviewed_at !== "string" || typeof value.head_sha !== "string") return null;
+  const findings = nonNegativeInteger(value.findings);
+  if (findings === null) return null;
   return {
     verdict: typeof value.verdict === "string" ? value.verdict : "",
-    summary_md: typeof value.summary_md === "string" ? value.summary_md : "",
     model: typeof value.model === "string" ? value.model : "",
     provider: typeof value.provider === "string" ? value.provider : "",
     reviewed_at: value.reviewed_at,
     head_sha: value.head_sha,
+    round: positiveInteger(value.round),
+    findings,
+    duration_ms: nonNegativeInteger(value.duration_ms),
   };
 }
 
@@ -973,6 +1018,7 @@ function parsePullRequestFinding(value: unknown): PullRequestFinding | null {
     file_path: typeof value.file_path === "string" ? value.file_path : "",
     line: value.line,
     body: typeof value.body === "string" ? value.body : "",
+    review_round: positiveInteger(value.review_round),
   };
 }
 
@@ -998,6 +1044,24 @@ export function parsePullRequestList(
 }
 
 /**
+ * The detail head's newest review: the five attribution columns alone. The
+ * head read never carries a round ordinal, run clock or tally, so this parser
+ * neither expects nor invents them.
+ */
+function parseLatestReview(value: unknown): PullRequestLatestReview | null {
+  if (!isRecord(value) || typeof value.reviewed_at !== "string" || typeof value.head_sha !== "string") {
+    return null;
+  }
+  return {
+    verdict: typeof value.verdict === "string" ? value.verdict : "",
+    model: typeof value.model === "string" ? value.model : "",
+    provider: typeof value.provider === "string" ? value.provider : "",
+    reviewed_at: value.reviewed_at,
+    head_sha: value.head_sha,
+  };
+}
+
+/**
  * The detail payload: the head row plus its record totals. The envelope is
  * strict — a missing row or a missing/non-finite tab count fails the whole
  * parse, because a silent zero would disable a tab's count. `must_fix` is the
@@ -1012,7 +1076,7 @@ export function parsePullRequestDetail(data: unknown): PullRequestDetail | null 
   const counts = parsePullRequestCounts(data.counts);
   if (counts === null) return null;
   // Absent/drifted → null (no headline verdict); the envelope itself still parses.
-  return { pull_request, counts, latest_review: parsePullRequestReview(data.latest_review) };
+  return { pull_request, counts, latest_review: parseLatestReview(data.latest_review) };
 }
 
 /**

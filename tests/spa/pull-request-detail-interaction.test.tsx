@@ -120,7 +120,7 @@ describe("pull request detail (mounted)", () => {
 
       // Selecting the reviews family renders its rows.
       await press(win, tabs()[1]);
-      expect(text()).toContain("The refresh race is still reachable.");
+      expect(text()).toContain(t("en", "pullRequests.reviewRound", { round: 2 }));
 
       // Returning to the visited family renders its rows again, and the second
       // visit does not issue a burst of reads: one bounded total, at most the
@@ -128,7 +128,7 @@ describe("pull request detail (mounted)", () => {
       await press(win, tabs()[0]);
       expect(text()).toContain("Use a parameterized query");
       await press(win, tabs()[1]);
-      expect(text()).toContain("The refresh race is still reachable.");
+      expect(text()).toContain(t("en", "pullRequests.reviewRound", { round: 2 }));
       expect(fetches.length - afterLanding).toBeLessThanOrEqual(2);
     } finally {
       await unmount();
@@ -143,6 +143,7 @@ describe("pull request detail (mounted)", () => {
       file_path: "",
       line: null,
       body: "",
+      review_round: null,
     }));
     const { container, win, fetches, unmount } = await mountDetailView(scene({ findings: page(corpus) }));
     try {
@@ -189,6 +190,7 @@ describe("pull request detail (mounted)", () => {
       file_path: "",
       line: null,
       body: "",
+      review_round: null,
     }));
     // The scene's page states a limit of 3: the route clamps to it and echoes
     // it back, so page 2 starts at 3. A stride re-derived from the client's own
@@ -223,6 +225,7 @@ describe("pull request detail (mounted)", () => {
       file_path: "",
       line: null,
       body: "",
+      review_round: null,
     }));
     const holds = ["offset=10", "offset=20"];
     // One gate per held REQUEST: the same window asked twice is two promises.
@@ -320,13 +323,18 @@ describe("pull request detail (mounted)", () => {
     // authoritative source.
     const corpus = Array.from({ length: 12 }, (_, index) => ({
       verdict: index === 0 ? "ship it" : "blocked",
-      summary_md: `Round ${index}`,
       model: `model-${String(index).padStart(2, "0")}`,
       provider: "openrouter",
       reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
       head_sha: `sha${index}`,
+      // Newest first, so index 0 is the PR's last round (12).
+      round: 12 - index,
+      findings: 0,
+      duration_ms: null,
     }));
-    const newest = corpus[0]!;
+    // The head read's newest review carries the attribution alone.
+    const { verdict, model, provider, reviewed_at, head_sha } = corpus[0]!;
+    const newest = { verdict, model, provider, reviewed_at, head_sha };
     const { container, win, unmount } = await mountDetailView(
       scene({ reviews: page(corpus) }, {}, newest),
     );
@@ -352,8 +360,13 @@ describe("pull request detail (mounted)", () => {
       expect(pagerButton(t("en", "pullRequests.pageNext"))?.disabled).toBe(false);
       await press(win, pagerButton(t("en", "pullRequests.pageNext")));
 
-      // Page 2 is on screen (its rows are the older reviews)…
-      expect(container.textContent ?? "").toContain("Round 10");
+      // Page 2 is on screen: its rows are the PR's two oldest rounds.
+      expect(
+        [...container.querySelectorAll('[data-slot="review-round"]')].map((chip) => chip.textContent),
+      ).toEqual([
+        t("en", "pullRequests.reviewRound", { round: 2 }),
+        t("en", "pullRequests.reviewRound", { round: 1 }),
+      ]);
       // …and the headline still reports the newest review, not the page's first.
       expect(read()).toEqual({ verdict: "ship it", meta: expect.stringContaining("model-00") });
       expect(read().meta).not.toContain("model-10");
@@ -371,11 +384,13 @@ describe("pull request detail (mounted)", () => {
     // failures, and its hidden count must not move when the operator pages.
     const corpus = Array.from({ length: 12 }, (_, index) => ({
       verdict: "ship it",
-      summary_md: `Round ${index}`,
       model: `model-${String(index).padStart(2, "0")}`,
       provider: "",
       reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
       head_sha: `sha${index}`,
+      round: 12 - index,
+      findings: 0,
+      duration_ms: null,
     }));
     // Newest of all, so the failure is one of the seven rows the cap shows.
     const failure = { stage: "sandbox", error: "exit 1", created_at: "2026-11-02 00:00:00" };
@@ -422,8 +437,9 @@ describe("pull request detail (mounted)", () => {
         file_path: "",
         line: null,
         body: "",
+        review_round: null,
       })),
-      { finding_id: "n-1", severity: "nit", title: "Nit 1", file_path: "", line: null, body: "" },
+      { finding_id: "n-1", severity: "nit", title: "Nit 1", file_path: "", line: null, body: "", review_round: null },
     ];
     const { container, win, fetches, unmount } = await mountDetailView(scene({ findings: page(corpus) }));
     try {
@@ -485,6 +501,7 @@ describe("pull request detail (mounted)", () => {
         file_path: "",
         line: null,
         body: "First body.",
+        review_round: null,
       },
       {
         finding_id: "f-1",
@@ -493,6 +510,7 @@ describe("pull request detail (mounted)", () => {
         file_path: "",
         line: null,
         body: "Second body.",
+        review_round: null,
       },
     ];
     const { container, win, unmount } = await mountDetailView(scene({ findings: page(duplicated) }));
@@ -765,6 +783,7 @@ describe("pull request detail (mounted)", () => {
       file_path: "",
       line: null,
       body: "",
+      review_round: null,
     });
     const appA = scene({ findings: page([finding("a-1", "App A finding")]) }, { title: "App A pull request" });
     const appB = scene({ findings: page([finding("b-1", "App B finding")]) }, { title: "App B pull request" });
