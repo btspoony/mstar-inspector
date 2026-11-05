@@ -13,9 +13,10 @@ category: Changed
   the operator has closed workspace creation (`workspace_creation_open`) the
   submit is refused 409 `WORKSPACE_CREATION_CLOSED_REFUSAL` and the setup page
   shows its generic create-failure notice; the sidebar entry is the surface that
-  renders the reason while it is disabled. Creation is the only
-  way into a first workspace, and a successful create lands directly inside the
-  new workspace (the `201` names `/dashboard/<ref>/apps`), so the creator never
+  renders the reason while it is disabled. Creating is the only way to
+  own a first workspace and the only path for a login with no pending invite —
+  the same setup page lists any pending invite and accepts it — and a successful
+  create lands directly inside the new workspace (the `201` names `/dashboard/<ref>/apps`), so the creator never
   depends on sole-workspace resolution finding a second workspace. There is no
   auto-join and no first-user-becomes-admin fallback; authority is
   workspace-scoped from then on.
@@ -33,7 +34,8 @@ category: Changed
   创建者设为该工作区的 `owner`。该表单始终渲染；当运维者关闭了工作区创建
   （`workspace_creation_open`）时，提交会被 409 `WORKSPACE_CREATION_CLOSED_REFUSAL` 拒绝，
   设置页只显示通用的创建失败提示；渲染禁用原因的是侧栏入口。
-  创建工作区是进入首个工作区的唯一途径；创建成功后直接落在新工作区内（`201` 会给出
+  创建工作区是「拥有」首个工作区、以及「没有任何待接受邀请」的登录进入工作区的唯一途径
+  ——同一个设置页也会列出待接受邀请并接受它——创建成功后直接落在新工作区内（`201` 会给出
   `/dashboard/<ref>/apps`），因此不依赖「唯一工作区」解析能否在存在第二个工作区时命中。
   没有自动加入，也没有「首位用户成为唯一工作区管理员」的回退；此后权限一律按工作区判定。
 - **部署接线去掉名单**：两个 workflow 只删除该白名单的必填变量门禁、部署后设置断言与

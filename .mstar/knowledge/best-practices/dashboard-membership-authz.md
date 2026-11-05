@@ -36,15 +36,15 @@ v0.5 B4 added membership control to a dashboard whose sessions are stateless HMA
 
 ## Why This Matters
 
-Stateless cookies are the cheap option on Workers, but they cannot be revoked — the per-request D1 check is the revocation mechanism. The bootstrap matrix is the security boundary of the whole deployment (first login on a public URL claims admin), so it is pinned by a four-case test matrix, not prose.
+Stateless cookies are the cheap option on Workers, but they cannot be revoked — the per-request D1 membership check is the revocation mechanism. There is no deployment-level admin bootstrap: sign-in creates a `role = 'member'` row for any GitHub-verified login that is not recorded as removed and not blocked by the `signup_open` flag, and authority is workspace-scoped. The sign-in precedence and the tombstone's write-boundary guard are the security boundary, so they are pinned by a test matrix (`signInDashboardUser precedence`), not prose.
 
 ## When to Apply
 
-Any multi-user dashboard on stateless sessions; any "first operator claims admin" bootstrap; any Hono sub-app where middleware order (guard before routes and catch-alls) matters.
+Any multi-user dashboard on stateless sessions; any tombstone-based removal that must outrun an in-flight sign-in; any Hono sub-app where middleware order (guard before routes and catch-alls) matters.
 
 ## Examples
 
-- `src/dashboard/users.ts` (store + `signInDashboardUser`), `src/dashboard/index.ts` (guard mount + `requireAdmin` + members routes), `tests/worker/dashboard.test.ts` (bootstrap matrix, removed-member 403 with zero-network assertion, conditional-delete matrix).
+- `src/dashboard/users.ts` (store + `signInDashboardUser`), `src/dashboard/index.ts` (guard mount + `requireAdmin` + members routes), `tests/worker/dashboard.test.ts` (`signInDashboardUser precedence`, removed-member 403 with zero-network assertion, conditional-delete matrix).
 
 
 ## Read-face visibility layer over membership (2026-09-18 refinement)
