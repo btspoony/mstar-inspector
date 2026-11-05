@@ -260,14 +260,17 @@ function jsonByteLength(value: unknown): number {
 }
 
 /**
- * The DEFAULT context budget for the seat's whole assignment, in UTF-8 bytes
- * (issue I-000396), used when the runner input carries no
- * `recheckAssignmentMaxBytes`. The operator tunes the live value in the
- * `review.recheck.assignment_max_bytes` system row; this constant is only its
- * absent-row fallback, never the cap the seat runs with. The §7.3 input cap
- * (512 KiB, consumer) is a WIRE cap, not a window: at 3.5–4 bytes per token it
- * is ~131k–150k tokens — a whole 128k window spent before the prompt's own
- * rules, the seat's read-only tool traffic and its yield (25 rows may carry
+ * The seat's assignment budget in UTF-8 bytes (issue I-000396) on the path
+ * that carries no operator value. The effective cap is a three-step chain:
+ * the operator's `review.recheck.assignment_max_bytes` system row is read once
+ * per round by the consumer into the runner input's `recheckAssignmentMaxBytes`;
+ * `runtime-omp` forwards it as `runRecheckSeat`'s `assignmentMaxBytes` only when
+ * present; this constant is the `??` fallback on that last hop, so an absent
+ * row (or an unreadable one, which answers the same default with
+ * `degraded: true`) makes THIS the cap the seat actually runs with. The §7.3
+ * input cap (512 KiB, consumer) is a WIRE cap, not a window: at 3.5–4 bytes per
+ * token it is ~131k–150k tokens — a whole 128k window spent before the prompt's
+ * own rules, the seat's read-only tool traffic and its yield (25 rows may carry
  * ~140 KB of quote + explanation) are counted, so the one-shot yield never
  * arrives. 64 KiB ≈ 16k–18k tokens leaves that window room; `fitRecheckInput`
  * fits the ask to it instead of asking for a document no seat can hold.
