@@ -504,12 +504,25 @@ export async function getWorkspaceCheckMinScore(
   }
 }
 
-/** The ledger row's `before` is the raw column — NULL is the absent state. */
+/**
+ * The ledger's `before` is the floor the workspace was actually RUNNING: the
+ * same mapping the reader applies (NULL stays the absent state, a trusted
+ * integer records itself, anything else records the platform default) — the
+ * concurrency audit's invariant. A raw corrupt value would attribute a floor
+ * that was never in effect.
+ */
+const workspaceCheckMinScoreAuditSql = (value: string) => `CASE
+      WHEN ${value} IS NULL THEN NULL
+      WHEN typeof(${value}) = 'integer' AND ${value} BETWEEN ${CHECK_MIN_SCORE_MIN} AND ${CHECK_MIN_SCORE_MAX}
+        THEN ${value}
+      ELSE ${DEFAULT_CHECK_MIN_SCORE} END`;
+
 const WORKSPACE_CHECK_MIN_SCORE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
   SELECT ?1, ?2, 'workspace.check_min_score.set', 'workspace', ?3,
-         json_object('before', (SELECT check_min_score FROM workspaces WHERE id = ?3),
+         json_object('before', (SELECT ${workspaceCheckMinScoreAuditSql("check_min_score")}
+                                  FROM workspaces WHERE id = ?3),
                      'after', ?4),
          ?5
    WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;

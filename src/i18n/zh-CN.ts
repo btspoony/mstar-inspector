@@ -543,7 +543,7 @@ export const zhCN: Dictionary = {
       triggerModeUnknown: "{mode} 不是有效的审查触发模式 — 可用值为 open、every_push、manual。未存储任何内容。",
       reviewLevelUnknown:
         "{level} 不是有效的评审深度 — 可用值为 quick、default、deep（或 inherit 表示跟随平台默认）。未存储任何内容。",
-      checkScoreInvalid: "审查门禁分数必须是 0 到 100 之间的整数。未存储任何内容。",
+      checkScoreInvalid: "审查门禁分数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
       checkVerdictUnknown: "{verdict} 不是有效的审查结论 — 可用值为：{verdicts}。未存储任何内容。",
       allowlistToggleInvalid: "所有者白名单开关必须为开或关。未存储任何内容。",
       allowlistTooManyOwners: "所有者白名单最多接受 {limit} 个所有者 — 未存储任何内容。请移除部分登录名后重新提交。",

@@ -4382,7 +4382,10 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // empty verdict set is legal and fails closed: no review can pass.
     const rawScore = typeof form.min_score === "string" ? form.min_score.trim() : "";
     if (!/^\d+$/.test(rawScore) || Number(rawScore) > 100) {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.checkScoreInvalid);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.checkScoreInvalid, {
+        min: CHECK_MIN_SCORE_MIN,
+        max: CHECK_MIN_SCORE_MAX,
+      });
     }
     // Repeated `pass_verdicts` fields are the shape this op expects (the SPA
     // posts one per checked box); parseBody({ all: true }) aggregates them.

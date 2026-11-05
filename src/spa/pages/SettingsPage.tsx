@@ -64,8 +64,6 @@ import {
   type ChainTab,
   type AllowlistSettings,
   type CheckGateSettings,
-  type CheckMinScoreSettings,
-  type ConcurrencySettings,
   type ModelOptionGroup,
   type ReviewLevel,
   type ReviewTriggerMode,
@@ -1503,18 +1501,50 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
 }
 
 /**
- * The workspace review-concurrency cap — the tenant half of the runtime
- * configuration (iteration spec §1.1). Owner/admin only; the server re-checks
- * the role and validates the value against the workspace's own range only, so
- * this card renders the `min`/`max` the payload carried and never sees the
- * platform quota.
+ * One integer setting of the current workspace: fetch → draft → save → notice,
+ * with the degraded-read repair path. The concurrency cap and the review-gate
+ * default floor share this shell verbatim, so a fix to the degraded retry, the
+ * empty-draft guard or the 2xx-with-a-non-JSON body lands once instead of
+ * needing a matching edit in two cards.
  */
-export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"] }) {
-  const [loaded, setLoaded] = useState<ConcurrencySettings | null>(null);
+type NumberSettingCopy = {
+  heading: DictionaryKey;
+  description: DictionaryKey;
+  label: DictionaryKey;
+  save: DictionaryKey;
+  saved: DictionaryKey;
+  failed: DictionaryKey;
+  range: DictionaryKey;
+  unreadable: DictionaryKey;
+};
+
+type NumberSettingValue = { value: number; min: number; max: number; degraded: boolean };
+
+function NumberSettingCard({
+  locale,
+  getPath,
+  putPath,
+  payloadKey,
+  inputId,
+  copy,
+  parse,
+  parseStored,
+}: {
+  locale: SpaBoot["locale"];
+  getPath: string;
+  putPath: string;
+  payloadKey: string;
+  inputId: string;
+  copy: NumberSettingCopy;
+  parse: (data: unknown) => NumberSettingValue | null;
+  parseStored: (body: string) => number | null;
+}) {
+  const [loaded, setLoaded] = useState<NumberSettingValue | null>(null);
   const [failed, setFailed] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
-  // Section-local channel, like the name card's: an op outcome never rides the page-level notice.
-  const [concurrencyNotice, setConcurrencyNotice] = useState<OpNotice | null>(null);
+  // Section-local channel, like the name card's: an op outcome never rides the
+  // page-level notice.
+  const [cardNotice, setCardNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
   // A degraded read starts the field empty and offers two ways out: type a
   // value (the repair write) or re-read.
@@ -1522,10 +1552,10 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
 
   useEffect(() => {
     let live = true;
-    fetchJson(`${apiBase()}/api/settings/concurrency`).then(
+    fetchJson(`${apiBase()}${getPath}`).then(
       (data) => {
         if (!live) return;
-        const parsed = parseConcurrencySettings(data);
+        const parsed = parse(data);
         if (parsed === null) setFailed(true);
         else {
           setFailed(false);
@@ -1539,6 +1569,8 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
     return () => {
       live = false;
     };
+    // The parse pair is a per-card constant; only a retry re-reads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -1548,37 +1580,34 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
     // An untouched form must submit the STORED value, never a derived one: the
     // stored number is what the tenant set.
     setBusy(true);
-    const submitted = Number((draft ?? String(loaded.concurrency)).trim());
+    const submitted = Number((draft ?? String(loaded.value)).trim());
     try {
-      const { status, body } = await putJson(`${apiBase()}/api/settings/concurrency`, {
-        concurrency: submitted,
+      const { status, body } = await putJson(`${apiBase()}${putPath}`, {
+        [payloadKey]: submitted,
       });
-      const outcome = settingsOpOutcome(locale, status, body, t(locale, "workspace.concurrencySaved"));
+      const outcome = settingsOpOutcome(locale, status, body, t(locale, copy.saved));
       if (outcome.kind === "success") {
         // The stored value is the server's answer, never the typed draft. A
         // landed 2xx whose body is not JSON still stored a value — the write
         // succeeded, so the submitted number stands in for the unreadable one
         // instead of reporting the save as a failure.
-        const stored = parseStoredConcurrency(body) ?? submitted;
+        const stored = parseStored(body) ?? submitted;
         // This write is the workspace's own level — the only level this
         // payload's `degraded` reports — so the accepted value is now known
         // and trustworthy: show it and clear the flag.
-        setLoaded((previous) => previous && { ...previous, concurrency: stored, degraded: false });
+        setLoaded((previous) => previous && { ...previous, value: stored, degraded: false });
         setDraft(null);
       }
-      setConcurrencyNotice(outcome);
+      setCardNotice(outcome);
     } catch {
-      setConcurrencyNotice({ kind: "error", message: t(locale, "workspace.concurrencyFailed") });
+      setCardNotice({ kind: "error", message: t(locale, copy.failed) });
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <FlowSection
-      title={t(locale, "workspace.concurrencyHeading")}
-      subtitle={t(locale, "workspace.concurrencyDescription")}
-    >
+    <FlowSection title={t(locale, copy.heading)} subtitle={t(locale, copy.description)}>
       {failed ? (
         <LoadFailedNotice locale={locale} />
       ) : loaded === null ? (
@@ -1586,37 +1615,34 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
       ) : (
         <div className="flex flex-col gap-3">
           {loaded.degraded ? (
-            // The store could not trust the stored cap, so both numbers in the
-            // payload are the conservative fallback (serial). The field starts
+            // The store could not trust the stored value, so the payload's
+            // number is a fallback the tenant never chose. The field starts
             // empty and never shows that fallback; a typed value OR the re-read
             // repairs the state.
-            <PageNotice
-              kind="warn"
-              message={t(locale, "workspace.concurrencyUnreadable", { max: loaded.max })}
-            />
+            <PageNotice kind="warn" message={t(locale, copy.unreadable, { max: loaded.max })} />
           ) : null}
           {/* The range line sits outside the row: inside the stack, `items-end`
               would align the button to the hint instead of the input. */}
           <div className="flex flex-col gap-1.5">
             <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
               <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium" htmlFor="workspace-concurrency">
-                  {t(locale, "workspace.concurrencyLabel")}
+                <label className="text-sm font-medium" htmlFor={inputId}>
+                  {t(locale, copy.label)}
                 </label>
                 <Input
-                  id="workspace-concurrency"
+                  id={inputId}
                   type="number"
                   min={loaded.min}
                   max={loaded.max}
                   className="w-32"
                   autoComplete="off"
                   required
-                  value={draft ?? (loaded.degraded ? "" : String(loaded.concurrency))}
+                  value={draft ?? (loaded.degraded ? "" : String(loaded.value))}
                   onChange={(event) => setDraft(event.target.value)}
                 />
               </div>
               <Button type="submit" disabled={busy}>
-                {t(locale, "workspace.concurrencySave")}
+                {t(locale, copy.save)}
               </Button>
               {loaded.degraded ? (
                 <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
@@ -1625,13 +1651,49 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
               ) : null}
             </form>
             <span className="text-xs text-muted-foreground">
-              {t(locale, "workspace.concurrencyRange", { max: loaded.max })}
+              {t(locale, copy.range, { max: loaded.max })}
             </span>
           </div>
         </div>
       )}
-      <NoticeRegion notice={concurrencyNotice} />
+      <NoticeRegion notice={cardNotice} />
     </FlowSection>
+  );
+}
+
+/**
+ * The workspace review-concurrency cap — the tenant half of the runtime
+ * configuration (iteration spec §1.1). Owner/admin only; the server re-checks
+ * the role and validates the value against the workspace's own range only, so
+ * this card renders the `min`/`max` the payload carried and never sees the
+ * platform quota.
+ */
+export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"] }) {
+  return (
+    <NumberSettingCard
+      locale={locale}
+      getPath="/api/settings/concurrency"
+      putPath="/api/settings/concurrency"
+      payloadKey="concurrency"
+      inputId="workspace-concurrency"
+      copy={{
+        heading: "workspace.concurrencyHeading",
+        description: "workspace.concurrencyDescription",
+        label: "workspace.concurrencyLabel",
+        save: "workspace.concurrencySave",
+        saved: "workspace.concurrencySaved",
+        failed: "workspace.concurrencyFailed",
+        range: "workspace.concurrencyRange",
+        unreadable: "workspace.concurrencyUnreadable",
+      }}
+      parse={(data) => {
+        const parsed = parseConcurrencySettings(data);
+        return parsed === null
+          ? null
+          : { value: parsed.concurrency, min: parsed.min, max: parsed.max, degraded: parsed.degraded };
+      }}
+      parseStored={parseStoredConcurrency}
+    />
   );
 }
 
@@ -1641,112 +1703,31 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
  * is the value `createApp` seeds, not a backfill.
  */
 export function WorkspaceCheckMinScoreCard({ locale }: { locale: SpaBoot["locale"] }) {
-  const [loaded, setLoaded] = useState<CheckMinScoreSettings | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [draft, setDraft] = useState<string | null>(null);
-  const [checkMinScoreNotice, setCheckMinScoreNotice] = useState<OpNotice | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [attempt, setAttempt] = useState(0);
-
-  useEffect(() => {
-    let live = true;
-    fetchJson(`${apiBase()}/api/settings/check-min-score`).then(
-      (data) => {
-        if (!live) return;
-        const parsed = parseCheckMinScoreSettings(data);
-        if (parsed === null) setFailed(true);
-        else {
-          setFailed(false);
-          setLoaded(parsed);
-        }
-      },
-      () => {
-        if (live) setFailed(true);
-      },
-    );
-    return () => {
-      live = false;
-    };
-  }, [attempt]);
-
-  async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    if (busy || loaded === null) return;
-    // Same no-value rule as the concurrency form: a degraded read's fallback
-    // is not a value anyone stored, and an empty draft is not a repair.
-    if (concurrencySubmitBlocked(loaded.degraded, draft)) return;
-    setBusy(true);
-    const submitted = Number((draft ?? String(loaded.minScore)).trim());
-    try {
-      const { status, body } = await putJson(`${apiBase()}/api/settings/check-min-score`, {
-        min_score: submitted,
-      });
-      const outcome = settingsOpOutcome(locale, status, body, t(locale, "workspace.checkMinScoreSaved"));
-      if (outcome.kind === "success") {
-        const stored = parseStoredCheckMinScore(body) ?? submitted;
-        setLoaded((previous) => previous && { ...previous, minScore: stored, degraded: false });
-        setDraft(null);
-      }
-      setCheckMinScoreNotice(outcome);
-    } catch {
-      setCheckMinScoreNotice({ kind: "error", message: t(locale, "workspace.checkMinScoreFailed") });
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
-    <FlowSection
-      title={t(locale, "workspace.checkMinScoreHeading")}
-      subtitle={t(locale, "workspace.checkMinScoreDescription")}
-    >
-      {failed ? (
-        <LoadFailedNotice locale={locale} />
-      ) : loaded === null ? (
-        <LoadingNotice locale={locale} />
-      ) : (
-        <div className="flex flex-col gap-3">
-          {loaded.degraded ? (
-            <PageNotice
-              kind="warn"
-              message={t(locale, "workspace.checkMinScoreUnreadable", { max: loaded.max })}
-            />
-          ) : null}
-          <div className="flex flex-col gap-1.5">
-            <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium" htmlFor="workspace-check-min-score">
-                  {t(locale, "workspace.checkMinScoreLabel")}
-                </label>
-                <Input
-                  id="workspace-check-min-score"
-                  type="number"
-                  min={loaded.min}
-                  max={loaded.max}
-                  className="w-32"
-                  autoComplete="off"
-                  required
-                  value={draft ?? (loaded.degraded ? "" : String(loaded.minScore))}
-                  onChange={(event) => setDraft(event.target.value)}
-                />
-              </div>
-              <Button type="submit" disabled={busy}>
-                {t(locale, "workspace.checkMinScoreSave")}
-              </Button>
-              {loaded.degraded ? (
-                <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
-                  {t(locale, "common.retry")}
-                </Button>
-              ) : null}
-            </form>
-            <span className="text-xs text-muted-foreground">
-              {t(locale, "workspace.checkMinScoreRange", { max: loaded.max })}
-            </span>
-          </div>
-        </div>
-      )}
-      <NoticeRegion notice={checkMinScoreNotice} />
-    </FlowSection>
+    <NumberSettingCard
+      locale={locale}
+      getPath="/api/settings/check-min-score"
+      putPath="/api/settings/check-min-score"
+      payloadKey="min_score"
+      inputId="workspace-check-min-score"
+      copy={{
+        heading: "workspace.checkMinScoreHeading",
+        description: "workspace.checkMinScoreDescription",
+        label: "workspace.checkMinScoreLabel",
+        save: "workspace.checkMinScoreSave",
+        saved: "workspace.checkMinScoreSaved",
+        failed: "workspace.checkMinScoreFailed",
+        range: "workspace.checkMinScoreRange",
+        unreadable: "workspace.checkMinScoreUnreadable",
+      }}
+      parse={(data) => {
+        const parsed = parseCheckMinScoreSettings(data);
+        return parsed === null
+          ? null
+          : { value: parsed.minScore, min: parsed.min, max: parsed.max, degraded: parsed.degraded };
+      }}
+      parseStored={parseStoredCheckMinScore}
+    />
   );
 }
 

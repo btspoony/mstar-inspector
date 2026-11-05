@@ -65,6 +65,8 @@ import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../.
 import { composeModelOptions, findFailingSelector } from "../../src/dashboard/model-membership";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
 import { createSecretbox } from "../../src/dashboard/secretbox";
+import { t } from "../../src/i18n";
+import { CHECK_MIN_SCORE_MAX, CHECK_MIN_SCORE_MIN } from "../../src/contracts/review-gate";
 import { ALLOWLIST_MAX_OWNERS } from "../../src/dashboard/apps-store";
 import { PROVIDERS } from "../../src/pipeline/provider-catalog";
 import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../packages/runner/src/runtime-omp";
@@ -2713,8 +2715,9 @@ describe("review gate + owner allowlist (payload and ops)", () => {
       app: { github_visibility: string | null };
     };
     expect(body.can_manage).toBe(true);
-    // Migration 0049's default floor: 60 points and "ship it"; the allowlist is
-    // off and empty; a never-probed App reads as 'unknown'.
+    // The create-path default floor (no workspace default set): 60 points and
+    // "ship it"; the allowlist is off and empty; a never-probed App reads as
+    // 'unknown'.
     expect(body.check_gate).toEqual({ min_score: 60, pass_verdicts: ["ship it"] });
     expect(body.allowlist).toEqual({ enabled: false, owners: [] });
     expect(body.app.github_visibility).toBe("unknown");
@@ -2829,8 +2832,16 @@ describe("review gate + owner allowlist (payload and ops)", () => {
         pass_verdicts: "ship it",
       });
       expect(res.status).toBe(400);
-      const body = (await res.json()) as { key: string };
+      const body = (await res.json()) as { key: string; message: string };
       expect(body.key).toBe("settings.error.checkScoreInvalid");
+      // The accepted range comes from the contract constants, so the message
+      // cannot drift from the values the route actually validates against.
+      expect(body.message).toBe(
+        t("en", "settings.error.checkScoreInvalid", {
+          min: CHECK_MIN_SCORE_MIN,
+          max: CHECK_MIN_SCORE_MAX,
+        }),
+      );
     }
     expect(gateRow(db, app.id)).toEqual(before);
   });

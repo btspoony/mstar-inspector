@@ -6,8 +6,11 @@ category: Added
   completion.** The `mstar-inspector review` Check run concludes `success` only
   when the published review's verdict is one of the App's passing verdicts
   **and** its tally score is at least the App's floor; the defaults are the
-  verdict `ship it` and a floor of 60, so an App that never touches the setting
-  passes only a `ship it` review scoring 60 or more. A confirmed degraded
+  verdict `ship it` and a floor of 60; an App connected from now on starts at
+  its workspace's default (60 unless the workspace chose another), while an App
+  that predates the change keeps the floor it already stored — every App that
+  existed when the gate column was added carries the 80 that migration `0045`
+  materialized, and nothing moves it to 60. A confirmed degraded
   publication, an unconfirmed or expired attempt, an execution failure, a
   published review below the bar, an unreadable App gate and a published review
   without a readable tally all conclude `failure`; `neutral` is no longer
@@ -75,8 +78,9 @@ category: Added
 - **按 App 的审查门禁——Check 报的是门禁结果，不再是“执行完成”。**
   `mstar-inspector review` 这个 Check 只有在已发布审查的 verdict 属于该 App 的
   通过集合**且**其 tally 分数不低于该 App 的分数下限时才结论为 `success`；
-  默认值是通过 verdict `ship it` 与下限 60，因此从未改过设置的 App 只会让
-  `ship it` 且得分 60 以上的审查通过。已确认的降级发布、未确认或已过期的尝试、
+  默认值是通过 verdict `ship it` 与下限 60；从此以后接入的 App 以所属工作区的
+  默认值为起始下限（平台默认 60），而在此变更之前就已存在的 App 保留自己已存储的下限
+  ——门禁列加入时已存在的每个 App 带的是迁移 `0045` 物化的 80，没有任何步骤把它改成 60。已确认的降级发布、未确认或已过期的尝试、
   执行失败、未达标的已发布审查、无法读取的 App 门禁配置，以及没有可读 tally 的
   已发布审查，一律结论为 `failure`；`neutral` 不再产生（只留在历史行里）。审查按
   该次尝试自己的 publication id 读取，因此同一 commit 上另一次尝试的行无法决定它，

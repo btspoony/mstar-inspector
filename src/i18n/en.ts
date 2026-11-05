@@ -638,7 +638,7 @@ export const en = {
       triggerModeUnknown: "{mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
       reviewLevelUnknown:
         "{level} is not a review depth — use quick, default, or deep (or inherit to follow the operator default). Nothing was stored.",
-      checkScoreInvalid: "The review gate score must be a whole number from 0 to 100. Nothing was stored.",
+      checkScoreInvalid: "The review gate score must be a whole number from {min} to {max}. Nothing was stored.",
       checkVerdictUnknown:
         "{verdict} is not a review verdict — use one of: {verdicts}. Nothing was stored.",
       allowlistToggleInvalid: "The owner allowlist switch must be on or off. Nothing was stored.",

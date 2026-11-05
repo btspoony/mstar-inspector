@@ -20,6 +20,7 @@ import { SESSION_COOKIE, createSessionValue } from "./session";
 import type { Env } from "../worker/env";
 import { createMigratedTestD1, type TestD1 } from "../../tests/store/helpers";
 import { withSpaAssets } from "../../tests/helpers/spa";
+import { t } from "../i18n";
 
 const SESSION_SECRET = ["test", "runtime", "routes", "session", "32-bytes!"].join("-");
 const OPERATOR = "Support-Bot";
@@ -818,7 +819,11 @@ describe("workspace default review-gate floor", () => {
     ]) {
       const res = await putCheckMinScore(db, "acme", "dana", body);
       expect(res.status, JSON.stringify(body)).toBe(400);
-      expect(await res.json()).toMatchObject({ key: "settings.error.checkScoreInvalid" });
+      const refusal = (await res.json()) as { key: string; message: string };
+      expect(refusal.key).toBe("settings.error.checkScoreInvalid");
+      expect(refusal.message).toBe(
+        t("en", "settings.error.checkScoreInvalid", { min: 0, max: 100 }),
+      );
     }
     expect(storedFloor(db)).toBeNull();
     expect(auditRows(db)).toEqual([]);

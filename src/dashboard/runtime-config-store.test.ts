@@ -949,7 +949,13 @@ describe("workspace check_min_score default", () => {
     // the read's trust rule exists for.
     db.raw.exec("PRAGMA ignore_check_constraints = ON");
     db.raw.prepare("UPDATE workspaces SET check_min_score = 'maybe' WHERE id = ?").run(WS);
+    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
     expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({ minScore: 60, degraded: true });
+
+    // The ledger records the floor the workspace actually ran with, not the
+    // raw corrupt text the concurrency audit's comment calls out.
+    await setWorkspaceCheckMinScore(db, WS, 75, ACTOR);
+    expect(auditDetails(db, ACTION)).toEqual([{ before: 60, after: 75 }]);
   });
 
   test("a retired workspace is absent, and a read failure answers the default, flagged", async () => {

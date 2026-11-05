@@ -30,7 +30,6 @@ import {
   createAppsStore,
   parseAppReviewLevel,
 } from "../../src/dashboard/apps-store";
-import { DEFAULT_CHECK_MIN_SCORE } from "../../src/contracts/review-gate";
 import { getWorkspaceCheckMinScore } from "../../src/dashboard/runtime-config-store";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import type { D1Like } from "../../src/store/types";
@@ -184,7 +183,6 @@ describe("review gate (migration 0045)", () => {
     // The creation path seeds the floor; the column's own default (80) is
     // 0045's historical value and never applies to a real App.
     expect(await store.getCheckGate("app-created")).toEqual({ minScore: 60, passVerdicts: ["ship it"] });
-    expect(DEFAULT_CHECK_MIN_SCORE).toBe(60);
   });
 });
 
