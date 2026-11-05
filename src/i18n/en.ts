@@ -607,6 +607,8 @@ export const en = {
         "This App already has the maximum of {limit} custom providers — remove one before materializing another (updating an existing declaration is always allowed). Nothing was stored.",
       runtimeHarnessUnknown: "Unknown or disabled runtime harness — nothing was stored.",
       triggerModeUnknown: "{mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
+      reviewLevelUnknown:
+        "{level} is not a review depth — use quick, default, or deep (or inherit to follow the operator default). Nothing was stored.",
       checkScoreInvalid: "The review gate score must be a whole number from 0 to 100. Nothing was stored.",
       checkVerdictUnknown:
         "{verdict} is not a review verdict — use one of: {verdicts}. Nothing was stored.",
@@ -643,6 +645,20 @@ export const en = {
     triggerModeManual: "Manual",
     triggerModeMention: "Mention the bot in a PR comment to (re-)start a review — works in every mode:",
     triggerModeMentionAria: "Bot mention: {mention}",
+    // Review depth (migration 0047): the four faces of the App's depth select.
+    // Wire values stay quick/default/deep (plus the inherit face's own
+    // sentinel); only the labels localize. "Standard" is the `default` enum's
+    // tenant-facing name — a degree word beside Quick and Deep.
+    reviewDepth: "Review depth",
+    reviewDepthCopy:
+      "How thoroughly each review of this App runs. Quick is the cheapest; Deep is the most thorough.",
+    reviewDepthQuick: "Quick",
+    reviewDepthQuickHint: "fast, single-pass review",
+    reviewDepthStandard: "Standard",
+    reviewDepthStandardHint: "balanced depth (recommended)",
+    reviewDepthDeep: "Deep",
+    reviewDepthDeepHint: "most thorough, slower",
+    reviewDepthInherit: "Follow operator default (currently {level})",
     confirmPauseTitle: "Pause reviews for {slug}?",
     confirmPauseBody: "Webhooks stay connected — deliveries are answered and ignored until you resume.",
     confirmResumeTitle: "Resume reviews for {slug}?",

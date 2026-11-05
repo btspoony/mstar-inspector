@@ -513,6 +513,8 @@ export const zhCN: Dictionary = {
       templateMaterializeMax: "此 App 已达到 {limit} 个自定义 provider 的上限 — 请先移除一个再物化新模板（更新现有声明不受限制）。未存储任何内容。",
       runtimeHarnessUnknown: "未知或已停用的运行时 harness — 未存储任何内容。",
       triggerModeUnknown: "{mode} 不是有效的审查触发模式 — 可用值为 open、every_push、manual。未存储任何内容。",
+      reviewLevelUnknown:
+        "{level} 不是有效的评审深度 — 可用值为 quick、default、deep（或 inherit 表示跟随平台默认）。未存储任何内容。",
       checkScoreInvalid: "审查门禁分数必须是 0 到 100 之间的整数。未存储任何内容。",
       checkVerdictUnknown: "{verdict} 不是有效的审查结论 — 可用值为：{verdicts}。未存储任何内容。",
       allowlistToggleInvalid: "所有者白名单开关必须为开或关。未存储任何内容。",
@@ -540,6 +542,17 @@ export const zhCN: Dictionary = {
     triggerModeManual: "仅手动",
     triggerModeMention: "在 PR 评论中提及机器人即可（重新）启动审查 — 所有模式下均可用：",
     triggerModeMentionAria: "机器人提及字符串：{mention}",
+    // 评审深度（migration 0047）：App 深度选择器的四个面孔。线上取值保持
+    // quick/default/deep（另有 inherit 面孔自有哨兵值），仅标签本地化。
+    reviewDepth: "评审深度",
+    reviewDepthCopy: "控制此 App 每次评审的深入程度。快速成本最低，深入最彻底。",
+    reviewDepthQuick: "快速",
+    reviewDepthQuickHint: "单轮快速评审",
+    reviewDepthStandard: "标准",
+    reviewDepthStandardHint: "均衡深度（推荐）",
+    reviewDepthDeep: "深入",
+    reviewDepthDeepHint: "最彻底，耗时更长",
+    reviewDepthInherit: "跟随平台默认（当前：{level}）",
     confirmPauseTitle: "暂停 {slug} 的审查？",
     confirmPauseBody: "Webhook 保持连接 — 投递会被应答并忽略，直到你恢复。",
     confirmResumeTitle: "恢复 {slug} 的审查？",
