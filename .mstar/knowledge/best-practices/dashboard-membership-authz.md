@@ -1,17 +1,17 @@
 ---
 module: dashboard / membership authz (B4)
 date: 2026-08-29
-last_updated: 2026-10-14
+last_updated: 2026-11-05
 problem_type: best_practice
 category: best-practices
 severity: high
 topic: dashboard access control
 tags:
   - oauth
-  - allowlist
+  - open-signin
   - guard-middleware
   - stateless-cookies
-  - invite-only
+  - removed-logins
   - hono
 related_components:
   - session.ts
@@ -19,7 +19,7 @@ related_components:
   - index.ts
 ---
 
-# Invite-only membership on top of stateless OAuth sessions (Workers dashboard)
+# Membership authz on top of stateless OAuth sessions (Workers dashboard)
 
 ## Context
 

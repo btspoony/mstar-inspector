@@ -39,8 +39,7 @@ category: Changed
   /dashboard/<ref>/api/support/grants`——在该路径上运维者只能看到自己的授予行，而租户通知包含全部有效授权。工作区网关按
   `member → invitee → operator-granted → operator-denied → outsider` 分类：本身是成员的
   运维者仍享有普通成员权限；没有有效 `support_grants` 行的运维者得到与外部人完全相同的
-  404；**拥有**有效授权的运维者只能读取工作区身份字段、成员名单（登录名 + 角色）以及
-  `GET /dashboard/<ref>/api/support/grants`（仅自己那条）。App
+  404；**拥有**有效授权的运维者只能读取上述三项。App
   列表、App 设置、凭据、模型链、设置写入、角色变更、移除成员、邀请与审计列表对已授权
   运维者一律返回 403。
 - **每一次授权判定都在网关内留痕。** 当请求被分类为 operator-granted 或 operator-denied 时，
