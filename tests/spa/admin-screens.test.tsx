@@ -6,7 +6,7 @@
  * Mounted in happy-dom because the states live in effects and both controls
  * are Radix widgets that only answer real events.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { type Element as DomElement, type Window } from "happy-dom";
@@ -284,6 +284,73 @@ describe("Flags screen", () => {
     expect(row?.querySelector('[data-slot="toggle"]')?.textContent).toBe("OFF");
     expect(row?.textContent).toContain("Saved.");
     await surface.close();
+  });
+
+  test("the Saved. note clears itself 3s after the write lands", async () => {
+    jest.useFakeTimers();
+    const surface = await flagsScreen((request) =>
+      request.method === "PATCH" ? json({ key: "review_global", enabled: false }) : json({ flags: FLAGS }),
+    );
+    try {
+      await surface.click(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null);
+      await surface.click(
+        [...surface.win.document.querySelectorAll("button")].find(
+          (node) => node.textContent === "Confirm",
+        ) as unknown as DomElement,
+      );
+      expect(rowContaining(surface, "review_global")?.textContent).toContain("Saved.");
+
+      // Short-lived by contract: still there just before its own deadline…
+      await act(async () => {
+        jest.advanceTimersByTime(2999);
+      });
+      expect(rowContaining(surface, "review_global")?.textContent).toContain("Saved.");
+
+      // …and gone once it passes, so a stale confirmation never lies.
+      await act(async () => {
+        jest.advanceTimersByTime(1);
+      });
+      expect(rowContaining(surface, "review_global")?.textContent).not.toContain("Saved.");
+    } finally {
+      jest.useRealTimers();
+      await surface.close();
+    }
+  });
+
+  test("unmounting the screen cancels the note's pending auto-clear", async () => {
+    // A surviving timer would call setSavedKey into an unmounted tree.
+    jest.useFakeTimers();
+    const surface = await flagsScreen((request) =>
+      request.method === "PATCH" ? json({ key: "review_global", enabled: false }) : json({ flags: FLAGS }),
+    );
+    try {
+      await surface.click(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null);
+      await surface.click(
+        [...surface.win.document.querySelectorAll("button")].find(
+          (node) => node.textContent === "Confirm",
+        ) as unknown as DomElement,
+      );
+      const armed = jest.getTimerCount();
+      await surface.close();
+      // The teardown removed exactly one timer: the one this save armed.
+      expect(jest.getTimerCount()).toBe(armed - 1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("the confirmation dialog opens with focus on Cancel, never Confirm", async () => {
+    const surface = await flagsScreen(() => json({ flags: FLAGS }));
+    try {
+      await surface.click(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null);
+      const dialog = surface.win.document.querySelector('[role="alertdialog"]');
+      const focused = surface.win.document.activeElement;
+      // A stray Enter or a blind keypress must land on the harmless control.
+      expect(focused?.textContent).toBe("Cancel");
+      expect(focused !== null && dialog?.contains(focused)).toBe(true);
+    } finally {
+      await surface.close();
+    }
   });
 
   test("a non-AdminWriteError failure names the flag, not a literal {flag}", async () => {
