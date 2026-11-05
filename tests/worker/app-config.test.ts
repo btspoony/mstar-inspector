@@ -527,7 +527,7 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
     expect(afterReset.updated_at > "2026-01-01 00:00:00").toBe(true);
   });
 
-  test("full-file direct run (0001→0012 order) creates app_custom_providers with the AL-23-1 DDL shape", async () => {
+  test("pre-pool shape (0006 → 0038) creates app_custom_providers with the AL-23-1 DDL shape", async () => {
     const db = createPreProviderPoolD1(); // 0006 → 0038 via APP_CONFIG_PRE_POOL_MIGRATIONS
     const cols = db.raw.query("PRAGMA table_info(app_custom_providers)").all() as Array<{
       name: string;

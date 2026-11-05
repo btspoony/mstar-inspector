@@ -5,10 +5,12 @@
  * getVerifiedModels).
  *
  * Production-shaped sequence (the 0004/0005 + 0012 precedent): the
- * bun:sqlite double applies 0001/0002, a row is SEEDED, and only then do
- * 0003 → 0012 apply in filename order; 0015 is applied SEPARATELY over the
- * populated DB — the append-only assumption is exercised against a DB that
- * already holds data, exactly like `wrangler d1 migrations apply`.
+ * bun:sqlite double applies 0001/0002, a row is SEEDED, and only then does
+ * `PROVIDER_VERIFY_MIGRATIONS` apply — the hand-listed pre-0015 provider shape
+ * with the 0010/0020 tail prerequisites and the 0038-derived tail. 0015 is
+ * applied SEPARATELY over the populated DB — the append-only assumption is
+ * exercised against a DB that already holds data, exactly like
+ * `wrangler d1 migrations apply`.
  *
  * Verify-service tests use a mocked fetch: success+models / 401 / timeout /
  * non-JSON / custom-provider happy+401, plus the endpoint-map parity lock

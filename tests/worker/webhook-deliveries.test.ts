@@ -4,7 +4,9 @@
  * face's best-effort recording.
  *
  * Contract under test:
- *   - 0011 applies over a seeded production-shaped DB (0001–0010) and
+ *   - 0011 applies over a seeded production-shaped DB (the double's 0001/0002
+ *     base plus the hand-listed 0003–0010 + 0036 prefix; every other test runs
+ *     on WEBHOOK_DELIVERIES_MIGRATIONS + WEBHOOK_DELIVERIES_TAIL) and
  *     creates webhook_deliveries + idx_webhook_deliveries_app_created
  *     (append-only; NO deliverable_hint column — AL-20-1).
  *   - The outcome vocabulary is producer-side (apps-store DELIVERY_OUTCOMES,

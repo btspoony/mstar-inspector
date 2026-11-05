@@ -24,13 +24,12 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { idemKey } from "../../src/contracts/idem";
 import type { ReviewOutput } from "../../src/review/schema";
-import { migrationsAfter, createTestD1, mapAppToDefaultWorkspace } from "../store/helpers";
+import { createTestD1, mapAppToDefaultWorkspace } from "../store/helpers";
+import { APP_CREDENTIAL_RESOLUTION_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -38,7 +37,6 @@ import { sk, fakePem } from "../helpers/fake-secrets";
 import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
-const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 /** Distinct fake App PEMs — isolation asserts the factory receives the right one. */
@@ -55,67 +53,7 @@ const VALID_OUTPUT: ReviewOutput = {
 
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
-  // 0006: the per-App config tables the settings consumer now reads
-  // on EVERY app-path message — the fixture must stay production-shaped.
-  // 0008: the github_apps ops columns (review_enabled) the
-  // paused gate reads on every app-path message.
-  // 0009: the per-role table the consumer's modelOverrides read
-  // queries on every app-path message.
-  // 0012: app_provider_keys.updated_at — the store's upsert writes
-  // it, so the fixture must carry the column.
-  // 0015: the store's addProviderKey upsert now writes the
-  // verified_* columns, so the fixture must carry them too.
-  // 0017: the store's setModelChain now writes the default
-  // app_model_chains row, so the fixture must carry the chains tables.
-  // 0018: github_apps.sandbox_image_id — the consumer's per-message
-  // sandbox-image resolution reads it on EVERY app-path message.
-  // 0019–0021 complete the shipped schema the same per-message path now
-  // reads, so the fixture must carry it too (the migration order below is
-  // wrangler's apply order; 0021's FKs target 0020, which targets 0004):
-  // 0019: the github_apps github_* metadata columns — the app
-  //     row the consumer re-reads per message is the production `SELECT *`
-  //     shape, which carries them.
-  // 0020: the finding-lifecycle journal. The consumer's step-2
-  //     journal handoff queries review_publications on EVERY app-path
-  //     message (journalHandoffRow), and its lifecycle-context step
-  //     reads review_findings (selectAssessmentTargets / countRecheckableFindings).
-  // 0021: review_checks — the Check-attempt registry the
-  //     consumer's §7.10 lifecycle seam owns; its publication_id FK
-  //     resolves against 0020's review_publications.
-  for (const name of [
-    "0003_dashboard_users.sql",
-    "0004_github_apps.sql",
-    "0005_reviews_app_id.sql",
-    "0006_app_provider_config.sql",
-    "0008_github_apps_ops.sql",
-    "0009_app_model_roles.sql",
-    // 0010: the derived tail's 0048 indexes review_failures, so the table this
-    // hand-listed shape skipped must exist before the tail runs.
-    "0010_review_failures.sql",
-    // 0011: the delivery table — 0043 adds a column to it, so the fixture must
-    // carry it before the derived tail runs. Listed here at its wrangler
-    // position (after 0009/0010), not appended where the need was noticed.
-    "0011_webhook_deliveries.sql",
-    "0012_custom_providers_and_key_updated_at.sql",
-    "0015_provider_verification.sql",
-    "0017_app_model_chains.sql",
-    "0018_app_sandbox_images.sql",
-    "0019_github_apps_metadata.sql",
-    "0020_finding_lifecycle.sql",
-    "0021_review_checks.sql",
-    "0022_app_trigger_mode.sql",
-    "0024_provider_multi_key.sql",
-    // 0026: createApp also writes the App's workspace mapping.
-    "0026_workspaces.sql",
-    "0036_app_identity.sql",
-    // Every later migration, derived from the directory (0040–… included):
-    // the consumer's per-message admission reads the runtime caps and writes
-    // the `review_inflight` row on EVERY admitted message, and 0043 adds the
-    // delivery source column.
-    ...migrationsAfter("0036_app_identity.sql"),
-  ]) {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
-  }
+  applyMigrations(db, APP_CREDENTIAL_RESOLUTION_MIGRATIONS);
   return db;
 }
 

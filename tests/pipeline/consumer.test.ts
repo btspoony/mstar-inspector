@@ -38,8 +38,6 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
@@ -49,7 +47,12 @@ import { createFailureStore } from "../../src/store/failure-store";
 import { acquireInflight } from "../../src/store/inflight-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
-import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
+import { createTestD1, type TestD1 } from "../store/helpers";
+import {
+  CONSUMER_POST_CHAINS_MIGRATIONS,
+  CONSUMER_PRE_CHAINS_MIGRATIONS,
+  applyMigrations,
+} from "../helpers/migration-shapes";
 import {
   REVIEW_LEVEL_KEY,
   SYSTEM_CONCURRENCY_DEFAULT,
@@ -121,15 +124,6 @@ import {
 
 /** The review gate the seeded test App carries (migration 0045's DDL default). */
 const GATE = { minScore: 80, passVerdicts: ["ship it"] } as const;
-
-/**
- * The migrations after the 0036 identity rewrite, in wrangler's apply order.
- * Derived from the directory (numeric prefix order, so `1000_*` follows
- * `999_*`) so a future migration cannot leave the equivalence fixture on a
- * stale schema; the 0036 boundary stays explicit because that fixture
- * reconstructs a specific historical shape.
- */
-const MIGRATIONS_AFTER_0036 = migrationsAfter(36);
 
 // --- shared runtime doubles -------------------------------------------------
 // The sandbox/commenter/KV doubles, the payload + batch builders and `reset`
@@ -1807,24 +1801,7 @@ describe("createReviewConsumer", () => {
     // journal tables (0020) are required by the §7.7 step-2 read
     // and are unrelated to the 0017 backfill under test.
     const db = createTestD1();
-    for (const name of [
-      "0003_dashboard_users.sql",
-      "0004_github_apps.sql",
-      "0005_reviews_app_id.sql",
-      "0006_app_provider_config.sql",
-      "0007_reviews_app_id_index.sql",
-      "0008_github_apps_ops.sql",
-      "0009_app_model_roles.sql",
-      "0010_review_failures.sql",
-      "0011_webhook_deliveries.sql",
-      "0012_custom_providers_and_key_updated_at.sql",
-      "0013_findings_review_id_index.sql",
-      "0014_idx_reviews_reviewed_at.sql",
-      "0015_provider_verification.sql",
-      "0016_users_login_nocase_unique.sql",
-    ]) {
-      db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
-    }
+    applyMigrations(db, CONSUMER_PRE_CHAINS_MIGRATIONS);
     // Seed the pre-chains shape: github_apps + app_model_config chain +
     // app_model_roles rows + the ark BYOK key (the fail-closed gate needs
     // it). The chain and selectors are the byte-identical baseline.
@@ -1874,36 +1851,12 @@ describe("createReviewConsumer", () => {
         .run(appId, provider, await box.encryptSecret(key, `app_provider_keys.key_enc:${appId}:${provider}`));
     }
     // Apply 0017 (the backfill) — the migration under test.
-    db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", "0017_app_model_chains.sql"), "utf8"));
+    applyMigrations(db, ["0017_app_model_chains.sql"]);
     // 0018 ships with the consumer that resolves the App's sandbox
     // image — the row backfills to the 'omp' default exactly like a real
-    // pre-37 App under this deployment pair. 0019–0024 complete the current
-    // migration set (0019 metadata, 0020 the lifecycle journal the
-    // consumer's step-2 read queries, 0021–0022 the check / trigger columns,
-    // 0024 the per-key provider pools the store now writes).
-    for (const name of [
-      "0018_app_sandbox_images.sql",
-      "0019_github_apps_metadata.sql",
-      "0020_finding_lifecycle.sql",
-      "0021_review_checks.sql",
-      "0022_app_trigger_mode.sql",
-      "0024_provider_multi_key.sql",
-      "0026_workspaces.sql",
-      // The workspace plane every App read joins; 0027 attributes the legacy
-      // App above to the 'default' workspace exactly as a real deployment does.
-      "0027_workspace_backfill.sql",
-      // 0031 completes the current set: the consumer meters every started
-      // execution into usage_events.
-      "0031_plans_usage.sql",
-      // 0036 renames the seeded route-key column, as the deploy does.
-      "0036_app_identity.sql",
-      // Every migration after 0036, derived from the directory (0039–0041
-      // included): the consumer's admission reads the runtime caps and writes
-      // the `review_inflight` row on every admitted message.
-      ...MIGRATIONS_AFTER_0036,
-    ]) {
-      db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
-    }
+    // pre-37 App under this deployment pair; the rest of the half completes
+    // the current migration set (see CONSUMER_POST_CHAINS_MIGRATIONS).
+    applyMigrations(db, CONSUMER_POST_CHAINS_MIGRATIONS);
     // Post-migration resolution is byte-identical: the default row holds
     // the chain verbatim; the seat-<role> chains + reference rows resolve
     // to the same overrides map; every carried key row was promoted to its
