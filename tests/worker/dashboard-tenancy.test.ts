@@ -1493,6 +1493,45 @@ describe("App creation is owner/admin", () => {
     expect(row.n).toBe(1);
   });
 
+  test("the commit recovery route answers the same named workspaceGone error, not a shell redirect", async () => {
+    // The callback's concurrent delete, replayed on POST /manifest/commit: the
+    // hold names a live workspace, the commit writes the App row, and the
+    // retirement lands before the post-commit landing read. The recovery route
+    // is the operator's native resubmit after a retryable callback failure, so
+    // it must answer with the same named failure instead of quietly dropping
+    // them on `/dashboard`.
+    const { db } = soleWorkspaceRoles();
+    const hold = await createHoldValue(CONVERSION, "dana", SESSION_SECRET, SLUG, "default");
+
+    // `getWorkspaceByRef`'s SELECT is unique to the post-commit landing read,
+    // so retiring the row here is exactly the mid-flow deletion.
+    const deletingDb: TestD1 = {
+      prepare(query: string) {
+        if (query.includes("FROM workspaces WHERE (slug = ?1 OR id = ?1)")) {
+          seed(
+            db,
+            "UPDATE workspaces SET deleted_at = ? WHERE id = 'default'",
+            new Date().toISOString(),
+          );
+        }
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+      raw: db.raw,
+    };
+
+    const res = await postWithHold("dana", hold, envFor(deletingDb));
+    expect(res.status).toBe(409);
+    expect(res.headers.get("Location")).toBeNull();
+    expect(await res.text()).toContain(t("en", "manifest.error.workspaceGone"));
+    // The App row was written before the workspace vanished: the named failure
+    // is about the missing landing page, not about a lost write.
+    const row = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM github_apps WHERE github_app_id = ?")
+      .get(CONVERSION.id) as { n: number };
+    expect(row.n).toBe(1);
+  });
+
   test("the boot's create capability follows the addressed workspace", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-acme", "acme");
