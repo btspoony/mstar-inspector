@@ -186,18 +186,33 @@ export function failureRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_failures ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
+/** The §7.10 coverage line's four numbers. */
+export type CoverageNumbers = {
+  assessed: number;
+  selected: number;
+  invalidOutput: number;
+  omitted: number;
+};
+
+/**
+ * The exact published coverage sentence for these numbers — the ONE place the
+ * wording is spelled, so a suite pins the user-visible text without restating
+ * it (and a wording change edits this helper, not every assertion).
+ */
+export function coverageLine(coverage: CoverageNumbers): string {
+  return (
+    `Reassessed ${coverage.assessed}/${coverage.selected} prior finding(s) this round` +
+    ` · ${coverage.invalidOutput} invalid-output · ${coverage.omitted} omitted`
+  );
+}
+
 /**
  * The published §7.10 coverage line's numbers, so a test can assert the
  * partition identity `assessed + invalid-output + omitted === selected` as
  * arithmetic instead of restating the line's literals. `null` when the body
  * carries no such line (a round with no prior finding renders `none`).
  */
-export function coverageLineNumbers(body: string): {
-  assessed: number;
-  selected: number;
-  invalidOutput: number;
-  omitted: number;
-} | null {
+export function coverageLineNumbers(body: string): CoverageNumbers | null {
   const match =
     /Reassessed (\d+)\/(\d+) prior finding\(s\) this round · (\d+) invalid-output · (\d+) omitted/.exec(body);
   if (match === null) return null;

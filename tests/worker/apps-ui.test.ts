@@ -18,8 +18,6 @@
  * models editor; 0022 is the per-App review trigger mode column).
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { t } from "../../src/i18n";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -27,12 +25,12 @@ import type { Env } from "../../src/worker/env";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
-import { createTestD1, migrationsAfter } from "../store/helpers";
+import { createTestD1 } from "../store/helpers";
+import { APPS_UI_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
-const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const TEST_WEBHOOK_SECRET = ["test", "app", "webhook", "secret"].join("-");
@@ -59,44 +57,7 @@ async function encryptedColumns(id: string): Promise<{ privateKeyEnc: string; we
 
 function createAppsUiD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
-  for (const name of [
-    "0003_dashboard_users.sql",
-    "0004_github_apps.sql",
-    "0005_reviews_app_id.sql",
-    "0006_app_provider_config.sql",
-    "0007_reviews_app_id_index.sql",
-    "0008_github_apps_ops.sql",
-    "0009_app_model_roles.sql",
-    // 0010: the derived tail's 0048 indexes review_failures, so the table this
-    // hand-listed shape skipped must exist before the tail runs.
-    "0010_review_failures.sql",
-    "0011_webhook_deliveries.sql",
-    "0012_custom_providers_and_key_updated_at.sql",
-    // 0020: the derived tail's 0047 indexes review_threads, so the table this
-    // hand-listed shape skipped must exist before the tail runs.
-    "0020_finding_lifecycle.sql",
-    "0022_app_trigger_mode.sql",
-    "0023_removed_logins.sql",
-    // 0026: createApp also writes the App's workspace mapping.
-    "0026_workspaces.sql",
-    // 0028: the SPA boot reads pending invites.
-    "0028_workspace_invites.sql",
-    // 0033: the SPA boot reads the `workspace_creation_open` server flag.
-    "0033_platform_admin.sql",
-    // 0036: github_apps.slug → webhook_path plus the cached github_slug.
-    "0036_app_identity.sql",
-    // 0038 rebuilds github_apps, so the fixture must carry every column the
-    // rebuild copies.
-    "0018_app_sandbox_images.sql",
-    "0019_github_apps_metadata.sql",
-    "0037_github_metadata_attempt.sql",
-    "0038_webhook_path_drop.sql",
-    // The directory-derived tail (0043 adds the delivery source column the
-    // health summary selects), so a new migration joins automatically.
-    ...migrationsAfter("0038_webhook_path_drop.sql"),
-  ]) {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
-  }
+  applyMigrations(db, APPS_UI_MIGRATIONS);
   return db;
 }
 

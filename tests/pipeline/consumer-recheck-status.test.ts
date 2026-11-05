@@ -26,6 +26,7 @@ import {
 import {
   commenterCalls,
   commenterState,
+  coverageLine,
   coverageLineNumbers,
   createReviewConsumer,
   failureRows,
@@ -119,12 +120,12 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     // Every sent row is answered-nothing, so all 25 land in `invalid-output`
     // and none is mistaken for a row the round never attempted.
-    expect(prepared.body).toContain("Reassessed 0/25 prior finding(s) this round");
-    expect(prepared.body).toContain("25 invalid-output · 0 omitted");
+    const expectedCoverage = { assessed: 0, selected: 25, invalidOutput: 25, omitted: 0 };
+    expect(prepared.body).toContain(coverageLine(expectedCoverage));
     // The line's identity, read back from the published text: every selected
     // row is accounted exactly once.
     const coverage = coverageLineNumbers(prepared.body)!;
-    expect(coverage).toEqual({ assessed: 0, selected: 25, invalidOutput: 25, omitted: 0 });
+    expect(coverage).toEqual(expectedCoverage);
     expect(coverage.assessed + coverage.invalidOutput + coverage.omitted).toBe(coverage.selected);
     // …and no row vanished from the table that renders the same verdicts.
     const priorSection = prepared.body.slice(prepared.body.indexOf("### Revalidated findings"));

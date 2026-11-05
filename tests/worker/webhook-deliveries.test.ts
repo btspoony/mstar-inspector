@@ -33,7 +33,13 @@ import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore, DELIVERY_OUTCOMES } from "../../src/dashboard/apps-store";
 import type { DeliveryOutcome } from "../../src/dashboard/apps-store";
-import { createMigratedTestD1, createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
+import {
+  WEBHOOK_DELIVERIES_FAILURE_ONLY,
+  WEBHOOK_DELIVERIES_MIGRATIONS,
+  WEBHOOK_DELIVERIES_TAIL,
+  applyMigrations,
+} from "../helpers/migration-shapes";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -493,49 +499,18 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
 describe("per-App webhook face — best-effort delivery recording", () => {
   function createMigratedD1(withDeliveries = true): ReturnType<typeof createTestD1> {
     const db = createTestD1();
-    // 0008: the github_apps ops columns (review_enabled /
-    // last_webhook_at) the pause gate + touch read and write on every
-    // delivery; 0011 is the delivery table under test — omitted
-    // for the best-effort failure fixture.
-    const names = [
-      "0004_github_apps.sql",
-      "0005_reviews_app_id.sql",
-      "0008_github_apps_ops.sql",
-      // 0010: the derived tail's 0048 indexes review_failures, so the table
-      // this hand-listed shape skipped must exist before the tail runs.
-      "0010_review_failures.sql",
-      // 0020: the derived tail's 0047 indexes review_threads, so the table
-      // this hand-listed shape skipped must exist before the tail runs.
-      "0020_finding_lifecycle.sql",
-      // 0026: the webhook's slug lookup is the joined tenant read, so the
-      // fixture carries the workspace plane and the App's mapping.
-      "0026_workspaces.sql",
-      // 0033: the enqueue decision reads the `review_global` server flag.
-      "0033_platform_admin.sql",
-      // 0036: webhook_path (renamed from slug) + the cached github_slug.
-      "0036_app_identity.sql",
-      // 0038 rebuilds github_apps, so the fixture must carry every column the
-      // rebuild copies.
-      "0018_app_sandbox_images.sql",
-      "0019_github_apps_metadata.sql",
-      "0022_app_trigger_mode.sql",
-      "0037_github_metadata_attempt.sql",
-      "0038_webhook_path_drop.sql",
-    ];
+    applyMigrations(db, WEBHOOK_DELIVERIES_MIGRATIONS);
     if (withDeliveries) {
       // 0011 plus every migration after the 0038 rebuild — derived from the
-      // directory, so a new one (0043's source column included) joins
-      // automatically. The failure fixture stops before the delivery table.
-      names.push("0011_webhook_deliveries.sql", ...migrationsAfter("0038_webhook_path_drop.sql"));
+      // directory, so a new one joins automatically.
+      applyMigrations(db, WEBHOOK_DELIVERIES_TAIL);
     } else {
       // ...but the owner allowlist read runs on every review-triggering
       // delivery (pull_request / issue_comment) and is fail-closed, so without
       // 0045's table this fixture would exercise the gate's 500 instead of the
-      // delivery recorder it is here to break.
-      names.push("0045_review_gate_and_owner_allowlist.sql");
-    }
-    for (const name of names) {
-      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+      // delivery recorder it is here to break. This branch carries the shared
+      // prefix's 0010/0020 but no tail — they are incidental here.
+      applyMigrations(db, WEBHOOK_DELIVERIES_FAILURE_ONLY);
     }
     return db;
   }

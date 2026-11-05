@@ -29,7 +29,13 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
-import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
+import { createTestD1, type TestD1 } from "../store/helpers";
+import {
+  APP_CONFIG_BASE_MIGRATIONS,
+  APP_CONFIG_MIGRATIONS,
+  APP_CONFIG_PRE_POOL_MIGRATIONS,
+  applyMigrations,
+} from "../helpers/migration-shapes";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import {
   CUSTOM_PROVIDER_API_IDS,
@@ -108,16 +114,6 @@ function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void
   db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
 }
 
-const PLAN_13_MIGRATIONS = [
-  "0003_dashboard_users.sql",
-  "0004_github_apps.sql",
-  // 0036 renames github_apps.slug → webhook_path and adds github_slug; every
-  // fixture that seeds an App through createApp needs it (it only touches
-  // github_apps, so applying it early keeps the later files' order intact).
-  "0036_app_identity.sql",
-  "0005_reviews_app_id.sql",
-];
-
 /**
  * Production-shaped DB: 0001/0002 + a seeded review row, then the later
  * migrations in filename order (0006 is applied SEPARATELY by the migration
@@ -130,98 +126,29 @@ function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
     `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
      VALUES ('review-1', 123, 'acme', 'widgets', 42, '0123456789abcdef0123456789abcdef01234567', 'comment', 'ok')`,
   );
-  for (const name of PLAN_13_MIGRATIONS) applyMigration(db, name);
-  // 0026: createApp writes its app_workspaces mapping in the same batch, so
-  // every fixture that seeds an App needs the workspace data plane. Applied
-  // after 0004 (its FK parent); the file only creates new tables.
-  applyMigration(db, "0026_workspaces.sql");
-  // 0028: the SPA boot reads pending invites.
-  applyMigration(db, "0028_workspace_invites.sql");
+  applyMigrations(db, APP_CONFIG_BASE_MIGRATIONS);
   return db;
 }
 
-/**
- * The pre-pool shape (0006 → 0022, filename order): app_provider_keys still
- * carries ONE row per (App, provider) under the two-segment AAD and
- * app_custom_providers still carries its key column. The 0024 migration tests
- * seed this shape, then apply the migration, exactly like the wrangler order
- * on a live deployment.
- */
+/** The pre-pool shape (0006 → 0038, filename order) the 0024/0025 tests seed. */
 function createPreProviderPoolD1(): TestD1 {
   const db = createPopulatedPre0006D1();
-  applyMigration(db, "0006_app_provider_config.sql");
-  applyMigration(db, "0008_github_apps_ops.sql");
-  applyMigration(db, "0009_app_model_roles.sql");
-  // 0010: the derived tail's 0048 indexes review_failures — the table must
-  // exist before `migrationsAfter(0038)` runs.
-  applyMigration(db, "0010_review_failures.sql");
-  // 0011: the settings page now renders the recent-deliveries
-  // panel from webhook_deliveries on every render — the fixture must carry
-  // the table or every settings route 500s.
-  applyMigration(db, "0011_webhook_deliveries.sql");
-  applyMigration(db, "0012_custom_providers_and_key_updated_at.sql");
-  applyMigration(db, "0015_provider_verification.sql");
-  // 0017: the chains store tests + the settings routes run on
-  // the chains shape (app_model_chains + app_model_chain_seats).
-  applyMigration(db, "0017_app_model_chains.sql");
-  // 0018: the settings routes + the sandbox-image selection run on
-  // the shape carrying github_apps.sandbox_image_id (the custom-provider
-  // collision backstop resolves the App's selected image through it).
-  applyMigration(db, "0018_app_sandbox_images.sql");
-  // 0019: the settings JSON GET reads/writes the five github_*
-  // metadata columns — the route must run on the production shape.
-  applyMigration(db, "0019_github_apps_metadata.sql");
-  // 0020: the derived tail's 0047 indexes review_threads, so the table this
-  // hand-listed shape skipped must exist before the tail runs.
-  applyMigration(db, "0020_finding_lifecycle.sql");
-  // 0022: the settings read face serves github_apps.review_trigger_mode
-  // (the SPA mode control's value) and the trigger-mode route validates
-  // against the CHECK enum — the route tests run on the production shape.
-  applyMigration(db, "0022_app_trigger_mode.sql");
-  // 0023: createUser clears a removal record in the same batch as its insert,
-  // so every membership-creating fixture needs the tombstone table too.
-  applyMigration(db, "0023_removed_logins.sql");
-  // 0037/0038: the metadata-attempt marker plus the github_apps rebuild that
-  // drops the local route key — every App seeded through createApp needs the
-  // post-0038 shape.
-  applyMigration(db, "0037_github_metadata_attempt.sql");
-  applyMigration(db, "0038_webhook_path_drop.sql");
+  applyMigrations(db, APP_CONFIG_PRE_POOL_MIGRATIONS);
   return db;
 }
 
 /**
- * The config routes' shape: the pre-pool one plus 0024/0025 (the per-key pools
- * and their model evidence), 0029/0031–0033 (the support-grant, plan and
- * `server_flags` tables the SPA boot reads) and the index-only 0034/0035.
- * Those are every migration between the parent's last file (0023) and the
- * 0037/0038 tail the parent already applied, so the declared shape has no
- * hole below the derived anchor. The tail itself is `migrationsAfter(0038)` —
- * 0038 being the last file applied by hand — so a new migration joins it with
- * no lockstep edit and nothing between the hand-applied set and the anchor can
- * silently drop out. 0015 matters because the store's key writes maintain the
- * verified_* columns, so every config-store test must run on the 0015-shaped
- * schema. This is the config routes' shape, not a replay of every migration.
+ * The config routes' shape: the pre-pool one plus 0024/0025, 0029/0031–0035
+ * and the derived tail (`migrationsAfter(0038)` — 0038 being the last file
+ * applied by hand). A new migration joins the tail with no lockstep edit,
+ * except when it indexes a table below the anchor: that dependency is
+ * declared once in `TAIL_PREREQUISITES`. 0015 matters because the store's key
+ * writes maintain the verified_* columns, so every config-store test must run
+ * on the 0015-shaped schema.
  */
 function createAppConfigD1(): TestD1 {
   const db = createPreProviderPoolD1();
-  applyMigration(db, "0024_provider_multi_key.sql");
-  applyMigration(db, "0025_provider_model_evidence.sql");
-  // 0029/0031–0033: SPA dispatch reads the support-grant table, the plan
-  // catalogue + subscriptions and `server_flags` while it builds the boot, so
-  // the shell route runs on the production shape.
-  applyMigration(db, "0029_operator_support.sql");
-  applyMigration(db, "0031_plans_usage.sql");
-  applyMigration(db, "0032_unlimited_plan.sql");
-  applyMigration(db, "0033_platform_admin.sql");
-  // 0034/0035 index the support-grant and lapsed-invite predicates: index-only,
-  // and they must follow 0029/0028. They sit here so the derived tail starts at
-  // the last hand-applied file with nothing below it left out.
-  applyMigration(db, "0034_support_grant_indexes.sql");
-  applyMigration(db, "0035_workspace_invite_expiry_index.sql");
-  // The derived tail (0039–…): the settings health face reads the delivery
-  // summary, which names the 0043 source column, and the workspace plan
-  // tables stay complete. A new migration joins here automatically.
-  for (const name of migrationsAfter("0038_webhook_path_drop.sql")) applyMigration(db, name);
+  applyMigrations(db, APP_CONFIG_MIGRATIONS);
   return db;
 }
 

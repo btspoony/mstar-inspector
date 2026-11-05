@@ -18,7 +18,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createMigratedTestD1, createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
+import { PROVIDER_VERIFY_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import {
@@ -83,44 +84,14 @@ async function seedApp(db: DashboardD1, slug: string): Promise<GithubAppRow> {
 }
 
 /**
- * Production-shaped DB through 0012 (the state 0015 must apply over, per the
- * locked order: AFTER 0004 and AFTER 0012), with an App plus one
- * pre-0015 key row and one pre-0015 custom-provider row seeded.
+ * The fixture 0015 must apply over: the pre-0015 provider tables (0006/0012)
+ * on an App seeded like production, plus the physical tables a later tail
+ * migration indexes (0010/0020) and the 0038-derived tail itself. 0015's own
+ * columns are absent here — the test that owns that migration applies it.
  */
 async function createPopulatedPre0015D1(): Promise<TestD1> {
   const db = createTestD1();
-  for (const name of [
-    "0003_dashboard_users.sql",
-    "0004_github_apps.sql",
-    // 0036: the cached github_slug column (createApp writes it).
-    "0036_app_identity.sql",
-    "0005_reviews_app_id.sql",
-    "0006_app_provider_config.sql",
-    "0008_github_apps_ops.sql",
-    "0009_app_model_roles.sql",
-    // 0010: the derived tail's 0048 indexes review_failures, so the table this
-    // hand-listed shape skipped must exist before the tail runs.
-    "0010_review_failures.sql",
-    "0011_webhook_deliveries.sql",
-    "0012_custom_providers_and_key_updated_at.sql",
-    // 0020: the derived tail's 0047 indexes review_threads, so the table this
-    // hand-listed shape skipped must exist before the tail runs.
-    "0020_finding_lifecycle.sql",
-    // 0026: createApp's atomic app_workspaces mapping.
-    "0026_workspaces.sql",
-    // 0038 rebuilds github_apps, so the fixture must carry every column the
-    // rebuild copies.
-    "0018_app_sandbox_images.sql",
-    "0019_github_apps_metadata.sql",
-    "0022_app_trigger_mode.sql",
-    "0037_github_metadata_attempt.sql",
-    "0038_webhook_path_drop.sql",
-    // The directory-derived tail (0043 adds the delivery source column the
-    // health summary selects), so a new migration joins automatically.
-    ...migrationsAfter("0038_webhook_path_drop.sql"),
-  ]) {
-    applyMigration(db, name);
-  }
+  applyMigrations(db, PROVIDER_VERIFY_MIGRATIONS);
   const app = await seedApp(db, "legacy-app");
   const box = createSecretbox(TEST_KEY);
   // A key row written BEFORE 0015 — the pre-migration column set.

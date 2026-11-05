@@ -22,6 +22,7 @@ import {
 } from "../helpers/consumer-fixtures";
 import {
   commenterCalls,
+  coverageLine,
   coverageLineNumbers,
   createReviewConsumer,
   failureRows,
@@ -158,10 +159,10 @@ describe("recheck conservative precedence (§7.4)", () => {
     await consumer(makeBatch(makePayload()));
 
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("Reassessed 0/25 prior finding(s) this round");
-    expect(prepared.body).toContain("25 invalid-output · 0 omitted");
+    const expectedCoverage = { assessed: 0, selected: 25, invalidOutput: 25, omitted: 0 };
+    expect(prepared.body).toContain(coverageLine(expectedCoverage));
     const coverage = coverageLineNumbers(prepared.body)!;
-    expect(coverage).toEqual({ assessed: 0, selected: 25, invalidOutput: 25, omitted: 0 });
+    expect(coverage).toEqual(expectedCoverage);
     expect(coverage.assessed + coverage.invalidOutput + coverage.omitted).toBe(coverage.selected);
     // No closure was claimed, so none is published and no thread resolves.
     expect(prepared.body).not.toContain("addressed (verified-fix)");
