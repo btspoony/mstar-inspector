@@ -17,7 +17,7 @@
  * a rejected credential is `unauthorized`, never a healthy bar.
  *
  * Catalog id → family. An unmapped id is `absent` + `no-probe` and NEVER a
- * guessed endpoint (the probe set is exactly the nine families below).
+ * guessed endpoint (the probe set is exactly the ten families below).
  *
  * | catalog ids                                                        | endpoint (auth)                                                        | limits |
  * |--------------------------------------------------------------------|------------------------------------------------------------------------|--------|
@@ -32,6 +32,7 @@
  * | umans                                                              | GET https://api.code.umans.ai/v1/usage (Bearer)                        | rolling request window + concurrency |
  * | hyper                                                              | GET https://hyper.charm.land/credits (Bearer)                          | credit balance |
  * | kimi-for-coding                                                    | GET https://api.kimi.com/coding/v1/usages (Bearer)                     | aggregate weekly + limits[] by span |
+ * | cursor                                                             | GET https://api2.cursor.sh/auth/usage (Bearer)                         | one window per bucket (requests, or USD for spend buckets) |
  *
  * Failure reasons are structured and never a raw vendor string. `absent` also
  * carries its cause: `no-probe` (unmapped id) vs `reported-nothing` (the vendor
@@ -148,6 +149,15 @@ function resetOf(row: Record<string, unknown>, keys: readonly string[]): number 
   for (const key of keys) {
     const parsed = resetFrom(row[key]);
     if (parsed !== undefined) return parsed;
+  }
+  return undefined;
+}
+
+/** The first alias that reads as a number; unreadable values fall through. */
+function firstNumber(row: Record<string, unknown>, keys: readonly string[]): number | undefined {
+  for (const key of keys) {
+    const value = toNumber(row[key]);
+    if (value !== undefined) return value;
   }
   return undefined;
 }
@@ -826,6 +836,69 @@ const kimiUsage: UsageProbe = async (input, key) => {
   });
 };
 
+// --- family: cursor ---
+
+const CURSOR_USAGE_URL = "https://api2.cursor.sh/auth/usage";
+
+/**
+ * The account's reset instant from the payload's own aliases: an explicit cycle
+ * end wins, otherwise one month after a cycle start. Unreadable aliases fall
+ * through, so a garbled end never hides a usable start.
+ */
+function cursorResetsAt(payload: Record<string, unknown>): number | undefined {
+  const end = resetOf(payload, ["billingCycleEnd", "endOfMonth", "resetsAt", "nextReset"]);
+  if (end !== undefined) return end;
+  const start = resetOf(payload, ["startOfMonth", "billingCycleStart", "startOfBillingCycle"]);
+  if (start === undefined) return undefined;
+  const date = new Date(start);
+  date.setUTCMonth(date.getUTCMonth() + 1);
+  return date.getTime();
+}
+
+/** Bucket name → its counters' unit: the spend buckets report dollars. */
+function cursorUnit(bucket: string): "usd" | "requests" {
+  const name = bucket.toLowerCase();
+  return name === "planusage" || name.includes("billing") || name.includes("usd") || name.includes("stripe")
+    ? "usd"
+    : "requests";
+}
+
+/**
+ * Cursor's request-count / spend buckets: the payload's top-level entries ARE
+ * the buckets, each carrying a used counter and — on a capped plan — a cap.
+ * Only a bucket with BOTH readable numbers becomes a bar: an uncapped bucket
+ * has no fraction to draw, and a garbled counter is dropped rather than zeroed.
+ * The reset instant is payload-wide (the vendor states one cycle for the
+ * account), so every bucket shares it when present.
+ */
+const cursorUsage: UsageProbe = async (input, key) => {
+  const read = await readQuotaJson(input, CURSOR_USAGE_URL, { authorization: `Bearer ${key}` });
+  return snapshotFromRead(read, (body) => {
+    const resetsAt = cursorResetsAt(body);
+    const limits: UsageLimit[] = [];
+    for (const [bucket, raw] of Object.entries(body)) {
+      const row = asRecord(raw);
+      if (row === undefined) continue;
+      const used = firstNumber(row, ["numRequests", "used", "amountUsed", "usdUsed"]);
+      const cap = firstNumber(row, ["maxRequestUsage", "limit", "amountLimit", "usdLimit"]);
+      if (used === undefined || cap === undefined) continue;
+      const usedFraction = fractionFromCounts(used, cap);
+      if (usedFraction === undefined) continue;
+      const unit = cursorUnit(bucket);
+      limits.push(
+        windowLimit({
+          id: `cursor:${unit}:${bucket.toLowerCase().trim()}`,
+          usedFraction,
+          unit,
+          limit: cap,
+          ...(resetsAt !== undefined ? { resetsAt } : {}),
+        }),
+      );
+    }
+    return limits;
+  });
+};
+
 // --- catalog id → family ---
 
 /**
@@ -850,6 +923,7 @@ const USAGE_PROBES: Readonly<Record<string, UsageProbe>> = Object.freeze({
   umans: umansUsage,
   hyper: hyperUsage,
   "kimi-for-coding": kimiUsage,
+  cursor: cursorUsage,
 });
 
 /**

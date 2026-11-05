@@ -1804,7 +1804,7 @@ describe("GET settings provider_catalog display_group (AD-547)", () => {
 });
 
 describe("GET settings provider_catalog usage_probe (per-key usage action)", () => {
-  /** The plan's nine families as catalog ids — every row the usage action can serve. */
+  /** Every catalog id with a usage endpoint — the explicit contract the stamp must match. */
   const MAPPED = [
     "commandcode",
     "commandcode-anthropic",
@@ -1820,6 +1820,7 @@ describe("GET settings provider_catalog usage_probe (per-key usage action)", () 
     "umans",
     "hyper",
     "kimi-for-coding",
+    "cursor",
   ];
 
   type StampRow = { id: string; tier: string; usage_probe: boolean };
@@ -1843,13 +1844,14 @@ describe("GET settings provider_catalog usage_probe (per-key usage action)", () 
     // …and exactly these rows come back stamped true.
     expect(rows.filter((row) => row.usage_probe).map((row) => row.id).sort()).toEqual([...MAPPED].sort());
 
-    // BOTH branches carry the stamp: the two builtin mapped ids…
-    expect(rows.filter((row) => row.tier === "builtin" && row.usage_probe).map((row) => row.id).sort()).toEqual([
-      "umans",
-      "zai",
-    ]);
-    // …and the twelve template-tier ones.
-    expect(rows.filter((row) => row.tier === "template" && row.usage_probe)).toHaveLength(MAPPED.length - 2);
+    // BOTH branches carry the stamp: the builtin-tier mapped ids…
+    expect(rows.filter((row) => row.tier === "builtin" && row.usage_probe).map((row) => row.id).sort()).toEqual(
+      MAPPED.filter((id) => PROVIDER_CATALOG[id]?.tier === "builtin").sort(),
+    );
+    // …and the template-tier ones.
+    expect(rows.filter((row) => row.tier === "template" && row.usage_probe).map((row) => row.id).sort()).toEqual(
+      MAPPED.filter((id) => PROVIDER_CATALOG[id]?.tier === "template").sort(),
+    );
     // An unmapped provider is stamped false, never left undefined.
     expect(rows.find((row) => row.id === "anthropic")?.usage_probe).toBe(false);
   });

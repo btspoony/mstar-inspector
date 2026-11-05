@@ -85,14 +85,15 @@ describe("usage probe table", () => {
     "umans",
     "hyper",
     "kimi-for-coding",
+    "cursor",
   ];
 
-  test("covers exactly the nine families' fourteen catalog ids", () => {
+  test("covers exactly the ten families' fifteen catalog ids", () => {
     expect(covered.filter((id) => hasUsageProbe(id))).toEqual(covered);
   });
 
   test("every other id has no probe (own-property lookup, no proto leak)", () => {
-    for (const id of ["anthropic", "openai", "cursor", "ollama-cloud", "moonshotai", "minimax", "constructor"]) {
+    for (const id of ["anthropic", "openai", "ollama-cloud", "moonshotai", "minimax", "constructor"]) {
       expect(hasUsageProbe(id)).toBe(false);
     }
   });
@@ -731,6 +732,74 @@ describe("kimi-for-coding", () => {
         limit: 500,
       },
     ]);
+  });
+});
+
+// --- family: cursor ---
+
+describe("cursor", () => {
+  test("one window per readable bucket: request counts and USD spend, payload-wide reset", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            "gpt-4": { numRequests: 150, maxRequestUsage: 500 },
+            planUsage: { used: 15.5, limit: 20 },
+            "usd-custom": { amountUsed: 45, amountLimit: 50 },
+            startOfMonth: "2026-07-01T00:00:00.000Z",
+          }),
+          calls,
+        ),
+      },
+      "cursor",
+      "cur-key",
+    );
+    expect(calls[0]!.url).toBe("https://api2.cursor.sh/auth/usage");
+    expect(calls[0]!.headers.authorization).toBe("Bearer cur-key");
+    // Every read asks for JSON, so an HTML error page is never parsed as usage.
+    expect(calls[0]!.headers.accept).toBe("application/json");
+    expect(snapshot.status).toBe("ok");
+    // One month after `startOfMonth`, stated once for the whole account.
+    const resetsAt = Date.UTC(2026, 7, 1);
+    expect(snapshot.limits).toEqual([
+      { id: "cursor:requests:gpt-4", kind: "window", usedFraction: 0.3, unit: "requests", limit: 500, resetsAt },
+      { id: "cursor:usd:planusage", kind: "window", usedFraction: 0.775, unit: "usd", limit: 20, resetsAt },
+      { id: "cursor:usd:usd-custom", kind: "window", usedFraction: 0.9, unit: "usd", limit: 50, resetsAt },
+    ]);
+  });
+
+  test("an uncapped, empty or unreadable bucket yields no limit — never an uncapped bar", async () => {
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            // Current plans report no legacy cap on the request bucket.
+            "gpt-4": { numRequests: 12, maxRequestUsage: null },
+            empty: {},
+            garbled: { numRequests: "n/a", maxRequestUsage: 100 },
+            sonnet: { used: 1, limit: 4 },
+          }),
+        ),
+      },
+      "cursor",
+      "cur-key",
+    );
+    expect(snapshot.status).toBe("ok");
+    expect(snapshot.limits).toEqual([
+      { id: "cursor:requests:sonnet", kind: "window", usedFraction: 0.25, unit: "requests", limit: 4 },
+    ]);
+  });
+
+  test("a rejected credential is unauthorized; a 404 is absent", async () => {
+    const rejected = await probeProviderUsage({ fetch: stubFetch(json(401, {})) }, "cursor", "cur-key");
+    expect(rejected.status).toBe("unauthorized");
+    expect(rejected.limits).toEqual([]);
+
+    const missing = await probeProviderUsage({ fetch: stubFetch(json(404, {})) }, "cursor", "cur-key");
+    expect(missing.status).toBe("absent");
+    expect(missing.absentCause).toBe("reported-nothing");
+    expect(missing.limits).toEqual([]);
   });
 });
 
