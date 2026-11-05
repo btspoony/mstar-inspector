@@ -529,6 +529,11 @@ const REPORT_STRUCTURE_LINE =
  * - list item — bullet `-`/`*`/`+`, or ordered `1.`/`1)`, followed by a space
  *   or the line end.
  *
+ * Line endings are normalized first (`\r\n` and a lone `\r` → `\n`): a CR is a
+ * line break to markdown too, and left in place it is the line's last
+ * character, so every end-anchored form above misses and `---\r` still opens a
+ * thematic break.
+ *
  * The escape goes before the marker character, except on an ordered item whose
  * digits take no escape: there the `.`/`)` is escaped instead. `### Findings`
  * therefore renders literally and is no longer an insertion anchor, a stray
@@ -545,6 +550,7 @@ const REPORT_STRUCTURE_LINE =
  */
 function neutralizeReportText(text: string): string {
   return text
+    .replace(/\r\n?/g, "\n")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .split("\n")

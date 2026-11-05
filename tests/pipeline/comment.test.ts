@@ -1003,6 +1003,42 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(safe).toContain("\n-- two dashes\n");
   });
 
+  test("CRLF and lone-CR line endings are normalized before neutralization", () => {
+    // A CR is a line break to markdown too. Left in place it is the line's last
+    // character, so every end-anchored form misses it and `---`, `===` or `-`
+    // still renders as a break, a setext underline or a list item.
+    const cases: Array<[string, string]> = [
+      ["suite green\r\n---\r\ntail", "\\---"],
+      ["suite green\r\n===\r\ntail", "\\==="],
+      ["suite green\r\n-\r\ntail", "\\-"],
+      // Every break in the field is a bare CR.
+      ["suite green\r---\rtail", "\\---"],
+    ];
+    for (const [field, escaped] of cases) {
+      const body = buildReviewBody(
+        { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        0,
+        // `planToFix: "none"` keeps the fenced plan (whose own `1.` lines are
+        // code, not markdown) out of the structural scan below.
+        { report: { ...report, verified: field, planToFix: "none" }, revalidated: "### Revalidated findings\n\nnone" },
+      );
+      // Escaped in place: the field's text survives and opens no structure.
+      expect(body).toContain(`\n${escaped}\ntail\n`);
+      expect(body.split("\n").filter((line) => /^ {0,3}([-=]+[ \t]*$|[-*+][ \t]|\d{1,9}[.)][ \t])/.test(line))).toHaveLength(0);
+      // The engine's headings keep their structure and order.
+      expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
+        "## ✅ Verdict: `ship it`",
+        "## 📋 Review",
+        "### Revalidated findings",
+        "### Findings",
+        "### Linked-issue AC",
+        "### ✅ Verified",
+        "### 🗑️ Considered & rejected",
+        "## 🛠️ Plan to fix",
+      ]);
+    }
+  });
+
   test("a block marker in a report field is text: a table row, quote or list item cannot absorb the lines under it", () => {
     const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
     // The field STARTS with the marker, so the lines a block would absorb are
