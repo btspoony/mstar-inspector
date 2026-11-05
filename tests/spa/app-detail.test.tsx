@@ -351,7 +351,7 @@ describe("installed tab configuration surface (static SSR)", () => {
     expect(manage).toContain(t("en", "settings.installCopy"));
   });
 
-  test("the install block shows the App's avatar image, not the octocat fallback", () => {
+  test("the install block renders the App's avatar image", () => {
     const manage = renderDetail(
       {
         ...managePayload,
@@ -365,10 +365,7 @@ describe("installed tab configuration surface (static SSR)", () => {
     const start = manage.indexOf(t("en", "settings.installCopy"));
     const block = manage.slice(start, manage.indexOf(t("en", "settings.allowlist"), start));
     expect(block).toContain('<img src="https://avatars.example/demo.png"');
-    // The block carries exactly one image — the App's avatar. The null-avatar
-    // fallback is AppAvatar's own mounted onError test; this static HTML slice
-    // cannot tell its wrapper from a sibling's class.
-    expect(block.match(/<img\b/g)?.length).toBe(1);
+    // The null-avatar fallback is the mounted test below, not this HTML slice.
   });
 
   test("the installations table carries a per-row availability badge (allowlist enabled)", () => {

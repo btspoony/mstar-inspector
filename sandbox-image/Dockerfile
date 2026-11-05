@@ -94,6 +94,11 @@
 # A deep report round without a recheck used to install nothing yet dispatch the
 # seat anyway, so the SDK resolved no agent and the seat failed anonymously; the
 # runtime now refuses to dispatch a report seat whose definition is missing.
+# rebuild: `packages/shared/src/recheck-wire.ts` now carries a type-only engine
+# type import (`MergeClass`) plus the note saying how that type resolves from
+# the root install. Nothing in it changes at runtime — the import is erased —
+# but the container copies `packages/shared/src/**`, so this marker must move
+# with the module.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and

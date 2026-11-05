@@ -35,9 +35,10 @@
  * the consumer.
  */
 
-// Type-only: the type resolves from the root install. This manifest
-// deliberately declares no engine edge — the package contract forbids a
-// runtime dependency on the engine (tests/contracts/shared-boundary.test.ts).
+// Type-only: the type resolves from the root install. The boundary test
+// (tests/contracts/shared-boundary.test.ts) forbids the runtime IMPORT from
+// this package, and `packages/shared/package.json` keeps its declaration in
+// step with that contract by naming no engine dependency at all.
 import type { MergeClass } from "@mstar-harness/engine";
 
 /** Authenticated routing scope (spec §7.0): appId is github_apps.id. */
