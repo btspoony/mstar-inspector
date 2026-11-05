@@ -39,6 +39,7 @@ import {
   MODEL_MAX_ITEMS,
   MODEL_TOTAL_MAX_CHARS,
   RECHECK_MAX_TARGETS,
+  validateRecheckDoc,
   type RecheckInput,
   type RecheckStatusReason,
 } from "../../packages/shared/src/recheck-wire";
@@ -388,16 +389,49 @@ describe("036b Task 2 — the ask fits the seat's context budget", () => {
     expect(coveredPaths).toBe(asked.evidence.length);
   });
 
-  test("the ask tells the seat what a row without retained evidence is worth", async () => {
+  test("a row the fit starved cannot be answered `addressed` from the catalog it received", async () => {
     seatResult = answerAll(INPUT);
     await run();
-    const assignment = seatCalls[0]!.assignment;
-    // The fitted catalog is a SUBSET: a row it no longer proves is
-    // `unverifiable`/`context-incomplete` — never a bare "no-evidence" and
-    // never an unproven `addressed`.
-    expect(assignment).toContain("PART");
-    expect(assignment).toContain("context-incomplete");
-    expect(assignment).toContain("never `no-evidence`");
+    const asked = askedDocument(seatCalls[0]!.assignment);
+    // The fit drops whole slices, so some row's file retains none: the ask
+    // gives that row no provable context at all.
+    const starved = asked.targets.find(
+      (target) => !asked.evidence.some((slice) => slice.path === target.original.filePath),
+    );
+    expect(starved).toBeDefined();
+    // The round's catalog DOES hold such a slice — the seat was just never
+    // given it — so the same citation is a real proof only against the ask.
+    const omitted = INPUT.evidence.find(
+      (slice) => slice.path === starved!.original.filePath && slice.addedNewLines.includes(slice.newStart),
+    )!;
+    const claimed = doc([
+      {
+        rowId: starved!.rowId,
+        disposition: "addressed",
+        reason: "verified-fix",
+        evidence: {
+          kind: "current-code",
+          sliceId: omitted.id,
+          startLine: omitted.newStart,
+          endLine: omitted.newStart,
+          quote: omitted.newLines[0]!,
+          explanation: "the added line removes the unbounded recursion",
+        },
+        relatedCurrentFindingIndexes: [],
+      },
+    ]);
+    const full = validateRecheckDoc(claimed, INPUT);
+    if (!full.ok) throw new Error(full.error);
+    expect(full.rejected).toHaveLength(0);
+    // A row the fit starved cannot be closed by evidence it never received:
+    // the citation is not in the retained catalog, so that row is dropped —
+    // it can only be yielded `unverifiable`/`context-incomplete`.
+    const fitted = validateRecheckDoc(claimed, asked);
+    if (!fitted.ok) throw new Error(fitted.error);
+    expect(fitted.rejected).toHaveLength(1);
+    expect(fitted.rejected[0]!.rowId).toBe(starved!.rowId);
+    expect(fitted.rejected[0]!.error).toContain("not in the input catalog");
+    expect(fitted.doc.results).toHaveLength(0);
   });
 
   test("a round whose targets alone overrun the budget is skipped, never a lost 180s seat", async () => {
