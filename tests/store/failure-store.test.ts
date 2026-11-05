@@ -189,4 +189,23 @@ describe("createFailureStore", () => {
     // The reason vocabulary is closed: the operator's four buckets.
     expect(ADMISSION_DROP_REASONS).toEqual(["pr-held", "system-cap", "workspace-cap", "error"]);
   });
+
+  test("the trailing-24h pipeline read is served by its partial window index (0048)", () => {
+    const db = createMigratedTestD1();
+    const index = db.raw
+      .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_failures_pipeline_created'")
+      .get() as { sql: string } | null;
+    expect(index?.sql).toContain("WHERE stage = 'pipeline'");
+    // The read's own predicate shape must seek the partial index, not scan the
+    // `created_at` window and discard every non-pipeline stage row.
+    const plan = (
+      db.raw
+        .query(
+          `EXPLAIN QUERY PLAN SELECT COUNT(*) FROM review_failures
+             WHERE stage = 'pipeline' AND created_at > datetime('now', '-24 hours')`,
+        )
+        .all() as Array<{ detail: string }>
+    ).map((row) => row.detail);
+    expect(plan.join("\n")).toContain("idx_review_failures_pipeline_created (created_at>?)");
+  });
 });
