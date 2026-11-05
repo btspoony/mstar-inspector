@@ -505,13 +505,26 @@ function insertBeforeHeading(body: string, anchor: string, block: string): strin
 const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|`{3,}|~{3,})/;
 
 /**
- * Escape the first character of every structure line, so the field stays text:
- * `### Findings` renders literally and is no longer an insertion anchor.
- * Raw HTML is the OTHER structure channel: an unclosed `<details>` routes
- * everything after it on the comment into a collapsed block, so `&` then `<`
- * are escaped (in that order, so the `&lt;` this produces is not re-escaped)
- * and no tag can open. `planToFix` is NOT passed through here — it is already
- * fenced as code.
+ * Neutralize a raw report field so markdown reads it as text, not structure.
+ *
+ * `&` then `<` are escaped, in that order so the `&lt;` this produces is not
+ * re-escaped. Raw HTML is one structure channel: an unclosed `<details>` routes
+ * everything after it on the comment into a collapsed block.
+ *
+ * The other channel is the line itself. Every line whose start
+ * `REPORT_STRUCTURE_LINE` matches — an ATX heading, a setext underline, a
+ * thematic break or a code-fence opener, after up to three leading spaces —
+ * gets a backslash before its first non-space character, so `### Findings`
+ * renders literally and is no longer an insertion anchor, and a stray `~~~`
+ * cannot swallow every section after it. Block syntax that cannot forge an
+ * anchor or open a fence (list items, quotes, table rows) is left as it is.
+ *
+ * Deliberate trade-off: `<https://…>` autolinks, and every other `<…>`, render
+ * as literal text. That is the smaller risk: unescaped, `<` opens raw HTML and
+ * a structure line re-heads the comment, and neither is recoverable once the
+ * comment is published, while a literal URL still reads.
+ *
+ * `planToFix` is NOT passed through here — it is already fenced as code.
  */
 function neutralizeReportText(text: string): string {
   return text
@@ -584,8 +597,8 @@ export const TRUNCATION_MARKER = "[... truncated to fit the comment limit ...]";
  * keeps the head — a tail appended before the clamp is the first thing lost on
  * a long body, exactly the newest sections the report exists to publish. When
  * the tail alone does not fit `limit` (less the blank-line separator and the
- * one-character core cut marker), it degrades in a fixed ladder, and every
- * heading survives every rung:
+ * one-character core cut marker), it degrades in a fixed ladder that keeps
+ * every heading until the final fallback:
  *
  *   1. truncate the plan block — it is the only section with a fence and a
  *      fold, so it is the only one that can be cut without leaving markdown
