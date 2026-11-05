@@ -229,9 +229,12 @@ const MATRIX_ROUTES: MatrixRoute[] = [
     verifies: true,
   },
   { name: "settings remove-custom-provider", path: SETTINGS, fields: { op: "remove-custom-provider", provider_id: "nope" } },
-  { name: "settings key/delete", path: `${SETTINGS}/key/delete`, fields: { provider: "anthropic" } },
   { name: "keys/verify", path: VERIFY, fields: { provider: "anthropic", key: PLAIN_KEY }, verifies: true },
   { name: "keys/usage", path: USAGE, fields: { provider: "zai", keyId: PLAIN_KEY_ID }, verifies: true },
+  // Removes the row `settings add-key` seeded (zai + PLAIN_KEY). It runs after
+  // keys/usage — which still needs that row — so the 200 face deletes a REAL
+  // row instead of finding nothing.
+  { name: "settings key/delete", path: `${SETTINGS}/key/delete`, fields: { provider: "zai", key_id: PLAIN_KEY_ID } },
   // (D5) The manager's forced metadata refresh — a manager-only write whose 200
   // side additionally calls api.github.com (GET /app + the bot avatar leg), so
   // the sweep's stub answers those URLs too.
@@ -325,7 +328,15 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
       } finally {
         fetchSpy.mockRestore();
       }
-      if (!allowed) {
+      if (allowed) {
+        // `settings key/delete` removed the row `settings add-key` seeded (zai):
+        // the delete's 200 face did real work rather than matching nothing, and
+        // only the row `keys/verify` stored (anthropic) is left in the pool.
+        expect(
+          db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys WHERE provider = 'zai'").get(),
+        ).toEqual({ n: 0 });
+        expect(rawCount(db, "app_provider_keys")).toBe(1);
+      } else {
         // Zero mutation on every deny path: the app row is untouched and no
         // config table gained a row.
         expectZeroAppMutations(db);
