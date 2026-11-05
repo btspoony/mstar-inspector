@@ -124,10 +124,13 @@ export async function listDiscussionWithOctokit(octokit: GraphqlOctokit, input: 
   } catch {
     issue = null;
   }
+  // The 200-comment bound counts the CAPTURED (filtered) entries — the
+  // Inspector's own publication comments are not part of the discussion
+  // domain, so they never push a PR into `truncated` (spec §7.8).
   const issueCoverage: Coverage =
     issue === null
       ? "unavailable"
-      : !issue.complete || issue.totalCount > DISCUSSION_ISSUE_MAX_COMMENTS
+      : !issue.complete || issue.comments.length > DISCUSSION_ISSUE_MAX_COMMENTS
         ? "truncated"
         : "complete";
   const issueDigest = issue !== null && issue.complete ? await issueDigestOf({ headSha: issue.headRefOid, comments: issue.comments }) : "";

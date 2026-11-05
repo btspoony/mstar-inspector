@@ -778,6 +778,78 @@ async function resolvedFixture(db: TestD1, intent: LineIntent): Promise<Verified
 }
 
 describe("resolveFindingThread — fences, adoption, mutation confirmation", () => {
+  test("our own publication comment never changes the issue digest → the verified resolve is not blocked", async () => {
+    const db = await createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    // The verification was captured BEFORE the review posted: its issue
+    // digest covers ISSUE_A only. The live list now also carries our review
+    // comment — the old domain hashed it and every resolve failed.
+    const verified = await resolvedFixture(db, intent);
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    const ownPublication: ThreadCommentSpec = {
+      id: "i-own",
+      fullDatabaseId: "8002",
+      body: "<!-- mstar-inspector:review:v1 round=1 -->\n\n## 📋 Review",
+      authorType: "Bot",
+      authorLogin: BOT_LOGIN,
+      createdAt: "2026-09-02T09:00:00Z",
+      updatedAt: "2026-09-02T09:00:00Z",
+    };
+    const { octokit, calls } = fakeOctokit({
+      threadPages: [{ comments: [root, REPLY] }],
+      issueComments: { comments: [ISSUE_A, ownPublication] },
+    });
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified,
+    });
+    expect(outcome.kind).toBe("resolved");
+    expect(calls.some((c) => c.kind === "mutation")).toBe(true);
+  });
+
+  test("a PRIOR association resolves while its finding stays addressed by a NEWER publication", async () => {
+    // The publication fence is addressed-state + this row's verdict, not
+    // `last_publication_id`: the reconcile lane resolves an ASSOCIATION whose
+    // finding a later round confirmed addressed without touching the row.
+    const db = await createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const verified = await resolvedFixture(db, intent);
+    // A NEWER publication (round 2) addressed the same finding row; the old
+    // association of round 1 is exactly the row this lane reconciles.
+    const newerPubId = uuid(9);
+    const newerBody = "newer overall body";
+    await stagePublication(db, {
+      id: newerPubId,
+      payload: {
+        version: 1,
+        scope: SCOPE,
+        headSha: SHA2,
+        kind: "review",
+        round: 2,
+        targetCommentId: null,
+        body: newerBody,
+        bodySha256: await sha256Hex(newerBody),
+        artifact: null,
+        lifecycle: null,
+        lineIntents: [],
+      },
+      nowMs: 1000,
+    });
+    db.raw.prepare(`UPDATE review_findings SET last_publication_id = ? WHERE id = ?`).run(newerPubId, FINDING_ROW_ID);
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    const { octokit } = fakeOctokit({
+      threadPages: [{ comments: [root, REPLY] }],
+      issueComments: { comments: [ISSUE_A] },
+    });
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified,
+    });
+    expect(outcome.kind).toBe("resolved");
+  });
+
   test("happy path: owned thread resolves, row stores resolved, mutation got the exact threadId", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
@@ -969,7 +1041,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     expect(calls.some((c) => c.kind === "mutation")).toBe(false);
   });
 
-  test("concern no longer addressed by THIS publication → needs-recheck concern-unresolved", async () => {
+  test("a reopened concern (finding state open) → needs-recheck concern-unresolved", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
@@ -1341,6 +1413,158 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     };
     expect(row.resolution_state).toBe("resolved");
     expect(row.late_change).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Prior-association re-verification (§7.11.1 reconcile lane)
+// ---------------------------------------------------------------------------
+
+const ownPublicationComment: ThreadCommentSpec = {
+  id: "i-own",
+  fullDatabaseId: "8002",
+  body: "<!-- mstar-inspector:review:v1 round=1 -->\n\n## 📋 Review",
+  authorType: "Bot",
+  authorLogin: BOT_LOGIN,
+  createdAt: "2026-09-02T09:00:00Z",
+  updatedAt: "2026-09-02T09:00:00Z",
+};
+
+function entryFor(c: ThreadCommentSpec) {
+  return {
+    id: c.id,
+    fullDatabaseId: c.fullDatabaseId,
+    authorType: c.authorType ?? "User",
+    authorLogin: c.authorLogin ?? "human-reviewer",
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+    body: c.body,
+  };
+}
+
+/** Store the row's verified snapshot exactly as a prior round left it. */
+function storeVerification(db: TestD1, verified: VerifiedResolution): void {
+  db.raw.prepare(`UPDATE review_threads SET verified_json = ? WHERE id = ?`).run(JSON.stringify(verified), ASSOC_ID);
+}
+
+describe("reverifyPriorAssociation — prove, then hand a live snapshot", () => {
+  test("re-proves the conversation and rebuilds the snapshot over the live HEAD + live (filtered) issue domain", async () => {
+    const db = await createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    // Stored under the OLD domain: the issue digest hashed our own review
+    // comment, and the thread snapshot predates nothing else.
+    const stored: VerifiedResolution = {
+      ...(await resolvedFixture(db, intent)),
+      issueDigest: await issueDigestOf({ headSha: SHA, comments: [ISSUE_A, ownPublicationComment].map(entryFor) }),
+    };
+    storeVerification(db, stored);
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    const { octokit } = fakeOctokit({
+      threadPages: [{ comments: [root, REPLY], headRefOid: SHA2 }],
+      issueComments: { comments: [ISSUE_A, ownPublicationComment], headRefOid: SHA },
+    });
+
+    const reverified = await createReviewThreads(makeDeps(db, octokit)).reverifyPriorAssociation({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+    });
+    expect(reverified).not.toBeNull();
+    // HEAD drift alone is not a veto: the handed snapshot carries live HEAD
+    // and a digest recomputed over it.
+    expect(reverified!.verified.snapshot.headSha).toBe(SHA2);
+    expect(reverified!.verified.snapshot.digest).toBe(
+      await threadDigestOf({ threadId: THREAD_GQL_ID, rootCommentId: String(ROOT_COMMENT_ID), headSha: SHA2, comments: [root, REPLY].map((c) => ({ ...entryFor(c), authorType: c.authorType ?? "Bot", authorLogin: c.authorLogin ?? BOT_LOGIN })) }),
+    );
+    expect(reverified!.verified.snapshot.commentCount).toBe(2);
+    // The issue digest moves to the new domain — ours is not discussion.
+    expect(reverified!.verified.issueDigest).toBe(await issueDigestOf({ headSha: SHA, comments: [ISSUE_A].map(entryFor) }));
+    expect(reverified!.verified.issueDigest).not.toBe(stored.issueDigest);
+    expect(reverified!.verified.issueCoverage).toBe("complete");
+    // The addressed verdict that closed the finding is kept.
+    expect(reverified!.verified.assessment).toEqual(stored.assessment);
+    expect(reverified!.intent.associationId).toBe(ASSOC_ID);
+    // Re-verification never mutates the row (the caller persists it).
+    const row = db.raw.query(`SELECT verified_json, resolution_state FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as {
+      verified_json: string; resolution_state: string;
+    };
+    expect(row.verified_json).toBe(JSON.stringify(stored));
+    expect(row.resolution_state).toBe("pending");
+  });
+
+  test("a human reply after the capture fails the conversation proof → null (row stays unresolved)", async () => {
+    const db = await createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const stored = await resolvedFixture(db, intent); // digest over [root, REPLY]
+    storeVerification(db, stored);
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    const newerReply: ThreadCommentSpec = { ...REPLY, id: "c-reply-2", fullDatabaseId: "9003", createdAt: "2026-09-03T10:00:00Z" };
+    const { octokit, calls } = fakeOctokit({
+      threadPages: [{ comments: [root, REPLY, newerReply] }],
+      issueComments: { comments: [ISSUE_A] },
+    });
+    const reverified = await createReviewThreads(makeDeps(db, octokit)).reverifyPriorAssociation({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+    });
+    expect(reverified).toBeNull();
+    expect(calls.some((c) => c.kind === "mutation")).toBe(false);
+    const row = db.raw.query(`SELECT verified_json FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as { verified_json: string };
+    expect(row.verified_json).toBe(JSON.stringify(stored));
+  });
+
+  test("a stored digest that no longer matches the live thread is never re-blessed", async () => {
+    const db = await createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const stored = { ...(await resolvedFixture(db, intent)), snapshot: { ...(await resolvedFixture(db, intent)).snapshot, digest: "stale-digest" } };
+    storeVerification(db, stored);
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    const { octokit } = fakeOctokit({
+      threadPages: [{ comments: [root, REPLY] }],
+      issueComments: { comments: [ISSUE_A] },
+    });
+    expect(
+      await createReviewThreads(makeDeps(db, octokit)).reverifyPriorAssociation({ scope: SCOPE, associationId: ASSOC_ID }),
+    ).toBeNull();
+  });
+
+  test("an unprovable prior row (thread gone, superseded, unaddressed verdict) → null", async () => {
+    // The thread node vanishes between capture and re-verification.
+    const goneDb = await createSeededTestD1();
+    const goneIntent = await seedLifecycle(goneDb);
+    storeVerification(goneDb, await resolvedFixture(goneDb, goneIntent));
+    expect(
+      await createReviewThreads(
+        makeDeps(goneDb, fakeOctokit({ issueComments: { comments: [ISSUE_A] } }).octokit),
+      ).reverifyPriorAssociation({ scope: SCOPE, associationId: ASSOC_ID }),
+    ).toBeNull();
+
+    // A superseded association is out of the lane entirely.
+    const supersededDb = await createSeededTestD1();
+    const supersededIntent = await seedLifecycle(supersededDb);
+    storeVerification(supersededDb, await resolvedFixture(supersededDb, supersededIntent));
+    supersededDb.raw.prepare(`UPDATE review_threads SET superseded_by_publication_id = ? WHERE id = ?`).run(uuid(9), ASSOC_ID);
+    const supersededRoot = { ...ROOT, body: buildLineCommentBody(supersededIntent) };
+    expect(
+      await createReviewThreads(
+        makeDeps(supersededDb, fakeOctokit({ threadPages: [{ comments: [supersededRoot, REPLY] }], issueComments: { comments: [ISSUE_A] } }).octokit),
+      ).reverifyPriorAssociation({ scope: SCOPE, associationId: ASSOC_ID }),
+    ).toBeNull();
+
+    // A stored verdict that never closed the finding is never re-proved into
+    // a resolve.
+    const unresolvedDb = await createSeededTestD1();
+    const unresolvedIntent = await seedLifecycle(unresolvedDb);
+    const unresolvedFixture = await resolvedFixture(unresolvedDb, unresolvedIntent);
+    storeVerification(unresolvedDb, {
+      ...unresolvedFixture,
+      assessment: { ...unresolvedFixture.assessment, disposition: "unverifiable" },
+    });
+    const unresolvedRoot = { ...ROOT, body: buildLineCommentBody(unresolvedIntent) };
+    expect(
+      await createReviewThreads(
+        makeDeps(unresolvedDb, fakeOctokit({ threadPages: [{ comments: [unresolvedRoot, REPLY] }], issueComments: { comments: [ISSUE_A] } }).octokit),
+      ).reverifyPriorAssociation({ scope: SCOPE, associationId: ASSOC_ID }),
+    ).toBeNull();
   });
 });
 

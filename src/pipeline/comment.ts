@@ -92,6 +92,7 @@ import {
   stripInspectorMarkerSyntax,
   type DiscoveryResult,
   type GraphqlOctokit,
+  type PriorReverification,
   type ResolveOutcome,
 } from "./review-threads";
 import { createChecksAdapter, type ChecksAdapter, type ChecksOctokit } from "./checks";
@@ -1273,6 +1274,13 @@ export type ReviewCommenter = {
     verified: VerifiedResolution;
   }): Promise<ResolveOutcome>;
   /**
+   * Re-prove a PRIOR association from live state (§7.5/§7.11.1): the stored
+   * thread snapshot must still reproduce its digest against the live
+   * conversation, and the handed verification is rebuilt over the live HEAD +
+   * live issue comments. null = unprovable (the row must stay untouched).
+   */
+  reverifyPriorResolution?(input: { scope: Scope; associationId: string }): Promise<PriorReverification | null>;
+  /**
    * §7.9 Checks adapter — present only when the commenter is
    * constructed with the registry/journal store (`createReviewCommenter(env,
    * { db })`), because every send is fenced on PERSISTED ownership. The
@@ -2086,6 +2094,8 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
             threadSurface.discoverThread(input),
           resolveFindingThread: (input: { scope: Scope; associationId: string; verified: VerifiedResolution }) =>
             threadSurface.resolveFindingThread(input),
+          reverifyPriorResolution: (input: { scope: Scope; associationId: string }) =>
+            threadSurface.reverifyPriorAssociation(input),
         }
       : {}),
     ...(checksAdapter ? { checks: checksAdapter } : {}),

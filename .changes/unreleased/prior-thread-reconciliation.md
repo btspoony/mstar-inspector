@@ -1,0 +1,8 @@
+---
+category: Fixed
+---
+
+- **Solved conversations from earlier rounds are resolved after a new review**: the Inspector's own publication comments (bot-authored review/degraded marker bodies) are excluded from the captured issue discussion, so the model context, the capture-time digest and the resolve-side digest share one domain and posting a review no longer invalidates the verification it was captured against. After publishing, the resolution lane is PR-scoped: alongside this round's verified resolutions it reconciles the PR's prior addressed associations that are not superseded, not resolved or abandoned, and whose finding is still `addressed`. Each prior row is re-proved from live state first — the stored thread snapshot must still reproduce its digest against the live conversation, and the handed snapshot is rebuilt over the live HEAD plus live issue comments while keeping the stored `assessment` — and its rebuilt verification is persisted before the inline attempt. A human reply, a moved/deleted thread, incomplete coverage or a digest mismatch leaves the row untouched; nothing is ever resolved on an unproved snapshot, and superseded associations or reopened findings are never selected.
+
+<!-- CN -->
+- **此前轮次已判定的会话会在新评审后自动解决**：Inspector 自己的发布评论（bot 作者、正文以 review/degraded 标记开头）不再计入被抓取的 issue 讨论，因此模型上下文、抓取时摘要与解决侧摘要共享同一域，发布评审不会再让它自己被验证过的快照失效。发布之后，解决通道按 PR 作用域工作：除本轮已验证的解决项外，还会处理该 PR 此前的已判定关联——未被取代、未 resolved/abandoned、且对应 finding 仍为 `addressed`。每条历史行都先按线上状态重新证明：存储的线程快照必须用**存储时的 headSha** + 实时评论复现原摘要，交给内核的快照则用实时 HEAD + 实时 issue 评论重建（保留原 `assessment`），重建结果在内联尝试之前落库。人类回复、线程移动/删除、覆盖不完整或摘要不匹配都会让该行保持原样：绝不在未经证明的快照上解决，被取代的关联与重新打开的 finding 也永远不会被选中。

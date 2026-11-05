@@ -761,6 +761,38 @@ export async function listResolutionRecovery(
 }
 
 /**
+ * PR-scoped prior-association selection for the POST-PUBLICATION reconcile
+ * lane (spec §7.11.1 "the resolution lane is PR-scoped"): every association
+ * of this PR that is not superseded, not terminal, carries a stored verified
+ * snapshot, and whose finding is still `addressed`. The lane re-proves each
+ * row from live state before enqueueing it (review-threads.ts) — selection
+ * alone never authorizes a resolve, and a finding reopened by a recurrence
+ * drops out here.
+ */
+export async function listPrResolvableAssociations(
+  db: D1Like,
+  scope: Scope,
+  limit: number,
+): Promise<{ associationId: string; scope: Scope }[]> {
+  const rows = await db
+    .prepare(
+      `SELECT t.id, t.app_id, t.installation_id, t.owner, t.repo, t.pr_number
+       FROM review_threads t
+       JOIN review_findings f ON f.id = t.finding_row_id
+       WHERE t.app_id = ? AND t.installation_id = ? AND t.owner = ? AND t.repo = ? AND t.pr_number = ?
+         AND t.superseded_by_publication_id IS NULL
+         AND t.resolution_state NOT IN ('resolved','abandoned')
+         AND t.verified_json IS NOT NULL
+         AND f.state = 'addressed'
+       ORDER BY COALESCE(t.next_attempt_ms, t.created_ms), t.id
+       LIMIT ?`,
+    )
+    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, limit)
+    .all<{ id: string; app_id: string; installation_id: number; owner: string; repo: string; pr_number: number }>();
+  return rows.results.map(threadScope);
+}
+
+/**
  * Operator-only, row-scoped retry (spec §7.11.1): exactly ONE work ID with
  * the matching complete scope and no live lease; resets attempts/due/error
  * state while retaining payload, proof, remote IDs, the verified snapshot

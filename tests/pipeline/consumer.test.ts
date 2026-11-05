@@ -85,6 +85,7 @@ import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
+import type { VerifiedResolution } from "../../src/store/finding-lifecycle";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import {
   readRecheckCommand,
@@ -3272,6 +3273,106 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     // The post-publish line comments + degraded cleanup still ran.
     expect(commenterCalls.some((c) => c.op === "line-comments")).toBe(true);
     expect(commenterCalls.some((c) => c.op === "delete-degraded")).toBe(true);
+  });
+
+  test("a PRIOR addressed association outside this round's targets is reconciled: re-proven, rebuilt snapshot persisted, then discovered and resolved", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    // The prior round closed the finding `addressed` but its thread was never
+    // resolved: the row sits needs-recheck with an OLD-domain verification and
+    // THIS round selects no open row at all.
+    await seedOpenTarget(db, { state: "addressed" });
+    await seedAssociation(db, "PRRT_thread1");
+    db.raw
+      .prepare(`UPDATE review_threads SET verified_json = ?, resolution_state = 'needs-recheck' WHERE id = ?`)
+      .run(JSON.stringify({ stored: "old-domain" }), ASSOC_ID);
+    const rebuilt: VerifiedResolution = {
+      assessment: { rowId: TARGET_ROW_ID, disposition: "addressed", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] },
+      snapshot: {
+        associationId: ASSOC_ID,
+        threadId: "PRRT_thread1",
+        commentId: 8,
+        headSha: SHA,
+        digest: "thread-digest-live",
+        commentCount: 2,
+        capturedMs: 0,
+        coverage: "complete",
+        modelCoverage: "complete",
+      },
+      issueDigest: "issue-digest-live",
+      issueCoverage: "complete",
+    };
+    commenterState.reverifyResult = {
+      verified: rebuilt,
+      intent: {
+        associationId: ASSOC_ID,
+        findingRowId: TARGET_ROW_ID,
+        publicationId: PRIOR_PUB_ID,
+        scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+        originalSha: PRIOR_SHA,
+        round: 1,
+        path: "src/auth.ts",
+        line: 21,
+        body: "old comment body",
+        bodySha256: "digest-old",
+      },
+    };
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The prior association was re-proved from live state, not resolved on
+    // its stored snapshot.
+    const reverify = commenterCalls.find((c) => c.op === "reverify");
+    expect(reverify).toBeDefined();
+    expect(reverify!.args).toEqual({
+      scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+      associationId: ASSOC_ID,
+    });
+    const discoverIdx = commenterCalls.findIndex((c) => c.op === "discover");
+    const resolveIdx = commenterCalls.findIndex((c) => c.op === "resolve");
+    expect(discoverIdx).toBeGreaterThan(commenterCalls.indexOf(reverify!));
+    expect(resolveIdx).toBe(discoverIdx + 1);
+    // Recorded double args: the kernel received the rebuilt verification.
+    const resolveCall = commenterCalls[resolveIdx]!.args as { verified: VerifiedResolution };
+    expect(resolveCall.verified).toEqual(rebuilt);
+    // The REBUILT snapshot is what the durable row carries afterwards.
+    const row = db.raw.query(`SELECT verified_json, resolution_state FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as {
+      verified_json: string;
+      resolution_state: string;
+    };
+    expect(JSON.parse(row.verified_json)).toEqual(rebuilt);
+    expect(row.resolution_state).toBe("pending");
+  });
+
+  test("an unprovable prior association is left untouched: no discovery, no resolve, stored verification unchanged", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db, { state: "addressed" });
+    await seedAssociation(db, "PRRT_thread1");
+    db.raw
+      .prepare(`UPDATE review_threads SET verified_json = ?, resolution_state = 'needs-recheck' WHERE id = ?`)
+      .run(JSON.stringify({ stored: "old-domain" }), ASSOC_ID);
+    // Default double behavior: re-verification cannot prove the row.
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(commenterCalls.some((c) => c.op === "reverify")).toBe(true);
+    expect(commenterCalls.some((c) => c.op === "discover")).toBe(false);
+    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
+    const row = db.raw.query(`SELECT verified_json, resolution_state FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as {
+      verified_json: string;
+      resolution_state: string;
+    };
+    expect(JSON.parse(row.verified_json)).toEqual({ stored: "old-domain" });
+    expect(row.resolution_state).toBe("needs-recheck");
   });
 
   test("P67-QC-006: the real newline-terminated recheck bytes are parsed; an overflow flag fails closed", async () => {

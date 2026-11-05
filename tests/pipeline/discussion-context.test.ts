@@ -181,13 +181,42 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
     expect(discussion.issueDigest).toBe("");
   });
 
-  test("totalCount over the 200-comment bound → truncated even when pagination exhausts", async () => {
-    const onePage = Array.from({ length: 60 }, (_, i) => spec(`i-${i}`, i));
+  test("the 200-comment bound counts the CAPTURED entries: an own-publication-inflated raw totalCount stays complete", async () => {
+    const comments = Array.from({ length: DISCUSSION_ISSUE_MAX_COMMENTS }, (_, i) => spec(`i-${i}`, i));
+    const own = { ...spec("i-own", 900, "<!-- mstar-inspector:review:v1 round=3 -->\n\n## 📋 Review"), authorType: "Bot", authorLogin: BOT_LOGIN };
     const { octokit } = fakeOctokit({
-      issuePages: [{ comments: onePage, totalCount: DISCUSSION_ISSUE_MAX_COMMENTS + 1, hasPreviousPage: false }],
+      issuePages: [{ comments: [...comments, own], totalCount: DISCUSSION_ISSUE_MAX_COMMENTS + 1, hasPreviousPage: false }],
     });
     const discussion = await listDiscussionWithOctokit(octokit, input());
-    expect(discussion.issueCoverage).toBe("truncated");
+    // The raw connection is over the bound; the digest/model domain is not —
+    // our own publication comment is never discussion (spec §7.5/§7.8).
+    expect(discussion.issueCoverage).toBe("complete");
+    expect(discussion.issueDigest).not.toBe("");
+    expect(discussion.items.some((item) => item.body.includes("mstar-inspector:review:v1"))).toBe(false);
+  });
+
+  test("only BOT-author marker bodies are ours: both marker families drop, a human-planted marker stays", async () => {
+    const human = spec("i-human", 1, "please fix the null deref");
+    const ownReview = { ...spec("i-own", 2, "<!-- mstar-inspector:review:v1 round=2 -->"), authorType: "Bot", authorLogin: BOT_LOGIN };
+    const ownDegraded = { ...spec("i-own-degraded", 3, "<!-- mstar-inspector:review-degraded:v1 round=1 -->"), authorType: "Bot", authorLogin: BOT_LOGIN };
+    const planted = { ...spec("i-planted", 4, "<!-- mstar-inspector:review:v1 round=9 -->"), authorType: "User", authorLogin: "mallory" };
+    const { octokit } = fakeOctokit({
+      issuePages: [{ comments: [human, ownReview, ownDegraded, planted] }],
+    });
+    const discussion = await listDiscussionWithOctokit(octokit, input());
+    expect(discussion.issueCoverage).toBe("complete");
+    expect(discussion.items.map((item) => item.id)).toEqual(["1001", "1004"]);
+    expect(discussion.items.map((item) => item.author)).toEqual(["human-reviewer", "mallory"]);
+    // The digest is computed over exactly the surviving domain.
+    expect(discussion.issueDigest).toBe(
+      await issueDigestOf({
+        headSha: SHA,
+        comments: [human, planted].map((c) => ({
+          id: c.id, fullDatabaseId: c.fullDatabaseId, authorType: c.authorType ?? "User", authorLogin: c.authorLogin ?? "human-reviewer",
+          createdAt: c.createdAt, updatedAt: c.updatedAt, body: c.body,
+        })),
+      }),
+    );
   });
 
   test("issue API failure → issueCoverage unavailable, thread captures still run (never empty/complete)", async () => {

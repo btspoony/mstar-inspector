@@ -43,6 +43,7 @@ import {
   claimPublication,
   countOpenFindings,
   hasUnprovenDegradedPublication,
+  listPrResolvableAssociations,
   listPublicationRecovery,
   listResolutionRecovery,
   listSuspendedLifecycleApps,
@@ -1085,6 +1086,35 @@ describe("resolution queue selection (spec §7.11.1)", () => {
     const queue = await listResolutionRecovery(db, 6000, 10);
     expect(queue.map((q) => q.associationId)).toEqual(["t-expired"]);
     expect(queue[0]!.scope).toEqual(SCOPE);
+  });
+
+  test("PR-scoped prior lane: addressed + non-superseded + non-terminal rows only", async () => {
+    const db = createSeededTestD1();
+    await seedThread(db, "t-open-finding", { created_ms: 500 });
+    await seedThread(db, "t-addressed", { created_ms: 1000 });
+    await seedThread(db, "t-retry", { created_ms: 2000, resolution_state: "retry" });
+    await seedThread(db, "t-needs-recheck", { created_ms: 3000, resolution_state: "needs-recheck" });
+    await seedThread(db, "t-resolved", { created_ms: 4000, resolution_state: "resolved" });
+    await seedThread(db, "t-abandoned", { created_ms: 5000, resolution_state: "abandoned" });
+    await seedThread(db, "t-superseded", { created_ms: 6000, superseded_by_publication_id: "pub-x" });
+    await seedThread(db, "t-unverified", { created_ms: 7000, verified_json: null });
+    await seedThread(db, "t-other-pr", { created_ms: 8000, pr_number: 99 });
+    for (const id of ["t-addressed", "t-retry", "t-needs-recheck", "t-resolved", "t-abandoned", "t-superseded", "t-unverified", "t-other-pr"]) {
+      db.raw.prepare(`UPDATE review_findings SET state = 'addressed' WHERE id = ?`).run(`finding-for-${id}`);
+    }
+
+    // A stranded needs-recheck row IS eligible (that is the bug this lane
+    // repairs); an open finding, a terminal row, a superseded association and
+    // another PR never are.
+    expect(await listPrResolvableAssociations(db, SCOPE, 25)).toEqual([
+      { associationId: "t-addressed", scope: SCOPE },
+      { associationId: "t-retry", scope: SCOPE },
+      { associationId: "t-needs-recheck", scope: SCOPE },
+    ]);
+    expect((await listPrResolvableAssociations(db, SCOPE, 2)).map((row) => row.associationId)).toEqual([
+      "t-addressed",
+      "t-retry",
+    ]);
   });
 });
 
