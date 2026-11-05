@@ -995,6 +995,31 @@ describe("report sections (mstar.report/v1 side document)", () => {
     }
   });
 
+  test("a GFM delimiter row and a bare ATX heading are neutralized as structure", () => {
+    // One dash already delimits a cell; pipes are optional at either end. The
+    // escape must land on the marker so no header row can pair with it.
+    const cases: Array<[string, string]> = [
+      ["Name | Value\n-|-", "\\-|-"],
+      ["Name | Value\n--|--", "\\--|--"],
+      ["Name | Value\n:---|---:", "\\:---|---:"],
+      ["Name | Value\n--- | ---", "\\--- | ---"],
+      ["Name | Value\n| --- | --- |", "\\| --- | --- |"],
+      ["a | b\n---|---", "\\---|---"],
+      ["###", "\\###"],
+    ];
+    for (const [field, escaped] of cases) {
+      const body = buildReviewBody(
+        { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        0,
+        {
+          report: { ...report, verified: field },
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+        },
+      );
+      expect({ field, escaped: body.includes(escaped) }).toEqual({ field, escaped: true });
+    }
+  });
+
   test("every thematic-break form is neutralized: `***`, `___` and spaced runs", () => {
     for (const rule of ["***", "___", "- - -", "* * *", "_ _ _", "----", "==="]) {
       const body = buildReviewBody(
