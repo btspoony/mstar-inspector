@@ -123,7 +123,7 @@ export type CheckBudgetConfig = {
   degraded: boolean;
 };
 
-/** The operator default review depth as the operator API reports it (plan 036a). */
+/** The operator default review depth as the operator API reports it. */
 export type ReviewLevelConfig = {
   /** The tier Apps without a depth of their own inherit. */
   value: string;

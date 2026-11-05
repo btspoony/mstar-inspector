@@ -29,7 +29,7 @@
  *     whenever the stored value is not one the readers would trust — never a
  *     `CAST`ed number nothing ever used
  *
- * The operator default review level (plan 036a) is the same table with a
+ * The operator default review level is the same table with a
  * vocabulary instead of a range: an absent row reads `"default"`, a value off
  * `REVIEW_LEVELS` reads `"default"` with `degraded: true` and never throws, and
  * a write outside the vocabulary is refused with no row and no audit row.
