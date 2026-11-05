@@ -136,6 +136,10 @@ export const en = {
    */
   pullRequests: {
     backToList: "Back to list",
+    /** Toolbar row above the ledger (list face only). */
+    filterRepo: "Repository",
+    filterRepoAll: "All repositories",
+    refreshAria: "Refresh the pull request list",
     /** The list table's columns — the row's own facts only. */
     columnPr: "Pull request",
     columnState: "State",

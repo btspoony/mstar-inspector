@@ -467,6 +467,61 @@ describe("pull requests tab (mounted)", () => {
     }
   });
 
+  test("the toolbar offers one option per distinct owner/repo plus all, and a selection filters the rows", async () => {
+    const { container, win, resolve, unmount } = await mountTabWithGatedFetch("");
+    try {
+      await act(async () =>
+        resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN, ROW_CLOSED] })),
+      );
+      await act(async () => {});
+      expect(container.textContent ?? "").toContain("Add the export button");
+      expect(container.textContent ?? "").toContain("Revert the cache change");
+
+      await press(win, container.querySelector('[role="combobox"]'));
+      const options = [...win.document.querySelectorAll('[role="option"]')];
+      expect(options.map((option) => option.textContent)).toEqual([
+        t("en", "pullRequests.filterRepoAll"),
+        "acme/api",
+        "acme/web",
+      ]);
+      await press(
+        win,
+        options.find((option) => option.textContent === "acme/api") as unknown as Element,
+      );
+      expect(container.textContent ?? "").toContain("Revert the cache change");
+      expect(container.textContent ?? "").not.toContain("Add the export button");
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("the refresh button re-reads the list and is disabled while the read is in flight", async () => {
+    const { container, fetches, win, resolve, unmount } = await mountTabWithGatedFetch("");
+    const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
+    const refreshButton = () =>
+      [...container.querySelectorAll("button")].find(
+        (button) => button.getAttribute("aria-label") === t("en", "pullRequests.refreshAria"),
+      ) as HTMLButtonElement | undefined;
+    try {
+      await act(async () => resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })));
+      await act(async () => {});
+      expect(listReads()).toHaveLength(1);
+      expect(refreshButton()?.disabled).toBe(false);
+
+      await press(win, refreshButton());
+      expect(listReads()).toHaveLength(2);
+      // The second read is gated: the control reports the in-flight read.
+      expect(refreshButton()?.disabled).toBe(true);
+
+      await act(async () => resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_CLOSED] })));
+      await act(async () => {});
+      expect(refreshButton()?.disabled).toBe(false);
+      expect(container.textContent ?? "").toContain("Revert the cache change");
+    } finally {
+      await unmount();
+    }
+  });
+
   test("a list read that fails after closing the detail shows the error face, and retry re-reads", async () => {
     const { container, fetches, text, win, rerender, resolve, unmount } = await mountTabWithGatedFetch("");
     const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));

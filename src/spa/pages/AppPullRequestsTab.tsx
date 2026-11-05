@@ -1,16 +1,28 @@
 import { useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { t } from "../../i18n";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
-import { StatusBadge } from "@design-system";
+import {
+  Button,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  StatusBadge,
+} from "@design-system";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import { apiBase } from "../workspace-base";
 import { PullRequestDetail } from "./PullRequestDetail";
 import {
+  INSIGHTS_REPO_ALL,
   appPullRequestsUrl,
+  insightsRepoFromSelect,
+  insightsRepoSelectValue,
   parsePullRequestList,
   pullRequestRefOf,
   pullRequestStatePill,
@@ -77,6 +89,20 @@ export function AppPullRequestsTab({
   const current = currentListRead(read, appId);
   // ErrorState retry: bumping the nonce re-runs the load effect below.
   const [reloadNonce, setReloadNonce] = useState(0);
+  // Local state, not URL state: `search.repo` belongs to the insights tab,
+  // and sharing one search param would leak each tab's filter into the other.
+  const [repoFilter, setRepoFilter] = useState("");
+  // The server caps the ledger at PULL_REQUEST_LIST_LIMIT rows, so the filter
+  // is client-side over the already-loaded rows; a filter with no match
+  // leaves the table to its normal empty state.
+  const repoOptions =
+    current.rows !== null
+      ? [...new Set(current.rows.map((row) => `${row.owner}/${row.repo}`))].sort()
+      : [];
+  const visibleRows =
+    current.rows !== null && repoFilter !== ""
+      ? current.rows.filter((row) => `${row.owner}/${row.repo}` === repoFilter)
+      : current.rows;
 
   // A malformed pr param resolves to null and falls back to the list face, so
   // "the detail owns the face" is the parsed ref, not the raw search value.
@@ -150,7 +176,45 @@ export function AppPullRequestsTab({
       {current.kind === "error" ? (
         <ErrorState locale={locale} onRetry={() => setReloadNonce((nonce) => nonce + 1)} />
       ) : current.rows !== null ? (
-        <PullRequestsListView locale={locale} rows={current.rows} onOpen={openPr} />
+        <>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            {/* The Select primitive rejects "" as an item value, so the "all"
+                choice reuses the shared insights sentinel (data.ts). */}
+            <Select
+              value={insightsRepoSelectValue(repoFilter)}
+              onValueChange={(next) => setRepoFilter(insightsRepoFromSelect(next))}
+            >
+              <SelectTrigger
+                className="min-w-48"
+                size="sm"
+                aria-label={t(locale, "pullRequests.filterRepo")}
+              >
+                <SelectValue placeholder={t(locale, "pullRequests.filterRepoAll")} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={INSIGHTS_REPO_ALL}>
+                  {t(locale, "pullRequests.filterRepoAll")}
+                </SelectItem>
+                {repoOptions.map((repo) => (
+                  <SelectItem key={repo} value={repo}>
+                    {repo}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-label={t(locale, "pullRequests.refreshAria")}
+              disabled={current.kind === "loading"}
+              onClick={() => setReloadNonce((nonce) => nonce + 1)}
+            >
+              <RefreshCw aria-hidden="true" />
+            </Button>
+          </div>
+          <PullRequestsListView locale={locale} rows={visibleRows ?? []} onOpen={openPr} />
+        </>
       ) : null}
     </div>
   );

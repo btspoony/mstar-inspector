@@ -112,6 +112,10 @@ export const zhCN: Dictionary = {
   /** Per-App 拉取请求标签页：App 收到的所有 PR 台账。详情以 owner/repo/number 寻址（同一 App 可能在多个仓库见到同一个编号），并以 `pr=owner/repo/number` 挂在 URL 上。 */
   pullRequests: {
     backToList: "返回列表",
+    /** 台账上方的工具行（仅列表面）。 */
+    filterRepo: "仓库",
+    filterRepoAll: "全部仓库",
+    refreshAria: "刷新拉取请求列表",
     /** 列表表格列——只含行自身的事实。 */
     columnPr: "拉取请求",
     columnState: "状态",
