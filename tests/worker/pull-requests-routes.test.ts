@@ -414,10 +414,11 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
       provider: "openrouter",
       reviewed_at: "2026-01-02 00:00:00",
       head_sha: "sha-1",
-      // The head's review carries no round facts: the parser coerces them to
-      // their "nothing recorded" face — absence, not a zero tally.
+      // The head's review omits the round ordinal and the measured clock: the
+      // parser reads those as "nothing recorded". Its tally is the producer's
+      // COUNT(*), so a review without findings reads 0, not absent.
       round: null,
-      findings: null,
+      findings: 0,
       duration_ms: null,
     });
   });

@@ -2124,10 +2124,10 @@ describe("migrations/0049_reviews_duration_ms.sql", () => {
         notnull: number;
         dflt_value: string | null;
       }>
-    ).find((c) => c.name === "duration_ms")!;
+    ).find((c) => c.name === "duration_ms");
     expect(column).toBeDefined();
-    expect(column.notnull).toBe(0);
-    expect(column.dflt_value).toBeNull();
+    expect(column!.notnull).toBe(0);
+    expect(column!.dflt_value).toBeNull();
   });
 });
 

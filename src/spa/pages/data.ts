@@ -813,8 +813,8 @@ export type PullRequestReview = {
   head_sha: string;
   /** Ordinal of this round in the PR's oldest-first review history; `null` when the payload carries none. */
   round: number | null;
-  /** Findings this round reported; `null` when the payload reports no tally (absence, not zero). */
-  findings: number | null;
+  /** Findings this round reported; the producer always sends a count, so a missing one folds to 0. */
+  findings: number;
   /** Wall clock of the round in ms; `null` for rows written before the measurement. */
   duration_ms: number | null;
 };
@@ -940,9 +940,9 @@ function positiveInteger(value: unknown): number | null {
 }
 
 /**
- * A wall clock or a findings tally: a finite non-negative integer passes, and
- * anything else is "no value" (`null`) rather than a coerced zero — 0 is a
- * real duration and a real tally, an absent one is not.
+ * A wall clock: a finite non-negative integer passes, and anything else is
+ * "no value" (`null`) rather than a coerced zero — 0 is a real duration, an
+ * absent one is not.
  */
 function nonNegativeInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
@@ -953,8 +953,8 @@ function nonNegativeInteger(value: unknown): number | null {
  * model/verdict can be absent too). The nullable text fields
  * coerce to "" at this boundary so the view never renders null; the
  * entry is dropped only when its timestamp/head anchor is missing. The
- * round facts coerce to their "nothing recorded" face instead of dropping the
- * row: a page read that predates them still renders its reviews.
+ * round ordinal and clock coerce to `null` and the tally to 0 instead of
+ * dropping the row: a page read without them still renders its reviews.
  */
 function parsePullRequestReview(value: unknown): PullRequestReview | null {
   if (!isRecord(value)) return null;
@@ -966,9 +966,9 @@ function parsePullRequestReview(value: unknown): PullRequestReview | null {
     reviewed_at: value.reviewed_at,
     head_sha: value.head_sha,
     round: positiveInteger(value.round),
-    // A missing or malformed tally is ABSENCE, not zero: the row omits the
-    // count rather than claiming the round reported nothing.
-    findings: nonNegativeInteger(value.findings),
+    // The producer counts findings with `COUNT(*)`, so it always sends a tally;
+    // a missing or malformed value folds to 0 rather than dropping the row.
+    findings: nonNegativeInteger(value.findings) ?? 0,
     duration_ms: nonNegativeInteger(value.duration_ms),
   };
 }

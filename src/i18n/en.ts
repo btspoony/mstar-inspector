@@ -173,7 +173,7 @@ export const en = {
     /** A round's wall clock: sub-minute runs read in seconds, longer ones as m/s. */
     reviewDurationSeconds: "{seconds}s",
     reviewDurationMinutes: "{minutes}m {seconds}s",
-    /** The run-time span's accessible name: the value alone would read as a bare number. */
+    /** The run-time span's tooltip, like the head-sha chip's: names what the value measures. */
     reviewDurationLabel: "Round run time",
     failures: "Failures",
     noFailures: "No failures for this pull request.",

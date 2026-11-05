@@ -219,31 +219,31 @@ describe("pull request detail data plane (pure helpers)", () => {
       review_round: 1,
     });
     // A payload that predates the round fields still renders its rows: the
-    // ordinal and clock are "no value" (`null`), and so is the absent tally —
-    // never a coerced 0 count and never NaN in the rendered count.
+    // ordinal and clock are "no value" (`null`), and a missing tally folds to
+    // 0 — never NaN in the rendered count.
     const legacyRound = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], round: "2", findings: "2", duration_ms: -1 }],
       total: 1,
     })?.items[0];
-    expect(legacyRound).toMatchObject({ round: null, findings: null, duration_ms: null });
+    expect(legacyRound).toMatchObject({ round: null, findings: 0, duration_ms: null });
     // Round 0 is not a round either: the history numbers from 1.
     const zeroRound = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], round: 0 }],
       total: 1,
     })?.items[0];
     expect(zeroRound?.round).toBeNull();
-    // A fractional or negative tally is not a count: absent, never
-    // "2.5 findings".
+    // A fractional or negative tally is not a count: it folds to 0 rather than
+    // reaching the rendered count as "2.5 findings".
     const fractional = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], findings: 2.5 }],
       total: 1,
     })?.items[0];
-    expect(fractional?.findings).toBeNull();
+    expect(fractional?.findings).toBe(0);
     const negative = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], findings: -3 }],
       total: 1,
     })?.items[0];
-    expect(negative?.findings).toBeNull();
+    expect(negative?.findings).toBe(0);
     const legacyFinding = parseRecordPage("findings", {
       items: [{ ...FINDINGS[0], review_round: 1.5 }],
       total: 1,
@@ -950,8 +950,8 @@ describe("pull request detail face (static SSR)", () => {
         duration_ms: null,
       },
       {
-        // A payload older than the round facts: the row still renders, with
-        // no ordinal and no measured clock.
+        // A round that carries no ordinal and no measured clock still renders;
+        // its zero tally prints as "0 findings", not as a missing figure.
         verdict: "ship it",
         model: "kimi-for-coding",
         provider: "",
@@ -976,8 +976,8 @@ describe("pull request detail face (static SSR)", () => {
       durations: [...container.querySelectorAll('[data-slot="review-duration"]')].map(
         (duration) => duration.textContent ?? "",
       ),
-      durationLabels: [...container.querySelectorAll('[data-slot="review-duration"]')].map((duration) =>
-        duration.getAttribute("aria-label"),
+      durationTitles: [...container.querySelectorAll('[data-slot="review-duration"]')].map((duration) =>
+        duration.getAttribute("title"),
       ),
       // The summary body and its expand/collapse control are gone: a review
       // row is its head line alone.
@@ -1001,9 +1001,9 @@ describe("pull request detail face (static SSR)", () => {
       t("en", "pullRequests.reviewFindings", { count: 0 }),
     ]);
     expect(read.durations).toEqual([t("en", "pullRequests.reviewDurationMinutes", { minutes: 1, seconds: 5 })]);
-    // The bare value is not the whole accessible name: the span says what the
+    // The bare value is not self-describing: the span's tooltip says what the
     // clock measures.
-    expect(read.durationLabels).toEqual([t("en", "pullRequests.reviewDurationLabel")]);
+    expect(read.durationTitles).toEqual([t("en", "pullRequests.reviewDurationLabel")]);
     expect(read.foldControls).toBe(0);
     expect(read.bodies).toEqual([]);
     expect(read.latestHead).toContain(

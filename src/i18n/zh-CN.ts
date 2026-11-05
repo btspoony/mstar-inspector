@@ -149,7 +149,7 @@ export const zhCN: Dictionary = {
     /** 单轮审查耗时：不足一分钟按秒显示，否则按分秒显示。 */
     reviewDurationSeconds: "{seconds} 秒",
     reviewDurationMinutes: "{minutes} 分 {seconds} 秒",
-    /** 耗时 span 的可访问名称：只有数值会被读成一个孤立的数字。 */
+    /** 耗时 span 的 tooltip（与 head-sha chip 同）：说明这个数值是本轮耗时。 */
     reviewDurationLabel: "本轮运行耗时",
     failures: "失败",
     noFailures: "此拉取请求没有失败记录。",

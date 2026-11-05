@@ -356,6 +356,11 @@ describe("createArtifactStore().put", () => {
     // A caller that measures nothing (historical / aborted round) omits the
     // field: the 15th bind must land NULL rather than a fabricated 0.
     await store.put(reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "d".repeat(40) }) }));
+    // A zero clock is a measurement too: it persists as 0, so 0 / N / absent
+    // are three distinct rows.
+    await store.put(
+      reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "e".repeat(40) }), durationMs: 0 }),
+    );
 
     const measured = db.raw.query("SELECT duration_ms FROM reviews WHERE head_sha = ?").get(SHA) as {
       duration_ms: number | null;
@@ -365,6 +370,10 @@ describe("createArtifactStore().put", () => {
       .query("SELECT duration_ms FROM reviews WHERE head_sha = ?")
       .get("d".repeat(40)) as { duration_ms: number | null };
     expect(unmeasured.duration_ms).toBeNull();
+    const zeroed = db.raw
+      .query("SELECT duration_ms FROM reviews WHERE head_sha = ?")
+      .get("e".repeat(40)) as { duration_ms: number | null };
+    expect(zeroed.duration_ms).toBe(0);
   });
 
   test("an appId with no github_apps row is FK-rejected with zero rows written", async () => {
