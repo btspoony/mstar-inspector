@@ -126,10 +126,10 @@ describe("review trigger vocabulary (duplication lock + mention grammar)", () =>
     expect(isReviewTriggerMode("whenever")).toBe(false);
   });
 
-  test("botMention is the exact canonical string @{slug}[bot] (spec §3 operator visibility)", () => {
-    expect(botMention("acme")).toBe("@acme[bot]");
+  test("botMention is the bare @{slug} form (spec §3 operator visibility)", () => {
+    expect(botMention("acme")).toBe("@acme");
     // GitHub login continuation: hyphens ride the slug verbatim.
-    expect(botMention("mstar-review")).toBe("@mstar-review[bot]");
+    expect(botMention("mstar-review")).toBe("@mstar-review");
   });
 });
 
@@ -166,14 +166,14 @@ describe("trigger-mode segmented control (SSR)", () => {
     expect(en).toContain("Every push");
     expect(en).toContain("Manual");
     const zh = controlHtml("every_push", "zh_CN");
-    expect(zh).toContain("评审触发");
+    expect(zh).toContain("审查触发");
     expect(zh).toContain("首次打开");
     expect(zh).toContain("每次推送");
     expect(zh).toContain("仅手动");
     // Both locales keep the same verbatim value set + mention form.
     for (const html of [en, zh]) {
       expect(html).toContain('title="every_push"');
-      expect(html).toContain("@acme[bot]");
+      expect(html).toContain("@acme");
     }
   });
 });
@@ -182,35 +182,43 @@ describe("mention-string display (spec §3 operator visibility, SSR)", () => {
   test("the exact string renders as one code node with the plain form in title + aria", () => {
     const en = controlHtml("every_push");
     // ONE text node — click-drag copies the exact string.
-    expect(en).toContain(">@acme[bot]</code>");
+    expect(en).toContain(">@acme</code>");
     // Copy-friendly plain form in the title and the localized aria label.
-    expect(en).toContain('title="@acme[bot]"');
-    expect(en).toContain('aria-label="Bot mention: @acme[bot]"');
-    expect(controlHtml("every_push", "zh_CN")).toContain('aria-label="机器人提及字符串：@acme[bot]"');
+    expect(en).toContain('title="@acme"');
+    expect(en).toContain('aria-label="Bot mention: @acme"');
+    expect(controlHtml("every_push", "zh_CN")).toContain('aria-label="机器人提及：@acme"');
   });
 
   test("the mention derives from the App slug (one App's string never leaks to another)", () => {
     const html = controlHtml("every_push", "en", "mstar-review");
-    expect(html).toContain(">@mstar-review[bot]</code>");
-    expect(html).toContain('title="@mstar-review[bot]"');
-    expect(html).not.toContain("@acme[bot]");
+    expect(html).toContain(">@mstar-review</code>");
+    expect(html).toContain('title="@mstar-review"');
+    expect(html).not.toContain("@acme");
   });
 
-  test("no github_slug → no mention renders at all (D2 fail-safe; never an @[bot] placeholder)", () => {
+  test("no github_slug → no mention renders at all (D2 fail-safe; never a placeholder)", () => {
     // Before the first metadata sync there is no real mention target: the
     // hint paragraph stays off the face entirely, the mode control does not.
+    // Product behaviour, never markup shape: the control owns other
+    // paragraphs (the save-outcome notice), so the assertion is that the
+    // localized hint sentence and the mention target are both absent.
     const html = controlHtml("every_push", "en", null);
-    expect(html).not.toContain("[bot]");
-    expect(html).not.toContain("works in every mode");
+    expect(html).not.toContain(t("en", "settings.triggerModeMention"));
+    expect(html).not.toContain("<code");
+    expect(html).not.toContain('title="@');
     expect(html).toContain('role="radiogroup"');
   });
 
   test("the mention copy sits in the control (near the mode segments, per the assignment)", () => {
     const html = controlHtml("every_push");
-    expect(html.indexOf('role="radiogroup"')).toBeGreaterThan(-1);
-    expect(html.indexOf("@acme[bot]")).toBeGreaterThan(html.indexOf('role="radiogroup"'));
-    // The every-mode hint rides it (the spec's "works in every mode" face).
-    expect(html).toContain("works in every mode");
+    const segments = html.indexOf('role="radiogroup"');
+    expect(segments).toBeGreaterThan(-1);
+    // The localized hint sentence renders, and its <code> follows the
+    // segments. Asserting the dictionary VALUE (not a literal) keeps the
+    // witness alive under a copy edit.
+    expect(html).toContain(t("en", "settings.triggerModeMention"));
+    expect(html.indexOf("<code")).toBeGreaterThan(segments);
+    expect(html.indexOf("@acme")).toBeGreaterThan(segments);
   });
 });
 
@@ -348,7 +356,45 @@ describe("save flow + 400 fallback contract", () => {
     }
   });
 
-  test("the keyed 400 key is a registered dictionary key with both locale faces (the resolver's input)", () => {
+  test("a keyed 400 from the route resolves its dictionary key in the operator's locale", async () => {
+    // The server's mapped 400 body, driven through the REAL save path: if the
+    // wire key or the resolver's key-first preference breaks, the operator
+    // would see the raw English `message` fallback and this fails.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          key: "settings.error.triggerModeUnknown",
+          message: "unknown trigger mode",
+          params: { mode: "whenever" },
+        }),
+        { status: 400 },
+      )) as unknown as typeof fetch;
+    const scope = globalThis as { location?: { pathname: string } };
+    scope.location = { pathname: "/dashboard/apps/1" };
+    let reloads = 0;
+    try {
+      for (const locale of ["en", "zh_CN"] as const) {
+        const outcome = await submitTriggerMode("1", "manual", locale, async () => {
+          reloads += 1;
+          return true;
+        });
+        expect(outcome).toEqual({
+          kind: "error",
+          message: t(locale, "settings.error.triggerModeUnknown", { mode: "whenever" }),
+        });
+        // The mapped key wins over the body's English `message`.
+        expect(outcome.message).not.toContain("unknown trigger mode");
+      }
+      // A failed save still refetches: the stored row is read, never assumed.
+      expect(reloads).toBe(2);
+    } finally {
+      globalThis.fetch = realFetch;
+      delete scope.location;
+    }
+  });
+
+  test("the keyed 400 key is registered with both locale faces (the resolver's precondition)", () => {
     expect(isDictionaryKey("settings.error.triggerModeUnknown")).toBe(true);
     expect(t("en", "settings.error.triggerModeUnknown", { mode: "whenever" })).toContain("whenever");
     expect(t("en", "settings.error.triggerModeUnknown", { mode: "whenever" })).toContain("open, every_push, or manual");
@@ -358,16 +404,19 @@ describe("save flow + 400 fallback contract", () => {
 
   test("control copy is dictionary-backed in both locales", () => {
     expect(t("en", "settings.triggerMode")).toBe("Review trigger");
-    expect(t("zh_CN", "settings.triggerMode")).toBe("评审触发");
+    expect(t("zh_CN", "settings.triggerMode")).toBe("审查触发");
     expect(t("en", "settings.triggerModeOpen")).toBe("First open");
     expect(t("zh_CN", "settings.triggerModeOpen")).toBe("首次打开");
     expect(t("en", "settings.triggerModeEveryPush")).toBe("Every push");
     expect(t("zh_CN", "settings.triggerModeEveryPush")).toBe("每次推送");
     expect(t("en", "settings.triggerModeManual")).toBe("Manual");
     expect(t("zh_CN", "settings.triggerModeManual")).toBe("仅手动");
-    expect(t("en", "settings.triggerModeMention")).toContain("PR comment");
-    expect(t("zh_CN", "settings.triggerModeMention")).toContain("PR 评论");
-    expect(t("en", "settings.triggerModeMentionAria", { mention: "@a[bot]" })).toBe("Bot mention: @a[bot]");
-    expect(t("zh_CN", "settings.triggerModeMentionAria", { mention: "@a[bot]" })).toBe("机器人提及字符串：@a[bot]");
+    // The hint names the actor allowlist — a teammate's comment is ignored.
+    expect(t("en", "settings.triggerModeMention")).toContain("PR author");
+    expect(t("en", "settings.triggerModeMention")).toContain("repo owner");
+    expect(t("zh_CN", "settings.triggerModeMention")).toContain("PR 作者");
+    expect(t("zh_CN", "settings.triggerModeMention")).toContain("仓库所有者");
+    expect(t("en", "settings.triggerModeMentionAria", { mention: "@a" })).toBe("Bot mention: @a");
+    expect(t("zh_CN", "settings.triggerModeMentionAria", { mention: "@a" })).toBe("机器人提及：@a");
   });
 });

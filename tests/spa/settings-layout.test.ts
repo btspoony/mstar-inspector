@@ -17,7 +17,7 @@ import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { t, type DictionaryKey } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { PROVIDER_CATALOG, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
-import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta, type SettingsManagePayload } from "../../src/spa/pages/data";
+import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta, type SettingsManagePayload, type SettingsReadOnlyPayload } from "../../src/spa/pages/data";
 import {
   ProviderCombobox,
   ProviderComboboxPanel,
@@ -27,9 +27,12 @@ import {
 import {
   AppInfoSection,
   DraftChainPanel,
+  REVIEW_DEPTH_INHERIT,
   ReviewGateSection,
+  SettingsView,
   draftChainTabLabel,
   githubAppSettingsUrl,
+  reviewDepthOptions,
 } from "../../src/spa/pages/SettingsPage";
 import { ProviderConfigForm } from "../../src/spa/pages/providers-dialogs";
 import type { SpaBoot } from "../../src/spa/boot";
@@ -74,6 +77,8 @@ const detailPayload = (): SettingsManagePayload => ({
     last_webhook_at: null,
     sandbox_image_id: "omp",
     review_trigger_mode: "every_push",
+    review_level: null,
+    default_review_level: "default",
     github_visibility: "unknown",
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
@@ -90,6 +95,26 @@ const detailPayload = (): SettingsManagePayload => ({
   sandbox_images: [{ id: "omp", enabled: true }],
   installations: [],
   deliveries: [],
+});
+
+/** The identity-only face a plain member gets — no ops stores, so no depth control. */
+const memberPayload = (): SettingsReadOnlyPayload => ({
+  can_manage: false,
+  workspace_id: "ws_0123456789abcdefghijkl",
+  app: {
+    github_app_id: 1,
+    status: "active",
+    review_enabled: true,
+    created_by: "octocat",
+    created_at: "2026-01-01T00:00:00.000Z",
+    id: "app-acme",
+    github_name: "Acme",
+    github_slug: "acme-app",
+    github_description: null,
+    github_html_url: null,
+    github_avatar_url: null,
+    github_metadata_synced_at: null,
+  },
 });
 
 describe("settings layout", () => {
@@ -1954,6 +1979,8 @@ describe("GitHub App identity card", () => {
       last_webhook_at: null,
       sandbox_image_id: "omp",
       review_trigger_mode: "every_push",
+      review_level: null,
+      default_review_level: "default",
       github_name: null,
       github_description: null,
       github_html_url: null,
@@ -2388,5 +2415,36 @@ describe("review gate section", () => {
     );
     expect(readable).toContain(t("en", "settings.reviewGateSave"));
     expect(readable).not.toContain("stored review gate could not be read");
+  });
+});
+
+describe("review depth control", () => {
+  test("the four faces carry the plan's vocabulary in both locales", () => {
+    expect(reviewDepthOptions("en", "default").map((option) => [option.value, option.label])).toEqual([
+      ["quick", "Quick — fast, single-pass review"],
+      ["default", "Standard — balanced depth (recommended)"],
+      ["deep", "Deep — most thorough, slower"],
+      [REVIEW_DEPTH_INHERIT, "Follow operator default (currently Standard)"],
+    ]);
+    // The inherit face names the level NULL currently resolves to, so a
+    // manager never has to open the operator console to know what it runs.
+    expect(reviewDepthOptions("zh_CN", "deep").map((option) => option.label)).toEqual([
+      "快速 — 单轮快速评审",
+      "标准 — 均衡深度（推荐）",
+      "深入 — 最彻底，耗时更长",
+      "跟随平台默认（当前：深入）",
+    ]);
+  });
+
+  test("managers get the depth control; the identity-only face renders none", () => {
+    const name = t("en", "settings.reviewDepth");
+    const manager = renderToStaticMarkup(
+      createElement(SettingsView, { locale: "en", payload: detailPayload(), groups: [], onReload: async () => true }),
+    );
+    expect(manager).toContain(name);
+    const member = renderToStaticMarkup(
+      createElement(SettingsView, { locale: "en", payload: memberPayload(), groups: [], onReload: async () => true }),
+    );
+    expect(member).not.toContain(name);
   });
 });

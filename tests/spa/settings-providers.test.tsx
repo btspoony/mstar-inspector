@@ -55,6 +55,8 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
       id: "app-test",
       sandbox_image_id: "omp",
       review_trigger_mode: "every_push",
+      review_level: null,
+      default_review_level: "default",
       github_name: null,
       github_slug: null,
       github_description: null,

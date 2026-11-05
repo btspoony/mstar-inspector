@@ -15,10 +15,12 @@
  * (src/contracts/sandbox-images.ts — the registry, not pipeline/review code —
  * and src/contracts/failure-stages.ts — the `review_failures` stage
  * partition), which bound the sandbox_image_id value domain and keep the
- * failure-count/history SQL off hand-written stage literals. The one engine
- * symbol pair (`PR_VERDICTS` / `PrVerdict`) is the review gate's verdict
- * vocabulary: it is imported, never restated, so a gate value the engine
- * rejects can never be stored (the src/review/schema.ts convention).
+ * failure-count/history SQL off hand-written stage literals, plus the pure
+ * types+constants packages/shared/src/runtime.ts, whose closed REVIEW_LEVELS
+ * vocabulary is the review-level value domain (imported, never restated).
+ * The one engine symbol pair (`PR_VERDICTS` / `PrVerdict`) is the review gate's
+ * verdict vocabulary: it is imported, never restated, so a gate value the
+ * engine rejects can never be stored (the src/review/schema.ts convention).
  * The `db` parameter is a locally-declared narrow D1 face (types
  * only, zero imports) — a real `D1Database`, the bun:sqlite test double
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
@@ -56,6 +58,14 @@
  *     updated_at, and refuses soft-deleted rows exactly like setAppStatus.
  *     createApp omits the column, so the migration 0022 DDL default seeds
  *     'every_push' (today's behavior, preserved exactly).
+ *   - setReviewLevel (migration 0047) is the per-App review depth: `null` is
+ *     the "follow the operator default" choice and writes the column back to
+ *     NULL, a non-null level must be on the shared REVIEW_LEVELS vocabulary
+ *     (the setReviewTriggerMode backstop; the DDL CHECK is the last line),
+ *     and it writes review_level + updated_at, refusing soft-deleted rows
+ *     exactly like setAppStatus. The read face is the row column itself, so
+ *     parseAppReviewLevel is the one parser: an off-vocabulary stored value
+ *     reads as absent, never as an error.
  *   - touchLastWebhook (migration 0008) writes ONLY
  *     last_webhook_at — never updated_at, which stays the operator-mutation
  *     timestamp (L5: the per-webhook frequency of this touch must not churn
@@ -124,6 +134,7 @@
  *     caller-visible errors, never swallowed.
  */
 import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
+import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { MUST_FIX_SEVERITY } from "../contracts/finding-severity";
@@ -156,6 +167,16 @@ export type GithubAppRow = {
    * trigger is orthogonal and works in every mode.
    */
   review_trigger_mode: ReviewTriggerMode;
+  /**
+   * Per-App review depth (migration 0047): 'quick' | 'default' | 'deep' — the
+   * packages/shared/src/runtime `REVIEW_LEVELS` vocabulary. NULL = no App
+   * choice, i.e. follow the operator default (`review_runtime_settings` key
+   * `review.level.default`); there is deliberately no backfill, so every App
+   * starts NULL. Read it through parseAppReviewLevel, which treats an
+   * off-vocabulary stored value as absent instead of throwing on the review
+   * path.
+   */
+  review_level: string | null;
   /**
    * Review-gate score floor (migration 0045): a published review concludes
    * the Check `success` only when its tally score is at least this value.
@@ -265,6 +286,17 @@ export const REVIEW_TRIGGER_MODES: readonly ReviewTriggerMode[] = Object.freeze(
  * no-answer; both callers keep the last stored value on `null`.
  */
 export type GithubVisibility = "public" | "private" | "unknown";
+
+/**
+ * The stored per-App review level (migration 0047), or `null` when the row
+ * carries no usable choice: a NULL column (follow the operator default) or a
+ * value outside the shared `REVIEW_LEVELS` vocabulary. An off-vocabulary
+ * stored value is UNTRUSTED and treated as absent — the review path falls back
+ * to the operator default and never throws for a row it cannot read.
+ */
+export function parseAppReviewLevel(value: unknown): ReviewLevel | null {
+  return isReviewLevel(value) ? value : null;
+}
 
 /**
  * The per-App review gate (migration 0045): a published review concludes the
@@ -1021,6 +1053,33 @@ export function createAppsStore(db: AppsStoreD1) {
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(mode, id)
+        .run();
+      return res.meta.changes > 0;
+    },
+
+    /**
+     * Select the App's review level (migration 0047). `null` is the
+     * "follow the operator default" choice and writes the column back to NULL,
+     * so it is a successful write, not a no-op. A non-null level must be on the
+     * shared `REVIEW_LEVELS` vocabulary — anything else throws BEFORE any write
+     * (the setReviewTriggerMode backstop; the settings route 400s first, and
+     * the DDL CHECK is the last line). Writes review_level + updated_at (an
+     * operator mutation, the setReviewEnabled convention) and refuses
+     * soft-deleted rows exactly like setAppStatus. Returns whether a row
+     * changed (false also covers unknown ids).
+     */
+    async setReviewLevel(id: string, level: ReviewLevel | null): Promise<boolean> {
+      if (level !== null && !isReviewLevel(level)) {
+        throw new Error(
+          `apps-store: review level ${JSON.stringify(level)} is not on the vocabulary (${REVIEW_LEVELS.join(" | ")}) — zero rows written`,
+        );
+      }
+      const res = await db
+        .prepare(
+          `UPDATE github_apps SET review_level = ?, updated_at = datetime('now')
+           WHERE id = ? AND deleted_at IS NULL`,
+        )
+        .bind(level, id)
         .run();
       return res.meta.changes > 0;
     },

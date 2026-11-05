@@ -65,6 +65,7 @@ import {
   ALLOWLIST_MAX_OWNERS,
   createAppsStore,
   dedupeOwnerLogins,
+  parseAppReviewLevel,
   REVIEW_TRIGGER_MODES,
   type DeliverySummary,
   type GithubAppRow,
@@ -193,6 +194,7 @@ import {
   WORKSPACE_CONCURRENCY_MAX,
   getWorkspaceConcurrency,
   isConcurrencyValue,
+  readDefaultReviewLevel,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
 import { isLocale, resolveLocale, serializeLocaleCookie, t, type DictionaryKey, type Locale } from "../i18n";
@@ -2856,6 +2858,7 @@ const SETTINGS_400_KEYS = {
   templateMaterializeMax: "settings.error.templateMaterializeMax",
   runtimeHarnessUnknown: "settings.error.runtimeHarnessUnknown",
   triggerModeUnknown: "settings.error.triggerModeUnknown",
+  reviewLevelUnknown: "settings.error.reviewLevelUnknown",
   /** Review gate + owner allowlist (migration 0045). */
   checkScoreInvalid: "settings.error.checkScoreInvalid",
   checkVerdictUnknown: "settings.error.checkVerdictUnknown",
@@ -3177,6 +3180,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
     if (allowlist === null) {
       throw new Error(`app settings row ${app.id} vanished while reading its review gate configuration`);
     }
+    // The level a NULL App column resolves to (migration 0047) — the depth
+    // control's inherit face names it, so a manager never needs the operator
+    // console to know what "follow the operator default" currently runs.
+    const defaultReviewLevel = (await readDefaultReviewLevel(gate.db)).value;
     const base = {
       // The stable workspace id the App belongs to (server-resolved scope,
       // never the request's path segment): with `app.id` it composes the
@@ -3197,6 +3204,14 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // by the column's CHECK enum, so the wire value is always one of
         // open | every_push | manual.
         review_trigger_mode: app.review_trigger_mode,
+        // The App's review depth (migration 0047): the stored level, or null
+        // for "follow the operator default". Read through parseAppReviewLevel
+        // so an off-vocabulary stored value renders as the inherit face (the
+        // review path treats it the same way) instead of a dead selection.
+        review_level: parseAppReviewLevel(app.review_level),
+        // The operator level the inherit face names. MANAGER face only: the
+        // member face is identity-set only and renders no depth control.
+        default_review_level: defaultReviewLevel,
         // Cached GitHub App visibility (migration 0045): null only when the
         // row could not be read; 'unknown' = never probed / probe could not
         // answer, which the SPA treats as "cannot prove private".
@@ -3495,6 +3510,15 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
 };
 
 /**
+ * The review-depth control's inherit face (migration 0047): the wire sentinel
+ * `save-review-level` maps to the NULL column ("follow the operator default").
+ * It is a form protocol value, never a stored one — the column holds a
+ * REVIEW_LEVELS value or NULL. The SPA restates it as REVIEW_DEPTH_INHERIT
+ * across the bundle boundary (the REVIEW_TRIGGER_MODES convention).
+ */
+const REVIEW_LEVEL_INHERIT = "inherit";
+
+/**
  * The settings POST: the operations on the pinned action path, discriminated
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
  * other id — the allowlist is the plan's Global Constraint) + the
@@ -3526,7 +3550,10 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
  * inside the store and never echoed. save-sandbox-image = the
  * App's runtime-harness selection (mounted into the sandbox image): only ENABLED
  * src/contracts/sandbox-images.ts registry ids are storable (unknown or
- * disabled → 400, nothing stored). The settings page is
+ * disabled → 400, nothing stored). save-review-level = the App's review depth
+ * (migration 0047): a REVIEW_LEVELS value is stored, the inherit sentinel
+ * writes the column back to NULL (follow the operator default), and anything
+ * else is a keyed 400 with zero writes. The settings page is
  * SPA-owned — 2xx = the SPA refetches the JSON face, 4xx/5xx = the reason
  * (400s are keyed JSON via settings400Response — native form
  * posts keep the 302); the re-rendered HTML page is retired.
@@ -4184,6 +4211,35 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.github_app_id, `Saved the ${image.id} runtime harness for ${appDisplayName(gate.app)}.`);
+  }
+  if (op === "save-review-level") {
+    // The App's review depth (migration 0047): a REVIEW_LEVELS value is
+    // stored, the inherit sentinel writes the column back to NULL (follow the
+    // operator default — a real choice, not a no-op), and anything else is a
+    // keyed 400 with zero writes. The store's isReviewLevel guard and the DDL
+    // CHECK are the backstops; setReviewLevel stamps updated_at.
+    const rawLevel = typeof form.level === "string" ? form.level.trim() : "";
+    const level = rawLevel === REVIEW_LEVEL_INHERIT ? null : parseAppReviewLevel(rawLevel);
+    if (level === null && rawLevel !== REVIEW_LEVEL_INHERIT) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.reviewLevelUnknown, {
+        level: rawLevel,
+      });
+    }
+    try {
+      // `false` = the App row vanished (or was soft-deleted) before this
+      // write: nothing was saved, so the success notice would lie.
+      if (!(await createAppsStore(gate.db).setReviewLevel(gate.app.id, level))) {
+        throw new Error(`app ${gate.app.id} vanished before its review level save`);
+      }
+    } catch (err) {
+      logSettingsFailure("save_review_level", gate.app.id, err);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(
+      c,
+      gate.app.github_app_id,
+      `Saved the review depth for ${appDisplayName(gate.app)} — ${level ?? "following the operator default"}.`,
+    );
   }
   if (op === "save-check-gate") {
     // The App's review gate (migration 0045): the score floor plus the set of

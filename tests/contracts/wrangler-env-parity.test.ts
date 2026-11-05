@@ -161,7 +161,7 @@ function containerFingerprints(block: Json): string[] {
  * drift this lock catches. Both consumers pin max_batch_size 1, the
  * deploy-time max_concurrency ceiling and max_retries 3 (see the
  * wrangler.jsonc rationale). Set-equality keeps the two blocks equal; the
- * ceiling VALUE is pinned to Cloudflare's 250 by the test below it.
+ * ceiling VALUE and the batch-size literal are pinned by the test below it.
  */
 function consumerTuningFingerprints(block: Json): string[] {
   return asArray(asObject(block.queues).consumers).map((entry) =>
@@ -264,14 +264,19 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
   /** The ceiling's VALUE is a deploy-config decision, but it is the blast-radius
    * bound (every admitted attempt starts its own container), so both blocks are
    * pinned to Cloudflare Queues' hard limit: 250 concurrent consumer
-   * invocations. Set-equality above only keeps the two blocks from drifting. */
-  test("both consumer blocks pin the deploy-time ceiling to Cloudflare's 250", () => {
+   * invocations. `max_batch_size` is pinned to the literal 1 beside it: a batch
+   * above 1 packs several reviews into one invocation and breaks the
+   * one-attempt-per-message retry/DLQ accounting plus the wall-clock budget.
+   * Set-equality above only keeps the two blocks from drifting — never a value
+   * they drift to together. */
+  test("both consumer blocks pin max_concurrency to 250 and max_batch_size to 1", () => {
     for (const [block, consumer] of [
       ["top level (staging)", asArray(asObject(staging.queues).consumers)[0]],
       ["env.production", asArray(asObject(production.queues).consumers)[0]],
     ] as [string, Json | undefined][]) {
       if (!consumer) throw new Error(`wrangler.jsonc: ${block} consumer entry is missing`);
       expect(consumer.max_concurrency, `wrangler.jsonc: ${block} max_concurrency ceiling`).toBe(250);
+      expect(consumer.max_batch_size, `wrangler.jsonc: ${block} max_batch_size`).toBe(1);
     }
   });
 

@@ -1293,6 +1293,9 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           input: input.recheck,
           model: seatModelChain(input),
           signal: recheckController.signal,
+          ...(input.recheckAssignmentMaxBytes === undefined
+            ? {}
+            : { assignmentMaxBytes: input.recheckAssignmentMaxBytes }),
         });
       }
 
@@ -1704,6 +1707,9 @@ export const ompAgentRuntime: AgentRuntime = {
               input: recheckDoc,
               model: seatModels,
               signal: recheckController.signal,
+              ...(input.recheckAssignmentMaxBytes === undefined
+                ? {}
+                : { assignmentMaxBytes: input.recheckAssignmentMaxBytes }),
             })
           : null;
       // Each seat's reserved registry id — the engine-mandated `<domain>-<seat>`

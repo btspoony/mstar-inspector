@@ -1,0 +1,25 @@
+-- 0047_review_level_per_app.sql — per-App review depth.
+--
+-- Review depth used to be a deploy-time env var (`REVIEW_LEVEL`): one depth
+-- per deployment, a redeploy to change it. It is App identity configuration in
+-- the same class as `review_enabled` / `sandbox_image_id`, so it moves onto
+-- `github_apps` — NOT `app_workspaces`, which would make depth
+-- per-(App, workspace) and change what the setting means.
+--
+--   review_level  TEXT CHECK(review_level IN ('quick','default','deep')) — the
+--                 closed `REVIEW_LEVELS` vocabulary of
+--                 packages/shared/src/runtime.ts. NULL = no App choice, i.e.
+--                 "follow the operator default" (review_runtime_settings key
+--                 `review.level.default`); `setReviewLevel` writes NULL for
+--                 that choice, so the column's NULL is meaningful, not
+--                 "unset by accident". No backfill: every existing App keeps
+--                 running whatever the operator default resolves to. A stored
+--                 value outside the vocabulary is unreachable through this
+--                 CHECK; if one ever arrives another way the read path treats
+--                 it as absent (`parseAppReviewLevel`) instead of throwing.
+--
+-- Append-only on the production DB: one nullable `ALTER TABLE ... ADD COLUMN`
+-- on the table 0001 created, no data rewrite. Forward-only (SQLite has no
+-- down).
+
+ALTER TABLE github_apps ADD COLUMN review_level TEXT CHECK (review_level IN ('quick','default','deep'));

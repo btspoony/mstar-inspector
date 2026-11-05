@@ -24,14 +24,23 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  MODEL_ITEM_MAX_CHARS,
+  MODEL_MAX_ITEMS,
+  MODEL_TOTAL_MAX_CHARS,
   RECHECK_MAX_TARGETS,
   validateRecheckDoc,
   type Assessment,
   type EvidenceSlice,
+  type RecheckGateResult,
   type RecheckInput,
   type RecheckTarget,
 } from "../../packages/shared/src/recheck-wire";
-import { RECHECK_HUNK, RECHECK_SHA } from "../helpers/recheck-wire-fixtures";
+import {
+  RECHECK_HUNK,
+  RECHECK_SHA,
+  RECHECK_SLICES_PER_TARGET,
+  maxRecheckInput,
+} from "../helpers/recheck-wire-fixtures";
 
 const SHA = RECHECK_SHA;
 const HUNK: EvidenceSlice = RECHECK_HUNK;
@@ -845,5 +854,92 @@ describe("validateRecheckDoc — disposition/reason pairing and shapes", () => {
       const result = validateRecheckDoc(value, input());
       expect(result.ok).toBe(false);
     }
+  });
+});
+
+/**
+ * The scenario every round must satisfy: an answer for a target either
+ * survives validation (`doc.results`) or is recorded as a rejection with a
+ * reason. An input row in neither set is a prior finding that vanished.
+ */
+function expectEveryRowHasVerdict(
+  limitInput: RecheckInput,
+  gate: RecheckGateResult,
+): void {
+  expect(gate.ok).toBe(true);
+  if (!gate.ok) return;
+  const resultIds = gate.doc.results.map((row) => row.rowId);
+  const rejectionIds = gate.rejected.flatMap((row) => (row.rowId === null ? [] : [row.rowId]));
+  expect(new Set(resultIds).size).toBe(resultIds.length);
+  expect(new Set(rejectionIds).size).toBe(rejectionIds.length);
+  for (const rejection of gate.rejected) expect(rejection.error.length).toBeGreaterThan(0);
+  const verdicted = new Set([...resultIds, ...rejectionIds]);
+  const missing = limitInput.targets.filter((target) => !verdicted.has(target.rowId)).map((target) => target.rowId);
+  expect(missing).toEqual([]);
+}
+
+describe("validateRecheckDoc — per-row verdicts at the documented input limits", () => {
+  const LIMIT_INPUT = maxRecheckInput();
+
+  /** One answer per target; `override` replaces the row at that index. */
+  function answers(override: { index: number; row: Record<string, unknown> } | null = null): Record<string, unknown>[] {
+    return LIMIT_INPUT.targets.map((target, index) => {
+      if (override !== null && override.index === index) return override.row;
+      return {
+        rowId: target.rowId,
+        disposition: "unverifiable",
+        reason: "no-evidence",
+        evidence: null,
+        relatedCurrentFindingIndexes: [],
+      };
+    });
+  }
+
+  test("the fixture rides the documented row, slice and character limits", () => {
+    expect(LIMIT_INPUT.targets).toHaveLength(RECHECK_MAX_TARGETS);
+    expect(LIMIT_INPUT.evidence).toHaveLength(RECHECK_MAX_TARGETS * RECHECK_SLICES_PER_TARGET);
+    expect(LIMIT_INPUT.discussion.items.length).toBeLessThanOrEqual(MODEL_MAX_ITEMS);
+    expect(LIMIT_INPUT.discussion.items.every((item) => item.body.length === MODEL_ITEM_MAX_CHARS)).toBe(true);
+    const totalChars = LIMIT_INPUT.discussion.items.reduce((sum, item) => sum + item.body.length, 0);
+    expect(totalChars).toBeLessThanOrEqual(MODEL_TOTAL_MAX_CHARS);
+  });
+
+  test("a document answering every row survives row for row", () => {
+    const gate = validateRecheckDoc(
+      { schema: "mstar.recheck/v1", headSha: LIMIT_INPUT.headSha, results: answers() },
+      LIMIT_INPUT,
+    );
+    expectEveryRowHasVerdict(LIMIT_INPUT, gate);
+    if (!gate.ok) return;
+    expect(gate.doc.results).toHaveLength(RECHECK_MAX_TARGETS);
+    expect(gate.rejected).toHaveLength(0);
+  });
+
+  test("one bad row at the limits keeps its reason and costs no other row", () => {
+    const bad = LIMIT_INPUT.targets[7]!;
+    const gate = validateRecheckDoc(
+      {
+        schema: "mstar.recheck/v1",
+        headSha: LIMIT_INPUT.headSha,
+        results: answers({
+          index: 7,
+          row: {
+            rowId: bad.rowId,
+            disposition: "addressed",
+            reason: "no-evidence",
+            evidence: null,
+            relatedCurrentFindingIndexes: [],
+          },
+        }),
+      },
+      LIMIT_INPUT,
+    );
+    expectEveryRowHasVerdict(LIMIT_INPUT, gate);
+    if (!gate.ok) return;
+    expect(gate.doc.results).toHaveLength(RECHECK_MAX_TARGETS - 1);
+    expect(gate.rejected).toHaveLength(1);
+    expect(gate.rejected[0]!.rowId).toBe(bad.rowId);
+    expect(gate.rejected[0]!.index).toBe(7);
+    expect(gate.rejected[0]!.error).toContain('addressed requires reason "verified-fix"');
   });
 });

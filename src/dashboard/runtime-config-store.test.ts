@@ -28,6 +28,11 @@
  *     `before` of both the system row and the workspace column is `null`
  *     whenever the stored value is not one the readers would trust — never a
  *     `CAST`ed number nothing ever used
+ *
+ * The operator default review level is the same table with a
+ * vocabulary instead of a range: an absent row reads `"default"`, a value off
+ * `REVIEW_LEVELS` reads `"default"` with `degraded: true` and never throws, and
+ * a write outside the vocabulary is refused with no row and no audit row.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -35,28 +40,39 @@ import {
   CHECK_TERMINALIZE_KEY,
   CHECK_TERMINALIZE_MIN,
   CHECK_UPDATE_DEFAULT,
-  CHECK_UPDATE_KEY,
   CHECK_UPDATE_MIN,
+  CHECK_UPDATE_KEY,
   CONCURRENCY_MIN,
+  RECHECK_BACKLOG_FILL_DEFAULT,
+  RECHECK_BACKLOG_FILL_KEY,
+  RECHECK_BACKLOG_FILL_MAX,
+  RECHECK_ASSIGNMENT_DEFAULT,
+  RECHECK_ASSIGNMENT_KEY,
+  RECHECK_ASSIGNMENT_MAX,
+  RECHECK_ASSIGNMENT_MIN,
+  REVIEW_LEVEL_DEFAULT,
+  REVIEW_LEVEL_KEY,
   RuntimeConfigError,
   SYSTEM_CONCURRENCY_DEFAULT,
   SYSTEM_CONCURRENCY_KEY,
   SYSTEM_CONCURRENCY_MAX,
-  RECHECK_BACKLOG_FILL_DEFAULT,
-  RECHECK_BACKLOG_FILL_KEY,
-  RECHECK_BACKLOG_FILL_MAX,
   WORKSPACE_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_MAX,
   getCheckBudgets,
   getRecheckBacklogFill,
   getEffectiveConcurrency,
+  getRecheckAssignmentMaxBytes,
   getSystemConcurrency,
   getWorkspaceConcurrency,
+  readDefaultReviewLevel,
   setCheckBudgets,
   setRecheckBacklogFill,
+  setDefaultReviewLevel,
+  setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
+import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import type { DashboardD1, DashboardD1Statement } from "./users";
 import { createMigratedTestD1, type TestD1 } from "../../tests/store/helpers";
 
@@ -553,48 +569,6 @@ describe("recheck backlog refill", () => {
 });
 
 describe("check budgets", () => {
-  /** Both stored budget rows, raw, keyed by PK. */
-  function storedBudgetsRaw(db: TestD1): Record<string, string> {
-    const rows = db.raw
-      .prepare("SELECT key, value FROM review_runtime_settings ORDER BY key")
-      .all() as Array<{ key: string; value: string }>;
-    return Object.fromEntries(rows.map((row) => [row.key, row.value]));
-  }
-
-  test("absent rows fall back to the documented defaults without degrading", async () =>
-    expect(await getCheckBudgets(fixture())).toEqual({
-      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
-      updateMs: CHECK_UPDATE_DEFAULT,
-      degraded: false,
-      derived: false,
-    }));
-
-  test("an untrusted or out-of-range stored value answers the defaults with degraded: true", async () => {
-    for (const value of ["not-a-number", "999999", "0"]) {
-      const db = fixture();
-      db.raw
-        .prepare(
-          `INSERT INTO review_runtime_settings (key, value, updated_at)
-           VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
-        )
-        .run(CHECK_UPDATE_KEY, value);
-      expect(await getCheckBudgets(db), value).toEqual({
-        terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
-        updateMs: CHECK_UPDATE_DEFAULT,
-        degraded: true,
-        derived: false,
-      });
-    }
-  });
-
-  test("a read failure answers the defaults with degraded: true and never throws", async () =>
-    expect(await getCheckBudgets(failingDb)).toEqual({
-      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
-      updateMs: CHECK_UPDATE_DEFAULT,
-      degraded: true,
-      derived: false,
-    }));
-
   test("a stored pair that breaks the writer's relation degrades the read", async () => {
     // Only an out-of-band write can produce this; the reader is the last fence.
     const pairs: Array<[string, string]> = [["5000", "5000"], ["4000", "5000"]];
@@ -686,6 +660,48 @@ describe("check budgets", () => {
     });
   });
 
+  /** Both stored budget rows, raw, keyed by PK. */
+  function storedBudgetsRaw(db: TestD1): Record<string, string> {
+    const rows = db.raw
+      .prepare("SELECT key, value FROM review_runtime_settings ORDER BY key")
+      .all() as Array<{ key: string; value: string }>;
+    return Object.fromEntries(rows.map((row) => [row.key, row.value]));
+  }
+
+  test("absent rows fall back to the documented defaults without degrading", async () =>
+    expect(await getCheckBudgets(fixture())).toEqual({
+      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+      updateMs: CHECK_UPDATE_DEFAULT,
+      degraded: false,
+      derived: false,
+    }));
+
+  test("an untrusted or out-of-range stored value answers the defaults with degraded: true", async () => {
+    for (const value of ["not-a-number", "999999", "0"]) {
+      const db = fixture();
+      db.raw
+        .prepare(
+          `INSERT INTO review_runtime_settings (key, value, updated_at)
+           VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+        )
+        .run(CHECK_UPDATE_KEY, value);
+      expect(await getCheckBudgets(db), value).toEqual({
+        terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+        updateMs: CHECK_UPDATE_DEFAULT,
+        degraded: true,
+        derived: false,
+      });
+    }
+  });
+
+  test("a read failure answers the defaults with degraded: true and never throws", async () =>
+    expect(await getCheckBudgets(failingDb)).toEqual({
+      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+      updateMs: CHECK_UPDATE_DEFAULT,
+      degraded: true,
+      derived: false,
+    }));
+
   test("an out-of-range pair is refused and writes nothing", async () => {
     const db = fixture();
     for (const pair of [
@@ -750,5 +766,186 @@ describe("check budgets", () => {
       before: { terminalizeMs: 12_000, updateMs: 7_000 },
       after: { terminalizeMs: 9_000, updateMs: 6_000 },
     });
+  });
+});
+
+describe("default review level", () => {
+  /** The stored default-level row, raw. */
+  function storedLevel(db: TestD1): string | null {
+    const row = db.raw
+      .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
+      .get(REVIEW_LEVEL_KEY) as { value: string } | null;
+    return row?.value ?? null;
+  }
+
+  /** That row as another writer left it, bypassing the store. */
+  function seedLevel(db: TestD1, value: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at)
+         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+      )
+      .run(REVIEW_LEVEL_KEY, value);
+  }
+
+  test("an absent row reads the documented default without degrading", async () =>
+    expect(await readDefaultReviewLevel(fixture())).toEqual({
+      value: REVIEW_LEVEL_DEFAULT,
+      degraded: false,
+    }));
+
+  test("a stored level reads back as itself", async () => {
+    const db = fixture();
+    seedLevel(db, "deep");
+    expect(await readDefaultReviewLevel(db)).toEqual({ value: "deep", degraded: false });
+  });
+
+  test("an off-vocabulary stored value answers the default with degraded: true", async () => {
+    for (const value of ["turbo", "QUICK", " deep", ""]) {
+      const db = fixture();
+      seedLevel(db, value);
+      expect(await readDefaultReviewLevel(db), value).toEqual({
+        value: REVIEW_LEVEL_DEFAULT,
+        degraded: true,
+      });
+    }
+  });
+
+  test("a read failure answers the default with degraded: true and never throws", async () =>
+    expect(await readDefaultReviewLevel(failingDb)).toEqual({
+      value: REVIEW_LEVEL_DEFAULT,
+      degraded: true,
+    }));
+
+  test("an off-vocabulary write is refused and writes nothing", async () => {
+    const db = fixture();
+    for (const value of ["turbo", "QUICK", ""]) {
+      await expect(setDefaultReviewLevel(db, value as ReviewLevel, ACTOR)).rejects.toBeInstanceOf(
+        RuntimeConfigError,
+      );
+    }
+    expect(storedLevel(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("an accepted write lands the row with one audit row, and reads back", async () => {
+    const db = fixture();
+    expect(await setDefaultReviewLevel(db, "deep", ACTOR)).toBe("deep");
+    expect(storedLevel(db)).toBe("deep");
+    expect(await readDefaultReviewLevel(db)).toEqual({ value: "deep", degraded: false });
+    expect(auditRows(db)).toEqual([
+      { action: "runtime.review_level.set", target_id: REVIEW_LEVEL_KEY },
+    ]);
+    expect(auditDetails(db, "runtime.review_level.set")).toEqual([
+      { before: null, after: "deep" },
+    ]);
+
+    // A second save records the previous level as `before`.
+    await setDefaultReviewLevel(db, "quick", ACTOR);
+    expect(auditDetails(db, "runtime.review_level.set")[1]).toEqual({
+      before: "deep",
+      after: "quick",
+    });
+  });
+
+  test("a corrupt stored level is audited as null, not as the raw text", async () => {
+    const db = fixture();
+    seedLevel(db, "turbo");
+    await setDefaultReviewLevel(db, "deep", ACTOR);
+    expect(auditDetails(db, "runtime.review_level.set")).toEqual([{ before: null, after: "deep" }]);
+  });
+});
+
+describe("recheck assignment budget", () => {
+  /** The stored budget row, raw so a refused write is observable. */
+  function storedBudget(db: TestD1): string | null {
+    const row = db.raw
+      .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
+      .get(RECHECK_ASSIGNMENT_KEY) as { value: string } | null;
+    return row?.value ?? null;
+  }
+
+  /** That row as another writer left it, bypassing the store. */
+  function seedBudget(db: TestD1, value: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at)
+         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+      )
+      .run(RECHECK_ASSIGNMENT_KEY, value);
+  }
+
+  test("an absent row reads the runner's documented default without degrading", async () =>
+    expect(await getRecheckAssignmentMaxBytes(fixture())).toEqual({
+      maxBytes: RECHECK_ASSIGNMENT_DEFAULT,
+      degraded: false,
+    }));
+
+  test("a stored value reads back as itself", async () => {
+    const db = fixture();
+    seedBudget(db, "131072");
+    expect(await getRecheckAssignmentMaxBytes(db)).toEqual({ maxBytes: 131_072, degraded: false });
+  });
+
+  test("an untrusted or out-of-range stored value answers the default with degraded: true", async () => {
+    for (const value of ["not-a-number", String(RECHECK_ASSIGNMENT_MIN - 1), String(RECHECK_ASSIGNMENT_MAX + 1), "0"]) {
+      const db = fixture();
+      seedBudget(db, value);
+      expect(await getRecheckAssignmentMaxBytes(db), value).toEqual({
+        maxBytes: RECHECK_ASSIGNMENT_DEFAULT,
+        degraded: true,
+      });
+    }
+  });
+
+  test("a read failure answers the default with degraded: true and never throws", async () =>
+    expect(await getRecheckAssignmentMaxBytes(failingDb)).toEqual({
+      maxBytes: RECHECK_ASSIGNMENT_DEFAULT,
+      degraded: true,
+    }));
+
+  test("an out-of-range or non-integer write is refused and writes nothing", async () => {
+    const db = fixture();
+    for (const value of [
+      RECHECK_ASSIGNMENT_MIN - 1,
+      RECHECK_ASSIGNMENT_MAX + 1,
+      131_072.5,
+      0,
+    ]) {
+      await expect(setRecheckAssignmentMaxBytes(db, value, ACTOR)).rejects.toBeInstanceOf(
+        RuntimeConfigError,
+      );
+    }
+    expect(storedBudget(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("an accepted write lands the row with one audit row, and reads back", async () => {
+    const db = fixture();
+    expect(await setRecheckAssignmentMaxBytes(db, 131_072, ACTOR)).toBe(131_072);
+    expect(storedBudget(db)).toBe("131072");
+    expect(await getRecheckAssignmentMaxBytes(db)).toEqual({ maxBytes: 131_072, degraded: false });
+    expect(auditRows(db)).toEqual([
+      { action: "runtime.recheck_assignment.set", target_id: RECHECK_ASSIGNMENT_KEY },
+    ]);
+    expect(auditDetails(db, "runtime.recheck_assignment.set")).toEqual([
+      { before: { maxBytes: null }, after: { maxBytes: 131_072 } },
+    ]);
+
+    // A second save records the previous value as `before`.
+    await setRecheckAssignmentMaxBytes(db, 200_000, ACTOR);
+    expect(auditDetails(db, "runtime.recheck_assignment.set")[1]).toEqual({
+      before: { maxBytes: 131_072 },
+      after: { maxBytes: 200_000 },
+    });
+  });
+
+  test("a corrupt stored value is audited as null, not as the raw text", async () => {
+    const db = fixture();
+    seedBudget(db, "not-a-number");
+    await setRecheckAssignmentMaxBytes(db, 65_536, ACTOR);
+    expect(auditDetails(db, "runtime.recheck_assignment.set")).toEqual([
+      { before: { maxBytes: null }, after: { maxBytes: 65_536 } },
+    ]);
   });
 });

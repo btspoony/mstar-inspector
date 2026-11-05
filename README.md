@@ -24,7 +24,7 @@ later analysis.
 - **Isolated execution** — every review runs in a one-shot Cloudflare Sandbox container (clone → review → destroy), with no secrets baked into the image
 - **Structured results** — reviews emit a `mstar.review/v1` envelope (verdict + classified findings) stored in D1, so dedup, recurrence, and health analytics are possible later
 - **Retained finding lifecycle** — unresolved findings survive across rounds: each round re-verifies them against the current code and discussion, reports the outcome in the same overall comment, and automatically resolves only the Inspector-owned review threads it can prove are its own and positively fixed (a finding's *addressed* disposition is never equated with a *resolved* GitHub thread)
-- **Per-App trigger modes** — each App picks when reviews auto-start on its settings page: `open` (first open only), `every_push` (default — open, push, reopen) or `manual` (never auto); in every mode a PR comment that @mentions the App's bot (`@your-app-slug[bot]`) from the PR author or the repo owner (re-)starts a review; a PR opened by a bot account — any login ending in `[bot]` — is never reviewed on either face
+- **Per-App trigger modes** — each App picks when reviews auto-start on its settings page: `open` (first open only), `every_push` (default — open, push, reopen) or `manual` (never auto); in every mode a PR comment that @mentions the App's bot (`@your-app-slug`) from the PR author or the repo owner (re-)starts a review; a PR opened by a bot account — any login ending in `[bot]` — is never reviewed on either face
 - **Fail-closed by design** — a paused App blocks new reviews (including their model runs), publications and line-comment creation; only the bounded [recovery exceptions](docs/deploy.md#lifecycle-recovery-7111) may still finish already-authorized work, and only for an otherwise active App. Every App must bring its own provider keys and model chain: a misconfigured App's reviews fail loudly, never on someone else's credentials
 
 ## Architecture
@@ -113,7 +113,7 @@ Deploy a pinned release to your own Cloudflare account:
 
 7. **Configure the App** — on the dashboard Settings page for the App, add the provider API key(s) the review model needs (BYOK, encrypted in D1) and a model chain. An App without these fails its reviews closed — see [Per-App configuration](#per-app-configuration).
 
-8. **Enable reviews and open a PR** — reviews are on per App by default (the dashboard Pause/Resume switch is the only review control), then open or update a PR in a repo where the App is installed.
+8. **Enable reviews and open a PR** — reviews are on per App by default (the dashboard Pause/Resume switch and the App's **Review trigger** mode are the review controls — `every_push` is the default), then open or update a PR in a repo where the App is installed. On `manual` the PR alone starts nothing; a PR comment by the PR author or a repo owner that @mentions the App still does.
 
    The review runs in a sandbox container and its result appears as one comment on the PR (upserted — no comment spam across force-pushes).
 

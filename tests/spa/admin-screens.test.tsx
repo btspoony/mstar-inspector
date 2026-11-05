@@ -479,6 +479,49 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("the depth card shows the operator default and one save fires exactly one PATCH", async () => {
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ reviewLevel: "deep" })
+        : json({
+            concurrency: 24,
+            min: 1,
+            max: 256,
+            degraded: false,
+            checkBudgets: CHECK_BUDGETS,
+            reviewLevel: {
+              value: "default",
+              levels: ["quick", "default", "deep"],
+              degraded: false,
+            },
+          }),
+    );
+    // Labelled as the inheritance default, and the copy says whom it applies to.
+    expect(surface.text()).toContain("Default review depth");
+    expect(surface.text()).toContain("Applies to Apps that have not chosen their own review depth.");
+    const trigger = surface.container.querySelector("#default-review-level");
+    expect(trigger?.textContent).toContain("Standard");
+
+    await surface.openSelect(trigger);
+    await surface.pickOption("Deep — most thorough, slower");
+    await surface.click(trigger!.closest("form")!.querySelector('button[type="submit"]'));
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      { url: "/_internal_admin/api/runtime", method: "PATCH", body: { reviewLevel: "deep" } },
+    ]);
+    expect(surface.container.querySelector("#default-review-level")?.textContent).toContain("Deep");
+    expect(surface.text()).toContain("Saved.");
+    await surface.close();
+  });
+
+  test("an older server without reviewLevel hides only the depth card", async () => {
+    const surface = await runtimeScreen(() => json(RUNTIME));
+    expect(surface.container.querySelector("#default-review-level")).toBeNull();
+    expect(surface.container.querySelector("#system-concurrency")).not.toBeNull();
+    expect(surface.container.querySelector("#check-terminalize-budget")).not.toBeNull();
+    await surface.close();
+  });
+
   test("an older Worker that omits only `derived` still renders the budget card", async () => {
     // The predecessor payload carries checkBudgets without the new field: the
     // whole page must keep rendering, with the stored pair prefilled.
@@ -494,8 +537,8 @@ describe("Runtime screen", () => {
   });
 
   test("a derived pair warns, starts both fields empty, and clears the state after a save", async () => {
-    // One side came from the absent-row default: the card must not present it
-    // as a configured value, and a save (which writes both rows) clears it.
+    // Exactly one row is stored: the card must not present the default as a
+    // configured value, and a save (which writes both rows) clears it.
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
         ? json({ checkBudgets: { terminalizeMs: 12_000, updateMs: 7_000 } })
@@ -523,8 +566,6 @@ describe("Runtime screen", () => {
         body: { checkBudgets: { terminalizeMs: 12_000, updateMs: 7_000 } },
       },
     ]);
-    // Both rows were written: the warning and the derived line are gone and
-    // the card reads as fully stored again.
     expect(surface.text()).not.toContain("Only one of these budgets is stored.");
     expect(surface.text()).not.toContain("(one side derived)");
     expect(surface.text()).toContain("Effective on the next review: terminalize 12000 ms, update 7000 ms.");
@@ -546,8 +587,7 @@ describe("Runtime screen", () => {
     expect(surface.text()).toContain("Saved.");
     expect(surface.text()).not.toContain("Only one of these budgets is stored.");
     expect(surface.text()).not.toContain("(one side derived)");
-    // The request values stand in for the absent echo — the card must not keep
-    // presenting the previous stored pair as the freshly saved one.
+    // The request values stand in for the absent echo.
     expect(surface.text()).toContain("Effective on the next review: terminalize 12000 ms, update 7000 ms.");
     await surface.close();
   });
@@ -610,6 +650,29 @@ describe("Runtime screen", () => {
     expect(surface.text()).toContain("the terminalize timeout must be greater than the check update budget");
     // The rejected write never replaced the stored pair.
     expect(surface.text()).toContain("Effective on the next review: terminalize 10000 ms, update 5000 ms.");
+    await surface.close();
+  });
+
+  test("the admission-drop card renders all four reasons and their 24h counts", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...RUNTIME,
+        admissionDrops24h: { "pr-held": 3, "system-cap": 1, "workspace-cap": 2, error: 0 },
+      }),
+    );
+    // The card names its window, so a number is never read as "all time".
+    expect(surface.text()).toContain("Admission drops (last 24 hours)");
+    const rendered = Object.fromEntries(
+      [...surface.container.querySelectorAll("[data-admission-drops]")].map((node) => [
+        node.getAttribute("data-admission-drops"),
+        node.textContent,
+      ]),
+    );
+    expect(rendered).toEqual({ "pr-held": "3", "system-cap": "1", "workspace-cap": "2", error: "0" });
+    // Every reason is labelled, not only numbered.
+    for (const label of ["PR in flight", "System cap", "Workspace cap", "Storage error"]) {
+      expect(surface.text()).toContain(label);
+    }
     await surface.close();
   });
 });
