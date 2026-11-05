@@ -697,20 +697,20 @@ async function reenableProbe(
     .bind(pair.appId, pair.installationId)
     .all<{ last_error: string | null; review_enabled: number }>();
   // A pair may hold mixed suspension kinds (the kill-switch hold is per row, a
-  // credential suspension covers the pair). Only when EVERY suspended row is
-  // status-resumable may this skip the credential probe. The `paused` half
-  // repeats the store's own `review_enabled !== 0` gate instead of treating the
-  // kind as self-proving, so a switch that re-engaged between the two reads
-  // cannot resume through this path.
-  const statusResumable =
-    rows.results.length > 0 &&
-    rows.results.every((row) => {
-      const kind = checkSuspensionKindOf(row.last_error);
-      if (kind === "disabled") return true;
-      if (kind === "paused") return row.review_enabled !== 0;
-      return false;
-    });
-  if (statusResumable) return { kind: "resume" };
+  // credential suspension covers the pair). A row whose kill switch is STILL
+  // off blocks every path, including the credential probe below: resuming a
+  // held row because a sibling looks provable is exactly the mixed-kind
+  // mistake this pair read exists to prevent.
+  const kinds = rows.results.map((row) => checkSuspensionKindOf(row.last_error));
+  if (rows.results.some((row, index) => kinds[index] === "paused" && row.review_enabled === 0)) {
+    return { kind: "unchanged" };
+  }
+  // Only when EVERY suspended row is status-resumable may this skip the
+  // credential probe: `disabled` was proved by App status and a LIFTED
+  // `paused` by the switch, and neither owes a proof.
+  if (kinds.length > 0 && kinds.every((kind) => kind === "disabled" || kind === "paused")) {
+    return { kind: "resume" };
+  }
   // Admission BEFORE the factory (M8's discipline): an unaffordable probe must
   // not run at all, so nothing is written and the pair stays retryable.
   if (!canSpend(budget, now(), CREDENTIAL_REQUESTS, false)) return { kind: "refused" };
