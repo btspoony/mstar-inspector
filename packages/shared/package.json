@@ -2,5 +2,8 @@
   "name": "@mstar-inspector/shared",
   "version": "0.1.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@mstar-harness/engine": "^4.2.2"
+  }
 }

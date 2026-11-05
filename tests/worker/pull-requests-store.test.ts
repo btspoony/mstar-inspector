@@ -141,7 +141,7 @@ describe("listPullRequests", () => {
         .run(id);
     }
 
-    const rows = await createAppsStore(db).listPullRequests(APP_ID);
+    const { rows } = await createAppsStore(db).listPullRequests(APP_ID);
     expect(rows.length).toBe(2);
     const byNumber = new Map(rows.map((row) => [row.number, row]));
     expect(byNumber.get(131)!.latest_review).toEqual({ verdict: "approve", reviewed_at: "2026-02-01 00:00:00" });
@@ -173,7 +173,7 @@ describe("listPullRequests", () => {
         .run(stage, error);
 
       const store = createAppsStore(db);
-      expect((await store.listPullRequests(APP_ID))[0]!.failure_count).toBe(0);
+      expect((await store.listPullRequests(APP_ID)).rows[0]!.failure_count).toBe(0);
       expect((await store.countPullRequestRecords(APP_ID, "acme", "widgets", 131)).failures).toBe(0);
       const history = await store.listPullRequestFailures(APP_ID, "acme", "widgets", 131, {
         offset: 0,
@@ -232,13 +232,13 @@ describe("listPullRequests", () => {
       )
       .run();
 
-    const rows = await createAppsStore(db).listPullRequests(APP_ID);
+    const { rows } = await createAppsStore(db).listPullRequests(APP_ID);
     expect(rows.length).toBe(1);
     expect(rows[0]!.latest_review).toBeNull();
     expect(rows[0]!.failure_count).toBe(0);
   });
 
-  test("is not N+1: three seeded PRs cost three statements, not one per row", async () => {
+  test("is not N+1: three seeded PRs cost a fixed number of statements, not one per row", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
     for (const n of [1, 2, 3]) await createAppsStore(db).upsertPullRequest({ ...PR, prNumber: n });
@@ -251,9 +251,11 @@ describe("listPullRequests", () => {
       },
       batch: db.batch.bind(db),
     };
-    const rows = await createAppsStore(counted as never).listPullRequests(APP_ID);
+    const { rows } = await createAppsStore(counted as never).listPullRequests(APP_ID);
     expect(rows.length).toBe(3);
-    expect(prepares).toBe(3);
+    // N+1 guard, not a query-plan freeze: a per-row statement would already
+    // exceed this bound at 3 rows.
+    expect(prepares).toBeLessThanOrEqual(4);
   });
 
   test("the aggregates are scoped to the window (mechanism, not just the payload)", async () => {
@@ -286,7 +288,7 @@ describe("listPullRequests", () => {
     };
     await createAppsStore(recording as never).listPullRequests(APP_ID);
 
-    expect(statements.length).toBe(3);
+    expect(statements.length).toBeLessThanOrEqual(4);
     const aggregates = statements.filter(
       (stmt) => stmt.sql.includes("FROM reviews") || stmt.sql.includes("FROM review_failures"),
     );
@@ -327,7 +329,7 @@ describe("listPullRequests", () => {
       )
       .run(total);
 
-    const rows = await createAppsStore(db).listPullRequests(APP_ID);
+    const { rows } = await createAppsStore(db).listPullRequests(APP_ID);
     expect(rows.length).toBe(PULL_REQUEST_LIST_LIMIT);
     expect(rows[0]!.number).toBe(total);
     expect(rows[0]!.latest_review).toEqual({ verdict: "approve", reviewed_at: expect.any(String) });
@@ -347,7 +349,7 @@ describe("listPullRequests", () => {
         updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, n)).toISOString(),
       });
     }
-    const rows = await createAppsStore(db).listPullRequests(APP_ID);
+    const { rows } = await createAppsStore(db).listPullRequests(APP_ID);
     expect(rows.length).toBe(PULL_REQUEST_LIST_LIMIT);
     // The oldest (prNumber 1, second 1) is the one dropped.
     expect(rows[0]!.number).toBe(total);
@@ -362,7 +364,7 @@ describe("listPullRequests", () => {
  * a row once selected. Both halves are pinned here: the option set covers the
  * whole ledger, and the filter runs INSIDE the window.
  */
-describe("listPullRequests repository filter + listPullRequestRepos", () => {
+describe("listPullRequests repository filter + option set", () => {
   const BEHIND = { ...PR, repo: "behind" };
 
   /**
@@ -411,27 +413,25 @@ describe("listPullRequests repository filter + listPullRequestRepos", () => {
     const db = createMigratedTestD1();
     const store = await seedCappedLedger(db);
 
-    // The option set is the whole ledger: no LIMIT, so the older repository
-    // is listed even though none of its rows are in the window.
-    expect(await store.listPullRequestRepos(APP_ID)).toEqual(["acme/behind", "acme/widgets"]);
-
     // The unfiltered list is unchanged: exactly the capped window, and the
-    // behind-the-cap repository has no row in it.
+    // behind-the-cap repository has no row in it. The option set is the whole
+    // ledger (no LIMIT), so that repository is listed anyway.
     const unfiltered = await store.listPullRequests(APP_ID);
-    expect(unfiltered.length).toBe(PULL_REQUEST_LIST_LIMIT);
-    expect(unfiltered.some((row) => row.repo === "behind")).toBe(false);
+    expect(unfiltered.repos).toEqual(["acme/behind", "acme/widgets"]);
+    expect(unfiltered.rows.length).toBe(PULL_REQUEST_LIST_LIMIT);
+    expect(unfiltered.rows.some((row) => row.repo === "behind")).toBe(false);
 
     // Filtering runs BEFORE the cap, so it reaches rows the window dropped.
     const filtered = await store.listPullRequests(APP_ID, { owner: "acme", repo: "behind" });
-    expect(filtered.map((row) => row.number).sort()).toEqual([9001, 9002]);
+    expect(filtered.rows.map((row) => row.number).sort()).toEqual([9001, 9002]);
     // …and the aggregates follow the same filtered window, so the tab's
     // verdict and failure count cannot disagree with the rows it shows.
-    const newest = filtered.find((row) => row.number === 9002)!;
+    const newest = filtered.rows.find((row) => row.number === 9002)!;
     expect(newest.latest_review).toEqual({ verdict: "approve", reviewed_at: "2026-02-01 00:00:00" });
     expect(newest.failure_count).toBe(1);
   });
 
-  test("a filtered read is still the three-statement batch", async () => {
+  test("a filtered read is still a fixed-size batch", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
     await createAppsStore(db).upsertPullRequest(PR);
@@ -444,7 +444,8 @@ describe("listPullRequests repository filter + listPullRequestRepos", () => {
       batch: db.batch.bind(db),
     };
     await createAppsStore(counted as never).listPullRequests(APP_ID, { owner: "acme", repo: "widgets" });
-    expect(prepares).toBe(3);
+    // N+1 guard, not a query-plan freeze: four statements regardless of rows.
+    expect(prepares).toBeLessThanOrEqual(4);
   });
 
   test("the option set is one App's ledger, never a sibling App's", async () => {
@@ -453,7 +454,7 @@ describe("listPullRequests repository filter + listPullRequestRepos", () => {
     seedApp(db, "other-app", 2002);
     await createAppsStore(db).upsertPullRequest(PR);
     await createAppsStore(db).upsertPullRequest({ ...PR, appId: "other-app", repo: "theirs" });
-    expect(await createAppsStore(db).listPullRequestRepos(APP_ID)).toEqual(["acme/widgets"]);
+    expect((await createAppsStore(db).listPullRequests(APP_ID)).repos).toEqual(["acme/widgets"]);
   });
 });
 

@@ -4572,11 +4572,10 @@ const appPullRequestsRoute = async (c: DashboardContext) => {
   // The filter is applied by the STORE, inside its bounded window: filtering
   // the returned rows here would only ever search the newest
   // PULL_REQUEST_LIST_LIMIT rows, which is the defect this face exists to fix.
-  const rows = await gate.store.listPullRequests(gate.app.id, parsed.filter ?? undefined);
-  // The option set is the App's whole ledger, never a window over it and never
-  // narrowed by the current selection — that is the only way a repository
-  // behind the row cap can be picked at all.
-  const repos = await gate.store.listPullRequestRepos(gate.app.id);
+  // The option set rides the same batch: the App's whole ledger, never a
+  // window over it and never narrowed by the current selection — that is the
+  // only way a repository behind the row cap can be picked at all.
+  const { rows, repos } = await gate.store.listPullRequests(gate.app.id, parsed.filter ?? undefined);
   return c.json({
     pull_requests: rows.map((row) => ({ ...row, ...pullRequestWireColumns(row) })),
     repos,

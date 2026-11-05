@@ -4,8 +4,9 @@
  * record route validates its `severity` filter against it, the SPA builds its
  * filter chips from it, the insights distribution zero-fills its key set with
  * it, and the store's must-fix tally names a class from it. A chip the UI
- * offers is therefore always a value the route accepts, and a class added
- * here reaches every layer in one edit.
+ * offers is therefore always a value the route accepts. A class added here is
+ * the START of a five-layer sweep, not a one-edit change; the checklist is
+ * `.mstar/knowledge/best-practices/merge-class-vocabulary-expansion.md`.
  *
  * Zero dependencies by design: the dashboard leaf boundary (AL-22-1) forbids
  * importing the store/pipeline/review layers, so the shared contract lives

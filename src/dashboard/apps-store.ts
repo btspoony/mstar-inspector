@@ -500,9 +500,9 @@ const PULL_REQUEST_REPO_PREDICATE = " AND owner = ? AND repo = ?";
  * capped: the work is. A repository filter narrows the window ITSELF, so the
  * cap bounds the filtered set and the aggregates keep matching the rows.
  */
-function pullRequestWindowSql(repoFiltered: boolean): string {
+function pullRequestWindowSql(repoPredicate: string): string {
   return `SELECT owner, repo, pr_number FROM pull_requests
-  WHERE app_id = ?${repoFiltered ? PULL_REQUEST_REPO_PREDICATE : ""}
+  WHERE app_id = ?${repoPredicate}
   ORDER BY ${PULL_REQUEST_LEDGER_ORDER} LIMIT ?`;
 }
 
@@ -1501,10 +1501,12 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * PR-ledger list face: the App's most recently active pull requests,
-     * newest first. THREE statements per call regardless of N — the rows, the
-     * newest review per (owner, repo, pr_number) via a ROW_NUMBER() window
-     * (the deliverySummaries shape), and the failure count joined through
-     * `app_installations` — never one query per row.
+     * newest first, plus the face's whole repository option set. FOUR
+     * statements per call regardless of N — the rows, the newest review per
+     * (owner, repo, pr_number) via a ROW_NUMBER() window (the
+     * deliverySummaries shape), the failure count joined through
+     * `app_installations`, and the option set — never one query per row, and
+     * never a second round trip for the option set.
      *
      * Capped at PULL_REQUEST_LIST_LIMIT: any third party who opens a PR mints
      * a row and the retention sweep only drains TERMINAL rows, so the table's
@@ -1525,6 +1527,12 @@ export function createAppsStore(db: AppsStoreD1) {
      * the rows. Filtering after the cap would show an empty list for exactly
      * the repositories the filter exists to reach.
      *
+     * The fourth statement is that option set: the App's DISTINCT
+     * `owner/repo` values with NO LIMIT, because an option set capped like the
+     * rows would drop the very repositories the filter exists to reach. It
+     * rides the same batch — and binds only `appId` — so opening the list is
+     * one round trip, not two.
+     *
      * Failure attribution assumes ONE installation per App. `app_installations`
      * permits the same installation id under two App rows, and in that case a
      * failure row would count toward both — accepted, because the alternative
@@ -1543,18 +1551,21 @@ export function createAppsStore(db: AppsStoreD1) {
     async listPullRequests(
       appId: string,
       filter?: { owner: string; repo: string },
-    ): Promise<PullRequestRow[]> {
+    ): Promise<{ rows: PullRequestRow[]; repos: string[] }> {
       // One binding list per window scope: the App, then the repository when
       // the caller filtered. The row statement takes it once before the limit;
       // each aggregate takes its own app_id first, then that same list for the
       // window subquery, then the limit — the order each SQL splices its `?` in.
       const scope = filter === undefined ? [appId] : [appId, filter.owner, filter.repo];
-      const window = pullRequestWindowSql(filter !== undefined);
+      // ONE suffix feeds the row statement and the window, so a change to the
+      // window helper cannot leave the rows filtering after the cap.
+      const repoPredicate = filter === undefined ? "" : PULL_REQUEST_REPO_PREDICATE;
+      const window = pullRequestWindowSql(repoPredicate);
       const results = await db.batch([
         db
           .prepare(
             `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-             FROM pull_requests WHERE app_id = ?${filter === undefined ? "" : PULL_REQUEST_REPO_PREDICATE}
+             FROM pull_requests WHERE app_id = ?${repoPredicate}
              ORDER BY ${PULL_REQUEST_LEDGER_ORDER}
              LIMIT ?`,
           )
@@ -1581,30 +1592,23 @@ export function createAppsStore(db: AppsStoreD1) {
              GROUP BY f.owner, f.repo, f.pr_number`,
           )
           .bind(appId, ...scope, PULL_REQUEST_LIST_LIMIT),
+        db
+          .prepare(
+            `SELECT DISTINCT owner, repo FROM pull_requests WHERE app_id = ?
+             ORDER BY owner, repo`,
+          )
+          .bind(appId),
       ]);
-      return assemblePullRequests(
-        results[0]!.results as PullRequestBaseRow[],
-        results[1]!.results as PullRequestReviewRow[],
-        results[2]!.results as PullRequestFailureCountRow[],
-      );
-    },
-
-    /**
-     * Every repository this App's ledger holds, `owner/repo`, A–Z — the list
-     * face's whole option set. NO LIMIT: a set capped like the rows would drop
-     * exactly the repositories the filter exists to reach (the ones whose PRs
-     * sit behind PULL_REQUEST_LIST_LIMIT), so it is the ledger's DISTINCT
-     * addresses, not a window over them.
-     */
-    async listPullRequestRepos(appId: string): Promise<string[]> {
-      const result = await db
-        .prepare(
-          `SELECT DISTINCT owner, repo FROM pull_requests WHERE app_id = ?
-           ORDER BY owner, repo`,
-        )
-        .bind(appId)
-        .all<{ owner: string; repo: string }>();
-      return result.results.map((row) => `${row.owner}/${row.repo}`);
+      return {
+        rows: assemblePullRequests(
+          results[0]!.results as PullRequestBaseRow[],
+          results[1]!.results as PullRequestReviewRow[],
+          results[2]!.results as PullRequestFailureCountRow[],
+        ),
+        repos: (results[3]!.results as Array<{ owner: string; repo: string }>).map(
+          (row) => `${row.owner}/${row.repo}`,
+        ),
+      };
     },
 
     /**
