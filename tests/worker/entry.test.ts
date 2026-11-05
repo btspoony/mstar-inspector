@@ -167,11 +167,15 @@ describe("worker entry scheduled wiring", () => {
     // Order-insensitive: the rule is "scheduled never throws and every step
     // degrades to its OWN warn", not a fixed janitor sequence — pinning
     // positions made every new best-effort step a test edit.
-    const events = warnCalls.map((call) => call.fields.event);
-    expect(new Set(events)).toEqual(
-      new Set(["retention_swept_failed", "pull_request_retention_swept_failed", "invite_lapse_swept_failed", "ops_sweep_failed"]),
-    );
-    expect(events).toHaveLength(4);
+    const events = warnCalls.map((call) => call.fields.event).sort();
+    expect(events).toEqual([
+      // Migration 0048's outbox re-send is its own independent step.
+      "comment_claim_outbox_failed",
+      "invite_lapse_swept_failed",
+      "ops_sweep_failed",
+      "pull_request_retention_swept_failed",
+      "retention_swept_failed",
+    ]);
     const sweepFailure = warnCalls.find((call) => call.fields.event === "ops_sweep_failed");
     expect(sweepFailure?.fields.detail).toContain("d1 down");
   });

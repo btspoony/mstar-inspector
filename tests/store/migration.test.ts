@@ -2086,3 +2086,106 @@ describe("migrations/0046_reviews_context_incomplete.sql", () => {
     expect(column.dflt_value).toBe("0");
   });
 });
+
+/**
+ * migration 0048 — the durable comment-trigger claim.
+ *
+ * The table is the at-most-once proof for a bot-mention comment: the worker
+ * inserts one row before its queue send, so the PRIMARY KEY (never a KV
+ * get-then-put) decides which delivery owns the comment. These assertions pin
+ * the identity columns, the state vocabulary and the outbox index the sweep
+ * scans.
+ */
+describe("migrations/0048_comment_trigger_claims.sql", () => {
+  test("declares the five-column identity, the state vocabulary and the timestamps", () => {
+    const db = createMigratedTestD1();
+    const columns = db.raw.query("PRAGMA table_info(comment_trigger_claims)").all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: string | null;
+      pk: number;
+    }>;
+
+    expect(columns.map((c) => c.name)).toEqual([
+      "installation_id",
+      "owner",
+      "repo",
+      "pr_number",
+      "comment_id",
+      "state",
+      "payload_json",
+      "attempts",
+      "created_ms",
+      "queued_ms",
+      "consumed_ms",
+    ]);
+    // The PK IS the dedup: exactly the five identity columns, in that order.
+    expect(columns.filter((c) => c.pk > 0).map((c) => c.name)).toEqual([
+      "installation_id",
+      "owner",
+      "repo",
+      "pr_number",
+      "comment_id",
+    ]);
+    for (const column of columns) {
+      // `consumed_ms` is the only nullable column: a claim exists before
+      // anything consumes it.
+      expect(column.notnull, column.name).toBe(column.name === "consumed_ms" ? 0 : 1);
+    }
+    expect(columns.find((c) => c.name === "attempts")?.dflt_value).toBe("0");
+  });
+
+  test("the primary key refuses a second claim for the same comment id, and refuses an unknown state", () => {
+    const db = createMigratedTestD1();
+    const insert = db.raw.prepare(
+      `INSERT INTO comment_trigger_claims
+         (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+       VALUES (1, 'acme', 'widgets', 42, 9001, ?, '{}', 0, 1, 1)`,
+    );
+
+    insert.run("queued");
+    // The whole point: one comment id, one claim.
+    expect(() => insert.run("queued")).toThrow();
+
+    // The same comment id on another PR is a different claim.
+    db.raw
+      .prepare(
+        `INSERT INTO comment_trigger_claims
+           (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+         VALUES (1, 'acme', 'widgets', 43, 9001, 'queued', '{}', 0, 1, 1)`,
+      )
+      .run();
+
+    // The vocabulary is closed: a typo can never strand a claim unreadable.
+    expect(() => insert.run("claimed")).toThrow();
+    for (const state of ["consumed", "expired"] as const) {
+      db.raw
+        .prepare("UPDATE comment_trigger_claims SET state = ? WHERE pr_number = 42 AND comment_id = 9001")
+        .run(state);
+      expect(db.raw.query("SELECT state FROM comment_trigger_claims WHERE pr_number = 42").get()).toEqual({ state });
+    }
+  });
+
+  test("the outbox index covers (state, queued_ms) and serves the sweep's scan", () => {
+    const db = createMigratedTestD1();
+    const indexColumns = (
+      db.raw.query("PRAGMA index_info(idx_comment_claim_outbox)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    expect(indexColumns).toEqual(["state", "queued_ms"]);
+
+    const plan = (
+      db.raw
+        .query(
+          `EXPLAIN QUERY PLAN
+             SELECT comment_id FROM comment_trigger_claims
+              WHERE state = 'queued' AND queued_ms <= 5
+              ORDER BY queued_ms LIMIT 20`,
+        )
+        .all() as Array<{ detail: string }>
+    )
+      .map((p) => p.detail)
+      .join("\n");
+    expect(plan).toContain("idx_comment_claim_outbox");
+    expect(plan).not.toContain("TEMP B-TREE");
+  });
+});

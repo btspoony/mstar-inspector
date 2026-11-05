@@ -6,19 +6,28 @@
  * only (webhook 5s timeout budget; sha comes from the webhook payload).
  *
  * Idempotency (compass S4):
- * - KV key for a non-empty `head_sha` (the commit); for a bot-mention job —
- *   which states no sha — by its `comment_id`. A job with neither enqueues
- *   with no key (fail-safe: a duplicate costs a review, never a lost one).
+ * - A `pull_request` job claims its commit in KV (24h TTL); for commit jobs
+ *   the D1 UNIQUE constraint stays the durable backstop.
+ * - A bot-mention job states no sha, so it claims its `comment_id` in D1
+ *   (`comment_trigger_claims`, migration 0048) BEFORE the queue send, with the
+ *   KV comment key kept as a 24h fast path. The row's primary key — never a
+ *   KV get-then-put — is what makes "one comment id triggers at most one
+ *   review" true under concurrent deliveries, and its `payload_json` is the
+ *   outbox record the cron sweep re-sends when a claim outlives its send.
  * - KV has no atomic conditional write (`noneMatch` is not in
- *   workers-types), so this is get-then-put with a race window; for commit
- *   jobs the D1 UNIQUE constraint is the durable fallback.
+ *   workers-types), so the commit claim is get-then-put with a race window;
+ *   the D1 UNIQUE constraint is the durable fallback for those jobs.
  * - KV read/write failure → conservative pass: log a warning and enqueue
- *   anyway (the D1 fallback covers duplicate commits).
- * - Ordering invariant: the KV key is claimed only AFTER `REVIEW_QUEUE.send`
- *   resolves. A key therefore means "enqueued" — a failed send leaves no key,
- *   so GitHub's retry re-enqueues instead of being KV-skipped.
+ *   anyway (the D1 fallback covers duplicate commits). A D1 claim failure is
+ *   NOT conservative: without the durable claim the at-most-once invariant is
+ *   unprovable, so it propagates and GitHub retries.
+ * - Ordering invariant: the D1 comment claim is inserted BEFORE
+ *   `REVIEW_QUEUE.send` (so a duplicate is refused before any work) and the
+ *   KV key is claimed only AFTER it resolves (so a failed send leaves no KV
+ *   key and GitHub's retry re-enqueues instead of being KV-skipped). A failed
+ *   send also deletes the D1 claim row, releasing it for that retry.
  */
-import type { KVNamespace } from "@cloudflare/workers-types";
+import type { D1Database, KVNamespace } from "@cloudflare/workers-types";
 import { idemCommentKey, idemKey, IDEMPOTENCY_SECONDS, IDEM_ENQUEUED, isEnqueuedClaim } from "../contracts/idem";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { Env } from "./env";
@@ -57,7 +66,9 @@ export type HandlerLog = {
 };
 
 export type HandlerDeps = {
-  env: Pick<Env, "IDEMPOTENCY_KV" | "REVIEW_QUEUE">;
+  // `DB` is required here even though fetch-face `Env.DB` is optional: the
+  // per-App route fails closed on an unbound DB long before this handler runs.
+  env: Pick<Env, "IDEMPOTENCY_KV" | "REVIEW_QUEUE"> & { DB: D1Database };
   log: HandlerLog;
 };
 
@@ -93,8 +104,9 @@ function toEventLog(payload: ReviewJobPayload): WorkerEventLog {
  * being skipped. `superseded` is therefore no tombstone: a force-push back to
  * that sha makes it the head again, and the consumer's ledger comparison — not
  * this claim — then decides whether it is a leftover. On KV failure, returns
- * false (conservative pass) and logs a warning — the D1 UNIQUE constraint is
- * the durable duplicate guard.
+ * false (conservative pass) and logs a warning — for commit jobs the D1
+ * UNIQUE constraint is the durable duplicate guard, and a comment job has its
+ * own `comment_trigger_claims` row regardless of KV.
  */
 export async function idempotencyHit(
   kv: KVNamespace,
@@ -133,9 +145,13 @@ export async function claimIdempotency(
 
 /**
  * Handle a classified review job: log the seven-field structured event, run
- * the idempotency pre-check (by commit sha, else by comment id), enqueue, then
- * claim the KV key. A key therefore means "enqueued" — a failed send leaves no
- * key, so GitHub's retry re-enqueues instead of being KV-skipped.
+ * the idempotency pre-check (by commit sha, else by comment id), take the
+ * durable claim, enqueue, then write the KV key.
+ *
+ * A comment-triggered job takes a D1 claim BEFORE the send (migration 0048).
+ * The row — not the KV key — is the "at most one review per comment id" proof
+ * under concurrent deliveries, and its stored payload is the outbox record the
+ * cron sweep re-sends if this isolate dies between the claim and the send.
  */
 export async function handleReviewJob(
   payload: ReviewJobPayload,
@@ -144,12 +160,7 @@ export async function handleReviewJob(
   const fields = toEventLog(payload);
 
   // A commit job claims its sha; a bot-mention job (no sha) claims its comment
-  // id, so one comment can trigger at most one review; a job with neither
-  // enqueues unclaimed, as every mention job did before.
-  //
-  // shortcut: the claim is get-then-put with a 24h TTL, so a duplicate
-  // delivery older than that enqueues again — upgrade to a D1 unique comment
-  // key only if >24h duplicate deliveries ever matter.
+  // id — KV as a 24h fast path, D1 as the durable claim below.
   const key = payload.head_sha
     ? idemKey({
         installation_id: payload.installation_id,
@@ -176,6 +187,38 @@ export async function handleReviewJob(
     }
   }
 
+  // Durable per-comment claim: `INSERT OR IGNORE`, so the row's primary key —
+  // not this isolate's read — decides which delivery owns the comment. The
+  // losing delivery skips whatever state the row holds (`queued`, `consumed`,
+  // `expired`): in every case this comment already claimed its one review.
+  //
+  // A D1 failure is NOT caught: without the durable claim the invariant cannot
+  // be proved, so the webhook 500s and GitHub retries.
+  const commentId = payload.comment_id;
+  if (commentId !== undefined) {
+    const nowMs = Date.now();
+    const claim = await deps.env.DB.prepare(
+      `INSERT OR IGNORE INTO comment_trigger_claims
+         (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+       VALUES (?, ?, ?, ?, ?, 'queued', ?, 0, ?, ?)`,
+    )
+      .bind(
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        commentId,
+        JSON.stringify(payload),
+        nowMs,
+        nowMs,
+      )
+      .run();
+    if (claim.meta.changes === 0) {
+      deps.log.info(fields, "duplicate comment trigger — skipping enqueue");
+      return { kind: "skipped", reason: "duplicate comment trigger" };
+    }
+  }
+
   try {
     await deps.env.REVIEW_QUEUE.send(payload);
   } catch (err) {
@@ -183,6 +226,24 @@ export async function handleReviewJob(
     // operator must be able to map the 500 to the specific event. Rethrow —
     // the 500 signals GitHub to retry, and no KV key is claimed, so the
     // retry re-enqueues instead of being KV-skipped (C1 invariant).
+    //
+    // The D1 claim is released so that retry can take it again. If the delete
+    // itself fails the row stays `queued` and the sweep re-sends its stored
+    // payload after the retry window — no lost review either way, and the
+    // pipeline's own claim collapses any duplicate that results.
+    if (commentId !== undefined) {
+      try {
+        await deps.env.DB.prepare(
+          `DELETE FROM comment_trigger_claims
+            WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?`,
+        )
+          .bind(payload.installation_id, payload.owner, payload.repo, payload.pr_number, commentId)
+          .run();
+      } catch (deleteErr) {
+        const detail = deleteErr instanceof Error ? deleteErr.message : String(deleteErr);
+        deps.log.warn(fields, `comment claim release failed — the sweep will re-send: ${detail}`);
+      }
+    }
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.warn(fields, `queue send failed — 500 for GitHub retry: ${detail}`);
     throw err;

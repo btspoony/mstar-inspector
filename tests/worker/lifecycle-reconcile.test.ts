@@ -82,8 +82,11 @@ const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
 
 const SILENT_LOG = { warn: () => {}, info: () => {} };
 
+/** The cron's queue binding (comment-claim outbox): these suites re-send nothing. */
+const NOOP_QUEUE = { send: async () => {} } as unknown as ScheduledEnv["REVIEW_QUEUE"];
+
 function asEnv(db: TestD1): ScheduledEnv {
-  return { DB: db as unknown as ScheduledEnv["DB"] };
+  return { DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE };
 }
 
 async function reconcile(db: TestD1, deps: Omit<LifecycleReconcileDeps, "log"> = {}): Promise<
@@ -1381,7 +1384,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
       }) as unknown as typeof fetch;
 
       const summary = await reconcileReviewLifecycle(
-        { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY },
+        { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE },
         { log: SILENT_LOG, now: () => T0 },
       );
 
@@ -1447,7 +1450,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
       }) as unknown as typeof fetch;
 
       const summary = await reconcileReviewLifecycle(
-        { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY },
+        { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE },
         { log: SILENT_LOG, now: () => T0 },
       );
 
@@ -1485,7 +1488,11 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
         });
       }) as unknown as typeof fetch;
 
-      const env = { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY };
+      const env = {
+        DB: db as unknown as ScheduledEnv["DB"],
+        DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
+        REVIEW_QUEUE: NOOP_QUEUE,
+      };
       const first = await reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => T0 });
       expect(first.suspended).toBe(2);
       expect(pubRow(db, "pub-1").recovery_state).toBe("suspended");

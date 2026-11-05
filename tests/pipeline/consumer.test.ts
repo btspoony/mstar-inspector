@@ -6104,3 +6104,77 @@ describe("usage ledger (migration 0031)", () => {
     ]);
   });
 });
+
+/**
+ * Migration 0048 — the pipeline's atomic consume. The worker inserts the claim
+ * `queued` BEFORE it enqueues, so the first delivery to reach `processMessage`
+ * flips it to `consumed` and every later delivery of that comment acks without
+ * running anything: at-least-once queue delivery, at-most-once execution.
+ */
+describe("comment-trigger claim consumption (migration 0048)", () => {
+  function seedQueuedClaim(db: TestD1, payload: ReviewJobPayload, commentId: number): void {
+    db.raw
+      .prepare(
+        `INSERT INTO comment_trigger_claims
+           (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+         VALUES (?, ?, ?, ?, ?, 'queued', ?, 0, 1, 1)`,
+      )
+      .run(
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        commentId,
+        JSON.stringify(payload),
+      );
+  }
+
+  function claimRows(db: TestD1): Array<{ state: string; consumed_ms: number | null }> {
+    return db.raw.query("SELECT state, consumed_ms FROM comment_trigger_claims").all() as Array<{
+      state: string;
+      consumed_ms: number | null;
+    }>;
+  }
+
+  test("the first delivery consumes the row; the redelivery acks without running", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9001 });
+    seedQueuedClaim(db, payload, 9001);
+
+    // An invalid level throws AFTER the claim: the row must already be
+    // `consumed`, because a failed comment-triggered run is re-run by posting a
+    // new comment, never by replaying this one.
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: db as never, REVIEW_LEVEL: "bogus" }),
+      testLog,
+      testOverrides,
+    );
+    await expect(consumer(makeBatch(payload))).rejects.toThrow();
+    expect(claimRows(db)).toEqual([{ state: "consumed", consumed_ms: expect.any(Number) }]);
+
+    // The redelivery is refused BEFORE that same level read, so it neither
+    // throws nor reaches the sandbox.
+    await consumer(makeBatch(payload));
+
+    expect(logLines.some((l) => l.msg.includes("comment trigger already claimed"))).toBe(true);
+    expect(sandbox.calls).toHaveLength(0);
+  });
+
+  test("a job without comment_id never touches the claim table", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: db as never, REVIEW_LEVEL: "bogus" }),
+      testLog,
+      testOverrides,
+    );
+
+    await expect(
+      consumer(makeBatch(makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment" }))),
+    ).rejects.toThrow();
+
+    expect(claimRows(db)).toEqual([]);
+    expect(logLines.some((l) => l.msg.includes("comment trigger already claimed"))).toBe(false);
+  });
+});

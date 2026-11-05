@@ -3294,6 +3294,37 @@ async function processMessage(
 
   try {
     baseFields = toBaseFields(payload);
+    // Durable per-comment claim (migration 0048) — the atomic step that turns
+    // at-least-once queue delivery into at-most-once execution. The worker
+    // already inserted the row `queued` before it enqueued, so the conditional
+    // UPDATE below decides which delivery runs: a queue redelivery, an outbox
+    // re-send, or a delivery arriving after the 24h KV claim lapsed all find
+    // `state` no longer `queued` and ack without running.
+    //
+    // Deliberately BEFORE the level/credential resolution: the claim must be
+    // recorded even when the run itself fails, because a comment-triggered
+    // review is re-run by posting a new comment (a new id), never by replaying
+    // this one (the documented accepted limit).
+    if (payload.comment_id !== undefined) {
+      const claimed = await deps.env.DB.prepare(
+        `UPDATE comment_trigger_claims SET state = 'consumed', consumed_ms = ?
+          WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
+            AND state = 'queued'`,
+      )
+        .bind(
+          Date.now(),
+          payload.installation_id,
+          payload.owner,
+          payload.repo,
+          payload.pr_number,
+          payload.comment_id,
+        )
+        .run();
+      if (claimed.meta.changes === 0) {
+        deps.log.info(baseFields, "comment trigger already claimed — ack without running");
+        return { kind: "ok" };
+      }
+    }
     // Review tier (AC-S7-level): resolved BEFORE any sandbox/KV step so a
     // misconfigured REVIEW_LEVEL fails loud (structured log + rethrow)
     // without touching the in-flight guard.

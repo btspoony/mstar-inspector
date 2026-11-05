@@ -16,6 +16,8 @@ import { createFailureStore } from "../../src/store/failure-store";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
   runSweep,
+  COMMENT_CLAIM_MAX_ATTEMPTS,
+  COMMENT_CLAIM_RETRY_MS,
   SWEEP_FAILURE_THRESHOLD,
   SWEEP_INVITE_LAPSE_CAP,
   SWEEP_LOG_DETAIL_MAX,
@@ -24,13 +26,15 @@ import {
   SWEEP_WEBHOOK_TIMEOUT_MS,
   SWEEP_WINDOW_HOURS,
   type SweepAlertFields,
+  type SweepCommentClaimFields,
+  type SweepDeps,
   type SweepInviteLapseFields,
   type SweepLog,
   type SweepRetentionFields,
   type SweepLedgerRetentionFields,
   type SweepWarnFields,
 } from "../../src/worker/sweep";
-import { createMigratedTestD1 } from "../store/helpers";
+import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const BASE = {
   installation_id: 123,
@@ -46,7 +50,8 @@ type WarnCall = {
     | SweepWarnFields
     | SweepRetentionFields
     | SweepLedgerRetentionFields
-    | SweepInviteLapseFields;
+    | SweepInviteLapseFields
+    | SweepCommentClaimFields;
   msg?: string;
 };
 
@@ -630,5 +635,136 @@ describe("runSweep", () => {
       },
     };
     await expect(runSweep(broken, { log: captureLog().log })).rejects.toThrow("d1 down");
+  });
+});
+
+/**
+ * Comment-claim outbox (migration 0048): a claim row whose worker-side send
+ * never happened must reach the queue eventually, and a claim that never gets
+ * consumed must stop being retried. Real migrated DDL for the table, a
+ * recording queue double for the send.
+ */
+describe("runSweep — comment-claim outbox", () => {
+  function seedClaim(
+    db: TestD1,
+    overrides: { state?: "queued" | "consumed" | "expired"; attempts?: number; ageMs?: number; commentId?: number } = {},
+  ): void {
+    const { state = "queued", attempts = 0, ageMs = COMMENT_CLAIM_RETRY_MS + 1_000, commentId = 9001 } = overrides;
+    const queuedMs = Date.now() - ageMs;
+    db.raw
+      .prepare(
+        `INSERT INTO comment_trigger_claims
+           (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+         VALUES (123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        commentId,
+        state,
+        JSON.stringify({
+          ...BASE,
+          head_sha: null,
+          action: "created",
+          triggered_by: "issue_comment",
+          comment_id: commentId,
+          appRef: { appId: "app-1" },
+        }),
+        attempts,
+        queuedMs,
+        queuedMs,
+      );
+  }
+
+  function claimRow(db: TestD1) {
+    return db.raw
+      .query("SELECT state, attempts, queued_ms, consumed_ms FROM comment_trigger_claims")
+      .get() as { state: string; attempts: number; queued_ms: number; consumed_ms: number | null };
+  }
+
+  function fakeQueue(fail = false): { queue: SweepDeps["queue"]; sent: unknown[] } {
+    const sent: unknown[] = [];
+    return {
+      sent,
+      queue: {
+        send: async (message: unknown) => {
+          if (fail) throw new Error("queue down");
+          sent.push(message);
+        },
+      } as never,
+    };
+  }
+
+  test("re-sends a stale claim with its stored payload and bumps the attempt", async () => {
+    const db = createMigratedTestD1();
+    seedClaim(db);
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      installation_id: 123,
+      pr_number: 42,
+      comment_id: 9001,
+      triggered_by: "issue_comment",
+      appRef: { appId: "app-1" },
+    });
+    const row = claimRow(db);
+    expect(row).toMatchObject({ state: "queued", attempts: 1, consumed_ms: null });
+    // The window restarts at THIS send, so the next sweep cannot re-send it.
+    expect(row.queued_ms).toBeGreaterThan(Date.now() - 60_000);
+    expect(calls.at(-1)?.fields).toEqual({ event: "comment_claim_outbox", resent: 1, expired: 0, failed: 0 });
+  });
+
+  test("a claim inside the retry window is left for the send in flight", async () => {
+    const db = createMigratedTestD1();
+    seedClaim(db, { ageMs: 1_000 });
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+    expect(claimRow(db)).toMatchObject({ state: "queued", attempts: 0 });
+  });
+
+  test("a claim at the attempt cap expires instead of being re-sent", async () => {
+    const db = createMigratedTestD1();
+    seedClaim(db, { attempts: COMMENT_CLAIM_MAX_ATTEMPTS });
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(0);
+    expect(claimRow(db)).toMatchObject({ state: "expired" });
+    expect(calls.at(-1)?.fields).toEqual({ event: "comment_claim_outbox", resent: 0, expired: 1, failed: 0 });
+  });
+
+  test("a consumed row is never re-sent, however old", async () => {
+    const db = createMigratedTestD1();
+    seedClaim(db, { state: "consumed", ageMs: 10 * COMMENT_CLAIM_RETRY_MS });
+    const { queue, sent } = fakeQueue();
+
+    await runSweep(db, { log: captureLog().log, queue });
+
+    expect(sent).toHaveLength(0);
+    expect(claimRow(db)).toMatchObject({ state: "consumed" });
+  });
+
+  test("a failing send still counts the attempt, so the claim cannot be retried forever", async () => {
+    const db = createMigratedTestD1();
+    seedClaim(db);
+    const { queue } = fakeQueue(true);
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    // The row stays `queued` for the next window, but the attempt is spent:
+    // a send that can never succeed reaches the cap and expires instead of
+    // being retried on every sweep.
+    expect(claimRow(db)).toMatchObject({ state: "queued", attempts: 1 });
+    expect(calls.at(-1)?.fields).toEqual({ event: "comment_claim_outbox", resent: 0, expired: 0, failed: 1 });
   });
 });
