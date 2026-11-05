@@ -85,7 +85,6 @@ import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
-import type { VerifiedResolution } from "../../src/store/finding-lifecycle";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import {
   readRecheckCommand,
@@ -3236,7 +3235,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(prepared.body).toContain("addressed (verified-fix)");
     expect(prepared.body).toContain("current-code");
     expect(prepared.body).toContain("not yet resolved");
-    expect(prepared.body).toContain("Reassessed 1/1 open prior finding(s)");
+    expect(prepared.body).toContain("Reassessed 1/1 prior finding(s)");
 
     // Step 9: the round assessment is durable — the row closed addressed and
     // BOTH rotation clocks advanced (selected → scheduled, assessed → assessed).
@@ -3275,104 +3274,103 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(commenterCalls.some((c) => c.op === "delete-degraded")).toBe(true);
   });
 
-  test("a PRIOR addressed association outside this round's targets is reconciled: re-proven, rebuilt snapshot persisted, then discovered and resolved", async () => {
+  test("the coverage counters describe the extended rotation: an addressed row with a non-terminal association is recheckable", async () => {
     reset();
     sandbox.diffStdout = VALID_DIFF;
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
-    // The prior round closed the finding `addressed` but its thread was never
-    // resolved: the row sits needs-recheck with an OLD-domain verification and
-    // THIS round selects no open row at all.
-    await seedOpenTarget(db, { state: "addressed" });
-    await seedAssociation(db, "PRRT_thread1");
+    // One open row (answered this round) plus one ADDRESSED row whose thread
+    // is still unresolved — the second is only recheckable because of it.
+    await seedOpenTarget(db);
+    const addressedRowId = "bbbbbbbb-0000-4000-8000-000000000009";
+    await seedOpenTarget(db, { state: "addressed", rowId: addressedRowId, findingId: "f-second" });
     db.raw
-      .prepare(`UPDATE review_threads SET verified_json = ?, resolution_state = 'needs-recheck' WHERE id = ?`)
-      .run(JSON.stringify({ stored: "old-domain" }), ASSOC_ID);
-    const rebuilt: VerifiedResolution = {
-      assessment: { rowId: TARGET_ROW_ID, disposition: "addressed", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] },
-      snapshot: {
-        associationId: ASSOC_ID,
-        threadId: "PRRT_thread1",
-        commentId: 8,
-        headSha: SHA,
-        digest: "thread-digest-live",
-        commentCount: 2,
-        capturedMs: 0,
-        coverage: "complete",
-        modelCoverage: "complete",
-      },
-      issueDigest: "issue-digest-live",
-      issueCoverage: "complete",
-    };
-    commenterState.reverifyResult = {
-      verified: rebuilt,
-      intent: {
-        associationId: ASSOC_ID,
-        findingRowId: TARGET_ROW_ID,
-        publicationId: PRIOR_PUB_ID,
-        scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
-        originalSha: PRIOR_SHA,
-        round: 1,
-        path: "src/auth.ts",
-        line: 21,
-        body: "old comment body",
-        bodySha256: "digest-old",
-      },
-    };
+      .prepare(
+        `INSERT INTO review_threads
+           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+            original_sha, round, intent_json, resolution_state, created_ms, updated_ms)
+         VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, 1, '{}', 'pending', 3000, 3000)`,
+      )
+      .run("cccccccc-0000-4000-8000-000000000009", addressedRowId, PRIOR_PUB_ID, TEST_APP_ID, PRIOR_SHA);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
-    // The prior association was re-proved from live state, not resolved on
-    // its stored snapshot.
-    const reverify = commenterCalls.find((c) => c.op === "reverify");
-    expect(reverify).toBeDefined();
-    expect(reverify!.args).toEqual({
-      scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
-      associationId: ASSOC_ID,
-    });
-    const discoverIdx = commenterCalls.findIndex((c) => c.op === "discover");
-    const resolveIdx = commenterCalls.findIndex((c) => c.op === "resolve");
-    expect(discoverIdx).toBeGreaterThan(commenterCalls.indexOf(reverify!));
-    expect(resolveIdx).toBe(discoverIdx + 1);
-    // Recorded double args: the kernel received the rebuilt verification.
-    const resolveCall = commenterCalls[resolveIdx]!.args as { verified: VerifiedResolution };
-    expect(resolveCall.verified).toEqual(rebuilt);
-    // The REBUILT snapshot is what the durable row carries afterwards.
-    const row = db.raw.query(`SELECT verified_json, resolution_state FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as {
-      verified_json: string;
-      resolution_state: string;
-    };
-    expect(JSON.parse(row.verified_json)).toEqual(rebuilt);
-    expect(row.resolution_state).toBe("pending");
+    // The published line reports the recheckable universe and keeps the
+    // partition identity: assessed + invalid-output + omitted = selected.
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("Reassessed 1/2 prior finding(s) this round");
+    expect(prepared.body).toContain("0 over cap · 2 recheckable");
+    const publication = db.raw
+      .query(`SELECT payload_json FROM review_publications WHERE id <> '${PRIOR_PUB_ID}'`)
+      .get() as { payload_json: string };
+    const coverage = (
+      JSON.parse(publication.payload_json) as {
+        lifecycle: { coverage: { totalOpen: number; selected: number; assessed: number; invalidOutput: number; omitted: number; capped: number } };
+      }
+    ).lifecycle.coverage;
+    expect(coverage).toMatchObject({ totalOpen: 2, selected: 2, capped: 0 });
+    expect(coverage.assessed + coverage.invalidOutput + coverage.omitted).toBe(coverage.selected);
   });
 
-  test("an unprovable prior association is left untouched: no discovery, no resolve, stored verification unchanged", async () => {
+  test("an addressed row re-selected by the rotation is re-verified in the round and its thread resolves", async () => {
     reset();
     sandbox.diffStdout = VALID_DIFF;
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The seat re-verifies the concern against the CURRENT discussion and says
+    // it is still fixed.
+    sandbox.recheckFileContent = recheckDocWith({});
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     await seedOpenTarget(db, { state: "addressed" });
     await seedAssociation(db, "PRRT_thread1");
-    db.raw
-      .prepare(`UPDATE review_threads SET verified_json = ?, resolution_state = 'needs-recheck' WHERE id = ?`)
-      .run(JSON.stringify({ stored: "old-domain" }), ASSOC_ID);
-    // Default double behavior: re-verification cannot prove the row.
+    commenterState.discussion = {
+      items: [],
+      issueCoverage: "complete",
+      issueDigest: "issue-digest",
+      capturedMs: 0,
+      threads: [
+        {
+          associationId: ASSOC_ID,
+          threadId: "PRRT_thread1",
+          commentId: 8,
+          headSha: SHA,
+          digest: "thread-digest-1",
+          commentCount: 2,
+          capturedMs: 0,
+          coverage: "complete",
+          modelCoverage: "complete",
+        },
+      ],
+    };
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
-    expect(commenterCalls.some((c) => c.op === "reverify")).toBe(true);
-    expect(commenterCalls.some((c) => c.op === "discover")).toBe(false);
-    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
-    const row = db.raw.query(`SELECT verified_json, resolution_state FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as {
-      verified_json: string;
+    // The addressed row really rode the rotation: it is the round's only
+    // recheck target, so the seat verified it against the current discussion.
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as { recheck?: { targets: RecheckTarget[] } };
+    expect(runnerInput.recheck!.targets.map((target) => target.rowId)).toEqual([TARGET_ROW_ID]);
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("Reassessed 1/1 prior finding(s) this round");
+    // ...and the ordinary resolution path resolved it with THIS round's snapshot.
+    const discoverIdx = commenterCalls.findIndex((c) => c.op === "discover");
+    const resolveIdx = commenterCalls.findIndex((c) => c.op === "resolve");
+    expect(discoverIdx).toBeGreaterThan(-1);
+    expect(resolveIdx).toBe(discoverIdx + 1);
+    // Recorded double args: the kernel received this round's verified snapshot.
+    const resolveCall = commenterCalls[resolveIdx]!.args as { associationId: string; verified: { snapshot: { digest: string }; assessment: { disposition: string } } };
+    expect(resolveCall.associationId).toBe(ASSOC_ID);
+    expect(resolveCall.verified.snapshot.digest).toBe("thread-digest-1");
+    expect(resolveCall.verified.assessment.disposition).toBe("addressed");
+    const threadRow = db.raw.query(`SELECT verified_json, resolution_state FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as {
+      verified_json: string | null;
       resolution_state: string;
     };
-    expect(JSON.parse(row.verified_json)).toEqual({ stored: "old-domain" });
-    expect(row.resolution_state).toBe("needs-recheck");
+    expect(JSON.parse(threadRow.verified_json!).snapshot.digest).toBe("thread-digest-1");
+    expect(threadRow.resolution_state).toBe("pending");
   });
 
   test("P67-QC-006: the real newline-terminated recheck bytes are parsed; an overflow flag fails closed", async () => {
@@ -3547,7 +3545,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     await consumer(makeBatch(makePayload()));
 
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
+    expect(prepared.body).toContain("Reassessed 0/1 prior finding(s)");
     expect(prepared.body).toContain("1 omitted");
     expect(prepared.body).toContain("unverifiable (omitted)");
     // Scheduling advanced (selected rows rotate) but the row was NOT assessed.

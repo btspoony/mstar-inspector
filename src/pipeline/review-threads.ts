@@ -56,11 +56,17 @@
  *     `isResolved === true` before `resolved` is stored. The post-mutation
  *     read records `lateChange` honestly — GitHub has no conditional resolve
  *     CAS (spec RL-12); a late change never claims to cover the newer
- *     discussion and never unresolves a human-visible thread. The
- *     `last_publication_id` fence is NOT part of this gate: a PRIOR
- *     association of an already addressed finding is reconciled after a new
- *     review posts, and `reverifyPriorAssociation` (below) is what re-proves
- *     its snapshot from live state before it reaches the kernel.
+ *     discussion and never unresolves a human-visible thread.
+ *   - Publication fence: the gate requires the finding to still be
+ *     `addressed` and the verified assessment to target this exact row — NOT
+ *     `finding.last_publication_id = row.publication_id`. The rotation
+ *     re-selects addressed rows whose association is still non-terminal, and
+ *     the seen upsert only rewrites `last_publication_id` when a new
+ *     publication reports the fingerprint again (which reopens the row, so it
+ *     is no longer `addressed`); requiring the old equality would therefore
+ *     block every re-selected row forever. Supersession, ownership, complete
+ *     coverage and the live HEAD/thread/issue-digest fences are unchanged, so
+ *     a recurrence or a human reply still fails closed.
  */
 
 import type { Coverage, ThreadSnapshot } from "../../packages/shared/src/recheck-wire";
@@ -478,6 +484,12 @@ export type IssueCapture = {
  * human discussion. Bot authorship is what `findReviewComment` /
  * `findDegradedComment` already require, so a human-planted marker is not
  * ours.
+ *
+ * Accepted limit: a FOREIGN App's bot-authored comment whose body carries
+ * our marker prefix would also leave the digest domain. The marker embeds a
+ * publication UUID this App generates, so the collision is cosmetic;
+ * enforcing authorship would need the probed App identity inside the capture
+ * layer, which this layer does not have.
  */
 function isOwnPublicationComment(entry: ThreadCommentEntry): boolean {
   return (
@@ -1166,11 +1178,12 @@ export async function resolveFindingThreadWithDeps(
   // 3. The finding must still be addressed, and the verified assessment must
   //    be an addressed verdict for this exact row (never an unverifiable one).
   //    The finding's `last_publication_id` is deliberately NOT required to be
-  //    this association's publication: a PRIOR association of an already
-  //    addressed finding is exactly what the post-publication reconcile lane
-  //    resolves (the newer round never re-assessed that row). Supersession —
-  //    a recurring concern — is fenced above, and a reopened finding is not
-  //    `addressed`, so nothing wider is admitted.
+  //    this association's publication: the rotation re-selects addressed rows
+  //    whose association is still non-terminal and the seat re-verifies them in
+  //    a real round, while the seen upsert only bumps `last_publication_id`
+  //    when a publication reports the fingerprint again (which reopens the
+  //    row). Supersession — a recurring concern — is fenced above, and a
+  //    reopened finding is not `addressed`, so nothing wider is admitted.
   const finding = await deps.db
     .prepare(`SELECT state FROM review_findings WHERE id = ?`)
     .bind(row.finding_row_id)
@@ -1403,138 +1416,6 @@ function safeParseIntent(json: string): LineIntent | null {
   }
 }
 
-// --- prior-association re-verification (§7.11.1) ------------------------------
-
-export type PriorReverification = { verified: VerifiedResolution; intent: LineIntent };
-
-/**
- * Re-prove a PRIOR association from live state before the reconcile lane
- * enqueues it (spec §7.5/§7.11.1). A stored verification may predate the
- * digest domain (the Inspector's own publication comments are excluded now)
- * or an older HEAD, so it is never handed to the kernel as-is:
- *
- *   - the STORED `snapshot.headSha` + the LIVE comments must reproduce the
- *     stored thread digest and comment count — the proof that the
- *     conversation itself did not change (a human reply after the capture
- *     fails it and the row stays unresolved);
- *   - the handed snapshot is rebuilt from live values (live HEAD, digest and
- *     count over live HEAD + live comments) plus a freshly captured issue
- *     digest under the same domain the capture uses;
- *   - the stored `assessment` is kept — the addressed verdict that closed the
- *     finding — and must still target this exact row.
- *
- * Any unprovable step returns null and the caller leaves the row untouched:
- * this lane never blind-resolves and never refreshes an expectation in place
- * of proving it.
- */
-export async function reverifyPriorAssociationWithDeps(
-  deps: ReviewThreadsDeps,
-  input: { scope: Scope; associationId: string },
-): Promise<PriorReverification | null> {
-  const { scope, associationId } = input;
-  const row = await loadAssociation(deps.db, associationId);
-  if (row === null || !sameScope(row, scope)) return null;
-  if (row.superseded_by_publication_id !== null || row.verified_json === null) return null;
-  const intent = safeParseIntent(row.intent_json);
-  if (intent === null) return null;
-
-  let stored: VerifiedResolution;
-  try {
-    stored = JSON.parse(row.verified_json) as VerifiedResolution;
-  } catch {
-    return null;
-  }
-  const snapshot = stored?.snapshot;
-  if (
-    stored?.assessment === undefined ||
-    stored.assessment.disposition !== "addressed" ||
-    stored.assessment.rowId !== row.finding_row_id ||
-    stored.issueCoverage !== "complete" ||
-    snapshot === undefined ||
-    snapshot.coverage !== "complete" ||
-    snapshot.modelCoverage !== "complete" ||
-    typeof snapshot.headSha !== "string" ||
-    typeof snapshot.digest !== "string" ||
-    snapshot.digest === "" ||
-    typeof snapshot.commentId !== "number" ||
-    typeof snapshot.commentCount !== "number" ||
-    row.thread_id === null ||
-    snapshot.threadId !== row.thread_id
-  ) {
-    return null;
-  }
-
-  const ctx = await resolveAppContext(deps, scope);
-  if (ctx === null) return null;
-
-  let thread: ThreadCapture;
-  try {
-    thread = await fetchThreadConversation(ctx.octokit, row.thread_id);
-  } catch {
-    return null; // an unavailable read is never a proof of anything
-  }
-  if (
-    thread.thread === null ||
-    !thread.complete ||
-    thread.thread.id !== row.thread_id ||
-    thread.thread.prNumber !== scope.prNumber ||
-    thread.thread.nameWithOwner !== `${scope.owner}/${scope.repo}`
-  ) {
-    return null;
-  }
-  const rootCommentId = String(snapshot.commentId);
-  const root = thread.comments[0] ?? null; // chronological first = root
-  if (root === null || root.fullDatabaseId !== rootCommentId) return null;
-
-  // Conversation-unchanged proof: the snapshot's own HEAD input plus the
-  // LIVE comments must reproduce the digest/count the reviewer verified.
-  const changed = await threadDigestOf({
-    threadId: thread.thread.id,
-    rootCommentId,
-    headSha: snapshot.headSha,
-    comments: thread.comments,
-  });
-  if (changed !== snapshot.digest || thread.comments.length !== snapshot.commentCount) return null;
-
-  // The handed snapshot describes the CURRENT state. HEAD drift alone is not
-  // a veto on this lane: the addressed verdict already closed the finding, a
-  // recurrence reopens it (and drops the row out of the selection query), and
-  // the proof above is the real fence.
-  const digest = await threadDigestOf({
-    threadId: thread.thread.id,
-    rootCommentId,
-    headSha: thread.headRefOid,
-    comments: thread.comments,
-  });
-
-  let issue: IssueCapture;
-  try {
-    issue = await fetchIssueComments(ctx.octokit, scope);
-  } catch {
-    return null;
-  }
-  if (!issue.complete) return null;
-  const issueDigest = await issueDigestOf({ headSha: issue.headRefOid, comments: issue.comments });
-
-  return {
-    intent,
-    verified: {
-      assessment: stored.assessment,
-      snapshot: {
-        ...snapshot,
-        associationId,
-        threadId: thread.thread.id,
-        headSha: thread.headRefOid,
-        digest,
-        commentCount: thread.comments.length,
-        capturedMs: deps.nowMs(),
-      },
-      issueDigest,
-      issueCoverage: "complete",
-    },
-  };
-}
-
 /** Persist the resolution outcome under the live lease and release it. */
 async function persistOutcome(
   db: D1Like,
@@ -1570,12 +1451,10 @@ async function persistOutcome(
 export function createReviewThreads(deps: ReviewThreadsDeps): {
   discoverThread: (input: { scope: Scope; intent: LineIntent; reviewId: number | null }) => Promise<DiscoveryResult>;
   resolveFindingThread: (input: { scope: Scope; associationId: string; verified: VerifiedResolution }) => Promise<ResolveOutcome>;
-  reverifyPriorAssociation: (input: { scope: Scope; associationId: string }) => Promise<PriorReverification | null>;
 } {
   return {
     discoverThread: (input) => discoverThreadWithDeps(deps, input),
     resolveFindingThread: (input) => resolveFindingThreadWithDeps(deps, input),
-    reverifyPriorAssociation: (input) => reverifyPriorAssociationWithDeps(deps, input),
   };
 }
 

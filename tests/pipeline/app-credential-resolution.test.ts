@@ -78,7 +78,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // 0020: the finding-lifecycle journal. The consumer's step-2
   //     journal handoff queries review_publications on EVERY app-path
   //     message (journalHandoffRow), and its lifecycle-context step
-  //     reads review_findings (selectAssessmentTargets / countOpenFindings).
+  //     reads review_findings (selectAssessmentTargets / countRecheckableFindings).
   // 0021: review_checks — the Check-attempt registry the
   //     consumer's §7.10 lifecycle seam owns; its publication_id FK
   //     resolves against 0020's review_publications.

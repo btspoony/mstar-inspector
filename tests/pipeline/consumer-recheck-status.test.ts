@@ -137,7 +137,7 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     // coverage counts the REAL seat answers only (23), so a gate-rejected row
     // never inflates the reassessed tally; it is published as its own
     // `invalid-output` term instead of vanishing, and nothing was omitted.
-    expect(prepared.body).toContain("Reassessed 23/25 open prior finding(s)");
+    expect(prepared.body).toContain("Reassessed 23/25 prior finding(s)");
     expect(prepared.body).toContain("2 invalid-output · 0 omitted");
     expect(prepared.body).toContain("unverifiable (invalid-output)");
     expect(prepared.body).not.toContain("unverifiable (omitted)");
@@ -295,7 +295,7 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     expect(prepared.body).toContain("unverifiable (invalid-output)");
     expect(prepared.body).not.toContain("unverifiable (omitted)");
     // The one selected row is accounted by the SAME term the table renders.
-    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
+    expect(prepared.body).toContain("Reassessed 0/1 prior finding(s)");
     expect(prepared.body).toContain("1 invalid-output · 0 omitted");
     // The round delivered nothing usable, so it is recorded once, named.
     const rows = failureRows(db);
@@ -694,7 +694,7 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     expect(prepared.body).not.toContain("unverifiable (omitted)");
     // No real seat answer survived the gate, so the coverage counts nothing —
     // while the row's rotation clock advanced (it WAS sent).
-    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
+    expect(prepared.body).toContain("Reassessed 0/1 prior finding(s)");
     const findingRow = db.raw.query("SELECT last_assessed_ms FROM review_findings").get() as {
       last_assessed_ms: number | null;
     };
@@ -792,7 +792,7 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
 
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     // Both rows are attempted-and-bad; no row is claimed twice, none omitted.
-    expect(prepared.body).toContain("Reassessed 0/2 open prior finding(s)");
+    expect(prepared.body).toContain("Reassessed 0/2 prior finding(s)");
     expect(prepared.body).toContain("2 invalid-output · 0 omitted");
     // Count inside the prior-findings section only: it is the body's ONE table
     // of those rows, and this case is about its per-row attribution.
@@ -968,7 +968,7 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
 
     expect(failureRows(db)).toHaveLength(0);
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("Reassessed 1/1 open prior finding(s)");
+    expect(prepared.body).toContain("Reassessed 1/1 prior finding(s)");
     expect(prepared.body).toContain("addressed (verified-fix)");
     expect(commenterCalls.some((c) => c.op === "resolve")).toBe(true);
   });

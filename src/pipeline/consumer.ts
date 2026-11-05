@@ -102,9 +102,8 @@ import { computeFindingFingerprint } from "../store/fingerprint";
 import {
   applyPublishedLifecycle,
   claimPublication,
-  countOpenFindings,
+  countRecheckableFindings,
   hasUnprovenDegradedPublication,
-  listPrResolvableAssociations,
   markPublicationFailed,
   recordPublicationProof,
   selectAssessmentTargets,
@@ -322,15 +321,6 @@ export const INLINE_RESOLVE_MAX_ENTRIES = 3;
 export const INLINE_RESOLVE_BUDGET_MS = 12_000;
 /** Per-entry slice (ms) — one §7.5 discover + resolve must fit inside it. */
 export const INLINE_RESOLVE_ENTRY_MS = 6_000;
-
-/**
- * One resolution lane entry: THIS round's freshly verified resolution, or a
- * PRIOR addressed association whose verification is rebuilt from live state
- * immediately before it is enqueued (`reverifyPriorResolution`).
- */
-type ResolveLaneEntry =
-  | { kind: "round"; associationId: string; verified: VerifiedResolution }
-  | { kind: "prior"; associationId: string };
 
 /** The named causes of a failed PR-context capture (`ConsumerLogFields.report_context`). */
 export type ReportContextFailure = "pr-view" | "pr-view-json" | "issue-view" | "issue-view-json" | "budget";
@@ -3770,7 +3760,7 @@ async function processMessage(
     let captureFailed = false;
     try {
       targets = await selectAssessmentTargets(deps.env.DB, lifecycleScope, ASSESSMENT_TARGET_CAP);
-      totalOpen = await countOpenFindings(deps.env.DB, lifecycleScope);
+      totalOpen = await countRecheckableFindings(deps.env.DB, lifecycleScope);
     } catch (err) {
       captureFailed = true;
       const detail = err instanceof Error ? err.message : String(err);
@@ -4764,16 +4754,8 @@ async function processMessage(
     // before the first attempt stays discoverable by M8), then discover +
     // resolve. Never throws out of the message; never reruns the model.
     // Newly-created threads of THIS round are never resolved inline — their
-    // associations carry no verified snapshot, so only entries with a
-    // complete verification are attempted here.
-    //
-    // The lane is the UNION of this round's resolutions and the PR's PRIOR
-    // addressed associations (§7.11.1): a round that closed a finding but
-    // could not resolve its thread (or a force-push that refused the
-    // verification) leaves the conversation open forever without it. A prior
-    // entry is re-proved from live state first — its stored snapshot may
-    // predate the digest domain or the current HEAD — and is left untouched
-    // when that proof fails (never blind-resolved).
+    // associations carry no verified snapshot, so only PRIOR associations
+    // with a complete verification are attempted here.
     //
     // The inline lane is a fast path, not the recovery engine: M8 owns
     // unbounded convergence with its own request/deadline discipline
@@ -4782,62 +4764,17 @@ async function processMessage(
     // cannot be admitted is simply left `pending`, which is exactly the
     // durable state M8 picks up, so nothing is lost and no attempt is spent
     // on skipped work.
-    const roundResolutions = reconciled.resolutions;
-    const roundAssociationIds = new Set(roundResolutions.map((resolution) => resolution.associationId));
-    const priorAssociations: { associationId: string }[] = [];
-    if (commenter.reverifyPriorResolution !== undefined) {
-      try {
-        // Same bound as one assessment rotation: the prior lane reconciles at
-        // most a rotation's worth of rows per round; the rest keep their
-        // stored state and are picked up by a later round or M8.
-        for (const prior of await listPrResolvableAssociations(deps.env.DB, lifecycleScope, ASSESSMENT_TARGET_CAP)) {
-          if (!roundAssociationIds.has(prior.associationId)) priorAssociations.push(prior);
-        }
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        deps.log.warn(fields, `prior-association selection failed — this round's resolutions only: ${detail}`);
-      }
-    }
-    const resolveLane: ResolveLaneEntry[] = [
-      ...roundResolutions.map((resolution) => ({ kind: "round" as const, associationId: resolution.associationId, verified: resolution.verified })),
-      ...priorAssociations.map((prior) => ({ kind: "prior" as const, associationId: prior.associationId })),
-    ];
-    if (resolveLane.length > 0) {
-      const intentById = new Map<string, string>();
-      if (roundResolutions.length > 0) {
-        const assocPlaceholders = roundResolutions.map(() => "?").join(",");
-        const assocRows = await deps.env.DB
-          .prepare(`SELECT id, intent_json FROM review_threads WHERE id IN (${assocPlaceholders})`)
-          .bind(...roundResolutions.map((r) => r.associationId))
-          .all<{ id: string; intent_json: string }>();
-        for (const row of assocRows.results) intentById.set(row.id, row.intent_json);
-      }
+    if (reconciled.resolutions.length > 0) {
+      const assocPlaceholders = reconciled.resolutions.map(() => "?").join(",");
+      const assocRows = await deps.env.DB
+        .prepare(`SELECT id, intent_json FROM review_threads WHERE id IN (${assocPlaceholders})`)
+        .bind(...reconciled.resolutions.map((r) => r.associationId))
+        .all<{ id: string; intent_json: string }>();
+      const intentById = new Map(assocRows.results.map((row) => [row.id, row.intent_json]));
       let inlineResolveBudgetMs = INLINE_RESOLVE_BUDGET_MS;
       let inlineResolveAttempts = 0;
-      for (const entry of resolveLane) {
+      for (const resolution of reconciled.resolutions) {
         try {
-          let verified: VerifiedResolution;
-          let laneIntent: LineIntent | null = null;
-          if (entry.kind === "prior") {
-            // The lane only carries prior entries when the surface exists.
-            const reverify = commenter.reverifyPriorResolution;
-            if (reverify === undefined) continue;
-            const reverified = await reverify({
-              scope: lifecycleScope,
-              associationId: entry.associationId,
-            });
-            if (reverified === null) {
-              deps.log.warn(
-                fields,
-                `prior association ${entry.associationId} could not be re-proved from live state — left untouched (never blind-resolved)`,
-              );
-              continue;
-            }
-            verified = reverified.verified;
-            laneIntent = reverified.intent;
-          } else {
-            verified = entry.verified;
-          }
           const enqueued = await deps.env.DB
             .prepare(
               // A CURRENT round supplies fresh verified_json — that is a
@@ -4847,15 +4784,13 @@ async function processMessage(
               // reset a row that had reached the cap could be re-enqueued as
               // `pending` while still `attempts >= 5`, making it permanently
               // invisible to `listResolutionRecovery` (a silent stall) and
-              // preserving a stale backoff (P67-QC-005). A prior association
-              // is persisted the same way — its rebuilt snapshot is written
-              // BEFORE the attempt so a crash stays recoverable.
+              // preserving a stale backoff (P67-QC-005).
               `UPDATE review_threads
                SET verified_json = ?, resolution_state = 'pending', attempts = 0,
                    next_attempt_ms = NULL, last_error = NULL, updated_ms = ?
                WHERE id = ? AND superseded_by_publication_id IS NULL`,
             )
-            .bind(JSON.stringify(verified), Date.now(), entry.associationId)
+            .bind(JSON.stringify(resolution.verified), Date.now(), resolution.associationId)
             .run();
           if (enqueued.meta.changes === 0) continue; // superseded — nothing to resolve
           // The row is durably queued from here on, so any entry this lane
@@ -4863,18 +4798,15 @@ async function processMessage(
           if (inlineResolveAttempts >= INLINE_RESOLVE_MAX_ENTRIES || inlineResolveBudgetMs <= 0) {
             deps.log.warn(
               fields,
-              `inline resolution admission exhausted (${inlineResolveAttempts}/${INLINE_RESOLVE_MAX_ENTRIES} entries, ${inlineResolveBudgetMs}ms left) — association ${entry.associationId} stays pending for scheduled recovery`,
+              `inline resolution admission exhausted (${inlineResolveAttempts}/${INLINE_RESOLVE_MAX_ENTRIES} entries, ${inlineResolveBudgetMs}ms left) — association ${resolution.associationId} stays pending for scheduled recovery`,
             );
             continue;
           }
-          if (laneIntent === null) {
-            const intentJson = intentById.get(entry.associationId);
-            laneIntent = intentJson === undefined ? null : (JSON.parse(intentJson) as LineIntent);
-          }
-          if (laneIntent === null || commenter.discoverThread === undefined || commenter.resolveFindingThread === undefined) {
+          const intentJson = intentById.get(resolution.associationId);
+          if (intentJson === undefined || commenter.discoverThread === undefined || commenter.resolveFindingThread === undefined) {
             deps.log.warn(
               fields,
-              `resolution for association ${entry.associationId} enqueued but discovery is unavailable — left pending for recovery`,
+              `resolution for association ${resolution.associationId} enqueued but discovery is unavailable — left pending for recovery`,
             );
             continue;
           }
@@ -4886,45 +4818,45 @@ async function processMessage(
           const entryStartedMs = Date.now();
           const discovery = await commenter.discoverThread({
             scope: lifecycleScope,
-            intent: laneIntent,
+            intent: JSON.parse(intentJson) as LineIntent,
             reviewId: null,
           });
           inlineResolveBudgetMs -= Date.now() - entryStartedMs;
           if (discovery.kind !== "found") {
             deps.log.warn(
               fields,
-              `thread discovery for association ${entry.associationId} returned ${discovery.kind} — verified resolve stays queued (never claims a foreign or ambiguous thread)`,
+              `thread discovery for association ${resolution.associationId} returned ${discovery.kind} — verified resolve stays queued (never claims a foreign or ambiguous thread)`,
             );
             continue;
           }
           if (Date.now() >= entryDeadline || inlineResolveBudgetMs <= 0) {
             deps.log.warn(
               fields,
-              `inline resolve deadline passed before the mutation for association ${entry.associationId} — left pending for scheduled recovery`,
+              `inline resolve deadline passed before the mutation for association ${resolution.associationId} — left pending for scheduled recovery`,
             );
             continue;
           }
           const outcome = await commenter.resolveFindingThread({
             scope: lifecycleScope,
-            associationId: entry.associationId,
-            verified,
+            associationId: resolution.associationId,
+            verified: resolution.verified,
           });
           inlineResolveBudgetMs -= Date.now() - entryStartedMs;
           if (outcome.kind === "resolved") {
             deps.log.info(
               fields,
-              `resolved association ${entry.associationId} (thread ${outcome.threadId}${outcome.adopted ? ", adopted" : ""}${outcome.lateChange ? ", LATE CHANGE recorded" : ""})`,
+              `resolved association ${resolution.associationId} (thread ${outcome.threadId}${outcome.adopted ? ", adopted" : ""}${outcome.lateChange ? ", LATE CHANGE recorded" : ""})`,
             );
           } else {
             const reason = outcome.kind === "needs-recheck" || outcome.kind === "retry" || outcome.kind === "abandoned" ? outcome.reason : "";
             deps.log.warn(
               fields,
-              `resolve for association ${entry.associationId} returned ${outcome.kind} (${reason}) — durable queue state owns the follow-up`,
+              `resolve for association ${resolution.associationId} returned ${outcome.kind} (${reason}) — durable queue state owns the follow-up`,
             );
           }
         } catch (err) {
           const detail = err instanceof Error ? err.message : String(err);
-          deps.log.warn(fields, `resolution attempt for ${entry.associationId} failed (queued state intact): ${detail}`);
+          deps.log.warn(fields, `resolution attempt for ${resolution.associationId} failed (queued state intact): ${detail}`);
         }
       }
     }

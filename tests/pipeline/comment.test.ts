@@ -645,14 +645,14 @@ describe("report sections (mstar.report/v1 side document)", () => {
       { title: "D", disposition: "unverifiable", reason: "no-evidence", evidenceKind: null, thread: "-" },
     ];
     const md = buildRevalidatedSection(coverage, rows);
-    expect(md.startsWith("### Revalidated findings\n\nReassessed 1/2 open prior finding(s) this round")).toBe(true);
+    expect(md.startsWith("### Revalidated findings\n\nReassessed 1/2 prior finding(s) this round")).toBe(true);
     expect(md).toContain("| finding | disposition | evidence | thread |");
     expect(md).toContain("| A \\| b | addressed (verified-fix) | current-code | not yet resolved |");
     expect(md).toContain("| C | dismissed (non-fix-dismissal) | - | - |");
     expect(md).toContain("| D | unverifiable (no-evidence) | - | - |");
     // The line's identity: assessed + invalid-output + omitted === selected.
     expect(buildRevalidatedSection({ ...coverage, invalidOutput: 1, omitted: 0 }, rows)).toContain(
-      "Reassessed 1/2 open prior finding(s) this round · 1 invalid-output · 0 omitted",
+      "Reassessed 1/2 prior finding(s) this round · 1 invalid-output · 0 omitted",
     );
   });
 
@@ -756,7 +756,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     };
     const md = buildRevalidatedSection(overCap, []);
     expect(md).toContain(
-      "Reassessed 0/0 open prior finding(s) this round · 0 invalid-output · 0 omitted · 4 over cap · 4 open",
+      "Reassessed 0/0 prior finding(s) this round · 0 invalid-output · 0 omitted · 4 over cap · 4 recheckable",
     );
     expect(md).not.toContain("| Prior finding |");
   });
@@ -1164,7 +1164,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
       rejected: "none",
       planToFix: "x".repeat(REVIEW_BODY_LIMIT + 5000),
     };
-    const reportParts = { report, revalidated: "Reassessed 0/0 open prior finding(s) this round" };
+    const reportParts = { report, revalidated: "Reassessed 0/0 prior finding(s) this round" };
     const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
 
     // Both clamp sites: the inner body clamp and the prepared-body clamp.

@@ -165,27 +165,53 @@ function threadScope(row: { id: string; app_id: string; installation_id: number;
 // ---------------------------------------------------------------------------
 
 /**
- * Open-row selection for the recheck seat: query OPEN rows only, ordered by
- * `COALESCE(last_scheduled_ms, created_ms), id` (oldest waiting first — no
- * newest-updated or permanent never-assessed priority), capped at
- * `ASSESSMENT_TARGET_CAP` (25) regardless of the caller's `limit` so a
- * misbehaving caller cannot break the rotation fairness. Association IDs
- * list the row's ACTIVE (non-superseded) thread associations — superseded
- * ones are dead and never offered again. Unselected rows are NOT returned
- * here; the caller represents them via the aggregate cap count in the
- * round coverage (spec §7.2).
+ * Recheckable-row selection for the recheck seat (spec §7.2): OPEN rows plus
+ * ADDRESSED rows that still own a non-superseded association in a non-terminal
+ * state (`pending`/`retry`/`needs-recheck`/`local-error`). The second class is
+ * how a solved-but-unresolved conversation gets another real round: the seat
+ * re-verifies the concern against the CURRENT head and discussion and the
+ * ordinary resolution path (this round's own verified snapshot) resolves it.
+ * Once that association reaches `resolved`/`abandoned` the finding drops back
+ * out, so the rotation keeps only genuinely open rows.
+ *
+ * Ordered by `COALESCE(last_scheduled_ms, created_ms), id` (oldest waiting
+ * first — no newest-updated or permanent never-assessed priority) and capped
+ * at `ASSESSMENT_TARGET_CAP` (25) regardless of the caller's `limit` so a
+ * misbehaving caller cannot break the rotation fairness. Every selected row
+ * advances `last_scheduled_ms` when the publication applies, so a row that
+ * can never be re-proved rotates out instead of starving the ones behind it.
+ * Association IDs list the row's ACTIVE (non-superseded) thread associations
+ * — superseded ones are dead and never offered again. Unselected rows are NOT
+ * returned here; the caller represents them via the aggregate cap count in
+ * the round coverage (spec §7.2/§7.4).
  */
 export async function selectAssessmentTargets(db: D1Like, scope: Scope, limit: number): Promise<RecheckTarget[]> {
   const capped = Math.max(0, Math.min(limit, ASSESSMENT_TARGET_CAP));
   if (capped === 0) return [];
   const rows = await db
     .prepare(
-      `SELECT * FROM review_findings
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'
-       ORDER BY COALESCE(last_scheduled_ms, created_ms), id
+      `SELECT f.* FROM review_findings f
+       WHERE f.app_id = ? AND f.installation_id = ? AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
+         AND (
+           f.state = 'open'
+           OR (
+             f.state = 'addressed'
+             AND EXISTS (
+               SELECT 1 FROM review_threads t
+               WHERE t.app_id = ? AND t.installation_id = ? AND t.owner = ? AND t.repo = ? AND t.pr_number = ?
+                 AND t.finding_row_id = f.id
+                 AND t.superseded_by_publication_id IS NULL
+                 AND t.resolution_state IN ('pending','retry','needs-recheck','local-error')
+             )
+           )
+         )
+       ORDER BY COALESCE(f.last_scheduled_ms, f.created_ms), f.id
        LIMIT ?`,
     )
-    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, capped)
+    .bind(
+      scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
+      scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, capped,
+    )
     .all<ReviewFindingRow>();
   const found = rows.results;
   if (found.length === 0) return [];
@@ -218,14 +244,36 @@ export async function selectAssessmentTargets(db: D1Like, scope: Scope, limit: n
   }));
 }
 
-/** Aggregate count of open lifecycle rows for the scope (coverage line). */
-export async function countOpenFindings(db: D1Like, scope: Scope): Promise<number> {
+/**
+ * Aggregate count of RECHECKABLE rows for the scope — the `totalOpen` the
+ * round coverage reports (spec §7.4). It mirrors `selectAssessmentTargets`
+ * exactly (open rows plus addressed rows owning a non-terminal association),
+ * so `selected <= totalOpen` always holds and `capped` stays the honest
+ * remainder instead of going negative.
+ */
+export async function countRecheckableFindings(db: D1Like, scope: Scope): Promise<number> {
   const row = await db
     .prepare(
-      `SELECT COUNT(*) AS n FROM review_findings
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'`,
+      `SELECT COUNT(*) AS n FROM review_findings f
+       WHERE f.app_id = ? AND f.installation_id = ? AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
+         AND (
+           f.state = 'open'
+           OR (
+             f.state = 'addressed'
+             AND EXISTS (
+               SELECT 1 FROM review_threads t
+               WHERE t.app_id = ? AND t.installation_id = ? AND t.owner = ? AND t.repo = ? AND t.pr_number = ?
+                 AND t.finding_row_id = f.id
+                 AND t.superseded_by_publication_id IS NULL
+                 AND t.resolution_state IN ('pending','retry','needs-recheck','local-error')
+             )
+           )
+         )`,
     )
-    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
+    .bind(
+      scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
+      scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
+    )
     .first<{ n: number }>();
   return row?.n ?? 0;
 }
@@ -756,38 +804,6 @@ export async function listResolutionRecovery(
        LIMIT ?`,
     )
     .bind(LIFECYCLE_MAX_ATTEMPTS, nowMs, nowMs, limit)
-    .all<{ id: string; app_id: string; installation_id: number; owner: string; repo: string; pr_number: number }>();
-  return rows.results.map(threadScope);
-}
-
-/**
- * PR-scoped prior-association selection for the POST-PUBLICATION reconcile
- * lane (spec §7.11.1 "the resolution lane is PR-scoped"): every association
- * of this PR that is not superseded, not terminal, carries a stored verified
- * snapshot, and whose finding is still `addressed`. The lane re-proves each
- * row from live state before enqueueing it (review-threads.ts) — selection
- * alone never authorizes a resolve, and a finding reopened by a recurrence
- * drops out here.
- */
-export async function listPrResolvableAssociations(
-  db: D1Like,
-  scope: Scope,
-  limit: number,
-): Promise<{ associationId: string; scope: Scope }[]> {
-  const rows = await db
-    .prepare(
-      `SELECT t.id, t.app_id, t.installation_id, t.owner, t.repo, t.pr_number
-       FROM review_threads t
-       JOIN review_findings f ON f.id = t.finding_row_id
-       WHERE t.app_id = ? AND t.installation_id = ? AND t.owner = ? AND t.repo = ? AND t.pr_number = ?
-         AND t.superseded_by_publication_id IS NULL
-         AND t.resolution_state NOT IN ('resolved','abandoned')
-         AND t.verified_json IS NOT NULL
-         AND f.state = 'addressed'
-       ORDER BY COALESCE(t.next_attempt_ms, t.created_ms), t.id
-       LIMIT ?`,
-    )
-    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, limit)
     .all<{ id: string; app_id: string; installation_id: number; owner: string; repo: string; pr_number: number }>();
   return rows.results.map(threadScope);
 }

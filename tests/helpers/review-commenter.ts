@@ -17,7 +17,7 @@ import type {
   UpsertPlan,
 } from "../../src/pipeline/comment";
 import type { Discussion } from "../../packages/shared/src/recheck-wire";
-import type { LineIntent, VerifiedResolution } from "../../src/store/finding-lifecycle";
+import type { LineIntent } from "../../src/store/finding-lifecycle";
 import { PreparedSendRejected } from "../../src/pipeline/comment";
 
 export type CommenterCall = { op: string; args: unknown };
@@ -56,8 +56,6 @@ export type FakeCommenterState = {
   /** §7.5 resolve result for the resolution step. */
   resolveResult: ResolveOutcome;
   resolveError?: Error;
-  /** §7.11.1 prior-association re-verification result (null = unprovable). */
-  reverifyResult: { verified: VerifiedResolution; intent: LineIntent } | null;
 };
 
 export function initialFakeCommenterState(): FakeCommenterState {
@@ -83,7 +81,6 @@ export function initialFakeCommenterState(): FakeCommenterState {
     discoverResult: { kind: "found", reviewId: 9, commentId: 8, threadId: "PRRT_thread1" },
     resolveResult: { kind: "resolved", threadId: "PRRT_thread1", adopted: false, outdated: false, lateChange: false },
     resolveError: undefined,
-    reverifyResult: null,
   };
 }
 
@@ -165,10 +162,6 @@ export function createFakeCommenter(state: FakeCommenterState, calls: CommenterC
       calls.push({ op: "resolve", args: input });
       if (state.resolveError) throw state.resolveError;
       return state.resolveResult;
-    }),
-    reverifyPriorResolution: mock(async (input: unknown) => {
-      calls.push({ op: "reverify", args: input });
-      return state.reverifyResult;
     }),
   };
 }
