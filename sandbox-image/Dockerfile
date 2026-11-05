@@ -12,10 +12,10 @@
 # (the fitting, the received-catalog validation and the skip/fit records) plus
 # `packages/shared/src/runtime.ts` (the optional runner-input field that carries the budget) — no
 # manifest, lockfile or CLI pin moved. A stale image has neither behaviour: it sends the whole
-# up-to-512 KiB `mstar.recheck-input/v1` document in one assignment, so a large round's yield never
-# arrives (`failed`/`seat-failed`, status `unavailable`), and it accepts a citation of a slice the
-# seat never received, publishing that row `addressed`. The Worker cannot repair either from
-# outside.
+# up-to-512 KiB `mstar.recheck-input/v1` document in one assignment, which is the observed shape of
+# the lost rounds (`failed`/`seat-failed`, status `unavailable`; the RCA could not separate context
+# pressure from the seat's own time cap), and it accepts a citation of a slice the seat never
+# received, publishing that row `addressed`. The Worker cannot repair either from outside.
 #
 # rebuild: the runner's pinned engine moves to 4.2.0 (`packages/runner/package.json`
 # and its lockfile are image inputs, so the container must be rebuilt with them).
