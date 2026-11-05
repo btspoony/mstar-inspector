@@ -24,10 +24,13 @@ import {
   getCheckBudgets,
   getSystemConcurrency,
   isConcurrencyValue,
+  readDefaultReviewLevel,
   setCheckBudgets,
+  setDefaultReviewLevel,
   setSystemConcurrency,
   type CheckBudgetValues,
 } from "../dashboard/runtime-config-store";
+import { REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { resolveLocale, t, type Locale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
 import { ADMIN_PAGES } from "../spa/admin/pages";
@@ -129,14 +132,19 @@ async function setFlag(c: AdminContext): Promise<Response> {
  * configuration (iteration spec §1.1). One row in `review_runtime_settings`,
  * absent = the documented default; the leaf store owns the parse, the
  * 1..SYSTEM_CONCURRENCY_MAX range and the audit row, so this handler only
- * gates, shapes and maps.
+ * gates, shapes and maps. The operator default review depth (plan 036a) rides
+ * the same read: the tier every App without its own depth inherits.
  */
 async function readRuntime(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
-  const [system, budgets] = await Promise.all([getSystemConcurrency(db), getCheckBudgets(db)]);
+  const [system, budgets, level] = await Promise.all([
+    getSystemConcurrency(db),
+    getCheckBudgets(db),
+    readDefaultReviewLevel(db),
+  ]);
   return c.json({
     concurrency: system.concurrency,
     min: CONCURRENCY_MIN,
@@ -152,6 +160,9 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       updateMax: CHECK_UPDATE_MAX,
       degraded: budgets.degraded,
     },
+    // The inheritance default, with the vocabulary so the console needs no
+    // second source for its options.
+    reviewLevel: { value: level.value, levels: REVIEW_LEVELS, degraded: level.degraded },
   });
 }
 
@@ -171,19 +182,39 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   if (!db) return c.notFound();
   let concurrency: unknown;
   let rawBudgets: unknown;
+  let rawLevel: unknown;
   try {
-    const body = (await c.req.json()) as { concurrency?: unknown; checkBudgets?: unknown };
+    const body = (await c.req.json()) as {
+      concurrency?: unknown;
+      checkBudgets?: unknown;
+      reviewLevel?: unknown;
+    };
     concurrency = body.concurrency;
     rawBudgets = body.checkBudgets;
+    rawLevel = body.reviewLevel;
   } catch {
     // malformed body → the shape gate's 400, never a 500
   }
-  // One save writes one parameter: a body carrying both is a shape error, so a
-  // refused half can never leave the other half written.
-  if (rawBudgets !== undefined) {
-    if (concurrency !== undefined) {
-      return c.json({ error: "body must carry exactly one of concurrency | checkBudgets" }, 400);
+  // One save writes one parameter: a body carrying more than one is a shape
+  // error, so a refused half can never leave another half written.
+  if ([concurrency, rawBudgets, rawLevel].filter((value) => value !== undefined).length > 1) {
+    return c.json(
+      { error: "body must carry exactly one of concurrency | checkBudgets | reviewLevel" },
+      400,
+    );
+  }
+  if (rawLevel !== undefined) {
+    try {
+      // The store owns the vocabulary and the refusal message.
+      return c.json({
+        reviewLevel: await setDefaultReviewLevel(db, rawLevel as ReviewLevel, login),
+      });
+    } catch (error) {
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
     }
+  }
+  if (rawBudgets !== undefined) {
     const pair = checkBudgetsBody(rawBudgets);
     if (pair === null) {
       return c.json({ error: "body must be { checkBudgets: { terminalizeMs, updateMs } }" }, 400);

@@ -15,14 +15,18 @@
  *     empty set meaningful; a deduped set past ALLOWLIST_MAX_OWNERS throws
  *     before any read;
  *   - both writers refuse an unknown or soft-deleted App with no rows written;
- *   - visibility round-trips and reads `unknown` for a never-probed row.
+ *   - visibility round-trips and reads `unknown` for a never-probed row;
+ *   - the per-App review level (migration 0047) has no backfill (every App
+ *     reads NULL until it chooses), NULL is a first-class choice that writes
+ *     back, and an off-vocabulary value reads as absent, never an error.
  *
  * The fixture is the fully migrated schema (tests/store/helpers), so the
  * assertions run against the real DDL rather than a hand-built table.
  */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
-import { ALLOWLIST_MAX_OWNERS, createAppsStore } from "../../src/dashboard/apps-store";
+import { ALLOWLIST_MAX_OWNERS, createAppsStore, parseAppReviewLevel } from "../../src/dashboard/apps-store";
+import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import type { D1Like } from "../../src/store/types";
 import type { TestD1 } from "../store/helpers";
 
@@ -238,5 +242,79 @@ describe("GitHub App visibility (migration 0045)", () => {
 
     expect(await store.getGithubVisibility("unknown-app")).toBeNull();
     expect(await store.saveGithubVisibility("unknown-app", "public")).toBe(false);
+  });
+});
+
+describe("review level (migration 0047)", () => {
+  /**
+   * One App through the real creation path, so it is mapped to the 'default'
+   * workspace and `getAppById` — the read `resolveCommenter` uses — resolves
+   * it. The local `seedApp` above writes no mapping, so every tenant read
+   * misses those rows.
+   */
+  async function seedMappedApp(db: TestD1, id: string, githubAppId: number): Promise<void> {
+    await createAppsStore(db).createApp({
+      id,
+      githubAppId,
+      githubSlug: null,
+      name: id,
+      privateKeyEnc: "enc",
+      webhookSecretEnc: "enc",
+      createdBy: "acme",
+      workspaceId: "default",
+    });
+  }
+
+  test("no backfill: an App reads NULL until it chooses, and NULL is a choice it can go back to", async () => {
+    const db = createMigratedTestD1();
+    await seedMappedApp(db, "app-level", 5401);
+    const store = createAppsStore(db);
+
+    // The creation path omits the column and nothing backfills it, so an
+    // untouched App has no level of its own: NULL means "follow the operator
+    // default".
+    expect((await store.getAppById("app-level"))?.review_level).toBeNull();
+
+    expect(await store.setReviewLevel("app-level", "deep")).toBe(true);
+    const stored = await store.getAppById("app-level");
+    expect(stored?.review_level).toBe("deep");
+    expect(parseAppReviewLevel(stored?.review_level)).toBe("deep");
+
+    // Choosing "follow the operator default" writes the column back to NULL.
+    expect(await store.setReviewLevel("app-level", null)).toBe(true);
+    expect((await store.getAppById("app-level"))?.review_level).toBeNull();
+  });
+
+  test("an off-vocabulary value reads as absent, never an error", async () => {
+    const db = createMigratedTestD1();
+    await seedMappedApp(db, "app-level-invalid", 5402);
+    const store = createAppsStore(db);
+
+    // The written vocabulary is closed: the DDL refuses anything else...
+    expect(() =>
+      db.raw.prepare(`UPDATE github_apps SET review_level = 'turbo' WHERE id = 'app-level-invalid'`).run(),
+    ).toThrow();
+    await expect(store.setReviewLevel("app-level-invalid", "turbo" as never)).rejects.toThrow(/review level/);
+
+    // ...and the parser is the last line for a value that arrived another way:
+    // an untrusted stored row falls back to the operator default instead of
+    // failing the review.
+    for (const level of REVIEW_LEVELS) {
+      expect(parseAppReviewLevel(level)).toBe(level);
+    }
+    for (const value of [null, undefined, "turbo", "", "DEEP", 3, ["deep"]]) {
+      expect(parseAppReviewLevel(value)).toBeNull();
+    }
+    expect((await store.getAppById("app-level-invalid"))?.review_level).toBeNull();
+  });
+
+  test("refuses a soft-deleted App with no write", async () => {
+    const db = createMigratedTestD1();
+    await seedMappedApp(db, "app-level-deleted", 5403);
+    db.raw.prepare(`UPDATE github_apps SET deleted_at = datetime('now') WHERE id = 'app-level-deleted'`).run();
+    const store = createAppsStore(db);
+
+    expect(await store.setReviewLevel("app-level-deleted", "quick")).toBe(false);
+    expect((await store.getAppById("app-level-deleted"))?.review_level).toBeNull();
   });
 });

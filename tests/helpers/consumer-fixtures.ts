@@ -85,6 +85,12 @@ const TEST_APP_WEBHOOK_SECRET_ENC = await createSecretbox(TEST_KEY).encryptSecre
  */
 export const TEST_OTHER_APP_ID = "99999999-8888-7777-6666-555555555555";
 
+/**
+ * A SECOND App a payload may be attributed to: its own row, workspace mapping
+ * and AI config, so one consumer serves two Apps in a single test.
+ */
+export const TEST_SECOND_APP_ID = "22222222-3333-4444-5555-666666666666";
+
 export function seedOtherApp(db: TestD1): void {
   db.raw
     .prepare(
@@ -153,6 +159,46 @@ export async function seedAppConfig(
   }
 }
 
+/**
+ * Seed the review depth on an App row (migration 0047). `null` is the
+ * "follow the operator default" face; both faces are stored verbatim.
+ */
+export function setAppReviewLevel(db: TestD1, appId: string, level: string | null): void {
+  db.raw.prepare("UPDATE github_apps SET review_level = ? WHERE id = ?").run(level, appId);
+}
+
+/**
+ * Seed a SECOND reviewing App with its own review depth: row + workspace
+ * mapping + AI config, i.e. the shape `createSeededTestD1` gives the default
+ * App. The envelopes are sealed under THIS App's id (the decrypt AAD is
+ * per-App), so one consumer can serve both within a single test.
+ */
+export async function seedReviewingApp(
+  db: TestD1,
+  appId: string,
+  githubAppId: number,
+  reviewLevel: string | null,
+): Promise<void> {
+  const box = createSecretbox(TEST_KEY);
+  const privateKeyEnc = await box.encryptSecret(TEST_APP_PEM, `github_apps.private_key_enc:${appId}`);
+  const webhookSecretEnc = await box.encryptSecret(
+    "whsec-consumer-test",
+    `github_apps.webhook_secret_enc:${appId}`,
+  );
+  db.raw
+    .prepare(
+      `INSERT INTO github_apps
+         (id, github_app_id, name, private_key_enc, webhook_secret_enc, review_level,
+          created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+    )
+    .run(appId, githubAppId, `consumer-test-app-${githubAppId}`, privateKeyEnc, webhookSecretEnc, reviewLevel);
+  db.raw
+    .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
+    .run(appId);
+  await seedAppConfig(db, appId);
+}
+
 /** Default diff fixture: a src/auth.ts hunk whose right range covers line 21. */
 export const VALID_DIFF = [
   "diff --git a/src/auth.ts b/src/auth.ts",
@@ -190,8 +236,6 @@ export const TEST_INSTALLATION_ID = 123;
 export const TEST_OWNER = "acme";
 export const TEST_REPO = "widgets";
 export const TEST_PR_NUMBER = 42;
-/** Review tier the harness env leaves unset (resolveReviewLevel's landing tier). */
-const TEST_REVIEW_LEVEL = "default";
 
 /**
  * The payload-derived commands the consumer WILL issue for this job, built by
@@ -232,7 +276,7 @@ const DEFAULT_GITOPS = gitOpsCommandsFor({
 });
 /**
  * The runner exec for EVERY legal tier, with and without the optional
- * `--recheck-out`: the consumer forwards REVIEW_LEVEL verbatim.
+ * `--recheck-out`: the consumer forwards the resolved review depth verbatim.
  */
 const RUNNER_CMDS: ReadonlySet<string> = new Set(
   REVIEW_LEVELS.flatMap((level) => [

@@ -21,8 +21,8 @@
  *     (reconFacts) → runner `--level/--input` (env-injected secrets) →
  *     parse the mstar.review/v1 envelope → post FIRST → put → KV
  *     completion → destroy
- *   - REVIEW_LEVEL configurable (quick/default/deep); invalid value fails loud
- *     BEFORE any sandbox step (never a silent downgrade)
+ *   - review depth is resolved per App (quick/default/deep); the App's NULL
+ *     takes the operator default and a missing default row lands on "default"
  *   - null payload sha → sha resolved from the checkout (no gh pr view)
  *   - parse failure (AL-1) → failure row (stage=parse) +
  *     degraded comment + ack — no post, no reviews row, no KV done, zero DLQ
@@ -50,6 +50,7 @@ import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
 import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
 import {
+  REVIEW_LEVEL_KEY,
   SYSTEM_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_DEFAULT,
 } from "../../src/dashboard/runtime-config-store";
@@ -98,8 +99,11 @@ import {
   VALID_DIFF,
   TEST_KEY,
   TEST_APP_ID,
+  TEST_SECOND_APP_ID,
   createSeededTestD1,
   seedAppConfig,
+  seedReviewingApp,
+  setAppReviewLevel,
   TEST_APP_PEM,
   PRIOR_PUB_ID,
   PRIOR_SHA,
@@ -219,6 +223,37 @@ function usageRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM usage_events ORDER BY review_id, seq").all() as Array<
     Record<string, unknown>
   >;
+}
+
+/** The operator default depth row (`review.level.default`). */
+function seedDefaultReviewLevel(db: TestD1, level: string): void {
+  db.raw
+    .prepare(
+      "INSERT INTO review_runtime_settings (key, value, updated_at, updated_by) VALUES (?, ?, datetime('now'), 'operator')",
+    )
+    .run(REVIEW_LEVEL_KEY, level);
+}
+
+/** The leaf's own statement — matched exactly, so no other settings read counts. */
+const DEFAULT_LEVEL_SQL = "SELECT value FROM review_runtime_settings WHERE key = ?";
+
+/**
+ * Wrap the D1 double to count the operator-default depth reads: the resolved
+ * depth must cost ZERO of them when the App row carries its own value, and
+ * exactly ONE when it does not.
+ */
+function countDefaultLevelReads(db: TestD1): { db: TestD1; reads: () => number } {
+  let reads = 0;
+  return {
+    db: {
+      ...db,
+      prepare(sql: string) {
+        if (sql.trim() === DEFAULT_LEVEL_SQL) reads++;
+        return db.prepare(sql);
+      },
+    },
+    reads: () => reads,
+  };
 }
 
 /** Live admission rows — the per-PR lock plus the capacity reservation. */
@@ -1004,24 +1039,33 @@ describe("createReviewConsumer", () => {
     expect(sandbox.destroyCalls).toBe(1);
   });
 
-  test("REVIEW_LEVEL unset → runner runs the harness landing tier 'default' (AC-S7-level)", async () => {
+  test("App row NULL + missing default row → runner runs the landing tier 'default' (one default read)", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const counted = countDefaultLevelReads(db);
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: counted.db as never }),
+      undefined,
+      testOverrides,
+    );
 
     await consumer(makeBatch(makePayload()));
 
     const runnerCall = sandbox.calls.find((c) => c.cmd.includes("--input"))!;
     expect(runnerCall.cmd).toContain("--level 'default'");
+    // The App column is NULL, so the operator default IS consulted — once.
+    expect(counted.reads()).toBe(1);
   });
 
-  test("REVIEW_LEVEL=quick → runner runs `--level 'quick'` (AC-S7-level configurable)", async () => {
+  test("App row review_level 'quick' → runner runs `--level 'quick'`, no default read (per-App depth)", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    setAppReviewLevel(db, TEST_APP_ID, "quick");
+    const counted = countDefaultLevelReads(db);
     const consumer = createReviewConsumer(
-      await makeEnv({ DB: db as never, REVIEW_LEVEL: "quick" }),
+      await makeEnv({ DB: counted.db as never }),
       undefined,
       testOverrides,
     );
@@ -1030,15 +1074,33 @@ describe("createReviewConsumer", () => {
 
     const runnerCall = sandbox.calls.find((c) => c.cmd.includes("--input"))!;
     expect(runnerCall.cmd).toContain("--level 'quick'");
+    // The App chose a depth: the operator default is never read.
+    expect(counted.reads()).toBe(0);
     expect(reviewCount(db)).toBe(1);
   });
 
-  test("REVIEW_LEVEL=deep → runner runs `--level 'deep'` forwarded unchanged (AC-S9-trigger)", async () => {
+  test("App row review_level 'deep' → runner runs `--level 'deep'` forwarded unchanged (AC-S9-trigger)", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    setAppReviewLevel(db, TEST_APP_ID, "deep");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerCall = sandbox.calls.find((c) => c.cmd.includes("--input"))!;
+    expect(runnerCall.cmd).toContain("--level 'deep'");
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("App row NULL → the operator default decides the depth (one settings read)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    seedDefaultReviewLevel(db, "deep");
+    const counted = countDefaultLevelReads(db);
     const consumer = createReviewConsumer(
-      await makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
+      await makeEnv({ DB: counted.db as never }),
       undefined,
       testOverrides,
     );
@@ -1047,22 +1109,61 @@ describe("createReviewConsumer", () => {
 
     const runnerCall = sandbox.calls.find((c) => c.cmd.includes("--input"))!;
     expect(runnerCall.cmd).toContain("--level 'deep'");
+    expect(counted.reads()).toBe(1);
     expect(reviewCount(db)).toBe(1);
   });
-  test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + admission TTL 2532; quick/default stay 600_000 (AC-S10-clock)", async () => {
+
+  test("a corrupt operator default degrades to 'default' and warns once (migration 0047)", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // Present but off the shared vocabulary: `readDefaultReviewLevel` answers
+    // the documented default with `degraded: true` instead of throwing, so the
+    // review still runs — and the consumer says so on its structured channel.
+    seedDefaultReviewLevel(db, "sideways");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerCall = sandbox.calls.find((c) => c.cmd.includes("--input"))!;
+    expect(runnerCall.cmd).toContain("--level 'default'");
+    const warns = logLines.filter((l) => l.level === "warn" && l.fields.event === "review_level_degraded");
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.fields.app_id).toBe(TEST_APP_ID);
+    expect(warns[0]!.fields.level).toBe("default");
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("two Apps on one consumer resolve their own depth (I-000387)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    setAppReviewLevel(db, TEST_APP_ID, "quick");
+    await seedReviewingApp(db, TEST_SECOND_APP_ID, 434344, "deep");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: TEST_SECOND_APP_ID } })));
+
+    // Same deployment, same consumer, two depths — no env var involved.
+    const levels = sandbox.calls
+      .filter((c) => c.cmd.includes("--input"))
+      .map((c) => /--level '(\w+)'/.exec(c.cmd)?.[1]);
+    expect(levels).toEqual(["quick", "deep"]);
+    expect(reviewCount(db)).toBe(2);
+  });
+
+  test("App row review_level 'deep' → runner exec timeout 840_000 + admission TTL 2532; quick/default stay 600_000 (AC-S10-clock)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    setAppReviewLevel(db, TEST_APP_ID, "deep");
     let admissionTtlMs = -1;
     sandbox.probe = () => {
       const row = inflightRows(db)[0]!;
       admissionTtlMs = Date.parse(String(row.expires_at)) - Date.parse(String(row.acquired_at));
     };
-    const consumer = createReviewConsumer(
-      await makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
-      undefined,
-      testOverrides,
-    );
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
@@ -1102,15 +1203,12 @@ describe("createReviewConsumer", () => {
     expect(line!.fields.orchestration).toBe("bun-fanout");
   });
 
-  test("REVIEW_LEVEL=deep → runner log: level=deep, budget 840_000, orchestration=parent, NO fake seat_count (AC-S10-logs)", async () => {
+  test("App row review_level 'deep' → runner log: level=deep, budget 840_000, orchestration=parent, NO fake seat_count (AC-S10-logs)", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(
-      await makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
-      testLog,
-      testOverrides,
-    );
+    setAppReviewLevel(db, TEST_APP_ID, "deep");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
@@ -1144,33 +1242,6 @@ describe("createReviewConsumer", () => {
     expect(typeof errLine!.fields.elapsed_ms).toBe("number");
     expect(errLine!.fields.elapsed_ms).toBeGreaterThanOrEqual(0);
     expect(errLine!.msg).toContain("runner failed");
-  });
-
-  test("invalid REVIEW_LEVEL (Object.prototype keys) → fail-loud BEFORE any sandbox step (never a silent downgrade)", async () => {
-    // qc3 F-302: "toString"/"__proto__" would pass an `in`-style guard — only
-    // REVIEW_LEVELS membership (isReviewLevel) rejects them at this first,
-    // pre-sandbox guard. "deep" is NOT here: it is a legal tier since the
-    // deep-tier work and is covered by the success test above.
-    for (const level of ["toString", "constructor", "__proto__"]) {
-      reset();
-      const db = await createSeededTestD1();
-      const consumer = createReviewConsumer(
-        await makeEnv({ DB: db as never, REVIEW_LEVEL: level }),
-        testLog,
-        testOverrides,
-      );
-
-      await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/invalid REVIEW_LEVEL/);
-
-      expect(sandbox.calls).toHaveLength(0);
-      expect(commenterCalls).toHaveLength(0);
-      expect(reviewCount(db)).toBe(0);
-      expect(inflightRows(db)).toHaveLength(0); // no admission row is ever written
-      const errLine = logLines.find((l) => l.level === "error");
-      expect(errLine).toBeDefined();
-      expect(errLine!.msg).toContain("invalid REVIEW_LEVEL");
-      expect(errLine!.msg).toContain(JSON.stringify(level));
-    }
   });
 
   test("envelope target folded from reconFacts agrees with the idem key → put cross-check passes (T4 store gate)", async () => {
@@ -1227,25 +1298,6 @@ describe("createReviewConsumer", () => {
     expect(sandbox.destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.sandbox_id).toMatch(/^review-/);
-  });
-
-  test("pre-checkout failure (invalid REVIEW_LEVEL) → failure row stage=pipeline with the payload sha", async () => {
-    reset();
-    const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(
-      await makeEnv({ DB: db as never, REVIEW_LEVEL: "bogus" }),
-      testLog,
-      testOverrides,
-    );
-
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/invalid REVIEW_LEVEL/);
-
-    // The checkout never ran: no authoritative sha — the row carries the
-    // payload sha as the best attribution available ("pipeline" phase).
-    expect(failureRows(db)).toHaveLength(1);
-    expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline", head_sha: SHA });
-    expect(sandbox.calls).toHaveLength(0);
-    expect(sandbox.destroyCalls).toBe(0);
   });
 
   test("KV completion write failure → warn, still ack (D1 row is durable)", async () => {
@@ -1949,15 +2001,12 @@ describe("createReviewConsumer", () => {
     expect(messageAckCalls).toHaveLength(0);
     expect(sandbox.calls).toHaveLength(0);
   });
-  test("REVIEW_LEVEL=deep guard-held → delayed retries use the deep backoff 90s → 480s → 2040s (AC-S10-guard)", async () => {
+  test("App row review_level 'deep' guard-held → delayed retries use the deep backoff 90s → 480s → 2040s (AC-S10-guard)", async () => {
     reset();
     const db = await createSeededTestD1();
+    setAppReviewLevel(db, TEST_APP_ID, "deep");
     await seedInflight(db);
-    const consumer = createReviewConsumer(
-      await makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
-      testLog,
-      testOverrides,
-    );
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
     for (const [attempts, delaySeconds] of [
       [1, 90],
       [2, 480],

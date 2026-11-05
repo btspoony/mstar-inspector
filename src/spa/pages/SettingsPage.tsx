@@ -46,6 +46,7 @@ import {
   configuredKeySlot,
   DEFAULT_CHAIN_NAME,
   isPaused,
+  isReviewLevel,
   isReviewTriggerMode,
   concurrencySubmitBlocked,
   modelChainTabs,
@@ -53,6 +54,7 @@ import {
   parseStoredConcurrency,
   PR_VERDICTS,
   removeChanged,
+  REVIEW_LEVELS,
   REVIEW_TRIGGER_MODES,
   seatRoleValues,
   seatSelectValue,
@@ -62,6 +64,7 @@ import {
   type CheckGateSettings,
   type ConcurrencySettings,
   type ModelOptionGroup,
+  type ReviewLevel,
   type ReviewTriggerMode,
   type SettingsAppMeta,
   type SettingsIdentityAppMeta,
@@ -376,7 +379,7 @@ export function SettingsView({
           by hairlines instead of one framed card per section. Sections are
           direct siblings so FlowSection's first/last edge trimming applies.
           Order and membership are the plan's: identity, runtime & harness,
-          review gate, configuration (providers, chains), seats, and the
+          review depth, review gate, configuration (providers, chains), seats, and the
           destructive ops zone. The installations / deliveries face lives on
           its own 已安装 tab (AppDetailPage). Every field, action and data flow
           is unchanged. */}
@@ -395,6 +398,8 @@ export function SettingsView({
           onSettings={submitSettings}
           onTriggerMode={runTriggerMode}
         />
+
+        <ReviewDepthSection locale={locale} payload={payload} onSettings={submitSettings} />
 
         <ReviewGateSection locale={locale} payload={payload} onSettings={submitSettings} />
 
@@ -1179,6 +1184,119 @@ function RuntimeHarnessEditor({
       </div>
       <NoticeRegion notice={notice} />
     </div>
+  );
+}
+
+/**
+ * Review depth (migration 0047): the select's four faces. Three are the wire
+ * levels; the fourth is the inherit face — it stores NULL and follows the
+ * operator default, whose resolved level its label names, so a manager never
+ * needs the operator console to know what NULL runs. Copy follows the plan's
+ * product vocabulary table: `default` reads "Standard" so the three degrees
+ * (Quick / Standard / Deep) sit side by side.
+ */
+export const REVIEW_DEPTH_INHERIT = "inherit";
+
+export type ReviewDepthChoice = ReviewLevel | typeof REVIEW_DEPTH_INHERIT;
+
+/** True exactly when `value` is one of the select's four faces. */
+function isReviewDepthChoice(value: string): value is ReviewDepthChoice {
+  return value === REVIEW_DEPTH_INHERIT || isReviewLevel(value);
+}
+
+const REVIEW_LEVEL_COPY: Record<ReviewLevel, { name: DictionaryKey; hint: DictionaryKey }> = {
+  quick: { name: "settings.reviewDepthQuick", hint: "settings.reviewDepthQuickHint" },
+  default: { name: "settings.reviewDepthStandard", hint: "settings.reviewDepthStandardHint" },
+  deep: { name: "settings.reviewDepthDeep", hint: "settings.reviewDepthDeepHint" },
+};
+
+/** The depth select's faces, in order: the three levels, then the inherit face. */
+export function reviewDepthOptions(
+  locale: SpaBoot["locale"],
+  defaultLevel: ReviewLevel,
+): Array<{ value: ReviewDepthChoice; label: string }> {
+  return [
+    ...REVIEW_LEVELS.map((level) => ({
+      value: level,
+      label: `${t(locale, REVIEW_LEVEL_COPY[level].name)} — ${t(locale, REVIEW_LEVEL_COPY[level].hint)}`,
+    })),
+    {
+      value: REVIEW_DEPTH_INHERIT,
+      label: t(locale, "settings.reviewDepthInherit", {
+        level: t(locale, REVIEW_LEVEL_COPY[defaultLevel].name),
+      }),
+    },
+  ];
+}
+
+/**
+ * Review depth: how thoroughly this App's reviews run. One select, four faces;
+ * picking one saves immediately (the review-trigger control's discipline), and
+ * the inherit face writes NULL. Manage face only — the identity-only payload
+ * has no depth field and renders no control.
+ */
+export function ReviewDepthSection({
+  locale,
+  payload,
+  onSettings,
+}: {
+  locale: SpaBoot["locale"];
+  payload: SettingsManagePayload;
+  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
+}) {
+  const stored: ReviewDepthChoice = payload.app.review_level ?? REVIEW_DEPTH_INHERIT;
+  const options = reviewDepthOptions(locale, payload.app.default_review_level);
+  const [selected, setSelected] = useState<ReviewDepthChoice>(stored);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Server-state mirror: a background reload lands the stored depth; a failed
+  // save reverts instead of leaving the optimistic value.
+  useEffect(() => {
+    setSelected(stored);
+  }, [stored]);
+
+  async function save(next: ReviewDepthChoice): Promise<void> {
+    if (next === selected) return;
+    setBusy(true);
+    try {
+      const outcome = await onSettings({ op: "save-review-level", level: next });
+      setNotice(outcome);
+      // Success = stored, so the trigger label moves now; the reload just
+      // confirms it.
+      if (outcome.kind === "success") setSelected(next);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const label = t(locale, "settings.reviewDepth");
+  const selectedLabel = options.find((option) => option.value === selected)?.label ?? label;
+
+  return (
+    <FlowSection title={label} subtitle={t(locale, "settings.reviewDepthCopy")}>
+      <div className="w-fit max-w-xs">
+        <Select
+          value={selected}
+          disabled={busy}
+          onValueChange={(value) => {
+            if (isReviewDepthChoice(value)) void save(value);
+          }}
+        >
+          <SelectTrigger aria-label={label}>
+            <SelectValue>{selectedLabel}</SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {options.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <NoticeRegion notice={notice} />
+    </FlowSection>
   );
 }
 

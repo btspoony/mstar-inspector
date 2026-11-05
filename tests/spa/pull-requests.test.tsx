@@ -74,6 +74,8 @@ const managePayload = {
     last_webhook_at: null,
     sandbox_image_id: "omp",
     review_trigger_mode: "every_push" as const,
+    review_level: null,
+    default_review_level: "default" as const,
     github_visibility: "unknown" as const,
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },

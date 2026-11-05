@@ -7,7 +7,7 @@
  * no new reason value. Static-key bodies carry no `params` field.
  */
 import { describe, expect, spyOn, test } from "bun:test";
-import { createMigratedTestD1, seedDefaultMemberships } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -24,11 +24,11 @@ const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
 const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
 const ACCOUNT_ID = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d";
 
-async function seededWorld() {
+async function seededWorld(malloryRole: "owner" | "member" = "owner") {
   const db = createMigratedTestD1();
   await createUser(db, { login: "octocat", role: "admin" });
   await createUser(db, { login: "mallory", role: "member" });
-  seedDefaultMemberships(db, { octocat: "owner", mallory: "owner" });
+  seedDefaultMemberships(db, { octocat: "owner", mallory: malloryRole });
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
   const app = await createAppsStore(db).createApp({
@@ -83,6 +83,16 @@ async function postForm(
         ...headers,
       },
       body: new URLSearchParams(fields),
+    }),
+    env,
+  );
+}
+
+/** GET helper for the settings JSON face (the read side of the depth control). */
+async function getJson(path: string, login: string, env: Env): Promise<Response> {
+  return worker.fetch(
+    new Request(`https://worker.local${path}`, {
+      headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}` },
     }),
     env,
   );
@@ -342,5 +352,101 @@ describe("CARRY-2: verify-route eligibility rejection gains the keyed face", () 
         "anthropic is not available under this App's selected runtime harness (legacy-runtime) — nothing was stored.",
       params: { provider: "anthropic", image: "legacy-runtime" },
     });
+  });
+});
+
+describe("review depth op (per-App review level)", () => {
+  const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
+
+  /** The operator-default depth leaf's exact statement, counted per request. */
+  const DEFAULT_LEVEL_SQL = "SELECT value FROM review_runtime_settings WHERE key = ?";
+  const countDefaultLevelReads = (db: TestD1): { db: TestD1; reads: () => number } => {
+    let reads = 0;
+    return {
+      db: {
+        ...db,
+        prepare(sql: string) {
+          if (sql.trim() === DEFAULT_LEVEL_SQL) reads++;
+          return db.prepare(sql);
+        },
+      } as TestD1,
+      reads: () => reads,
+    };
+  };
+
+  /** The stored column — the zero-write / stored assertion. */
+  const storedLevel = (db: TestD1, appId: string): string | null => {
+    const row = db.raw.query("SELECT review_level FROM github_apps WHERE id = ?").get(appId) as {
+      review_level: string | null;
+    } | null;
+    return row?.review_level ?? null;
+  };
+
+  test("off-vocabulary level → keyed 400 naming the value, zero writes", async () => {
+    const { db, app } = await seededWorld();
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), { op: "save-review-level", level: "turbo" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      key: "settings.error.reviewLevelUnknown",
+      message:
+        "turbo is not a review depth — use quick, default, or deep (or inherit to follow the operator default). Nothing was stored.",
+      params: { level: "turbo" },
+    });
+    expect(storedLevel(db, app.id)).toBeNull();
+  });
+
+  test("a level stores; the inherit face writes the column back to NULL", async () => {
+    const { db, app } = await seededWorld();
+    const stored = await postForm(SETTINGS, "mallory", makeEnv(db), { op: "save-review-level", level: "deep" });
+    expect(stored.status).toBe(200);
+    expect(storedLevel(db, app.id)).toBe("deep");
+    const inherit = await postForm(SETTINGS, "mallory", makeEnv(db), { op: "save-review-level", level: "inherit" });
+    expect(inherit.status).toBe(200);
+    expect(storedLevel(db, app.id)).toBeNull();
+  });
+
+  test("native form navigation keeps the 302 back to the settings tab", async () => {
+    const { db, app } = await seededWorld();
+    const res = await postForm(
+      SETTINGS,
+      "mallory",
+      makeEnv(db),
+      { op: "save-review-level", level: "quick" },
+      { Accept: "text/html" },
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}/settings`);
+    expect(storedLevel(db, app.id)).toBe("quick");
+  });
+
+  test("a plain member's save answers 403 and stores nothing", async () => {
+    const { db, app } = await seededWorld("member");
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), { op: "save-review-level", level: "deep" });
+    expect(res.status).toBe(403);
+    expect(storedLevel(db, app.id)).toBeNull();
+  });
+
+  test("the manager face carries review_level + the operator default; the member face carries neither", async () => {
+    const { db } = await seededWorld("member");
+    rawRun(
+      db,
+      "INSERT INTO review_runtime_settings (key, value, updated_at, updated_by) VALUES ('review.level.default', 'deep', '2026-01-01T00:00:00.000Z', 'octocat')",
+    );
+    const counted = countDefaultLevelReads(db);
+    const manager = await getJson(SETTINGS_API, "octocat", makeEnv(counted.db));
+    expect(manager.status).toBe(200);
+    const managerBody = (await manager.json()) as { app: Record<string, unknown> };
+    expect(managerBody.app.review_level).toBeNull();
+    expect(managerBody.app.default_review_level).toBe("deep");
+    // The manager face names the inherit target: exactly one operator-default read.
+    expect(counted.reads()).toBe(1);
+
+    const member = await getJson(SETTINGS_API, "mallory", makeEnv(counted.db));
+    expect(member.status).toBe(200);
+    const memberBody = (await member.json()) as { app: Record<string, unknown> };
+    expect("review_level" in memberBody.app).toBe(false);
+    expect("default_review_level" in memberBody.app).toBe(false);
+    // The identity-only face renders no depth control, so it pays no settings read.
+    expect(counted.reads()).toBe(1);
   });
 });

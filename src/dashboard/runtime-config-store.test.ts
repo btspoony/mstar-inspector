@@ -28,6 +28,11 @@
  *     `before` of both the system row and the workspace column is `null`
  *     whenever the stored value is not one the readers would trust — never a
  *     `CAST`ed number nothing ever used
+ *
+ * The operator default review level (plan 036a) is the same table with a
+ * vocabulary instead of a range: an absent row reads `"default"`, a value off
+ * `REVIEW_LEVELS` reads `"default"` with `degraded: true` and never throws, and
+ * a write outside the vocabulary is refused with no row and no audit row.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -36,6 +41,8 @@ import {
   CHECK_UPDATE_DEFAULT,
   CHECK_UPDATE_KEY,
   CONCURRENCY_MIN,
+  REVIEW_LEVEL_DEFAULT,
+  REVIEW_LEVEL_KEY,
   RuntimeConfigError,
   SYSTEM_CONCURRENCY_DEFAULT,
   SYSTEM_CONCURRENCY_KEY,
@@ -46,10 +53,13 @@ import {
   getEffectiveConcurrency,
   getSystemConcurrency,
   getWorkspaceConcurrency,
+  readDefaultReviewLevel,
   setCheckBudgets,
+  setDefaultReviewLevel,
   setSystemConcurrency,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
+import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import type { DashboardD1, DashboardD1Statement } from "./users";
 import { createMigratedTestD1, type TestD1 } from "../../tests/store/helpers";
 
@@ -591,5 +601,92 @@ describe("check budgets", () => {
       before: { terminalizeMs: 12_000, updateMs: 7_000 },
       after: { terminalizeMs: 9_000, updateMs: 6_000 },
     });
+  });
+});
+
+describe("default review level", () => {
+  /** The stored default-level row, raw. */
+  function storedLevel(db: TestD1): string | null {
+    const row = db.raw
+      .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
+      .get(REVIEW_LEVEL_KEY) as { value: string } | null;
+    return row?.value ?? null;
+  }
+
+  /** That row as another writer left it, bypassing the store. */
+  function seedLevel(db: TestD1, value: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at)
+         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+      )
+      .run(REVIEW_LEVEL_KEY, value);
+  }
+
+  test("an absent row reads the documented default without degrading", async () =>
+    expect(await readDefaultReviewLevel(fixture())).toEqual({
+      value: REVIEW_LEVEL_DEFAULT,
+      degraded: false,
+    }));
+
+  test("a stored level reads back as itself", async () => {
+    const db = fixture();
+    seedLevel(db, "deep");
+    expect(await readDefaultReviewLevel(db)).toEqual({ value: "deep", degraded: false });
+  });
+
+  test("an off-vocabulary stored value answers the default with degraded: true", async () => {
+    for (const value of ["turbo", "QUICK", " deep", ""]) {
+      const db = fixture();
+      seedLevel(db, value);
+      expect(await readDefaultReviewLevel(db), value).toEqual({
+        value: REVIEW_LEVEL_DEFAULT,
+        degraded: true,
+      });
+    }
+  });
+
+  test("a read failure answers the default with degraded: true and never throws", async () =>
+    expect(await readDefaultReviewLevel(failingDb)).toEqual({
+      value: REVIEW_LEVEL_DEFAULT,
+      degraded: true,
+    }));
+
+  test("an off-vocabulary write is refused and writes nothing", async () => {
+    const db = fixture();
+    for (const value of ["turbo", "QUICK", ""]) {
+      await expect(setDefaultReviewLevel(db, value as ReviewLevel, ACTOR)).rejects.toBeInstanceOf(
+        RuntimeConfigError,
+      );
+    }
+    expect(storedLevel(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("an accepted write lands the row with one audit row, and reads back", async () => {
+    const db = fixture();
+    expect(await setDefaultReviewLevel(db, "deep", ACTOR)).toBe("deep");
+    expect(storedLevel(db)).toBe("deep");
+    expect(await readDefaultReviewLevel(db)).toEqual({ value: "deep", degraded: false });
+    expect(auditRows(db)).toEqual([
+      { action: "runtime.review_level.set", target_id: REVIEW_LEVEL_KEY },
+    ]);
+    expect(auditDetails(db, "runtime.review_level.set")).toEqual([
+      { before: null, after: "deep" },
+    ]);
+
+    // A second save records the previous level as `before`.
+    await setDefaultReviewLevel(db, "quick", ACTOR);
+    expect(auditDetails(db, "runtime.review_level.set")[1]).toEqual({
+      before: "deep",
+      after: "quick",
+    });
+  });
+
+  test("a corrupt stored level is audited as null, not as the raw text", async () => {
+    const db = fixture();
+    seedLevel(db, "turbo");
+    await setDefaultReviewLevel(db, "deep", ACTOR);
+    expect(auditDetails(db, "runtime.review_level.set")).toEqual([{ before: null, after: "deep" }]);
   });
 });

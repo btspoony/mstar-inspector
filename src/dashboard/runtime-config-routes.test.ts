@@ -153,6 +153,21 @@ function storedBudgets(db: TestD1): Record<string, string> {
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
 }
 
+/** The documented absent-row default review level as the operator API reports it. */
+const DEFAULT_REVIEW_LEVEL = {
+  value: "default",
+  levels: ["quick", "default", "deep"],
+  degraded: false,
+};
+
+/** The stored default-level row, raw so a refused write is observable. */
+function storedLevel(db: TestD1): string | null {
+  const row = db.raw
+    .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.level.default'")
+    .get() as { value: string } | null;
+  return row?.value ?? null;
+}
+
 async function putConcurrency(
   db: TestD1,
   ref: string,
@@ -262,6 +277,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       max: 256,
       degraded: true,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
+      reviewLevel: DEFAULT_REVIEW_LEVEL,
     });
   });
 
@@ -352,6 +368,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       max: 256,
       degraded: false,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
+      reviewLevel: DEFAULT_REVIEW_LEVEL,
     });
     await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ concurrency: 5 }) });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
@@ -360,6 +377,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       max: 256,
       degraded: false,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
+      reviewLevel: DEFAULT_REVIEW_LEVEL,
     });
   });
 
@@ -457,6 +475,59 @@ describe("PATCH /_internal_admin/api/runtime checkBudgets", () => {
     expect(res.status).toBe(400);
     expect(storedSystem(db)).toBeNull();
     expect(storedBudgets(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("PATCH /_internal_admin/api/runtime reviewLevel", () => {
+  test("writes the row with one audit row and reports the stored level", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ reviewLevel: "deep" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ reviewLevel: "deep" });
+    expect(storedLevel(db)).toBe("deep");
+    expect(auditRows(db)).toEqual([
+      {
+        action: "runtime.review_level.set",
+        actor_login: OPERATOR,
+        target_type: "runtime",
+        target_id: "review.level.default",
+      },
+    ]);
+    const read = (await (await runtimeApi(db, { method: "GET" })).json()) as {
+      reviewLevel: Record<string, unknown>;
+    };
+    expect(read.reviewLevel).toEqual({ ...DEFAULT_REVIEW_LEVEL, value: "deep" });
+  });
+
+  test("an off-vocabulary or malformed value is a 400 that writes nothing", async () => {
+    const { db } = fixture();
+    for (const body of [
+      JSON.stringify({ reviewLevel: "turbo" }),
+      JSON.stringify({ reviewLevel: "QUICK" }),
+      JSON.stringify({ reviewLevel: 5 }),
+      JSON.stringify({ reviewLevel: "" }),
+    ]) {
+      const res = await runtimeApi(db, { method: "PATCH", body });
+      expect(res.status, body).toBe(400);
+      expect(await res.json()).toHaveProperty("error");
+    }
+    expect(storedLevel(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a body carrying both parameters is refused so neither half is written", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ concurrency: 8, reviewLevel: "quick" }),
+    });
+    expect(res.status).toBe(400);
+    expect(storedSystem(db)).toBeNull();
+    expect(storedLevel(db)).toBeNull();
     expect(auditRows(db)).toEqual([]);
   });
 });
