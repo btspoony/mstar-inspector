@@ -31,10 +31,13 @@ writes one parameter, and every accepted write lands with its
 | `review.level.default` | `default` | `quick` \| `default` \| `deep` (`REVIEW_LEVELS`) | `readDefaultReviewLevel` (`src/pipeline/consumer.ts`, only when `github_apps.review_level` is NULL) | The review depth every App without its own choice inherits |
 | `review.check.terminalize_timeout_ms` | `10000` | integer `1000..30000` | `getCheckBudgets` (`src/pipeline/consumer.ts` terminalize wait) | Bound on the inline terminalize hook |
 | `review.check.update_timeout_ms` | `5000` | integer `500..15000` | `getCheckBudgets` (`src/pipeline/checks.ts`, `src/pipeline/comment.ts`, `src/worker/check-reconcile.ts`) | Bound on the one terminal `checks.update` |
+| `review.recheck.assignment_max_bytes` | `65536` | integer `8192..262144` | `getRecheckAssignmentMaxBytes` (`src/pipeline/consumer.ts`, one read per recheck round; passed to the seat as the runner input's `recheckAssignmentMaxBytes`) | UTF-8 bytes of assignment the prior-findings seat may be asked with — every prior finding and the discussion always ride, evidence slices ride until the budget is spent |
 
 Degraded reads: an untrusted concurrency value answers `1` (serial) with
 `degraded: true`; an untrusted level answers `default` with `degraded: true`; an
-untrusted Check budget answers its default with `degraded: true`. The Check
+untrusted Check budget answers its default with `degraded: true`; an untrusted
+recheck assignment budget answers the seat's documented default (`65536`) with
+`degraded: true`. The Check
 budgets are saved as a pair (`checkBudgets: {terminalizeMs, updateMs}`) because
 one operator action defines both.
 

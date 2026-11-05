@@ -160,6 +160,22 @@ const DEFAULT_REVIEW_LEVEL = {
   degraded: false,
 };
 
+/** The documented absent-row recheck ask budget as the operator API reports it. */
+const DEFAULT_RECHECK_ASSIGNMENT = {
+  maxBytes: 65_536,
+  min: 8_192,
+  max: 262_144,
+  degraded: false,
+};
+
+/** The stored recheck ask-budget row, raw so a refused write is observable. */
+function storedRecheckBudget(db: TestD1): string | null {
+  const row = db.raw
+    .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.recheck.assignment_max_bytes'")
+    .get() as { value: string } | null;
+  return row?.value ?? null;
+}
+
 /** The stored default-level row, raw so a refused write is observable. */
 function storedLevel(db: TestD1): string | null {
   const row = db.raw
@@ -278,6 +294,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       degraded: true,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
+      recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
     });
   });
 
@@ -369,6 +386,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       degraded: false,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
+      recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
     });
     await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ concurrency: 5 }) });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
@@ -378,6 +396,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       degraded: false,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
+      recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
     });
   });
 
@@ -528,6 +547,52 @@ describe("PATCH /_internal_admin/api/runtime reviewLevel", () => {
     expect(res.status).toBe(400);
     expect(storedSystem(db)).toBeNull();
     expect(storedLevel(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("PATCH /_internal_admin/api/runtime recheckAssignment", () => {
+  test("writes the row with one audit row and reports the stored value", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ recheckAssignment: { maxBytes: 131_072 } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ recheckAssignment: { maxBytes: 131_072 } });
+    expect(storedRecheckBudget(db)).toBe("131072");
+    expect(auditRows(db)).toEqual([
+      {
+        action: "runtime.recheck_assignment.set",
+        actor_login: OPERATOR,
+        target_type: "runtime",
+        target_id: "review.recheck.assignment_max_bytes",
+      },
+    ]);
+    const read = (await (await runtimeApi(db, { method: "GET" })).json()) as {
+      recheckAssignment: Record<string, unknown>;
+    };
+    expect(read.recheckAssignment).toEqual({
+      ...DEFAULT_RECHECK_ASSIGNMENT,
+      maxBytes: 131_072,
+    });
+  });
+
+  test("an out-of-range or malformed value is a 400 that writes nothing", async () => {
+    const { db } = fixture();
+    for (const body of [
+      JSON.stringify({ recheckAssignment: { maxBytes: 8_191 } }),
+      JSON.stringify({ recheckAssignment: { maxBytes: 262_145 } }),
+      JSON.stringify({ recheckAssignment: { maxBytes: 65_536.5 } }),
+      JSON.stringify({ recheckAssignment: { maxBytes: "65536" } }),
+      JSON.stringify({ recheckAssignment: {} }),
+      JSON.stringify({ recheckAssignment: null }),
+    ]) {
+      const res = await runtimeApi(db, { method: "PATCH", body });
+      expect(res.status, body).toBe(400);
+      expect(await res.json()).toHaveProperty("error");
+    }
+    expect(storedRecheckBudget(db)).toBeNull();
     expect(auditRows(db)).toEqual([]);
   });
 });

@@ -183,7 +183,7 @@ import { createSecretbox } from "../dashboard/secretbox";
 // The operator default review depth (migration 0047 pairing): read ONLY when
 // the App row's `review_level` is NULL, through the same runtime-config leaf
 // the admission settings use.
-import { readDefaultReviewLevel } from "../dashboard/runtime-config-store";
+import { getRecheckAssignmentMaxBytes, readDefaultReviewLevel } from "../dashboard/runtime-config-store";
 // Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads app_provider_keys / app_model_config and
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
@@ -345,11 +345,14 @@ export type ConsumerLogFields = {
    * `review_level_degraded` (same channel, migration 0047): the operator-default
    * review-level read's degraded warn — a corrupt row falls back to `default`
    * and says so here instead of degrading silently.
+   * `review_recheck_assignment_degraded` (same channel): the recheck seat's
+   * ask-budget read's degraded warn — a corrupt row falls back to the runner's
+   * documented budget and says so here.
    * `review_no_increment` (union widened ADDITIVELY): an incremental round whose
    * `base...head` is genuinely empty — the prior round already covers this head,
    * so the delivery is acked without a new review body.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_no_increment";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment";
   action: string;
   installation_id: number;
   owner: string;
@@ -371,6 +374,8 @@ export type ConsumerLogFields = {
   workspace_id?: string;
   /** The degraded concurrency read's cap (always the conservative 1 when degraded). */
   effective?: number;
+  /** The degraded recheck ask-budget read's value (the runner's documented default). */
+  max_bytes?: number;
   /**
    * Review admission (§1.3): WHY the in-flight guard held this message —
    * `pr-held` (this PR already has a live review), `system-cap` /
@@ -4002,6 +4007,28 @@ async function processMessage(
       }
     }
 
+    // §7.8: the seat's ask budget is an operator setting, read ONCE per message
+    // and only when a recheck round will actually be asked, so a delivery with
+    // no open rows pays nothing. It rides the runner input as its own top-level
+    // field — the `mstar.recheck-input/v1` document stays frozen.
+    let recheckAssignmentMaxBytes: number | undefined;
+    if (recheckInput !== undefined) {
+      const budget = await getRecheckAssignmentMaxBytes(deps.env.DB);
+      recheckAssignmentMaxBytes = budget.maxBytes;
+      // A degraded read answers the documented default and owes the operator
+      // one structured warn (the level/concurrency readers' contract).
+      if (budget.degraded) {
+        deps.log.warn(
+          {
+            ...(baseFields ?? payloadIdentityFields(payload)),
+            event: "review_recheck_assignment_degraded",
+            max_bytes: budget.maxBytes,
+          },
+          "recheck assignment budget read degraded — using the documented default",
+        );
+      }
+    }
+
     // 6. §7.7 step 4 — the fenced Check claim: after the authoritative SHA
     // and dedup, BEFORE model work. Absent `checks` dep = no Checks, M8
     // fully operational; hook failure is isolated and cannot prevent the
@@ -4168,6 +4195,9 @@ async function processMessage(
       // exist — a first round with an empty lifecycle serializes
       // byte-identically to the pre-recheck payload.
       ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
+      // The seat's ask budget: a top-level runner field, never part of the
+      // frozen recheck document.
+      ...(recheckAssignmentMaxBytes !== undefined ? { recheckAssignmentMaxBytes } : {}),
       // The report seat's untrusted input. Absent when gh could not answer,
       // so no report is attempted and the sections render `none`.
       ...(prContext !== undefined ? { prContext } : {}),

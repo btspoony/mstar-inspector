@@ -8,7 +8,9 @@
  * seeders and payload builders come from ../helpers/consumer-harness.
  */
 import { describe, expect, test } from "bun:test";
+import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import {
+  SHA,
   TARGET_ROW_ID,
   VALID_DIFF,
   VALID_OUTPUT,
@@ -20,7 +22,9 @@ import {
 } from "../helpers/consumer-fixtures";
 import {
   commenterCalls,
+  coverageLineNumbers,
   createReviewConsumer,
+  failureRows,
   makeBatch,
   makeEnv,
   makePayload,
@@ -115,5 +119,61 @@ describe("recheck conservative precedence (§7.4)", () => {
         reason: verdict.reason,
       });
     }
+  });
+
+  test("a lost large round claims no closure: every row is invalid-output, so precedence has nothing to resolve", async () => {
+    // The RCA's mode (I-000396) on the largest round: the seat's document never
+    // arrives, so no row carries a claim the conservative guards must outvote.
+    // The round must still be attributed per reason — and it must resolve
+    // nothing, because there is no closure to verify.
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = "";
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "seat-failed",
+      rejected: 0,
+      rejected_row_ids: [],
+      error: "structured output unavailable",
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    // The default target carries the thread below; the rest fill the round to
+    // its full selection cap.
+    await seedOpenTarget(db);
+    for (let i = 1; i < ASSESSMENT_TARGET_CAP; i += 1) {
+      await seedOpenTarget(db, {
+        rowId: `lost-precedence-row-${i}`,
+        findingId: `lost-precedence-finding-${i}`,
+        original: { fingerprintHint: `lost-precedence-fp-${i}` },
+        nowMs: 2_000 + i,
+      });
+    }
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("Reassessed 0/25 open prior finding(s) this round");
+    expect(prepared.body).toContain("25 invalid-output · 0 omitted");
+    const coverage = coverageLineNumbers(prepared.body)!;
+    expect(coverage).toEqual({ assessed: 0, selected: 25, invalidOutput: 25, omitted: 0 });
+    expect(coverage.assessed + coverage.invalidOutput + coverage.omitted).toBe(coverage.selected);
+    // No closure was claimed, so none is published and no thread resolves.
+    expect(prepared.body).not.toContain("addressed (verified-fix)");
+    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
+    const thread = db.raw.query("SELECT resolution_state FROM review_threads").get() as {
+      resolution_state: string;
+    };
+    expect(thread.resolution_state).toBe("pending");
+    // ONE failure row names the lost round at the recheck stage.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
+    expect(String(rows[0]!.error)).toBe("failed: seat-failed: structured output unavailable");
   });
 });

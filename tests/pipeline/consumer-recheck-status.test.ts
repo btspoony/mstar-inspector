@@ -9,7 +9,7 @@
  * ../helpers/consumer-harness, shared by all three.
  */
 import { describe, expect, test } from "bun:test";
-import { RECHECK_STATUS_ERROR_MAX_CHARS } from "../../packages/shared/src/recheck-wire";
+import { ASSESSMENT_TARGET_CAP, RECHECK_STATUS_ERROR_MAX_CHARS } from "../../packages/shared/src/recheck-wire";
 import { REDACTED } from "../../src/pipeline/redact";
 import {
   ASSOC_ID,
@@ -26,6 +26,7 @@ import {
 import {
   commenterCalls,
   commenterState,
+  coverageLineNumbers,
   createReviewConsumer,
   failureRows,
   logLines,
@@ -76,6 +77,67 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
       recheck_outcome: "failed",
       recheck_reason: "seat-failed",
       recheck_error: "session aborted",
+      rejected: 0,
+      assessed: 0,
+    });
+  });
+
+  test("a large round whose document is lost reports the per-reason split, never a bare `Reassessed 0/25`", async () => {
+    // The RCA's mode (I-000396): on a large round the seat's structured yield
+    // never arrives. Every selected row WAS sent into the round, so the
+    // published line must name the loss per reason rather than print a bare
+    // `Reassessed 0/25` that leaves the operator unable to tell a lost seat
+    // from a round that never ran.
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = "";
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "seat-failed",
+      rejected: 0,
+      rejected_row_ids: [],
+      error: "structured output unavailable",
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    // The full selection cap: the largest round the wire and the table carry.
+    for (let i = 0; i < ASSESSMENT_TARGET_CAP; i += 1) {
+      await seedOpenTarget(db, {
+        rowId: `lost-round-row-${i}`,
+        findingId: `lost-finding-${i}`,
+        original: { fingerprintHint: `lost-fp-${i}` },
+        nowMs: 2_000 + i,
+      });
+    }
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    // Every sent row is answered-nothing, so all 25 land in `invalid-output`
+    // and none is mistaken for a row the round never attempted.
+    expect(prepared.body).toContain("Reassessed 0/25 open prior finding(s) this round");
+    expect(prepared.body).toContain("25 invalid-output · 0 omitted");
+    // The line's identity, read back from the published text: every selected
+    // row is accounted exactly once.
+    const coverage = coverageLineNumbers(prepared.body)!;
+    expect(coverage).toEqual({ assessed: 0, selected: 25, invalidOutput: 25, omitted: 0 });
+    expect(coverage.assessed + coverage.invalidOutput + coverage.omitted).toBe(coverage.selected);
+    // …and no row vanished from the table that renders the same verdicts.
+    const priorSection = prepared.body.slice(prepared.body.indexOf("### Revalidated findings"));
+    expect(priorSection.split("\n").filter((line) => line.includes("| unverifiable (invalid-output) "))).toHaveLength(25);
+    // ONE failure row names the lost round, whatever the round's size.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
+    expect(String(rows[0]!.error)).toBe("failed: seat-failed: structured output unavailable");
+    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+    expect(line.fields).toMatchObject({
+      recheck_outcome: "failed",
+      recheck_reason: "seat-failed",
       rejected: 0,
       assessed: 0,
     });
@@ -217,6 +279,71 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     };
     expect(findingRow.state).toBe("open");
     expect(findingRow.last_assessed_ms).toBeNull();
+  });
+
+  test("an ask that cannot fit the seat's context budget accounts every sent row as budget, none dropped", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The runner built the input, then refused to dispatch: targets + discussion
+    // alone overrun the seat's context budget. Every selected row WAS sent into
+    // the round and answered by nobody, so each lands on `budget` — never
+    // `invalid-output` (no one asked) and never a silent drop.
+    const askFitError =
+      "recheck assignment exceeds the seat's context budget: targets + discussion need at least 90000 bytes, the budget is 65536";
+    sandbox.recheckFileContent = "";
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "skipped",
+      reason: "budget",
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 0,
+      error: askFitError,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    const rowIds = ["ask-fit-row-0", "ask-fit-row-1", "ask-fit-row-2"];
+    for (const [i, rowId] of rowIds.entries()) {
+      await seedOpenTarget(db, {
+        rowId,
+        findingId: `ask-fit-finding-${i}`,
+        original: { fingerprintHint: `ask-fit-fp-${i}` },
+        nowMs: 2_000 + i,
+      });
+    }
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    // Every sent row is accounted in the table; none is blamed on the seat.
+    const priorSection = prepared.body.slice(prepared.body.indexOf("### Revalidated findings"));
+    expect(priorSection.split("\n").filter((line) => line.includes("| unverifiable (budget) "))).toHaveLength(3);
+    expect(prepared.body).not.toContain("unverifiable (invalid-output)");
+    const coverage = coverageLineNumbers(prepared.body)!;
+    expect(coverage).toEqual({ assessed: 0, selected: 3, invalidOutput: 0, omitted: 3 });
+    expect(coverage.assessed + coverage.invalidOutput + coverage.omitted).toBe(coverage.selected);
+    // The skip is attributable once, and the rows stay open and unassessed.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
+    expect(String(rows[0]!.error)).toBe(`skipped: budget: ${askFitError}`);
+    const clocks = (
+      db.raw
+        .query("SELECT id, state, last_assessed_ms FROM review_findings ORDER BY id")
+        .all() as Array<{ id: string; state: string; last_assessed_ms: number | null }>
+    ).filter((row) => rowIds.includes(row.id));
+    expect(clocks.map((row) => row.id)).toEqual([...rowIds].sort());
+    expect(clocks.every((row) => row.state === "open" && row.last_assessed_ms === null)).toBe(true);
+    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+    expect(line.fields).toMatchObject({
+      recheck_outcome: "skipped",
+      recheck_reason: "budget",
+      recheck_error: askFitError,
+      assessed: 0,
+    });
   });
 
   test("a round the runner cancelled by design is not a failure: rows stay omitted, the clock untouched, no D1 row", async () => {

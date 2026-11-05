@@ -185,3 +185,26 @@ export function reset(): void {
 export function failureRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_failures ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
+
+/**
+ * The published §7.10 coverage line's numbers, so a test can assert the
+ * partition identity `assessed + invalid-output + omitted === selected` as
+ * arithmetic instead of restating the line's literals. `null` when the body
+ * carries no such line (a round with no prior finding renders `none`).
+ */
+export function coverageLineNumbers(body: string): {
+  assessed: number;
+  selected: number;
+  invalidOutput: number;
+  omitted: number;
+} | null {
+  const match =
+    /Reassessed (\d+)\/(\d+) open prior finding\(s\) this round · (\d+) invalid-output · (\d+) omitted/.exec(body);
+  if (match === null) return null;
+  return {
+    assessed: Number(match[1]),
+    selected: Number(match[2]),
+    invalidOutput: Number(match[3]),
+    omitted: Number(match[4]),
+  };
+}

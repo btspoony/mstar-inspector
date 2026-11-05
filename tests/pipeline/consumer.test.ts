@@ -3266,8 +3266,16 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     // Step 5: the runner input carries the typed recheck document (targets
     // with the ORIGINAL concern + trusted evidence + discussion), and the
     // runner gains --recheck-out, read back through the audited read.
-    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as { recheck?: { targets: RecheckTarget[]; evidence: unknown[]; discussion: { issueCoverage: string } } };
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
+      recheck?: { targets: RecheckTarget[]; evidence: unknown[]; discussion: { issueCoverage: string } };
+      recheckAssignmentMaxBytes?: number;
+    };
     expect(runnerInput.recheck).toBeDefined();
+    // The seat's ask budget is a TOP-LEVEL runner field — the frozen
+    // `mstar.recheck-input/v1` document never carries it. Absent row = the
+    // store's documented default.
+    expect(runnerInput.recheckAssignmentMaxBytes).toBe(65_536);
+    expect(runnerInput.recheck).not.toHaveProperty("recheckAssignmentMaxBytes");
     expect(runnerInput.recheck!.targets).toHaveLength(1);
     expect(runnerInput.recheck!.targets[0]!.original.title).toBe(TARGET_ORIGINAL.title);
     expect(runnerInput.recheck!.targets[0]!.original.body).toContain("never reduced to a title");
@@ -3321,6 +3329,37 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     // The post-publish line comments + degraded cleanup still ran.
     expect(commenterCalls.some((c) => c.op === "line-comments")).toBe(true);
     expect(commenterCalls.some((c) => c.op === "delete-degraded")).toBe(true);
+  });
+
+  test("the configured recheck assignment budget rides the runner input, never the frozen document", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    // The operator raised the seat's ask budget: the consumer reads the row
+    // once and passes the value to the runner.
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.recheck.assignment_max_bytes', '131072', ?, 'fixture')`,
+      )
+      .run(new Date().toISOString());
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
+      recheck?: Record<string, unknown>;
+      recheckAssignmentMaxBytes?: number;
+    };
+    expect(runnerInput.recheck).toBeDefined();
+    expect(runnerInput.recheckAssignmentMaxBytes).toBe(131_072);
+    // The wire document is frozen: the budget is not part of it.
+    expect(runnerInput.recheck).not.toHaveProperty("recheckAssignmentMaxBytes");
   });
 
   test("P67-QC-006: the real newline-terminated recheck bytes are parsed; an overflow flag fails closed", async () => {

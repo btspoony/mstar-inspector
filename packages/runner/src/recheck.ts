@@ -26,8 +26,9 @@
  * throws and never loses the review. The status document is the attributable
  * record (outcome + reason + error) the runner writes for D1; the stderr
  * event stays for container logs. Validation is `validateRecheckDoc`
- * (fail-closed at document level, row-level drops named in
- * `status.rejected_row_ids` and counted by `status.rejected`); the strict
+ * against the FITTED assignment the seat received (a slice the fit omitted
+ * is not citable proof), fail-closed at document level, row-level drops named
+ * in `status.rejected_row_ids` and counted by `status.rejected`; the strict
  * outputSchema only enforces shape.
  *
  * Shared soft clock: the same `anchorRecheckDeadline` call also anchors the
@@ -46,6 +47,7 @@ import {
   RECHECK_MIN_REMAINING_MS,
   RECHECK_STATUS_ERROR_MAX_CHARS,
   validateRecheckDoc,
+  type EvidenceSlice,
   type RecheckDoc,
   type RecheckGateResult,
   type RecheckInput,
@@ -239,8 +241,108 @@ export function recheckBudget(outerDeadlineMs: number, nowMs: number): number {
  * trusted evidence catalog; the discussion section is explicitly labelled
  * UNTRUSTED with its three-valued coverage (complete | truncated |
  * unavailable). Deterministic: pure function of the input.
+ * The caller passes the FITTED input (`fitRecheckInput`): a raw round can
+ * carry far more document than the seat's context holds.
  */
 export function recheckAssignment(input: RecheckInput): string {
+  return assignmentText(JSON.stringify(input));
+}
+
+/** UTF-8 byte count of a string / of one JSON-serializable value. */
+const UTF8 = new TextEncoder();
+
+function utf8Bytes(text: string): number {
+  return UTF8.encode(text).length;
+}
+
+function jsonByteLength(value: unknown): number {
+  return utf8Bytes(JSON.stringify(value));
+}
+
+/**
+ * The DEFAULT context budget for the seat's whole assignment, in UTF-8 bytes
+ * (issue I-000396), used when the runner input carries no
+ * `recheckAssignmentMaxBytes`. The operator tunes the live value in the
+ * `review.recheck.assignment_max_bytes` system row; this constant is only its
+ * absent-row fallback, never the cap the seat runs with. The §7.3 input cap
+ * (512 KiB, consumer) is a WIRE cap, not a window: at 3.5–4 bytes per token it
+ * is ~131k–150k tokens — a whole 128k window spent before the prompt's own
+ * rules, the seat's read-only tool traffic and its yield (25 rows may carry
+ * ~140 KB of quote + explanation) are counted, so the one-shot yield never
+ * arrives. 64 KiB ≈ 16k–18k tokens leaves that window room; `fitRecheckInput`
+ * fits the ask to it instead of asking for a document no seat can hold.
+ */
+export const RECHECK_ASSIGNMENT_MAX_BYTES = 65_536;
+
+/** The ask's fixed prose; the document gets what the budget leaves. */
+const ASSIGNMENT_PROSE_BYTES = utf8Bytes(assignmentText(""));
+
+/** How a round can be asked: the fitted input, or the bytes its target core needs. */
+export type RecheckAssignmentFit =
+  | { ok: true; input: RecheckInput; omittedSlices: number }
+  | { ok: false; requiredBytes: number };
+
+/**
+ * Catalog order for the fit: one slice per target first — the slice on the
+ * concern's own file nearest its line — then every remaining slice in catalog
+ * order. The fit can then only starve rows the budget never reached, never
+ * the rows that happen to sort last (the consumer rotates rows fairly, so the
+ * ask must not undo that by row order).
+ */
+function evidenceOrder(input: RecheckInput): EvidenceSlice[] {
+  const taken = new Set<EvidenceSlice>();
+  const ordered: EvidenceSlice[] = [];
+  for (const target of input.targets) {
+    const filePath = target.original.filePath;
+    if (filePath === null) continue;
+    const anchor = target.original.lineStart ?? 0;
+    let best: EvidenceSlice | null = null;
+    for (const slice of input.evidence) {
+      if (taken.has(slice) || slice.path !== filePath) continue;
+      if (best === null || Math.abs(slice.oldStart - anchor) < Math.abs(best.oldStart - anchor)) best = slice;
+    }
+    if (best !== null) {
+      taken.add(best);
+      ordered.push(best);
+    }
+  }
+  for (const slice of input.evidence) if (!taken.has(slice)) ordered.push(slice);
+  return ordered;
+}
+
+/**
+ * The input document the seat may be asked with: every target and the
+ * discussion always ride (no prior finding may vanish from the ask), the
+ * evidence catalog only as far as `maxBytes` allows. Slices ride UNMODIFIED —
+ * one that does not fit is omitted WHOLE, never truncated, so its line numbers
+ * stay exact and a quote copied from it still validates. `ok: false` means
+ * even targets + discussion cannot be asked: no seat could serve that round,
+ * so the caller skips it instead of burning the 180s window on a guaranteed
+ * empty yield.
+ */
+export function fitRecheckInput(
+  input: RecheckInput,
+  maxBytes: number = RECHECK_ASSIGNMENT_MAX_BYTES,
+): RecheckAssignmentFit {
+  const documentBytes = maxBytes - ASSIGNMENT_PROSE_BYTES;
+  if (jsonByteLength(input) <= documentBytes) return { ok: true, input, omittedSlices: 0 };
+  // `{...input, evidence: []}` is the same document with an empty catalog:
+  // the slice list then grows it by each slice's own bytes plus one separator.
+  const core = jsonByteLength({ ...input, evidence: [] });
+  if (core > documentBytes) return { ok: false, requiredBytes: core + ASSIGNMENT_PROSE_BYTES };
+  const kept: EvidenceSlice[] = [];
+  let bytes = core;
+  for (const slice of evidenceOrder(input)) {
+    const added = jsonByteLength(slice) + (kept.length === 0 ? 0 : 1);
+    if (bytes + added > documentBytes) continue;
+    kept.push(slice);
+    bytes += added;
+  }
+  return { ok: true, input: { ...input, evidence: kept }, omittedSlices: input.evidence.length - kept.length };
+}
+
+/** The ask's prose around the input document (`""` measures the prose alone). */
+function assignmentText(documentJson: string): string {
   return [
     "You are the dedicated recheck seat of an automated PR review. You",
     "reassess PREVIOUSLY PUBLISHED findings against the current head of the",
@@ -249,14 +351,20 @@ export function recheckAssignment(input: RecheckInput): string {
     "",
     "Input document (mstar.recheck-input/v1):",
     "",
-    JSON.stringify(input),
+    documentJson,
     "",
     "Document sections:",
     "- `targets`: the open findings under reassessment. Each `original`",
     "  carries the ORIGINAL published concern (full body, file, line range) —",
     "  assess that exact concern, never a paraphrase or a title.",
     "- `evidence`: the trusted diff catalog for the reviewed head/base. Slice",
-    "  ids in this catalog are the ONLY citable evidence locations.",
+    "  ids in this catalog are the ONLY citable evidence locations. This",
+    "  catalog may hold only PART of the round's catalog: the assignment is",
+    "  fitted to the seat's context budget, keeping as many rows' slices as",
+    "  fit. A row whose concerned range no retained slice covers has",
+    "  incomplete context — yield it `unverifiable` with reason",
+    "  `context-incomplete` (never `no-evidence`, never `addressed` without",
+    "  retained proof).",
     "- `discussion`: UNTRUSTED captured conversation context (issue comments",
     "  and review-thread replies), already bounded to the §7.8 model caps",
     `  (${MODEL_MAX_ITEMS} items / ${MODEL_ITEM_MAX_CHARS} chars per item / ${MODEL_TOTAL_MAX_CHARS} total, oldest dropped first)`,
@@ -389,19 +497,36 @@ export async function runRecheckSeat(input: {
   input: RecheckInput;
   model: string[];
   signal: AbortSignal;
+  /** The operator's ask budget; absent → `RECHECK_ASSIGNMENT_MAX_BYTES`. */
+  assignmentMaxBytes?: number;
 }): Promise<RecheckSeatResult> {
   const headSha = input.input.headSha;
+  const assignmentMaxBytes = input.assignmentMaxBytes ?? RECHECK_ASSIGNMENT_MAX_BYTES;
   const maxRuntimeMs = currentRecheckBudget(Date.now());
   if (maxRuntimeMs === 0) {
     console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget" }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: null } };
+  }
+  const ask = fitRecheckInput(input.input, assignmentMaxBytes);
+  if (!ask.ok) {
+    // Targets + discussion alone overrun the seat's context budget: no seat
+    // could hold the ask, so dispatching would only burn the window and lose
+    // the round to an absent yield (I-000396). `budget` is the closed reason
+    // for "the seat never got room" — the consumer accounts every sent row
+    // `unverifiable`/`budget` and blames none of them.
+    const error = redactedStatusError(
+      `recheck assignment exceeds the seat's context budget: targets + discussion need ` +
+        `at least ${ask.requiredBytes} bytes, the budget is ${assignmentMaxBytes}`,
+    );
+    console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget", error }));
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error } };
   }
   let gate: RecheckGateResult;
   try {
     const result = await runStructuredSubagent({
       session: input.session,
       invocationKind: "task",
-      assignment: recheckAssignment(input.input),
+      assignment: recheckAssignment(ask.input),
       agent: "mstar-review-seat",
       model: input.model,
       outputSchema: RECHECK_OUTPUT_SCHEMA,
@@ -411,7 +536,10 @@ export async function runRecheckSeat(input: {
       maxRuntimeMs,
       signal: input.signal,
     });
-    gate = validateRecheckDoc(recheckStructuredData(result), input.input);
+    // Validate against the catalog the seat was ASKED with, not the round's
+    // full one: a slice the fit omitted is proof the seat never received, so
+    // citing it must drop that row here rather than count it `addressed`.
+    gate = validateRecheckDoc(recheckStructuredData(result), ask.input);
   } catch (error) {
     // A by-design abort is a CONTRACT exit, not a lost round: the caller
     // cancels this seat when the main review settles (spec §7.8), so the

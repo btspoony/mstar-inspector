@@ -41,6 +41,12 @@
  * stored value answers the default with `degraded: true` and never throws,
  * because a Check never blocks or delays the review.
  *
+ * The recheck seat's ask budget (`review.recheck.assignment_max_bytes`) is one
+ * more global row: how many UTF-8 bytes of assignment the seat may be asked
+ * with. An absent row reads the runner's documented default; an untrusted
+ * value answers that default with `degraded: true`, never a throw — the round
+ * is still asked, at the conservative budget.
+ *
  * The operator default review depth (plan 036a) is one more row in the same
  * table: `review.level.default` holds a `REVIEW_LEVELS` tier that every App
  * with no depth of its own inherits. An absent row reads `"default"`; a stored
@@ -566,9 +572,86 @@ export async function setCheckBudgets(
   return value;
 }
 
+/** PK of the recheck seat's ask-budget row. */
+export const RECHECK_ASSIGNMENT_KEY = "review.recheck.assignment_max_bytes";
+/** Absent row: the seat's documented ask budget (the runner's default). */
+export const RECHECK_ASSIGNMENT_DEFAULT = 65_536;
+/**
+ * Range of a stored budget. Below the floor the ask cannot even carry its own
+ * prose plus a target core, so every round would skip; above the ceiling the
+ * ask is larger than any supported window can hold.
+ */
+export const RECHECK_ASSIGNMENT_MIN = 8_192;
+export const RECHECK_ASSIGNMENT_MAX = 262_144;
+
+/** The ask budget and whether the stored value could be trusted. */
+export type RecheckAssignmentRead = { maxBytes: number; degraded: boolean };
+
+/**
+ * The recheck seat's ask budget on its own. Only an absent row is the default;
+ * an untrusted stored value or a read failure answers the default with
+ * `degraded: true` and never throws — a round must still be asked.
+ */
+export async function getRecheckAssignmentMaxBytes(db: DashboardD1): Promise<RecheckAssignmentRead> {
+  try {
+    const row = await db
+      .prepare(`SELECT value FROM review_runtime_settings WHERE key = ?1`)
+      .bind(RECHECK_ASSIGNMENT_KEY)
+      .first<RuntimeSettingRow>();
+    if (row === null) return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: false };
+    // This query yields one row per stored key; a row without `value` is
+    // malformed rather than absent.
+    if (row === undefined || row.value === undefined) {
+      return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: true };
+    }
+    const parsed = parseInRange(row.value, RECHECK_ASSIGNMENT_MIN, RECHECK_ASSIGNMENT_MAX);
+    if (Number.isNaN(parsed)) return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: true };
+    return { maxBytes: parsed ?? RECHECK_ASSIGNMENT_DEFAULT, degraded: false };
+  } catch {
+    return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: true };
+  }
+}
+
+/**
+ * One operator save, one audit row: `before` carries the stored value under
+ * the readers' trust rule (a corrupt row is `null`), `after` the accepted one.
+ */
+const RECHECK_ASSIGNMENT_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'runtime.recheck_assignment.set', 'runtime', '${RECHECK_ASSIGNMENT_KEY}',
+          json_object('before', json_object('maxBytes', ${storedBudgetSql("?4", "NULL", RECHECK_ASSIGNMENT_MIN, RECHECK_ASSIGNMENT_MAX)}),
+                      'after', json_object('maxBytes', ?3)),
+          ?5)`;
+
+/**
+ * Set the ask budget. A value outside its range refuses the write
+ * (`invalid_value`) with no row and no audit entry; an accepted value is
+ * audited with the actor in ONE batch and returned.
+ */
+export async function setRecheckAssignmentMaxBytes(
+  db: DashboardD1,
+  value: number,
+  actor: string,
+): Promise<number> {
+  if (!isIntegerIn(value, RECHECK_ASSIGNMENT_MIN, RECHECK_ASSIGNMENT_MAX)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `recheck assignment budget must be an integer in ${RECHECK_ASSIGNMENT_MIN}..${RECHECK_ASSIGNMENT_MAX}`,
+    );
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(RECHECK_ASSIGNMENT_AUDIT_SQL)
+      .bind(crypto.randomUUID(), actor, value, RECHECK_ASSIGNMENT_KEY, now),
+    db.prepare(SYSTEM_UPSERT_SQL).bind(RECHECK_ASSIGNMENT_KEY, String(value), now, actor),
+  ]);
+  return value;
+}
+
 /** The operator default and whether the stored value could be trusted. */
 export type DefaultReviewLevelRead = { value: ReviewLevel; degraded: boolean };
-
 /**
  * The operator default review depth on its own. Only an absent row is the
  * default; a present value off the shared vocabulary, a malformed result row or
