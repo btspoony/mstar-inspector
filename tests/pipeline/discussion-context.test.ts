@@ -386,8 +386,9 @@ describe("boundDiscussion — §7.8 model context", () => {
     const bounded = boundDiscussion(discussionWith([ownThread], threadSnapshot("assoc-1")));
     expect(bounded.items).toHaveLength(1);
     expect(bounded.items[0]!.ownAuthor).toBe(true);
-    // The realistic marker run is stripped from what the model sees.
+    // The realistic marker run is stripped and the human text survives.
     expect(bounded.items[0]!.body).not.toContain("mstar-inspector:");
+    expect(bounded.items[0]!.body).toContain("thread reply");
   });
 
   test("a HUMAN body copying the bot marker is kept and still truncates the view", () => {

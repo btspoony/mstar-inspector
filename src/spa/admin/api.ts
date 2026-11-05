@@ -165,7 +165,10 @@ function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
     updateMax: num(budgets, "updateMax"),
     degraded: bool(budgets, "degraded"),
     // Tolerant read: the predecessor Worker serves this object without the
-    // field, and that payload must keep the whole page rendering.
+    // field, and that payload must keep the whole page rendering. It is assumed
+    // fully stored: that Worker's writer always upserts both rows, so a
+    // half-configured pair behind it can only be an out-of-band row, and the
+    // skew window ends with the next Worker deploy.
     derived: (budgets as Record<string, unknown>)["derived"] === true,
   };
 }
@@ -235,7 +238,9 @@ export async function setCheckBudgets(
       }
     }
   }
-  return { ...stored, ...value, degraded: false };
+  // A 2xx without a readable echo still landed both rows, so the derived flag
+  // must clear here too — the same reason the echo branch does.
+  return { ...stored, ...value, degraded: false, derived: false };
 }
 
 /**

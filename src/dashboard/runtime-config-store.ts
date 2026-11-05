@@ -446,9 +446,11 @@ export type CheckBudgets = {
   updateMs: number;
   degraded: boolean;
   /**
-   * `true` when one side is the absent-row default adjusted to keep the
-   * `terminalize > update` invariant, i.e. the pair the consumer runs with is
-   * NOT what the operator stored. The admin face must not round-trip it.
+   * `true` when EXACTLY ONE row is stored: that side's partner is the
+   * documented default (adjusted to the nearest legal value only when the
+   * effective pair would otherwise break `terminalize > update`), so the pair
+   * the consumer runs with is NOT what the operator configured. The admin face
+   * must not round-trip it. Both rows stored and both absent are `false`.
    */
   derived: boolean;
 };

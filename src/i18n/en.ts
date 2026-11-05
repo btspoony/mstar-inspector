@@ -969,7 +969,7 @@ export const en = {
       checkCurrent: "Effective on the next review: terminalize {terminalize} ms, update {update} ms.",
       /** One side came from the absent-row default, adjusted to keep the invariant. */
       checkDerived:
-        "Only one of these budgets is stored. The other is derived from the documented default and adjusted so the inline wait still contains the check update. Enter both values to save them.",
+        "Only one of these budgets is stored. The other is the documented default (raised only when the inline wait would no longer contain the check update). Enter both values to save them.",
       /** {terminalize}/{update} = the effective pair (one side derived, not stored). */
       checkDerivedCurrent: "Effective on the next review: terminalize {terminalize} ms, update {update} ms (one side derived).",
       /** Neither stored budget could be read — the numbers are the documented defaults. */

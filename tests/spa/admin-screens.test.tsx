@@ -515,11 +515,37 @@ describe("Runtime screen", () => {
     const budgetForm = surface.container.querySelector("#check-terminalize-budget")!.closest("form")!;
     await surface.click(budgetForm.querySelector('button[type="submit"]'));
 
+    // The save carries what the operator typed, never the derived numbers.
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { checkBudgets: { terminalizeMs: 12_000, updateMs: 7_000 } },
+      },
+    ]);
     // Both rows were written: the warning and the derived line are gone and
     // the card reads as fully stored again.
     expect(surface.text()).not.toContain("Only one of these budgets is stored.");
     expect(surface.text()).not.toContain("(one side derived)");
     expect(surface.text()).toContain("Effective on the next review: terminalize 12000 ms, update 7000 ms.");
+    await surface.close();
+  });
+
+  test("a landed budget save clears the derived state even without a readable echo", async () => {
+    // A 2xx whose body carries no readable checkBudgets still wrote both rows.
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? new Response("ok", { status: 200 })
+        : json({ concurrency: 24, min: 1, max: 256, degraded: false, checkBudgets: { ...CHECK_BUDGETS, derived: true } }),
+    );
+    await surface.type("#check-terminalize-budget", "12000");
+    await surface.type("#check-update-budget", "7000");
+    const budgetForm = surface.container.querySelector("#check-terminalize-budget")!.closest("form")!;
+    await surface.click(budgetForm.querySelector('button[type="submit"]'));
+
+    expect(surface.text()).toContain("Saved.");
+    expect(surface.text()).not.toContain("Only one of these budgets is stored.");
+    expect(surface.text()).not.toContain("(one side derived)");
     await surface.close();
   });
 
