@@ -1,0 +1,12 @@
+---
+category: Fixed
+---
+
+- **The check run appears when the review starts and finishes about a minute after it publishes**: the Check attempt is now claimed at admission — after the in-flight guard accepts the message, before the container is acquired and the PR is cloned — using the delivery's head SHA or the PR head watermark, so a cold sandbox no longer hides the first five minutes of a run. When the authoritative checkout disagrees with that claim (a force-push mid-flight), the early run is closed as `superseded` and a fresh attempt is claimed at the checked-out commit; a duplicate delivery that hits idempotency closes its run before acking. The execution window widens to 20 minutes to cover the phase the claim now sits ahead of.
+
+- **Giving up on the terminal `checks.update` now releases the attempt instead of waiting out the deadline**: when the consumer's terminalize budget elapses or the hook throws, the lifecycle re-writes the frozen intent under the same lease fence and hands the attempt to recovery with `remote-unconfirmed` and the first backoff rung — no remote request, and a no-op if recovery already claimed it. The Check recovery reconciler also runs on its own every-minute cron (declared for the top-level Worker and every named environment) while the failure sweep and the publication reconciler stay on fifteen minutes, so a released attempt closes within a minute instead of at the next quarter hour after its execution deadline. Give-ups are diagnosable through the structured `check_terminalize_budget_exceeded`, `check_terminalize_failed` and `check_abandon_released` lines.
+
+<!-- CN -->
+- **检查在审查开始时出现、并在发布后约一分钟内结束**：Check 尝试改为在准入时认领——在并发守卫接受消息之后、创建容器与克隆 PR 之前——使用投递携带的 head SHA 或 PR 头水位，因此冷启动沙箱不再掩盖一次运行最初五分钟的状态。若权威检出的提交与该认领不一致（处理期间发生 force-push），早期运行会以 `superseded` 关闭，并在实际检出的提交上重新认领；命中幂等的重复投递会先关闭其运行再 ack。执行窗口放宽到 20 分钟，以覆盖认领提前到容器之前所增加的那一段。
+
+- **放弃终端 `checks.update` 时立即释放尝试，而不是等执行截止**：当消费方的 terminalize 预算耗尽或 hook 抛出异常时，生命周期在同一租约护栏下重写已冻结的结论，并以 `remote-unconfirmed` 与第一档退避把尝试交还恢复通道——不发送任何远端请求，若恢复通道已接管则为空操作。Check 恢复协调器新增独立的每分钟 cron（顶层 Worker 与每个具名环境都要声明），失败巡检与发布协调器仍保持十五分钟，于是被释放的尝试会在一分钟内收敛，而不是在执行截止后的下一个整刻钟。放弃路径可通过结构化日志 `check_terminalize_budget_exceeded`、`check_terminalize_failed`、`check_abandon_released` 诊断。

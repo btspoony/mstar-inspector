@@ -676,6 +676,32 @@ const saasApp = new Hono<{ Bindings: Env }>()
   .route("/", app)
   .route("/_internal_admin", adminApp);
 
+/**
+ * The Check lane's own cron expression (spec §7.11.2): every minute. It runs
+ * `reconcileReviewChecks` alone — the sweep and the publication reconciler
+ * stay on their fifteen-minute cadence.
+ */
+export const CHECK_RECOVERY_CRON = "* * * * *";
+
+/**
+ * The M7 Check recovery stage in its OWN try/catch, shared by the minute
+ * expression and the fifteen-minute composition, so both keep one failure
+ * boundary.
+ */
+async function runCheckReconcileStage(env: ScheduledEnv): Promise<void> {
+  try {
+    await reconcileReviewChecks(env);
+  } catch (error) {
+    defaultSweepLog.warn(
+      {
+        event: "ops_check_reconcile_failed",
+        detail: redactSecrets(error instanceof Error ? error.message : String(error)),
+      },
+      "check reconcile failed",
+    );
+  }
+}
+
 export default {
   fetch: (request: Request, env: Env, ctx?: ExecutionContext): Response | Promise<Response> =>
     (env.DEPLOYMENT_MODE === "saas" ? saasApp : app).fetch(request, env, ctx),
@@ -692,17 +718,28 @@ export default {
     // handler returns instead of being reclaimed with the isolate.
     await createReviewConsumer(env, undefined, {}, { waitUntil: (promise) => ctx.waitUntil(promise) })(batch);
   },
-  // Cron wiring (AL-6): the trailing-24h `review_failures` sweep,
-  // composed (spec review-lifecycle §7.11) with the M8 recovery
-  // reconciler and the M7 Check recovery reconciler — runSweep →
-  // reconcileReviewLifecycle → reconcileReviewChecks — each stage caught
-  // INDEPENDENTLY so one stage's failure can never break another, and nothing
-  // ever throws out of `scheduled` (a throwing cron handler just retries into
-  // alert noise). The sweep reads D1 only; the reconcilers additionally read
-  // the DASHBOARD_ENCRYPTION_KEY binding to route per-App recovery credentials
-  // (§7.6). All three stages are awaited directly, so no ctx.waitUntil is
-  // needed.
-  async scheduled(_controller: ScheduledController, env: ScheduledEnv, _ctx: ExecutionContext): Promise<void> {
+  // Cron wiring (AL-6): TWO expressions, routed by `controller.cron`.
+  //
+  // `* * * * *` — the Check lane alone (spec §7.11.2). A Check attempt whose
+  // terminalize overran or threw releases its lease immediately, so recovery
+  // must run on the same minute instead of waiting up to fifteen: this is what
+  // turns "terminal state 15 minutes after publication" into "about a minute".
+  //
+  // `*/15 * * * *` — the trailing-24h `review_failures` sweep composed with
+  // the M8 recovery reconciler and the M7 Check recovery reconciler —
+  // runSweep → reconcileReviewLifecycle → reconcileReviewChecks. Every stage
+  // is caught INDEPENDENTLY, so one stage's failure can never break another,
+  // and nothing ever throws out of `scheduled` (a throwing cron handler just
+  // retries into alert noise). The sweep reads D1 only; the reconcilers
+  // additionally read the DASHBOARD_ENCRYPTION_KEY binding to route per-App
+  // recovery credentials (§7.6). Both reconcilers are idempotent, so the
+  // `*/15` minute also running the Check lane costs one no-op pass. All
+  // stages are awaited directly, so no ctx.waitUntil is needed.
+  async scheduled(controller: ScheduledController, env: ScheduledEnv, _ctx: ExecutionContext): Promise<void> {
+    if (controller.cron === CHECK_RECOVERY_CRON) {
+      await runCheckReconcileStage(env);
+      return;
+    }
     try {
       if (!env.DB) {
         defaultSweepLog.warn(
@@ -739,20 +776,6 @@ export default {
         "lifecycle reconcile failed",
       );
     }
-    // M7 Check recovery reconciler (§7.11.2) — the SECOND independent
-    // reconciler, in its OWN try/catch AFTER the M8 lane. M8 owns publication
-    // proof; this lane only reads what M8 persisted, so ordering is what makes
-    // a proven publication visible to the Check conclusion in the same run.
-    try {
-      await reconcileReviewChecks(env);
-    } catch (error) {
-      defaultSweepLog.warn(
-        {
-          event: "ops_check_reconcile_failed",
-          detail: redactSecrets(error instanceof Error ? error.message : String(error)),
-        },
-        "check reconcile failed",
-      );
-    }
+    await runCheckReconcileStage(env);
   },
 };

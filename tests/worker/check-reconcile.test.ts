@@ -1494,7 +1494,7 @@ describe("throw-proofing (spec §7.11 composition)", () => {
  * exactly once per pass — so the ORDER of those lines is direct evidence of
  * the composition order (§7.11) rather than an assertion about wiring.
  */
-async function captureComposition(env: ScheduledEnv): Promise<string[]> {
+async function captureComposition(env: ScheduledEnv, cron = ""): Promise<string[]> {
   const events: string[] = [];
   const sweepWarn = defaultSweepLog.warn;
   const lifecycleWarn = defaultReconcileLog.warn;
@@ -1507,7 +1507,7 @@ async function captureComposition(env: ScheduledEnv): Promise<string[]> {
   defaultCheckReconcileLog.warn = (fields) => void events.push(fields.event);
   defaultCheckReconcileLog.info = (fields) => void events.push(String(fields.event));
   try {
-    await worker.scheduled({} as never, env, {} as never);
+    await worker.scheduled({ cron } as never, env, {} as never);
   } finally {
     defaultSweepLog.warn = sweepWarn;
     defaultReconcileLog.warn = lifecycleWarn;
@@ -1573,6 +1573,36 @@ describe("scheduled composition (spec §7.11)", () => {
     expect(events2).toContain("ops_lifecycle_reconcile");
     expect(events2).toContain("ops_check_reconcile");
     expect((await rawRow(db, attempt.identity.attemptId)).recovery_state).toBe("suspended");
+  });
+
+  test("routes by controller.cron: the minute expression runs the Checks lane ALONE", async () => {
+    const db = seededDb();
+    // A breached failure window (the sweep WOULD alert) plus a due Check row
+    // (the minute lane must act on it): the two effects discriminate routing.
+    for (let i = 0; i < 6; i += 1) {
+      db.raw
+        .prepare(
+          `INSERT INTO review_failures (installation_id, owner, repo, pr_number, head_sha, stage, error, created_at)
+           VALUES (1, 'acme', 'widgets', 1, '', 'runner', ?, datetime('now'))`,
+        )
+        .run(`boom-${i}`);
+    }
+    const { attempt } = await claim(db);
+    db.raw.prepare(`DELETE FROM app_installations WHERE app_id = ?`).run(APP);
+    const env = { DB: db as unknown as ScheduledEnv["DB"] };
+
+    const minute = await captureComposition(env, "* * * * *");
+    // The Check lane alone — none of the other stages' lines — and it really
+    // ran (its durable suspension is present).
+    expect(minute).not.toContain("ops_sweep_alert");
+    expect(minute).not.toContain("ops_lifecycle_reconcile");
+    expect(minute).toContain("ops_check_reconcile");
+    expect((await rawRow(db, attempt.identity.attemptId)).recovery_state).toBe("suspended");
+
+    const quarter = await captureComposition(env, "*/15 * * * *");
+    expect(quarter).toContain("ops_sweep_alert");
+    expect(quarter).toContain("ops_lifecycle_reconcile");
+    expect(quarter).toContain("ops_check_reconcile");
   });
 });
 

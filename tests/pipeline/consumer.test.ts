@@ -80,6 +80,7 @@ import {
   claimAttempt,
   claimCheckRecovery,
   setCheckCreateState,
+  setCheckDesired,
 } from "../../src/store/review-checks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
@@ -3852,7 +3853,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(reviewCount(db)).toBe(1); // the review itself is unaffected
   });
 
-  test("the Check seam: begin after dedup before model work; ONE terminalize after the proof is durable; hook throws are isolated", async () => {
+  test("the Check seam: ONE begin at admission before model work; ONE terminalize after the proof is durable; hook throws are isolated", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -3892,8 +3893,8 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    // begin: exactly once, after the authoritative sha + dedup and BEFORE
-    // the runner exec, with the row's numeric App id and the §7.9 window.
+    // begin: exactly once, at ADMISSION (before the container and the
+    // authoritative sha), with the row's numeric App id and the §7.9 window.
     expect(beginCalls).toHaveLength(1);
     const beginInput = beginCalls[0] as { githubAppId: number; headSha: string; triggeredBy: string; action: string; executionDeadlineMs: number };
     expect(beginInput.githubAppId).toBe(424242);
@@ -4484,7 +4485,8 @@ const checkRequests: ChecksRequest[] = [];
 const checkRuns = new Map<number, CheckRunPayload>();
 let checkRequestOverrides: {
   create?: (params: ChecksCreateParams) => CheckRunPayload;
-  update?: (params: ChecksUpdateParams) => CheckRunPayload;
+  /** A promise is a SLOW request (never answered inside the consumer's budget). */
+  update?: (params: ChecksUpdateParams) => CheckRunPayload | Promise<CheckRunPayload>;
 } = {};
 let checkRunSeq = FIRST_CHECK_RUN_ID;
 /**
@@ -4530,7 +4532,7 @@ function scriptedChecks(): ChecksOctokit {
         async update(params) {
           record("update", params as unknown as Record<string, unknown>);
           const respond = checkRequestOverrides.update;
-          if (respond !== undefined) return { data: respond(params) };
+          if (respond !== undefined) return { data: await respond(params) };
           const run = checkRuns.get(params.check_run_id);
           if (run === undefined) throw Object.assign(new Error(`no scripted run ${params.check_run_id}`), { status: 404 });
           const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
@@ -4668,15 +4670,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(update.summary).toContain("score 85");
     expect(update.summary).toContain("floor 80");
 
-    // Order: the create lands after the authoritative-SHA step and before the
-    // model work; the terminal update lands after the publication was posted.
+    // Order (spec §7.9): the claim lands at ADMISSION — before the container
+    // runs a single command and long before the authoritative SHA — while the
+    // terminal update still lands after the publication was posted.
     const revParseIdx = sandbox.calls.findIndex((c) => c.cmd.includes("rev-parse"));
     const runnerIdx = sandbox.calls.findIndex((c) => c.cmd.includes("--input"));
     const postIdx = commenterCalls.findIndex((c) => c.op === "post-prepared");
     expect(revParseIdx).toBeGreaterThan(-1);
     expect(runnerIdx).toBeGreaterThan(revParseIdx);
-    expect(checkRequests[0]!.sandboxCalls).toBeGreaterThan(revParseIdx);
-    expect(checkRequests[0]!.sandboxCalls).toBeLessThanOrEqual(runnerIdx);
+    expect(checkRequests[0]!.sandboxCalls).toBe(0);
+    expect(checkRequests[1]!.sandboxCalls).toBeGreaterThan(runnerIdx);
     expect(postIdx).toBeGreaterThan(-1);
     expect(checkRequests[1]!.commenterCalls).toBeGreaterThan(postIdx);
 
@@ -5730,6 +5733,220 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRows(db)).toHaveLength(0);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(publicationRow(db).phase).toBe("applied");
+  });
+
+  test("check lifecycle: giving up on terminalize releases the lease, so recovery is due at the first backoff", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    // The consumer waits 1s; the remote update is allowed 1.5s, so the
+    // BUDGET is what ends this path — the adapter has not answered yet.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
+    seedCheckBudget(db, "review.check.update_timeout_ms", "1500");
+    checkRequestOverrides.update = () => new Promise<CheckRunPayload>(() => {});
+    const adapter = checksAdapterFor(db);
+    const handed: Promise<unknown>[] = [];
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: db as never }),
+      testLog,
+      { ...testOverrides, createAppCommenter: () => commenterWithChecks(adapter) },
+      { waitUntil: (promise) => void handed.push(promise) },
+    );
+
+    await consumer(makeBatch(makePayload()));
+    await Promise.all(handed);
+
+    const row = checkRowFor(db, SHA);
+    // Released at the instant the consumer gave up, not at the execution
+    // deadline (which is what made the old path wait for the next quarter hour).
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.next_attempt_ms).not.toBeNull();
+    expect(row.next_attempt_ms!).toBeLessThan(row.execution_deadline_ms);
+    expect(row.attempts).toBe(1);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.last_error).toContain("terminalize budget exceeded");
+    // A Check give-up never reaches the publication path.
+    expect(publicationRow(db).phase).toBe("applied");
+
+    // Every give-up is diagnosable on the ONE structured channel.
+    expect(logLines.filter((line) => line.fields.event === "check_terminalize_budget_exceeded")).toHaveLength(1);
+    const releasedLine = logLines.find((line) => line.fields.event === "check_abandon_released");
+    expect(releasedLine).toBeDefined();
+    expect(releasedLine!.fields.attempt_id).toBe(row.id);
+    expect(String(releasedLine!.fields.check_reason)).toContain("terminalize budget exceeded");
+  }, 10_000);
+
+  test("check lifecycle: a throwing terminalize hook releases the lease the same way", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const real = lifecycleFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: (input) => real.begin(input),
+        // The HOOK fails (not the adapter): the consumer's catch must still
+        // hand the attempt it claimed to recovery instead of holding its lease
+        // to the execution deadline.
+        terminalize: async () => {
+          throw new Error("terminalize boom");
+        },
+        abandonTerminalize: (input) => real.abandonTerminalize(input),
+      },
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(logLines.filter((line) => line.fields.event === "check_terminalize_failed")).toHaveLength(1);
+    expect(logLines.filter((line) => line.fields.event === "check_abandon_released")).toHaveLength(1);
+    const row = checkRowFor(db, SHA);
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.last_error).toContain("terminalize boom");
+    expect(row.desired).toBe("failure");
+    expect(row.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    // Nothing escaped the Check lane, and the review still published.
+    expect(publicationRow(db).phase).toBe("applied");
+  }, 10_000);
+
+  test("check lifecycle: the Check is claimed BEFORE the container starts, and a matching checkout reuses it", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    const real = lifecycleFor(db);
+    const beginOrder: Array<{ headSha: string; afterSandbox: boolean }> = [];
+    let sandboxAcquired = false;
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      getSandbox: async () => {
+        sandboxAcquired = true;
+        return fakeSandbox;
+      },
+      checks: {
+        begin: async (input) => {
+          beginOrder.push({ headSha: input.headSha, afterSandbox: sandboxAcquired });
+          return real.begin(input);
+        },
+        terminalize: (input) => real.terminalize(input),
+      },
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // ONE claim, made from the delivery's sha and BEFORE `getSandbox` — the
+    // run appears when the review starts working, not after the clone. The
+    // authoritative `rev-parse` agrees, so the handle is reused and no second
+    // attempt is claimed.
+    expect(beginOrder).toEqual([{ headSha: SHA, afterSandbox: false }]);
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    expect(checkRows(db)).toHaveLength(1);
+    expect(checkRowFor(db, SHA).observed).toBe("success");
+  });
+
+  test("check lifecycle: a claim the checkout contradicts is closed as superseded, then re-claimed at the authoritative sha", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    // The clone landed a NEWER commit than the delivery's payload sha.
+    sandbox.resolvedSha = SHA2;
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload())); // payload head_sha = SHA
+
+    // create + terminalize the early claim, then create + terminalize the
+    // authoritative one: the early run is never left in progress.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "create", "update"]);
+    expect((checkRequests[1]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+
+    const early = checkRowFor(db, SHA);
+    expect(early.desired).toBe("failure");
+    expect(early.desired_summary).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
+    expect(early.observed).toBe("failure");
+    expect(early.terminal_ms).not.toBeNull();
+
+    const authoritative = checkRowFor(db, SHA2);
+    expect(authoritative.desired).toBe("success");
+    expect(authoritative.observed).toBe("success");
+    // The review itself still landed once, for the checked-out commit.
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+  });
+
+  test("check lifecycle: an idempotency hit closes the admitted run before acking", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    // A completed review for the checked-out sha: the delivery is a duplicate.
+    await createArtifactStore(db).put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: VALID_OUTPUT,
+      appId: TEST_APP_ID,
+    });
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // The claim happens before the dedup read, so the run it created is
+    // terminalized (`neutral`: nothing to review for this head) before ack.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    expect((checkRequests[1]!.params as ChecksUpdateParams).conclusion).toBe("neutral");
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("neutral");
+    expect(row.terminal_ms).not.toBeNull();
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+  });
+
+  test("check lifecycle: abandonTerminalize releases once, and writes nothing after recovery claims the attempt", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const hooks = lifecycleFor(db, checkClock);
+    const handle = await hooks.begin(beginInput(SHA, checkState.clockMs + CHECK_LEASE_MS));
+    expect(handle).not.toBeNull();
+    // The interrupted terminalize had already frozen its intent: the give-up
+    // replays it (idempotent) and releases.
+    expect(
+      await setCheckDesired(
+        db,
+        handle!.attemptId,
+        handle!.lease,
+        { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed },
+        null,
+        checkState.clockMs,
+      ),
+    ).toBe(true);
+
+    await hooks.abandonTerminalize({ handle: handle!, reason: "terminalize budget exceeded (100ms)" });
+
+    const released = checkRowFor(db, SHA);
+    expect(released.holder).toBeNull();
+    expect(released.lease_until_ms).toBeNull();
+    expect(released.recovery_state).toBe("remote-unconfirmed");
+    expect(released.next_attempt_ms).toBe(checkState.clockMs + 60_000);
+    expect(released.attempts).toBe(1);
+    expect(released.last_error).toContain("terminalize budget exceeded");
+    expect(released.desired).toBe("failure");
+    expect(released.observed).toBe("unknown");
+    expect(released.terminal_ms).toBeNull();
+    // NO remote request: the create is the only one this attempt ever sent.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
+
+    // Recovery now owns the row: a second give-up is a silent no-op.
+    expect(await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms!)).not.toBeNull();
+    const owned = checkRowFor(db, SHA);
+    await hooks.abandonTerminalize({ handle: handle!, reason: "second give-up" });
+    expect(checkRowFor(db, SHA)).toEqual(owned);
   });
 });
 

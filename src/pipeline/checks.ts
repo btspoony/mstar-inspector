@@ -850,6 +850,13 @@ export const CHECK_SUMMARIES = {
    */
   inheritedUnreadable: (head7: string, base7: string) =>
     `No new changes at ${head7} (since ${base7}); the review result of ${base7} could not be read, so no gate result could be inherited and the check is failing closed.`,
+  /**
+   * The attempt was CLAIMED early (admission time, before the container) and
+   * the authoritative checkout then proved a newer commit: this run never
+   * reviewed anything, so it is closed instead of being left in progress.
+   */
+  superseded: (sha7: string) =>
+    `Review attempt was superseded by a newer commit; no review was published for ${sha7}.`,
 } as const;
 
 /** The allowed-verdict list for a public summary — bounded even if a stored gate were malformed. */
@@ -865,7 +872,12 @@ export type CheckTerminalOutcome =
   | "expired"
   | "local-error"
   /** The round was acked without a review because the increment was empty. */
-  | "skipped";
+  | "skipped"
+  /**
+   * The attempt was claimed ahead of the checkout and the authoritative head
+   * proved a DIFFERENT commit: this run reviewed nothing for its own SHA.
+   */
+  | "superseded";
 
 /**
  * Decide the Check conclusion from spec §7.9's matrix:
@@ -883,6 +895,7 @@ export type CheckTerminalOutcome =
  * | recovery exhausted                                             | proof-derived, else failure |
  * | empty increment: inherits the reviewed head's gate result      | success/failure |
  * | empty increment with no readable baseline result               | failure |
+ * | early claim contradicted by a newer checked-out head           | failure |
  *
  * Proof precedence (normal over degraded within the exact scope/SHA) lives in
  * `readPublicationProof`, which the caller uses to obtain `proof`; this
@@ -912,6 +925,12 @@ export function decideConclusion(input: {
    * then that head's row and the App's CURRENT gate.
    */
   inherited?: { headSha: string; reviewedHeadSha: string };
+  /**
+   * The head THIS attempt covers (`handle.headSha`). Read only by the
+   * `superseded` branch, whose summary must name the commit that was not
+   * reviewed: with no proof there is no other honest source for it.
+   */
+  headSha?: string;
   reason?: string;
 }): CheckConclusion {
   const { proof, outcome, gate, review, inherited } = input;
@@ -984,6 +1003,16 @@ export function decideConclusion(input: {
   // is the honest one.
   if (outcome === "skipped") {
     return { desired: "neutral", title: CHECK_NAME, summary: CHECK_SUMMARIES.skipped };
+  }
+  // An early claim the checkout contradicted: this attempt's own SHA was never
+  // reviewed. A PROVEN publication for that same SHA still wins above (it is
+  // an older attempt's result and the honest one for that commit); without one
+  // the run fails closed rather than claiming an approval nobody earned.
+  if (outcome === "superseded") {
+    // The attempt's OWN head, sliced raw like every other summary (redaction
+    // is for prose, not for a commit id the caller already knows).
+    const sha7 = input.headSha === undefined || input.headSha === "" ? "unknown" : input.headSha.slice(0, 7);
+    return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.superseded(sha7) };
   }
   if (outcome === "local-error") {
     return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.exhausted };
@@ -1116,6 +1145,16 @@ export type CheckLifecycle = {
      */
     updateBudgetMs?: number;
   }): Promise<void>;
+  /**
+   * The consumer gave up on `terminalize` (its bounded wait elapsed, or the
+   * hook threw): re-write the frozen terminal intent under this lease — an
+   * idempotent replay, refused when the terminalize already froze a different
+   * one — and hand the attempt to recovery NOW with `remote-unconfirmed`, so
+   * the minute Check reconciler closes the run instead of waiting out the
+   * execution deadline. Sends NO remote request, and sends none twice: a fence
+   * already claimed by recovery refuses every write here (a silent no-op).
+   */
+  abandonTerminalize(input: { handle: CheckLifecycleHandle; reason: string }): Promise<void>;
 };
 
 /**
@@ -1167,7 +1206,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
    * provably dead in that case, and the identity fence is the honest one.
    */
   const abandonUnterminalized = async (
-    identity: CheckIdentity,
+    attemptId: string,
     lease: Lease,
     reason: string,
     requestsSpent: boolean,
@@ -1175,7 +1214,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     const fence = fenceFor(lease);
     const frozen = await setCheckDesired(
       deps.db,
-      identity.attemptId,
+      attemptId,
       fence.lease,
       {
         desired: "failure",
@@ -1186,14 +1225,14 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       fence.nowMs,
     );
     if (frozen) {
-      await releaseForRecovery(identity.attemptId, fence.lease, reason, requestsSpent);
+      await releaseForRecovery(attemptId, fence.lease, reason, requestsSpent);
       return;
     }
     if (!requestsSpent) {
       // No request was dispatched, so nothing may exist remotely: the
       // identity-fenced release is the correct one even though the lease is
       // dead (that is exactly why the intent write above refused).
-      await releaseForRecovery(identity.attemptId, fence.lease, reason, false);
+      await releaseForRecovery(attemptId, fence.lease, reason, false);
     }
   };
 
@@ -1237,7 +1276,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
   const adoptLateCreatedRun = async (identity: CheckIdentity, lease: Lease, remoteId: number): Promise<void> => {
     const fence = fenceFor(lease);
     if (!(await attachCheckRunId(deps.db, identity.attemptId, fence.lease, remoteId, fence.nowMs))) return;
-    await abandonUnterminalized(identity, lease, "the creating invocation was abandoned by the consumer budget", true);
+    await abandonUnterminalized(identity.attemptId, lease, "the creating invocation was abandoned by the consumer budget", true);
   };
 
   return {
@@ -1364,6 +1403,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         gate,
         review,
         inherited,
+        headSha: handle.headSha,
       });
       // Freeze the boundary title/summary and the proof link BEFORE any remote
       // update, fenced on the CURRENT lease with a clock sampled for THIS write
@@ -1412,6 +1452,30 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // Unavailable/unconfirmed: recovery status, error and backoff only —
       // never `desired`, never `observed`. Publication is untouched either way.
       await releaseForRecovery(attemptId, fenceFor(handle.lease).lease, completed.reason, completed.requests > 0);
+    },
+
+    async abandonTerminalize(input) {
+      const { handle } = input;
+      const fence = fenceFor(handle.lease);
+      // Replay the frozen terminal intent. The interrupted terminalize may
+      // already have written one: re-writing the SAME text is the documented
+      // idempotent case, while a DIFFERENT terminal intent is refused by
+      // `setCheckDesired`'s monotonicity rule and kept — either way the row
+      // ends terminal-desired, which is what makes it due for recovery. A dead
+      // fence (recovery already claimed the attempt) refuses both statements
+      // below, which is the silent no-op this path is allowed to be.
+      await setCheckDesired(
+        deps.db,
+        handle.attemptId,
+        fence.lease,
+        { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed },
+        null,
+        fence.nowMs,
+      );
+      // `requestsSpent: true`: the interrupted terminalize may already have
+      // sent its update, so the row stays `remote-unconfirmed` — recovery
+      // ADOPTS that run instead of creating a second one (RL-12).
+      await releaseForRecovery(handle.attemptId, fence.lease, input.reason, true);
     },
   };
 }
