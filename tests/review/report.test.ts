@@ -127,7 +127,7 @@ describe("revalidatedNotes", () => {
       },
     ],
     evidence: [],
-    discussion: { items: [], issueCoverage: "unavailable", issueDigest: "", capturedMs: 0, threads: [] },
+    discussion: { items: [], issueCoverage: "unavailable", issueModelCoverage: "unavailable", issueDigest: "", capturedMs: 0, threads: [] },
   } satisfies RecheckInput;
 
   test("one line per recheck result, titled by the ORIGINAL concern", () => {

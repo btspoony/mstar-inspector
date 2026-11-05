@@ -344,6 +344,7 @@ function makeVerified(intent: LineIntent, comments: ThreadCommentSpec[], issue: 
         fullDatabaseId: c.fullDatabaseId,
         authorType: c.authorType ?? authorType,
         authorLogin: c.authorLogin ?? authorLogin,
+        viewerDidAuthor: false,
         createdAt: c.createdAt,
         updatedAt: c.updatedAt,
         body: c.body,

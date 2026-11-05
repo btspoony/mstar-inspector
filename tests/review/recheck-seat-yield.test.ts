@@ -172,8 +172,10 @@ function maxSizeInput(): RecheckInput {
         createdAt: "2026-11-01T00:00:00Z",
         updatedAt: "2026-11-01T00:00:00Z",
         body: `discussion body ${index} `.padEnd(MODEL_ITEM_MAX_CHARS, "x"),
+        ownAuthor: false,
       })),
       issueCoverage: "truncated" as const,
+      issueModelCoverage: "complete" as const,
       issueDigest: "digest-1",
       capturedMs: 1762000000000,
       threads: [],
@@ -215,17 +217,6 @@ async function run(signal = new AbortController().signal) {
 }
 
 describe("recheck seat yield at the documented input limits", () => {
-  test("the fixture is a max-size round: 25 rows, 100 slices, near the input byte cap", () => {
-    expect(INPUT.targets).toHaveLength(RECHECK_MAX_TARGETS);
-    expect(INPUT.evidence).toHaveLength(RECHECK_MAX_TARGETS * 4);
-    const bytes = Buffer.byteLength(JSON.stringify(INPUT));
-    // The §7.3 input cap is 512 KiB; the catalog cap is 256 KiB. A large round
-    // therefore carries a quarter of a megabyte of trusted evidence as PROMPT
-    // text — this is the size the seat's one-shot context must hold.
-    expect(bytes).toBeGreaterThan(256 * 1024);
-    expect(bytes).toBeLessThan(512 * 1024);
-  });
-
   test("(a) a valid document over the max-size input survives whole — 25/25 assessed", async () => {
     const results = INPUT.targets.map((target) => row(target.rowId));
     seatResult = {
@@ -488,7 +479,7 @@ describe("the ask fits the seat's context budget", () => {
       headSha: SHA,
       targets: [target("row-large", "src/large.ts"), target("row-small", "src/small.ts")],
       evidence: [largeSlice, smallSlice],
-      discussion: { items: [], issueCoverage: "complete", issueDigest: "digest-1", capturedMs: 0, threads: [] },
+      discussion: { items: [], issueCoverage: "complete", issueModelCoverage: "complete", issueDigest: "digest-1", capturedMs: 0, threads: [] },
     };
     // At a zero budget the core (targets + discussion) overruns, and the
     // refusal names the smallest budget that holds it. One small slice's

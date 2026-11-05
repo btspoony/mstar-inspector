@@ -18,8 +18,9 @@
  * (`anchorRecheckDeadline(startMs, level)`); the seat evaluates
  * `currentRecheckBudget(Date.now())` at start so a late start shrinks toward
  * the shared deadline — a fresh 180s after the normal review is structurally
- * impossible (the seat only ever starts concurrently, and the caller aborts
- * it when the review settles).
+ * impossible (the seat only ever starts concurrently, and the caller awaits
+ * it on that same budget; it aborts the seat only on review failure or when
+ * the outer deadline leaves no room).
  *
  * Failure contract: ANY seat failure/timeout/invalid payload logs one
  * structured stderr event and resolves `{ doc: null, status }` — it never
@@ -494,8 +495,9 @@ export function recheckRoundStatus(
 
 /**
  * Run the bounded recheck seat (spec §7.8) against `session` —
- * the caller owns concurrency (started alongside the review work, aborted
- * via `signal` when the normal review settles) and this function NEVER
+ * the caller owns concurrency (started alongside the review work, awaited on
+ * its own budget; `signal` aborts it on review failure or an exhausted outer
+ * deadline) and this function NEVER
  * throws: every exit path resolves `{ doc, status }`, where `doc` is null
  * unless a validated document came back and `status` says why. The budget is
  * evaluated from the anchored outer deadline at start; 0 = skip (logged, no
@@ -579,10 +581,10 @@ export async function runRecheckSeat(input: {
     gate = validateRecheckDoc(recheckStructuredData(result), ask.input);
   } catch (error) {
     // A by-design abort is a CONTRACT exit, not a lost round: the caller
-    // cancels this seat when the main review settles (spec §7.8), so the
-    // round answered nothing because it was stopped — never because the
-    // model failed. `skipped`/`aborted` keeps the worker from writing a
-    // failure row or blaming the rows it never answered.
+    // cancels this seat on review failure or when the outer deadline leaves
+    // no room (spec §7.8), so the round answered nothing because it was
+    // stopped — never because the model failed. `skipped`/`aborted` keeps the
+    // worker from writing a failure row or blaming the rows it never answered.
     if (input.signal.aborted) {
       console.error(JSON.stringify({ event: "recheck_seat_aborted", reason: "aborted" }));
       return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "aborted", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: null } };

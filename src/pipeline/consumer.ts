@@ -1886,12 +1886,21 @@ function reconcileRecheckRound(input: {
   }
 
   // Resolution eligibility (§7.4/§7.5): addressed verdicts only, with the
-  // complete snapshot fences actually captured this round.
+  // snapshot fences actually captured this round. The ISSUE side needs its
+  // FETCH and its MODEL view complete plus a digest: a model that never saw
+  // part of the human discussion could miss a rebuttal or a still-open
+  // concern, so that evidence never authorizes a resolve.
   const resolutions: { associationId: string; verified: VerifiedResolution }[] = [];
   for (const target of targets) {
     const assessment = outcomeByRowId.get(target.rowId);
     if (assessment === undefined || assessment.disposition !== "addressed") continue;
-    if (discussion.issueCoverage !== "complete" || discussion.issueDigest === "") continue;
+    if (
+      discussion.issueCoverage !== "complete" ||
+      discussion.issueModelCoverage !== "complete" ||
+      discussion.issueDigest === ""
+    ) {
+      continue;
+    }
     for (const associationId of target.associationIds) {
       const snapshot = discussion.threads.find((t) => t.associationId === associationId);
       if (
@@ -1944,7 +1953,14 @@ function reconcileRecheckRound(input: {
 
 /** The empty discussion for rounds with no open rows (nothing to capture). */
 function emptyDiscussion(nowMs: number): Discussion {
-  return { items: [], issueCoverage: "complete", issueDigest: "", capturedMs: nowMs, threads: [] };
+  return {
+    items: [],
+    issueCoverage: "complete",
+    issueModelCoverage: "complete",
+    issueDigest: "",
+    capturedMs: nowMs,
+    threads: [],
+  };
 }
 
 /**
@@ -1955,7 +1971,9 @@ function emptyDiscussion(nowMs: number): Discussion {
  */
 function roundContextCoverage(discussion: Discussion): Coverage {
   if (discussion.issueCoverage === "unavailable") return "unavailable";
-  if (discussion.issueCoverage !== "complete") return "truncated";
+  if (discussion.issueCoverage !== "complete" || discussion.issueModelCoverage !== "complete") {
+    return "truncated";
+  }
   for (const thread of discussion.threads) {
     if (thread.coverage !== "complete" || thread.modelCoverage !== "complete") return "truncated";
   }
@@ -4227,7 +4245,14 @@ async function processMessage(
         discussion = boundDiscussion(discussion);
       } catch (err) {
         captureFailed = true;
-        discussion = { items: [], issueCoverage: "unavailable", issueDigest: "", capturedMs: captureMs, threads: [] };
+        discussion = {
+          items: [],
+          issueCoverage: "unavailable",
+          issueModelCoverage: "unavailable",
+          issueDigest: "",
+          capturedMs: captureMs,
+          threads: [],
+        };
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(fields, `discussion capture failed — context-unavailable: ${detail}`);
       }

@@ -395,6 +395,7 @@ const adminApi = (url: string): unknown => {
         updateMin: 500,
         updateMax: 15_000,
         degraded: false,
+        derived: false,
       },
     };
   if (url.includes("/workspaces")) return { workspaces: ADMIN_WORKSPACES };

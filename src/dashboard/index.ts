@@ -3510,8 +3510,9 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
 };
 
 /**
- * The review-depth control's inherit face (migration 0047): the wire sentinel
- * `save-review-level` maps to the NULL column ("follow the operator default").
+ * The review-depth control's inherit face (migration 0047): the wire field
+ * `op: "save-review-level"` carries the sentinel value `"inherit"`, which maps
+ * to the NULL column ("follow the operator default").
  * It is a form protocol value, never a stored one — the column holds a
  * REVIEW_LEVELS value or NULL. The SPA restates it as REVIEW_DEPTH_INHERIT
  * across the bundle boundary (the REVIEW_TRIGGER_MODES convention).

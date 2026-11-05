@@ -380,14 +380,18 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
     const identity = request.identity as { id?: string } | undefined;
     reservedSeatIds.push(identity?.id);
     seatDispatchQueue.shift()?.();
+    // Bound at DISPATCH, never after a test release: a held seat must own the
+    // scripted result for ITS dispatch position, not the one left over when a
+    // later seat is released first.
+    const plan = seatResults.shift() ?? {};
     if (holdSeats) {
       // The seat stays running until the test releases it (dispatch order).
       await new Promise<void>((resolve) => seatReleases.push(resolve));
     }
-    const plan = seatResults.shift() ?? {};
     // A seat the caller cancels: it stays pending until ITS OWN signal fires,
     // then rejects the way the SDK does. This is the path the runner takes
-    // when the main review settles before the recheck seat finishes.
+    // when a review fails or the outer deadline leaves no room while the
+    // recheck seat still runs.
     if (plan.awaitAbort) {
       const signal = request.signal as AbortSignal;
       await new Promise<void>((_resolve, reject) => {
@@ -2243,7 +2247,7 @@ function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
         complete: true,
       },
     ],
-    discussion: { items: [], issueCoverage: "complete", issueDigest: "d", capturedMs: 1, threads: [] },
+    discussion: { items: [], issueCoverage: "complete", issueModelCoverage: "complete", issueDigest: "d", capturedMs: 1, threads: [] },
     ...overrides,
   };
 }
@@ -2394,21 +2398,80 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(result.recheckStatus?.error).toBe("provider boom");
   });
 
-  test("a seat the runner cancels when the review settles reports skipped/aborted, never failed", async () => {
-    // The normal path: the recheck seat is still running when the review
-    // settles, so the runner aborts it (spec §7.8). That is a contract exit —
-    // the round answered nothing because it was stopped.
-    seatResults = [{ awaitAbort: true }, { data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
-    const spy = spyOn(console, "error").mockImplementation(() => {});
-    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
-    try {
-      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, recheck: recheckInput() });
-    } finally {
-      spy.mockRestore();
-    }
+  test("a review that settles early lets the in-flight recheck finish and returns its document", async () => {
+    // The recheck is still running when the review seats return. The runner
+    // awaits that same seat on ITS OWN budget — settlement of the review is
+    // no longer a reason to stop it.
+    holdSeats = true;
+    const dispatched = [deferred(), deferred(), deferred()];
+    seatDispatchQueue = dispatched.map((entry) => entry.resolve);
+    seatResults = [{ data: validRecheckDoc() }, { data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
 
-    expect(result.recheck).toBeNull();
-    expect(result.recheckStatus).toEqual({
+    const run = ompAgentRuntime.runReview({ ...BASE_INPUT, recheck: recheckInput() });
+    await dispatched[2]!.promise;
+
+    // Both review seats return; the recheck seat (dispatch 0) is still held.
+    seatReleases[1]!();
+    seatReleases[2]!();
+    for (let i = 0; i < 50; i += 1) await Promise.resolve();
+
+    // It survived the review's settlement: the old abort-on-settle contract
+    // would have fired the shared controller by now.
+    const signal = subagentRequests[0]!.signal as AbortSignal;
+    expect(signal.aborted).toBe(false);
+
+    // It settles on its own schedule and its document rides the result.
+    seatReleases[0]!();
+    const { recheck, recheckStatus } = await run;
+    expect(recheck).toEqual(validRecheckDoc());
+    expect(recheckStatus).toMatchObject({ outcome: "ok", reason: null });
+  });
+
+  test("the settle-time gate stays open near the floor: a seat that started is awaited, not aborted", async () => {
+    // 45 s of outer budget left: recheckBudget floors out at the 30 s minimum,
+    // so the seat starts with 40 s and the settle-time gate (remaining <= 30 s)
+    // does NOT abort it. The old unconditional abort would have.
+    anchorRecheckDeadline(Date.now() - 600_000 + 45_000, "quick");
+    holdSeats = true;
+    const dispatched = [deferred(), deferred(), deferred()];
+    seatDispatchQueue = dispatched.map((entry) => entry.resolve);
+    seatResults = [{ data: validRecheckDoc() }, { data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+
+    const run = ompAgentRuntime.runReview({ ...BASE_INPUT, recheck: recheckInput() });
+    await dispatched[2]!.promise;
+    seatReleases[1]!();
+    seatReleases[2]!();
+    for (let i = 0; i < 50; i += 1) await Promise.resolve();
+
+    expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(false);
+    seatReleases[0]!();
+    const { recheck } = await run;
+    expect(recheck).toEqual(validRecheckDoc());
+  });
+
+  test("an exhausted outer budget aborts the still-running recheck instead of blocking the run", async () => {
+    // The seat parks until its own signal fires; both review seats deliver.
+    holdSeats = true;
+    const dispatched = [deferred(), deferred(), deferred()];
+    seatDispatchQueue = dispatched.map((entry) => entry.resolve);
+    seatResults = [{ awaitAbort: true }, { data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+
+    const run = ompAgentRuntime.runReview({ ...BASE_INPUT, recheck: recheckInput() });
+    await dispatched[2]!.promise;
+
+    // The review outlived the outer deadline: by the time it settles there is
+    // no room left to finish the recheck, so the runner must stop the seat
+    // rather than block the run's tail waiting for it.
+    anchorRecheckDeadline(Date.now() - 600_000, "quick");
+    seatReleases[1]!();
+    seatReleases[2]!();
+    // Release the seat's dispatch hold so it reaches its own signal wait.
+    seatReleases[0]!();
+
+    const { recheck, recheckStatus } = await run;
+    expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(true);
+    expect(recheck).toBeNull();
+    expect(recheckStatus).toEqual({
       schema: "mstar.recheck-status/v1",
       headSha: RECHECK_SHA,
       outcome: "skipped",

@@ -500,7 +500,7 @@ describe("createReviewConsumer", () => {
     expect(prepared.body).toContain("## ⚠️ Verdict: `needs fixes`");
     expect(prepared.body).toContain("Two issues found in the diff.");
     // §7.10 prior-findings section: the report body carries exactly one.
-    expect(prepared.body).toContain("### Revalidated findings");
+    expect(prepared.body).toContain("<summary>Revalidated findings</summary>");
     expect(prepared.body).toMatch(
       /<!-- mstar-inspector:publication:v1 id=[0-9a-f-]+ sha=0123456789abcdef0123456789abcdef01234567 kind=review -->/,
     );
@@ -3250,6 +3250,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     commenterState.discussion = {
       items: [],
       issueCoverage: "complete",
+      issueModelCoverage: "complete",
       issueDigest: "issue-digest",
       capturedMs: 0,
       threads: [
@@ -3393,6 +3394,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     commenterState.discussion = {
       items: [],
       issueCoverage: "complete",
+      issueModelCoverage: "complete" as const,
       issueDigest: "issue-digest",
       capturedMs: 0,
       threads: [
@@ -3490,6 +3492,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       commenterState.discussion = {
         items: [],
         issueCoverage: "complete",
+        issueModelCoverage: "complete",
         issueDigest: "issue-digest",
         capturedMs: 0,
         threads: [
@@ -3540,9 +3543,11 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
           createdAt: "2026-09-02T10:00:00Z",
           updatedAt: "2026-09-02T10:00:00Z",
           body: hostile,
+          ownAuthor: false,
         },
       ],
       issueCoverage: "complete",
+      issueModelCoverage: "complete",
       issueDigest: "issue-digest",
       capturedMs: 0,
       threads: [
@@ -3564,7 +3569,14 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     await consumer(makeBatch(makePayload()));
 
     const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
-      recheck?: { discussion: { items: Array<{ body: string }>; issueCoverage: string; threads: Array<{ modelCoverage: string }> } };
+      recheck?: {
+        discussion: {
+          items: Array<{ body: string }>;
+          issueCoverage: string;
+          issueModelCoverage: string;
+          threads: Array<{ modelCoverage: string }>;
+        };
+      };
     };
     const wire = runnerInput.recheck!.discussion;
     // The raw body never reaches the model: marker syntax, delimiter runs and
@@ -3575,13 +3587,14 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(wire.items[0]!.body).not.toContain("\x00");
     expect(wire.items[0]!.body.length).toBeLessThan(hostile.length);
     expect(wire.items[0]!.body).toContain("[... body truncated ...]");
-    // Coverage honesty: the model did not see the whole capture, so the round
-    // is not labelled complete and no auto-resolution may proceed on it.
-    expect(wire.issueCoverage).toBe("truncated");
+    // Coverage honesty: the FETCH was complete, the model-view caps clamped the
+    // body, and each fact stays on its own flag.
+    expect(wire.issueCoverage).toBe("complete");
+    expect(wire.issueModelCoverage).toBe("truncated");
     expect(wire.threads[0]!.modelCoverage).toBe("complete"); // its own items were untouched
-    // The consequence the caps exist for: a model that saw partial context may
-    // close its row, but the round is NOT labelled complete and the thread is
-    // never queued for auto-resolution (§7.4/§7.5).
+    // The round is NOT labelled complete, and a clamped HUMAN item is a
+    // resolution fence: the model never saw that body in full, so a digest
+    // alone must not authorize a resolve (§7.4/§7.5).
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("context coverage: truncated");
     expect(prepared.body).not.toContain("not yet resolved");
@@ -3827,6 +3840,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     commenterState.discussion = {
       items: [],
       issueCoverage: "complete",
+      issueModelCoverage: "complete",
       issueDigest: "issue-digest",
       capturedMs: 0,
       threads: [
@@ -3877,6 +3891,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       commenterState.discussion = {
         items: [],
         issueCoverage: "complete",
+        issueModelCoverage: "complete",
         issueDigest: "issue-digest",
         capturedMs: 0,
         threads: [
@@ -3919,6 +3934,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     commenterState.discussion = {
       items: [],
       issueCoverage: "complete",
+      issueModelCoverage: "complete",
       issueDigest: "issue-digest",
       capturedMs: 0,
       threads: [
@@ -4125,6 +4141,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
       const db = await createSeededTestD1();
       seedCheckBudget(db, "review.check.terminalize_timeout_ms", String(configured));
+      // The writer's relation must hold on a pair the reader trusts: the send
+      // budget stays below every configured wait.
+      seedCheckBudget(db, "review.check.update_timeout_ms", "500");
       const handed: Array<Promise<unknown>> = [];
       const consumer = createReviewConsumer(
         await makeEnv({ DB: db as never }),
@@ -4286,6 +4305,7 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
     return {
       items: [],
       issueCoverage: "complete" as const,
+      issueModelCoverage: "complete" as const,
       issueDigest: "issue-digest",
       capturedMs: 0,
       threads: seeded.map(({ assocId }) => ({
@@ -5832,13 +5852,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(publicationRow(db).phase).toBe("applied");
   });
 
-  test("check lifecycle: giving up on terminalize releases the lease, so recovery is due at the first backoff", async () => {
+  test("check lifecycle: a terminal update that exceeds its budget releases the lease, so recovery is due at the first backoff", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // The consumer waits 1s; the remote update is allowed 1.5s, so the
-    // BUDGET is what ends this path — the adapter has not answered yet.
-    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
+    // The pair is LEGAL (§7.10: the inline wait must exceed the send budget),
+    // and the adapter never answers, so the send budget — always the shorter
+    // side of a legal pair — is what ends this path. An illegal pair (wait
+    // shorter than the send) is refused by the reader's cross-field fence
+    // before it could ever reach this adapter.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1600");
     seedCheckBudget(db, "review.check.update_timeout_ms", "1500");
     checkRequestOverrides.update = () => Promise.withResolvers<CheckRunPayload>().promise;
     const adapter = checksAdapterFor(db);
@@ -5863,16 +5886,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.next_attempt_ms!).toBeLessThan(row.execution_deadline_ms);
     expect(row.attempts).toBe(1);
     expect(row.terminal_ms).toBeNull();
-    expect(row.last_error).toContain("terminalize budget exceeded");
+    expect(row.last_error).toContain("check update exceeded");
     // A Check give-up never reaches the publication path.
     expect(publicationRow(db).phase).toBe("applied");
 
-    // Every give-up is diagnosable on the ONE structured channel.
-    expect(logLines.filter((line) => line.fields.event === "check_terminalize_budget_exceeded")).toHaveLength(1);
-    const releasedLine = logLines.find((line) => line.fields.event === "check_abandon_released");
-    expect(releasedLine).toBeDefined();
-    expect(releasedLine!.fields.attempt_id).toBe(row.id);
-    expect(String(releasedLine!.fields.check_reason)).toContain("terminalize budget exceeded");
+    // The adapter owns the send-budget failure here (a legal pair always ends
+    // on the shorter update budget), so the lease release is asserted on the
+    // row above rather than on the consumer's terminalize give-up log line.
   }, 10_000);
 
   test("check lifecycle: a throwing terminalize hook releases the lease the same way", async () => {
