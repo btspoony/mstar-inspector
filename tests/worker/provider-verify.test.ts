@@ -103,6 +103,9 @@ async function createPopulatedPre0015D1(): Promise<TestD1> {
     "0010_review_failures.sql",
     "0011_webhook_deliveries.sql",
     "0012_custom_providers_and_key_updated_at.sql",
+    // 0020: the derived tail's 0047 indexes review_threads, so the table this
+    // hand-listed shape skipped must exist before the tail runs.
+    "0020_finding_lifecycle.sql",
     // 0026: createApp's atomic app_workspaces mapping.
     "0026_workspaces.sql",
     // 0038 rebuilds github_apps, so the fixture must carry every column the

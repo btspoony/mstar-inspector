@@ -171,6 +171,9 @@ function createPreProviderPoolD1(): TestD1 {
   // 0019: the settings JSON GET reads/writes the five github_*
   // metadata columns — the route must run on the production shape.
   applyMigration(db, "0019_github_apps_metadata.sql");
+  // 0020: the derived tail's 0047 indexes review_threads, so the table this
+  // hand-listed shape skipped must exist before the tail runs.
+  applyMigration(db, "0020_finding_lifecycle.sql");
   // 0022: the settings read face serves github_apps.review_trigger_mode
   // (the SPA mode control's value) and the trigger-mode route validates
   // against the CHECK enum — the route tests run on the production shape.
