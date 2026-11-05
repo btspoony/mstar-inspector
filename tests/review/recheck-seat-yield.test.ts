@@ -373,11 +373,12 @@ function addressedRow(rowId: string, slice: EvidenceSlice): Record<string, unkno
 
 describe("the ask fits the seat's context budget", () => {
   test("a max-size round is asked inside the budget, every row still reachable", async () => {
-    // The observed failure mode: the max-size input is ~270 KB of JSON, which
-    // is a whole 128k window of prompt before the seat's own tools or its
-    // yield. The RCA could not separate that from the seat's own time cap, so
-    // this test does not claim a proven cause — it pins the mitigation: the ask
-    // is FITTED, and whatever the cause, no row is sent an unbounded document.
+    // The observed failure mode: the max-size fixture is a multi-hundred-KB
+    // JSON ask, ~4x the 64 KiB budget, so the seat used to be handed far more
+    // prompt than it could hold. The RCA could not separate that from the
+    // seat's own time cap, so this test does not claim a proven cause — it
+    // pins the mitigation: the ask is FITTED, and whatever the cause, no row
+    // is sent an unbounded document.
     seatResult = answerAll(INPUT);
     const { doc: seatDoc, status } = await run();
     expect(seatCalls).toHaveLength(1);
@@ -412,6 +413,9 @@ describe("the ask fits the seat's context budget", () => {
       (target) => INPUT.evidence.find((slice) => slice.path === target.original.filePath)!,
     );
     const expected = [...firstPerRow, ...INPUT.evidence.filter((slice) => !firstPerRow.includes(slice))];
+    // The budget actually BIT here: without this the prefix check below would
+    // pass on an untruncated ask and stop pinning the fit at all.
+    expect(asked.evidence.length).toBeLessThan(INPUT.evidence.length);
     expect(asked.evidence).toEqual(expected.slice(0, asked.evidence.length));
     // Consequence: the leading block is one slice per row, so distinct paths
     // covered equal the slice count until every row has one.

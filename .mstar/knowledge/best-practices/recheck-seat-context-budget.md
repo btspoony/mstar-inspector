@@ -19,7 +19,8 @@ how many fixes land.
    `addressed` on evidence it could not have read.
 2. **Observed correlation, cause unproven.** The seat's ask used to be the whole recheck input
    serialized verbatim; at the documented input limits (25 targets, up to four evidence slices per
-   target) that is ~280 KB / ~130k–150k tokens, and the rounds it produced were lost with
+   target) that is ~280 KB — ≈ 72k–82k tokens at 3.5–4 bytes per token, not the 512 KiB cap's figure —
+   and the rounds it produced were lost with
    `structuredOutput.status = "unavailable"` and an empty stderr. The RCA could NOT separate context
    pressure from the seat's own time cap: both surface as an absent yield. Treat the size limit as a
    mitigation for an observed failure shape, not as a proven root cause.
