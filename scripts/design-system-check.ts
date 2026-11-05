@@ -244,42 +244,25 @@ const SHORTHAND = /[a-z][a-z0-9-]*-\((?:[a-z-]+:)?--([a-z0-9-]+)\)/g;
  * its own name excuses nothing (see `danglingReferences`).
  */
 const DECLARATION = /(?:^|[;{\s}])(--[a-z0-9-]+)\s*:\s*([^;{}]*)/g;
-/** A block comment declares nothing: a commented-out `--legacy-x:` is not a declaration. */
-const CSS_COMMENT = /\/\*[\s\S]*?\*\//g;
+/** A block comment: a stylesheet's prose, and one of the two shapes a script's comment may take. */
+const BLOCK_COMMENT = /\/\*[\s\S]*?\*\//g;
 /** The other consumer grammar: an HTML shell's own comment. */
 const HTML_COMMENT = /<!--[\s\S]*?-->/g;
 /** A `<style>` block inside an HTML shell — CSS again, so its comments go too. */
 const STYLE_BLOCK = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
 /**
- * A script's `// …` line comment, but only where the comment start needs no
- * token context at all: a line whose first non-whitespace characters are `//`.
- *
- * A trailing `//` is left in place. Telling it apart from a literal's text
- * (`"https://…"`, `` `${ … // … }` ``, `/[//]/`) is a lexer, and every lexer
- * this gate grew shipped a case where it deleted a live reference: the
- * operator is a character, the context is not.
- *
- * shortcut: a token reference after `//` on a code line is scanned as code and
- * reported as dangling, though it is prose. That direction is the accepted one
- * — an over-read costs a visible false alarm, an over-delete costs a silent
- * pass, and this gate exists to remove silent passes. Upgrade to a real
- * tokenizer if the false alarms ever cost more than that silence did.
+ * A script's other comment shape: `//` to the end of its line. It places spans
+ * that *may* be comments (see `scriptCommentSpans`), never a reference, so it
+ * does not have to be right about a slash's context.
  */
-const LINE_COMMENT = /^[ \t]*\/\/[^\n]*/gm;
-/**
- * The same text's `//` tails, whatever opened them — the declaration view
- * only (see `danglingReferences`). A name a kept comment mentions must never
- * excuse a reference, so here the gate deletes more than it does for
- * references: losing a real declaration surfaces a violation, never hides one.
- */
-const LINE_TAIL = /\/\/[^\n]*/g;
+const LINE_COMMENT = /\/\/[^\n]*/g;
 
 /**
  * `text` without its comments, read in the grammar the file is written in: a
  * stylesheet's block comments, an HTML shell's `<!-- … -->` ones, and — in the
- * shell's `<style>` blocks — the stylesheet's again. A TS/TSX module shares the
- * block form and adds the line form, but only its line-start spelling and no
- * `//` tail (`LINE_COMMENT`); a trailing `//` it cannot place stays live.
+ * shell's `<style>` blocks — the stylesheet's again. A TS/TSX module is
+ * returned unchanged: see `danglingReferences` for why its comments are placed
+ * as spans instead.
  *
  * One CSS-only stripper read an HTML comment as live markup: a token name
  * quoted in prose became a reference and failed the link, while inside a
@@ -288,13 +271,29 @@ const LINE_TAIL = /\/\/[^\n]*/g;
  */
 function withoutComments(file: string, text: string): string {
   const kind = consumerKind(file);
-  if (kind === "script") return text.replace(LINE_COMMENT, "").replace(CSS_COMMENT, "");
-  if (kind !== "html") return text.replace(CSS_COMMENT, "");
+  if (kind === "style") return text.replace(BLOCK_COMMENT, "");
+  if (kind !== "html") return text;
   return text
     .replace(HTML_COMMENT, "")
     .replace(STYLE_BLOCK, (_block, open: string, css: string, close: string) =>
-      `${open}${css.replace(CSS_COMMENT, "")}${close}`,
+      `${open}${css.replace(BLOCK_COMMENT, "")}${close}`,
     );
+}
+
+/**
+ * Every span in a script that may hold one of its comments, the two shapes
+ * taken independently so that neither can hide the other's start.
+ *
+ * A real comment always lies inside one of these — that is the whole property
+ * the declaration view needs — and the spans over-approximate: a `//` inside a
+ * template, a regex or JSX text places one too. Over-approximating costs a
+ * dropped declaration, which surfaces a reference as a visible violation; the
+ * opposite error would excuse one silently (`I-000351`).
+ */
+function scriptCommentSpans(text: string): Array<readonly [number, number]> {
+  return [...text.matchAll(LINE_COMMENT), ...text.matchAll(BLOCK_COMMENT)].map(
+    (match) => [match.index, match.index + match[0].length] as const,
+  );
 }
 
 export interface DanglingReference {
@@ -315,19 +314,36 @@ export interface DanglingReference {
  * (`I-000248`). Only that spelling loses its vote; a name declared genuinely
  * elsewhere in the file still excuses its references.
  *
- * Comments are stripped in the file's own grammar before either match, so a
- * retired name quoted in prose — a CSS comment, an HTML shell's `<!-- -->`,
- * or a script's line-start `// …` — neither becomes a reference nor a
- * self-declaration that suppresses the check. A script's trailing `//` is only
- * half stripped: it stays live for the reference match (a visible false alarm)
- * and is deleted for the declaration match, because a name a comment mentions
- * must not excuse a reference. Both halves err toward reporting.
+ * A stylesheet and an HTML shell are stripped of their comments before either
+ * match, so a retired name quoted in prose is neither a reference nor a
+ * declaration. A script is not stripped. Which `//` opens a comment is the
+ * parser's answer — a template's middle text, a regex body and JSX text all
+ * spell the same two characters — and no parser ships in this install, so a
+ * lexer's guess here has deleted a live reference every time this gate grew
+ * one. Instead:
+ *
+ * - references are read from the raw text, so a real one can never be erased:
+ *   a name only a comment carries is reported as a visible false alarm;
+ * - declarations are read from the raw text too, and a declaration its
+ *   `scriptCommentSpans` touches is dropped whole. That drops every
+ *   commented-out declaration (they can no longer excuse a reference) without
+ *   ever truncating a live one at a `//` inside its own value — a truncated
+ *   `--x: url(https://…) var(--x)` would excuse its own cycle (`I-000351`).
+ *
+ * Both halves therefore fail toward reporting: the gate can over-report a
+ * script's prose, and it cannot miss a reference.
  */
 export function danglingReferences(file: string, text: string): DanglingReference[] {
   const live = withoutComments(file, text);
-  const declared = consumerKind(file) === "script" ? live.replace(LINE_TAIL, "") : live;
+  const commented = consumerKind(file) === "script" ? scriptCommentSpans(live) : [];
   const local = new Set(
-    [...declared.matchAll(DECLARATION)]
+    [...live.matchAll(DECLARATION)]
+      .filter(
+        (match) =>
+          !commented.some(
+            ([from, to]) => match.index < to && match.index + match[0].length > from,
+          ),
+      )
       .filter((match) => !new RegExp(`var\\s*\\(\\s*${match[1]}(?=[\\s,)])`).test(match[2] as string))
       .map((match) => (match[1] as string).slice(2)),
   );
