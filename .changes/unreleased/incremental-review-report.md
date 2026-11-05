@@ -6,13 +6,16 @@ category: Added
   one (GitHub `compare` → `ahead`), the seats review the `since <base>` delta instead of the whole PR, and
   the comment header marks the round with `· since <sha7>`. The prior-findings evidence catalog still reads
   the full PR diff, and any other compare verdict (or a force-push 404) keeps the full-diff round.
-- **Complete review reports**: the published comment now carries what the envelope cannot — a
-  `**What this PR does**` overview, a mechanical `### Revalidated findings` table, `### Linked-issue AC`,
-  `### ✅ Verified`, `### 🗑️ Considered & rejected`, and a collapsible `## 🛠️ Plan to fix`. These ride a
-  side document (`mstar.report/v1`) written by a bounded report seat, validated fail-closed by the Worker,
-  and rendered as `none` when unavailable. Report text cannot fold, fence or re-head the comment:
-  headings, thematic breaks, code-fence lines and raw HTML are neutralized before insertion, and the
-  fix plan stays fenced as code.
+- **Complete review reports**: where a round could capture its PR context, the published comment now
+  carries what the envelope cannot — a `**What this PR does**` overview, a mechanical
+  `### Revalidated findings` table, `### Linked-issue AC`, `### ✅ Verified`,
+  `### 🗑️ Considered & rejected`, and a collapsible `## 🛠️ Plan to fix`. These ride a side document
+  (`mstar.report/v1`) written by a bounded report seat, validated fail-closed by the Worker, and rendered
+  as `none` when unavailable. The `deep` tier never publishes that document: the queue window leaves no
+  room for the PR-context capture next to its own runner budget, so `What this PR does` is omitted and
+  `Linked-issue AC`, `Verified`, `Considered & rejected` and `Plan to fix` publish `none`.
+  Report text cannot fold, fence or re-head the comment: headings, thematic breaks, code-fence lines and
+  raw HTML are neutralized before insertion, and the fix plan stays fenced as code.
 - **The report is bound to the reviewed head**: the side document carries the reviewed `headSha`, written
   by the runner from the envelope rather than the seat, and the Worker refuses a document bound to any
   other head — a report a skipped seat left behind in the container can no longer speak for a later
@@ -38,11 +41,14 @@ category: Added
 - **增量审查轮次**：当本 PR 上一个已审查的 head 是新 head 的祖先（GitHub `compare` 返回 `ahead`）时，各席位
   只审查 `since <base>` 的增量而非整个 PR，评论头部以 `· since <sha7>` 标注。既有 finding 的证据目录仍基于完整
   PR diff 构建；其它 compare 结论（或 force-push 造成的 404）继续走全量 diff 轮次。
-- **完整审查报告**：发布的评论现在携带 envelope 无法承载的内容——`**What this PR does**` 概述、机器生成的
-  `### Revalidated findings` 表、`### Linked-issue AC`、`### ✅ Verified`、`### 🗑️ Considered & rejected`
-  与可折叠的 `## 🛠️ Plan to fix`。这些内容走独立文档（`mstar.report/v1`），由有界报告席位写出，Worker
-  失败即拒绝校验，缺失时统一渲染为 `none`。报告文本无法折叠、围栏或改写评论结构：标题、分隔线、代码围栏行与
-  原始 HTML 在插入前均已中和，修复计划始终以代码块围栏呈现。
+- **完整审查报告**：当本轮能抓取到 PR 上下文时，发布的评论现在携带 envelope 无法承载的内容——
+  `**What this PR does**` 概述、机器生成的 `### Revalidated findings` 表、`### Linked-issue AC`、
+  `### ✅ Verified`、`### 🗑️ Considered & rejected` 与可折叠的 `## 🛠️ Plan to fix`。这些内容走独立文档
+  （`mstar.report/v1`），由有界报告席位写出，Worker 失败即拒绝校验，缺失时统一渲染为 `none`。
+  `deep` 档位永远不发布该文档：队列窗口在预留本档位 runner 自身预算后已没有余量留给 PR 上下文抓取，因此
+  `What this PR does` 直接省略，`Linked-issue AC`、`Verified`、`Considered & rejected` 与 `Plan to fix`
+  一律发布 `none`。报告文本无法折叠、围栏或改写评论结构：标题、分隔线、代码围栏行与原始 HTML
+  在插入前均已中和，修复计划始终以代码块围栏呈现。
 - **报告绑定到本次审查的 head**：独立文档携带被审查的 `headSha`，由 runner 从 envelope 写入（而非席位自己），
   Worker 拒绝任何绑定到其它 head 的文档——席位被跳过时遗留在容器里的报告不会再冒充后续一次审查。席位定义缺失
   或 envelope 无 head 时降级为 `none`，绝不会让审查失败。
