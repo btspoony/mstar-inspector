@@ -173,10 +173,9 @@ export async function createUser(
         .bind(row.id, row.github_login, row.role, row.created_at, row.invited_by),
       // A deliberate (re-)creation is the ONLY thing that may undo a removal:
       // clearing the tombstone in the SAME batch as the insert is what makes a
-      // re-admitted login bootstrappable again (migration 0023). Bootstrap has
-      // its own creation path (bootstrapCreateAdmin) that never clears removal
-      // state — an in-flight OAuth callback must not be able to undo a removal
-      // that landed after its reads.
+      // re-admitted login admissible again (migration 0023). The sign-in path
+      // (signInCreateUser) never clears removal state — an in-flight OAuth
+      // callback must not be able to undo a removal that landed after its reads.
       db
         .prepare("DELETE FROM removed_logins WHERE github_login = ? COLLATE NOCASE")
         .bind(user.login),
