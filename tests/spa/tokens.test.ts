@@ -627,8 +627,9 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(moduleNames('a = "text-(length:--typo-label-12-size)"')).toEqual([]);
     expect(moduleNames('a = "bg-(--retired-900)"')).toEqual(["retired-900"]);
     expect(moduleNames('a = "border-l-(--tone-${tone}-fg)"')).toEqual([]);
-    // A module's own comments are prose in both forms — and the block form
-    // declares nothing, so it cannot excuse the live reference beside it.
+    // A module's own comments are prose in both forms — a line-start `//` and
+    // `/* … */` — and the block form declares nothing, so it cannot excuse the
+    // live reference beside it.
     expect(moduleNames('// var(--retired-900)\na = "bg-(--surface-page)"')).toEqual([]);
     expect(moduleNames('/* --retired-900: #fff; */ a = "bg-(--retired-900)"')).toEqual([
       "retired-900",
@@ -638,10 +639,9 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(
       moduleNames('const u = "https://api.example.com"; const k = "bg-(--retired-900)";'),
     ).toEqual(["retired-900"]);
-    // The same literal with whitespace before its `//` — the spelling that a
-    // whitespace-anchored matcher read as a comment start, erasing the live
-    // reference later on the line. The quote, not the surrounding space, is
-    // what makes it prose.
+    // The same literal with whitespace before its `//` — not a comment either,
+    // because the rule anchors on the line start rather than on any preceding
+    // space. Erasing it would take the live reference later on the line.
     expect(moduleNames('const u = " // "; const k = "bg-(--retired-900)";')).toEqual(["retired-900"]);
     expect(moduleNames("const u = ' // '; const k = 'bg-(--retired-900)';")).toEqual(["retired-900"]);
     // A template literal is string text too, `${ … }` expression included.
@@ -651,16 +651,28 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // and reading its slashes as a comment start would swallow the live
     // reference beside it.
     expect(moduleNames('const r = /[ //]/; const k = "bg-(--retired-900)"')).toEqual(["retired-900"]);
-    // The inverse direction: a comment starts after ANY token, so a tight
-    // `;//` or `)//` is prose and its `var(--x)` is not a live reference.
-    expect(moduleNames('const n = 1;// bg-(--retired-900)')).toEqual([]);
-    expect(moduleNames('f()// bg-(--retired-900)')).toEqual([]);
-    // A regex may open after a control condition's `)`: that is a statement
-    // position, not an operand. Reading the slash as division re-read the
-    // `[//]` character class as a comment start and swallowed the live
-    // reference beside it — the silent miss this gate exists to remove, so an
-    // ambiguous slash is read as a regex (W1-R1).
+    // The three shapes the retired scanner read as division-then-comment, each
+    // deleting the live reference after it and passing the gate: a slash after
+    // a control condition's `)`, after `return`, and after `for await (`. The
+    // rule no longer looks at a slash's context at all — a `//` that does not
+    // start its line is code — so none of them can silence a reference.
     expect(moduleNames('if (ok) /[//]/.test(value); const k = "bg-(--retired-900)"')).toEqual([
+      "retired-900",
+    ]);
+    expect(moduleNames('return /[//]/.test(value) ? "bg-(--retired-900)" : ""')).toEqual([
+      "retired-900",
+    ]);
+    expect(
+      moduleNames('for await (const r of rs) /[//]/.test(r); k = "bg-(--retired-900)"'),
+    ).toEqual(["retired-900"]);
+    // The accepted cost, pinned: a trailing `//` is prose, but it is scanned as
+    // code, so the token it names is reported. Over-reporting is the direction
+    // this gate can afford; deleting a reference it cannot place is not.
+    expect(moduleNames('const n = 1;// bg-(--retired-900)')).toEqual(["retired-900"]);
+    expect(moduleNames('f()// bg-(--retired-900)')).toEqual(["retired-900"]);
+    // And that kept tail cannot silence the reference beside it: a declaration
+    // written in a comment is prose, not a local token.
+    expect(moduleNames('a = "bg-(--retired-900)"; // --retired-900: #fff')).toEqual([
       "retired-900",
     ]);
   });

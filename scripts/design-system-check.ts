@@ -251,201 +251,35 @@ const HTML_COMMENT = /<!--[\s\S]*?-->/g;
 /** A `<style>` block inside an HTML shell — CSS again, so its comments go too. */
 const STYLE_BLOCK = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
 /**
- * Where a `/` divides rather than opens a regex: the tokens that unambiguously
- * END an expression. Anything else — a control condition's `)`, a `}`, an
- * unknown token — leaves the slash ambiguous, and an ambiguous slash opens a
- * regex. The two mistakes are not symmetric: over-reading a regex only keeps
- * text live (a visible false alarm), while reading a regex as division let the
- * `//` inside its body start a comment, deleting a live reference and passing
- * the gate. So ambiguity resolves in the direction that never hides one.
+ * A script's `// …` line comment, but only where the comment start needs no
+ * token context at all: a line whose first non-whitespace characters are `//`.
+ *
+ * A trailing `//` is left in place. Telling it apart from a literal's text
+ * (`"https://…"`, `` `${ … // … }` ``, `/[//]/`) is a lexer, and every lexer
+ * this gate grew shipped a case where it deleted a live reference: the
+ * operator is a character, the context is not.
+ *
+ * shortcut: a token reference after `//` on a code line is scanned as code and
+ * reported as dangling, though it is prose. That direction is the accepted one
+ * — an over-read costs a visible false alarm, an over-delete costs a silent
+ * pass, and this gate exists to remove silent passes. Upgrade to a real
+ * tokenizer if the false alarms ever cost more than that silence did.
  */
-const EXPRESSION_ENDS: Record<string, true> = {
-  "]": true, ")": true, '"': true, "'": true, "/": true,
-};
-/** A `(` after one of these opens a condition, not a value: its `)` leaves a statement position. */
-const CONDITION_KEYWORDS: Record<string, true> = {
-  if: true, while: true, for: true, switch: true, catch: true, with: true,
-};
-/** `previous` after a condition's `)` — not an operand, so a regex may follow. */
-const AFTER_CONDITION = ")condition";
-/** Keywords a regex may follow directly. */
-const REGEX_KEYWORDS: Record<string, true> = {
-  return: true, typeof: true, instanceof: true, in: true, of: true, new: true,
-  delete: true, void: true, throw: true, case: true, do: true, else: true,
-  yield: true, await: true,
-};
-
-/** The index after the quoted literal at `start`, or `start` when its line ends first. */
-function skipQuoted(text: string, start: number, quote: string): number {
-  for (let i = start + 1; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === "\\") i++;
-    else if (ch === quote) return i + 1;
-    else if (ch === "\n") return start;
-  }
-  return start;
-}
-
-/** The index after the regex literal at `start`, or `start` when it is not one. */
-function skipRegex(text: string, start: number): number {
-  let inClass = false;
-  for (let i = start + 1; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === "\\") i++;
-    else if (ch === "\n") return start;
-    else if (ch === "[") inClass = true;
-    else if (ch === "]") inClass = false;
-    else if (ch === "/" && !inClass) return i + 1;
-  }
-  return start;
-}
-
+const LINE_COMMENT = /^[ \t]*\/\/[^\n]*/gm;
 /**
- * A script's comments, removed with a scanner rather than a pattern.
- *
- * A `//` starts a comment only in code — never inside a string, template or
- * regex literal — and it starts after ANY token, so `x;// prose` and `)//`
- * are comments too. Anchoring the match on whitespace got both wrong: a
- * string's ` // ` swallowed a live reference later on its line (the silence
- * this gate exists to remove), while a tight comment's `var(--x)` stayed live
- * and failed valid code.
- *
- * A slash the scanner cannot place is read as a regex opener, so the text
- * after it stays live; the only cost of that guess being wrong is a comment
- * kept as code, which the link then reports.
+ * The same text's `//` tails, whatever opened them — the declaration view
+ * only (see `danglingReferences`). A name a kept comment mentions must never
+ * excuse a reference, so here the gate deletes more than it does for
+ * references: losing a real declaration surfaces a violation, never hides one.
  */
-function withoutScriptComments(text: string): string {
-  const out: string[] = [];
-  // Code frames sit above the template frame whose `${` opened them; the
-  // bottom frame is always code.
-  const modes: Array<"code" | "template"> = ["code"];
-  // `{` nesting inside the open `${ … }`: a `}` at zero hands back to the
-  // template text.
-  const braces: number[] = [0];
-  // Whether each open `(` is a control condition — its `)` ends a statement,
-  // where a regex may open, not a value, where `/` divides.
-  const conditions: boolean[] = [];
-  // The last significant character and word in code — the regex/division rule.
-  let previous = "";
-  let word = "";
-  let i = 0;
-
-  while (i < text.length) {
-    const ch = text[i] as string;
-
-    if (modes[modes.length - 1] === "template") {
-      if (ch === "\\") {
-        out.push(text.slice(i, i + 2));
-        i += 2;
-      } else if (ch === "`") {
-        out.push(ch);
-        modes.pop();
-        braces.pop();
-        previous = "";
-        word = "";
-        i += 1;
-      } else if (ch === "$" && text[i + 1] === "{") {
-        out.push("${");
-        modes.push("code");
-        braces.push(0);
-        previous = "{";
-        word = "";
-        i += 2;
-      } else {
-        out.push(ch);
-        i += 1;
-      }
-      continue;
-    }
-
-    const next = text[i + 1];
-    if (ch === "/" && next === "/") {
-      const end = text.indexOf("\n", i);
-      i = end < 0 ? text.length : end;
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      const end = text.indexOf("*/", i + 2);
-      i = end < 0 ? text.length : end + 2;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      const end = skipQuoted(text, i, ch);
-      // An apostrophe in JSX text opens no literal: read it as one character.
-      if (end > i) {
-        out.push(text.slice(i, end));
-        previous = ch;
-        word = "";
-        i = end;
-        continue;
-      }
-    }
-    if (ch === "`") {
-      out.push(ch);
-      modes.push("template");
-      braces.push(braces[braces.length - 1] as number);
-      word = "";
-      i += 1;
-      continue;
-    }
-    // A `/` divides only after a token that ends an expression; anything else
-    // is ambiguous and opens a regex, so no text can be read as a comment by
-    // mistake.
-    if (
-      ch === "/" &&
-      REGEX_KEYWORDS[word] !== true &&
-      !/^[A-Za-z0-9_$]$/.test(previous) &&
-      EXPRESSION_ENDS[previous] !== true
-    ) {
-      const end = skipRegex(text, i);
-      if (end > i) {
-        out.push(text.slice(i, end));
-        previous = "/";
-        word = "";
-        i = end;
-        continue;
-      }
-    }
-    // A condition's `)` is not an operand: the slash after it opens a regex.
-    if (ch === "(") {
-      conditions.push(CONDITION_KEYWORDS[word] === true);
-    } else if (ch === ")" && conditions.pop() === true) {
-      out.push(ch);
-      previous = AFTER_CONDITION;
-      word = "";
-      i += 1;
-      continue;
-    }
-    if (ch === "{" && modes.length > 1) {
-      braces[braces.length - 1] = (braces[braces.length - 1] as number) + 1;
-    } else if (ch === "}" && modes.length > 1) {
-      const depth = (braces[braces.length - 1] as number) - 1;
-      if (depth < 0) {
-        out.push(ch);
-        modes.pop();
-        braces.pop();
-        previous = "";
-        word = "";
-        i += 1;
-        continue;
-      }
-      braces[braces.length - 1] = depth;
-    }
-    out.push(ch);
-    if (!/\s/.test(ch)) {
-      previous = ch;
-      word = /[A-Za-z0-9_$]/.test(ch) ? word + ch : "";
-    }
-    i += 1;
-  }
-  return out.join("");
-}
+const LINE_TAIL = /\/\/[^\n]*/g;
 
 /**
  * `text` without its comments, read in the grammar the file is written in: a
  * stylesheet's block comments, an HTML shell's `<!-- … -->` ones, and — in the
  * shell's `<style>` blocks — the stylesheet's again. A TS/TSX module shares the
- * block form and adds the line form.
+ * block form and adds the line form, but only its line-start spelling and no
+ * `//` tail (`LINE_COMMENT`); a trailing `//` it cannot place stays live.
  *
  * One CSS-only stripper read an HTML comment as live markup: a token name
  * quoted in prose became a reference and failed the link, while inside a
@@ -454,7 +288,7 @@ function withoutScriptComments(text: string): string {
  */
 function withoutComments(file: string, text: string): string {
   const kind = consumerKind(file);
-  if (kind === "script") return withoutScriptComments(text);
+  if (kind === "script") return text.replace(LINE_COMMENT, "").replace(CSS_COMMENT, "");
   if (kind !== "html") return text.replace(CSS_COMMENT, "");
   return text
     .replace(HTML_COMMENT, "")
@@ -483,13 +317,17 @@ export interface DanglingReference {
  *
  * Comments are stripped in the file's own grammar before either match, so a
  * retired name quoted in prose — a CSS comment, an HTML shell's `<!-- -->`,
- * or a script's `// …` — neither becomes a reference nor a self-declaration
- * that suppresses the check.
+ * or a script's line-start `// …` — neither becomes a reference nor a
+ * self-declaration that suppresses the check. A script's trailing `//` is only
+ * half stripped: it stays live for the reference match (a visible false alarm)
+ * and is deleted for the declaration match, because a name a comment mentions
+ * must not excuse a reference. Both halves err toward reporting.
  */
 export function danglingReferences(file: string, text: string): DanglingReference[] {
   const live = withoutComments(file, text);
+  const declared = consumerKind(file) === "script" ? live.replace(LINE_TAIL, "") : live;
   const local = new Set(
-    [...live.matchAll(DECLARATION)]
+    [...declared.matchAll(DECLARATION)]
       .filter((match) => !new RegExp(`var\\s*\\(\\s*${match[1]}(?=[\\s,)])`).test(match[2] as string))
       .map((match) => (match[1] as string).slice(2)),
   );
