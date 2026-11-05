@@ -3,16 +3,18 @@
  * Mock env: in-memory KV stub + queue send recorder. No real bindings.
  *
  * Product lock (compass S4 / plan Clarify 4): a null `head_sha` must never
- * become a KV key and must always enqueue — comment-mention jobs are never
- * KV-skipped.
+ * become a KV key; a bot-mention job claims by its `comment_id` instead, so
+ * one comment triggers at most one review. A job with neither still enqueues.
  */
 import { describe, expect, mock, test, type Mock } from "bun:test";
 import type { KVNamespace, Queue } from "@cloudflare/workers-types";
-import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
+import { idemCommentKey, idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { claimIdempotency, handleReviewJob, idempotencyHit, type HandlerLog } from "../../src/worker/handlers";
 
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
+/** The `issue_comment` id a mention job claims its idempotency on. */
+const COMMENT_ID = 987654321;
 
 function prPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
   return {
@@ -36,6 +38,8 @@ function mentionPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPay
     repo: "inspector",
     pr_number: 42,
     head_sha: null,
+    // The comment trigger's identity — the only claim a no-sha job can make.
+    comment_id: COMMENT_ID,
     action: "created",
     triggered_by: "issue_comment",
     appRef: { appId: "11111111-2222-3333-4444-555555555555" },
@@ -184,20 +188,20 @@ describe("handleReviewJob — a key that still covers the commit", () => {
   });
 });
 
-describe("handleReviewJob — null head_sha (product lock)", () => {
-  test("null head_sha enqueues and never writes a KV key", async () => {
+describe("handleReviewJob — comment-trigger claim (no head_sha)", () => {
+  test("a mention job without a comment id enqueues and never writes a KV key", async () => {
     const { kv, store } = makeKvStub();
     const { queue, sent } = makeQueueStub();
     const log = makeLog();
 
-    const outcome = await handleReviewJob(mentionPayload(), {
+    const outcome = await handleReviewJob(mentionPayload({ comment_id: undefined }), {
       env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue },
       log,
     });
 
     expect(outcome).toEqual({ kind: "enqueued" });
     expect(queue.send).toHaveBeenCalledTimes(1);
-    expect(sent[0]).toEqual(mentionPayload());
+    expect(sent).toHaveLength(1);
     expect(kv.get).not.toHaveBeenCalled();
     expect(kv.put).not.toHaveBeenCalled();
     expect(store.size).toBe(0);
@@ -208,20 +212,47 @@ describe("handleReviewJob — null head_sha (product lock)", () => {
     });
   });
 
-  test("repeated bot-mention comments always enqueue (never KV-skipped)", async () => {
+  test("two deliveries of the same comment id enqueue once and claim the comment key", async () => {
+    const { kv, store } = makeKvStub();
+    const { queue, sent } = makeQueueStub();
+    const log = makeLog();
+
+    await handleReviewJob(mentionPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
+    log.info.mockClear();
+    const outcome = await handleReviewJob(mentionPayload(), {
+      env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue },
+      log,
+    });
+
+    expect(outcome).toEqual({ kind: "skipped", reason: "idempotency hit" });
+    expect(queue.send).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(1);
+    expect(log.info.mock.calls[0]?.[1]).toContain("idempotency hit");
+    const key = idemCommentKey({
+      installation_id: 12345,
+      owner: "acme",
+      repo: "inspector",
+      pr_number: 42,
+      comment_id: COMMENT_ID,
+    });
+    expect(store.get(key)?.value).toBe("1");
+    expect(store.get(key)?.expirationTtl).toBe(IDEMPOTENCY_SECONDS);
+  });
+
+  test("a different comment id on the same PR enqueues again", async () => {
     const { kv } = makeKvStub();
     const { queue, sent } = makeQueueStub();
     const log = makeLog();
 
     await handleReviewJob(mentionPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
-    const outcome = await handleReviewJob(mentionPayload(), {
+    const outcome = await handleReviewJob(mentionPayload({ comment_id: COMMENT_ID + 1 }), {
       env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue },
       log,
     });
 
     expect(outcome).toEqual({ kind: "enqueued" });
     expect(queue.send).toHaveBeenCalledTimes(2);
-    expect(sent).toHaveLength(2);
+    expect(sent[1]?.comment_id).toBe(COMMENT_ID + 1);
   });
 });
 
@@ -317,6 +348,8 @@ describe("payload hygiene — no secrets", () => {
       repo: true,
       pr_number: true,
       head_sha: true,
+      // The comment trigger's identity (issue_comment jobs only).
+      comment_id: true,
       action: true,
       triggered_by: true,
       // The App attribution reference — an id, never a secret.

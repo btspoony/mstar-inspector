@@ -444,7 +444,9 @@ const pullRequestSchema = z.object({
 const issueCommentSchema = z.object({
   action: z.string(),
   installation: installationSchema,
-  comment: z.object({ body: z.string() }).nullable().optional(),
+  // `id` is the comment-trigger's identity (`ReviewJobPayload.comment_id`);
+  // optional so a payload without it still classifies and enqueues.
+  comment: z.object({ body: z.string(), id: z.number().int().positive().optional() }).nullable().optional(),
   issue: z
     .object({
       number: z.number(),
@@ -733,6 +735,9 @@ function classifyIssueComment(parsed: unknown, log: HandlerLog | undefined, appS
       repo,
       pr_number: prNumber,
       head_sha: null,
+      // The comment trigger's identity — the idempotency claim for a job
+      // that states no commit. Omitted when the payload carried none.
+      ...(comment?.id === undefined ? {} : { comment_id: comment.id }),
       action: "created",
       triggered_by: "issue_comment",
     },

@@ -6,19 +6,20 @@
  * only (webhook 5s timeout budget; sha comes from the webhook payload).
  *
  * Idempotency (compass S4):
- * - KV key only for non-empty `head_sha`; a null/empty sha must never become
- *   a KV key — comment-mention jobs always enqueue.
+ * - KV key for a non-empty `head_sha` (the commit); for a bot-mention job —
+ *   which states no sha — by its `comment_id`. A job with neither enqueues
+ *   with no key (fail-safe: a duplicate costs a review, never a lost one).
  * - KV has no atomic conditional write (`noneMatch` is not in
- *   workers-types), so this is get-then-put with a race window; the D1
- *   UNIQUE constraint is the durable fallback.
+ *   workers-types), so this is get-then-put with a race window; for commit
+ *   jobs the D1 UNIQUE constraint is the durable fallback.
  * - KV read/write failure → conservative pass: log a warning and enqueue
- *   anyway (D1 fallback covers duplicates).
+ *   anyway (the D1 fallback covers duplicate commits).
  * - Ordering invariant: the KV key is claimed only AFTER `REVIEW_QUEUE.send`
  *   resolves. A key therefore means "enqueued" — a failed send leaves no key,
  *   so GitHub's retry re-enqueues instead of being KV-skipped.
  */
 import type { KVNamespace } from "@cloudflare/workers-types";
-import { idemKey, IDEMPOTENCY_SECONDS, IDEM_ENQUEUED, isEnqueuedClaim } from "../contracts/idem";
+import { idemCommentKey, idemKey, IDEMPOTENCY_SECONDS, IDEM_ENQUEUED, isEnqueuedClaim } from "../contracts/idem";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { Env } from "./env";
 
@@ -132,8 +133,8 @@ export async function claimIdempotency(
 
 /**
  * Handle a classified review job: log the seven-field structured event, run
- * the idempotency pre-check (non-empty head_sha only), enqueue, then claim
- * the KV key. A key therefore means "enqueued" — a failed send leaves no
+ * the idempotency pre-check (by commit sha, else by comment id), enqueue, then
+ * claim the KV key. A key therefore means "enqueued" — a failed send leaves no
  * key, so GitHub's retry re-enqueues instead of being KV-skipped.
  */
 export async function handleReviewJob(
@@ -142,16 +143,28 @@ export async function handleReviewJob(
 ): Promise<HandleOutcome> {
   const fields = toEventLog(payload);
 
-  // Non-empty sha only: a null/empty sha (e.g. comment-mention jobs) must
-  // never become a KV key and always enqueues (compass S4 / Clarify 4).
-  const key =
-    payload.head_sha
-      ? idemKey({
+  // A commit job claims its sha; a bot-mention job (no sha) claims its comment
+  // id, so one comment can trigger at most one review; a job with neither
+  // enqueues unclaimed, as every mention job did before.
+  //
+  // shortcut: the claim is get-then-put with a 24h TTL, so a duplicate
+  // delivery older than that enqueues again — upgrade to a D1 unique comment
+  // key only if >24h duplicate deliveries ever matter.
+  const key = payload.head_sha
+    ? idemKey({
+        installation_id: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        pr_number: payload.pr_number,
+        head_sha: payload.head_sha,
+      })
+    : payload.comment_id !== undefined
+      ? idemCommentKey({
           installation_id: payload.installation_id,
           owner: payload.owner,
           repo: payload.repo,
           pr_number: payload.pr_number,
-          head_sha: payload.head_sha,
+          comment_id: payload.comment_id,
         })
       : null;
 

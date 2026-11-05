@@ -39,6 +39,14 @@ export type ReviewJobPayload = {
    * for messages enqueued before this field existed.
    */
   head_at?: string;
+  /**
+   * The `issue_comment` id that produced this job — the comment trigger's
+   * identity, and the only thing an idempotency claim can key on when
+   * `head_sha` is null (a mention delivery states no commit). Present on
+   * every `issue_comment` job whose payload carried a readable `comment.id`;
+   * absent otherwise, exactly like `head_at`.
+   */
+  comment_id?: number;
   action: string;
   triggered_by: "pull_request" | "issue_comment";
   appRef: { appId: string };
