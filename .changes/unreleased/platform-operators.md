@@ -2,9 +2,9 @@
 category: Changed
 ---
 
-- **The deployment operator no longer holds tenant rights.** There is no
-  deployment-level admin allowlist any more; the new
-  `PLATFORM_OPERATORS` var is a pure allowlist that grants nothing by default.
+- **The deployment operator no longer holds tenant rights.** No deployment-level
+  allowlist grants tenant access any more; the new `PLATFORM_OPERATORS` var is a
+  pure allowlist for the operator console and grants nothing by default.
   The workspace gate classifies `member → invitee → operator-granted →
   operator-denied → outsider`: an operator who is a member keeps ordinary
   membership rights, one without a live `support_grants` row gets the same 404
@@ -23,12 +23,13 @@ category: Changed
   undismissable notice naming the operator, the grant reason and its expiry —
   with no control that ends or edits the grant. `owner`/`admin` can read the
   audit rows through `GET /dashboard/<ref>/api/audit`; a plain `member` gets
-  403. The notice re-reads on every in-app navigation, so a grant that lapses
-  (or appears) is gone (or shown) as soon as the tenant moves between pages.
+  403. The notice is read once per workspace session — the shell survives
+  client-side navigation — so a grant that lapses (or appears) mid-session
+  changes only after a reload.
 
 <!-- CN -->
-- **部署运维者不再自动获得租户权限。** 部署级管理员白名单已从授权路径中移除；
-  新的 `PLATFORM_OPERATORS` 变量只是一个白名单，默认不授予任何权限。工作区网关按
+- **部署运维者不再自动获得租户权限。** 已没有任何部署级白名单会授予租户权限；
+  新的 `PLATFORM_OPERATORS` 变量只是运维控制台的白名单，默认不授予任何权限。工作区网关按
   `member → invitee → operator-granted → operator-denied → outsider` 分类：本身是成员的
   运维者仍享有普通成员权限；没有有效 `support_grants` 行的运维者得到与外部人完全相同的
   404；**拥有**有效授权的运维者只能读取工作区身份字段与成员名单（登录名 + 角色）。App
@@ -41,5 +42,6 @@ category: Changed
   `expires_at` 判定；过期授权与无授权表现完全一致。
 - **租户看得见这段窗口。** 工作区的所有成员都会看到一条不可关闭的通知，写明运维者、
   授权原因与到期时间——且不提供任何结束或编辑授权的控件。`owner`/`admin` 可以通过
-  `GET /dashboard/<ref>/api/audit` 读取审计记录，普通 `member` 返回 403。通知在每次站内
-  导航时重新读取，因此授权过期（或新增）会在租户切换页面的那一刻消失（或出现）。
+  `GET /dashboard/<ref>/api/audit` 读取审计记录，普通 `member` 返回 403。通知在每个工作区
+  会话中只读取一次——外壳在客户端导航间存活——因此中途过期（或新增）的授权要等到刷新
+  页面才会变化。
