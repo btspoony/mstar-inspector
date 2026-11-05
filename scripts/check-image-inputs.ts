@@ -223,9 +223,14 @@ export function touchesImageInput(paths: string[]): boolean {
   return paths.some((path) => IMAGE_INPUT_PATTERNS.some((pattern) => pattern.test(path)));
 }
 
+/** `# rebuild:` at a line's comment start, indentation and the hash gap tolerated. */
+const REBUILD_MARKER = /^\s*#\s*rebuild:/;
+
 /**
- * A marker change is an added or removed line carrying `rebuild:`. Diff
- * headers (`+++ b/...`, `--- a/...`) are not content lines.
+ * A marker change is an added or removed line whose comment declares
+ * `rebuild:` — the marker convention is a Dockerfile comment, so prose and
+ * instruction lines that merely contain the text are not a declaration.
+ * Diff headers (`+++ b/...`, `--- a/...`) are not content lines.
  */
 export function touchesRebuildMarker(dockerfileDiff: string): boolean {
   return dockerfileDiff.split("\n").some(
@@ -233,7 +238,7 @@ export function touchesRebuildMarker(dockerfileDiff: string): boolean {
       (line.startsWith("+") || line.startsWith("-")) &&
       !line.startsWith("+++") &&
       !line.startsWith("---") &&
-      line.includes("rebuild:"),
+      REBUILD_MARKER.test(line.slice(1)),
   );
 }
 

@@ -292,6 +292,18 @@ describe("touchesRebuildMarker", () => {
   test("a removed marker line counts", () =>
     expect(touchesRebuildMarker("-# rebuild: stale note")).toBe(true));
 
+  test("an indented comment marker still counts", () =>
+    expect(touchesRebuildMarker("+  # rebuild: indented marker")).toBe(true));
+
+  test("a comment marker with no space after the hash counts", () =>
+    expect(touchesRebuildMarker("-#rebuild: tight marker")).toBe(true));
+
+  test("prose that merely mentions the marker does not count", () =>
+    expect(touchesRebuildMarker("+# the rebuild: note moved to AGENTS.md")).toBe(false));
+
+  test("an instruction line echoing the marker text does not count", () =>
+    expect(touchesRebuildMarker('+RUN echo "rebuild: stale image" > /tmp/note')).toBe(false));
+
   test("diff headers naming the file do not count", () =>
     expect(touchesRebuildMarker("--- a/sandbox-image/Dockerfile\n+++ b/sandbox-image/Dockerfile")).toBe(
       false,
