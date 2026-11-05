@@ -127,6 +127,18 @@ export function reviewAttribution(locale: Locale, review: PullRequestReview): st
   return t(locale, "pullRequests.reviewMeta", { model: review.model, provider: review.provider });
 }
 
+/**
+ * A round's wall clock as the row prints it: whole seconds under a minute,
+ * otherwise `m`/`s`. Rounds run for minutes, not days, so no date library (and
+ * no hour form) earns its place here; a sub-second run rounds to 0s.
+ */
+export function formatReviewDuration(locale: Locale, durationMs: number): string {
+  const totalSeconds = Math.round(durationMs / 1000);
+  if (totalSeconds < 60) return t(locale, "pullRequests.reviewDurationSeconds", { seconds: totalSeconds });
+  const minutes = Math.floor(totalSeconds / 60);
+  return t(locale, "pullRequests.reviewDurationMinutes", { minutes, seconds: totalSeconds % 60 });
+}
+
 /** Characters an id may carry literally; anything else is escaped. */
 const ID_LITERAL = /^[A-Za-z0-9-]$/;
 

@@ -141,6 +141,14 @@ export const zhCN: Dictionary = {
     reviews: "审查",
     noReviews: "此拉取请求还没有审查。",
     reviewMeta: "{model} · {provider}",
+    /** 审查行的轮次序号；发现行复用同一文案标明首次报告该发现的轮次。 */
+    reviewRound: "第 {round} 轮",
+    /** 单轮审查报告的发现数（英文区分为单复数两式）。 */
+    reviewFindings: "{count} 项发现",
+    reviewFindingsOne: "{count} 项发现",
+    /** 单轮审查耗时：不足一分钟按秒显示，否则按分秒显示。 */
+    reviewDurationSeconds: "{seconds} 秒",
+    reviewDurationMinutes: "{minutes} 分 {seconds} 秒",
     failures: "失败",
     noFailures: "此拉取请求没有失败记录。",
     findings: "发现",

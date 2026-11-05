@@ -57,6 +57,8 @@ export const FINDINGS: PullRequestFinding[] = [
     file_path: "src/db.ts",
     line: 42,
     body: "String interpolation reaches the SQL engine.",
+    // First reported by the PR's first round.
+    review_round: 1,
   },
   {
     finding_id: "f-2",
@@ -65,6 +67,8 @@ export const FINDINGS: PullRequestFinding[] = [
     file_path: "src/auth/session.ts",
     line: 88,
     body: "The refresh cookie is set with secure only.",
+    // Surfaced by the second round.
+    review_round: 2,
   },
   {
     finding_id: "f-3",
@@ -74,6 +78,8 @@ export const FINDINGS: PullRequestFinding[] = [
     file_path: "",
     line: null,
     body: "The variable holds the pending redirect target.",
+    // No stored review carries its first-seen sha, so no round chip renders.
+    review_round: null,
   },
 ];
 
@@ -86,6 +92,11 @@ export const REVIEWS: PullRequestReview[] = [
     provider: "openrouter",
     reviewed_at: "2026-11-01 08:00:00",
     head_sha: "aaa111bbb222",
+    // The second round: the first is the older row below.
+    round: 2,
+    findings: 2,
+    // 1m 5s — the minutes+seconds form.
+    duration_ms: 65_000,
   },
   {
     verdict: "ship it",
@@ -95,6 +106,10 @@ export const REVIEWS: PullRequestReview[] = [
     provider: "",
     reviewed_at: "2026-10-30 08:00:00",
     head_sha: "f00d12c1",
+    round: 1,
+    findings: 1,
+    // Historical row: no measured clock, so the row omits the time.
+    duration_ms: null,
   },
 ];
 

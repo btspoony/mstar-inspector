@@ -165,6 +165,14 @@ export const en = {
     reviews: "Reviews",
     noReviews: "No reviews for this pull request.",
     reviewMeta: "{model} · {provider}",
+    /** A review row's round ordinal. The findings row reuses it for the round that first reported the finding. */
+    reviewRound: "Round {round}",
+    /** Findings one review round reported, and its singular pair (`XxxOne` convention). */
+    reviewFindings: "{count} findings",
+    reviewFindingsOne: "{count} finding",
+    /** A round's wall clock: sub-minute runs read in seconds, longer ones as m/s. */
+    reviewDurationSeconds: "{seconds}s",
+    reviewDurationMinutes: "{minutes}m {seconds}s",
     failures: "Failures",
     noFailures: "No failures for this pull request.",
     findings: "Findings",

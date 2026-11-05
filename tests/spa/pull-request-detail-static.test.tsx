@@ -29,7 +29,7 @@ import {
   PullRequestDetail as PullRequestDetailFace,
   PullRequestDetailView,
 } from "../../src/spa/pages/PullRequestDetail";
-import { defaultFamily, recordId } from "../../src/spa/pages/pullRequestDetailModel";
+import { defaultFamily, formatReviewDuration, recordId } from "../../src/spa/pages/pullRequestDetailModel";
 import { withMarkup } from "./dom";
 import {
   DETAIL,
@@ -157,6 +157,19 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(parseRecordPage("reviews", null)).toBeNull();
   });
 
+  test("a round's wall clock reads in seconds under a minute and as m/s above it", () => {
+    expect(formatReviewDuration("en", 12_400)).toBe(
+      t("en", "pullRequests.reviewDurationSeconds", { seconds: 12 }),
+    );
+    expect(formatReviewDuration("en", 65_000)).toBe(
+      t("en", "pullRequests.reviewDurationMinutes", { minutes: 1, seconds: 5 }),
+    );
+    // The zh-CN templates are the same shape with their own units.
+    expect(formatReviewDuration("zh_CN", 65_000)).toBe(
+      t("zh_CN", "pullRequests.reviewDurationMinutes", { minutes: 1, seconds: 5 }),
+    );
+  });
+
   test("an absent must_fix tally degrades to zero; a malformed one fails; the opening family is records-first", () => {
     // The tally is a head fact newer than the envelope: a payload that predates
     // it keeps rendering, with no danger dot — the same skew tolerance the
@@ -184,7 +197,8 @@ describe("pull request detail data plane (pure helpers)", () => {
       total: 1,
     });
     // The nullable text fields coerce to "" at the parse boundary; the
-    // address fields pass through untouched.
+    // address fields pass through untouched. The round facts ride through when
+    // the payload carries them.
     expect(reviews?.items[0]).toEqual({
       verdict: "",
       summary_md: "",
@@ -192,6 +206,9 @@ describe("pull request detail data plane (pure helpers)", () => {
       provider: "",
       reviewed_at: "2026-11-01 08:00:00",
       head_sha: "aaa111bbb222",
+      round: 2,
+      findings: 2,
+      duration_ms: 65_000,
     });
     expect(findings?.items[0]).toEqual({
       finding_id: "f-1",
@@ -200,7 +217,21 @@ describe("pull request detail data plane (pure helpers)", () => {
       file_path: "",
       line: 42,
       body: "",
+      review_round: 1,
     });
+    // A payload that predates the round fields still renders its rows: the
+    // ordinal and clock are "no value" (`null`), the count is zero — never a
+    // coerced 0 round, and never NaN in the rendered count.
+    const legacyRound = parseRecordPage("reviews", {
+      items: [{ ...REVIEWS[0], round: "2", findings: "2", duration_ms: -1 }],
+      total: 1,
+    })?.items[0];
+    expect(legacyRound).toMatchObject({ round: null, findings: 0, duration_ms: null });
+    const legacyFinding = parseRecordPage("findings", {
+      items: [{ ...FINDINGS[0], review_round: 1.5 }],
+      total: 1,
+    })?.items[0];
+    expect(legacyFinding?.review_round).toBeNull();
     const detail: PullRequestDetail = {
       ...DETAIL,
       counts: { ...DETAIL.counts, reviews: 1, findings: 1 },
@@ -271,17 +302,18 @@ describe("pull request detail face (static SSR)", () => {
     );
 
   /**
-   * The head line (verdict, attribution, when, sha) of the review row that owns
-   * `summary` — the row's own text, so a claim about it reads the rendered
-   * content rather than the serialized tag around it. The head carries no
-   * identifying text of its own, so it is selected by its slot inside the row
-   * the summary identifies.
+   * The head line (verdict, attribution, round, findings, when, sha) of the
+   * review row whose round chip reads `Round {round}` — the row's own text, so
+   * a claim about it reads the rendered content rather than the serialized tag
+   * around it. Reviews no longer carry a summary body, so the round ordinal is
+   * the row's identifying text.
    */
-  const reviewHead = (container: HTMLElement, summary: string): string => {
-    const row = [...container.querySelectorAll<HTMLElement>("li")].find((item) =>
-      [...item.querySelectorAll("p")].some((node) => node.textContent === summary),
+  const reviewHead = (container: HTMLElement, round: number): string => {
+    const label = t("en", "pullRequests.reviewRound", { round });
+    const row = [...container.querySelectorAll<HTMLElement>("li")].find(
+      (item) => item.querySelector('[data-slot="review-round"]')?.textContent === label,
     );
-    expect(row, summary).toBeDefined();
+    expect(row, label).toBeDefined();
     return row?.querySelector<HTMLElement>('[data-slot="review-head"]')?.textContent ?? "";
   };
 
@@ -390,6 +422,9 @@ describe("pull request detail face (static SSR)", () => {
                 provider: "",
                 reviewed_at: "2026-11-01 08:00:00",
                 head_sha: "aaa111b",
+                round: 1,
+                findings: 0,
+                duration_ms: null,
               },
             ]),
           },
@@ -441,6 +476,9 @@ describe("pull request detail face (static SSR)", () => {
               provider: "openrouter",
               reviewed_at: "2026-11-01 08:00:00",
               head_sha: "aaa111bbb222",
+              round: 1,
+              findings: 0,
+              duration_ms: null,
             },
           ]),
         },
@@ -524,6 +562,7 @@ describe("pull request detail face (static SSR)", () => {
           file_path: "src/a.ts",
           line: 3,
           body: "Optional cleanup: the two branches repeat the same guard.",
+          review_round: null,
         },
         {
           finding_id: "f-nit",
@@ -532,6 +571,7 @@ describe("pull request detail face (static SSR)", () => {
           file_path: "src/b.ts",
           line: 4,
           body: "Naming only.",
+          review_round: null,
         },
       ]),
     });
@@ -603,6 +643,7 @@ describe("pull request detail face (static SSR)", () => {
         file_path: "",
         line: null,
         body: "The payload's severity is a free string; this one is outside the set.",
+        review_round: null,
       },
       {
         // An out-of-set severity with no identity text: its toggle must still
@@ -613,6 +654,7 @@ describe("pull request detail face (static SSR)", () => {
         file_path: "",
         line: null,
         body: "A second out-of-set finding, this one untitled.",
+        review_round: null,
       },
     ];
     const withOther = page([
@@ -625,6 +667,7 @@ describe("pull request detail face (static SSR)", () => {
         file_path: "",
         line: null,
         body: "The class the engine added; it buckets ahead of nit, before `other`.",
+        review_round: null,
       },
     ]);
     const read = await withMarkup(face({ findings: withOther }), (container) => {
@@ -717,8 +760,24 @@ describe("pull request detail face (static SSR)", () => {
     // ones with no text at all.
     const twin = face({
       findings: page([
-        { finding_id: "f-1", severity: "must-fix", title: "Guard the write", file_path: "", line: null, body: "" },
-        { finding_id: "f-2", severity: "must-fix", title: "Guard the write", file_path: "", line: null, body: "" },
+        {
+          finding_id: "f-1",
+          severity: "must-fix",
+          title: "Guard the write",
+          file_path: "",
+          line: null,
+          body: "",
+          review_round: null,
+        },
+        {
+          finding_id: "f-2",
+          severity: "must-fix",
+          title: "Guard the write",
+          file_path: "",
+          line: null,
+          body: "",
+          review_round: null,
+        },
       ]),
     });
     const labels = await withMarkup(twin, (container) =>
@@ -738,8 +797,8 @@ describe("pull request detail face (static SSR)", () => {
     // the position keeps the two toggles distinguishable.
     const untitled = face({
       findings: page([
-        { finding_id: "f-1", severity: "must-fix", title: "", file_path: "", line: null, body: "" },
-        { finding_id: "f-2", severity: "should-fix", title: "", file_path: "", line: null, body: "" },
+        { finding_id: "f-1", severity: "must-fix", title: "", file_path: "", line: null, body: "", review_round: null },
+        { finding_id: "f-2", severity: "should-fix", title: "", file_path: "", line: null, body: "", review_round: null },
       ]),
     });
     const findingLabels = await withMarkup(untitled, (container) =>
@@ -748,31 +807,6 @@ describe("pull request detail face (static SSR)", () => {
       ),
     );
     expect(findingLabels).toEqual([
-      `${t("en", "pullRequests.collapse")} — #1`,
-      `${t("en", "pullRequests.expand")} — #2`,
-    ]);
-
-    // The same case on the reviews family: no verdict and no head sha.
-    const anonymous = (summary: string, reviewed_at: string) => ({
-      verdict: "",
-      summary_md: summary,
-      model: "",
-      provider: "",
-      reviewed_at,
-      head_sha: "",
-    });
-    const unattributed = face({
-      findings: page([]),
-      failures: page([]),
-      reviews: page([anonymous("", "2026-11-01 08:00:00"), anonymous("An older round.", "2026-10-30 08:00:00")]),
-    });
-    expect(
-      await withMarkup(unattributed, (container) =>
-        [...container.querySelectorAll('[role="tabpanel"] li button[aria-expanded][aria-label]')].map(
-          (control) => control.getAttribute("aria-label") ?? "",
-        ),
-      ),
-    ).toEqual([
       `${t("en", "pullRequests.collapse")} — #1`,
       `${t("en", "pullRequests.expand")} — #2`,
     ]);
@@ -793,6 +827,7 @@ describe("pull request detail face (static SSR)", () => {
             file_path: "src/auth/session.ts",
             line: 88,
             body: "The refresh cookie is set with secure only.",
+            review_round: null,
           },
         ]),
       },
@@ -830,6 +865,9 @@ describe("pull request detail face (static SSR)", () => {
             provider: "openrouter",
             reviewed_at: "2026-11-01 08:00:00",
             head_sha: "aaa111b",
+            round: 1,
+            findings: 0,
+            duration_ms: null,
           },
         ]),
       },
@@ -850,7 +888,7 @@ describe("pull request detail face (static SSR)", () => {
         verdictText: verdict?.textContent ?? "",
         verdictTone: verdict?.getAttribute("data-tone") ?? null,
         badges: container.querySelectorAll('[role="tabpanel"] [data-slot="status-badge"]').length,
-        head: reviewHead(container, "The pipeline recorded no verdict."),
+        head: reviewHead(container, 1),
         label: label?.textContent ?? "",
         meta: meta?.textContent ?? "",
       };
@@ -870,7 +908,7 @@ describe("pull request detail face (static SSR)", () => {
     expect(read.meta).not.toContain(" · ·");
   });
 
-  test("a clean detail opens on the reviews family with the latest summary readable", async () => {
+  test("a clean detail opens on the reviews family: rounds, findings counts and run times", async () => {
     const reviews = page([
       {
         verdict: "ship it",
@@ -879,14 +917,20 @@ describe("pull request detail face (static SSR)", () => {
         provider: "openrouter",
         reviewed_at: "2026-11-01 09:00:00",
         head_sha: "aaa111b",
+        round: 2,
+        findings: 3,
+        duration_ms: 65_000,
       },
       {
         verdict: "ship it",
-        summary_md: "An older round, folded by default.",
+        summary_md: "An older round.",
         model: "kimi-for-coding",
         provider: "",
         reviewed_at: "2026-10-30 09:00:00",
         head_sha: "bbb222c",
+        round: 1,
+        findings: 1,
+        duration_ms: null,
       },
     ]);
     const markup = face(
@@ -896,34 +940,56 @@ describe("pull request detail face (static SSR)", () => {
     );
     const read = await withMarkup(markup, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
-      // The latest summary opens; older history is mounted but folded.
-      pairs: foldPairs(container),
+      rounds: [...container.querySelectorAll('[data-slot="review-round"]')].map((chip) => chip.textContent ?? ""),
+      counts: [...container.querySelectorAll('[data-slot="review-findings"]')].map((count) => count.textContent ?? ""),
+      // Only the measured round prints a time; the historical row omits it.
+      durations: [...container.querySelectorAll('[data-slot="review-duration"]')].map(
+        (duration) => duration.textContent ?? "",
+      ),
+      // The summary body and its expand/collapse control are gone: a review
+      // row is its head line alone.
+      foldControls: container.querySelectorAll('[role="tabpanel"] button[aria-expanded][aria-controls]').length,
+      bodies: [...container.querySelectorAll('[role="tabpanel"] p')].map((body) => body.textContent ?? ""),
       // No provider means no dangling separator: the attributed row reads
       // `model · provider`, the unattributed one stops at its model.
-      latestHead: reviewHead(container, "Everything the last round asked for is in."),
-      olderHead: reviewHead(container, "An older round, folded by default."),
-      // Review toggles name their verdict and short sha, so two "Collapse"s on
-      // this face are distinguishable.
-      labels: [...container.querySelectorAll('[role="tabpanel"] li button[aria-expanded][aria-label]')].map(
-        (control) => control.getAttribute("aria-label") ?? "",
-      ),
+      latestHead: reviewHead(container, 2),
+      olderHead: reviewHead(container, 1),
     }));
     expect(read.selected).toEqual([false, true, false]);
-    expect(markup).toContain("Everything the last round asked for is in.");
-    expect(read.pairs).toEqual([
-      { expanded: true, hidden: false },
-      { expanded: false, hidden: true },
+    expect(read.rounds).toEqual([
+      t("en", "pullRequests.reviewRound", { round: 2 }),
+      t("en", "pullRequests.reviewRound", { round: 1 }),
     ]);
+    expect(read.counts).toEqual([
+      t("en", "pullRequests.reviewFindings", { count: 3 }),
+      t("en", "pullRequests.reviewFindingsOne", { count: 1 }),
+    ]);
+    expect(read.durations).toEqual([t("en", "pullRequests.reviewDurationMinutes", { minutes: 1, seconds: 5 })]);
+    expect(read.foldControls).toBe(0);
+    expect(read.bodies).toEqual([]);
     expect(read.latestHead).toContain(
       t("en", "pullRequests.reviewMeta", { model: "kimi-for-coding", provider: "openrouter" }),
     );
     expect(read.olderHead).toContain("kimi-for-coding");
     expect(read.olderHead).not.toContain(" · ");
-    expect(read.labels).toEqual([
-      `${t("en", "pullRequests.collapse")} — ship it · aaa111b · #1`,
-      `${t("en", "pullRequests.expand")} — ship it · bbb222c · #2`,
-    ]);
+    expect(markup).not.toContain("Everything the last round asked for is in.");
     expect(markup).not.toContain(t("en", "pullRequests.noReviews"));
+  });
+
+  test("a finding row names the round that first reported it", async () => {
+    // The default face opens on findings, so its rows are the rendered list.
+    const rounds = await withMarkup(face(), (container) =>
+      [...container.querySelectorAll('[data-slot="finding"]')].map(
+        (row) => row.querySelector('[data-slot="finding-round"]')?.textContent ?? null,
+      ),
+    );
+    expect(rounds).toEqual([
+      t("en", "pullRequests.reviewRound", { round: 1 }),
+      t("en", "pullRequests.reviewRound", { round: 2 }),
+      // No stored review carries this finding's first-seen sha: no chip, not
+      // an empty one.
+      null,
+    ]);
   });
 
   test("an empty head sha renders neither chip nor aside row", async () => {
@@ -959,6 +1025,9 @@ describe("pull request detail face (static SSR)", () => {
         // Newest first, as the store orders them; one hour apart.
         reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
         head_sha: `sha${index}`,
+        round: 12 - index,
+        findings: 0,
+        duration_ms: null,
       })),
     );
     const markup = face(
@@ -1014,6 +1083,9 @@ describe("pull request detail face (static SSR)", () => {
         provider: "",
         reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
         head_sha: `sha${index}`,
+        round: 3 - index,
+        findings: 0,
+        duration_ms: null,
       })),
       30,
     );
@@ -1038,6 +1110,9 @@ describe("pull request detail face (static SSR)", () => {
         provider: "",
         reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
         head_sha: `sha${index}`,
+        round: 6 - index,
+        findings: 0,
+        duration_ms: null,
       })),
     );
     // Nothing was dropped: every entry renders and the truncation row is absent
@@ -1131,29 +1206,24 @@ describe("pull request detail face (static SSR)", () => {
     expect(read.labels.filter((label) => /^\s*·|·\s*$/.test(label))).toEqual([]);
   });
 
-  test("two records whose raw ids differ only by punctuation get distinct body ids", async () => {
-    // The record keys differ only in punctuation (space vs `T` in the
-    // timestamp), and the old fold-to-dash sanitisation mapped both onto one
-    // id: a duplicate DOM id whose `aria-controls` pointed at one body.
-    const punctuated = (reviewed_at: string, summary: string) => ({
-      verdict: "ship it",
-      summary_md: summary,
-      model: "kimi-for-coding",
-      provider: "",
-      reviewed_at,
-      head_sha: "aaa111b",
+  test("a finding body id encodes punctuation, so distinct ids never collide", async () => {
+    // Ids differing only by punctuation (space vs dash) and otherwise equal
+    // would map onto one id under a fold-to-dash sanitiser: a duplicate DOM id
+    // whose `aria-controls` pointed at the other record's body.
+    const finding = (finding_id: string, body: string) => ({
+      finding_id,
+      severity: "nit",
+      title: "",
+      file_path: "",
+      line: null,
+      body,
+      review_round: null,
     });
     const markup = face({
-      findings: page([]),
-      failures: page([]),
-      reviews: page([
-        punctuated("2026-11-01 08:00:00", "First record."),
-        punctuated("2026-11-01T08:00:00", "Second record."),
-      ]),
+      findings: page([finding("f 1", "First record."), finding("f-1", "Second record.")]),
     });
-    // The encoding is the contract: distinct keys, distinct ids — never one
-    // sanitised text two records can share.
-    expect(recordId("base", "2026-11-01 08:00:00")).not.toBe(recordId("base", "2026-11-01-08:00:00"));
+    // The encoding is the contract: distinct keys, distinct ids.
+    expect(recordId("base", "f 1")).not.toBe(recordId("base", "f-1"));
     const read = await withMarkup(markup, (container) => {
       const bodyOf = (id: string) =>
         [...container.querySelectorAll<HTMLElement>("p[id]")].find((body) => body.id === id) ?? null;

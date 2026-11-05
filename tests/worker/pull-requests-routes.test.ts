@@ -385,6 +385,11 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
       provider: "openrouter",
       reviewed_at: "2026-01-02 00:00:00",
       head_sha: "sha-1",
+      // The head's review carries no round facts: the parser coerces them to
+      // their "nothing recorded" face.
+      round: null,
+      findings: 0,
+      duration_ms: null,
     });
   });
 

@@ -41,6 +41,7 @@ import {
   copyOutcomeLabel,
   defaultFamily,
   foldLabel,
+  formatReviewDuration,
   recordId,
   reviewAttribution,
   SEVERITY_GROUPS,
@@ -403,6 +404,10 @@ const TIMELINE_DOT: Record<ActivityTone, string> = {
   neutral: "bg-(--border-strong)",
 };
 
+/** The round chip: a review row's ordinal, reused by the finding row it first reported. */
+const ROUND_CHIP =
+  "rounded-(--radius-control) border border-(--border-default) px-1.5 py-0.5 tabular-nums text-(--text-muted)";
+
 /**
  * The detail face — pure `t()` + data rendering, no window/router access.
  *
@@ -434,7 +439,6 @@ export function PullRequestDetailView({
   // Fold overrides only: an unset key keeps the entry's own default, so a
   // remount never has to seed state from props.
   const [openFindings, setOpenFindings] = useState<Readonly<Record<string, boolean>>>({});
-  const [openReviews, setOpenReviews] = useState<Readonly<Record<string, boolean>>>({});
   const baseId = useId();
 
   const findingsPage = records.findings.page;
@@ -820,6 +824,13 @@ export function PullRequestDetailView({
                             >
                               <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
                                 <span className="min-w-0 flex-1 text-sm font-medium">{finding.title}</span>
+                                {/* The round that FIRST reported this finding; a
+                                    finding no stored review carries has none. */}
+                                {finding.review_round === null ? null : (
+                                  <span data-slot="finding-round" className={ROUND_CHIP}>
+                                    {t(locale, "pullRequests.reviewRound", { round: finding.review_round })}
+                                  </span>
+                                )}
                                 {/* A coerced-empty file_path (repo-wide finding)
                                     renders no location at all — never a bare `:line`. */}
                                 {location === "" ? null : (
@@ -896,17 +907,10 @@ export function PullRequestDetailView({
                 <div className="flex flex-col gap-(--spacing-4)">
                   <ul className="flex flex-col gap-2">
                     {reviewsPage.items.map((review, index) => {
-                      // Position in the key keeps it unique; the identity claim
-                      // is the remount — this tree is keyed on the PR, so a
-                      // refetch's positional drift cannot survive into another
-                      // mount and the fold state never crosses PRs.
-                      const reviewKey = `${review.reviewed_at}-${review.head_sha}-${index}`;
-                      const open = openReviews[reviewKey] ?? index === 0;
-                      const id = recordId(baseId, reviewKey);
                       const attribution = reviewAttribution(locale, review);
                       return (
                         <li
-                          key={reviewKey}
+                          key={`${review.reviewed_at}-${review.head_sha}-${index}`}
                           className={cn(
                             "flex flex-col gap-2 rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5",
                             index === 0 ? "border-(--border-strong)" : "",
@@ -921,11 +925,34 @@ export function PullRequestDetailView({
                             {review.verdict === "" ? null : (
                               <StatusBadge tone={verdictTone(review.verdict)}>{review.verdict}</StatusBadge>
                             )}
+                            {/* The round's ordinal in the PR's history; a
+                                payload that predates it has no chip. */}
+                            {review.round === null ? null : (
+                              <span data-slot="review-round" className={ROUND_CHIP}>
+                                {t(locale, "pullRequests.reviewRound", { round: review.round })}
+                              </span>
+                            )}
                             {/* An unattributed review (v1 records no model) gets
                                 no empty span — the row starts at whatever it
                                 does carry. */}
                             {attribution === "" ? null : (
                               <span className="text-(--text-muted)">{attribution}</span>
+                            )}
+                            <span data-slot="review-findings" className="tabular-nums text-(--text-muted)">
+                              {t(
+                                locale,
+                                review.findings === 1
+                                  ? "pullRequests.reviewFindingsOne"
+                                  : "pullRequests.reviewFindings",
+                                { count: review.findings },
+                              )}
+                            </span>
+                            {/* Historical rows carry no measured clock: the
+                                row simply omits the time. */}
+                            {review.duration_ms === null ? null : (
+                              <span data-slot="review-duration" className="tabular-nums text-(--text-muted)">
+                                {formatReviewDuration(locale, review.duration_ms)}
+                              </span>
                             )}
                             <span className="ml-auto tabular-nums text-(--text-faint)" title={review.reviewed_at}>
                               {formatRelativeTime(review.reviewed_at, locale)}
@@ -940,31 +967,6 @@ export function PullRequestDetailView({
                               </span>
                             )}
                           </div>
-                          <p
-                            id={id}
-                            hidden={!open}
-                            className="whitespace-pre-wrap break-words text-sm text-(--text-secondary)"
-                          >
-                            {review.summary_md}
-                          </p>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="xs"
-                            className="self-start text-(--text-muted)"
-                            aria-expanded={open}
-                            aria-controls={id}
-                            aria-label={foldLabel(
-                              locale,
-                              open,
-                              [review.verdict, review.head_sha.slice(0, 7)].filter((part) => part !== "").join(" · "),
-                              index + 1,
-                            )}
-                            onClick={() => setOpenReviews((previous) => ({ ...previous, [reviewKey]: !open }))}
-                          >
-                            <ChevronRight aria-hidden="true" className={cn("transition-transform", open && "rotate-90")} />
-                            {t(locale, open ? "pullRequests.collapse" : "pullRequests.expand")}
-                          </Button>
                         </li>
                       );
                     })}

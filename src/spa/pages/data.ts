@@ -812,6 +812,12 @@ export type PullRequestReview = {
   provider: string;
   reviewed_at: string;
   head_sha: string;
+  /** Ordinal of this round in the PR's oldest-first review history; `null` when the payload carries none. */
+  round: number | null;
+  /** Findings this round reported. */
+  findings: number;
+  /** Wall clock of the round in ms; `null` for rows written before the measurement. */
+  duration_ms: number | null;
 };
 
 /** One review-failure log row — the diagnostic payload this tab exists for. */
@@ -825,6 +831,8 @@ export type PullRequestFinding = {
   /** `null` on file-level findings with no line anchor. */
   line: number | null;
   body: string;
+  /** The review round that first reported it; `null` when no review carries its first-seen sha. */
+  review_round: number | null;
 };
 
 /** The PR detail payload's record totals — one number per record family, plus
@@ -925,10 +933,21 @@ function parseLatestReview(value: unknown): { verdict: string; reviewed_at: stri
 }
 
 /**
+ * A round ordinal or a wall clock: a finite non-negative integer passes, and
+ * anything else is "no value" (`null`) rather than a coerced zero — 0 is a real
+ * duration and round 0 never exists.
+ */
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/**
  * One review entry (QC: the pipeline persists `provider: null`, and
  * model/summary/verdict can be absent too). The nullable text fields
  * coerce to "" at this boundary so the view never renders null; the
- * entry is dropped only when its timestamp/head anchor is missing.
+ * entry is dropped only when its timestamp/head anchor is missing. The
+ * round facts coerce to their "nothing recorded" face instead of dropping the
+ * row: a page read that predates them still renders its reviews.
  */
 function parsePullRequestReview(value: unknown): PullRequestReview | null {
   if (!isRecord(value)) return null;
@@ -940,6 +959,10 @@ function parsePullRequestReview(value: unknown): PullRequestReview | null {
     provider: typeof value.provider === "string" ? value.provider : "",
     reviewed_at: value.reviewed_at,
     head_sha: value.head_sha,
+    round: nonNegativeInteger(value.round),
+    // A non-numeric tally is zero findings, never NaN in the rendered count.
+    findings: typeof value.findings === "number" && Number.isFinite(value.findings) ? value.findings : 0,
+    duration_ms: nonNegativeInteger(value.duration_ms),
   };
 }
 
@@ -971,6 +994,7 @@ function parsePullRequestFinding(value: unknown): PullRequestFinding | null {
     file_path: typeof value.file_path === "string" ? value.file_path : "",
     line: value.line,
     body: typeof value.body === "string" ? value.body : "",
+    review_round: nonNegativeInteger(value.review_round),
   };
 }
 
