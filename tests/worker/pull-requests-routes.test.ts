@@ -154,6 +154,8 @@ describe("GET /api/apps/:appId/pull-requests", () => {
       head_sha: "sha-1",
       latest_review: null,
       failure_count: 0,
+      // D11/D16: no live lock → the explicit idle state, not an absent field.
+      reviewing: { state: "none" },
     });
     // The option set rides every answer, filtered or not.
     expect(body.repos).toEqual(["acme/widgets"]);
@@ -464,6 +466,45 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(await unknownPr.json()).toEqual({ error: "unknown pull request" });
   });
 
+  test("the catch-all filter selects rows outside the merge-class vocabulary", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    seedFindings(db, [
+      { id: "row-1", findingId: "F-1", mergeClass: "must-fix", filePath: null, lineStart: null },
+      { id: "row-2", findingId: "F-2", mergeClass: "blocker", filePath: null, lineStart: null },
+      { id: "row-3", findingId: "F-3", mergeClass: "critical", filePath: null, lineStart: null },
+    ]);
+
+    // The complement of the vocabulary, newest first — the same rows the SPA
+    // renders under its catch-all bucket.
+    const body = (await (await getFace(`${sectionPath("findings")}?unclassified=1`, db)).json()) as {
+      items: Array<{ finding_id: string }>;
+      total: number;
+    };
+    expect(body.items.map((item) => item.finding_id)).toEqual(["F-3", "F-2"]);
+    expect(body.total).toBe(2);
+
+    // It is a filter MODE, not a fifth severity spelling: `severity` still
+    // refuses the bucket name, and the two filters never combine.
+    const asSeverity = await getFace(`${sectionPath("findings")}?severity=other`, db);
+    expect(asSeverity.status).toBe(400);
+    expect(await asSeverity.json()).toEqual({ error: "invalid severity" });
+    const combined = await getFace(`${sectionPath("findings")}?unclassified=1&severity=must-fix`, db);
+    expect(combined.status).toBe(400);
+    expect(await combined.json()).toEqual({ error: "invalid filter" });
+    const malformed = await getFace(`${sectionPath("findings")}?unclassified=yes`, db);
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({ error: "invalid filter" });
+
+    // The same 404-outranks-400 rule the severity guard keeps.
+    const unknownPr = await getFace(
+      `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/999/findings?unclassified=yes`,
+      db,
+    );
+    expect(unknownPr.status).toBe(404);
+    expect(await unknownPr.json()).toEqual({ error: "unknown pull request" });
+  });
+
   test("malformed paging is a 400 on every section", async () => {
     const db = await fixture();
     seedInstallation(db);
@@ -557,5 +598,87 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     );
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "unknown app" });
+  });
+});
+
+/**
+ * Reviewing-now on the wire (compass D11/D16): both PR faces carry the
+ * three-state `reviewing` projection the STORE decides — the client does no
+ * inference — and a failed inflight read reaches the client as `unknown`
+ * rather than as the idle `none` or as a failed face.
+ */
+describe("GET pull-requests — reviewing projection", () => {
+  const LIST_PATH = `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests`;
+
+  /**
+   * One lock row for #131 as the pipeline writes it, and its `acquired_at`.
+   * `expiresAt` decides the disposition: future = held, past = expired.
+   */
+  function lock(db: TestD1, expiresAt: string, headSha = "sha-live"): string {
+    const acquiredAt = new Date(Date.now() - 60_000).toISOString();
+    db.raw
+      .prepare(
+        `INSERT INTO review_inflight
+           (installation_id, owner, repo, pr_number, workspace_id, attempt_id, head_sha, acquired_at, expires_at)
+         VALUES (77, 'acme', 'widgets', 131, 'ws-acme', 'attempt-1', ?, ?, ?)`,
+      )
+      .run(headSha, acquiredAt, expiresAt);
+    return acquiredAt;
+  }
+
+  async function listReviewing(db: TestD1) {
+    const res = await getFace(LIST_PATH, db);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { pull_requests: Array<{ number: number; reviewing: unknown }> };
+    return body.pull_requests.find((row) => row.number === 131)?.reviewing;
+  }
+
+  async function headReviewing(db: TestD1) {
+    const res = await getFace(detailPath, db);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { pull_request: { reviewing: unknown } }).pull_request.reviewing;
+  }
+
+  test("a live lock reaches both faces as live, carrying its head sha and acquisition time", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    const acquiredAt = lock(db, new Date(Date.now() + 3_600_000).toISOString());
+    const live = { state: "live", head_sha: "sha-live", acquired_at: acquiredAt };
+    expect(await listReviewing(db)).toEqual(live);
+    expect(await headReviewing(db)).toEqual(live);
+  });
+
+  test("a comment-triggered lock carries no head sha but still reads live", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    const acquiredAt = lock(db, new Date(Date.now() + 3_600_000).toISOString(), "");
+    expect(await listReviewing(db)).toEqual({ state: "live", head_sha: "", acquired_at: acquiredAt });
+  });
+
+  test("an expired lock reads none on both faces", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    lock(db, new Date(Date.now() - 1_000).toISOString());
+    expect(await listReviewing(db)).toEqual({ state: "none" });
+    expect(await headReviewing(db)).toEqual({ state: "none" });
+  });
+
+  test("a failed inflight read reaches both faces as unknown, never none", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    lock(db, new Date(Date.now() + 3_600_000).toISOString());
+    // The route builds its store from `env.DB`, so the wrapper is the fault
+    // injection: only the lock statement breaks, and both faces must still
+    // answer 200 with the degraded field.
+    const failing = {
+      prepare(sql: string) {
+        if (sql.includes("review_inflight")) throw new Error("D1_ERROR: dead binding");
+        return db.prepare(sql);
+      },
+      batch: db.batch.bind(db),
+      raw: db.raw,
+    };
+    expect(await listReviewing(failing as unknown as TestD1)).toEqual({ state: "unknown" });
+    expect(await headReviewing(failing as unknown as TestD1)).toEqual({ state: "unknown" });
   });
 });

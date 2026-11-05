@@ -356,17 +356,25 @@ export async function setCommentClaimSettings(
 
 /**
  * Save the operator default review depth, answering the level the server
- * stored. A 2xx with an unreadable body still landed, so the request value
- * stands in — the same rule as `setSystemConcurrency`.
+ * stored. The request carries the same `{ value }` group the GET reports, so a
+ * read result is a valid save body; a 2xx with an unreadable body still landed,
+ * so the request value stands in — the same rule as `setSystemConcurrency`.
  */
 export async function setDefaultReviewLevel(
   value: string,
   stored: ReviewLevelConfig,
 ): Promise<ReviewLevelConfig> {
-  const answer = await write("PATCH", "/runtime", { reviewLevel: value });
+  const answer = await write("PATCH", "/runtime", { reviewLevel: { value } });
   if (typeof answer === "object" && answer !== null && "reviewLevel" in answer) {
     const saved = answer.reviewLevel;
-    if (typeof saved === "string") return { ...stored, value: saved, degraded: false };
+    if (
+      typeof saved === "object" &&
+      saved !== null &&
+      "value" in saved &&
+      typeof saved.value === "string"
+    ) {
+      return { ...stored, value: saved.value, degraded: false };
+    }
   }
   return { ...stored, value, degraded: false };
 }

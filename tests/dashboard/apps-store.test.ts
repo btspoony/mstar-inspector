@@ -111,6 +111,12 @@ describe("review gate (migration 0045)", () => {
         .run(),
     ).toThrow();
     expect(await store.getCheckGate("app-corrupt")).toBeNull();
+
+    // The recovery: saveCheckGate's UPDATE never reads the columns it sets, so
+    // the settings route's reset overwrites the corrupt value on the SAME row
+    // and the next read is a real gate again (compass D13).
+    expect(await store.saveCheckGate("app-corrupt", { minScore: 80, passVerdicts: ["ship it"] })).toBe(true);
+    expect(await store.getCheckGate("app-corrupt")).toEqual({ minScore: 80, passVerdicts: ["ship it"] });
   });
 
   test("an empty verdict set is readable configuration that no review can pass", async () => {

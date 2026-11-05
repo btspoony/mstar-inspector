@@ -70,14 +70,23 @@ async function get(path: string, login: string | null, env: Env): Promise<Respon
 
 describe("/_internal_admin on saas", () => {
   test("an operator reads the namespace API", async () => {
-    const res = await get("/_internal_admin/api/me", OPERATOR, envFor("saas"));
+    const res = await get("/_internal_admin/api/users", OPERATOR, envFor("saas"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ login: OPERATOR });
+    const body = (await res.json()) as { users: Array<{ login: string }> };
+    expect(body.users.map((user) => user.login)).toContain(OPERATOR);
+  });
+
+  test("there is no identity read: /api/me is the unknown-path 404", async () => {
+    const env = envFor("saas");
+    const res = await get("/_internal_admin/api/me", OPERATOR, env);
+    const unknown = await get("/not-a-route", null, env);
+    expect(res.status).toBe(unknown.status);
+    expect(await res.text()).toBe(await unknown.text());
   });
 
   test("a signed-in non-operator gets the unknown-path 404, not a 403", async () => {
     const env = envFor("saas");
-    const res = await get("/_internal_admin/api/me", MEMBER, env);
+    const res = await get("/_internal_admin/api/users", MEMBER, env);
     const unknown = await get("/not-a-route", null, env);
     expect(res.status).toBe(unknown.status);
     expect(await res.text()).toBe(await unknown.text());
@@ -85,7 +94,7 @@ describe("/_internal_admin on saas", () => {
 
   test("an unauthenticated request gets 404, never a login redirect", async () => {
     const env = envFor("saas");
-    const res = await get("/_internal_admin/api/me", null, env);
+    const res = await get("/_internal_admin/api/users", null, env);
     const unknown = await get("/not-a-route", null, env);
     expect(res.status).toBe(unknown.status);
     expect(res.headers.get("location")).toBeNull();
@@ -95,7 +104,7 @@ describe("/_internal_admin on saas", () => {
   test("a forged session cookie is a 404", async () => {
     const env = envFor("saas");
     const res = await worker.fetch(
-      new Request("https://worker.local/_internal_admin/api/me", {
+      new Request("https://worker.local/_internal_admin/api/users", {
         headers: { Cookie: `${SESSION_COOKIE}=not-a-signed-value` },
       }),
       env,
@@ -107,7 +116,7 @@ describe("/_internal_admin on saas", () => {
     const env = envFor("saas");
     // Same signature, but this login was never created — the allowlist alone
     // must not authorize.
-    const res = await get("/_internal_admin/api/me", "never-signed-in", env);
+    const res = await get("/_internal_admin/api/users", "never-signed-in", env);
     expect(res.status).toBe(404);
   });
 });
@@ -163,7 +172,7 @@ describe("/_internal_admin on self-hosted", () => {
     const env = envFor("self-hosted");
     const unknown = await get("/not-a-route", null, env);
     const unknownText = await unknown.text();
-    for (const path of ["/_internal_admin/api/me", "/_internal_admin/flags"]) {
+    for (const path of ["/_internal_admin/api/users", "/_internal_admin/flags"]) {
       const res = await get(path, OPERATOR, env);
       expect(res.status).toBe(unknown.status);
       expect(await res.text()).toBe(unknownText);

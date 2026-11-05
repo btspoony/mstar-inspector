@@ -43,8 +43,10 @@ import { useRenameMembership } from "../workspace-memberships";
 import {
   activeChainTabId,
   appDisplayName,
+  checkGateSaveFields,
   configuredKeySlot,
   DEFAULT_CHAIN_NAME,
+  DEFAULT_CHECK_GATE,
   isPaused,
   isReviewLevel,
   isReviewTriggerMode,
@@ -1002,17 +1004,61 @@ export function ReviewGateSection({
   const gate = payload.check_gate;
   // An unreadable stored verdict list arrives as `null`: there is no value to
   // render and nothing a save could round-trip, so the section keeps its
-  // heading and states the degradation instead of offering dead controls.
-  if (gate === null) {
-    return (
-      <FlowSection title={t(locale, "settings.reviewGate")} subtitle={t(locale, "settings.reviewGateCopy")}>
-        <p role="status" className="text-sm text-(--tone-warn-fg)">
-          {t(locale, "settings.reviewGateUnreadable")}
-        </p>
-      </FlowSection>
-    );
-  }
+  // heading, states the degradation, and offers the one recovery that works.
+  if (gate === null) return <ReviewGateRecovery locale={locale} onSettings={onSettings} />;
   return <ReviewGateEditor locale={locale} gate={gate} onSettings={onSettings} />;
+}
+
+/**
+ * The unreadable-gate face. There is no value to edit, so the only way back is
+ * a re-write of the SAME row through the settings route's `save-check-gate`
+ * op: `saveCheckGate`'s UPDATE never reads the columns it sets, so the
+ * documented DDL defaults overwrite whatever the row holds and the readable
+ * gate section returns on the reload. No second writer and no new route — the
+ * control names the values it writes, and nothing is written until it is used.
+ */
+function ReviewGateRecovery({
+  locale,
+  onSettings,
+}: {
+  locale: SpaBoot["locale"];
+  onSettings: (fields: Record<string, string> | URLSearchParams) => Promise<OpNotice>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  async function reset(): Promise<void> {
+    setBusy(true);
+    try {
+      setNotice(
+        await onSettings(
+          checkGateSaveFields({
+            min_score: String(DEFAULT_CHECK_GATE.min_score),
+            pass_verdicts: DEFAULT_CHECK_GATE.pass_verdicts,
+          }),
+        ),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <FlowSection title={t(locale, "settings.reviewGate")} subtitle={t(locale, "settings.reviewGateCopy")}>
+      <p role="status" className="text-sm text-(--tone-warn-fg)">
+        {t(locale, "settings.reviewGateUnreadable")}
+      </p>
+      <div>
+        <Button type="button" disabled={busy} onClick={() => void reset()}>
+          {t(locale, "settings.reviewGateReset", {
+            score: DEFAULT_CHECK_GATE.min_score,
+            verdicts: DEFAULT_CHECK_GATE.pass_verdicts.join(", "),
+          })}
+        </Button>
+      </div>
+      <NoticeRegion notice={notice} />
+    </FlowSection>
+  );
 }
 
 function ReviewGateEditor({
@@ -1044,14 +1090,17 @@ function ReviewGateEditor({
   }
 
   async function save(): Promise<void> {
-    const fields = new URLSearchParams({ op: "save-check-gate", min_score: score.trim() });
-    // One field per checked box, in the canonical vocabulary order.
-    for (const verdict of PR_VERDICTS) {
-      if (verdicts.includes(verdict)) fields.append("pass_verdicts", verdict);
-    }
     setBusy(true);
     try {
-      setNotice(await onSettings(fields));
+      setNotice(
+        await onSettings(
+          checkGateSaveFields({
+            min_score: score.trim(),
+            // One field per checked box, in the canonical vocabulary order.
+            pass_verdicts: PR_VERDICTS.filter((verdict) => verdicts.includes(verdict)),
+          }),
+        ),
+      );
     } finally {
       setBusy(false);
     }

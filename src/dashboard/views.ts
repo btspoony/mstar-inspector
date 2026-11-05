@@ -361,22 +361,26 @@ ${STYLE}
  * Flow-page chrome: product name + GitHub identity + Logout, restyled to
  * the SPA navbar tokens. Manifest pages never pass `adminNav` (Members
  * stays on the dashboard shell only). No language toggle — current IA.
- * Apps points at the workbench itself (`/dashboard` — the
- * legacy `/dashboard/apps` page is a 301 alias).
+ * Brand and Apps point at the request's workspace Apps page when the page
+ * was reached through one (`/dashboard/<ref>/apps`), else the workbench
+ * (`/dashboard` — the legacy `/dashboard/apps` page is a 301 alias).
  */
 function shellHeader(
   user: { login: string; name?: string },
   adminNav = false,
   locale: Locale = "en",
+  workspaceRef: string | null = null,
 ): string {
   const display = user.name ? `${user.name} (${user.login})` : user.login;
+  const appsHref =
+    workspaceRef === null ? "/dashboard" : `/dashboard/${escapeHtml(workspaceRef)}/apps`;
   const members = adminNav
     ? `<a href="/dashboard/members">${escapeHtml(t(locale, "nav.members"))}</a>`
     : "";
   return `<header>
-    <h1><a href="/dashboard">${escapeHtml(t(locale, "nav.brand"))}</a></h1>
+    <h1><a href="${appsHref}">${escapeHtml(t(locale, "nav.brand"))}</a></h1>
     <span class="user">
-      <a href="/dashboard">${escapeHtml(t(locale, "nav.apps"))}</a>
+      <a href="${appsHref}">${escapeHtml(t(locale, "nav.apps"))}</a>
       ${members}
       <span>${escapeHtml(t(locale, "nav.signedInAs", { name: display }))}</span>
       <a href="/dashboard/logout">${escapeHtml(t(locale, "nav.logout"))}</a>
@@ -396,10 +400,14 @@ export function manifestStartPage(
   manifestJson: string,
   createUrl: string,
   locale: Locale = "en",
+  /** Workspace ref (id) the flow targets; null renders the deployment-level links. */
+  workspaceRef: string | null = null,
 ): string {
+  const appsHref =
+    workspaceRef === null ? "/dashboard" : `/dashboard/${escapeHtml(workspaceRef)}/apps`;
   return page(
     t(locale, "manifest.title"),
-    `${shellHeader(user, false, locale)}
+    `${shellHeader(user, false, locale, workspaceRef)}
   <main>
     <section class="enabled">
       <h2>${escapeHtml(t(locale, "manifest.start.heading"))}</h2>
@@ -407,7 +415,7 @@ export function manifestStartPage(
       <form method="post" action="${escapeHtml(createUrl)}">
         <input type="hidden" name="manifest" value="${escapeHtml(manifestJson)}">
         <button type="submit" class="primary">${escapeHtml(t(locale, "manifest.start.continue"))}</button>
-        <a class="cancel" href="/dashboard">${escapeHtml(t(locale, "manifest.start.cancel"))}</a>
+        <a class="cancel" href="${appsHref}">${escapeHtml(t(locale, "manifest.start.cancel"))}</a>
       </form>
     </section>
   </main>`,
@@ -426,7 +434,11 @@ export function manifestConfirmPage(
   user: { login: string; name?: string },
   app: { id: number; name: string; slug: string | null; webhookUrl: string },
   locale: Locale = "en",
+  /** Workspace ref (id) the held App commits into; null renders the deployment-level links. */
+  workspaceRef: string | null = null,
 ): string {
+  const appsHref =
+    workspaceRef === null ? "/dashboard" : `/dashboard/${escapeHtml(workspaceRef)}/apps`;
   const ready = t(locale, "manifest.confirm.ready", {
     appName: `<strong>${escapeHtml(app.name)}</strong>`,
     id: `<span class="id">${app.id}</span>`,
@@ -445,7 +457,7 @@ export function manifestConfirmPage(
       });
   return page(
     t(locale, "manifest.title"),
-    `${shellHeader(user, false, locale)}
+    `${shellHeader(user, false, locale, workspaceRef)}
   <main>
     <section class="enabled">
       <h2>${escapeHtml(t(locale, "manifest.confirm.heading"))}</h2>
@@ -455,7 +467,7 @@ export function manifestConfirmPage(
       <p class="note">${escapeHtml(t(locale, "manifest.confirm.note"))}</p>
       <form method="post" action="/dashboard/manifest/commit">
         <button type="submit" class="primary">${escapeHtml(t(locale, "manifest.confirm.create"))}</button>
-        <a class="cancel" href="/dashboard">${escapeHtml(t(locale, "manifest.confirm.cancel"))}</a>
+        <a class="cancel" href="${appsHref}">${escapeHtml(t(locale, "manifest.confirm.cancel"))}</a>
       </form>
     </section>
   </main>`,
@@ -486,22 +498,23 @@ export function manifestOnboardingPage(
   });
   // The legacy App family answers 404 under `strict`, so the primary CTA
   // follows the workspace the page was reached through. The secondary link
-  // stays `/dashboard`: under `strict` the root now redirects into the
-  // workspace Apps page (`signedInLanding`).
+  // follows the same workspace; only a page with no ref falls back to the
+  // workbench root.
   const settingsBase =
     workspaceRef === null
       ? "/dashboard/apps"
       : `/dashboard/${escapeHtml(workspaceRef)}/apps`;
+  const dashboardHref = workspaceRef === null ? "/dashboard" : settingsBase;
   return page(
     t(locale, "manifest.onboarding.title"),
-    `${shellHeader(user, false, locale)}
+    `${shellHeader(user, false, locale, workspaceRef)}
   <main>
     <section class="enabled">
       <h2>${escapeHtml(t(locale, "manifest.onboarding.heading"))}</h2>
       <p>${connected}</p>
       <p class="status">${escapeHtml(app.slug ? t(locale, "manifest.onboarding.slug", { slug: app.slug }) : t(locale, "manifest.onboarding.appId", { id: app.id }))}<br>${escapeHtml(t(locale, "manifest.onboarding.webhookUrl", { webhookUrl: app.webhookUrl }))}</p>
       <p class="note">${escapeHtml(t(locale, "manifest.onboarding.nextStep"))}</p>
-      <p><a class="primary" href="${settingsBase}/${app.id}/settings">${escapeHtml(t(locale, "manifest.onboarding.openSettings"))}</a> · <a href="/dashboard">${escapeHtml(t(locale, "manifest.onboarding.dashboard"))}</a></p>
+      <p><a class="primary" href="${settingsBase}/${app.id}/settings">${escapeHtml(t(locale, "manifest.onboarding.openSettings"))}</a> · <a href="${dashboardHref}">${escapeHtml(t(locale, "manifest.onboarding.dashboard"))}</a></p>
     </section>
   </main>`,
     locale,

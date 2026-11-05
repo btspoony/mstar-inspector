@@ -18,12 +18,14 @@ import { describe, expect, test } from "bun:test";
 import { act, createElement, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
+import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   appPullRequestsUrl,
   parsePullRequestList,
   pullRequestRefOf,
   type AppDetailSearch,
   type PullRequestDetail,
+  type PullRequestReviewing,
   type PullRequestRow,
   type SettingsPayload,
 } from "../../src/spa/pages/data";
@@ -122,6 +124,7 @@ const ROW_CLOSED: PullRequestRow = {
   head_sha: "ccc333ddd444",
   first_seen_at: "2026-10-20 08:00:00",
   last_seen_at: "2026-10-25 10:00:00",
+  reviewing: { state: "none" },
   latest_review: null,
   failure_count: 2,
 };
@@ -194,6 +197,66 @@ describe("pull requests list face (static SSR)", () => {
     expect(markup).toContain(t("en", "pullRequests.emptyDescription"));
     // No table shell leaks through the empty state.
     expect(markup).not.toContain("<table");
+  });
+});
+
+/**
+ * The reviewing-now badge on a LIST row (compass D11). The projection is the
+ * server's: `live` paints the badge with the holding attempt's head sha (or
+ * its acquisition time when a comment trigger carried none), `none` paints no
+ * label at all, and `unknown` paints a note that is neither of those.
+ *
+ * Asserted through the rendered status badges, not the markup text: `none`
+ * must leave exactly the row's state pill, which is what "no queued /
+ * superseded / abandoned label of its own" means.
+ */
+describe("reviewing-now badge on the list row (D11)", () => {
+  const ACQUIRED_AT = new Date(Date.now() - 5 * 60_000).toISOString();
+
+  const replay = (reviewing: PullRequestReviewing): string =>
+    renderToStaticMarkup(
+      createElement(PullRequestsListView, {
+        locale: "en",
+        rows: [{ ...ROW_OPEN, reviewing }],
+        onOpen: noSearch,
+      }),
+    );
+
+  const badges = (markup: string): Promise<string[]> =>
+    withMarkup(markup, (container) =>
+      [...container.querySelectorAll('[data-slot="status-badge"]')].map((badge) => badge.textContent ?? ""),
+    );
+
+  test("a live lock paints the badge carrying the attempt's head sha", async () => {
+    const texts = await badges(replay({ state: "live", head_sha: "abc1234def567", acquired_at: ACQUIRED_AT }));
+    expect(texts).toEqual([
+      t("en", "pullRequests.state.open"),
+      t("en", "pullRequests.reviewingHead", { head: "abc1234" }),
+    ]);
+  });
+
+  test("a live lock with no head sha carries its acquisition time instead", async () => {
+    const texts = await badges(replay({ state: "live", head_sha: "", acquired_at: ACQUIRED_AT }));
+    expect(texts[1]).toBe(
+      t("en", "pullRequests.reviewingSince", { time: formatRelativeTime(ACQUIRED_AT, "en") }),
+    );
+  });
+
+  test("no live lock leaves the state pill alone — no badge, no label of its own", async () => {
+    // The one shape every non-reviewing disposition (no row, expired,
+    // released, queued without a lock, superseded before admission, abandoned
+    // after release) renders as.
+    const texts = await badges(replay({ state: "none" }));
+    expect(texts).toEqual([t("en", "pullRequests.state.open")]);
+  });
+
+  test("an unreadable inflight read paints unknown — not reviewing, not idle", async () => {
+    const texts = await badges(replay({ state: "unknown" }));
+    expect(texts).toEqual([
+      t("en", "pullRequests.state.open"),
+      t("en", "pullRequests.reviewingUnknown"),
+    ]);
+    expect(texts.join(" ")).not.toContain(t("en", "pullRequests.reviewingHead", { head: "abc1234" }));
   });
 });
 
