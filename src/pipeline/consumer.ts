@@ -138,6 +138,7 @@ import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import type { ShellCommand } from "./shell-command";
 import {
+  BOUNDED_READ_ABSENT_FLAG,
   buildGitOpsCommands,
   CLONE_DIR,
   compareStatusCommand,
@@ -540,11 +541,13 @@ export type ConsumerLogFields = {
   /**
    * Why the seat's report document yielded no sections (the `none` headings):
    * one named cause per rejected read, so a missing narrative is attributable
-   * instead of silently absent. `invalid-document` carries the gate's own
-   * reason in `report_doc_error`; `stale-head` carries the head the document
-   * was bound to in `report_doc_head_sha` (a validated sha, never free text).
+   * instead of silently absent. `absent` means the read itself proved the seat
+   * wrote no document; `unreadable` is a broken read of it, so the two never
+   * read alike. `invalid-document` carries the gate's own reason in
+   * `report_doc_error`; `stale-head` carries the head the document was bound to
+   * in `report_doc_head_sha` (a validated sha, never free text).
    */
-  report_doc?: "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document" | "stale-head";
+  report_doc?: "absent" | "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document" | "stale-head";
   report_doc_error?: string;
   report_doc_head_sha?: string;
 };
@@ -1056,10 +1059,11 @@ async function applyPendingLifecycleJournals(
  * audited fixed-path read (`readReportCommand`) yields `<content>\n<flag>`;
  * anything other than a flag-0 document that passes `validateReportDoc` and is
  * bound to `expectedHeadSha` is NO report (the sections render `none`) and
- * leaves ONE warn naming which cause rejected it. Each narrative field is
- * redacted before it can reach a public body — the seat's text is model output
- * like any other, and a prompt-injected credential can hide in a PR description
- * it quoted.
+ * leaves ONE warn naming which cause rejected it — a document the read PROVED
+ * missing (`absent`) and a read that broke (`unreadable`) are separate names,
+ * though both render `none`. Each narrative field is redacted before it can
+ * reach a public body — the seat's text is model output like any other, and a
+ * prompt-injected credential can hide in a PR description it quoted.
  */
 async function readReportDoc(
   sandbox: ReviewSandbox,
@@ -1068,10 +1072,12 @@ async function readReportDoc(
   log: ConsumerLog,
   fields: ConsumerLogFields,
 ): Promise<ReportDoc | null> {
-  const read = await boundedRead(sandbox, readReportCommand(), POST_RUNNER_READ_TIMEOUT_MS);
+  const read = await boundedRead(sandbox, readReportCommand(), POST_RUNNER_READ_TIMEOUT_MS, true);
   if (read.failure !== null) {
+    // `absent` and `unreadable` are distinct failures of the SAME disclosure:
+    // the seat wrote no document vs. the read of it broke. Both render `none`.
     log.warn(
-      { ...fields, report_doc: read.failure === "overflow" ? "overflow" : "unreadable" },
+      { ...fields, report_doc: read.failure },
       `report document ${read.failure} — sections render none`,
     );
     return null;
@@ -1991,11 +1997,26 @@ function roundContextCoverage(discussion: Discussion): Coverage {
  */
 type BoundedRead = { text: string | null; failure: "overflow" | "unreadable" | null };
 
-function parseBoundedRead(stdout: string): BoundedRead {
+/**
+ * The report read's own result: the same transport, plus `absent` — the
+ * command itself proved the path is not there. ONLY a read whose command
+ * probes for the file may report it (see `readReportCommand`); every other
+ * producer never emits that flag, so their reads cannot report it and keep
+ * their meanings.
+ */
+type ReportBoundedRead = { text: string | null; failure: "overflow" | "unreadable" | "absent" | null };
+
+function parseBoundedRead(stdout: string): BoundedRead;
+function parseBoundedRead(stdout: string, provesAbsence: true): ReportBoundedRead;
+function parseBoundedRead(stdout: string, provesAbsence = false): ReportBoundedRead {
   const out = stdout.trimEnd();
   const split = out.lastIndexOf("\n");
   if (split < 0) return { text: null, failure: "unreadable" };
-  if (out.slice(split + 1).trim() !== "0") return { text: null, failure: "overflow" }; // beyond the byte bound
+  const flag = out.slice(split + 1).trim();
+  // Absence is claimed only where the command PROVED it; for every other read
+  // a stray `2` keeps its old meaning (over the byte bound).
+  if (provesAbsence && flag === BOUNDED_READ_ABSENT_FLAG) return { text: null, failure: "absent" };
+  if (flag !== "0") return { text: null, failure: "overflow" }; // beyond the byte bound
   return { text: out.slice(0, split), failure: null };
 }
 
@@ -2003,7 +2024,19 @@ async function boundedRead(
   sandbox: ReviewSandbox,
   command: ShellCommand,
   timeoutMs: number,
-): Promise<BoundedRead> {
+): Promise<BoundedRead>;
+async function boundedRead(
+  sandbox: ReviewSandbox,
+  command: ShellCommand,
+  timeoutMs: number,
+  provesAbsence: true,
+): Promise<ReportBoundedRead>;
+async function boundedRead(
+  sandbox: ReviewSandbox,
+  command: ShellCommand,
+  timeoutMs: number,
+  provesAbsence = false,
+): Promise<ReportBoundedRead> {
   let read;
   try {
     read = await sandbox.runCommand(command, { timeout: timeoutMs });
@@ -2011,7 +2044,7 @@ async function boundedRead(
     return { text: null, failure: "unreadable" };
   }
   if (read.exitCode !== 0) return { text: null, failure: "unreadable" };
-  return parseBoundedRead(read.stdout);
+  return provesAbsence ? parseBoundedRead(read.stdout, true) : parseBoundedRead(read.stdout);
 }
 
 /**

@@ -105,8 +105,8 @@ const IN_IMAGE_PATH_RE = /^\/[A-Za-z0-9._/-]+$/;
  * `<content>\n1\n` (a byte exists BEYOND the bound). A missing/unreadable file
  * fails the `head` chain (non-zero exit, empty stdout). The path is
  * allowlisted and single-quoted HERE so every caller inherits the same guard
- * (diff capture, recheck document/status, report); `maxBytes` is always an
- * in-repo constant, never payload-derived.
+ * (diff capture, recheck document/status); `maxBytes` is always an in-repo
+ * constant, never payload-derived.
  */
 export function boundedFileReadCommand(path: string, maxBytes: number): ShellCommand {
   assertShellSafe(path, IN_IMAGE_PATH_RE, "bounded read path");
@@ -115,6 +115,14 @@ export function boundedFileReadCommand(path: string, maxBytes: number): ShellCom
       `tail -c '+${maxBytes + 1}' '${path}' | head -c '1' | wc -c`,
   );
 }
+
+/**
+ * The bounded read's THIRD flag line, beside `0` (fit) and `1` (over the byte
+ * bound). It is not a byte count: only a command that itself probed for the
+ * path may emit it, and only `readReportCommand` does. Consumers must treat it
+ * as "the read PROVED the file is not there", never as a failed read.
+ */
+export const BOUNDED_READ_ABSENT_FLAG = "2";
 
 /** A commit sha interpolated into a command path segment — hex only. */
 function assertSha(value: string, label: string): void {
@@ -298,9 +306,23 @@ export function readRecheckStatusCommand(path: string = RECHECK_STATUS_PATH): Sh
  * the same transport and the same fail-closed rule as the recheck read: the
  * Worker validates the seat's narrative against its own gate
  * (`validateReportDoc`) and renders `none` headings when it cannot.
+ *
+ * A seat that wrote NO document and a read that broke are different facts, so
+ * this command proves the first one itself: a positive `[ -e ]` probe
+ * short-circuits a missing path to the absent flag line (`\n2\n`, exit 0),
+ * while a file that exists but cannot be read still fails the `head` chain
+ * (non-zero exit) as any transport fault does.
+ *
+ * shortcut: `test -e` cannot tell "no such file" from a parent directory the
+ * shell may not search, so an EACCES-only miss reads as absent; a sandboxed
+ * report path has no untraversable parent, so upgrade if one ever appears.
  */
 export function readReportCommand(path: string = REPORT_OUTPUT_PATH): ShellCommand {
-  return boundedFileReadCommand(path, REPORT_FILE_MAX_BYTES);
+  assertShellSafe(path, IN_IMAGE_PATH_RE, "bounded read path");
+  return shellCommand(
+    `if [ -e '${path}' ]; then ${boundedFileReadCommand(path, REPORT_FILE_MAX_BYTES)}; ` +
+      `else printf '\\n${BOUNDED_READ_ABSENT_FLAG}\\n'; fi`,
+  );
 }
 
 /** Main-flow commands in execution order (clone → sha → diff → numstat). */
