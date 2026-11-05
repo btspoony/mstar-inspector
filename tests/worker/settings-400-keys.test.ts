@@ -358,6 +358,22 @@ describe("CARRY-2: verify-route eligibility rejection gains the keyed face", () 
 describe("review depth op (per-App review level)", () => {
   const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
 
+  /** The operator-default depth leaf's exact statement, counted per request. */
+  const DEFAULT_LEVEL_SQL = "SELECT value FROM review_runtime_settings WHERE key = ?";
+  const countDefaultLevelReads = (db: TestD1): { db: TestD1; reads: () => number } => {
+    let reads = 0;
+    return {
+      db: {
+        ...db,
+        prepare(sql: string) {
+          if (sql.trim() === DEFAULT_LEVEL_SQL) reads++;
+          return db.prepare(sql);
+        },
+      } as TestD1,
+      reads: () => reads,
+    };
+  };
+
   /** The stored column — the zero-write / stored assertion. */
   const storedLevel = (db: TestD1, appId: string): string | null => {
     const row = db.raw.query("SELECT review_level FROM github_apps WHERE id = ?").get(appId) as {
@@ -416,16 +432,21 @@ describe("review depth op (per-App review level)", () => {
       db,
       "INSERT INTO review_runtime_settings (key, value, updated_at, updated_by) VALUES ('review.level.default', 'deep', '2026-01-01T00:00:00.000Z', 'octocat')",
     );
-    const manager = await getJson(SETTINGS_API, "octocat", makeEnv(db));
+    const counted = countDefaultLevelReads(db);
+    const manager = await getJson(SETTINGS_API, "octocat", makeEnv(counted.db));
     expect(manager.status).toBe(200);
     const managerBody = (await manager.json()) as { app: Record<string, unknown> };
     expect(managerBody.app.review_level).toBeNull();
     expect(managerBody.app.default_review_level).toBe("deep");
+    // The manager face names the inherit target: exactly one operator-default read.
+    expect(counted.reads()).toBe(1);
 
-    const member = await getJson(SETTINGS_API, "mallory", makeEnv(db));
+    const member = await getJson(SETTINGS_API, "mallory", makeEnv(counted.db));
     expect(member.status).toBe(200);
     const memberBody = (await member.json()) as { app: Record<string, unknown> };
     expect("review_level" in memberBody.app).toBe(false);
     expect("default_review_level" in memberBody.app).toBe(false);
+    // The identity-only face renders no depth control, so it pays no settings read.
+    expect(counted.reads()).toBe(1);
   });
 });

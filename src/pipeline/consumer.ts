@@ -342,11 +342,14 @@ export type ConsumerLogFields = {
    * concurrency reader's degraded-read warn, relayed on this channel.
    * `review_check_budgets_degraded` (same channel, spec §7.10): the check-budget
    * reader's degraded-read warn.
+   * `review_level_degraded` (same channel, migration 0047): the operator-default
+   * review-level read's degraded warn — a corrupt row falls back to `default`
+   * and says so here instead of degrading silently.
    * `review_no_increment` (union widened ADDITIVELY): an incremental round whose
    * `base...head` is genuinely empty — the prior round already covers this head,
    * so the delivery is acked without a new review body.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_no_increment";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_no_increment";
   action: string;
   installation_id: number;
   owner: string;
@@ -3362,10 +3365,23 @@ async function processMessage(
     // The App's review depth (migration 0047), resolved from the SAME row read
     // that resolved its credentials — the admission TTL, the runner budget and
     // the guard backoff all use it. A NULL (or off-vocabulary) column follows
-    // the operator default: one bounded settings read, issued only then.
-    level =
-      parseAppReviewLevel(resolution.reviewLevel) ??
-      (await readDefaultReviewLevel(deps.env.DB)).value;
+    // the operator default: one bounded settings read, issued only then. A
+    // degraded read answers the documented default and owes the operator one
+    // structured warn (the concurrency reader's contract) — never a silent
+    // fallback.
+    const appLevel = parseAppReviewLevel(resolution.reviewLevel);
+    if (appLevel !== null) {
+      level = appLevel;
+    } else {
+      const fallback = await readDefaultReviewLevel(deps.env.DB);
+      level = fallback.value;
+      if (fallback.degraded) {
+        deps.log.warn(
+          { ...baseFields, event: "review_level_degraded", level: fallback.value },
+          "operator default review level read degraded — using the documented default",
+        );
+      }
+    }
     // Supersede skip (migration 0044): a queued delivery whose PR head has
     // already advanced must cost nothing that can fail it, hold the guard, or
     // start work — no admission row, no sandbox, no Check, no publication.

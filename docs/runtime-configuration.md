@@ -64,11 +64,27 @@ to the default instead of pinning a value nobody can change.
 
 ## Per-App layer — `github_apps` columns and their tables
 
-Read from the App row on the code's existing per-message read (`getAppById`), so
-a change applies to the next delivery: the admission switches (`review_enabled`,
-`review_level`, `review_trigger_mode`) are resolved before admission, the Check
-gate and image after the review. Values are validated at the write face and
-again in the store; the DDL `CHECK` is the last line.
+Read per delivery, so a change applies to the next webhook or the next queue
+message. The parameters sit at three distinct decision points:
+
+- **Webhook classification and enqueue.** `review_trigger_mode` is read by the
+  webhook route and gates only the `pull_request` auto face (`open` →
+  `opened`; `every_push` → every whitelisted action; `manual` → none — a bot
+  mention is then the only trigger). The mention target is the row's
+  `github_slug`, not the mode. `allowlist_enabled` is read there too — a
+  refused review-triggering delivery is answered before any ledger write or
+  enqueue. Neither gates the consumer.
+- **Consumer, before admission.** `review_enabled` (the paused gate) and
+  `review_level` (the seat split, runner budget and guard TTL) ride the
+  per-message row read. `sandbox_image_id` is resolved on its own App-row read
+  immediately after — still before the in-flight guard and sandbox creation, so
+  an unknown or disabled image never starts a container.
+- **After the review.** `check_min_score` and `check_pass_verdicts` are evaluated
+  when the review's Check is reconciled. `github_visibility` is a UI hint only
+  and never gates anything.
+
+Values are validated at the write face and again in the store; the DDL `CHECK`
+is the last line.
 
 | Column | Default | Accepted values | Changed by | Effect |
 |---|---|---|---|---|
@@ -83,9 +99,21 @@ again in the store; the DDL `CHECK` is the last line.
 
 `app_owner_allowlist` (migration `0045`) holds the owner logins the switch
 enforces — one row per `(app_id, owner_login)`, replaced atomically by
-`save-allowlist`. Per-App credentials, provider keys and the model chain are
-also App rows, encrypted in D1 rather than Worker secrets; they are not part of
-this inventory because they are not tuning parameters (see `.env.example`).
+`save-allowlist`.
+
+Model selection is per-App configuration, not a credential: the chains are
+stored as plaintext TEXT in two App tables (migration `0017`) and are read on
+every message, with no deployment-level fallback.
+
+| Row | Absent default | Accepted values | Changed by | Effect |
+|---|---|---|---|---|
+| `app_model_chains`, reserved name `default` | no row = no chain: that App's reviews fail closed (`per-App config incomplete: app <id>: missing model chain`) | ≥1 comma-separated provider/model selectors, stored verbatim | dashboard App Settings, `save-chain` (empty clears the row) | The chain every seat without its own reference runs |
+| `app_model_chains`, named rows | only the `default` row exists | a non-reserved chain name + selectors, stored verbatim | dashboard App Settings, `add-chain` / `remove-chain` | Per-seat alternative chains; removing one deletes its seat references in the same batch |
+| `app_model_chain_seats` | no row = the seat uses the `default` chain | `(role, chain name)` for the audit seats, naming an existing chain | dashboard App Settings, `save-roles` (blank = the default chain) | Routes one seat to a named chain; a reference to a missing chain fails that App's reviews closed |
+
+Per-App credentials and provider keys are the App rows that ARE encrypted in D1
+rather than Worker secrets; they stay out of this inventory because they are not
+tuning parameters (see `.env.example`).
 
 ### Review depth
 

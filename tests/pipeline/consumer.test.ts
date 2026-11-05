@@ -1113,6 +1113,27 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(1);
   });
 
+  test("a corrupt operator default degrades to 'default' and warns once (migration 0047)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // Present but off the shared vocabulary: `readDefaultReviewLevel` answers
+    // the documented default with `degraded: true` instead of throwing, so the
+    // review still runs — and the consumer says so on its structured channel.
+    seedDefaultReviewLevel(db, "sideways");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerCall = sandbox.calls.find((c) => c.cmd.includes("--input"))!;
+    expect(runnerCall.cmd).toContain("--level 'default'");
+    const warns = logLines.filter((l) => l.level === "warn" && l.fields.event === "review_level_degraded");
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.fields.app_id).toBe(TEST_APP_ID);
+    expect(warns[0]!.fields.level).toBe("default");
+    expect(reviewCount(db)).toBe(1);
+  });
+
   test("two Apps on one consumer resolve their own depth (I-000387)", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
