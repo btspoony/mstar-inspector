@@ -6,7 +6,7 @@
  * Mounted in happy-dom because the states live in effects and both controls
  * are Radix widgets that only answer real events.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { type Element as DomElement, type Window } from "happy-dom";
@@ -286,6 +286,73 @@ describe("Flags screen", () => {
     await surface.close();
   });
 
+  test("the Saved. note clears itself 3s after the write lands", async () => {
+    jest.useFakeTimers();
+    const surface = await flagsScreen((request) =>
+      request.method === "PATCH" ? json({ key: "review_global", enabled: false }) : json({ flags: FLAGS }),
+    );
+    try {
+      await surface.click(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null);
+      await surface.click(
+        [...surface.win.document.querySelectorAll("button")].find(
+          (node) => node.textContent === "Confirm",
+        ) as unknown as DomElement,
+      );
+      expect(rowContaining(surface, "review_global")?.textContent).toContain("Saved.");
+
+      // Short-lived by contract: still there just before its own deadline…
+      await act(async () => {
+        jest.advanceTimersByTime(2999);
+      });
+      expect(rowContaining(surface, "review_global")?.textContent).toContain("Saved.");
+
+      // …and gone once it passes, so a stale confirmation never lies.
+      await act(async () => {
+        jest.advanceTimersByTime(1);
+      });
+      expect(rowContaining(surface, "review_global")?.textContent).not.toContain("Saved.");
+    } finally {
+      jest.useRealTimers();
+      await surface.close();
+    }
+  });
+
+  test("unmounting the screen cancels the note's pending auto-clear", async () => {
+    // A surviving timer would call setSavedKey into an unmounted tree.
+    jest.useFakeTimers();
+    const surface = await flagsScreen((request) =>
+      request.method === "PATCH" ? json({ key: "review_global", enabled: false }) : json({ flags: FLAGS }),
+    );
+    try {
+      await surface.click(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null);
+      await surface.click(
+        [...surface.win.document.querySelectorAll("button")].find(
+          (node) => node.textContent === "Confirm",
+        ) as unknown as DomElement,
+      );
+      const armed = jest.getTimerCount();
+      await surface.close();
+      // The teardown removed exactly one timer: the one this save armed.
+      expect(jest.getTimerCount()).toBe(armed - 1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("the confirmation dialog opens with focus on Cancel, never Confirm", async () => {
+    const surface = await flagsScreen(() => json({ flags: FLAGS }));
+    try {
+      await surface.click(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null);
+      const dialog = surface.win.document.querySelector('[role="alertdialog"]');
+      const focused = surface.win.document.activeElement;
+      // A stray Enter or a blind keypress must land on the harmless control.
+      expect(focused?.textContent).toBe("Cancel");
+      expect(focused !== null && dialog?.contains(focused)).toBe(true);
+    } finally {
+      await surface.close();
+    }
+  });
+
   test("a non-AdminWriteError failure names the flag, not a literal {flag}", async () => {
     const surface = await flagsScreen((request) => {
       if (request.method === "PATCH") throw new Error("network down");
@@ -494,7 +561,7 @@ describe("Runtime screen", () => {
   test("the depth card shows the operator default and one save fires exactly one PATCH", async () => {
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
-        ? json({ reviewLevel: "deep" })
+        ? json({ reviewLevel: { value: "deep" } })
         : json({
             concurrency: 24,
             min: 1,
@@ -519,7 +586,11 @@ describe("Runtime screen", () => {
     await surface.click(trigger!.closest("form")!.querySelector('button[type="submit"]'));
 
     expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
-      { url: "/_internal_admin/api/runtime", method: "PATCH", body: { reviewLevel: "deep" } },
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { reviewLevel: { value: "deep" } },
+      },
     ]);
     expect(surface.container.querySelector("#default-review-level")?.textContent).toContain("Deep");
     expect(surface.text()).toContain("Saved.");
@@ -751,6 +822,16 @@ describe("Workspaces screen", () => {
     await surface.close();
   });
 
+  test("an empty list plus a typed query keeps the page empty state", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: [] }));
+    await surface.type('input[type="search"]', "zzz");
+    // Nothing was loaded, so the query has nothing to fail to match.
+    const empty = surface.container.querySelector('[data-slot="empty-state"]');
+    expect(empty?.textContent).toContain("No workspaces");
+    expect(empty?.textContent).not.toContain("No matches");
+    await surface.close();
+  });
+
   test("a zh_CN render shows Chinese copy for the page and the search control", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }), "zh_CN");
     expect(surface.text()).toContain("所有在线工作区。");
@@ -962,6 +1043,16 @@ describe("Users screen", () => {
     await surface.type('input[type="search"]', "zzz");
     expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No matches");
     expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).not.toContain("No users");
+    await surface.close();
+  });
+
+  test("an empty list plus a typed query keeps the page empty state", async () => {
+    const surface = await usersScreen(() => json({ users: [] }));
+    await surface.type('input[type="search"]', "zzz");
+    // Nothing was loaded, so the query has nothing to fail to match.
+    const empty = surface.container.querySelector('[data-slot="empty-state"]');
+    expect(empty?.textContent).toContain("No users");
+    expect(empty?.textContent).not.toContain("No matches");
     await surface.close();
   });
 

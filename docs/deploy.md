@@ -2359,8 +2359,10 @@ treated as absent, never a throw — a review must still run.
 
 The operator default sits on the `/_internal_admin` runtime page, on the same
 call as the caps: `PATCH /_internal_admin/api/runtime` with
-`{"reviewLevel": "quick" | "default" | "deep"}` (one save writes one
-parameter). It applies only to Apps that have not chosen a depth of their own.
+`{"reviewLevel": {"value": "quick" | "default" | "deep"}}` (one save writes one
+parameter). The body takes the same `reviewLevel` group the GET reports, so the
+read result is a valid save body. It applies only to Apps that have not chosen a
+depth of their own.
 
 The tier decides three bounds, all defined in `src/pipeline/consumer.ts`:
 `runnerTimeoutMs` (600 s for `quick`/`default`, 840 s for `deep`),

@@ -2394,7 +2394,7 @@ describe("the tenant support notice renders nothing until the client read", () =
 });
 
 describe("review gate section", () => {
-  test("an unreadable gate renders the read-only notice instead of the controls", () => {
+  test("an unreadable gate renders the read-only notice plus one reset that names the defaults", () => {
     const unreadable = renderToStaticMarkup(
       createElement(ReviewGateSection, {
         locale: "en",
@@ -2406,9 +2406,14 @@ describe("review gate section", () => {
     // sentence fragment that carries no special characters.
     expect(t("en", "settings.reviewGateUnreadable")).toContain("stored review gate could not be read");
     expect(unreadable).toContain("stored review gate could not be read");
-    // No control and no save path — a gate that cannot be read cannot be edited.
+    // The editor stays unreachable — there is no value to round-trip.
     expect(unreadable).not.toContain(t("en", "settings.reviewGateScore"));
     expect(unreadable).not.toContain(t("en", "settings.reviewGateSave"));
+    // The recovery control names the DDL defaults it writes back (migration 0045).
+    const resetLabel = t("en", "settings.reviewGateReset", { score: 80, verdicts: "ship it" });
+    expect(resetLabel).toContain("80");
+    expect(resetLabel).toContain("ship it");
+    expect(unreadable).toContain(resetLabel);
 
     const readable = renderToStaticMarkup(
       createElement(ReviewGateSection, {
@@ -2419,6 +2424,59 @@ describe("review gate section", () => {
     );
     expect(readable).toContain(t("en", "settings.reviewGateSave"));
     expect(readable).not.toContain("stored review gate could not be read");
+    // A readable gate is edited, never reset — one recovery per face.
+    expect(readable).not.toContain(resetLabel);
+  });
+
+  test("the reset posts the default gate through the existing save-check-gate op", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1/settings");
+    try {
+      const calls: Array<Record<string, string> | URLSearchParams> = [];
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      await act(async () =>
+        root.render(
+          createElement(ReviewGateSection, {
+            locale: "en",
+            payload: { ...detailPayload(), check_gate: null },
+            onSettings: async (fields) => {
+              calls.push(fields);
+              return { kind: "success", message: "Saved the review gate for Acme." };
+            },
+          }),
+        ),
+      );
+
+      const resetLabel = t("en", "settings.reviewGateReset", { score: 80, verdicts: "ship it" });
+      const button = [...container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent === resetLabel,
+      );
+      expect(button).toBeDefined();
+      await act(async () => {
+        button?.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+      });
+
+      expect(calls).toHaveLength(1);
+      const fields = calls[0]!;
+      const params =
+        fields instanceof URLSearchParams ? fields : new URLSearchParams(fields as Record<string, string>);
+      // The same op the editor posts — the same row, re-written without ever
+      // reading it; no second writer and no new route.
+      expect(params.get("op")).toBe("save-check-gate");
+      expect(params.get("min_score")).toBe("80");
+      expect(params.getAll("pass_verdicts")).toEqual(["ship it"]);
+      // The outcome lands in the section's own region.
+      expect(
+        [...container.querySelectorAll('[role="status"]')].some((node) =>
+          node.textContent?.includes("Saved the review gate for Acme."),
+        ),
+      ).toBe(true);
+
+      await act(async () => root.unmount());
+    } finally {
+      cleanup();
+    }
   });
 });
 

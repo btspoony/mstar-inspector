@@ -2099,6 +2099,29 @@ describe("createReviewConsumer", () => {
     });
   });
 
+  test("a superseded delivery never reads the operator default depth (I-000411)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    kvState.entries.set(ENQUEUED_KEY(NEW_SHA), "1");
+    const counted = countDefaultLevelReads(db);
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: counted.db as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    // The App row's depth is NULL, so a delivery that went on to review WOULD
+    // consult the operator default (the sibling cases above pin that read).
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
+    // A superseded delivery is not the live review: it resolves nothing, so it
+    // pays no settings read and cannot degrade the skip on one.
+    expect(counted.reads()).toBe(0);
+  });
+
   test("a newer ledger commit with NO queued job is reviewed, not skipped (open mode / ignored delivery)", async () => {
     // The ledger advances on deliveries that enqueue nothing (`synchronize` in
     // `open` mode, a paused App, a failed send). Skipping on the ledger alone

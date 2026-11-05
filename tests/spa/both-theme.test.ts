@@ -56,16 +56,19 @@ import type { ThemeName } from "../../src/design-system/tokens";
 import { resolveTheme, tokenNames } from "../../src/design-system/tokens";
 import { t } from "../../src/i18n";
 import { InsightsRecordsView } from "../../src/spa/pages/AppInsightsTab";
+import { PullRequestsListView } from "../../src/spa/pages/AppPullRequestsTab";
 import type { AppsPayload, InsightsSummary, SettingsManagePayload } from "../../src/spa/pages/data";
 import { AppsView } from "../../src/spa/pages/AppsPage";
 import { LoginPage } from "../../src/spa/pages/LoginPage";
 import { MembersList, WorkspacePanel } from "../../src/spa/pages/MembersPage";
+import { PullRequestDetailView } from "../../src/spa/pages/PullRequestDetail";
 import { SettingsView } from "../../src/spa/pages/SettingsPage";
 import { SupportPage } from "../../src/spa/pages/SupportPage";
 import { WorkspaceSettingsPage } from "../../src/spa/pages/WorkspaceSettingsPage";
 import { WorkspaceSetupPage } from "../../src/spa/pages/WorkspaceSetupPage";
 import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
+import { DETAIL, ROW_OPEN, recordsOf } from "./pull-request-fixtures";
 import { PALETTE_UTILITY_SOURCE } from "../helpers/tailwind-palette";
 
 const NAMES = tokenNames();
@@ -433,10 +436,17 @@ async function mountAdmin(
 
 type Surface = {
   readonly name: string;
-  /** Copy the render must carry — proves the pass measured a real face. */
+  /** Copy the render must carry — proves the pass measured a real surface. */
   readonly marker: string;
   readonly render: () => string | Promise<string>;
 };
+
+/** A held review lock, as both PR faces receive it (compass D11/D16). */
+const LIVE_REVIEWING = {
+  state: "live",
+  head_sha: "aaa111bbb222",
+  acquired_at: "2026-11-01T10:00:00.000Z",
+} as const;
 
 /**
  * The census, in the plan's order. Each surface renders the loaded face a user
@@ -477,6 +487,41 @@ const SURFACES: readonly Surface[] = [
     name: "App detail — insights",
     marker: t("en", "insights.heading"),
     render: () => renderLight(createElement(InsightsRecordsView, { locale: "en", data: INSIGHTS })),
+  },
+  // The two PR faces carry the D11 reviewing badge: a quiet accent outline
+  // beside the filled state pill, and a quiet neutral note for an unreadable
+  // read. Both faces are measured with a LIVE lock so the new vocabulary is
+  // actually painted here, not only in the loading/empty branches.
+  {
+    name: "App detail — pull requests",
+    marker: t("en", "pullRequests.columnPr"),
+    render: () =>
+      renderLight(
+        createElement(PullRequestsListView, {
+          locale: "en",
+          // Both badge faces in one measured surface: the accent outline for a
+          // held lock and the neutral note for an unreadable read.
+          rows: [
+            { ...ROW_OPEN, reviewing: LIVE_REVIEWING },
+            { ...ROW_OPEN, number: 7, title: "Unreadable lock", reviewing: { state: "unknown" } },
+          ],
+          onOpen: () => {},
+        }),
+      ),
+  },
+  {
+    name: "App detail — pull request",
+    marker: t("en", "pullRequests.reviewingHead", { head: LIVE_REVIEWING.head_sha.slice(0, 7) }),
+    render: () =>
+      renderLight(
+        createElement(PullRequestDetailView, {
+          locale: "en",
+          detail: { ...DETAIL, pull_request: { ...DETAIL.pull_request, reviewing: LIVE_REVIEWING } },
+          records: recordsOf(),
+          onEnsureSection: () => {},
+          onLoadPage: () => {},
+        }),
+      ),
   },
   {
     name: "Members",
@@ -611,11 +656,13 @@ const SURFACES: readonly Surface[] = [
 ];
 
 describe("both-theme acceptance pass", () => {
-  test("the pass enumerates the eight customer faces and the console's six", () => {
+  test("the pass enumerates the ten customer faces and the console's six", () => {
     expect(SURFACES.map((surface) => surface.name)).toEqual([
       "Apps list",
       "App detail — settings",
       "App detail — insights",
+      "App detail — pull requests",
+      "App detail — pull request",
       "Members",
       "Workspace settings",
       "Workspace setup",

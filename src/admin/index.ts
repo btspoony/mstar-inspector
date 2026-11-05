@@ -63,13 +63,6 @@ type AdminRoute = {
   handler: (c: AdminContext) => Response | Promise<Response>;
 };
 
-/** The operator's own identity — the read that proves gate → handler wiring. */
-async function readMe(c: AdminContext): Promise<Response> {
-  const login = await operatorLogin(c);
-  if (!login) return c.notFound();
-  return c.json({ login });
-}
-
 /** Every known flag with its effective value; an absent row reads as enabled. */
 async function readFlags(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
@@ -220,6 +213,17 @@ function commentClaimBody(value: unknown): CommentClaimValues | null {
     : null;
 }
 
+/**
+ * The accepted `reviewLevel` body shape: the `value` of the GET group, with any
+ * `levels` / `degraded` alongside it ignored — the read result is a valid save
+ * body as-is. The store owns the vocabulary and the refusal message.
+ */
+function reviewLevelValue(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { value: level } = value as { value?: unknown };
+  return typeof level === "string" ? level : null;
+}
+
 /** The accepted `checkBudgets` body shape; the store owns the accepted ranges. */
 function checkBudgetsBody(value: unknown): CheckBudgetValues | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -306,10 +310,14 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     }
   }
   if (rawLevel !== undefined) {
+    const level = reviewLevelValue(rawLevel);
+    if (level === null) {
+      return c.json({ error: "body must be { reviewLevel: { value } }" }, 400);
+    }
     try {
       // The store owns the vocabulary and the refusal message.
       return c.json({
-        reviewLevel: await setDefaultReviewLevel(db, rawLevel as ReviewLevel, login),
+        reviewLevel: { value: await setDefaultReviewLevel(db, level as ReviewLevel, login) },
       });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
@@ -610,7 +618,6 @@ export function localizeDocument(html: string, locale: Locale): string {
 }
 
 const ADMIN_ROUTES: readonly AdminRoute[] = [
-  { method: "get", path: "/api/me", handler: readMe },
   { method: "get", path: "/api/flags", handler: readFlags },
   { method: "patch", path: "/api/flags", handler: setFlag },
   { method: "get", path: "/api/runtime", handler: readRuntime },

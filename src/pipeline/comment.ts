@@ -133,11 +133,13 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
   const closers = closersFor(md);
   if (md.length + closers.length <= limit) return `${md}${closers}`;
   // Shortening the head can drop the opener a closer answered, so re-derive
-  // the closers on each shorter head until head + closers + "…" fits.
-  let head = md.slice(0, limit - 1);
+  // the closers on each shorter head until head + closers + "…" fits. Cuts go
+  // through the pair-safe slice: a cut between an emoji's halves posts a
+  // replacement character instead of the character.
+  let head = sliceWithoutSplittingPair(md, limit - 1);
   for (;;) {
     const headClosers = closersFor(head);
-    const next = head.slice(0, Math.max(0, limit - 1 - headClosers.length));
+    const next = sliceWithoutSplittingPair(head, Math.max(0, limit - 1 - headClosers.length));
     if (next === head) return `${head}${headClosers}…`;
     head = next;
   }
@@ -282,11 +284,11 @@ function stripFactEcho(
  * `omittedFindings` is the count dropped by the consumer's merge-class cap
  * (B4): the footer tells readers the review is a Top-N subset.
  *
- * The report tail is reserved BEFORE the clamp: the clamp keeps the head, so a
- * tail appended first would be the first thing lost on a long body. The core
- * is what gets shortened; the tail is only degraded when it cannot fit alone.
- * `limit` lets the prepared body pass its marker-reserved ceiling, so the two
- * clamps agree on what the tail may consume.
+ * The omitted-findings footer and the report tail are reserved BEFORE the
+ * clamp: the clamp keeps the head, so a part appended first would be the first
+ * thing lost on a long body. The core is what gets shortened; the tail is only
+ * degraded when it cannot fit alone. `limit` lets the prepared body pass its
+ * marker-reserved ceiling, so the two clamps agree on what the tail may consume.
  */
 export function buildReviewBody(
   output: ReviewOutput,
@@ -315,20 +317,32 @@ export function buildReviewBody(
     rendered = { ...rendered, summary_md: truncateSummary(rendered.summary_md) };
   }
   let core = renderReviewMarkdown(rendered);
+  // Preserved parts: each states something a head-keeping cut would silently
+  // remove. The closure is where the round's prior-findings verdicts are
+  // published, and the footer discloses the findings the merge-class cap
+  // dropped — losing either hides the very fact it exists to state.
+  const closure = reportParts === undefined ? "" : reportParts.revalidated;
+  const footer = omittedFindings > 0 ? `*(+${omittedFindings} more findings omitted)*` : "";
+  const closureReserve = closure === "" ? 0 : closure.length + 2;
+  const footerReserve = footer === "" ? 0 : footer.length + 2;
   // The report fields are composed into the engine's layout by ANCHOR, so the
   // renderer keeps owning the layout and an absent report leaves the string
-  // byte-identical to the pre-report shape.
-  const tail = reportParts === undefined ? "" : buildReportTail(reportParts.report, limit);
+  // byte-identical to the pre-report shape. Its budget excludes the preserved
+  // parts so the degradation ladder shortens a section body rather than
+  // overflow.
+  const tail =
+    reportParts === undefined
+      ? ""
+      : buildReportTail(reportParts.report, limit - closureReserve - footerReserve);
   if (reportParts !== undefined) {
-    core = insertReportFields(core, reportParts.report, reportParts.revalidated);
+    core = insertReportFields(core, reportParts.report);
   }
-  const sections = [core];
-  if (omittedFindings > 0) sections.push(`*(+${omittedFindings} more findings omitted)*`);
-  const body = sections.join("\n\n");
-  if (tail === "") return clampKeepingHead(body, limit);
-  // One blank line joins the tail; the tail already leaves room for the core's
-  // cut marker, so this never exceeds `limit`.
-  return `${clampKeepingHead(body, limit - tail.length - 2)}\n\n${tail}`;
+  const reserved = closureReserve + footerReserve + (tail === "" ? 0 : tail.length + 2);
+  // One blank line joins each preserved part; all of them leave room for the
+  // core's cut marker, so this never exceeds `limit`.
+  return [clampKeepingHead(core, limit - reserved), closure, footer, tail]
+    .filter((part) => part !== "")
+    .join("\n\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -439,7 +453,7 @@ function priorFindingLines(rows: ClosureRow[]): string[] {
 
 /** The engine's narrative heading — the overview's anchor. */
 const REVIEW_HEADING = "## 📋 Review";
-/** The engine's findings heading — the revalidated block is appended after it. */
+/** The engine's findings heading — the closure and tail sections follow it. */
 const FINDINGS_HEADING = "### Findings";
 /** The folded prior-findings block: the summary IS its heading. */
 const REVALIDATED_OPEN = "<details><summary>Revalidated findings</summary>";
@@ -485,36 +499,14 @@ function planBlock(planToFix: string | null, budget = Number.POSITIVE_INFINITY):
 }
 
 /** Insert `block` after the line that equals `anchor` (first occurrence). */
-function insertAfterHeading(body: string, anchor: string, block: string): string | null {
+function insertAfterHeading(body: string, anchor: string, block: string): string {
   const lines = body.split("\n");
   const index = lines.indexOf(anchor);
-  if (index < 0) return null;
+  // The engine's renderer emits this heading unconditionally, so a miss means
+  // the pinned layout changed: refuse to drop the report overview silently.
+  if (index < 0) throw new Error(`report anchor missing: ${anchor}`);
   lines.splice(index + 1, 0, "", block);
   return lines.join("\n");
-}
-
-/**
- * Insert `block` AFTER the whole section opened by `anchor` (first heading
- * match) — before the next heading at the same or a higher level, or at the
- * end of the body when nothing follows. Used to place the revalidated block
- * after the current findings rather than in front of them.
- */
-function insertAfterSection(body: string, anchor: string, block: string): string | null {
-  const lines = body.split("\n");
-  const index = lines.indexOf(anchor);
-  if (index < 0) return null;
-  const level = /^#+/.exec(anchor)?.[0].length ?? 3;
-  let end = lines.length;
-  for (let i = index + 1; i < lines.length; i += 1) {
-    const heading = /^(#{1,6})\s/.exec(lines[i]!);
-    if (heading !== null && heading[1]!.length <= level) {
-      end = i;
-      break;
-    }
-  }
-  const head = lines.slice(0, end).join("\n");
-  const tail = lines.slice(end).join("\n");
-  return tail === "" ? `${head}\n\n${block}` : `${head}\n\n${block}\n\n${tail}`;
 }
 
 /**
@@ -600,46 +592,37 @@ function neutralizeReportText(text: string): string {
 }
 
 /**
- * Compose the report fields into an engine-rendered review body; the tail
- * sections are appended by `buildReviewBody` through `buildReportTail`.
+ * Compose the report fields into an engine-rendered review body. The overview
+ * lands under `## 📋 Review`; the closure fold and the tail sections are
+ * appended by `buildReviewBody`, which reserves them BEFORE its clamp — a
+ * head-keeping cut would otherwise drop them with the finding tail.
  *
  *   `## 📋 Review` → overview → (narrative) → `### Findings` →
  *   `<details>Revalidated findings</details>` (collapsed) →
  *   `### Linked-issue AC` → `### ✅ Verified` →
  *   `### 🗑️ Considered & rejected` → `## 🛠️ Plan to fix`
  *
- * Anchors are matched on the FIRST line equal to the heading, and every raw
- * field is neutralized (see `neutralizeReportText`) before insertion so it
- * cannot forge one. `summary_md` is the exception: the engine renders it
- * verbatim, so a summary line that is EXACTLY `## 📋 Review` or `### Findings`
- * is matched instead of the engine's own heading. The sections still land in
- * the body, a little earlier — accepted next to parsing the model's summary as
- * markdown here. A body that carries no `## 📋 Review` line is not the engine's
- * layout: the overview is SKIPPED rather than prepended somewhere the reader
- * would not expect, and the remaining sections are still appended. A
- * zero-finding envelope omits `### Findings`; the empty heading is added first,
- * then the fold, so the section order matches every other round. A missing
- * report writes `none` under every heading — the headings themselves are never
- * deleted.
+ * The overview anchor is matched on the FIRST line equal to the heading, and
+ * the raw field is neutralized (see `neutralizeReportText`) before insertion so
+ * it cannot forge one. `summary_md` is the exception: the engine renders it
+ * verbatim, so a summary line that is EXACTLY `## 📋 Review` is matched instead
+ * of the engine's own heading. The overview still lands in the body, a little
+ * earlier — accepted next to parsing the model's summary as markdown here. A
+ * zero-finding envelope omits `### Findings`; the empty heading is added so the
+ * closure always has its anchor and the section order matches every other
+ * round.
  */
-function insertReportFields(rendered: string, report: ReportDoc | null, revalidated: string): string {
+function insertReportFields(rendered: string, report: ReportDoc | null): string {
   let body = rendered;
   if (report !== null) {
     const overview = `**What this PR does**: ${neutralizeReportText(report.overview)}`;
-    // A miss is not reported: this composer is pure (no log sink) and the
-    // anchor is an engine-owned constant pinned with the engine version, so a
-    // miss can only mean that layout changed under us — the overview is
-    // skipped rather than prefixed somewhere the reader would not expect.
-    body = insertAfterHeading(body, REVIEW_HEADING, overview) ?? body;
+    body = insertAfterHeading(body, REVIEW_HEADING, overview);
   }
-  const withRevalidated = insertAfterSection(body, FINDINGS_HEADING, revalidated);
-  if (withRevalidated === null) {
-    // Zero-finding envelope: the renderer omitted the heading, so this IS the
-    // template's self-add case — the empty heading first, then the fold, so
-    // the section order matches a body that has findings.
-    return `${body}\n\n${FINDINGS_HEADING}\n\nnone\n\n${revalidated}`;
-  }
-  return withRevalidated;
+  if (body.split("\n").includes(FINDINGS_HEADING)) return body;
+  // Zero-finding envelope: the renderer omitted the heading, so this IS the
+  // template's self-add case — the empty heading first, so the closure and the
+  // report sections that follow it keep the order a body with findings has.
+  return `${body}\n\n${FINDINGS_HEADING}\n\nnone`;
 }
 
 /** What a section body becomes when the tail cannot afford its text. */

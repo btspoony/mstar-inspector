@@ -61,7 +61,7 @@ import {
   type CommenterFetch,
   type PostOctokit,
 } from "../../src/pipeline/comment";
-import type { ReviewFinding, ReviewOutput } from "../../src/review/schema";
+import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../../src/review/schema";
 import { testAppPem } from "../helpers/rsa-key";
 
 function finding(mergeClass: ReviewFinding["mergeClass"], title: string): ReviewFinding {
@@ -88,6 +88,26 @@ describe("truncateSummary", () => {
     expect(truncated.length).toBe(SUMMARY_MD_LIMIT); // budget incl. ellipsis
     expect(truncated.startsWith("x".repeat(SUMMARY_MD_LIMIT - 1))).toBe(true);
     expect(truncated.endsWith("…")).toBe(true);
+  });
+
+  test("a cut between the halves of an emoji at the budget edge posts readable text", () => {
+    // The pair straddles the 8000-char cut: a raw slice keeps its high half and
+    // the posted body carries a replacement character.
+    const narrative = `${"x".repeat(SUMMARY_MD_LIMIT - 2)}😀${"y".repeat(200)}`;
+    const truncated = truncateSummary(narrative);
+    expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
+    expect(truncated.endsWith("…")).toBe(true);
+    // Well-formed text survives an encode/decode round trip; a lone surrogate does not.
+    expect(new TextDecoder().decode(new TextEncoder().encode(truncated))).toBe(truncated);
+  });
+
+  test("a cut between the halves of an emoji behind a fence closer posts readable text", () => {
+    // The second cut moves back by the closer's length and lands mid-pair.
+    const narrative = `\`\`\`\n${"x".repeat(SUMMARY_MD_LIMIT - 10)}😀${"y".repeat(200)}`;
+    const truncated = truncateSummary(narrative);
+    expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
+    expect(truncated.endsWith("\n```…")).toBe(true);
+    expect(new TextDecoder().decode(new TextEncoder().encode(truncated))).toBe(truncated);
   });
 
   test("a cut inside an unclosed fence closes it, so the rest of the body is not code", () => {
@@ -438,6 +458,20 @@ describe("buildReviewBody", () => {
       expect(body).not.toContain("cause:");
       expect(body).not.toContain("unscanned:");
     }
+  });
+
+  test("a settled verdict publishes a narrative that looks like a fact pair verbatim", () => {
+    // The echo strip is scoped to an envelope that CARRIES `incomplete`. A
+    // settled verdict's seat narrative is model text, not a restatement of a
+    // rendered pair, so those lines stay exactly as the model wrote them.
+    const narrative = "Runner recovered.\n\ncause: runner timed out\nunscanned: tests/a.ts";
+    const body = buildReviewBody({ ...output, verdict: "needs fixes", findings: [], summary_md: narrative });
+    expect(body).toContain(narrative);
+    // No pair is rendered above the review section: one line each, and both
+    // come from the narrative.
+    expect(body.match(/^cause: /gm)).toHaveLength(1);
+    expect(body.match(/^unscanned: /gm)).toHaveLength(1);
+    expect(body.indexOf("cause: runner timed out")).toBeGreaterThan(body.indexOf("## 📋 Review"));
   });
 });
 
@@ -1065,7 +1099,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       );
       // Escaped in place: the field's text survives and opens no structure.
       expect(body).toContain(`\n${escaped}\ntail\n`);
-      expect(body.split("\n").filter((line) => /^ {0,3}([-=]+[ \t]*$|[-*+][ \t]|\d{1,9}[.)][ \t])/.test(line))).toHaveLength(0);
+      expect(body.split("\n").filter((line) => /^ {0,3}([-=]+[ \t]*$|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/.test(line))).toHaveLength(0);
       // The engine's headings keep their structure and order.
       expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
         "## ✅ Verdict: `ship it`",
@@ -1092,6 +1126,13 @@ describe("report sections (mstar.report/v1 side document)", () => {
       ["+ bullet\nabsorbed", ["\\+ bullet"]],
       ["1. step\nabsorbed", ["1\\. step"]],
       ["1) step\nabsorbed", ["1\\) step"]],
+      // A marker alone on its line opens a block too; the shipped rule accepts
+      // line end, so the scan below must as well.
+      ["-\nabsorbed", ["\\-"]],
+      ["*\nabsorbed", ["\\*"]],
+      ["+\nabsorbed", ["\\+"]],
+      ["1.\nabsorbed", ["1\\."]],
+      ["1)\nabsorbed", ["1\\)"]],
     ];
     for (const [field, escaped] of cases) {
       const body = buildReviewBody(
@@ -1105,7 +1146,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       // Escaped in place: the field's text survives and opens no block.
       for (const line of escaped) expect(body).toContain(`\n${line}\n`);
       // No line of the body still starts a table row, quote or list item.
-      expect(body.split("\n").filter((line) => /^ {0,3}([|>]|[-*+][ \t]|\d{1,9}[.)][ \t])/.test(line))).toHaveLength(0);
+      expect(body.split("\n").filter((line) => /^ {0,3}([|>]|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/.test(line))).toHaveLength(0);
       // The engine's sections keep their structure: nothing was absorbed.
       expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
         "## ✅ Verdict: `ship it`",
@@ -1392,6 +1433,54 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body.endsWith("</details>")).toBe(true);
   });
 
+  test("an over-budget body keeps the omitted-findings footer and the sections that disclose what was cut", () => {
+    // The fixture uses the product's own maxima: a narrative at
+    // SUMMARY_MD_LIMIT and finding bodies at FINDING_BODY_MAX (the consumer
+    // clamps each body to that; it never rejects the review). 27 findings at
+    // those sizes is the smallest set that fills the 65000-char body.
+    const findings: ReviewFinding[] = Array.from({ length: 27 }, (_, index) => ({
+      mergeClass: "should-fix",
+      category: "logic",
+      file_path: `src/module-${index}.ts`,
+      line_start: 1,
+      line_end: 2,
+      title: `Finding ${index}`,
+      body: "x".repeat(FINDING_BODY_MAX),
+    }));
+    const output: ReviewOutput = {
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      summary_md: "n".repeat(SUMMARY_MD_LIMIT),
+      findings,
+    };
+    const headSha = "0123456789abcdef0123456789abcdef01234567";
+    const body = buildPreparedReviewBody({
+      output,
+      omittedFindings: 3,
+      round: 9,
+      headSha,
+      publicationMarker: buildPublicationMarker({
+        publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        headSha,
+        kind: "review",
+      }),
+      reportParts: {
+        report: reportDoc,
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+      },
+    });
+    expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
+    // The cut happened, so the fixture really is over budget.
+    expect(body).toContain("…");
+    // The finding tail is what the head clamp drops; the footer is the only
+    // line that says the review is a Top-N subset, so it must survive.
+    expect(body).toContain("*(+3 more findings omitted)*");
+    // The closure is reserved with the other preserved parts, so the cut
+    // cannot take it.
+    expect(body).toContain("<summary>Revalidated findings</summary>");
+    for (const heading of reportTailHeadings) expect(body).toContain(heading);
+  });
+
   test("an oversized plan is truncated before any report section is dropped", () => {
     const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
     const body = buildReviewBody(small, 0, {
@@ -1403,8 +1492,12 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body).toContain("…");
     // Fence and fold stay balanced: opener plus closer each, nothing swallowed.
     expect(fenceLines(body)).toHaveLength(2);
-    expect((body.match(/<details>/g) ?? []).length).toBe(1);
-    expect((body.match(/<\/details>/g) ?? []).length).toBe(1);
+    expect((body.match(/<details>/g) ?? []).length).toBe(
+      (body.match(/<\/details>/g) ?? []).length,
+    );
+    // The closure and the plan fold both survive the oversized plan.
+    expect(body).toContain("<summary>Revalidated findings</summary>");
+    expect(body).toContain("<summary>Expand fix plan</summary>");
   });
 
   test("a limit that forces degradation keeps every heading, marks each dropped body, and stays inside it", () => {

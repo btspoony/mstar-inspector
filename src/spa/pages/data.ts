@@ -422,6 +422,27 @@ export type CheckGateSettings = {
 };
 
 /**
+ * The review gate's DDL default (migration 0045): a floor of 80 and
+ * `["ship it"]`. The columns are written only by `saveCheckGate`, whose UPDATE
+ * never reads the old value — so this is the value the unreadable-gate
+ * recovery writes back over a row it cannot read.
+ */
+export const DEFAULT_CHECK_GATE: CheckGateSettings = { min_score: 80, pass_verdicts: ["ship it"] };
+
+/**
+ * The one `save-check-gate` submission body. The score rides as submitted —
+ * the route owns its validation, so a blank field must reach it as a keyed 400
+ * rather than becoming 0 — and each verdict is one repeated `pass_verdicts`
+ * field, the shape the route aggregates. The gate editor and the
+ * unreadable-gate recovery are its two callers; neither may invent a second op.
+ */
+export function checkGateSaveFields(gate: { min_score: string; pass_verdicts: readonly string[] }): URLSearchParams {
+  const fields = new URLSearchParams({ op: "save-check-gate", min_score: gate.min_score });
+  for (const verdict of gate.pass_verdicts) fields.append("pass_verdicts", verdict);
+  return fields;
+}
+
+/**
  * The per-App owner allowlist (migration 0045): `enabled` off behaves exactly
  * as before this App configuration existed; on with an empty `owners` refuses
  * every owner (fail closed).
@@ -786,6 +807,20 @@ export function appInsightsSummaryUrl(
 export type PullRequestState = "open" | "closed" | "merged";
 
 /**
+ * The PR's reviewing-now projection (compass D11/D16), as the server decides
+ * it: `live` = that PR's `review_inflight` row is held right now, carrying the
+ * holding attempt's head sha (`""` for a comment trigger) and its acquisition
+ * instant; `none` = a successful read with no live row, which is also every
+ * queued / superseded / released / abandoned / expired attempt; `unknown` = the
+ * read failed, and the client renders it as neither reviewing nor idle. The
+ * client never infers this field from anything else.
+ */
+export type PullRequestReviewing =
+  | { state: "live"; head_sha: string; acquired_at: string }
+  | { state: "none" }
+  | { state: "unknown" };
+
+/**
  * The per-App pull-request ledger's head row — the list's rows and the
  * detail's `pull_request` are ONE shape: the list adds its two aggregates, the
  * detail its record totals. `failure_count` is the list's alone; the detail
@@ -800,6 +835,7 @@ export type PullRequestHead = {
   head_sha: string;
   first_seen_at: string;
   last_seen_at: string;
+  reviewing: PullRequestReviewing;
 };
 
 export type PullRequestRow = PullRequestHead & {
@@ -898,7 +934,28 @@ function parsePullRequestHead(value: unknown): PullRequestHead | null {
     head_sha: typeof value.head_sha === "string" ? value.head_sha : "",
     first_seen_at: value.first_seen_at,
     last_seen_at: value.last_seen_at,
+    reviewing: parsePullRequestReviewing(value.reviewing),
   };
+}
+
+/**
+ * The reviewing-now projection. A payload that does not carry a well-formed
+ * three-state value reads `unknown`: an older server or a truncated read must
+ * never let the client claim the PR is idle, and it must not claim it is
+ * reviewing either. `live` without its two anchors is not a live lock, so it
+ * degrades to `unknown` rather than to the idle `none`.
+ */
+function parsePullRequestReviewing(value: unknown): PullRequestReviewing {
+  if (!isRecord(value)) return { state: "unknown" };
+  if (value.state === "none") return { state: "none" };
+  if (
+    value.state === "live" &&
+    typeof value.head_sha === "string" &&
+    typeof value.acquired_at === "string"
+  ) {
+    return { state: "live", head_sha: value.head_sha, acquired_at: value.acquired_at };
+  }
+  return { state: "unknown" };
 }
 
 /**
@@ -1089,6 +1146,14 @@ export function appPullRequestDetailUrl(base: string, appId: string, ref: PullRe
 }
 
 /**
+ * The findings filter's catch-all choice: the rows whose `mergeClass` is
+ * outside the merge-class vocabulary. It maps to the record route's
+ * `unclassified` flag, never to a `severity` spelling — the route admits only
+ * the vocabulary there, and a fifth spelling would be a rejected filter.
+ */
+export const CATCH_ALL_SEVERITY = "other";
+
+/**
  * One record section's page URL. `offset`/`limit` ride every request — the
  * server's bounds are the contract — and `severity` only when the findings
  * filter is set; the query is encoded, so a free-form value cannot break out
@@ -1102,7 +1167,8 @@ export function appPullRequestRecordsUrl(
   page: { offset: number; limit: number; severity?: string },
 ): string {
   const params = new URLSearchParams({ offset: String(page.offset), limit: String(page.limit) });
-  if (page.severity !== undefined && page.severity !== "") params.set("severity", page.severity);
+  if (page.severity === CATCH_ALL_SEVERITY) params.set("unclassified", "1");
+  else if (page.severity !== undefined && page.severity !== "") params.set("severity", page.severity);
   return `${appPullRequestDetailUrl(base, appId, ref)}/${section}?${params.toString()}`;
 }
 
