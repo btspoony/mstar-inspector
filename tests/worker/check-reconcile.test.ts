@@ -76,405 +76,42 @@ import { sha256Hex } from "../../src/pipeline/review-threads";
 import { CHECK_UPDATE_DEFAULT } from "../../src/dashboard/runtime-config-store";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
-const APP = "11111111-2222-3333-4444-555555555555";
-const APP_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-const NUMERIC_APP = 1001;
-const NUMERIC_APP_B = 1002;
-const SCOPE: Scope = { appId: APP, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
-const SCOPE_B: Scope = { appId: APP_B, installationId: 456, owner: "other", repo: "gadgets", prNumber: 7 };
-const SHA = "0123456789abcdef0123456789abcdef01234567";
-const T0 = 1_700_000_000_000;
-/** The consumer's claim happened an hour before T0; its lease died 30 min before. */
-const CLAIM_AT = T0 - 3_600_000;
-const EXPIRED_DEADLINE = T0 - 1_800_000;
-
-const SILENT_LOG = { warn: () => {}, info: () => {} };
-
-/** The cron's queue binding (comment-claim outbox): these suites re-send nothing. */
-const NOOP_QUEUE = { send: async () => {} } as unknown as ScheduledEnv["REVIEW_QUEUE"];
-
-function asEnv(db: TestD1): ScheduledEnv {
-  return { DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE };
-}
-
-function seedApp(
-  db: TestD1,
-  id: string,
-  githubAppId: number,
-  options: { install?: boolean; installationId?: number; status?: string } = {},
-): void {
-  const { install = true, installationId = 123, status = "active" } = options;
-  db.raw
-    .prepare(
-      `INSERT INTO github_apps
-         (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-          created_by, status, deleted_at, review_enabled, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, NULL, 1, datetime('now'), datetime('now'))`,
-    )
-    .run(id, `checks-${id}`, githubAppId, `checks-${id}`, status);
-  if (install) {
-    db.raw
-      .prepare(
-        `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
-         VALUES (?, ?, ?, 'acme', datetime('now'))`,
-      )
-      .run(`inst-${id}-${installationId}`, id, installationId);
-  }
-}
-
-function seededDb(): TestD1 {
-  const db = createMigratedTestD1();
-  seedApp(db, APP, NUMERIC_APP);
-  seedApp(db, APP_B, NUMERIC_APP_B, { installationId: SCOPE_B.installationId });
-  return db;
-}
-
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
-async function claim(
-  db: TestD1,
-  overrides: Partial<Parameters<typeof claimAttempt>[1]> = {},
-): Promise<{ attempt: CheckAttempt; lease: Lease }> {
-  const result = await claimAttempt(db, {
-    scope: SCOPE,
-    githubAppId: NUMERIC_APP,
-    headSha: SHA,
-    triggeredBy: "octocat",
-    action: "review",
-    holder: "consumer-run",
-    nowMs: CLAIM_AT,
-    executionDeadlineMs: EXPIRED_DEADLINE,
-    ...overrides,
-  });
-  if (result.kind !== "claimed") {
-    throw new Error(`expected a claimed attempt, got ${result.kind}`);
-  }
-  return { attempt: result.attempt, lease: result.lease };
-}
-
-function remoteFor(identity: CheckIdentity, overrides: Partial<CheckRemote> = {}): CheckRemote {
-  return {
-    id: overrides.id ?? 4242,
-    name: overrides.name ?? CHECK_NAME,
-    head_sha: overrides.head_sha ?? identity.headSha,
-    external_id: overrides.external_id === undefined ? identity.externalId : overrides.external_id,
-    app: overrides.app === undefined ? { id: identity.githubAppId } : overrides.app,
-    status: overrides.status ?? "completed",
-    conclusion: overrides.conclusion === undefined ? "success" : overrides.conclusion,
-  };
-}
-
-/** A self-consistent persisted publication proof for the attempt's scope/SHA. */
-function proofFor(identity: CheckIdentity, kind: "review" | "degraded" = "review"): PublicationProof {
-  return {
-    publicationId: `pub-${identity.attemptId}`,
-    scope: identity.scope,
-    headSha: identity.headSha,
-    kind,
-    round: 3,
-    commentId: 77,
-    bodySha256: "a".repeat(64),
-    confirmedMs: T0 - 10_000,
-  };
-}
-
-function seedPublication(
-  db: TestD1,
-  scope: Scope,
-  headSha: string,
-  proof: PublicationProof,
-  phase = "confirmed",
-  payload: unknown = {},
-): void {
-  db.raw
-    .prepare(
-      `INSERT INTO review_publications
-         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
-          payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms, confirmed_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'done', ?, ?, ?)`,
-    )
-    .run(
-      proof.publicationId,
-      scope.appId,
-      scope.installationId,
-      scope.owner,
-      scope.repo,
-      scope.prNumber,
-      headSha,
-      proof.kind,
-      phase,
-      JSON.stringify(payload),
-      JSON.stringify(proof),
-      T0 - 20_000,
-      T0 - 10_000,
-      T0 - 10_000,
-    );
-}
-
-/** An `mstar.review/v1` envelope with the given verdict and tally score. */
-function reviewEnvelope(verdict: string, scorePct: number | null): Record<string, unknown> {
-  return {
-    schema: "mstar.review/v1",
-    verdict,
-    findings: [],
-    ...(scorePct === null
-      ? {}
-      : { tally: { verdict, scorePct, tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 0 }, chatHeader: "h" } }),
-  };
-}
-
-/**
- * A staged `kind: "review"` publication payload carrying its own envelope —
- * the second attempt's journal row, distinct from any `reviews` row.
- */
-function reviewPayload(scope: Scope, headSha: string, verdict: string, scorePct: number): unknown {
-  return {
-    version: 1,
-    scope,
-    headSha,
-    kind: "review",
-    round: 3,
-    targetCommentId: null,
-    body: `## Review\n\n${verdict}`,
-    bodySha256: "a".repeat(64),
-    artifact: {
-      kind: "review",
-      key: {
-        installation_id: scope.installationId,
-        owner: scope.owner,
-        repo: scope.repo,
-        pr_number: scope.prNumber,
-        head_sha: headSha,
-      },
-      schema: "mstar.review/v1",
-      payload: reviewEnvelope(verdict, scorePct),
-      appId: scope.appId,
-      model: null,
-      provider: null,
-    },
-    lifecycle: null,
-    lineIntents: [],
-  };
-}
-
-/** The applied review the gate reads (verdict + envelope tally); `scorePct` null = no tally. */
-function seedReview(db: TestD1, scope: Scope, headSha: string, verdict: string, scorePct: number | null): void {
-  db.raw
-    .prepare(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, envelope)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      crypto.randomUUID(),
-      scope.installationId,
-      scope.owner,
-      scope.repo,
-      scope.prNumber,
-      headSha,
-      verdict,
-      JSON.stringify(reviewEnvelope(verdict, scorePct)),
-    );
-}
-
-async function rawRow(db: TestD1, id: string): Promise<Record<string, string | number | null>> {
-  return (await db.prepare(`SELECT * FROM review_checks WHERE id = ?`).bind(id).first()) as Record<
-    string,
-    string | number | null
-  >;
-}
-
-// ---------------------------------------------------------------------------
-// Scripted adapter double + real dispatch meter
-// ---------------------------------------------------------------------------
-
-type AdoptOutcome = { kind: "found"; remote: CheckRemote } | { kind: "absent" | "incomplete" | "ambiguous" };
-type BeginOutcome =
-  | { kind: "ready"; remote: CheckRemote }
-  | { kind: "unavailable"; reason: string; requests?: number };
-type FetchOutcome = { kind: "found"; remote: CheckRemote } | { kind: "absent" } | { kind: "unavailable"; reason: string };
-type CompleteOutcome =
-  | { kind: "completed"; remote: CheckRemote }
-  | { kind: "unavailable"; reason: string; requests?: number };
-
-type AdapterScript = {
-  /**
-   * REAL requests each adapter call issues through the run transport before
-   * answering. 1 mirrors a single-request operation; a higher value simulates
-   * the multi-request shapes the live adapter can produce (a paginated
-   * adoption walk, a token mint plus a call), which is what the per-row
-   * bound has to absorb.
-   */
-  requestsPerCall?: number;
-  adopt?: (identity: CheckIdentity) => Promise<AdoptOutcome>;
-  begin?: (identity: CheckIdentity) => Promise<BeginOutcome>;
-  fetch?: (identity: CheckIdentity, checkRunId: number) => Promise<FetchOutcome>;
-  complete?: (identity: CheckIdentity, checkRunId: number, conclusion: CheckConclusion) => Promise<CompleteOutcome>;
-};
-
-/** Counts real dispatches — the transport is the only path to `fetch`. */
-function stubFetch(): { urls: string[]; restore: () => void } {
-  const urls: string[] = [];
-  const original = globalThis.fetch;
-  globalThis.fetch = (async (input: string | URL | Request) => {
-    urls.push(String(input));
-    return new Response("{}", { status: 200 });
-  }) as unknown as typeof fetch;
-  return {
-    urls,
-    restore: () => {
-      globalThis.fetch = original;
-    },
-  };
-}
-
-/**
- * The injected credential factory: one purpose-scoped "adapter" per App pair
- * whose operations issue real requests through the run's own transport, so
- * every assertion about budgets counts genuine dispatches rather than
- * simulated ones. `scopeFor` is the one pair the script serves; every other
- * pair resolves `unavailable`, exactly like a routing miss.
- *
- * `beginCheck` deliberately writes the durable `sending` transition through
- * the REAL store, because that is what the live adapter does before it lets a
- * create request leave — a double that skipped it would make the row's
- * `not-sent` state contradict the run it just created.
- */
-function scriptedCredentials(
-  db: TestD1,
-  script: AdapterScript = {},
-  capture?: { transport?: CheckTransport },
-  scopeFor: Scope = SCOPE,
-  paused = false,
-): CheckCredentialFactory {
-  return async ({ scope, transport }) => {
-    if (capture !== undefined) capture.transport = transport;
-    if (scope.appId !== scopeFor.appId || scope.installationId !== scopeFor.installationId) {
-      return { kind: "unavailable", reason: "missing" };
-    }
-    return { kind: "ok", paused, adapter: scriptedAdapter(db, script, transport) };
-  };
-}
-
-/**
- * The adapter double itself, for tests that need to serve an ARBITRARY scope
- * (a run-budget case spread over many pairs) rather than one pinned pair. Each
- * operation issues its scripted real requests through the run's transport, so
- * every budget assertion counts genuine dispatches.
- *
- * `beginCheck` deliberately writes the durable `sending` transition through
- * the REAL store, because that is what the live adapter does before it lets a
- * create request leave — a double that skipped it would make the row's
- * `not-sent` state contradict the run it just created.
- */
-function scriptedAdapter(db: TestD1, script: AdapterScript, transport: CheckTransport): ChecksAdapter {
-  const perCall = script.requestsPerCall ?? 1;
-  /** True when every scripted request for this call actually dispatched. */
-  const spend = async (): Promise<boolean> => {
-    for (let i = 0; i < perCall; i += 1) {
-      try {
-        await transport.fetchImpl("https://api.github.com/checks");
-      } catch {
-        // Refused BEFORE dispatch. The live adapter surfaces this as
-        // `unavailable` and never would have reached GitHub, so the script must
-        // not run either: a double that answered anyway would fake a request
-        // the budget already refused.
-        return false;
-      }
-    }
-    return true;
-  };
-  return {
-    adoptCheckRun: async ({ identity }) => {
-      if (!(await spend())) return { kind: "incomplete" };
-      return script.adopt === undefined ? { kind: "absent" } : script.adopt(identity);
-    },
-    beginCheck: async ({ identity, lease }) => {
-      // Mirror the live adapter: `sending` is persisted BEFORE the request.
-      // One millisecond inside the recovery lease is a valid fence instant for
-      // every clock these tests use.
-      const markedAt = lease.untilMs - 1;
-      await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, markedAt);
-      if (!(await spend())) {
-        // The transport refused BEFORE dispatch — the live adapter's
-        // `refused(...)` shape, which reports zero invoked Checks calls. (The
-        // caller short-circuits on `budget.refused` before reading a count.)
-        return { kind: "unavailable", reason: "request budget refused before dispatch", requests: 0 };
-      }
-      if (script.begin === undefined) return { kind: "unavailable", reason: "no create scripted", requests: 1 };
-      const begun = await script.begin(identity);
-      if (begun.kind !== "unavailable") return begun;
-      // Mirror the live adapter's additive contract: a script that does not say
-      // otherwise describes a dispatched call, so it reports a positive count.
-      const requests = begun.requests ?? 1;
-      if (requests === 0) {
-        // A provably undispatched create: the adapter undoes its own mark.
-        await rollbackCheckCreateDispatch(db, identity.attemptId, lease, markedAt);
-      }
-      // `requests` LAST so the declared `number` wins over the script type's
-      // optional field — identical value at runtime.
-      return { ...begun, requests };
-    },
-    fetchCheckRun: async ({ identity, checkRunId }) => {
-      if (!(await spend())) return { kind: "unavailable", reason: "request budget refused before dispatch" };
-      return script.fetch === undefined
-        ? { kind: "unavailable", reason: "no fetch scripted" }
-        : script.fetch(identity, checkRunId);
-    },
-    completeCheck: async ({ identity, checkRunId, conclusion }) => {
-      if (!(await spend())) {
-        return { kind: "unavailable", reason: "request budget refused before dispatch", requests: 0 };
-      }
-      if (script.complete === undefined) return { kind: "unavailable", reason: "no complete scripted", requests: 1 };
-      const completed = await script.complete(identity, checkRunId, conclusion);
-      if (completed.kind !== "unavailable") return completed;
-      // Same additive contract as `beginCheck`: a script that does not say
-      // otherwise describes a dispatched update, so it reports a positive count.
-      return { ...completed, requests: completed.requests ?? 1 };
-    },
-  };
-}
-
-/**
- * The ordinary healthy flow: nothing is observable yet, the create lands, and
- * the run then reads back terminal and in agreement with the frozen intent.
- */
-function agreeingScript(
-  conclusion: CheckConclusion["desired"] = "failure",
-  checkRunId = 4242,
-): AdapterScript {
-  return {
-    adopt: async () => ({ kind: "absent" }),
-    begin: async (identity) => ({
-      kind: "ready",
-      remote: remoteFor(identity, { id: checkRunId, status: "in_progress", conclusion: null }),
-    }),
-    fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { id: checkRunId, status: "completed", conclusion }) }),
-  };
-}
-
-function run(db: TestD1, deps: CheckReconcileDeps = {}) {
-  // The caller's log wins when supplied (tests that assert on warn events);
-  // silence is only the default.
-  return reconcileReviewChecks(asEnv(db), { log: SILENT_LOG, ...deps });
-}
-
-/**
- * The same database with the SELECTs matching `matcher` throwing, i.e. a
- * persistent read failure on exactly those statements (everything else —
- * including the durable writes and `raw` assertions — still works).
- */
-function withFailingReads(db: TestD1, matcher: RegExp): TestD1 {
-  return {
-    prepare(sql: string) {
-      if (matcher.test(sql)) throw new Error("d1 read failed");
-      return db.prepare(sql);
-    },
-    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
-    raw: db.raw,
-  } as TestD1;
-}
+// The shared fixtures live in one module so the journal/proof-wait suite
+// drives the same production surface (see tests/worker/helpers/check-reconcile).
+import {
+  APP,
+  APP_B,
+  NUMERIC_APP,
+  NUMERIC_APP_B,
+  SCOPE,
+  SCOPE_B,
+  SHA,
+  T0,
+  CLAIM_AT,
+  EXPIRED_DEADLINE,
+  SILENT_LOG,
+  NOOP_QUEUE,
+  UNCONFIRMED,
+  agreeingScript,
+  asEnv,
+  claim,
+  proofFor,
+  rawRow,
+  remoteFor,
+  reviewEnvelope,
+  reviewPayload,
+  run,
+  scriptedAdapter,
+  scriptedCredentials,
+  seedApp,
+  seedJournal,
+  seedPublication,
+  seedReview,
+  seededDb,
+  stubFetch,
+  withFailingReads,
+} from "./helpers/check-reconcile";
+import type { AdapterScript, AdoptOutcome, BeginOutcome, CompleteOutcome, FetchOutcome } from "./helpers/check-reconcile";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1442,7 +1079,7 @@ describe("throw-proofing (spec §7.11 composition)", () => {
 
   test("an unbound DB binding and a broken D1 both resolve without throwing", async () => {
     const unbound = await reconcileReviewChecks({} as ScheduledEnv, { log: SILENT_LOG });
-    expect(unbound).toEqual({ examined: 0, completed: 0, unconfirmed: 0, suspended: 0, gaveUp: 0, errors: 0 });
+    expect(unbound).toEqual({ examined: 0, completed: 0, unconfirmed: 0, suspended: 0, gaveUp: 0, errors: 0, deferred: 0 });
 
     const broken = {
       prepare(): never {
@@ -1497,7 +1134,7 @@ describe("throw-proofing (spec §7.11 composition)", () => {
  * exactly once per pass — so the ORDER of those lines is direct evidence of
  * the composition order (§7.11) rather than an assertion about wiring.
  */
-async function captureComposition(env: ScheduledEnv): Promise<string[]> {
+async function captureComposition(env: ScheduledEnv, cron = ""): Promise<string[]> {
   const events: string[] = [];
   const sweepWarn = defaultSweepLog.warn;
   const lifecycleWarn = defaultReconcileLog.warn;
@@ -1510,7 +1147,7 @@ async function captureComposition(env: ScheduledEnv): Promise<string[]> {
   defaultCheckReconcileLog.warn = (fields) => void events.push(fields.event);
   defaultCheckReconcileLog.info = (fields) => void events.push(String(fields.event));
   try {
-    await worker.scheduled({} as never, env, {} as never);
+    await worker.scheduled({ cron } as never, env, {} as never);
   } finally {
     defaultSweepLog.warn = sweepWarn;
     defaultReconcileLog.warn = lifecycleWarn;
@@ -1522,11 +1159,10 @@ async function captureComposition(env: ScheduledEnv): Promise<string[]> {
 }
 
 describe("scheduled composition (spec §7.11)", () => {
-  test("runs runSweep → reconcileReviewLifecycle → reconcileReviewChecks, in that order", async () => {
+  test("the quarter-hour expression composes runSweep → reconcileReviewLifecycle, WITHOUT the Check lane", async () => {
     const db = seededDb();
-    // A breached failure window makes the sweep stage emit its alert line, and
-    // a due Check row of an App with NO installation mapping makes the real
-    // Checks lane suspend it — a durable, network-free stage effect.
+    // A breached failure window makes the sweep stage emit its alert line; the
+    // Check lane must leave no trace at all in this expression.
     const store = db.raw;
     for (let i = 0; i < 6; i += 1) {
       store
@@ -1536,22 +1172,26 @@ describe("scheduled composition (spec §7.11)", () => {
         )
         .run(`boom-${i}`);
     }
+    // A due Check row exists, yet this expression must not touch it.
     const { attempt } = await claim(db);
-    store.prepare(`DELETE FROM app_installations WHERE app_id = ?`).run(APP);
 
     const events = await captureComposition({ DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE });
 
     const sweepAt = events.indexOf("ops_sweep_alert");
     const lifecycleAt = events.indexOf("ops_lifecycle_reconcile");
-    const checksAt = events.indexOf("ops_check_reconcile");
     expect(sweepAt).toBeGreaterThanOrEqual(0);
     expect(lifecycleAt).toBeGreaterThan(sweepAt);
-    expect(checksAt).toBeGreaterThan(lifecycleAt);
-    // The Checks stage really ran: its durable suspension is present.
-    expect((await rawRow(db, attempt.identity.attemptId)).recovery_state).toBe("suspended");
+    // The Check lane belongs to the MINUTE expression alone: both fire on
+    // :00/:15/:30/:45, so running it here would duplicate every pass (and its
+    // suspension/backoff writes) in that minute.
+    expect(events).not.toContain("ops_check_reconcile");
+    // This pass therefore touched nothing Check-side.
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
   });
 
-  test("a throwing sweep and a throwing lifecycle lane neither stop the Checks lane nor escape the handler", async () => {
+  test("a throwing sweep and a throwing lifecycle lane never escape the handler", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     db.raw.prepare(`DELETE FROM app_installations WHERE app_id = ?`).run(APP);
@@ -1569,13 +1209,45 @@ describe("scheduled composition (spec §7.11)", () => {
     expect(events[0]).toBe("retention_swept_failed");
     expect(events).toContain("ops_sweep_failed");
     expect(events).toContain("ops_lifecycle_reconcile_failed");
-    expect(events).toContain("ops_check_reconcile_failed");
+    // The Check lane is not part of this expression at all.
+    expect(events).not.toContain("ops_check_reconcile");
 
     // And with a working DB both later lanes still reach their terminal lines.
     const events2 = await captureComposition({ DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE });
     expect(events2).toContain("ops_lifecycle_reconcile");
-    expect(events2).toContain("ops_check_reconcile");
+    expect(events2).not.toContain("ops_check_reconcile");
+  });
+
+  test("routes by controller.cron: the minute expression runs the Checks lane ALONE", async () => {
+    const db = seededDb();
+    // A breached failure window (the sweep WOULD alert) plus a due Check row
+    // (the minute lane must act on it): the two effects discriminate routing.
+    for (let i = 0; i < 6; i += 1) {
+      db.raw
+        .prepare(
+          `INSERT INTO review_failures (installation_id, owner, repo, pr_number, head_sha, stage, error, created_at)
+           VALUES (1, 'acme', 'widgets', 1, '', 'runner', ?, datetime('now'))`,
+        )
+        .run(`boom-${i}`);
+    }
+    const { attempt } = await claim(db);
+    db.raw.prepare(`DELETE FROM app_installations WHERE app_id = ?`).run(APP);
+    const env = { DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE };
+
+    const minute = await captureComposition(env, "* * * * *");
+    // The Check lane alone — none of the other stages' lines — and it really
+    // ran (its durable suspension is present).
+    expect(minute).not.toContain("ops_sweep_alert");
+    expect(minute).not.toContain("ops_lifecycle_reconcile");
+    expect(minute).toContain("ops_check_reconcile");
     expect((await rawRow(db, attempt.identity.attemptId)).recovery_state).toBe("suspended");
+
+    const quarter = await captureComposition(env, "*/15 * * * *");
+    expect(quarter).toContain("ops_sweep_alert");
+    expect(quarter).toContain("ops_lifecycle_reconcile");
+    // The minute expression is the ONLY Check driver — the quarter hour must
+    // not run the same lane a second time.
+    expect(quarter).not.toContain("ops_check_reconcile");
   });
 });
 
@@ -2696,31 +2368,65 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
   test("an unaffordable probe is skipped: zero factory calls, zero writes, prior state intact", async () => {
     const db = seededDb();
     const { id, before } = await correctedPair(db);
+    // A DISTRACTOR pair with a LOWER installation id, so the scan probes it
+    // first and it spends the run's entire request budget. The clock stays
+    // FIXED: the refusal must come from the spent cap, never from a
+    // side-effecting `now`.
+    const DISTRACTOR = 100;
+    db.raw
+      .prepare(
+        `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+         VALUES ('inst-distractor', ?, ?, 'acme', datetime('now'))`,
+      )
+      .run(APP, DISTRACTOR);
+    await claim(db, { scope: { ...SCOPE, installationId: DISTRACTOR } });
+    expect(
+      await suspendCheckRecovery(
+        db,
+        { appId: APP, installationId: DISTRACTOR },
+        checkSuspensionReason("identity-mismatch", "mismatch", "a".repeat(64)),
+        T0,
+      ),
+    ).toBe(1);
+
     let factoryCalls = 0;
-    // The run's deadline is fixed at the pass's start, then the clock jumps past
-    // it. The re-enable scan therefore cannot afford the probe's admission
-    // estimate and must skip the pair WITHOUT calling the factory.
-    let clock = T0;
+    const warned: { event: string; detail: string }[] = [];
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, {
-        now: () => {
-          const value = clock;
-          clock = T0 + CHECK_RECONCILE_RUN_BUDGET_MS * 2;
-          return value;
-        },
-        credentials: async ({ scope }) => {
+        now: () => T0,
+        log: { warn: (fields) => void warned.push(fields), info: () => {} },
+        credentials: async ({ scope, transport }) => {
+          if (scope.installationId === DISTRACTOR) {
+            // Burn the whole run cap here; the last request is refused before
+            // dispatch, which stops the loop.
+            for (let i = 0; i < CHECK_RECONCILE_MAX_REQUESTS + 5; i += 1) {
+              try {
+                await transport.fetchImpl(`https://api.github.com/burn/${i}`);
+              } catch {
+                break;
+              }
+            }
+            return { kind: "unavailable", reason: "identity-mismatch" };
+          }
           factoryCalls += 1;
-          if (scope.appId !== APP) return { kind: "unavailable", reason: "missing" };
           return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: "b".repeat(64) };
         },
       });
-      void summary;
+      // The pass RAN and left the target pair queued: the sibling warn names it.
+      expect(summary.errors).toBe(0);
+      expect(summary.examined).toBe(0);
+      expect(
+        warned
+          .filter((entry) => entry.event === "ops_check_reconcile_reenable_probe_deferred")
+          .map((entry) => entry.detail),
+      ).toContain(`pair=(${APP}, ${SCOPE.installationId})`);
     } finally {
       fetchStub.restore();
     }
-    // NOT ONE factory call: the pair's stored state is byte-identical, so a
-    // later pass with budget retries it. Writing a verdict here is F-004.
+    // NOT ONE factory call for the target pair: its stored state is
+    // byte-identical, so a later pass with budget retries it. Writing a verdict
+    // here is F-004.
     expect(factoryCalls).toBe(0);
     expect(await rawRow(db, id)).toEqual(before);
   });
@@ -2742,7 +2448,9 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
           throw new CheckRequestNotDispatched("test: probe refused before dispatch");
         },
       });
-      void summary;
+      // Positive signal: the pass ran and reported the pair as deferred.
+      expect(summary.errors).toBe(0);
+      expect(warned.map((entry) => entry.event)).toContain("ops_check_reconcile_reenable_probe_deferred");
     } finally {
       fetchStub.restore();
     }
