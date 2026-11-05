@@ -45,11 +45,13 @@ import { afterAll, afterEach, beforeEach, describe, expect, jest, mock, spyOn, t
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as realSdkRoot from "@oh-my-pi/pi-coding-agent";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import {
   buildOutputValidator,
   type OutputValidator,
 } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
+import * as realStructuredSubagent from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, validateMstarReviewV1 } from "@mstar-harness/engine";
 
 import type {
@@ -188,6 +190,9 @@ function registerSeat(id: string): { isStreaming: boolean } & Record<string, unk
 }
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
+  // Additive: the registry is process-global, so the stub must keep the root's
+  // other exports (`AuthStorage`, …) for every sibling file that imports them.
+  ...realSdkRoot,
   createAgentSession: mock(async (options: Record<string, unknown>) => {
     createdOptions.push(options);
     disposeCalls = 0;
@@ -361,7 +366,11 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   },
 }));
 
+// Additive: Bun's module-mock registry is process-global, so the stub must not
+// drop the SDK's other exports — a replacement that did broke every sibling
+// file importing them.
 mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
+  ...realStructuredSubagent,
   runStructuredSubagent: mock(async (request: Record<string, unknown>) => {
     subagentRequests.push(request);
     // The dispatch's reserved identity id — what the SDK registers the seat
