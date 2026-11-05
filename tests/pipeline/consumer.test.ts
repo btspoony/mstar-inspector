@@ -5840,7 +5840,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(makeBatch(makePayload()));
 
     expect(logLines.filter((line) => line.fields.event === "check_terminalize_failed")).toHaveLength(1);
+    // A real release: and NOT the benign no-op event, nor a fault event.
     expect(logLines.filter((line) => line.fields.event === "check_abandon_released")).toHaveLength(1);
+    expect(logLines.filter((line) => line.fields.event === "check_abandon_not_owned")).toHaveLength(0);
+    expect(logLines.filter((line) => line.fields.event === "check_abandon_failed")).toHaveLength(0);
     const row = checkRowFor(db, SHA);
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
@@ -5889,6 +5892,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // The consumer could only have returned after the slow write landed.
     expect(releaseLanded).toBe(true);
     expect(logLines.filter((line) => line.fields.event === "check_abandon_released")).toHaveLength(1);
+    expect(logLines.filter((line) => line.fields.event === "check_abandon_not_owned")).toHaveLength(0);
+    expect(logLines.filter((line) => line.fields.event === "check_abandon_failed")).toHaveLength(0);
     parked.resolve();
   }, 20_000);
 

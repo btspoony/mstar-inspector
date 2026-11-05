@@ -105,6 +105,8 @@ export type CheckReconcileSummary = {
   suspended: number;
   gaveUp: number;
   errors: number;
+  /** Rows whose claim was given back to WAIT for an in-flight publication. */
+  deferred: number;
 };
 
 /** Whole-run request budget (§7.11.2: "≤100 requests/60s/run"). */
@@ -440,7 +442,7 @@ export async function reconcileReviewChecks(
 ): Promise<CheckReconcileSummary> {
   const log = deps.log ?? defaultCheckReconcileLog;
   const summary: CheckReconcileSummary = {
-    examined: 0, completed: 0, unconfirmed: 0, suspended: 0, gaveUp: 0, errors: 0,
+    examined: 0, completed: 0, unconfirmed: 0, suspended: 0, gaveUp: 0, errors: 0, deferred: 0,
   };
   try {
     const db = env.DB;
@@ -760,6 +762,33 @@ async function reconcileCheckAttempt(
   const attemptId = row.identity.attemptId;
   const scope = row.identity.scope;
 
+  // §7.11.2 step 2a — the publication-proof WAIT, decided BEFORE any credential
+  // work: a row that is only waiting must not mint GitHub requests, and it must
+  // not push terminal rows behind its App-identity probe. While the exact
+  // scope/head still owns an in-flight journal (or that read is unreadable) and
+  // the execution deadline is ahead, the row is not concludable yet: claim it
+  // (D1 only) and give the claim straight back, spending no attempt.
+  if (now() < row.executionDeadlineMs) {
+    const pending = await probePendingPublication(db, row);
+    if (pending.kind !== "none") {
+      const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now());
+      if (waitingLease === null) return;
+      const nextAttemptMs = now() + CHECK_BACKOFF_MS[0]!;
+      if (!(await deferCheckForPendingPublication(db, attemptId, waitingLease, nextAttemptMs, now()))) return;
+      summary.deferred += 1;
+      log.info(
+        {
+          event: "check_recovery_deferred_pending_publication",
+          attempt_id: attemptId,
+          phase: pending.kind === "pending" ? pending.phase : "unknown",
+          next_attempt_ms: nextAttemptMs,
+        },
+        "check recovery waiting for the publication proof — claim given back, no attempt spent",
+      );
+      return;
+    }
+  }
+
   // The pair's credential path first: a pair that cannot be used must be
   // suspended, not claimed (no ownership is taken for work that cannot run).
   const resolved = await credentialsForPair(db, env, scope, now, budget, transport, credentials, credentialCache, log, summary, updateBudgetMs);
@@ -791,20 +820,6 @@ async function reconcileCheckAttempt(
   //    lane only ever READS what that lane persisted — never a send, replay
   //    or paid re-review.
   const proof = await readProof(db, owned);
-  // No proof yet can mean "still being produced", not "failed": while this
-  // exact scope/head owns an in-flight publication journal, the M8 lane is
-  // still working on it. Terminalizing the unconfirmed fallback now would mark
-  // the run `done` for good — nothing re-opens it when that publication lands —
-  // so the claim is given back with no send and no attempt spent, and the next
-  // tick re-checks. The execution deadline is the HARD STOP: past it the wait
-  // is over and the unconfirmed failure is the honest answer.
-  if (proof === null) {
-    const pending = await findPendingPublicationJournal(db, owned);
-    if (pending !== null && now() < current.executionDeadlineMs) {
-      await deferCheckForPendingPublication(db, attemptId, lease, now() + CHECK_BACKOFF_MS[0]!, now());
-      return;
-    }
-  }
   // The gate decision needs the App's stored gate and the review THIS proof
   // published. A missing or corrupt gate row, or a tallies-free review, is
   // unreadable, so it can never be corrected into a success (spec §7.9).
@@ -1224,22 +1239,28 @@ async function readRecoveryReview(
 }
 
 /**
- * Does this exact scope/head still own an IN-FLIGHT publication journal? A read
- * failure answers `null` — the caller then keeps today's behaviour (deadline →
- * unconfirmed failure) rather than deferring forever on an unreadable table.
+ * The §7.11.2 proof-wait probe's THREE answers: a journal is in flight, there
+ * is none, or the journal table could not be read. "unknown" is deliberately
+ * distinct from "none": swallowing a read failure into "nothing pending" would
+ * terminalize the unconfirmed failure on a publication that can still land
+ * seconds later. The wait is bounded by the execution deadline, so treating
+ * "unknown" as "keep waiting" can never loop forever.
  */
-async function findPendingPublicationJournal(
-  db: D1Like,
-  owned: CheckOwnership,
-): Promise<{ id: string; phase: string } | null> {
+type PendingPublication =
+  | { kind: "pending"; phase: string }
+  | { kind: "none" }
+  | { kind: "unknown" };
+
+async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promise<PendingPublication> {
   try {
-    return await findPublicationJournal(db, {
-      scope: owned.identity.scope,
-      headSha: owned.identity.headSha,
+    const journal = await findPublicationJournal(db, {
+      scope: attempt.identity.scope,
+      headSha: attempt.identity.headSha,
       phases: PUBLICATION_IN_FLIGHT_PHASES,
     });
+    return journal === null ? { kind: "none" } : { kind: "pending", phase: journal.phase };
   } catch {
-    return null;
+    return { kind: "unknown" };
   }
 }
 
