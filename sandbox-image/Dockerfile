@@ -27,6 +27,9 @@
 # before its first model turn.
 # rebuild: the shim COPY is digest-pinned, so a rebuild no longer depends on what
 # the mutable 1.0.0 tag resolves to at build time.
+# rebuild: the recheck seat's ask is fitted to an operator-set byte budget and its yield is
+# validated against the catalog the seat actually received; the image's runner sources changed
+# without any manifest or CLI pin change.
 # rebuild: the runner marks its `incomplete`-cause composition as engine-owned
 # staging (the engine should derive the fact from seat results, not accept a
 # consumer's string), so the removal is scheduled rather than discovered.
