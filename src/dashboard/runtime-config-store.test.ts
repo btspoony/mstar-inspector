@@ -33,8 +33,10 @@ import { describe, expect, test } from "bun:test";
 import {
   CHECK_TERMINALIZE_DEFAULT,
   CHECK_TERMINALIZE_KEY,
+  CHECK_TERMINALIZE_MIN,
   CHECK_UPDATE_DEFAULT,
   CHECK_UPDATE_KEY,
+  CHECK_UPDATE_MIN,
   CONCURRENCY_MIN,
   RuntimeConfigError,
   SYSTEM_CONCURRENCY_DEFAULT,
@@ -564,6 +566,7 @@ describe("check budgets", () => {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: false,
+      derived: false,
     }));
 
   test("an untrusted or out-of-range stored value answers the defaults with degraded: true", async () => {
@@ -579,6 +582,7 @@ describe("check budgets", () => {
         terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
         updateMs: CHECK_UPDATE_DEFAULT,
         degraded: true,
+        derived: false,
       });
     }
   });
@@ -588,6 +592,7 @@ describe("check budgets", () => {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: true,
+      derived: false,
     }));
 
   test("a stored pair that breaks the writer's relation degrades the read", async () => {
@@ -611,6 +616,7 @@ describe("check budgets", () => {
         terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
         updateMs: CHECK_UPDATE_DEFAULT,
         degraded: true,
+        derived: false,
       });
     }
   });
@@ -631,6 +637,37 @@ describe("check budgets", () => {
       terminalizeMs: 1_000,
       updateMs: 999,
       degraded: false,
+      derived: true,
+    });
+
+    // A lone send below the default wait needs no derivation at all.
+    const smallSend = fixture();
+    smallSend.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at)
+         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+      )
+      .run(CHECK_UPDATE_KEY, CHECK_UPDATE_MIN);
+    expect(await getCheckBudgets(smallSend)).toEqual({
+      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+      updateMs: CHECK_UPDATE_MIN,
+      degraded: false,
+      derived: false,
+    });
+
+    // A stored value that already satisfies the relation is returned as is.
+    const alreadyValid = fixture();
+    alreadyValid.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at)
+         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+      )
+      .run(CHECK_TERMINALIZE_KEY, "20000");
+    expect(await getCheckBudgets(alreadyValid)).toEqual({
+      terminalizeMs: 20_000,
+      updateMs: CHECK_UPDATE_DEFAULT,
+      degraded: false,
+      derived: false,
     });
 
     // The mirror case: only the send is stored, above the default wait.
@@ -645,6 +682,7 @@ describe("check budgets", () => {
       terminalizeMs: 12_001,
       updateMs: 12_000,
       degraded: false,
+      derived: true,
     });
   });
 
@@ -694,6 +732,7 @@ describe("check budgets", () => {
       terminalizeMs: 12_000,
       updateMs: 7_000,
       degraded: false,
+      derived: false,
     });
     expect(auditRows(db)).toEqual([
       { action: "runtime.check_budgets.set", target_id: "review.check.budgets" },

@@ -441,7 +441,17 @@ export class UnknownWorkspaceError extends RuntimeConfigError {
  * `degraded: true` means at least one stored value was untrusted or the read
  * failed, so BOTH answers are the documented defaults.
  */
-export type CheckBudgets = { terminalizeMs: number; updateMs: number; degraded: boolean };
+export type CheckBudgets = {
+  terminalizeMs: number;
+  updateMs: number;
+  degraded: boolean;
+  /**
+   * `true` when one side is the absent-row default adjusted to keep the
+   * `terminalize > update` invariant, i.e. the pair the consumer runs with is
+   * NOT what the operator stored. The admin face must not round-trip it.
+   */
+  derived: boolean;
+};
 
 /** The pair an accepted write carries. */
 export type CheckBudgetValues = { terminalizeMs: number; updateMs: number };
@@ -452,16 +462,20 @@ function degradedCheckBudgets(): CheckBudgets {
     terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
     updateMs: CHECK_UPDATE_DEFAULT,
     degraded: true,
+    derived: false,
   };
 }
 
 /**
- * Both check budgets in ONE statement (one read per decision point). Only an
- * absent row is the default; a present value the parse cannot trust, a
- * malformed result row or a read failure answers the defaults with
- * `degraded: true` and never throws — a Check never blocks or delays the
- * review, so there is no conservative fallback smaller than the default worth
- * inventing.
+ * Both check budgets in ONE statement (one read per decision point). An absent
+ * row takes the documented default. The effective pair always satisfies the
+ * writer's `terminalize > update` rule: when BOTH rows are stored and violate
+ * it the answer is the documented defaults with `degraded: true`; when only one
+ * row is stored, the absent side is adjusted to the nearest in-range legal
+ * value and `derived: true` reports that the pair is not purely stored. A
+ * present value the parse cannot trust, a malformed result row or a read
+ * failure answers the degraded defaults and never throws — a Check never
+ * blocks or delays the review.
  */
 export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
   try {
@@ -494,8 +508,10 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
     // the invariant.
     let effectiveTerminalize = terminalize ?? CHECK_TERMINALIZE_DEFAULT;
     let effectiveUpdate = update ?? CHECK_UPDATE_DEFAULT;
+    let derived = false;
     if (effectiveTerminalize <= effectiveUpdate) {
       if (terminalize !== undefined && update !== undefined) return degradedCheckBudgets();
+      derived = true;
       if (terminalize === undefined) {
         effectiveTerminalize = Math.max(
           CHECK_TERMINALIZE_MIN,
@@ -505,7 +521,7 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
         effectiveUpdate = Math.max(CHECK_UPDATE_MIN, effectiveTerminalize - 1);
       }
     }
-    return { terminalizeMs: effectiveTerminalize, updateMs: effectiveUpdate, degraded: false };
+    return { terminalizeMs: effectiveTerminalize, updateMs: effectiveUpdate, degraded: false, derived };
   } catch {
     return degradedCheckBudgets();
   }

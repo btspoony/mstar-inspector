@@ -146,6 +146,7 @@ const DEFAULT_CHECK_BUDGETS = {
   updateMin: 500,
   updateMax: 15_000,
   degraded: false,
+  derived: false,
 };
 
 /** Both stored budget rows, raw, keyed by PK. */

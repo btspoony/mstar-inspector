@@ -53,6 +53,7 @@ describe("readCheckBudgets", () => {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: false,
+      derived: false,
     });
     expect(log.calls).toEqual([]);
   });
@@ -65,6 +66,7 @@ describe("readCheckBudgets", () => {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: true,
+      derived: false,
     });
     expect(log.calls).toHaveLength(1);
     expect(log.calls[0]!.fields).toEqual({

@@ -376,7 +376,12 @@ describe("boundDiscussion — §7.8 model context", () => {
   test("thread items keep their provenance and are never excluded by the issue-only rule", () => {
     // A thread reply this App wrote: the exclusion is ISSUE-scoped, so the
     // thread lane keeps it, and its provenance survives the bounding pass.
-    const ownThread = item(1, "<!-- mstar-inspector:thread:v1 x -->\nthread reply", "thread", "assoc-1");
+    const ownThread = item(
+      1,
+      "<!-- mstar-inspector:thread:v1 publication=11111111-2222-4333-8444-555555555555 association=66666666-7777-4888-8999-aaaaaaaaaaaa -->\nthread reply",
+      "thread",
+      "assoc-1",
+    );
     ownThread.ownAuthor = true;
     const bounded = boundDiscussion(discussionWith([ownThread], threadSnapshot("assoc-1")));
     expect(bounded.items).toHaveLength(1);

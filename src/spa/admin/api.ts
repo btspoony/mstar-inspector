@@ -121,6 +121,8 @@ export type CheckBudgetConfig = {
   updateMax: number;
   /** A stored budget could not be read: both numbers are the documented defaults. */
   degraded: boolean;
+  /** One side is derived from an absent row; it is not a configured value. */
+  derived: boolean;
 };
 
 /** The §7.2 recheck backlog refill as the operator API reports it. */
@@ -162,6 +164,7 @@ function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
     updateMin: num(budgets, "updateMin"),
     updateMax: num(budgets, "updateMax"),
     degraded: bool(budgets, "degraded"),
+    derived: bool(budgets, "derived"),
   };
 }
 

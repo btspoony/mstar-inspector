@@ -826,6 +826,11 @@ export const zhCN: Dictionary = {
       checkFailed: "修改检查预算失败。",
       /** {terminalize}/{update} = 当前存储的预算（或文档默认值）。 */
       checkCurrent: "下一次审查生效值：terminalize {terminalize} 毫秒，update {update} 毫秒。",
+      /** 只有一侧被存储；另一侧由文档默认值派生并调整，以维持不变式。 */
+      checkDerived:
+        "当前只存储了其中一个预算。另一个由文档默认值派生并做了调整，确保内联等待仍覆盖检查更新。要保存请显式输入两个值。",
+      /** {terminalize}/{update} = 生效值（一侧为派生值，不是存储值）。 */
+      checkDerivedCurrent: "下一次审查生效值：terminalize {terminalize} 毫秒，update {update} 毫秒（其中一侧为派生值）。",
       /** 两个已存储的预算都无法读取——数字只是文档默认值。 */
       checkUnreadable:
         "无法读取已存储的检查预算，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",

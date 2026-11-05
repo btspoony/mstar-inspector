@@ -82,9 +82,10 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   ): Promise<void> {
     event.preventDefault();
     if (busy) return; // in-flight guard — no double submit
+    const needsExplicit = stored.degraded || stored.derived;
     if (
-      concurrencySubmitBlocked(stored.degraded, terminalizeDraft) ||
-      concurrencySubmitBlocked(stored.degraded, updateDraft)
+      concurrencySubmitBlocked(needsExplicit, terminalizeDraft) ||
+      concurrencySubmitBlocked(needsExplicit, updateDraft)
     ) {
       return;
     }
@@ -256,6 +257,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.checkUnreadable")} />
                   </div>
                 ) : null}
+                {!budgets.degraded && budgets.derived ? (
+                  // One side was derived from the absent-row default to keep
+                  // terminalize > update: it is not a configured value, so the
+                  // form starts empty and a save can never pin it.
+                  <div className="mt-4">
+                    <PageNotice kind="warn" message={t(locale, "admin.runtime.checkDerived")} />
+                  </div>
+                ) : null}
                 <form
                   className="mt-4 flex flex-wrap items-end gap-2"
                   onSubmit={(event) => void onSaveBudgets(event, budgets)}
@@ -274,7 +283,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       required
                       value={
                         terminalizeDraft ??
-                        (budgets.degraded ? "" : String(budgets.terminalizeMs))
+                        (budgets.degraded || budgets.derived ? "" : String(budgets.terminalizeMs))
                       }
                       onChange={(event) => setTerminalizeDraft(event.target.value)}
                     />
@@ -293,7 +302,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       required
                       value={
                         updateDraft ??
-                        (budgets.degraded ? "" : String(budgets.updateMs))
+                        (budgets.degraded || budgets.derived ? "" : String(budgets.updateMs))
                       }
                       onChange={(event) => setUpdateDraft(event.target.value)}
                     />
@@ -307,7 +316,15 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     </Button>
                   ) : null}
                 </form>
-                {budgets.degraded ? null : (
+                {!budgets.degraded && budgets.derived ? (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {t(locale, "admin.runtime.checkDerivedCurrent", {
+                      terminalize: budgets.terminalizeMs,
+                      update: budgets.updateMs,
+                    })}
+                  </p>
+                ) : null}
+                {budgets.degraded || budgets.derived ? null : (
                   <p className="mt-2 text-xs text-muted-foreground">
                     {t(locale, "admin.runtime.checkCurrent", {
                       terminalize: budgets.terminalizeMs,

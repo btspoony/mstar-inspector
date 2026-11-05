@@ -342,6 +342,7 @@ describe("Runtime screen", () => {
     updateMin: 500,
     updateMax: 15_000,
     degraded: false,
+    derived: false,
   };
   const RUNTIME = {
     concurrency: 24,
