@@ -1607,6 +1607,53 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     expect((await listCheckReconcileBatch(db, T0 + 1)).map((r) => r.identity.attemptId)).toEqual([id]);
   });
 
+  test("a mixed-kind pair resumes only when EVERY suspended row is releasable", async () => {
+    const db = seededDb();
+    // Two attempts under one pair: one credential-suspended, one held by the
+    // kill switch. The resume write flips both, so neither may speak for the
+    // other.
+    const first = await claim(db, { headSha: "a".repeat(40) });
+    const second = await claim(db, { headSha: "b".repeat(40) });
+    for (const attempt of [first, second]) {
+      await setCheckDesired(db, attempt.attempt.identity.attemptId, attempt.lease, CONCLUSION, null, T0);
+      await deferCheckRecovery(
+        db,
+        attempt.attempt.identity.attemptId,
+        attempt.lease,
+        { state: "pending", nextAttemptMs: T0, reason: "release" },
+        T0,
+      );
+    }
+    // Credential suspension covers the pair, then the kill-switch hold stamps
+    // the second row only.
+    await suspendCheckRecovery(
+      db,
+      { appId: APP_ID, installationId: SCOPE.installationId },
+      checkSuspensionReason("identity-mismatch", "suspended", DIGEST),
+      T0,
+    );
+    // The pair-wide suspension cleared the holders, so the per-row pause is
+    // written directly here: the fixture's job is the mixed STATE, not the
+    // lease fencing (that path has its own tests).
+    db.raw
+      .prepare(`UPDATE review_checks SET last_error = ? WHERE id = ?`)
+      .run(checkSuspensionReason("paused", "kill switch"), second.attempt.identity.attemptId);
+    const pair = { appId: APP_ID, installationId: SCOPE.installationId };
+    // The kill switch has been lifted, so the paused row is releasable.
+    db.raw.prepare(`UPDATE github_apps SET review_enabled = 1 WHERE id = ?`).run(APP_ID);
+
+    // The credential envelope is unchanged: the paused row alone must not lift
+    // the pair.
+    expect(
+      await listReenableableCheckPairs(db, [{ ...pair, currentFingerprint: DIGEST }]),
+    ).toEqual([]);
+
+    // A changed envelope makes the credential row releasable too.
+    expect(
+      await listReenableableCheckPairs(db, [{ ...pair, currentFingerprint: "e".repeat(64) }]),
+    ).toEqual([pair]);
+  });
+
   test("a live holder is never resumed", async () => {
     const db = seededDb();
     const { id } = await suspendedRow(db, "identity-mismatch", DIGEST);

@@ -1249,6 +1249,9 @@ export async function reenableChecksForApps(
  * (`currentFingerprint !== recorded`), and it is deliberately asymmetric about
  * which side may be absent:
  *
+ * The probe reads EVERY suspended row of the pair, because the resume write
+ * flips them all: one row of an unreleasable kind keeps the pair suspended.
+ *
  *  - a READABLE current digest that differs from the recorded one — INCLUDING
  *    the "recorded digest absent" case, where a stored null compares unequal —
  *    means the operator changed something, so the pair earns ONE bounded proof;
@@ -1258,11 +1261,14 @@ export async function reenableChecksForApps(
  *    the pair stays suspended. That is the fail-closed direction, and it is also
  *    what keeps a pair whose routing row is still missing from being resumed.
  *
+ * A `paused` row (kill switch) resumes only once the switch is lifted, and a
+ * `disabled` row on App status alone; neither owes a credential proof. Every
+ * other kind needs the digest comparison above.
+ *
  * Without the first case a suspension recorded with no digest — a `missing`
  * installation mapping, or a row written before this encoding existed — could
- * never be resumed by anything: not by proof (`proven` is false on this path),
- * not by comparison, and not by the operator retry (which refuses suspended
- * rows). Repairing the mapping would leave the rows durably stranded with no
+ * never be resumed by anything: not by comparison, and not by the operator
+ * retry (which refuses suspended rows). Repairing the mapping would leave the rows durably stranded with no
  * operator path, which is the defect F-005 names.
  */
 export async function listReenableableCheckPairs(
@@ -1299,11 +1305,8 @@ export async function listReenableableCheckPairs(
     // keeps the whole pair suspended. A mixed-kind pair is reachable — a
     // kill-switch hold is written per row, a credential suspension covers the
     // pair — so an unordered single-row probe cannot speak for the rest.
-    const active = suspended.every(
-      (row) => row.app_status === "active" && row.app_deleted === null,
-    );
-    if (!active) continue;
     const everyRowReleasable = suspended.every((row) => {
+      if (row.app_status !== "active" || row.app_deleted !== null) return false;
       // A live holder is never yanked out from under its owner.
       if (row.holder !== null) return false;
       const kind = checkSuspensionKindOf(row.last_error);

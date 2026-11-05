@@ -684,19 +684,21 @@ async function reenableProbe(
   | { kind: "refused" }
   | { kind: "resuspend"; reason: CheckCredentialReason; credentialFingerprint?: string }
 > {
-  const row = await db
+  const rows = await db
     .prepare(
       `SELECT last_error FROM review_checks
-        WHERE app_id = ? AND installation_id = ? AND recovery_state = 'suspended' LIMIT 1`,
+        WHERE app_id = ? AND installation_id = ? AND recovery_state = 'suspended'`,
     )
     .bind(pair.appId, pair.installationId)
-    .first<{ last_error: string | null }>();
-  const kind = checkSuspensionKindOf(row?.last_error ?? null);
-  // Neither kind ever had a credential question, so neither owes a probe:
-  // `disabled` was proved by App status and `paused` by the kill switch. Both
-  // resume straight into the row loop, which resolves credentials afresh anyway
-  // before any request.
-  if (kind === "disabled" || kind === "paused") return { kind: "resume" };
+    .all<{ last_error: string | null }>();
+  const kinds = rows.results.map((row) => checkSuspensionKindOf(row.last_error));
+  // A pair may hold mixed suspension kinds (the kill-switch hold is per row, a
+  // credential suspension covers the pair). Only when EVERY suspended row is
+  // status-resumable may this skip the credential probe: `disabled` was proved
+  // by App status and `paused` by the kill switch, and neither owes a proof.
+  if (kinds.length > 0 && kinds.every((kind) => kind === "disabled" || kind === "paused")) {
+    return { kind: "resume" };
+  }
   // Admission BEFORE the factory (M8's discipline): an unaffordable probe must
   // not run at all, so nothing is written and the pair stays retryable.
   if (!canSpend(budget, now(), CREDENTIAL_REQUESTS, false)) return { kind: "refused" };
