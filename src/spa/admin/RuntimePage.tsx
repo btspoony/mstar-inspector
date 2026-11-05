@@ -1,8 +1,9 @@
 /**
  * Runtime parameters — the non-secret values an operator changes without a
  * redeploy (iteration spec §1.1, §2.4): the system review-concurrency cap,
- * the §7.10 Check budgets and the default review depth Apps without their own
- * depth inherit.
+ * the §7.10 Check budgets, the recheck seat's assignment budget (UTF-8 bytes of
+ * ask the prior-findings seat may receive) and the default review depth Apps
+ * without their own depth inherit.
  *
  * One save writes ONE `PATCH /api/runtime`; the server pairs the write with its
  * audit row, so this screen owns no ledger logic. Each field is a local draft
