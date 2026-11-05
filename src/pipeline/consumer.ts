@@ -1162,10 +1162,11 @@ async function findIncrementBase(db: PipelineEnv["DB"], scope: Scope): Promise<s
 /**
  * Closing/mentioning issue refs the report seat may read (finite vocabulary).
  * Every keyword is accepted bare (`Fix #12`) or colon-prefixed (`Fixes: #12`);
- * the leading `\b` keeps `unfixes #3` out of the table.
+ * the colon must follow the keyword directly, because GitHub does not close
+ * from `fix : #12`, and the leading `\b` keeps `unfixes #3` out of the table.
  */
 const ISSUE_REF_RE =
-  /\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved|refs?|references?)\s*:?\s*#(\d+)\b/gi;
+  /\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved|refs?|references?)(?::\s*|\s+)#(\d+)\b/gi;
 
 /**
  * Extract the issue numbers a PR body claims to close or reference. A finite
