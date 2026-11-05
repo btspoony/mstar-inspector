@@ -135,6 +135,74 @@ describe("failure classification", () => {
   }
 });
 
+// --- bounded transport ---
+//
+// These two cases pin the platform clock ON PURPOSE: the production bound is
+// `AbortSignal.timeout` around a real fetch, and fake timers do not drive that
+// signal, so the only faithful reproduction is a real (single-digit-ms) wait.
+
+/**
+ * Answers only when the caller's budget aborts the wait — the behavior a real
+ * fetch has under `AbortSignal.timeout`, so a hung vendor cannot hang a probe.
+ */
+function hungFetch(calls: FetchCall[] = []): UsageDeps["fetch"] {
+  return ((input, init) => {
+    calls.push({ url: String(input), headers: (init?.headers ?? {}) as Record<string, string> });
+    const { promise, reject } = Promise.withResolvers<Response>();
+    init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    return promise;
+  }) as UsageDeps["fetch"];
+}
+
+/** Resolves `body` after `ms`. `honorAbort: false` models a vendor whose answer
+ *  arrives late anyway — only the read's own budget can cut that wait short. */
+function timedJson(
+  body: unknown,
+  ms: number,
+  opts: { honorAbort?: boolean; calls?: FetchCall[] } = {},
+): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
+  return async (input, init) => {
+    opts.calls?.push({ url: String(input), headers: (init?.headers ?? {}) as Record<string, string> });
+    const { promise, resolve, reject } = Promise.withResolvers<Response>();
+    const timer = setTimeout(() => resolve(json(200, body)), ms);
+    if (opts.honorAbort !== false) {
+      init?.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(new DOMException("aborted", "AbortError"));
+      });
+    }
+    return await promise;
+  };
+}
+
+describe("bounded transport", () => {
+  test("a vendor that never answers resolves to an error snapshot within the probe's budget", async () => {
+    const calls: FetchCall[] = [];
+    const snapshot = await probeProviderUsage({ fetch: hungFetch(calls), timeoutMs: 5 }, "hyper", "key-123");
+    expect(snapshot.status).toBe("error");
+    expect(snapshot.limits).toEqual([]);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("Command Code's two GETs share ONE budget — a slow whoami leaves no fresh window for credits", async () => {
+    const calls: FetchCall[] = [];
+    // whoami answers LATE (past the shared deadline) and ignores the abort
+    // signal; the credits read then has ~1 ms left while its answer needs 5 ms.
+    // An implementation that reset the budget per request would accept it.
+    const fetchImpl: UsageDeps["fetch"] = (async (input, init) =>
+      calls.length === 0
+        ? timedJson({ user: { id: "user-1" } }, 25, { honorAbort: false, calls })(input, init)
+        : timedJson({ data: { credits: { monthlyCredits: 10 } } }, 5, { calls })(input, init)) as UsageDeps["fetch"];
+    const snapshot = await probeProviderUsage({ fetch: fetchImpl, timeoutMs: 10 }, "commandcode", "cc-key");
+    expect(snapshot.status).toBe("error");
+    // whoami + one credits attempt, never a retry that spends a second budget.
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://api.commandcode.ai/alpha/whoami",
+      "https://api.commandcode.ai/alpha/billing/credits",
+    ]);
+  });
+});
+
 // --- family: commandcode ---
 
 describe("commandcode", () => {
@@ -216,6 +284,42 @@ describe("commandcode", () => {
     );
     expect(snapshot.status).toBe("ok");
     expect(snapshot.limits.map((limit) => limit.id)).toEqual(["commandcode:week", "commandcode:balance"]);
+  });
+
+  test("a present-but-unreadable credit component drops the whole balance instead of zero-filling it", async () => {
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: queueFetch([
+          json(200, { user: { id: "user-1" } }),
+          json(200, { data: { credits: { monthlyCredits: 100, purchasedCredits: "not-a-number", freeCredits: 5 } } }),
+        ]),
+      },
+      "commandcode",
+      "cc-key",
+    );
+    // 105 would be a total the payload never stated: the balance is dropped.
+    expect(snapshot.limits).toEqual([]);
+    expect(snapshot.status).toBe("error");
+
+    // The drop is scoped to the balance limit — the account's windows still
+    // render instead of the whole snapshot collapsing.
+    const withWindows = await probeProviderUsage(
+      {
+        fetch: queueFetch([
+          json(200, { user: { id: "user-1" } }),
+          json(200, {
+            data: {
+              credits: { monthlyCredits: 100, purchasedCredits: "not-a-number" },
+              windowLimits: { weekly: { used: 250, cap: 500 } },
+            },
+          }),
+        ]),
+      },
+      "commandcode",
+      "cc-key",
+    );
+    expect(withWindows.status).toBe("ok");
+    expect(withWindows.limits.map((limit) => limit.id)).toEqual(["commandcode:week"]);
   });
 
   test("a rejected credential on whoami is unauthorized", async () => {

@@ -3516,7 +3516,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
 };
 
 /**
- * Per-key usage probe (plan api-key-usage-probe): `POST
+ * Per-key usage probe: `POST
  * /api/apps/:appId/keys/usage` with form fields `provider` + `keyId` asks the
  * provider's own quota endpoint with ONE stored key and answers the normalized
  * snapshot. Refusals are ordered by cost: a provider with no probe is refused

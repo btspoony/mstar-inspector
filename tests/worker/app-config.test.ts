@@ -3765,7 +3765,7 @@ describe("POST /dashboard/default/apps/:appId/settings/key/delete (per-key delet
   });
 });
 
-// --- per-key usage probe (plan api-key-usage-probe) ---
+// --- per-key usage probe ---
 
 describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage probe)", () => {
   const USAGE = `/dashboard/default/api/apps/${APP_ID}/keys/usage`;

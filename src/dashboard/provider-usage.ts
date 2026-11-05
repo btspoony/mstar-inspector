@@ -292,6 +292,18 @@ const COMMANDCODE_WINDOWS = [
 ] as const;
 
 /**
+ * One credit component: `undefined` when the field is ABSENT, `null` when it is
+ * present but not a finite non-negative number. The distinction matters — an
+ * absent component contributes nothing, while an unreadable one makes the
+ * account total unknowable.
+ */
+function creditComponent(value: unknown): number | undefined | null {
+  if (value === undefined || value === null) return undefined;
+  const amount = toNumber(value);
+  return amount === undefined || amount < 0 ? null : amount;
+}
+
+/**
  * Command Code's inference base is `/provider`, while the account routes sit at
  * the host root — so the origin is a constant, never derived from a base URL.
  * `/alpha/whoami` names the org whose credit pool the CLI reads; without one
@@ -334,19 +346,28 @@ const commandCodeUsage: UsageProbe = async (input, key) => {
     }
     const credits = asRecord(body.credits);
     if (credits !== undefined) {
-      const monthly = toNumber(credits.monthlyCredits);
-      const purchased = toNumber(credits.purchasedCredits);
-      const free = toNumber(credits.freeCredits);
-      // A pay-as-you-go account has no windowLimits at all: one balance limit,
-      // never a fabricated 0 % window.
-      if (monthly !== undefined || purchased !== undefined || free !== undefined) {
-        limits.push({
-          id: "commandcode:balance",
-          kind: "balance",
-          remaining: (monthly ?? 0) + (purchased ?? 0) + (free ?? 0),
-          unit: "credits",
-          shared: true,
-        });
+      const components = [
+        creditComponent(credits.monthlyCredits),
+        creditComponent(credits.purchasedCredits),
+        creditComponent(credits.freeCredits),
+      ];
+      // A present-but-unreadable component makes the TOTAL unknowable: summing
+      // only the readable ones would publish a partial balance as the account's
+      // credits, so the balance limit is dropped whole rather than zero-filling
+      // the gap. An absent component legitimately contributes nothing.
+      if (components.every((component) => component !== null)) {
+        const readable = components.filter((component): component is number => component !== undefined);
+        // A pay-as-you-go account has no windowLimits at all: one balance
+        // limit, never a fabricated 0 % window.
+        if (readable.length > 0) {
+          limits.push({
+            id: "commandcode:balance",
+            kind: "balance",
+            remaining: readable.reduce((sum, component) => sum + component, 0),
+            unit: "credits",
+            shared: true,
+          });
+        }
       }
     }
     return limits;
