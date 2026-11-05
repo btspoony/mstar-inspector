@@ -206,9 +206,11 @@ export function remainingSoftMinutes(nowMs: number, level?: ReviewLevel): number
  * hard cap derives from, as opposed to the soft convergence target
  * `remainingSoftMinutes` reports. Same anchor and same purity; unanchored
  * (direct runtime/test use) → the tier's full cap from `nowMs`, mirroring
- * `currentRecheckBudget`'s convention.
+ * `currentRecheckBudget`'s convention. `level` only picks that unanchored
+ * cap, so it defaults to the anchored tier — an anchored caller need not name
+ * one.
  */
-export function remainingOuterMs(nowMs: number, level: ReviewLevel): number {
+export function remainingOuterMs(nowMs: number, level: ReviewLevel = anchoredSoftLevel ?? "default"): number {
   return (anchoredDeadlineMs ?? nowMs + OUTER_RUNNER_CAP_MS[level]) - nowMs;
 }
 
@@ -266,9 +268,12 @@ function jsonByteLength(value: unknown): number {
  * the consumer into the runner input's `recheckAssignmentMaxBytes`;
  * `runtime-omp` forwards that FIELD as `runRecheckSeat`'s `assignmentMaxBytes`
  * only when it is present; this constant is the `??` fallback for an absent
- * field on that last hop. The field is absent when no operator row exists, or
- * when an unreadable row answers the same default with `degraded: true` — and
- * then this constant is the cap the seat actually runs with. The §7.3 input cap
+ * field on that last hop. The consumer ALWAYS sets the field on a round it
+ * asks: an absent operator row answers this default once (`degraded: true` for
+ * an unreadable one) and the field carries that number, so this constant is
+ * the cap the seat actually runs with either way. The field is absent only on a
+ * direct runner call that has no consumer at all, and `runtime-omp` then
+ * forwards nothing. The §7.3 input cap
  * (512 KiB, consumer) is a WIRE cap, not a window: at 3.5–4 bytes per token it
  * is ~131k–150k tokens — a whole 128k window spent before the prompt's own
  * rules, the seat's read-only tool traffic and its yield (25 rows may carry
@@ -509,16 +514,20 @@ export async function runRecheckSeat(input: {
   const headSha = input.input.headSha;
   const assignmentMaxBytes = input.assignmentMaxBytes ?? RECHECK_ASSIGNMENT_MAX_BYTES;
   const runSeat = input.runSeat ?? runStructuredSubagent;
-  const maxRuntimeMs = currentRecheckBudget(Date.now());
+  const nowMs = Date.now();
+  const maxRuntimeMs = currentRecheckBudget(nowMs);
   if (maxRuntimeMs === 0) {
     // `cause` splits the two skips that both report the closed `reason:
     // "budget"`: this one is the transient tail (the outer deadline is
     // already spent) and is re-evaluated on the next round, never a
     // configuration fault the operator must fix. The status error carries the
     // same cause so the durable document (and the failure row built from it)
-    // tells the two apart without a new wire field.
+    // tells the two apart without a new wire field. Both figures are the ones
+    // the skip was decided on: what the outer deadline actually left, and the
+    // outer time the seat's minimum budget plus the start margin needs.
     const error = redactedStatusError(
-      "recheck seat skipped (tail): the review's outer deadline left less than the seat's minimum budget",
+      `recheck seat skipped (tail): the review's outer deadline left ${remainingOuterMs(nowMs)}ms, ` +
+        `the seat needs at least ${RECHECK_MIN_REMAINING_MS + RECHECK_START_MARGIN_MS}ms`,
     );
     console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget", cause: "tail", error }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error } };

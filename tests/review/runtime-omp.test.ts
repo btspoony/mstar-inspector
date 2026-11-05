@@ -2350,7 +2350,10 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   test("exhausted budget → the seat is skipped entirely (no child started), status reason budget", async () => {
-    anchorRecheckDeadline(Date.now() - 600_000, "quick"); // outer deadline already past → 0
+    // A frozen clock pins the skip's figures: the deadline is exactly 600,000ms
+    // in the past, so the whole durable status is comparable to a literal.
+    jest.useFakeTimers();
+    anchorRecheckDeadline(Date.now() - 600_000, "quick"); // outer deadline spent → 0
     seatResults = [{ data: seatPayload() }];
     const { recheck, recheckStatus } = await ompAgentRuntime.runReview({
       ...BASE_INPUT,
@@ -2359,7 +2362,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     });
 
     expect(recheck).toBeNull();
-    expect(recheckStatus).toMatchObject({
+    expect(recheckStatus).toEqual({
       schema: "mstar.recheck-status/v1",
       headSha: RECHECK_SHA,
       outcome: "skipped",
@@ -2367,9 +2370,9 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       rejected: 0,
       rejected_row_ids: [],
       rejected_unnamed: 0,
+      // The tail skip names its cause AND the figures it decided on.
+      error: "recheck seat skipped (tail): the review's outer deadline left 0ms, the seat needs at least 35000ms",
     });
-    // The tail skip names its cause in the durable status.
-    expect(recheckStatus!.error).toContain("(tail)");
     // Only the review seat ran — no recheck child was dispatched.
     expect(subagentRequests).toHaveLength(1);
     expect(subagentRequests[0]!.outputSchema).not.toBe(RECHECK_OUTPUT_SCHEMA);
