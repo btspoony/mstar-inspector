@@ -1117,4 +1117,12 @@ describe("extractIssueRefs", () => {
     // A keyword must stand alone: `unfixes #3` is not `fixes #3`.
     expect(extractIssueRefs("unfixes #3")).toEqual([]);
   });
+
+  test("recognizes bare and colon spellings of close / fix / resolve", () => {
+    for (const body of ["Fix #12", "Close #12", "Resolve #12", "Fixes: #12", "Closes #12", "Resolves #12"]) {
+      expect(extractIssueRefs(body)).toEqual([12]);
+    }
+    // The bare forms keep the standalone-keyword and positive-number rules.
+    expect(extractIssueRefs("unfixes #3, fix #abc, fix #0, mentions #9")).toEqual([]);
+  });
 });
