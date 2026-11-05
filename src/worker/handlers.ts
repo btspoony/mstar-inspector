@@ -187,9 +187,11 @@ export async function handleReviewJob(
     }
   }
 
-  // Durable per-comment claim: `INSERT OR IGNORE`, so the row's primary key —
-  // not this isolate's read — decides which delivery owns the comment. The
-  // losing delivery skips whatever state the row holds (`queued`, `consumed`,
+  // Durable per-comment claim: `ON CONFLICT (…identity…) DO NOTHING`, so the
+  // row's primary key — not this isolate's read — decides which delivery owns
+  // the comment, and `changes === 0` means EXACTLY that duplicate (never a
+  // CHECK/NOT NULL refusal, which must not be logged as one). The losing
+  // delivery skips whatever state the row holds (`queued`, `consumed`,
   // `expired`): in every case this comment already claimed its one review.
   //
   // A D1 failure is NOT caught: without the durable claim the invariant cannot
@@ -198,9 +200,10 @@ export async function handleReviewJob(
   if (commentId !== undefined) {
     const nowMs = Date.now();
     const claim = await deps.env.DB.prepare(
-      `INSERT OR IGNORE INTO comment_trigger_claims
+      `INSERT INTO comment_trigger_claims
          (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
-       VALUES (?, ?, ?, ?, ?, 'queued', ?, 0, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, 'queued', ?, 0, ?, ?)
+       ON CONFLICT (installation_id, owner, repo, pr_number, comment_id) DO NOTHING`,
     )
       .bind(
         payload.installation_id,

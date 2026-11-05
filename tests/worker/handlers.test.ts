@@ -90,7 +90,7 @@ function makeLog(): { info: Mock<(fields: unknown, msg?: string) => void>; warn:
 /**
  * Handler deps with all three required bindings; `db` is injectable. The
  * default DB is a migrated double: the REAL `comment_trigger_claims` DDL, so
- * `INSERT OR IGNORE` behaves exactly as it does in production.
+ * the claim insert behaves exactly as it does in production.
  */
 function handlerEnv(
   kv: KVNamespace,
@@ -305,6 +305,38 @@ describe("handleReviewJob — durable comment-trigger claim (no head_sha)", () =
       // The winner's row is never rewritten by the losing delivery.
       expect(claimRows(db), state).toHaveLength(1);
     }
+  });
+
+  test("a non-conflict claim refusal propagates instead of being logged as a duplicate", async () => {
+    const { kv } = makeKvStub();
+    const { queue, sent } = makeQueueStub();
+    const log = makeLog();
+    const db = createMigratedTestD1() as unknown as D1Database;
+    // The scenario `INSERT OR IGNORE` hid: a later migration adds a NOT NULL
+    // column the worker cannot fill. Only a duplicate key is suppressed now, so
+    // this refusal reaches the handler's uncaught-D1 path (500 → GitHub retry)
+    // instead of a silent drop with a misleading "duplicate" log.
+    (db as unknown as TestD1).raw.exec(`
+      CREATE TABLE comment_trigger_claims_v2 (
+        installation_id INTEGER NOT NULL, owner TEXT NOT NULL, repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL, comment_id INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('queued', 'consumed', 'expired')),
+        payload_json TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+        created_ms INTEGER NOT NULL, queued_ms INTEGER NOT NULL, consumed_ms INTEGER,
+        origin TEXT NOT NULL,
+        PRIMARY KEY (installation_id, owner, repo, pr_number, comment_id)
+      );
+      DROP TABLE comment_trigger_claims;
+      ALTER TABLE comment_trigger_claims_v2 RENAME TO comment_trigger_claims;
+    `);
+
+    await expect(handleReviewJob(mentionPayload(), { env: handlerEnv(kv, queue, db), log })).rejects.toThrow(
+      /NOT NULL/,
+    );
+
+    expect(queue.send).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
+    expect(log.info).not.toHaveBeenCalled();
   });
 
   test("a failed send releases the claim so GitHub's retry enqueues again", async () => {
