@@ -664,9 +664,11 @@ describe("pull request detail face (static SSR)", () => {
       { expanded: false, hidden: true },
       { expanded: false, hidden: true },
     ]);
+    // The position is the rendered one inside the `other` group, not the
+    // payload array index.
     expect(read.otherLabels).toEqual([
-      `${t("en", "pullRequests.expand")} — Drop the unsafe default · #4`,
-      `${t("en", "pullRequests.expand")} — #5`,
+      `${t("en", "pullRequests.expand")} — Drop the unsafe default · #1`,
+      `${t("en", "pullRequests.expand")} — #2`,
     ]);
 
     // A legacy severity still renders, still opens the findings family (a
@@ -703,11 +705,12 @@ describe("pull request detail face (static SSR)", () => {
     expect(pairs.filter((pair) => pair.expanded)).toHaveLength(1);
     expect(pairs.filter((pair) => !pair.expanded)).toHaveLength(2);
     // Each toggle names the record it folds and its position, so identical
-    // "Expand" labels do not leave several controls indistinguishable.
+    // "Expand" labels do not leave several controls indistinguishable. The
+    // position is per group: each finding is the first row of its own bucket.
     expect(labels).toEqual([
       `${t("en", "pullRequests.collapse")} — Use a parameterized query · #1`,
-      `${t("en", "pullRequests.expand")} — Session cookie lacks HttpOnly · #2`,
-      `${t("en", "pullRequests.expand")} — Rename tmp to pending · #3`,
+      `${t("en", "pullRequests.expand")} — Session cookie lacks HttpOnly · #1`,
+      `${t("en", "pullRequests.expand")} — Rename tmp to pending · #1`,
     ]);
   });
 
@@ -747,9 +750,11 @@ describe("pull request detail face (static SSR)", () => {
         (control) => control.getAttribute("aria-label") ?? "",
       ),
     );
+    // The position is per group: each untitled finding is the first row of
+    // its own bucket.
     expect(findingLabels).toEqual([
       `${t("en", "pullRequests.collapse")} — #1`,
-      `${t("en", "pullRequests.expand")} — #2`,
+      `${t("en", "pullRequests.expand")} — #1`,
     ]);
 
     // The same case on the reviews family: no verdict and no head sha.
