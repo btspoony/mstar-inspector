@@ -655,6 +655,14 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // `;//` or `)//` is prose and its `var(--x)` is not a live reference.
     expect(moduleNames('const n = 1;// bg-(--retired-900)')).toEqual([]);
     expect(moduleNames('f()// bg-(--retired-900)')).toEqual([]);
+    // A regex may open after a control condition's `)`: that is a statement
+    // position, not an operand. Reading the slash as division re-read the
+    // `[//]` character class as a comment start and swallowed the live
+    // reference beside it — the silent miss this gate exists to remove, so an
+    // ambiguous slash is read as a regex (W1-R1).
+    expect(moduleNames('if (ok) /[//]/.test(value); const k = "bg-(--retired-900)"')).toEqual([
+      "retired-900",
+    ]);
   });
 
   test("an unreadable consumer is a reported failure, never a thrown run", () => {

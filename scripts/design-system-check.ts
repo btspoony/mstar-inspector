@@ -251,16 +251,24 @@ const HTML_COMMENT = /<!--[\s\S]*?-->/g;
 /** A `<style>` block inside an HTML shell — CSS again, so its comments go too. */
 const STYLE_BLOCK = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
 /**
- * Where a `/` opens a regex literal rather than a division: an expression
- * opener, or a keyword that expects one. An identifier, literal, `)` or `]`
- * leaves a division. Not a parser: an ambiguous `/` is read as division, the
- * common case, so ordinary text stays live.
+ * Where a `/` divides rather than opens a regex: the tokens that unambiguously
+ * END an expression. Anything else — a control condition's `)`, a `}`, an
+ * unknown token — leaves the slash ambiguous, and an ambiguous slash opens a
+ * regex. The two mistakes are not symmetric: over-reading a regex only keeps
+ * text live (a visible false alarm), while reading a regex as division let the
+ * `//` inside its body start a comment, deleting a live reference and passing
+ * the gate. So ambiguity resolves in the direction that never hides one.
  */
-const REGEX_OPENERS: Record<string, true> = {
-  "(": true, "[": true, "{": true, ",": true, ";": true, ":": true,
-  "=": true, "!": true, "?": true, "&": true, "|": true, "+": true,
-  "-": true, "*": true, "%": true, "^": true, "~": true,
+const EXPRESSION_ENDS: Record<string, true> = {
+  "]": true, ")": true, '"': true, "'": true, "/": true,
 };
+/** A `(` after one of these opens a condition, not a value: its `)` leaves a statement position. */
+const CONDITION_KEYWORDS: Record<string, true> = {
+  if: true, while: true, for: true, switch: true, catch: true, with: true,
+};
+/** `previous` after a condition's `)` — not an operand, so a regex may follow. */
+const AFTER_CONDITION = ")condition";
+/** Keywords a regex may follow directly. */
 const REGEX_KEYWORDS: Record<string, true> = {
   return: true, typeof: true, instanceof: true, in: true, of: true, new: true,
   delete: true, void: true, throw: true, case: true, do: true, else: true,
@@ -301,6 +309,10 @@ function skipRegex(text: string, start: number): number {
  * string's ` // ` swallowed a live reference later on its line (the silence
  * this gate exists to remove), while a tight comment's `var(--x)` stayed live
  * and failed valid code.
+ *
+ * A slash the scanner cannot place is read as a regex opener, so the text
+ * after it stays live; the only cost of that guess being wrong is a comment
+ * kept as code, which the link then reports.
  */
 function withoutScriptComments(text: string): string {
   const out: string[] = [];
@@ -310,6 +322,9 @@ function withoutScriptComments(text: string): string {
   // `{` nesting inside the open `${ … }`: a `}` at zero hands back to the
   // template text.
   const braces: number[] = [0];
+  // Whether each open `(` is a control condition — its `)` ends a statement,
+  // where a regex may open, not a value, where `/` divides.
+  const conditions: boolean[] = [];
   // The last significant character and word in code — the regex/division rule.
   let previous = "";
   let word = "";
@@ -373,7 +388,15 @@ function withoutScriptComments(text: string): string {
       i += 1;
       continue;
     }
-    if (ch === "/" && (REGEX_OPENERS[previous] === true || REGEX_KEYWORDS[word] === true)) {
+    // A `/` divides only after a token that ends an expression; anything else
+    // is ambiguous and opens a regex, so no text can be read as a comment by
+    // mistake.
+    if (
+      ch === "/" &&
+      REGEX_KEYWORDS[word] !== true &&
+      !/^[A-Za-z0-9_$]$/.test(previous) &&
+      EXPRESSION_ENDS[previous] !== true
+    ) {
       const end = skipRegex(text, i);
       if (end > i) {
         out.push(text.slice(i, end));
@@ -382,6 +405,16 @@ function withoutScriptComments(text: string): string {
         i = end;
         continue;
       }
+    }
+    // A condition's `)` is not an operand: the slash after it opens a regex.
+    if (ch === "(") {
+      conditions.push(CONDITION_KEYWORDS[word] === true);
+    } else if (ch === ")" && conditions.pop() === true) {
+      out.push(ch);
+      previous = AFTER_CONDITION;
+      word = "";
+      i += 1;
+      continue;
     }
     if (ch === "{" && modes.length > 1) {
       braces[braces.length - 1] = (braces[braces.length - 1] as number) + 1;

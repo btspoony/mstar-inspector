@@ -410,13 +410,21 @@ describe("resolveBase", () => {
   const HEAD = "c".repeat(40);
 
   test("a reachable base is used as-is, with no fallback attempted", () => {
-    const calls: string[] = [];
+    const calls: string[][] = [];
     const run = (args: string[]) => {
-      calls.push(args[0]!);
-      return args[0] === "cat-file" ? "" : undefined;
+      calls.push(args);
+      if (args[0] === "cat-file") return "";
+      if (args[0] === "rev-parse") return `${HEAD}\n`;
+      if (args[0] === "merge-base") return undefined;
+      return undefined;
     };
     expect(resolveBase(BASE, "main", run)).toEqual({ sha: BASE });
-    expect(calls).toEqual(["cat-file"]);
+    // The descendant guard is the only extra question: nothing is fetched and
+    // no merge base is sought.
+    expect(calls.some(([command]) => command === "fetch")).toBe(false);
+    expect(calls.some(([command, sub]) => command === "merge-base" && sub !== "--is-ancestor")).toBe(
+      false,
+    );
   });
 
   test("an unreachable push base is fetched from origin and still evaluated", () => {
@@ -426,15 +434,55 @@ describe("resolveBase", () => {
         fetched = true;
         return "";
       }
-      return args[0] === "cat-file" && fetched ? "" : undefined;
+      if (args[0] === "cat-file") return fetched ? "" : undefined;
+      if (args[0] === "rev-parse") return `${HEAD}\n`;
+      return undefined;
     };
     expect(resolveBase(BASE, "main", run)).toEqual({ sha: BASE, recovered: "fetched" });
+  });
+
+  test("a local base at or ahead of HEAD is not a base: it would diff an empty range", () => {
+    const behind = "b".repeat(40);
+    const run = (args: string[]) => {
+      if (args[0] === "cat-file") return "";
+      if (args[0] === "rev-parse") return `${HEAD}\n`;
+      // HEAD is an ancestor of the requested commit: a backwards force-push.
+      if (args[0] === "merge-base" && args[1] === "--is-ancestor") {
+        return args[3] === BASE ? "" : undefined;
+      }
+      if (args[0] === "merge-base") return `${behind}\n`;
+      return undefined;
+    };
+    expect(resolveBase(BASE, "main", run)).toEqual({ sha: behind, recovered: "merge-base" });
+  });
+
+  test("a fetched base ahead of HEAD is refused too, not passed as an empty diff", () => {
+    let fetched = false;
+    const run = (args: string[]) => {
+      if (args[0] === "fetch") {
+        fetched = true;
+        return "";
+      }
+      if (args[0] === "cat-file") return fetched ? "" : undefined;
+      if (args[0] === "rev-parse") return `${HEAD}\n`;
+      // HEAD is an ancestor of the fetched commit: a backwards force-push.
+      if (args[0] === "merge-base") return "";
+      return undefined;
+    };
+    const resolved = resolveBase(BASE, undefined, run);
+    expect("error" in resolved).toBe(true);
+    if ("error" in resolved) {
+      expect(resolved.error).toContain(BASE);
+      expect(resolved.error).toContain("not behind HEAD");
+    }
   });
 
   test("an unreachable base recovers to the merge base with the target branch", () => {
     const mergeBase = "b".repeat(40);
     const run = (args: string[]) => {
       if (args[0] === "cat-file") return undefined;
+      // HEAD is not an ancestor of the merge base: the base lies behind HEAD.
+      if (args[0] === "merge-base" && args[1] === "--is-ancestor") return undefined;
       if (args[0] === "merge-base") return `${mergeBase}\n`;
       if (args[0] === "rev-parse") return `${HEAD}\n`;
       return undefined;

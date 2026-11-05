@@ -323,6 +323,13 @@ function objectExists(spec: string, run: GitRun): boolean {
  * 3. the merge base with `ref` (the target branch), where the new history
  *    actually diverged — never HEAD itself, which would diff an empty range.
  *
+ * Every one of them answers only for a base BEHIND HEAD. A backwards
+ * force-push leaves `before` a descendant, and the server still serves it
+ * through the gc window, so the fetched path could accept a base newer than
+ * the change: `git diff base...HEAD` then collapses to `diff(HEAD, HEAD)` —
+ * an empty range, read as "nothing image-affecting changed". The guard is
+ * global for that reason, not a property of the merge-base fallback.
+ *
  * Only when none answers does the gate fail closed, with a cause that names
  * the unreachable base rather than the file it could not read.
  */
@@ -331,23 +338,39 @@ export function resolveBase(
   ref: string | undefined,
   run: GitRun,
 ): { sha: string; recovered?: "fetched" | "merge-base" } | { error: string } {
-  if (objectExists(`${requested}^{commit}`, run)) return { sha: requested };
-  if (
+  const head = run(["rev-parse", "HEAD"])?.trim();
+  const local = objectExists(`${requested}^{commit}`, run);
+  const fetched =
+    !local &&
     run(["fetch", "--no-tags", "--quiet", "origin", requested]) !== undefined &&
-    objectExists(`${requested}^{commit}`, run)
+    objectExists(`${requested}^{commit}`, run);
+  // The named/fetched commit answers only when it lies behind HEAD: a base at
+  // HEAD or ahead of it diffs to `diff(HEAD, HEAD)` — empty, and read as a pass.
+  if (
+    (local || fetched) &&
+    requested !== head &&
+    run(["merge-base", "--is-ancestor", "HEAD", requested]) === undefined
   ) {
-    return { sha: requested, recovered: "fetched" };
+    return fetched ? { sha: requested, recovered: "fetched" } : { sha: requested };
   }
   if (ref !== undefined && ref !== "") {
-    const head = run(["rev-parse", "HEAD"])?.trim();
-    const mergeBase = run(["merge-base", "HEAD", ref])?.trim();
-    if (mergeBase !== undefined && mergeBase !== "" && mergeBase !== head) {
+    const mergeBase = run(["merge-base", "HEAD", ref])?.trim() ?? "";
+    // Same rule as above, on the same terms: the fallback is no exception.
+    if (
+      mergeBase !== "" &&
+      mergeBase !== head &&
+      run(["merge-base", "--is-ancestor", "HEAD", mergeBase]) === undefined
+    ) {
       return { sha: mergeBase, recovered: "merge-base" };
     }
   }
+  const cause =
+    local || fetched
+      ? `the base commit ${requested} is not behind HEAD, so a diff from it is empty (a backwards force-push)`
+      : `the base commit ${requested} is not reachable in this checkout (a force-push or a garbage-collected commit)`;
   return {
     error:
-      `the base commit ${requested} is not reachable in this checkout (a force-push or a garbage-collected commit)` +
+      cause +
       (ref === undefined || ref === "" ? "" : `, and ${ref} offers no older merge base`),
   };
 }
