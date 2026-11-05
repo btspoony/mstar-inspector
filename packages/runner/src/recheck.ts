@@ -224,12 +224,12 @@ export function remainingOuterMs(nowMs: number, level: ReviewLevel = anchoredSof
 }
 
 /**
- * The tail of the outer guard the recheck seat leaves for the runner's own
- * work after it stops (merge, synthesize, validate, publish) — the same 60s
- * reserve the seat fan-out keeps. A seat that claimed it could deliver its
+ * The tail of the outer guard a seat leaves for the runner's own work after it
+ * stops (merge, synthesize, validate, publish) — reserved by both the review
+ * seat fan-out and the recheck seat. A seat that claimed it could deliver its
  * findings after the run had already published.
  */
-export const RECHECK_PUBLICATION_TAIL_MS = 60_000;
+export const PUBLICATION_TAIL_MS = 60_000;
 
 /**
  * The recheck budget available at `nowMs` given the anchored deadline and
@@ -237,7 +237,7 @@ export const RECHECK_PUBLICATION_TAIL_MS = 60_000;
  * (`PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes`) — the same clock the
  * review seats run on, because a recheck round re-reads up to 25 published
  * findings and a fixed 180s killed it mid-read (I-000431) — bounded by
- * `outerDeadline - now - RECHECK_PUBLICATION_TAIL_MS` so the tail keeps its
+ * `outerDeadline - now - PUBLICATION_TAIL_MS` so the tail keeps its
  * publication room. Unanchored → the tier's unanchored budget, its cap bounded
  * by the unanchored outer guard less the publication tail, mirroring
  * `remainingOuterMs`. Pure view over `recheckBudget` — exported for tests;
@@ -250,7 +250,7 @@ export function currentRecheckBudget(nowMs: number): number {
   return recheckBudget(
     outerDeadlineMs,
     nowMs,
-    Math.min(tierCapMs, outerDeadlineMs - nowMs - RECHECK_PUBLICATION_TAIL_MS),
+    Math.min(tierCapMs, outerDeadlineMs - nowMs - PUBLICATION_TAIL_MS),
   );
 }
 
@@ -570,7 +570,7 @@ export async function runRecheckSeat(input: {
     // outer time the seat's minimum budget plus the publication tail needs.
     const error = redactedStatusError(
       `recheck seat skipped (tail): the review's outer deadline left ${remainingOuterMs(nowMs)}ms, ` +
-        `the seat needs at least ${RECHECK_MIN_REMAINING_MS + RECHECK_PUBLICATION_TAIL_MS}ms`,
+        `the seat needs at least ${RECHECK_MIN_REMAINING_MS + PUBLICATION_TAIL_MS}ms`,
     );
     console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget", cause: "tail", error }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error } };

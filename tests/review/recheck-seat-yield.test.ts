@@ -18,9 +18,13 @@
  *   (g) a caller abort is `skipped`/`aborted`, not a blamed round;
  *   (h) with no cap reason and no stderr the message still names the child's
  *       exit code, so no lost round is attributed to nothing at all;
- *   (i) the dispatched cap is the anchored TIER's clock, not the retired fixed
- *       180s — the seat's own timeout was what killed it mid-read;
- *   (j) a late dispatch still clears the contract floor instead of skipping.
+ *   (h2) an absent exit code still names the `unknown` fallback;
+ *   (i) the dispatched cap is the anchored TIER's clock: quick's 5-minute
+ *       clock sits inside its 9-minute outer window, so the tier — not the
+ *       outer guard or the retired fixed 180s — decides the figure;
+ *   (j) a late dispatch still clears the contract floor instead of skipping;
+ *   (k) the dispatch/skip boundary sits exactly at the floor plus the
+ *       publication tail of outer time (90,001ms dispatches, 89,999ms skips).
  *
  * The budget cases ask the same seat within `RECHECK_ASSIGNMENT_MAX_BYTES`: the
  * documented limits still reach every row, the fit covers rows before it
@@ -38,15 +42,13 @@
  * installs no `mock.module`, so it cannot leak a stub into a sibling file
  * whose imports resolve the same SDK specifier.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 
-import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 import type { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import {
   MODEL_ITEM_MAX_CHARS,
   MODEL_MAX_ITEMS,
   MODEL_TOTAL_MAX_CHARS,
-  RECHECK_MAX_RUNTIME_MS,
   RECHECK_MAX_TARGETS,
   RECHECK_MIN_REMAINING_MS,
   RECHECK_STATUS_ERROR_MAX_CHARS,
@@ -59,7 +61,6 @@ import {
   fitRecheckInput,
   OUTER_RUNNER_CAP_MS,
   RECHECK_ASSIGNMENT_MAX_BYTES,
-  RECHECK_PUBLICATION_TAIL_MS,
   resetRecheckAnchor,
   runRecheckSeat,
 } from "../../packages/runner/src/recheck";
@@ -101,7 +102,7 @@ const fakeRunSeat = (async (request: { assignment: string; maxRuntimeMs?: number
       index: 0,
       id: `seat-${seatCalls.length}`,
       agent: "mstar-review-seat",
-      exitCode: reply.exitCode ?? (reply.error !== undefined ? 1 : 0),
+      exitCode: reply.exitCode ?? (reply.error !== undefined ? 1 : undefined),
       output: "",
       stderr: reply.stderr,
       error: reply.error,
@@ -356,6 +357,18 @@ describe("recheck seat yield at the documented input limits", () => {
     expect(status.reason).toBe("seat-failed");
     expect(status.error).toBe("recheck seat produced no valid structured output (status unavailable): exit 1");
   });
+
+  test("(h2) an absent exit code still names the unknown fallback", async () => {
+    // The SDK does not always report an exit code (no `error`, no cap reason):
+    // the durable error must still say something rather than end at the status.
+    seatResult = {
+      stderr: "",
+      structuredOutput: { source: "caller", mode: "strict", status: "unavailable" },
+    };
+    const { status } = await run();
+    expect(status.reason).toBe("seat-failed");
+    expect(status.error).toBe("recheck seat produced no valid structured output (status unavailable): exit unknown");
+  });
 });
 
 describe("the recheck seat's wall clock comes from the anchored tier", () => {
@@ -366,23 +379,18 @@ describe("the recheck seat's wall clock comes from the anchored tier", () => {
 
   afterEach(() => {
     resetRecheckAnchor();
+    jest.useRealTimers();
   });
 
-  test("(i) the dispatched cap is the tier's clock, not the retired fixed 180s", async () => {
-    anchorRecheckDeadline(Date.now(), "default");
+  test("(i) the dispatched cap is the tier's clock, not the outer guard", async () => {
+    anchorRecheckDeadline(Date.now(), "quick");
     seatResult = { stderr: "", structuredOutput: { source: "caller", mode: "strict", status: "valid", data: doc([]) } };
     await run();
     expect(seatCalls).toHaveLength(1);
-    const cap = seatCalls[0]!.maxRuntimeMs!;
-    // A round re-reads up to 25 published findings, so it gets the review
-    // seats' own allowance — bounded by the outer guard's publication tail.
-    expect(cap).toBeGreaterThan(RECHECK_MAX_RUNTIME_MS);
-    expect(cap).toBeLessThanOrEqual(
-      Math.min(
-        PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes * 60_000,
-        OUTER_RUNNER_CAP_MS.default - RECHECK_PUBLICATION_TAIL_MS,
-      ),
-    );
+    // Quick's 5-minute tier clock is TIGHTER than its 9-minute outer window
+    // (600,000 - 60,000 = 540,000), so the two candidates differ: an
+    // outer-derived cap would be 540,000 and the retired fixed cap 180,000.
+    expect(seatCalls[0]!.maxRuntimeMs).toBe(300_000);
   });
 
   test("(j) a late dispatch keeps the contract floor instead of skipping", async () => {
@@ -396,6 +404,29 @@ describe("the recheck seat's wall clock comes from the anchored tier", () => {
     const cap = seatCalls[0]!.maxRuntimeMs!;
     expect(cap).toBeGreaterThanOrEqual(RECHECK_MIN_REMAINING_MS);
     expect(cap).toBeLessThan(60_000);
+  });
+
+  test("(k) the dispatch/skip boundary is the floor plus the publication tail", async () => {
+    jest.useFakeTimers();
+    seatResult = { stderr: "", structuredOutput: { source: "caller", mode: "strict", status: "valid", data: doc([]) } };
+    const now = Date.now();
+
+    // 90,001ms of outer guard left: the tail takes 60s, leaving 30,001ms — one
+    // millisecond above the contract floor, so the seat dispatches with it.
+    anchorRecheckDeadline(now - OUTER_RUNNER_CAP_MS.default + 90_001, "default");
+    expect((await run()).status.outcome).not.toBe("skipped");
+    expect(seatCalls[0]!.maxRuntimeMs).toBe(30_001);
+
+    // 89,999ms left: 29,999ms after the tail — below the floor, so the round
+    // skips and the durable error names the figures the decision used.
+    seatCalls.length = 0;
+    anchorRecheckDeadline(now - OUTER_RUNNER_CAP_MS.default + 89_999, "default");
+    const { doc: seatDoc, status } = await run();
+    expect(seatDoc).toBeNull();
+    expect(seatCalls).toHaveLength(0);
+    expect(status).toMatchObject({ outcome: "skipped", reason: "budget" });
+    expect(status.error).toContain("left 89999ms");
+    expect(status.error).toContain("at least 90000ms");
   });
 });
 

@@ -102,7 +102,7 @@ import {
 } from "@mstar-harness/engine";
 import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../shared/src/runtime";
 import {
-  RECHECK_PUBLICATION_TAIL_MS,
+  PUBLICATION_TAIL_MS,
   remainingOuterMs,
   remainingSoftMinutes,
   runRecheckSeat,
@@ -565,7 +565,7 @@ function dispatchBudgetMinutes(level: ReviewLevel): number {
  */
 function seatMaxRuntimeMs(nowMs: number, level: ReviewLevel): number {
   const softCapMs = PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes * 60_000;
-  return Math.max(1, Math.min(softCapMs * 2, remainingOuterMs(nowMs, level) - RECHECK_PUBLICATION_TAIL_MS));
+  return Math.max(1, Math.min(softCapMs * 2, remainingOuterMs(nowMs, level) - PUBLICATION_TAIL_MS));
 }
 
 /**
@@ -1401,7 +1401,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           // stop. An unbounded wait would hang the review on a session that
           // never comes back.
           if (resuming && yielded === undefined && gathered === undefined) {
-            await waitTick(Math.max(1, remainingOuterMs(Date.now(), input.level) - RECHECK_PUBLICATION_TAIL_MS), outcome);
+            await waitTick(Math.max(1, remainingOuterMs(Date.now(), input.level) - PUBLICATION_TAIL_MS), outcome);
           }
           unsubscribe();
         }
