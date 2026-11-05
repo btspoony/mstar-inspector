@@ -723,7 +723,7 @@ export function PullRequestDetailView({
           </TabsTrigger>
         </TabsList>
 
-        <div className="mt-(--spacing-5) flex flex-col gap-(--spacing-6) xl:flex-row xl:items-start xl:gap-(--spacing-8)">
+        <div className="mt-5 flex flex-col gap-(--spacing-6) xl:flex-row xl:items-start xl:gap-(--spacing-8)">
           <div className="min-w-0 flex-1">
             <TabsContent value="findings">
               {/* The filter sits above the list; changing it reloads from page

@@ -554,12 +554,16 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(themeVars["color-sidebar-accent"]).toBe("var(--sidebar-accent)");
   });
 
-  test("every var() the hand-written stylesheets and shells consume still names a token", () => {
+  test("every reference the hand-written stylesheets, shells and modules consume still names a token", () => {
     // The set is derived from the tree, so the assertion below covers whatever
-    // stylesheet and HTML shell exists — not the two this link first listed.
+    // stylesheet, HTML shell and TSX/TS module exists — not the two this link
+    // first listed.
     const walk = consumerWalk();
     const consumers = walk.files;
     expect(consumers.length).toBeGreaterThan(0);
+    // A walk that stopped at the old extension set would still pass the loop
+    // below, so the module half of the coverage is stated on its own.
+    expect(consumers.some((file) => file.endsWith(".tsx"))).toBe(true);
     // A readable-but-partly-unreadable tree would silently pass the link below
     // (every file it did read is fine), so the walk's own read failures are
     // part of the live-tree claim.
@@ -612,6 +616,28 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(
       htmlNames("<style>/* var(--retired-900) */ .a { color: var(--surface-page); }</style>"),
     ).toEqual([]);
+    // The TSX module is the third grammar: the shorthand names the same token,
+    // typed (`text-(length:--x)`) or not, and a name computed at runtime is not
+    // one a static walk can check — matching its truncated prefix would invent
+    // a violation instead of reporting one.
+    const moduleNames = (tsx: string) => [
+      ...new Set(danglingReferences("probe.tsx", tsx).map(({ name }) => name)),
+    ];
+    expect(moduleNames('a = "bg-(--surface-page) rounded-(--radius-pill)"')).toEqual([]);
+    expect(moduleNames('a = "text-(length:--typo-label-12-size)"')).toEqual([]);
+    expect(moduleNames('a = "bg-(--retired-900)"')).toEqual(["retired-900"]);
+    expect(moduleNames('a = "border-l-(--tone-${tone}-fg)"')).toEqual([]);
+    // A module's own comments are prose in both forms — and the block form
+    // declares nothing, so it cannot excuse the live reference beside it.
+    expect(moduleNames('// var(--retired-900)\na = "bg-(--surface-page)"')).toEqual([]);
+    expect(moduleNames('/* --retired-900: #fff; */ a = "bg-(--retired-900)"')).toEqual([
+      "retired-900",
+    ]);
+    // A `//` inside a URL literal is not a comment: stripping it would swallow
+    // the rest of the line, and the reference on that line with it.
+    expect(
+      moduleNames('const u = "https://api.example.com"; const k = "bg-(--retired-900)";'),
+    ).toEqual(["retired-900"]);
   });
 
   test("an unreadable consumer is a reported failure, never a thrown run", () => {

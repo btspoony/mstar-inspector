@@ -67,7 +67,7 @@ export const SPA_ROOT = path.join(ROOT, "src/spa");
 export const PROTOTYPES_ROOT = path.join(ROOT, "src/design-system/prototypes");
 /** The one stylesheet under `src/spa` the token source derives — link 1 owns it. */
 const GENERATED_STYLESHEET = "src/spa/styles/tokens.css";
-const CONSUMER_FILE = /\.(?:css|html)$/;
+const CONSUMER_FILE = /\.(?:css|html|ts|tsx)$/;
 
 /**
  * The links that are a `--check` run of a generator, in report order. The
@@ -80,7 +80,7 @@ const GENERATORS = [
 ] as const;
 
 /**
- * The trees whose hand-written CSS/HTML answers to the token source. A root
+ * The trees whose hand-written CSS/HTML/TSX answers to the token source. A root
  * that contributes no consumer (moved, renamed, emptied) breaks the link: a
  * global "some consumer exists" passes while one root silently checks nothing,
  * which is the failure mode this link exists to catch.
@@ -94,7 +94,8 @@ const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
  * worse, could disagree with the first.
  *
  * Two forests, derived from the trees rather than listed: the SPA's
- * stylesheets/shells, and the design-system prototypes, which are hand-written
+ * stylesheets, shells and the TSX/TS modules that carry class strings, and the
+ * design-system prototypes, which are hand-written
  * HTML reference pages that read the same tokens. A list would be a guard whose
  * coverage is its own contents; a new stylesheet joins the link by existing.
  * The generated stylesheet is the one exclusion — link 1 already proves it
@@ -210,6 +211,15 @@ export function rootsWithoutConsumers(roots: readonly ConsumerRoot[]): string[] 
  */
 const REFERENCE = /var\s*\(\s*--([a-z0-9-]+)[\s,)]/g;
 /**
+ * The same reference in Tailwind v4's shorthand, which is how a TSX consumer
+ * spells it: `bg-(--x)`, `rounded-(--radius-control)`, and the typed form
+ * `text-(length:--typo-label-12-size)` all name `x`. The closing paren is
+ * required: `bg-(--tone-${tone}-fg)` computes its name at runtime and names
+ * nothing a static walk can check — matching its truncated prefix would invent
+ * a violation instead of reporting one.
+ */
+const SHORTHAND = /[a-z][a-z0-9-]*-\((?:[a-z-]+:)?--([a-z0-9-]+)\)/g;
+/**
  * A custom property the stylesheet declares itself — the bridge's own keys.
  * The declared value is captured with the name: a declaration that references
  * its own name excuses nothing (see `danglingReferences`).
@@ -223,11 +233,19 @@ const HTML_COMMENT = /<!--[\s\S]*?-->/g;
 const STYLE_BLOCK = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
 /** The consumers written as HTML shells rather than as stylesheets. */
 const HTML_FILE = /\.html$/i;
+/** The consumers written as TS/TSX modules; their block comments are CSS's. */
+const SCRIPT_FILE = /\.(?:ts|tsx)$/i;
+/**
+ * A script's line comment. Anchored on a comment start — line start or
+ * whitespace — so the `//` inside a `"https://…"` literal is not one.
+ */
+const SCRIPT_COMMENT = /(?:^|\s)\/\/[^\n]*/gm;
 
 /**
  * `text` without its comments, read in the grammar the file is written in: a
  * stylesheet's block comments, an HTML shell's `<!-- … -->` ones, and — in the
- * shell's `<style>` blocks — the stylesheet's again.
+ * shell's `<style>` blocks — the stylesheet's again. A TS/TSX module shares the
+ * block form and adds the line form.
  *
  * One CSS-only stripper read an HTML comment as live markup: a token name
  * quoted in prose became a reference and failed the link, while inside a
@@ -235,6 +253,9 @@ const HTML_FILE = /\.html$/i;
  * over the whole file.
  */
 function withoutComments(file: string, text: string): string {
+  if (SCRIPT_FILE.test(file)) {
+    return text.replace(CSS_COMMENT, "").replace(SCRIPT_COMMENT, "");
+  }
   if (!HTML_FILE.test(file)) return text.replace(CSS_COMMENT, "");
   return text
     .replace(HTML_COMMENT, "")
@@ -250,10 +271,10 @@ export interface DanglingReference {
 }
 
 /**
- * Every `var(--x)` in `text` that names neither a token of `theme` nor a property
- * the file declares itself. Checked per theme rather than over the union: a name
- * one theme declares and the other does not is dangling in the other one, and
- * the union would hide exactly that.
+ * Every `var(--x)` or `bg-(--x)` in `text` that names neither a token of `theme`
+ * nor a property the file declares itself. Checked per theme rather than over
+ * the union: a name one theme declares and the other does not is dangling in
+ * the other one, and the union would hide exactly that.
  *
  * A declaration excuses references to its name only when it is not itself the
  * cycle: `--x: var(--x)` (the fallback and spaced spellings included) is
@@ -262,9 +283,9 @@ export interface DanglingReference {
  * elsewhere in the file still excuses its references.
  *
  * Comments are stripped in the file's own grammar before either match, so a
- * retired name quoted in prose — a CSS comment or an HTML shell's `<!-- -->`
- * — neither becomes a reference nor a self-declaration that suppresses the
- * check.
+ * retired name quoted in prose — a CSS comment, an HTML shell's `<!-- -->`,
+ * or a script's `// …` — neither becomes a reference nor a self-declaration
+ * that suppresses the check.
  */
 export function danglingReferences(file: string, text: string): DanglingReference[] {
   const live = withoutComments(file, text);
@@ -273,7 +294,12 @@ export function danglingReferences(file: string, text: string): DanglingReferenc
       .filter((match) => !new RegExp(`var\\s*\\(\\s*${match[1]}(?=[\\s,)])`).test(match[2] as string))
       .map((match) => (match[1] as string).slice(2)),
   );
-  const names = [...new Set([...live.matchAll(REFERENCE)].map((match) => match[1] as string))].sort();
+  const names = [
+    ...new Set([
+      ...[...live.matchAll(REFERENCE)].map((match) => match[1] as string),
+      ...[...live.matchAll(SHORTHAND)].map((match) => match[1] as string),
+    ]),
+  ].sort();
   return THEMES.flatMap((theme) => {
     const layers = resolveTheme(theme);
     const known = new Set([
@@ -741,7 +767,7 @@ if (import.meta.main) {
       console.log(`        ${failure}`);
     }
     for (const root of emptyRoots) {
-      console.log(`        no stylesheet or HTML shell found under ${root}`);
+      console.log(`        no stylesheet, HTML shell or TS/TSX module found under ${root}`);
     }
     if (!consumersOk) brokenLinks.push("consumers → source");
   } catch (error) {
