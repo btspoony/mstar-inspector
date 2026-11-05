@@ -638,6 +638,23 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(
       moduleNames('const u = "https://api.example.com"; const k = "bg-(--retired-900)";'),
     ).toEqual(["retired-900"]);
+    // The same literal with whitespace before its `//` — the spelling that a
+    // whitespace-anchored matcher read as a comment start, erasing the live
+    // reference later on the line. The quote, not the surrounding space, is
+    // what makes it prose.
+    expect(moduleNames('const u = " // "; const k = "bg-(--retired-900)";')).toEqual(["retired-900"]);
+    expect(moduleNames("const u = ' // '; const k = 'bg-(--retired-900)';")).toEqual(["retired-900"]);
+    // A template literal is string text too, `${ … }` expression included.
+    expect(moduleNames('const t = `a // b`; const k = "bg-(--retired-900)"')).toEqual(["retired-900"]);
+    expect(moduleNames('const t = `${x /* bg-(--retired-900) */}`; k = "bg-(--surface-page)"')).toEqual([]);
+    // A regex literal is not a comment either: `[ //]` is a character class,
+    // and reading its slashes as a comment start would swallow the live
+    // reference beside it.
+    expect(moduleNames('const r = /[ //]/; const k = "bg-(--retired-900)"')).toEqual(["retired-900"]);
+    // The inverse direction: a comment starts after ANY token, so a tight
+    // `;//` or `)//` is prose and its `var(--x)` is not a live reference.
+    expect(moduleNames('const n = 1;// bg-(--retired-900)')).toEqual([]);
+    expect(moduleNames('f()// bg-(--retired-900)')).toEqual([]);
   });
 
   test("an unreadable consumer is a reported failure, never a thrown run", () => {

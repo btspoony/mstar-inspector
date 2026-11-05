@@ -2159,7 +2159,10 @@ The Dockerfile path is not written into the script: the gate reads
 overrides the file), so it diffs exactly the file a deploy hashes. The gate
 reads git output plus the two revisions of that config — it never builds the
 image — and an unreadable diff, config or container block fails the run rather
-than passing unverified.
+than passing unverified. A config that is absent at the base revision is not a
+truncated checkout: its containers block is new in this diff, so the gate fails
+with the changed families and the marker repair, exactly as for any other new
+image input.
 
 **Pull requests and pushes.** The `Image rebuild gate` step in
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) diffs a pull request
@@ -2177,7 +2180,17 @@ cannot ship the Worker against the previous image. It has no
 `pull_request` trigger: a push diffs `github.event.before` (the all-zeros
 first push is the same printed skip), and a `workflow_dispatch` has no previous
 tip — the push that landed that SHA already ran the gate in CI — so the step
-prints a skip naming the trigger instead of failing. The failure output names
+prints a skip naming the trigger instead of failing. A dispatch that passes its
+`base_sha` input runs the gate against that commit instead of skipping it.
+
+**When the base is gone.** A force-push orphans the previous tip: the depth-0
+checkout fetched only what the new ref points at. The script resolves a usable
+base rather than blaming the config — the named commit, the same commit fetched
+from `origin`, or the merge base with the target branch (where the rewritten
+history actually diverged) — emits a `::warning::` naming what it used, and
+still evaluates the diff. Only when none of those resolves does it fail closed,
+with `::error::image-gate-base-unreachable` naming the unreachable commit and
+the `--base` recovery; pass the deploy dispatch's `base_sha` then. The failure output names
 the input families the diff actually touched and the `# rebuild:` line to add;
 the marker instruction is the one in
 [`AGENTS.md`](../AGENTS.md) § Sandbox image rebuild.

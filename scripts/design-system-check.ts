@@ -251,10 +251,162 @@ const HTML_COMMENT = /<!--[\s\S]*?-->/g;
 /** A `<style>` block inside an HTML shell — CSS again, so its comments go too. */
 const STYLE_BLOCK = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
 /**
- * A script's line comment. Anchored on a comment start — line start or
- * whitespace — so the `//` inside a `"https://…"` literal is not one.
+ * Where a `/` opens a regex literal rather than a division: an expression
+ * opener, or a keyword that expects one. An identifier, literal, `)` or `]`
+ * leaves a division. Not a parser: an ambiguous `/` is read as division, the
+ * common case, so ordinary text stays live.
  */
-const SCRIPT_COMMENT = /(?:^|\s)\/\/[^\n]*/gm;
+const REGEX_OPENERS: Record<string, true> = {
+  "(": true, "[": true, "{": true, ",": true, ";": true, ":": true,
+  "=": true, "!": true, "?": true, "&": true, "|": true, "+": true,
+  "-": true, "*": true, "%": true, "^": true, "~": true,
+};
+const REGEX_KEYWORDS: Record<string, true> = {
+  return: true, typeof: true, instanceof: true, in: true, of: true, new: true,
+  delete: true, void: true, throw: true, case: true, do: true, else: true,
+  yield: true, await: true,
+};
+
+/** The index after the quoted literal at `start`, or `start` when its line ends first. */
+function skipQuoted(text: string, start: number, quote: string): number {
+  for (let i = start + 1; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\") i++;
+    else if (ch === quote) return i + 1;
+    else if (ch === "\n") return start;
+  }
+  return start;
+}
+
+/** The index after the regex literal at `start`, or `start` when it is not one. */
+function skipRegex(text: string, start: number): number {
+  let inClass = false;
+  for (let i = start + 1; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\") i++;
+    else if (ch === "\n") return start;
+    else if (ch === "[") inClass = true;
+    else if (ch === "]") inClass = false;
+    else if (ch === "/" && !inClass) return i + 1;
+  }
+  return start;
+}
+
+/**
+ * A script's comments, removed with a scanner rather than a pattern.
+ *
+ * A `//` starts a comment only in code — never inside a string, template or
+ * regex literal — and it starts after ANY token, so `x;// prose` and `)//`
+ * are comments too. Anchoring the match on whitespace got both wrong: a
+ * string's ` // ` swallowed a live reference later on its line (the silence
+ * this gate exists to remove), while a tight comment's `var(--x)` stayed live
+ * and failed valid code.
+ */
+function withoutScriptComments(text: string): string {
+  const out: string[] = [];
+  // Code frames sit above the template frame whose `${` opened them; the
+  // bottom frame is always code.
+  const modes: Array<"code" | "template"> = ["code"];
+  // `{` nesting inside the open `${ … }`: a `}` at zero hands back to the
+  // template text.
+  const braces: number[] = [0];
+  // The last significant character and word in code — the regex/division rule.
+  let previous = "";
+  let word = "";
+  let i = 0;
+
+  while (i < text.length) {
+    const ch = text[i] as string;
+
+    if (modes[modes.length - 1] === "template") {
+      if (ch === "\\") {
+        out.push(text.slice(i, i + 2));
+        i += 2;
+      } else if (ch === "`") {
+        out.push(ch);
+        modes.pop();
+        braces.pop();
+        previous = "";
+        word = "";
+        i += 1;
+      } else if (ch === "$" && text[i + 1] === "{") {
+        out.push("${");
+        modes.push("code");
+        braces.push(0);
+        previous = "{";
+        word = "";
+        i += 2;
+      } else {
+        out.push(ch);
+        i += 1;
+      }
+      continue;
+    }
+
+    const next = text[i + 1];
+    if (ch === "/" && next === "/") {
+      const end = text.indexOf("\n", i);
+      i = end < 0 ? text.length : end;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end < 0 ? text.length : end + 2;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const end = skipQuoted(text, i, ch);
+      // An apostrophe in JSX text opens no literal: read it as one character.
+      if (end > i) {
+        out.push(text.slice(i, end));
+        previous = ch;
+        word = "";
+        i = end;
+        continue;
+      }
+    }
+    if (ch === "`") {
+      out.push(ch);
+      modes.push("template");
+      braces.push(braces[braces.length - 1] as number);
+      word = "";
+      i += 1;
+      continue;
+    }
+    if (ch === "/" && (REGEX_OPENERS[previous] === true || REGEX_KEYWORDS[word] === true)) {
+      const end = skipRegex(text, i);
+      if (end > i) {
+        out.push(text.slice(i, end));
+        previous = "/";
+        word = "";
+        i = end;
+        continue;
+      }
+    }
+    if (ch === "{" && modes.length > 1) {
+      braces[braces.length - 1] = (braces[braces.length - 1] as number) + 1;
+    } else if (ch === "}" && modes.length > 1) {
+      const depth = (braces[braces.length - 1] as number) - 1;
+      if (depth < 0) {
+        out.push(ch);
+        modes.pop();
+        braces.pop();
+        previous = "";
+        word = "";
+        i += 1;
+        continue;
+      }
+      braces[braces.length - 1] = depth;
+    }
+    out.push(ch);
+    if (!/\s/.test(ch)) {
+      previous = ch;
+      word = /[A-Za-z0-9_$]/.test(ch) ? word + ch : "";
+    }
+    i += 1;
+  }
+  return out.join("");
+}
 
 /**
  * `text` without its comments, read in the grammar the file is written in: a
@@ -269,9 +421,7 @@ const SCRIPT_COMMENT = /(?:^|\s)\/\/[^\n]*/gm;
  */
 function withoutComments(file: string, text: string): string {
   const kind = consumerKind(file);
-  if (kind === "script") {
-    return text.replace(CSS_COMMENT, "").replace(SCRIPT_COMMENT, "");
-  }
+  if (kind === "script") return withoutScriptComments(text);
   if (kind !== "html") return text.replace(CSS_COMMENT, "");
   return text
     .replace(HTML_COMMENT, "")

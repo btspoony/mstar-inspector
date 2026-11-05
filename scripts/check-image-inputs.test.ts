@@ -20,9 +20,10 @@ import {
   containerSignature,
   evaluateImageGate,
   familyPattern,
+  imageRebuildInstruction,
   IMAGE_INPUT_FAMILIES,
-  IMAGE_REBUILD_INSTRUCTION,
   readDockerfilePaths,
+  resolveBase,
   touchesImageInput,
   touchesRebuildMarker,
 } from "./check-image-inputs";
@@ -93,9 +94,9 @@ describe("image input vocabulary parity", () => {
         agents.indexOf("\nCheck before merging"),
       )
       .trimEnd();
-    expect(IMAGE_REBUILD_INSTRUCTION).toBe(quoted);
+    expect(imageRebuildInstruction()).toBe(quoted);
     // The fact the retired hand copy had lost: the doc names the Dockerfile.
-    expect(IMAGE_REBUILD_INSTRUCTION).toContain("sandbox-image/Dockerfile");
+    expect(imageRebuildInstruction()).toContain("sandbox-image/Dockerfile");
   });
 
   test("every COPY source in the Dockerfile is covered by an input family", () => {
@@ -390,14 +391,77 @@ function write(dir: string, path: string, content = "export const x = 1;\n"): vo
 }
 
 /** The gate's actual CLI, run against `dir` for `base...HEAD`. */
-function runGate(dir: string, base: string, script: string): { code: number; out: string } {
-  const proc = Bun.spawnSync(["bun", script, "--base", base], {
+function runGate(
+  dir: string,
+  base: string,
+  script: string,
+  ...extra: string[]
+): { code: number; out: string } {
+  const proc = Bun.spawnSync(["bun", script, "--base", base, ...extra], {
     cwd: dir,
     stdout: "pipe",
     stderr: "pipe",
   });
   return { code: proc.exitCode!, out: proc.stdout.toString() + proc.stderr.toString() };
 }
+
+describe("resolveBase", () => {
+  const BASE = "a".repeat(40);
+  const HEAD = "c".repeat(40);
+
+  test("a reachable base is used as-is, with no fallback attempted", () => {
+    const calls: string[] = [];
+    const run = (args: string[]) => {
+      calls.push(args[0]!);
+      return args[0] === "cat-file" ? "" : undefined;
+    };
+    expect(resolveBase(BASE, "main", run)).toEqual({ sha: BASE });
+    expect(calls).toEqual(["cat-file"]);
+  });
+
+  test("an unreachable push base is fetched from origin and still evaluated", () => {
+    let fetched = false;
+    const run = (args: string[]) => {
+      if (args[0] === "fetch") {
+        fetched = true;
+        return "";
+      }
+      return args[0] === "cat-file" && fetched ? "" : undefined;
+    };
+    expect(resolveBase(BASE, "main", run)).toEqual({ sha: BASE, recovered: "fetched" });
+  });
+
+  test("an unreachable base recovers to the merge base with the target branch", () => {
+    const mergeBase = "b".repeat(40);
+    const run = (args: string[]) => {
+      if (args[0] === "cat-file") return undefined;
+      if (args[0] === "merge-base") return `${mergeBase}\n`;
+      if (args[0] === "rev-parse") return `${HEAD}\n`;
+      return undefined;
+    };
+    expect(resolveBase(BASE, "main", run)).toEqual({ sha: mergeBase, recovered: "merge-base" });
+  });
+
+  test("a merge base equal to HEAD is not a base: it would diff an empty range", () => {
+    const run = (args: string[]) => {
+      if (args[0] === "cat-file") return undefined;
+      if (args[0] === "merge-base") return `${HEAD}\n`;
+      if (args[0] === "rev-parse") return `${HEAD}\n`;
+      return undefined;
+    };
+    const resolved = resolveBase(BASE, "main", run);
+    expect("error" in resolved).toBe(true);
+  });
+
+  test("no base at all fails closed and names the unreachable commit", () => {
+    const resolved = resolveBase(BASE, undefined, () => undefined);
+    expect("error" in resolved).toBe(true);
+    if ("error" in resolved) {
+      expect(resolved.error).toContain(BASE);
+      expect(resolved.error).toContain("not reachable");
+    }
+  });
+});
 
 describe("image gate CLI", () => {
   const script = join(import.meta.dir, "check-image-inputs.ts");
@@ -567,19 +631,80 @@ describe("image gate CLI", () => {
     }
   });
 
-  test("an unknown --base refuses instead of passing", () => {
+  test("an unknown --base refuses instead of passing, and names the base", () => {
     const { dir, git } = tempRepo();
     try {
       git("add", "-A");
       git("commit", "-qm", "config");
 
-      // A base that was never fetched, e.g. a truncated CI checkout.
-      const { code, out } = runGate(dir, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", script);
+      // A base that was never fetched, e.g. an orphaned force-push tip.
+      const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+      const { code, out } = runGate(dir, sha, script);
       expect(code).toBe(1);
-      expect(out).toContain(
-        "could not read the container blocks of wrangler.jsonc at deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-      );
+      expect(out).toContain("::error::image-gate-base-unreachable");
+      expect(out).toContain(sha);
+      // The wrong cause this fix removes: the config was readable all along.
+      expect(out).not.toContain("could not read the container blocks");
       expect(out).toContain("treat as unverified, not a pass");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreachable base recovers to the merge base and the gate still evaluates", () => {
+    const { dir, git } = tempRepo();
+    try {
+      write(dir, "sandbox-image/Dockerfile", "FROM scratch\n");
+      git("add", "-A");
+      git("commit", "-qm", "base");
+      const base = git("rev-parse", "HEAD");
+      // The target branch stays at the divergence point; the feature branch
+      // moves on, so its merge base with the target is the base commit.
+      git("branch", "target");
+
+      write(dir, "packages/runner/src/gate.ts", "export const changed = true;\n");
+      git("add", "-A");
+      git("commit", "-qm", "feature work");
+
+      // The push's previous tip is gone (force-push): the fallback names what
+      // it used and the diff is still evaluated — a failure, not a skip.
+      const { code, out } = runGate(dir, "f".repeat(40), script, "--ref", "target");
+      expect(code).toBe(1);
+      expect(out).toContain("::warning::image-gate-base-recovered");
+      expect(out).toContain("::error::image-input-without-marker");
+      expect(out).toContain("- packages/runner/src/**");
+      expect(out).not.toContain("image-gate-base-unreachable");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a config that is new in this diff gets the family list, not the unverified message", () => {
+    const { dir, git } = tempRepo();
+    try {
+      // The base revision predates the containers block entirely.
+      rmSync(join(dir, "wrangler.jsonc"));
+      write(dir, "packages/runner/src/gate.ts");
+      write(dir, "sandbox-image/Dockerfile", "FROM scratch\n");
+      git("add", "-A");
+      git("commit", "-qm", "no config yet");
+      const base = git("rev-parse", "HEAD");
+
+      write(
+        dir,
+        "wrangler.jsonc",
+        '{\n  "containers": [{ "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile" } } }]\n}\n',
+      );
+      write(dir, "packages/runner/src/gate.ts", "export const changed = true;\n");
+      git("add", "-A");
+      git("commit", "-qm", "add the containers block and touch an input");
+
+      const { code, out } = runGate(dir, base, script);
+      expect(code).toBe(1);
+      expect(out).toContain("::error::image-input-without-marker");
+      expect(out).toContain("- packages/runner/src/**");
+      expect(out).toContain("wrangler.jsonc containers block");
+      expect(out).not.toContain("unverified");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

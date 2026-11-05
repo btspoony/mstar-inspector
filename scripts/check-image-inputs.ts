@@ -67,14 +67,17 @@ const IMAGE_INPUT_PATTERNS: readonly RegExp[] = IMAGE_INPUT_FAMILIES.map(familyP
  * had already drifted (it named no Dockerfile while the doc names one); the
  * section is the single source, so the printed text cannot disagree with it.
  * The bullets are the doc's, and the parity test keeps them equal to
- * `IMAGE_INPUT_FAMILIES`. Throws, rather than printing a fragment, when the
- * section it quotes is gone.
+ * `IMAGE_INPUT_FAMILIES`.
+ *
+ * Read on the failure path only: a passing diff must not depend on the doc's
+ * shape, so drift cannot block a clean run. The CLI catches the throw and
+ * reports it as an `::error::` annotation instead of a stack trace.
  */
 const AGENTS_SECTION = "## Sandbox image rebuild";
 const INSTRUCTION_START = "The review container is built from";
 const INSTRUCTION_END = "\nCheck before merging";
 
-function agentsRebuildInstruction(): string {
+export function imageRebuildInstruction(): string {
   const agents = readFileSync(join(import.meta.dir, "..", "AGENTS.md"), "utf8");
   const heading = agents.indexOf(AGENTS_SECTION);
   const start = heading < 0 ? -1 : agents.indexOf(INSTRUCTION_START, heading);
@@ -84,8 +87,6 @@ function agentsRebuildInstruction(): string {
   }
   return agents.slice(start, end).trimEnd();
 }
-
-export const IMAGE_REBUILD_INSTRUCTION = agentsRebuildInstruction();
 
 /**
  * A JSON object at `value`, or `undefined` for anything else — a config field
@@ -286,27 +287,86 @@ export function parseNameOnly(output: string): string[] {
 }
 
 /** Run one git command; `undefined` when it fails (the diff is then unknown). */
-function git(args: string[]): string | undefined {
+function git(args: string[], quiet = false): string | undefined {
   const proc = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
   if (proc.exitCode !== 0) {
-    const stderr = proc.stderr.toString().trim();
-    console.error(`check-image-inputs: git ${args.join(" ")} failed${stderr === "" ? "" : `: ${stderr}`}`);
+    if (!quiet) {
+      const stderr = proc.stderr.toString().trim();
+      console.error(`check-image-inputs: git ${args.join(" ")} failed${stderr === "" ? "" : `: ${stderr}`}`);
+    }
     return undefined;
   }
   return proc.stdout.toString();
 }
 
+/** A git call whose failure is an answer rather than a report. */
+export type GitRun = (args: string[]) => string | undefined;
+
+const gitQuiet: GitRun = (args) => git(args, true);
+
+/** Whether `spec` names an object in the repository (`git cat-file -e`). */
+function objectExists(spec: string, run: GitRun): boolean {
+  return run(["cat-file", "-e", spec]) !== undefined;
+}
+
+/**
+ * The commit the gate diffs from, or the recovery that answered when the named
+ * one cannot be resolved.
+ *
+ * A push's `--base` is the ref's previous tip, and a force-push orphans it:
+ * the depth-0 checkout fetched only what the new ref points at, so `git show`
+ * failed and the gate blamed the config for an absent commit on every re-run.
+ * Recovery still evaluates the diff instead of skipping it:
+ *
+ * 1. the named commit, when the checkout has it;
+ * 2. the same commit fetched from `origin`, when the server still holds it;
+ * 3. the merge base with `ref` (the target branch), where the new history
+ *    actually diverged — never HEAD itself, which would diff an empty range.
+ *
+ * Only when none answers does the gate fail closed, with a cause that names
+ * the unreachable base rather than the file it could not read.
+ */
+export function resolveBase(
+  requested: string,
+  ref: string | undefined,
+  run: GitRun,
+): { sha: string; recovered?: "fetched" | "merge-base" } | { error: string } {
+  if (objectExists(`${requested}^{commit}`, run)) return { sha: requested };
+  if (
+    run(["fetch", "--no-tags", "--quiet", "origin", requested]) !== undefined &&
+    objectExists(`${requested}^{commit}`, run)
+  ) {
+    return { sha: requested, recovered: "fetched" };
+  }
+  if (ref !== undefined && ref !== "") {
+    const head = run(["rev-parse", "HEAD"])?.trim();
+    const mergeBase = run(["merge-base", "HEAD", ref])?.trim();
+    if (mergeBase !== undefined && mergeBase !== "" && mergeBase !== head) {
+      return { sha: mergeBase, recovered: "merge-base" };
+    }
+  }
+  return {
+    error:
+      `the base commit ${requested} is not reachable in this checkout (a force-push or a garbage-collected commit)` +
+      (ref === undefined || ref === "" ? "" : `, and ${ref} offers no older merge base`),
+  };
+}
+
 function printUsage(): void {
-  console.error("usage: bun scripts/check-image-inputs.ts --base <sha> [--config wrangler.jsonc]");
+  console.error(
+    "usage: bun scripts/check-image-inputs.ts --base <sha> [--ref <branch>] [--config wrangler.jsonc]",
+  );
 }
 
 if (import.meta.main) {
   const argv = process.argv.slice(2);
   let base = "";
+  let ref = "";
   let configPath = "wrangler.jsonc";
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === "--base") base = argv[++i] ?? "";
+    else if (arg === "--ref") ref = argv[++i] ?? "";
     else if (arg === "--config") configPath = argv[++i] ?? "";
     else {
       console.error(`check-image-inputs: unknown argument ${arg}`);
@@ -318,6 +378,27 @@ if (import.meta.main) {
     printUsage();
     process.exit(1);
   }
+
+  // The diff base first: a push's previous tip may be gone (a force-push
+  // orphans it), and blaming the config file for that absence named the wrong
+  // cause on every re-run. A recovery still evaluates the gate; only an
+  // unresolvable base fails closed.
+  const requested = base;
+  const resolved = resolveBase(requested, ref, gitQuiet);
+  if ("error" in resolved) {
+    console.error(
+      `::error::image-gate-base-unreachable: ${resolved.error} — pass --base <sha> (the deploy workflow's base_sha input) with a commit this checkout has; treat as unverified, not a pass`,
+    );
+    process.exit(1);
+  }
+  if (resolved.recovered !== undefined) {
+    const how =
+      resolved.recovered === "fetched" ? "fetched from origin" : `the merge base with ${ref}`;
+    console.error(
+      `::warning::image-gate-base-recovered: ${requested} is unreachable in this checkout (a force-push or a garbage-collected commit); diffing from ${resolved.sha}, ${how} — the gate still evaluated`,
+    );
+  }
+  base = resolved.sha;
 
   // The paths come from the config `wrangler` itself reads, so a hand-copied
   // Dockerfile path here can never drift from the files a deploy hashes.
@@ -342,14 +423,43 @@ if (import.meta.main) {
   // The container blocks are read at BOTH revisions: a `build_context` or
   // Dockerfile repoint changes the image even though no copied path did. The
   // file itself is not a path family — every other config edit is image-neutral.
-  const baseConfig = git(["show", `${base}:${configPath}`]);
-  const baseSignature = baseConfig === undefined ? undefined : containerSignature(baseConfig);
   const headSignature = containerSignature(headConfig);
-  if (baseSignature === undefined || headSignature === undefined) {
+  if (headSignature === undefined) {
     console.error(
-      `::error::check-image-inputs: could not read the container blocks of ${configPath} at ${base} and HEAD (the path must be repo-relative) — treat as unverified, not a pass`,
+      `::error::check-image-inputs: ${configPath} at HEAD declares no readable container blocks — treat as unverified, not a pass`,
     );
     process.exit(1);
+  }
+  const baseConfig = git(["show", `${base}:${configPath}`]);
+  let containersChanged: boolean;
+  if (baseConfig === undefined) {
+    // Two different facts hide in one failed `git show`. A config absent from
+    // the base revision is this diff's own new containers block — every block
+    // is a change, and the failure must list the actionable families. Anything
+    // else (a path the git side cannot answer for, an unreadable object) is
+    // unknown, never a pass.
+    if (!objectExists(`HEAD:${configPath}`, gitQuiet)) {
+      console.error(
+        `::error::check-image-inputs: ${configPath} is not in HEAD's tree (the path must be repo-relative and committed) — treat as unverified, not a pass`,
+      );
+      process.exit(1);
+    }
+    if (objectExists(`${base}:${configPath}`, gitQuiet)) {
+      console.error(
+        `::error::check-image-inputs: could not read the container blocks of ${configPath} at ${base} — treat as unverified, not a pass`,
+      );
+      process.exit(1);
+    }
+    containersChanged = true;
+  } else {
+    const baseSignature = containerSignature(baseConfig);
+    if (baseSignature === undefined) {
+      console.error(
+        `::error::check-image-inputs: could not read the container blocks of ${configPath} at ${base} — treat as unverified, not a pass`,
+      );
+      process.exit(1);
+    }
+    containersChanged = baseSignature !== headSignature;
   }
 
   const range = `${base}...HEAD`;
@@ -364,12 +474,7 @@ if (import.meta.main) {
   }
 
   const paths = parseNameOnly(nameOnly);
-  const verdict = evaluateImageGate(
-    paths,
-    dockerfileDiff,
-    baseSignature !== headSignature,
-    configPath,
-  );
+  const verdict = evaluateImageGate(paths, dockerfileDiff, containersChanged, configPath);
   if (!verdict.ok) {
     console.error(
       `::error::${verdict.reason}: this diff changes image inputs but not the rebuild marker in ${dockerfileLabel}.`,
@@ -380,7 +485,13 @@ if (import.meta.main) {
       `Repair: add a \`# rebuild: <what changed>\` comment line to ${dockerfileLabel} in this same diff — an added or removed line at the comment start — so the next deploy rebuilds the image.`,
     );
     console.error("");
-    console.error(IMAGE_REBUILD_INSTRUCTION);
+    try {
+      console.error(imageRebuildInstruction());
+    } catch (error) {
+      console.error(
+        `::error::image-rebuild-instruction: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     process.exit(1);
   }
   console.log("image inputs: no rebuild marker required");
