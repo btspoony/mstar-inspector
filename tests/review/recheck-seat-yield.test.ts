@@ -49,6 +49,7 @@ import {
 } from "../../packages/shared/src/recheck-wire";
 import {
   anchorRecheckDeadline,
+  fitRecheckInput,
   OUTER_RUNNER_CAP_MS,
   RECHECK_ASSIGNMENT_MAX_BYTES,
   resetRecheckAnchor,
@@ -431,6 +432,74 @@ describe("the ask fits the seat's context budget", () => {
     // Every retained slice still covers a distinct row, so the ask reaches rows
     // once each before deepening any of them.
     expect(new Set(asked.evidence.map((slice) => slice.path)).size).toBe(asked.evidence.length);
+  });
+
+  test("an oversized slice is skipped past, not stopped at: a later row's smaller slice still fits", () => {
+    // `evidenceOrder` takes each row's own-file slice in row order, so the
+    // LARGE slice (first row) sorts before the SMALL one (second row). The
+    // budget below admits the core plus ONLY the small slice: a fit that
+    // `continue`s past the large slice keeps the small one, a fit that
+    // `break`s loses it. The max-size fixture cannot show this — its slices
+    // are all the same size, so both loop exits produce the same ask.
+    const sliceAt = (id: string, path: string, lines: number): EvidenceSlice => ({
+      id,
+      headSha: SHA,
+      baseSha: "b" + "0".repeat(39),
+      path,
+      oldPath: null,
+      kind: "hunk",
+      oldStart: 1,
+      oldLines: Array.from(
+        { length: lines },
+        (_, index) => `const oldValue_${id}_${index} = computeSomething("srcreaper.ts", ${index}); // srcreaper-core-module`,
+      ),
+      newStart: 1,
+      newLines: Array.from(
+        { length: lines },
+        (_, index) => `const newValue_${id}_${index} = computeSomething("srcreaper.ts", ${index}); // srcreaper-core-module`,
+      ),
+      addedNewLines: [1],
+      oldBlobOid: "oid-old",
+      headBlobOid: "oid-head",
+      absentAtHead: false,
+      complete: true,
+    });
+    const largeSlice = sliceAt("slice-large", "src/large.ts", 80);
+    const smallSlice = sliceAt("slice-small", "src/small.ts", 1);
+    const target = (rowId: string, filePath: string) => ({
+      rowId,
+      findingId: `f-${rowId}`,
+      original: {
+        title: `Prior finding ${rowId}`,
+        body: `The previously published concern ${rowId}.`,
+        filePath,
+        lineStart: 1,
+        lineEnd: 1,
+        mergeClass: "must-fix" as const,
+        category: "logic",
+        fingerprintHint: `fp-${rowId}`,
+      },
+      firstSeenSha: SHA,
+      lastAssessment: null,
+      associationIds: [`assoc-${rowId}`],
+    });
+    const input: RecheckInput = {
+      schema: "mstar.recheck-input/v1",
+      headSha: SHA,
+      targets: [target("row-large", "src/large.ts"), target("row-small", "src/small.ts")],
+      evidence: [largeSlice, smallSlice],
+      discussion: { items: [], issueCoverage: "complete", issueDigest: "digest-1", capturedMs: 0, threads: [] },
+    };
+    // At a zero budget the core (targets + discussion) overruns, and the
+    // refusal names the smallest budget that holds it. One small slice's
+    // bytes above that admits the small slice and not the 80-line one.
+    const probe = fitRecheckInput(input, 0);
+    if (probe.ok) throw new Error("the fixture's core fits a zero budget");
+    const smallBytes = Buffer.byteLength(JSON.stringify(smallSlice));
+    const fit = fitRecheckInput(input, probe.requiredBytes + smallBytes);
+    if (!fit.ok) throw new Error("the fixture's core does not fit its own required budget");
+    expect(fit.input.evidence.map((slice) => slice.id)).toEqual([smallSlice.id]);
+    expect(fit.omittedSlices).toBe(1);
   });
 
   test("a citation of a slice the fit omitted drops that row instead of publishing it addressed", async () => {
