@@ -1,16 +1,29 @@
 import { useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { t } from "../../i18n";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
-import { StatusBadge } from "@design-system";
+import {
+  Button,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  StatusBadge,
+} from "@design-system";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import { apiBase } from "../workspace-base";
 import { PullRequestDetail } from "./PullRequestDetail";
 import {
+  INSIGHTS_REPO_ALL,
   appPullRequestsUrl,
+  insightsRepoFromSelect,
+  insightsRepoOptions,
+  insightsRepoSelectValue,
   parsePullRequestList,
   pullRequestRefOf,
   pullRequestStatePill,
@@ -24,7 +37,13 @@ import {
  * unstamped read would paint the previous App's rows or error under the new
  * one until the new read landed.
  */
-export type ListRead = { app: string; rows: PullRequestRow[] | null; kind: "loading" | "ok" | "error" };
+export type ListRead = {
+  app: string;
+  rows: PullRequestRow[] | null;
+  /** The payload's repository option set — kept across an in-flight re-read. */
+  repos: string[] | null;
+  kind: "loading" | "ok" | "error";
+};
 
 /**
  * The read for the ACTIVE App — the loading face when the stamp names another
@@ -33,7 +52,7 @@ export type ListRead = { app: string; rows: PullRequestRow[] | null; kind: "load
  * still be the frame the operator saw.
  */
 export function currentListRead(read: ListRead, appId: string): ListRead {
-  return read.app === appId ? read : { app: appId, rows: null, kind: "loading" };
+  return read.app === appId ? read : { app: appId, rows: null, repos: null, kind: "loading" };
 }
 
 /**
@@ -73,10 +92,33 @@ export function AppPullRequestsTab({
   // this tab instance, so an unstamped ledger would paint the previous App's
   // rows (or its error) until the new read landed. A read for another App
   // derives to `loading` with no rows.
-  const [read, setRead] = useState<ListRead>({ app: appId, rows: null, kind: "loading" });
+  const [read, setRead] = useState<ListRead>({ app: appId, rows: null, repos: null, kind: "loading" });
   const current = currentListRead(read, appId);
   // ErrorState retry: bumping the nonce re-runs the load effect below.
   const [reloadNonce, setReloadNonce] = useState(0);
+  // Local state, not URL state: `search.repo` belongs to the insights tab,
+  // and sharing one search param would leak each tab's filter into the other.
+  // The choice is a REQUEST parameter now: the selection re-reads the ledger
+  // through `?repo=owner/name`, so the server filters BEFORE its row cap
+  // instead of the tab hiding rows it already holds.
+  //
+  // The filter is scoped to one App: the tab instance survives an App switch,
+  // so the choice is stamped with the App it was made for — another App
+  // derives to "all" instead of inheriting a value that names none of its
+  // rows (a coincidental name match would silently filter the new ledger).
+  const [repoFilter, setRepoFilter] = useState<{ app: string; value: string }>({
+    app: appId,
+    value: "",
+  });
+  const repoFilterValue = repoFilter.app === appId ? repoFilter.value : "";
+  // The option set is the payload's `repos` — the App's whole repository set,
+  // including repositories whose rows sit behind the server's row cap. It is
+  // NOT derived from the loaded rows: a capped window would silently drop
+  // repositories from the toolbar. The current filter rides along even when
+  // the errored payload carried no option list, so the select never shows a
+  // dead entry; the "all" sentinel is always rendered (data.ts helper, the
+  // AppInsightsTab pattern).
+  const repoOptions = insightsRepoOptions(current.repos ?? [], repoFilterValue);
 
   // A malformed pr param resolves to null and falls back to the list face, so
   // "the detail owns the face" is the parsed ref, not the raw search value.
@@ -89,28 +131,31 @@ export function AppPullRequestsTab({
     // re-runs on the emptied search value.
     if (detailOpen) return;
     let cancelled = false;
-    // Rows survive a re-read of the SAME App, so a retry does not blank the
-    // ledger; an App switch drops them with the stamp.
-    const carry = (previous: ListRead): PullRequestRow[] | null =>
-      previous.app === appId ? previous.rows : null;
-    setRead((previous) => ({ app: appId, rows: carry(previous), kind: "loading" }));
-    fetchJson(appPullRequestsUrl(apiBase(), appId))
+    // Rows and the option list survive a re-read of the SAME App (a retry, a
+    // filter switch), so the frame keeps its content while the new read is in
+    // flight; an App switch drops them with the stamp.
+    const carry = (previous: ListRead): Pick<ListRead, "rows" | "repos"> =>
+      previous.app === appId
+        ? { rows: previous.rows, repos: previous.repos }
+        : { rows: null, repos: null };
+    setRead((previous) => ({ app: appId, ...carry(previous), kind: "loading" }));
+    fetchJson(appPullRequestsUrl(apiBase(), appId, repoFilterValue === "" ? undefined : repoFilterValue))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parsePullRequestList(raw);
         if (!parsed) {
-          setRead((previous) => ({ app: appId, rows: carry(previous), kind: "error" }));
+          setRead((previous) => ({ app: appId, ...carry(previous), kind: "error" }));
           return;
         }
-        setRead({ app: appId, rows: parsed, kind: "ok" });
+        setRead({ app: appId, rows: parsed.rows, repos: parsed.repos, kind: "ok" });
       })
       .catch(() => {
-        if (!cancelled) setRead((previous) => ({ app: appId, rows: carry(previous), kind: "error" }));
+        if (!cancelled) setRead((previous) => ({ app: appId, ...carry(previous), kind: "error" }));
       });
     return () => {
       cancelled = true;
     };
-  }, [appId, detailOpen, reloadNonce]);
+  }, [appId, detailOpen, reloadNonce, repoFilterValue]);
 
   function openPr(row: PullRequestRow): void {
     onSearch({ ...search, pr: `${row.owner}/${row.repo}/${row.number}` });
@@ -144,6 +189,46 @@ export function AppPullRequestsTab({
           {t(locale, "common.loading")}
         </p>
       ) : null}
+      {/* The toolbar rides the list face regardless of the read state: an
+          errored read (or the first load) must not strand the operator
+          without the repository filter or the refresh — the content area
+          below owns the loading / error / rows ternary. */}
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        {/* The Select primitive rejects "" as an item value, so the "all"
+            choice reuses the shared insights sentinel (data.ts). */}
+        <Select
+          value={insightsRepoSelectValue(repoFilterValue)}
+          onValueChange={(next) => setRepoFilter({ app: appId, value: insightsRepoFromSelect(next) })}
+        >
+          <SelectTrigger
+            className="min-w-48"
+            size="sm"
+            aria-label={t(locale, "pullRequests.filterRepo")}
+          >
+            <SelectValue placeholder={t(locale, "pullRequests.filterRepoAll")} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={INSIGHTS_REPO_ALL}>
+              {t(locale, "pullRequests.filterRepoAll")}
+            </SelectItem>
+            {repoOptions.map((repo) => (
+              <SelectItem key={repo} value={repo}>
+                {repo}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          aria-label={t(locale, "pullRequests.refreshAria")}
+          disabled={current.kind === "loading"}
+          onClick={() => setReloadNonce((nonce) => nonce + 1)}
+        >
+          <RefreshCw aria-hidden="true" />
+        </Button>
+      </div>
       {/* A failed read replaces the ledger rather than sitting above it: rows
           from an earlier read would read as the current list. Covers the close
           of a detail, whose list read is this tab's own. */}

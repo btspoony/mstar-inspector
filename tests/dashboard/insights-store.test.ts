@@ -312,7 +312,7 @@ describe("createInsightsStore", () => {
       findingsDistribution: dayGrid(30).map((bucket_start) => ({
         bucket_start,
         granularity: "day" as const,
-        by_severity: { "must-fix": 0, "should-fix": 0, nit: 0 },
+        by_severity: { "must-fix": 0, "should-fix": 0, "may-fix": 0, nit: 0 },
       })),
     });
   });
@@ -564,7 +564,7 @@ describe("createInsightsStore", () => {
     // merge-class set, and it is the bucket's only series map.
     for (const bucket of grid) {
       expect(Object.keys(bucket)).toEqual(["bucket_start", "granularity", "by_severity"]);
-      expect(Object.keys(bucket.by_severity)).toEqual(["must-fix", "should-fix", "nit"]);
+      expect(Object.keys(bucket.by_severity)).toEqual(["must-fix", "should-fix", "may-fix", "nit"]);
     }
     // Bucket lookup keyed by the seed timestamp's own UTC date (independent
     // derivation — reviewedAt pins hour 12:00 UTC, so the date part is stable).
@@ -587,7 +587,7 @@ describe("createInsightsStore", () => {
     expect(at(2)).toEqual({
       bucket_start: reviewedAt(2).slice(0, 10),
       granularity: "day",
-      by_severity: { "must-fix": 0, "should-fix": 0, nit: 0 },
+      by_severity: { "must-fix": 0, "should-fix": 0, "may-fix": 0, nit: 0 },
     });
     // Totals across the grid equal the page-level finding count (5 v1
     // findings; the era-gated 6th never distributes).

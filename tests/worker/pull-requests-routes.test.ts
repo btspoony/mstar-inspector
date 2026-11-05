@@ -140,7 +140,10 @@ describe("GET /api/apps/:appId/pull-requests", () => {
   test("lists this App's PRs with the contract row shape", async () => {
     const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests`, await fixture());
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { pull_requests: Array<Record<string, unknown>> };
+    const body = (await res.json()) as {
+      pull_requests: Array<Record<string, unknown>>;
+      repos: string[];
+    };
     expect(body.pull_requests.length).toBe(1);
     expect(body.pull_requests[0]).toMatchObject({
       number: 131,
@@ -152,7 +155,46 @@ describe("GET /api/apps/:appId/pull-requests", () => {
       latest_review: null,
       failure_count: 0,
     });
+    // The option set rides every answer, filtered or not.
+    expect(body.repos).toEqual(["acme/widgets"]);
   });
+
+  test("?repo=owner/name filters the list server-side; `repos` still lists the whole ledger", async () => {
+    const db = await fixture();
+    await createAppsStore(db).upsertPullRequest({
+      appId: "app-acme",
+      owner: "acme",
+      repo: "gadgets",
+      prNumber: 7,
+      state: "open",
+    });
+    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests?repo=acme/gadgets`, db);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { pull_requests: Array<{ number: number }>; repos: string[] };
+    expect(body.pull_requests.map((row) => row.number)).toEqual([7]);
+    expect(body.repos).toEqual(["acme/gadgets", "acme/widgets"]);
+  });
+
+  test("a well-formed repository with no rows answers an empty list, not a 404", async () => {
+    const db = await fixture();
+    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests?repo=acme/nothing`, db);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ pull_requests: [], repos: ["acme/widgets"] });
+  });
+
+  // A filter the server cannot apply must never read as an unfiltered ledger:
+  // the value is exactly two non-empty segments split on the FIRST `/`.
+  for (const malformed of ["a/b/c", "a/", "/b", "a", ""]) {
+    test(`a malformed repo query (${JSON.stringify(malformed)}) is a 400, never a filtered 200`, async () => {
+      const db = await fixture();
+      const res = await getFace(
+        `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests?repo=${encodeURIComponent(malformed)}`,
+        db,
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid repo" });
+    });
+  }
 
   test("an App from another workspace answers the same 404 as an unknown one", async () => {
     const db = await fixture();

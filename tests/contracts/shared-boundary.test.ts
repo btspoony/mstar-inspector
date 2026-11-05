@@ -2,16 +2,17 @@
  * `packages/shared` dependency boundary.
  *
  * The package is the dependency-free owner of the dual-surface wire
- * contracts: a runtime engine/omp import, any `zod` import, or a relative
- * path escaping `packages/shared/src` would drag the Worker or runner
- * dependency graph back into the shared surface. `import type` is allowed —
- * type-only specifiers are erased.
+ * contracts: a runtime engine/omp import, any `zod` import, a relative
+ * path escaping `packages/shared/src`, or an engine entry in the package
+ * manifest would drag the Worker or runner dependency graph back into the
+ * shared surface. `import type` is allowed — type-only specifiers are erased.
  */
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 const SHARED_SRC = join(import.meta.dir, "..", "..", "packages", "shared", "src");
+const SHARED_MANIFEST = join(SHARED_SRC, "..", "package.json");
 
 /** Every `.ts` file under the package source root, recursively. */
 function sharedFiles(dir: string = SHARED_SRC): string[] {
@@ -126,5 +127,14 @@ describe("packages/shared boundary", () => {
 
   test("no relative import escaping packages/shared/src", () => {
     expect(offenders(escapesPackage)).toEqual([]);
+  });
+
+  test("the package manifest names no engine dependency", () => {
+    const manifest = JSON.parse(readFileSync(SHARED_MANIFEST, "utf8")) as Record<string, unknown>;
+    for (const field of ["dependencies", "devDependencies", "peerDependencies"]) {
+      expect(Object.keys((manifest[field] ?? {}) as Record<string, string>)).not.toContain(
+        "@mstar-harness/engine",
+      );
+    }
   });
 });

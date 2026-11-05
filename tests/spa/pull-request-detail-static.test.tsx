@@ -512,6 +512,37 @@ describe("pull request detail face (static SSR)", () => {
     expect(markup).not.toContain(":null");
   });
 
+  test("a may-fix finding renders under its own group, between should-fix and nit", async () => {
+    // The class is part of the record route's vocabulary, so the face must
+    // bucket it with a label rather than fold it into `other`.
+    const markup = face({
+      findings: page([
+        {
+          finding_id: "f-may",
+          severity: "may-fix",
+          title: "Consider a shared helper",
+          file_path: "src/a.ts",
+          line: 3,
+          body: "Optional cleanup: the two branches repeat the same guard.",
+        },
+        {
+          finding_id: "f-nit",
+          severity: "nit",
+          title: "Rename tmp to pending",
+          file_path: "src/b.ts",
+          line: 4,
+          body: "Naming only.",
+        },
+      ]),
+    });
+    const groups = await withMarkup(markup, severityGroups);
+    expect(groups.map((group) => group.severity)).toEqual(["may-fix", "nit"]);
+    expect(groups[0]?.header).toBe(
+      `${t("en", "pullRequests.severityMayFix")}${t("en", "pullRequests.groupPageCount", { count: 1 })}`,
+    );
+    expect(markup).toContain("Optional cleanup: the two branches repeat the same guard.");
+  });
+
   test("the danger dot marks a PR with must-fix rows and a recorded failure, nothing else", async () => {
     // The dot reads the HEAD's tally, so each scene states its own: a PR whose
     // findings are all should-fix/nit has none, whatever page is loaded.
@@ -564,8 +595,7 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("an out-of-set severity lands in the `other` bucket, last, with its count", async () => {
-    const withOther = page([
-      ...FINDINGS,
+    const outOfSet = [
       {
         finding_id: "f-4",
         severity: "blocker",
@@ -583,6 +613,18 @@ describe("pull request detail face (static SSR)", () => {
         file_path: "",
         line: null,
         body: "A second out-of-set finding, this one untitled.",
+      },
+    ];
+    const withOther = page([
+      ...FINDINGS,
+      ...outOfSet,
+      {
+        finding_id: "f-6",
+        severity: "may-fix",
+        title: "Fold the duplicate guard",
+        file_path: "",
+        line: null,
+        body: "The class the engine added; it buckets ahead of nit, before `other`.",
       },
     ]);
     const read = await withMarkup(face({ findings: withOther }), (container) => {
@@ -604,7 +646,13 @@ describe("pull request detail face (static SSR)", () => {
               ),
       };
     });
-    expect(read.groups.map((group) => group.severity)).toEqual(["must-fix", "should-fix", "nit", "other"]);
+    expect(read.groups.map((group) => group.severity)).toEqual([
+      "must-fix",
+      "should-fix",
+      "may-fix",
+      "nit",
+      "other",
+    ]);
     // The bucket carries its own page-scoped count, and its findings render
     // under it.
     expect(read.groups.at(-1)?.header).toBe(
@@ -624,7 +672,7 @@ describe("pull request detail face (static SSR)", () => {
     // A legacy severity still renders, still opens the findings family (a
     // findings count outranks history) — it lands in `other`, and it is not a
     // must-fix row, so the PR's danger dot stays off.
-    const legacyOnly = face({ findings: page(withOther.items.slice(3)) }, {}, DETAIL.latest_review, 0);
+    const legacyOnly = face({ findings: page(outOfSet) }, {}, DETAIL.latest_review, 0);
     const legacyRead = await withMarkup(legacyOnly, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
       dots: familyDots(container),

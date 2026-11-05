@@ -35,6 +35,12 @@
  * the consumer.
  */
 
+// Type-only: the type resolves from the root install. The boundary test
+// (tests/contracts/shared-boundary.test.ts) forbids the runtime IMPORT from
+// this package, and `packages/shared/package.json` keeps its declaration in
+// step with that contract by naming no engine dependency at all.
+import type { MergeClass } from "@mstar-harness/engine";
+
 /** Authenticated routing scope (spec §7.0): appId is github_apps.id. */
 export type Scope = { appId: string; installationId: number; owner: string; repo: string; prNumber: number };
 
@@ -44,7 +50,7 @@ export type Coverage = 'complete' | 'truncated' | 'unavailable';
 export type OriginalFinding = {
   title: string; body: string; filePath: string | null;
   lineStart: number | null; lineEnd: number | null;
-  mergeClass: 'must-fix' | 'should-fix' | 'nit'; category: string | null;
+  mergeClass: MergeClass; category: string | null;
   fingerprintHint: string | null;
 };
 
