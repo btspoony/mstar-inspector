@@ -1161,8 +1161,13 @@ async function findIncrementBase(db: PipelineEnv["DB"], scope: Scope): Promise<s
   return row?.head_sha ?? null;
 }
 
-/** Closing/mentioning issue refs the report seat may read (finite vocabulary). */
-const ISSUE_REF_RE = /\b(?:closes|closed|fixes|fixed|resolves|resolved|refs?|references?)\s*:?\s*#(\d+)\b/gi;
+/**
+ * Closing/mentioning issue refs the report seat may read (finite vocabulary).
+ * Every keyword is accepted bare (`Fix #12`) or colon-prefixed (`Fixes: #12`);
+ * the leading `\b` keeps `unfixes #3` out of the table.
+ */
+const ISSUE_REF_RE =
+  /\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved|refs?|references?)\s*:?\s*#(\d+)\b/gi;
 
 /**
  * Extract the issue numbers a PR body claims to close or reference. A finite
@@ -3697,8 +3702,8 @@ async function processMessage(
     // ONE conditional D1 insert is both the per-PR lock and the capacity
     // reservation, so a duplicate for this PR or a reached cap returns the
     // DISTINCT guard-held outcome — NOT a throw. The consumer schedules a
-    // per-message delayed retry (per level: 60/300/1200s quick/default,
-    // 90/480/1200s deep); after the final delayed attempt the job is acked
+    // per-message delayed retry (per level: 60/300/2040s quick/default,
+    // 90/480/2040s deep); after the final delayed attempt the job is acked
     // with a warning — guard-held is not an error state and never goes to the
     // DLQ. Admission precedes EVERY sandbox step, so a refused message costs
     // no container.

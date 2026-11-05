@@ -37,7 +37,6 @@ import {
   buildPublicationMarker,
   buildRevalidatedSection,
   buildReviewBody,
-  insertReportSections,
   CLOSURE_MAX_ROWS,
   createReviewCommenter,
   DEGRADED_EXCERPT_LIMIT,
@@ -55,6 +54,7 @@ import {
   deleteDegradedCommentWithOctokit,
   REVIEW_BODY_LIMIT,
   SUMMARY_MD_LIMIT,
+  TRUNCATION_MARKER,
   truncateSummary,
   type ClosureCoverage,
   type ClosureRow,
@@ -674,30 +674,36 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(revalidated.match(/<details>/g)).toHaveLength(1);
     expect(revalidated).not.toContain("<details><summary>prior");
 
-    const rendered = renderReviewMarkdown({
-      schema: "mstar.review/v1",
-      verdict: "needs fixes",
-      summary_md: "One issue.",
-      findings: [
-        {
-          mergeClass: "should-fix",
-          title: "Fractional expiry",
-          body: "b",
-          file_path: "src/auth.ts",
-          line_start: 21,
-          line_end: 21,
-        },
-      ],
-    });
-    // `planToFix: "none"` keeps the fix-plan fold out; the revalidated section
-    // is the body's ONLY live fold, and the injected tag stays text inside it.
-    const body = insertReportSections(rendered, { ...report, planToFix: "none" }, revalidated);
+    // `planToFix: "none"` keeps the fix-plan fold out, so any raw `<details>`
+    // left in the body would be the injected one.
+    const body = buildReviewBody(
+      {
+        schema: "mstar.review/v1",
+        verdict: "needs fixes",
+        summary_md: "One issue.",
+        findings: [
+          {
+            mergeClass: "should-fix",
+            title: "Fractional expiry",
+            body: "b",
+            file_path: "src/auth.ts",
+            line_start: 21,
+            line_end: 21,
+          },
+        ],
+      },
+      0,
+      { report: { ...report, planToFix: "none" }, revalidated },
+    );
     expect(body.match(/<details/g)).toHaveLength(1);
     expect(body.match(/<\/details>/g)).toHaveLength(1);
     const injected = body.indexOf("&lt;details>");
     expect(injected).toBeGreaterThan(-1);
-    // Findings comes first; every section AFTER the fold is still outside it.
-    expect(body.indexOf("### Findings")).toBeLessThan(body.indexOf("<summary>Revalidated findings</summary>"));
+    // Findings precedes the fold; every section AFTER it stays outside the
+    // (escaped) fold text — the escape is in place, not just somewhere.
+    expect(body.indexOf("### Findings")).toBeLessThan(
+      body.indexOf("<summary>Revalidated findings</summary>"),
+    );
     for (const section of [
       "### Linked-issue AC",
       "### ✅ Verified",
@@ -763,26 +769,6 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(md).not.toContain("| Prior finding |");
   });
 
-  test("a clamp inside the revalidated fold closes it, so the sections after it stay visible", () => {
-    const rows: ClosureRow[] = Array.from({ length: CLOSURE_MAX_ROWS }, (_, i) => ({
-      title: `prior finding ${i} ${"x".repeat(80)}`,
-      disposition: "unverifiable" as const,
-      reason: "no-evidence" as const,
-      evidenceKind: null,
-      thread: "-",
-    }));
-    const body = buildReviewBody(
-      { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
-      0,
-      { report, revalidated: buildRevalidatedSection(coverage, rows) },
-      1_200,
-    );
-    // A cut through the fold still closes it: an unclosed `<details>` would
-    // hide every section the report appends after the body.
-    expect(body.match(/<details>/g)?.length ?? 0).toBe(body.match(/<\/details>/g)?.length ?? 0);
-    expect(body.indexOf("## 🛠️ Plan to fix")).toBeGreaterThan(-1);
-  });
-
   test("a body with report parts carries exactly ONE prior-findings table", () => {
     const rows: ClosureRow[] = [
       {
@@ -804,23 +790,26 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(body).toContain("| Fractional expiry comparison | addressed (verified-fix) | diff | - |");
   });
 
-  test("insertReportSections places every section at its template anchor", () => {
-    const rendered = renderReviewMarkdown({
-      schema: "mstar.review/v1",
-      verdict: "needs fixes",
-      summary_md: "Two issues found.",
-      findings: [
-        {
-          mergeClass: "should-fix",
-          title: "Fractional expiry",
-          body: "b",
-          file_path: "src/auth.ts",
-          line_start: 21,
-          line_end: 21,
-        },
-      ],
-    });
-    const body = insertReportSections(rendered, report, "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>");
+  test("buildReviewBody places every section at its template anchor", () => {
+    const body = buildReviewBody(
+      {
+        schema: "mstar.review/v1",
+        verdict: "needs fixes",
+        summary_md: "Two issues found.",
+        findings: [
+          {
+            mergeClass: "should-fix",
+            title: "Fractional expiry",
+            body: "b",
+            file_path: "src/auth.ts",
+            line_start: 21,
+            line_end: 21,
+          },
+        ],
+      },
+      0,
+      { report, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" },
+    );
     const order = [
       "## 📋 Review",
       "**What this PR does**",
@@ -844,36 +833,30 @@ describe("report sections (mstar.report/v1 side document)", () => {
 
   test("the fix-plan fence outruns the longest backtick run inside the plan", () => {
     const plan = "Use `a` then ```` a four-backtick block";
-    const body = insertReportSections(
-      renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] }),
-      { ...report, planToFix: plan },
-      "none",
+    const body = buildReviewBody(
+      { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+      0,
+      { report: { ...report, planToFix: plan }, revalidated: "none" },
     );
     expect(body).toContain("`````md\n" + plan + "\n`````");
   });
 
   test("a zero-finding envelope: the revalidated table self-adds the empty `### Findings`", () => {
-    const rendered = renderReviewMarkdown({
-      schema: "mstar.review/v1",
-      verdict: "ship it",
-      findings: [],
-    });
-    expect(rendered).not.toContain("### Findings");
-    const body = insertReportSections(rendered, report, "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>");
+    const output: ReviewOutput = { schema: "mstar.review/v1", verdict: "ship it", findings: [] };
+    expect(renderReviewMarkdown(output)).not.toContain("### Findings");
+    const body = buildReviewBody(output, 0, { report, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" });
     expect(body).toContain("<summary>Revalidated findings</summary>");
-    // The empty heading is added FIRST, then the fold — every round keeps the
-    // same section order.
+    // Revalidated FIRST, then the added heading — the fixed template order.
     expect(body.indexOf("### Findings")).toBeLessThan(body.indexOf("<summary>Revalidated findings</summary>"));
     expect(body).toContain("### Linked-issue AC");
   });
 
   test("a null report keeps every heading and writes `none` under each", () => {
-    const rendered = renderReviewMarkdown({
-      schema: "mstar.review/v1",
-      verdict: "ship it",
-      findings: [],
-    });
-    const body = insertReportSections(rendered, null, "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>");
+    const body = buildReviewBody(
+      { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+      0,
+      { report: null, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" },
+    );
     expect(body).not.toContain("**What this PR does**");
     expect(body).toContain("### Linked-issue AC\n\nnone");
     expect(body).toContain("### ✅ Verified\n\nnone");
@@ -883,21 +866,23 @@ describe("report sections (mstar.report/v1 side document)", () => {
   });
 
   test("a report field cannot forge the findings anchor: `### Findings` stays text", () => {
-    const rendered = renderReviewMarkdown({
-      schema: "mstar.review/v1",
-      verdict: "needs fixes",
-      summary_md: "One issue.",
-      findings: [
-        { mergeClass: "should-fix", title: "Fractional expiry", body: "b", file_path: "src/auth.ts", line_start: 21, line_end: 21 },
-      ],
-    });
-    const body = insertReportSections(
-      rendered,
-      { ...report, overview: "Adds a guard.\n### Findings\n#### 🟠 Injected" },
-      "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+    const body = buildReviewBody(
+      {
+        schema: "mstar.review/v1",
+        verdict: "needs fixes",
+        summary_md: "One issue.",
+        findings: [
+          { mergeClass: "should-fix", title: "Fractional expiry", body: "b", file_path: "src/auth.ts", line_start: 21, line_end: 21 },
+        ],
+      },
+      0,
+      {
+        report: { ...report, overview: "Adds a guard.\n### Findings\n#### 🟠 Injected" },
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+      },
     );
     // Escaped in place, so the ONLY `### Findings` line is the engine's — the
-    // revalidated fold still lands directly after that section.
+    // revalidated table still lands directly above it.
     expect(body).toContain("\\### Findings");
     expect(body).toContain("\\#### 🟠 Injected");
     const headings = body.split("\n").filter((line) => /^#{2,4} /.test(line));
@@ -914,11 +899,13 @@ describe("report sections (mstar.report/v1 side document)", () => {
   });
 
   test("an indented ATX heading is neutralized too — markdown reads up to 3 spaces as the same heading", () => {
-    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
-    const body = insertReportSections(
-      rendered,
-      { ...report, overview: "Adds a guard.\n   ### Findings\n   #### 🟠 Injected" },
-      "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+    const body = buildReviewBody(
+      { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+      0,
+      {
+        report: { ...report, overview: "Adds a guard.\n   ### Findings\n   #### 🟠 Injected" },
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+      },
     );
     // The indent is kept and only the marker escaped, so the field stays text
     // and the engine's own headings keep their positions.
@@ -937,11 +924,13 @@ describe("report sections (mstar.report/v1 side document)", () => {
   });
 
   test("a report field cannot fork the layout: `## 📋 Review` and a `---` fence stay text", () => {
-    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
-    const body = insertReportSections(
-      rendered,
-      { ...report, verified: "## 📋 Review\n---\nsuite green" },
-      "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+    const body = buildReviewBody(
+      { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+      0,
+      {
+        report: { ...report, verified: "## 📋 Review\n---\nsuite green" },
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+      },
     );
     expect(body).toContain("\\## 📋 Review");
     expect(body).toContain("\\---");
@@ -988,10 +977,13 @@ describe("report sections (mstar.report/v1 side document)", () => {
     // `~~~` opens a block exactly like backticks: left unclosed it runs to the
     // end of the comment, the sections and the marker lines after it included.
     for (const fence of ["~~~", "```"]) {
-      const body = insertReportSections(
-        renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] }),
-        { ...report, verified: `- suite green\n${fence}\ntail`, planToFix: "none" },
-        "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+      const body = buildReviewBody(
+        { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        0,
+        {
+          report: { ...report, verified: `- suite green\n${fence}\ntail`, planToFix: "none" },
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+        },
       );
       // Escaped in place: the opener stays text and the field is still readable.
       expect(body).toContain(`\n\\${fence}\ntail\n`);
@@ -1005,34 +997,115 @@ describe("report sections (mstar.report/v1 side document)", () => {
   });
 
   test("every thematic-break form is neutralized: `***`, `___` and spaced runs", () => {
-    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
     for (const rule of ["***", "___", "- - -", "* * *", "_ _ _", "----", "==="]) {
-      const body = insertReportSections(
-        rendered,
-        { ...report, verified: `suite green\n${rule}\ntail` },
-        "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+      const body = buildReviewBody(
+        { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        0,
+        {
+          report: { ...report, verified: `suite green\n${rule}\ntail` },
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+        },
       );
       expect(body).toContain(`\\${rule}`);
     }
-    // A list item and a two-dash run are text, not breaks: they stay untouched.
-    const safe = insertReportSections(
-      rendered,
-      { ...report, verified: "- item\n-- two dashes" },
-      "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+    // A two-dash run is text, not a break: it stays untouched.
+    const safe = buildReviewBody(
+      { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+      0,
+      {
+        report: { ...report, verified: "suite green\n-- two dashes" },
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+      },
     );
-    expect(safe).toContain("\n- item");
-    expect(safe).toContain("-- two dashes");
+    expect(safe).toContain("\n-- two dashes\n");
+  });
+
+  test("CRLF and lone-CR line endings are normalized before neutralization", () => {
+    // A CR is a line break to markdown too. Left in place it is the line's last
+    // character, so every end-anchored form misses it and `---`, `===` or `-`
+    // still renders as a break, a setext underline or a list item.
+    const cases: Array<[string, string]> = [
+      ["suite green\r\n---\r\ntail", "\\---"],
+      ["suite green\r\n===\r\ntail", "\\==="],
+      ["suite green\r\n-\r\ntail", "\\-"],
+      // Every break in the field is a bare CR.
+      ["suite green\r---\rtail", "\\---"],
+    ];
+    for (const [field, escaped] of cases) {
+      const body = buildReviewBody(
+        { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        0,
+        // `planToFix: "none"` keeps the fenced plan (whose own `1.` lines are
+        // code, not markdown) out of the structural scan below.
+        { report: { ...report, verified: field, planToFix: "none" }, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" },
+      );
+      // Escaped in place: the field's text survives and opens no structure.
+      expect(body).toContain(`\n${escaped}\ntail\n`);
+      expect(body.split("\n").filter((line) => /^ {0,3}([-=]+[ \t]*$|[-*+][ \t]|\d{1,9}[.)][ \t])/.test(line))).toHaveLength(0);
+      // The engine's headings keep their structure and order.
+      expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
+        "## ✅ Verdict: `ship it`",
+        "## 📋 Review",
+        "### Findings",
+        "### Linked-issue AC",
+        "### ✅ Verified",
+        "### 🗑️ Considered & rejected",
+        "## 🛠️ Plan to fix",
+      ]);
+    }
+  });
+
+  test("a block marker in a report field is text: a table row, quote or list item cannot absorb the lines under it", () => {
+    // The field STARTS with the marker, so the lines a block would absorb are
+    // the ones right below it: the field's own tail, then the engine's
+    // sections. `planToFix` stays out of the field so the body carries no
+    // other list line and the scan below is about the field alone.
+    const cases: Array<[string, string[]]> = [
+      ["| a | b |\n|---||---|\ntail", ["\\| a | b |", "\\|---||---|"]],
+      ["> quoted\nabsorbed", ["\\> quoted"]],
+      ["- bullet\nabsorbed", ["\\- bullet"]],
+      ["* bullet\nabsorbed", ["\\* bullet"]],
+      ["+ bullet\nabsorbed", ["\\+ bullet"]],
+      ["1. step\nabsorbed", ["1\\. step"]],
+      ["1) step\nabsorbed", ["1\\) step"]],
+    ];
+    for (const [field, escaped] of cases) {
+      const body = buildReviewBody(
+        { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        0,
+        {
+          report: { ...report, verified: field, planToFix: "none" },
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+        },
+      );
+      // Escaped in place: the field's text survives and opens no block.
+      for (const line of escaped) expect(body).toContain(`\n${line}\n`);
+      // No line of the body still starts a table row, quote or list item.
+      expect(body.split("\n").filter((line) => /^ {0,3}([|>]|[-*+][ \t]|\d{1,9}[.)][ \t])/.test(line))).toHaveLength(0);
+      // The engine's sections keep their structure: nothing was absorbed.
+      expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
+        "## ✅ Verdict: `ship it`",
+        "## 📋 Review",
+        "### Findings",
+        "### Linked-issue AC",
+        "### ✅ Verified",
+        "### 🗑️ Considered & rejected",
+        "## 🛠️ Plan to fix",
+      ]);
+    }
   });
 
   test("every setext-underline form is neutralized — a lone `=` or `-` shapes the line above too", () => {
-    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
     for (const underline of ["===", "=", "-------", "-", "  ==="]) {
       const indent = underline.slice(0, underline.length - underline.trimStart().length);
       const marker = underline.slice(indent.length);
-      const body = insertReportSections(
-        rendered,
-        { ...report, verified: `suite green\n${underline}\ntail` },
-        "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+      const body = buildReviewBody(
+        { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        0,
+        {
+          report: { ...report, verified: `suite green\n${underline}\ntail` },
+          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+        },
       );
       // Escaped in place, indent kept: the divider stays text, never a heading.
       expect(body).toContain(`\n${indent}\\${marker}\ntail\n`);
@@ -1050,18 +1123,23 @@ describe("report sections (mstar.report/v1 side document)", () => {
     }
   });
 
-  test("an anchor miss skips that section silently, leaving the layout intact", () => {
-    // Not the engine's layout: no `## 📋 Review` line. The renderer is pure —
-    // it returns the body unchanged for that section and logs nothing.
-    const rendered = "## Verdict: something\n\nbody";
+  test("a report section is never prepended above the engine's layout, and composition logs nothing", () => {
     const warns: string[] = [];
     const originalWarn = console.warn;
     console.warn = (message: string) => warns.push(String(message));
     try {
-      const body = insertReportSections(rendered, report, "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>");
-      // Nothing was prepended, and the fixed tail still landed.
-      expect(body.startsWith("## Verdict: something")).toBe(true);
-      expect(body).not.toContain("**What this PR does**");
+      // The overview is anchored under `## 📋 Review`, so it lands inside the
+      // engine's layout and never above it — that is what the anchor-miss guard
+      // protects. The shipped composer reaches the guard only if the engine
+      // drops its heading, so the reachable half is pinned here: nothing is
+      // prepended to the renderer's own head, and the composer stays silent.
+      const body = buildReviewBody(
+        { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+        0,
+        { report, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" },
+      );
+      expect(body.startsWith("## ✅ Verdict: `ship it`")).toBe(true);
+      expect(body.indexOf("**What this PR does**")).toBeGreaterThan(body.indexOf("## 📋 Review"));
       expect(body).toContain("### Linked-issue AC");
       expect(warns).toEqual([]);
     } finally {
@@ -1070,8 +1148,11 @@ describe("report sections (mstar.report/v1 side document)", () => {
   });
 
   test("a fix plan containing a fence gets a longer outer fence", () => {
-    const rendered = renderReviewMarkdown({ schema: "mstar.review/v1", verdict: "ship it", findings: [] });
-    const body = insertReportSections(rendered, { ...report, planToFix: "```ts\nx\n```" }, "none");
+    const body = buildReviewBody(
+      { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
+      0,
+      { report: { ...report, planToFix: "```ts\nx\n```" }, revalidated: "none" },
+    );
     expect(body).toContain("````md");
     expect(body).toContain("````");
   });
@@ -1300,6 +1381,35 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(fenceLines(body)).toHaveLength(2);
     expect((body.match(/<details>/g) ?? []).length).toBe(1);
     expect((body.match(/<\/details>/g) ?? []).length).toBe(1);
+  });
+
+  test("a limit that forces degradation keeps every heading, marks each dropped body, and stays inside it", () => {
+    const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
+    const limit = 500;
+    const body = buildReviewBody(
+      small,
+      0,
+      {
+        report: {
+          ...reportDoc,
+          linkedIssueAc: "a".repeat(400),
+          verified: "b".repeat(400),
+          rejected: "c".repeat(400),
+          planToFix: "x".repeat(REVIEW_BODY_LIMIT),
+        },
+        revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
+      },
+      limit,
+    );
+    expect(body.length).toBeLessThanOrEqual(limit);
+    const positions = reportTailHeadings.map((heading) => body.indexOf(heading));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
+    // No body quietly vanished: the three section bodies this limit cannot
+    // afford render the marker under their headings, and the plan block has no
+    // room left for a balanced fence and fold.
+    expect(body.split(TRUNCATION_MARKER)).toHaveLength(4);
+    expect(body).toContain(`${reportTailHeadings[3]}\n\nnone`);
   });
 
   test("without report parts the body is the pre-report shape, unchanged", () => {
