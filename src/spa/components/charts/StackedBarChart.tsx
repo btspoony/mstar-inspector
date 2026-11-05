@@ -146,8 +146,8 @@ export function StackedBarChart({
           cursor={false}
           labelFormatter={(bucket) => formatDateLabel(String(bucket))}
           contentStyle={{
-            backgroundColor: "var(--card)",
-            border: "1px solid var(--border)",
+            backgroundColor: "var(--surface-card)",
+            border: "1px solid var(--border-default)",
             borderRadius: "6px",
           }}
           labelStyle={{ color: "var(--text-primary)", fontWeight: 500 }}

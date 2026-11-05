@@ -8,11 +8,15 @@
  *
  * Also pinned here: the ref-identity assertion still runs before every
  * deploy-capable step (the tenant-mode rollout that needed a replay binding is
- * gone; a moved tag/branch must never deploy), the container-digest comparison
- * is reported, the last version-creating step binds `DEPLOYMENT_MODE` (the one
- * remaining deployment-shape switch), no deploy command passes the retired
- * tenant-mode var, and the always-run summary derives its status keys from the
- * deploy steps' outcomes — never from the non-fatal version-id capture. The
+ * gone; a moved tag/branch must never deploy), the deploy job's image rebuild
+ * gate runs before the install and every version-creating step (a push diffs
+ * `github.event.before`; a dispatch or the all-zeros first push is a printed
+ * skip, and a dispatch that names `base_sha` runs the gate instead), the
+ * container-digest comparison is reported, the last version-creating
+ * step binds `DEPLOYMENT_MODE` (the one remaining deployment-shape switch), no
+ * deploy command passes the retired tenant-mode var, and the always-run summary
+ * derives its status keys from the deploy steps' outcomes — never from the
+ * non-fatal version-id capture. The
  * summary pins assert the CONTENT the step actually writes into
  * `$GITHUB_STEP_SUMMARY` (the step body is executed), not the markdown source
  * shape.
@@ -188,6 +192,10 @@ const WORKFLOWS = [
     migrations: "Apply D1 migrations (remote)",
     refIdentity: "Assert checkout identity",
     refNeedles: ["HEAD_SHA"],
+    // `base_sha` is the image rebuild gate's explicit recovery base (a push
+    // whose own base was orphaned by a force-push), not a mode or replay
+    // binding — the dispatch still carries no deploy-shape input.
+    dispatchInputs: ["base_sha", "expected_container_digest"],
     // Wording the moved-ref exit must carry; everything after the dash is a
     // file-specific tail clause and stays unpinned.
     redNeedles: ["checked-out HEAD", "!= run SHA"],
@@ -200,6 +208,7 @@ const WORKFLOWS = [
     migrations: "Apply prod D1 migrations (remote)",
     refIdentity: "Assert tag identity",
     refNeedles: ["refs/tags/", "TAG_SHA"],
+    dispatchInputs: ["expected_container_digest"],
     // Prod compares the TAG's commit with the run SHA (a separate checkout-head
     // step exists, but it is not the step this case runs), so its exit must
     // name the tag and the run it disagrees with — not the tail clause.
@@ -210,7 +219,7 @@ const WORKFLOWS = [
   },
 ] as const;
 
-for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving } of WORKFLOWS) {
+for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dispatchInputs } of WORKFLOWS) {
   describe(`${file} gate ordering`, () => {
     const steps = parseWorkflow(file).jobs.deploy.steps as Step[];
     const deployCapable = steps
@@ -318,7 +327,7 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving } of
       const wf = parseWorkflow(file);
       const dispatch = (wf["true"] ?? wf.on).workflow_dispatch;
       expect(Object.keys(dispatch.inputs ?? {}).sort(), `${file}: dispatch inputs`).toEqual([
-        "expected_container_digest",
+        ...dispatchInputs,
       ]);
     });
 
@@ -442,6 +451,114 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving } of
         expect(capture.run).toContain("unreported");
         expect(deploy.name).not.toBe(capture.name);
       });
+
+      test("the image rebuild gate runs after Setup Bun, before install and every version-creating step", () => {
+        const gate = steps.findIndex((s) => s.name === "Image rebuild gate");
+        expect(gate, "deploy.yml: image rebuild gate is missing").toBeGreaterThan(-1);
+        expect(gate, "deploy.yml: the gate must follow Setup Bun").toBeGreaterThan(
+          steps.findIndex((s) => (s.name ?? "").includes("Setup Bun")),
+        );
+        expect(gate, "deploy.yml: the gate must precede Install dependencies").toBeLessThan(
+          steps.findIndex((s) => (s.name ?? "").includes("Install dependencies")),
+        );
+        const versionCreating = steps
+          .map((s, i) => (VERSION_CREATING.test(s.run ?? "") ? i : -1))
+          .filter((i) => i >= 0);
+        expect(versionCreating.length, "deploy.yml: no version-creating step found").toBeGreaterThan(0);
+        for (const i of versionCreating) {
+          expect(i, `deploy.yml: "${steps[i]!.name}" runs before the image rebuild gate`).toBeGreaterThan(gate);
+        }
+      });
+
+      test("the image rebuild gate mirrors CI's base rule for this job's triggers", () => {
+        const gate = steps.find((s) => s.name === "Image rebuild gate")!;
+        expect(gate, "deploy.yml: image rebuild gate is missing").toBeDefined();
+        expect(gate.env?.EVENT_NAME, "deploy.yml: the gate must read the trigger").toBe("${{ github.event_name }}");
+        expect(gate.env?.BASE_SHA, "deploy.yml: the gate must diff the push's previous tip").toBe(
+          "${{ github.event.before }}",
+        );
+        expect(
+          gate.env?.DISPATCH_BASE_SHA,
+          "deploy.yml: the dispatch must be able to name the base it diffs",
+        ).toBe("${{ inputs.base_sha }}");
+        expect(gate.run).toContain('bun scripts/check-image-inputs.ts --base "$base" --ref "$REF_NAME"');
+        // The job fails only through the script's exit 1: both no-base cases
+        // print a named skip and exit 0.
+        expect(gate.run).not.toContain("exit 1");
+
+        const ran = (event: string, base: string, dispatchBase: string) =>
+          runStep(gate, {
+            EVENT_NAME: event,
+            BASE_SHA: base,
+            DISPATCH_BASE_SHA: dispatchBase,
+            REF_NAME: "main",
+          });
+
+        const dispatch = ran("workflow_dispatch", "", "");
+        expect(dispatch.code, `deploy.yml: a dispatch must not fail\n${dispatch.out}`).toBe(0);
+        expect(dispatch.out, "deploy.yml: a dispatch skip must name the trigger").toContain("workflow_dispatch");
+
+        // ... but a dispatch that NAMES a base runs the gate instead of
+        // skipping it: the scratch tree is no repository, so the script
+        // refuses — a failing gate, never a silent pass.
+        const withBase = ran("workflow_dispatch", "", "f".repeat(40));
+        expect(withBase.code, `deploy.yml: a dispatch with a base must evaluate\n${withBase.out}`).toBe(1);
+        expect(withBase.out, "deploy.yml: the recovery must run the gate").toContain(
+          "image-gate-base-unreachable",
+        );
+
+        const firstPush = ran("push", "0".repeat(40), "");
+        expect(firstPush.code, `deploy.yml: the all-zeros base must not fail\n${firstPush.out}`).toBe(0);
+        expect(firstPush.out, "deploy.yml: the first-push skip must say why").toContain("no previous commit");
+      });
     }
   });
 }
+
+/**
+ * CI's gate is the one that runs on every push to `main` and every pull
+ * request, so it carries the same shape this branch hardened: after `Setup
+ * Bun`, before `Install dependencies`, and event values through `env:` only.
+ * Only the deploy twin was pinned; without this, a revert to an interpolated
+ * `run:` body — the injection shape this plan removed — passed the suite.
+ */
+describe("ci.yml image rebuild gate", () => {
+  const steps = parseWorkflow("ci.yml").jobs.test.steps as Step[];
+  const index = steps.findIndex((s) => s.name === "Image rebuild gate");
+
+  test("the gate exists, runs after Setup Bun and before install", () => {
+    expect(index, "ci.yml: image rebuild gate is missing").toBeGreaterThan(-1);
+    expect(index, "ci.yml: the gate must follow Setup Bun").toBeGreaterThan(
+      steps.findIndex((s) => (s.name ?? "").includes("Setup Bun")),
+    );
+    expect(index, "ci.yml: the gate must precede Install dependencies").toBeLessThan(
+      steps.findIndex((s) => (s.name ?? "").includes("Install dependencies")),
+    );
+  });
+
+  test("the gate reads every event value through env:, never through the script", () => {
+    const gate = steps[index]!;
+    expect(gate.run, "ci.yml: the gate splices an expression into its script").not.toContain("${{");
+    expect(gate.env?.EVENT_NAME, "ci.yml: the gate must read the trigger").toBe("${{ github.event_name }}");
+    expect(gate.env?.PR_BASE_SHA, "ci.yml: the gate must diff a pull request's base").toBe(
+      "${{ github.event.pull_request.base.sha }}",
+    );
+    expect(gate.env?.PUSH_BEFORE_SHA, "ci.yml: the gate must diff a push's previous tip").toBe(
+      "${{ github.event.before }}",
+    );
+    expect(gate.run).toContain('bun scripts/check-image-inputs.ts --base "$base"');
+    // The job fails only through the script's exit 1: the no-base case skips.
+    expect(gate.run).not.toContain("exit 1");
+  });
+
+  test("the first push's all-zeros base executes as a printed skip", () => {
+    const firstPush = runStep(steps[index]!, {
+      EVENT_NAME: "push",
+      PUSH_BEFORE_SHA: "0".repeat(40),
+      BASE_REF: "",
+      REF_NAME: "main",
+    });
+    expect(firstPush.code, `ci.yml: the all-zeros base must not fail\n${firstPush.out}`).toBe(0);
+    expect(firstPush.out, "ci.yml: the first-push skip must say why").toContain("no previous commit");
+  });
+});

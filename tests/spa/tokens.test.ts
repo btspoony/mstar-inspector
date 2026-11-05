@@ -554,12 +554,16 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(themeVars["color-sidebar-accent"]).toBe("var(--sidebar-accent)");
   });
 
-  test("every var() the hand-written stylesheets and shells consume still names a token", () => {
+  test("every reference the hand-written stylesheets, shells and modules consume still names a token", () => {
     // The set is derived from the tree, so the assertion below covers whatever
-    // stylesheet and HTML shell exists — not the two this link first listed.
+    // stylesheet, HTML shell and TSX/TS module exists — not the two this link
+    // first listed.
     const walk = consumerWalk();
     const consumers = walk.files;
     expect(consumers.length).toBeGreaterThan(0);
+    // A walk that stopped at the old extension set would still pass the loop
+    // below, so the module half of the coverage is stated on its own.
+    expect(consumers.some((file) => file.endsWith(".tsx"))).toBe(true);
     // A readable-but-partly-unreadable tree would silently pass the link below
     // (every file it did read is fine), so the walk's own read failures are
     // part of the live-tree claim.
@@ -612,6 +616,87 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(
       htmlNames("<style>/* var(--retired-900) */ .a { color: var(--surface-page); }</style>"),
     ).toEqual([]);
+    // The TSX module is the third grammar: the shorthand names the same token,
+    // typed (`text-(length:--x)`) or not, and a name computed at runtime is not
+    // one a static walk can check — matching its truncated prefix would invent
+    // a violation instead of reporting one.
+    const moduleNames = (tsx: string) => [
+      ...new Set(danglingReferences("probe.tsx", tsx).map(({ name }) => name)),
+    ];
+    expect(moduleNames('a = "bg-(--surface-page) rounded-(--radius-pill)"')).toEqual([]);
+    expect(moduleNames('a = "text-(length:--typo-label-12-size)"')).toEqual([]);
+    expect(moduleNames('a = "bg-(--retired-900)"')).toEqual(["retired-900"]);
+    expect(moduleNames('a = "border-l-(--tone-${tone}-fg)"')).toEqual([]);
+    // A script's comments are not classified, so a name only a comment carries
+    // is reported. That is the direction this gate can afford — the opposite one
+    // erased live references three times — and it is what keeps the reference
+    // read total with no lexer to get wrong.
+    expect(moduleNames('// var(--retired-900)\na = "bg-(--surface-page)"')).toEqual([
+      "retired-900",
+    ]);
+    expect(moduleNames('const n = 1;// bg-(--retired-900)')).toEqual(["retired-900"]);
+    expect(moduleNames('f()// bg-(--retired-900)')).toEqual(["retired-900"]);
+    expect(
+      moduleNames('const t = `${x /* bg-(--retired-900) */}`; k = "bg-(--surface-page)"'),
+    ).toEqual(["retired-900"]);
+    // A declaration a comment wrote excuses nothing: the declaration view drops
+    // every declaration its comment spans touch, whole — a block comment, a
+    // line tail, and a multi-line block alike.
+    expect(moduleNames('/* --retired-900: #fff; */ a = "bg-(--retired-900)"')).toEqual([
+      "retired-900",
+    ]);
+    expect(moduleNames('a = "bg-(--retired-900)"; // --retired-900: #fff')).toEqual([
+      "retired-900",
+    ]);
+    expect(moduleNames('/*\n --retired-900: #fff;\n*/\na = "bg-(--retired-900)"')).toEqual([
+      "retired-900",
+    ]);
+    // A `//` inside a URL literal takes no reference with it: nothing is
+    // stripped from a script, so the reference on that line stays.
+    expect(
+      moduleNames('const u = "https://api.example.com"; const k = "bg-(--retired-900)";'),
+    ).toEqual(["retired-900"]);
+    expect(moduleNames('const u = " // "; const k = "bg-(--retired-900)";')).toEqual(["retired-900"]);
+    expect(moduleNames("const u = ' // '; const k = 'bg-(--retired-900)';")).toEqual(["retired-900"]);
+    // A template literal is string text too, `${ … }` expression included.
+    expect(moduleNames('const t = `a // b`; const k = "bg-(--retired-900)"')).toEqual(["retired-900"]);
+    // A regex literal is not a comment either: `[ //]` is a character class,
+    // and reading its slashes as a comment start swallowed the live reference
+    // beside it.
+    expect(moduleNames('const r = /[ //]/; const k = "bg-(--retired-900)"')).toEqual(["retired-900"]);
+    // The retired scanner's division-then-comment shapes, plus the two a bare
+    // tokenizer still reads as a comment — a template's middle text and JSX
+    // child text. Every one keeps the reference it used to erase.
+    expect(moduleNames('if (ok) /[//]/.test(value); const k = "bg-(--retired-900)"')).toEqual([
+      "retired-900",
+    ]);
+    expect(moduleNames('return /[//]/.test(value) ? "bg-(--retired-900)" : ""')).toEqual([
+      "retired-900",
+    ]);
+    expect(
+      moduleNames('for await (const r of rs) /[//]/.test(r); k = "bg-(--retired-900)"'),
+    ).toEqual(["retired-900"]);
+    expect(moduleNames('const t = `a ${x} // b`; const k = "bg-(--retired-900)"')).toEqual([
+      "retired-900",
+    ]);
+    expect(moduleNames('<p>a // b</p><div className="bg-(--retired-900)" />')).toEqual([
+      "retired-900",
+    ]);
+    // The three boundaries a comment-stripping pass got wrong (qc1-rereview3): a
+    // template line that starts with `//` and carries a real class, block
+    // delimiters inside ordinary strings, and a declaration value holding a URL
+    // — where truncating the value at the `//` excused that value's own cycle.
+    expect(moduleNames('const view = <div className={`\n// bg-(--retired-900)\n`} />;')).toEqual([
+      "retired-900",
+    ]);
+    expect(
+      moduleNames('const open = "/*"; const k = "bg-(--retired-900)"; const close = "*/";'),
+    ).toEqual(["retired-900"]);
+    expect(
+      moduleNames(
+        'const css = `:root { --retired-900: url(https://example.test) var(--retired-900); }`;',
+      ),
+    ).toEqual(["retired-900"]);
   });
 
   test("an unreadable consumer is a reported failure, never a thrown run", () => {
@@ -626,6 +711,25 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       expect(walk.files.some((file) => file.endsWith("ok.css"))).toBe(true);
       expect(walk.failures).toHaveLength(1);
       expect(walk.failures[0]).toContain("broken.css");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the walk and the stripper read an extension's case the same way (I-000352)", () => {
+    // One rule, lower-cased before either side reads it: a mixed-case
+    // stylesheet is admitted by the walk and its block comment is prose to the
+    // stripper. A walk that spelled extensions case-sensitively skipped the
+    // file entirely, leaving the two rules free to disagree again.
+    const dir = mkdtempSync(join(tmpdir(), "consumer-root-"));
+    try {
+      const entry = join(dir, "Card.CSS");
+      writeFileSync(entry, "/* var(--retired-900) */\n:root { color: var(--surface-page); }");
+      const walk = consumerWalk([dir]);
+      expect(walk.files).toHaveLength(1);
+      const file = walk.files[0] as string;
+      expect(file.endsWith("Card.CSS")).toBe(true);
+      expect(danglingReferences(file, readFileSync(entry, "utf8"))).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

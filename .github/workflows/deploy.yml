@@ -6,6 +6,10 @@ on:
     paths-ignore: ['docs/**', '.mstar/**', '*.md', 'LICENSE', '.env.example']
   workflow_dispatch:
     inputs:
+      base_sha:
+        description: "Optional: the commit the image rebuild gate diffs from (e.g. the last deployed SHA after a force-push)"
+        required: false
+        default: ''
       expected_container_digest:
         description: "Optional: a previously recorded sandbox image digest (sha256:…) — compared and reported, never assumed identical"
         required: false
@@ -96,6 +100,41 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
+
+      # `wrangler` hashes the Dockerfile alone, so an image input change that
+      # skips the `# rebuild:` marker would deploy the Worker while the
+      # container keeps the previous build — silently. CI runs this gate on the
+      # push that lands a SHA, but the deploy executes it again against the
+      # revision it builds on: the script imports no dependencies, so it runs
+      # before `Install dependencies` and before any version-creating step.
+      # `push` diffs against the ref's previous tip (`github.event.before`);
+      # the all-zeros first-push sha has nothing to diff and is a printed skip.
+      # A force-push orphans that tip — the script recovers a usable base and
+      # still evaluates the diff. A `workflow_dispatch` has no previous tip: it
+      # skips by name unless `base_sha` names the commit to diff from, which is
+      # the recovery for a push whose own base cannot be resolved.
+      - name: Image rebuild gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.before }}
+          DISPATCH_BASE_SHA: ${{ inputs.base_sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            base="$BASE_SHA"
+          else
+            base="$DISPATCH_BASE_SHA"
+            if [ -z "$base" ]; then
+              echo "$EVENT_NAME on $REF_NAME — no previous tip to diff; the push that landed this SHA already ran the gate in CI. Pass base_sha=<sha> to run the gate here instead"
+              exit 0
+            fi
+          fi
+          if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "no previous commit on $REF_NAME — image rebuild gate skipped"
+            exit 0
+          fi
+          bun scripts/check-image-inputs.ts --base "$base" --ref "$REF_NAME"
 
       # Bun's install cache is content-addressed, so a restored entry cannot
       # change what a frozen install resolves — it only skips the download.

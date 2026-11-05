@@ -67,7 +67,26 @@ export const SPA_ROOT = path.join(ROOT, "src/spa");
 export const PROTOTYPES_ROOT = path.join(ROOT, "src/design-system/prototypes");
 /** The one stylesheet under `src/spa` the token source derives — link 1 owns it. */
 const GENERATED_STYLESHEET = "src/spa/styles/tokens.css";
-const CONSUMER_FILE = /\.(?:css|html)$/;
+/**
+ * The consumer's comment grammar, from its extension lower-cased once. The
+ * walk and the comment stripper both read this one rule, so a file cannot be
+ * admitted under one extension spelling and stripped under another
+ * (`I-000352`). `null` is not a consumer.
+ */
+type ConsumerKind = "style" | "html" | "script";
+function consumerKind(file: string): ConsumerKind | null {
+  switch (path.extname(file).toLowerCase()) {
+    case ".css":
+      return "style";
+    case ".html":
+      return "html";
+    case ".ts":
+    case ".tsx":
+      return "script";
+    default:
+      return null;
+  }
+}
 
 /**
  * The links that are a `--check` run of a generator, in report order. The
@@ -80,7 +99,7 @@ const GENERATORS = [
 ] as const;
 
 /**
- * The trees whose hand-written CSS/HTML answers to the token source. A root
+ * The trees whose hand-written CSS/HTML/TSX answers to the token source. A root
  * that contributes no consumer (moved, renamed, emptied) breaks the link: a
  * global "some consumer exists" passes while one root silently checks nothing,
  * which is the failure mode this link exists to catch.
@@ -94,7 +113,8 @@ const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
  * worse, could disagree with the first.
  *
  * Two forests, derived from the trees rather than listed: the SPA's
- * stylesheets/shells, and the design-system prototypes, which are hand-written
+ * stylesheets, shells and the TSX/TS modules that carry class strings, and the
+ * design-system prototypes, which are hand-written
  * HTML reference pages that read the same tokens. A list would be a guard whose
  * coverage is its own contents; a new stylesheet joins the link by existing.
  * The generated stylesheet is the one exclusion — link 1 already proves it
@@ -163,7 +183,7 @@ function walkConsumers(dir: string, failures: string[] = []): string[] {
     if (isDirectory === null) continue;
     if (isDirectory) {
       out.push(...walkConsumers(full, failures));
-    } else if (CONSUMER_FILE.test(entry)) {
+    } else if (consumerKind(entry) !== null) {
       const file = path.relative(ROOT, full);
       if (file !== GENERATED_STYLESHEET) out.push(file);
     }
@@ -210,24 +230,39 @@ export function rootsWithoutConsumers(roots: readonly ConsumerRoot[]): string[] 
  */
 const REFERENCE = /var\s*\(\s*--([a-z0-9-]+)[\s,)]/g;
 /**
+ * The same reference in Tailwind v4's shorthand, which is how a TSX consumer
+ * spells it: `bg-(--x)`, `rounded-(--radius-control)`, and the typed form
+ * `text-(length:--typo-label-12-size)` all name `x`. The closing paren is
+ * required: `bg-(--tone-${tone}-fg)` computes its name at runtime and names
+ * nothing a static walk can check — matching its truncated prefix would invent
+ * a violation instead of reporting one.
+ */
+const SHORTHAND = /[a-z][a-z0-9-]*-\((?:[a-z-]+:)?--([a-z0-9-]+)\)/g;
+/**
  * A custom property the stylesheet declares itself — the bridge's own keys.
  * The declared value is captured with the name: a declaration that references
  * its own name excuses nothing (see `danglingReferences`).
  */
 const DECLARATION = /(?:^|[;{\s}])(--[a-z0-9-]+)\s*:\s*([^;{}]*)/g;
-/** A block comment declares nothing: a commented-out `--legacy-x:` is not a declaration. */
-const CSS_COMMENT = /\/\*[\s\S]*?\*\//g;
+/** A block comment: a stylesheet's prose, and one of the two shapes a script's comment may take. */
+const BLOCK_COMMENT = /\/\*[\s\S]*?\*\//g;
 /** The other consumer grammar: an HTML shell's own comment. */
 const HTML_COMMENT = /<!--[\s\S]*?-->/g;
 /** A `<style>` block inside an HTML shell — CSS again, so its comments go too. */
 const STYLE_BLOCK = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
-/** The consumers written as HTML shells rather than as stylesheets. */
-const HTML_FILE = /\.html$/i;
+/**
+ * A script's other comment shape: `//` to the end of its line. It places spans
+ * that *may* be comments (see `scriptCommentSpans`), never a reference, so it
+ * does not have to be right about a slash's context.
+ */
+const LINE_COMMENT = /\/\/[^\n]*/g;
 
 /**
  * `text` without its comments, read in the grammar the file is written in: a
  * stylesheet's block comments, an HTML shell's `<!-- … -->` ones, and — in the
- * shell's `<style>` blocks — the stylesheet's again.
+ * shell's `<style>` blocks — the stylesheet's again. A TS/TSX module is
+ * returned unchanged: see `danglingReferences` for why its comments are placed
+ * as spans instead.
  *
  * One CSS-only stripper read an HTML comment as live markup: a token name
  * quoted in prose became a reference and failed the link, while inside a
@@ -235,12 +270,30 @@ const HTML_FILE = /\.html$/i;
  * over the whole file.
  */
 function withoutComments(file: string, text: string): string {
-  if (!HTML_FILE.test(file)) return text.replace(CSS_COMMENT, "");
+  const kind = consumerKind(file);
+  if (kind === "style") return text.replace(BLOCK_COMMENT, "");
+  if (kind !== "html") return text;
   return text
     .replace(HTML_COMMENT, "")
     .replace(STYLE_BLOCK, (_block, open: string, css: string, close: string) =>
-      `${open}${css.replace(CSS_COMMENT, "")}${close}`,
+      `${open}${css.replace(BLOCK_COMMENT, "")}${close}`,
     );
+}
+
+/**
+ * Every span in a script that may hold one of its comments, the two shapes
+ * taken independently so that neither can hide the other's start.
+ *
+ * A real comment always lies inside one of these — that is the whole property
+ * the declaration view needs — and the spans over-approximate: a `//` inside a
+ * template, a regex or JSX text places one too. Over-approximating costs a
+ * dropped declaration, which surfaces a reference as a visible violation; the
+ * opposite error would excuse one silently (`I-000351`).
+ */
+function scriptCommentSpans(text: string): Array<readonly [number, number]> {
+  return [...text.matchAll(LINE_COMMENT), ...text.matchAll(BLOCK_COMMENT)].map(
+    (match) => [match.index, match.index + match[0].length] as const,
+  );
 }
 
 export interface DanglingReference {
@@ -250,10 +303,10 @@ export interface DanglingReference {
 }
 
 /**
- * Every `var(--x)` in `text` that names neither a token of `theme` nor a property
- * the file declares itself. Checked per theme rather than over the union: a name
- * one theme declares and the other does not is dangling in the other one, and
- * the union would hide exactly that.
+ * Every `var(--x)` or `bg-(--x)` in `text` that names neither a token of `theme`
+ * nor a property the file declares itself. Checked per theme rather than over
+ * the union: a name one theme declares and the other does not is dangling in
+ * the other one, and the union would hide exactly that.
  *
  * A declaration excuses references to its name only when it is not itself the
  * cycle: `--x: var(--x)` (the fallback and spaced spellings included) is
@@ -261,19 +314,45 @@ export interface DanglingReference {
  * (`I-000248`). Only that spelling loses its vote; a name declared genuinely
  * elsewhere in the file still excuses its references.
  *
- * Comments are stripped in the file's own grammar before either match, so a
- * retired name quoted in prose — a CSS comment or an HTML shell's `<!-- -->`
- * — neither becomes a reference nor a self-declaration that suppresses the
- * check.
+ * A stylesheet and an HTML shell are stripped of their comments before either
+ * match, so a retired name quoted in prose is neither a reference nor a
+ * declaration. A script is not stripped. Which `//` opens a comment is the
+ * parser's answer — a template's middle text, a regex body and JSX text all
+ * spell the same two characters — and no parser ships in this install, so a
+ * lexer's guess here has deleted a live reference every time this gate grew
+ * one. Instead:
+ *
+ * - references are read from the raw text, so a real one can never be erased:
+ *   a name only a comment carries is reported as a visible false alarm;
+ * - declarations are read from the raw text too, and a declaration its
+ *   `scriptCommentSpans` touches is dropped whole. That drops every
+ *   commented-out declaration (they can no longer excuse a reference) without
+ *   ever truncating a live one at a `//` inside its own value — a truncated
+ *   `--x: url(https://…) var(--x)` would excuse its own cycle (`I-000351`).
+ *
+ * Both halves therefore fail toward reporting: the gate can over-report a
+ * script's prose, and it cannot miss a reference.
  */
 export function danglingReferences(file: string, text: string): DanglingReference[] {
   const live = withoutComments(file, text);
+  const commented = consumerKind(file) === "script" ? scriptCommentSpans(live) : [];
   const local = new Set(
     [...live.matchAll(DECLARATION)]
+      .filter(
+        (match) =>
+          !commented.some(
+            ([from, to]) => match.index < to && match.index + match[0].length > from,
+          ),
+      )
       .filter((match) => !new RegExp(`var\\s*\\(\\s*${match[1]}(?=[\\s,)])`).test(match[2] as string))
       .map((match) => (match[1] as string).slice(2)),
   );
-  const names = [...new Set([...live.matchAll(REFERENCE)].map((match) => match[1] as string))].sort();
+  const names = [
+    ...new Set([
+      ...[...live.matchAll(REFERENCE)].map((match) => match[1] as string),
+      ...[...live.matchAll(SHORTHAND)].map((match) => match[1] as string),
+    ]),
+  ].sort();
   return THEMES.flatMap((theme) => {
     const layers = resolveTheme(theme);
     const known = new Set([
@@ -741,7 +820,7 @@ if (import.meta.main) {
       console.log(`        ${failure}`);
     }
     for (const root of emptyRoots) {
-      console.log(`        no stylesheet or HTML shell found under ${root}`);
+      console.log(`        no stylesheet, HTML shell or TS/TSX module found under ${root}`);
     }
     if (!consumersOk) brokenLinks.push("consumers → source");
   } catch (error) {
