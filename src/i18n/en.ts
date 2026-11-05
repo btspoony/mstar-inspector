@@ -62,6 +62,13 @@ export const en = {
       hoursAgo: "{count} hours ago",
       dayAgo: "{count} day ago",
       daysAgo: "{count} days ago",
+      /** Future tense (formatUntil) — the usage dialog's reset stamps. */
+      inMinute: "in {count} minute",
+      inMinutes: "in {count} minutes",
+      inHour: "in {count} hour",
+      inHours: "in {count} hours",
+      inDay: "in {count} day",
+      inDays: "in {count} days",
       never: "never",
       unknown: "unknown",
     },
@@ -723,6 +730,27 @@ export const en = {
         "{provider}'s built-in id is reserved — a custom endpoint needs its own id. This opens the declaration form with the provider's API protocol and base-URL shape filled in.",
       customIdRequired: "{provider} is taken — enter a new id for this declaration.",
       submitFailed: "That request failed before it reached the server — nothing was stored.",
+      /**
+       * The per-key usage probe (plan api-key-usage-probe T3): the key-row
+       * action, the dialog it opens, and the four faces — ok (window bar /
+       * balance), unauthorized, absent, error. The wire's diagnostic
+       * `reason` never renders verbatim.
+       */
+      usage: {
+        action: "Usage",
+        title: "Usage for {label}",
+        refresh: "Refresh",
+        error: "Could not read this key's usage right now.",
+        unauthorized: "The provider rejected this key — it may be revoked or expired.",
+        absentNoProbe: "This provider has no usage probe.",
+        absentNothing: "The provider reported no usage window for this key.",
+        windowRemaining: "{percent}% remaining",
+        resets: "resets {time}",
+        balanceRemaining: "{amount} {unit} remaining",
+        /** One account-wide pool behind several keys, never a per-key allowance. */
+        shared: "account-wide",
+        unit: { requests: "requests", credits: "credits", usd: "USD", tokens: "tokens", percent: "%" },
+      },
     },
     providersCopy:
       "The providers configured for this App — stored keys show masked, custom declarations show their base URL and models. Add Provider picks a catalog entry; keys are stored only after a successful verify.",

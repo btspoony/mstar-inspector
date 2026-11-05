@@ -11,6 +11,7 @@ import { NoticeRegion, type OpNotice } from "./PageNotice";
 import { AddKeyDialog, AddProviderDialog } from "./providers-dialogs";
 import { providerGroups, type ProviderGroup } from "./providers-groups";
 import type { PendingAction } from "./SettingsPage";
+import { UsageDialog } from "./usage-dialog";
 
 /**
  * AC-10: exactly one verification label per key row, from the four store
@@ -125,6 +126,7 @@ export function ProvidersSection({
             <ProviderGroupCard
               key={group.providerId}
               locale={locale}
+              appId={payload.app.github_app_id}
               group={group}
               catalog={catalogById[group.providerId]}
               removeNotice={
@@ -188,6 +190,7 @@ function groupMeta(
  */
 function ProviderGroupCard({
   locale,
+  appId,
   group,
   catalog,
   removeNotice,
@@ -195,6 +198,8 @@ function ProviderGroupCard({
   onAddKey,
 }: {
   locale: SpaBoot["locale"];
+  /** The numeric GitHub App id — the usage probe posts under `/api/apps/:appId`. */
+  appId: number;
   group: ProviderGroup;
   /** The catalog entry of this id, when the catalog knows it. */
   catalog: CatalogProvider | undefined;
@@ -205,6 +210,10 @@ function ProviderGroupCard({
   onAddKey: () => void;
 }) {
   const [modelsOpen, setModelsOpen] = useState(false);
+  // The key row whose usage dialog is open; null = no probe flow. Every key
+  // of the group shares the provider, so the group's catalog entry decides
+  // whether the row's usage action exists at all.
+  const [usageTarget, setUsageTarget] = useState<{ keyId: string; last4: string } | null>(null);
   const meta = groupMeta(group, catalog);
   // The disclosure region's id uses the provider id verbatim. Custom provider
   // ids are stored under the slug grammar (`[a-z0-9][a-z0-9-]{0,63}`), so no
@@ -271,21 +280,34 @@ function ProviderGroupCard({
                         : null
                   }
                   actions={
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="sm"
-                      onClick={() =>
-                        onPending({
-                          kind: "remove-key",
-                          provider: key.provider,
-                          keyId: key.keyId,
-                          last4: key.last4,
-                        })
-                      }
-                    >
-                      {t(locale, "settings.remove")}
-                    </Button>
+                    <>
+                      {catalog?.usage_probe === true ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          aria-haspopup="dialog"
+                          onClick={() => setUsageTarget({ keyId: key.keyId, last4: key.last4 })}
+                        >
+                          {t(locale, "settings.providers.usage.action")}
+                        </Button>
+                      ) : null}
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        onClick={() =>
+                          onPending({
+                            kind: "remove-key",
+                            provider: key.provider,
+                            keyId: key.keyId,
+                            last4: key.last4,
+                          })
+                        }
+                      >
+                        {t(locale, "settings.remove")}
+                      </Button>
+                    </>
                   }
                 />
               );
@@ -333,6 +355,16 @@ function ProviderGroupCard({
           </ul>
         ) : null}
       </GroupCardBody>
+      <UsageDialog
+        locale={locale}
+        appId={appId}
+        open={usageTarget !== null}
+        provider={group.providerId}
+        label={group.label}
+        last4={usageTarget?.last4 ?? ""}
+        keyId={usageTarget?.keyId ?? ""}
+        onClose={() => setUsageTarget(null)}
+      />
     </GroupCard>
   );
 }
