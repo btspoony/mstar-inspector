@@ -375,14 +375,12 @@ export type ConsumerLogFields = {
   /** github_apps.id the job resolves to (per-App jobs only). */
   app_id?: string;
   idempotency_key?: string;
-  /** review_check_attempts.attempt_id — the Check attempt a line is about. */
-  attempt_id?: string;
   /**
-   * The Check attempt's attached remote run id, when a line knows it (spec
-   * §7.10 give-up events carry it "when known"). Absent while the create never
-   * attached a run — the give-up path itself keys on `attempt_id` alone.
+   * review_check_attempts.attempt_id — the Check attempt a line is about, and
+   * the only join key a give-up line carries: it names the `review_checks` row
+   * that owns the remote run id.
    */
-  check_run_id?: number | null;
+  attempt_id?: string;
   /**
    * Why the consumer stopped waiting on the Check hook (§7.10 give-up) — the
    * free-form detail, distinct from `reason`'s closed admission vocabulary.
