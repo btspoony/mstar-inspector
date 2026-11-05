@@ -107,7 +107,7 @@ export async function getUserByLogin(
 /**
  * Thrown by createUser when a concurrent case-variant row wins the insert
  * (migration 0016 NOCASE unique index) — the invite route maps it to 409
- * duplicate-invite semantics; bootstrap re-reads and allows.
+ * duplicate-invite semantics.
  */
 export class DuplicateLoginError extends Error {
   constructor(login: string) {
