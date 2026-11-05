@@ -3718,7 +3718,11 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
 
   test("a provider without a probe is unsupported_provider — zero outbound requests, zero key reads", async () => {
     const { db } = await seededWorld();
-    fetchSpy = spyOn(globalThis, "fetch");
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
+      // Fail fast: no outbound request may leave the Worker on a denied path,
+      // and a regression must fail here instead of timing out on the network.
+      throw new Error("unexpected outbound request");
+    }) as unknown as typeof fetch);
     const res = await postForm(
       USAGE,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
@@ -3801,7 +3805,11 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
       },
       plainKey,
     );
-    fetchSpy = spyOn(globalThis, "fetch");
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
+      // Fail fast: no outbound request may leave the Worker on a denied path,
+      // and a regression must fail here instead of timing out on the network.
+      throw new Error("unexpected outbound request");
+    }) as unknown as typeof fetch);
     const res = await postForm(USAGE, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       provider: "commandcode",
       keyId: await keyIdOf(plainKey),
