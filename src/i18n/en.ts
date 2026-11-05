@@ -977,7 +977,7 @@ export const en = {
       /** Neither stored budget could be read — the numbers are the documented defaults. */
       checkUnreadable:
         "The stored check budgets could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
-      /** The operator default an App without its own depth inherits (plan 036a). */
+      /** The operator default an App without its own depth inherits. */
       reviewLevelTitle: "Review depth",
       reviewLevelDescription: "Applies to Apps that have not chosen their own review depth.",
       reviewLevelLabel: "Default review depth",

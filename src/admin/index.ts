@@ -137,8 +137,8 @@ async function setFlag(c: AdminContext): Promise<Response> {
  * configuration (iteration spec §1.1). One row in `review_runtime_settings`,
  * absent = the documented default; the leaf store owns the parse, the
  * 1..SYSTEM_CONCURRENCY_MAX range and the audit row, so this handler only
- * gates, shapes and maps. The operator default review depth (plan 036a) rides
- * the same read: the tier every App without its own depth inherits.
+ * gates, shapes and maps. The operator default review depth rides the same
+ * read: the tier every App without its own depth inherits.
  */
 async function readRuntime(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);

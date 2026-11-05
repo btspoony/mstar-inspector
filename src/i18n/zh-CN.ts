@@ -834,7 +834,7 @@ export const zhCN: Dictionary = {
       /** 两个已存储的预算都无法读取——数字只是文档默认值。 */
       checkUnreadable:
         "无法读取已存储的检查预算，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
-      /** App 未自行选择深度时继承的平台默认（plan 036a）。 */
+      /** App 未自行选择深度时继承的平台默认。 */
       reviewLevelTitle: "评审深度",
       reviewLevelDescription: "适用于尚未自行选择评审深度的 App。",
       reviewLevelLabel: "默认评审深度",

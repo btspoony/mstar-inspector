@@ -47,7 +47,7 @@
  * value answers that default with `degraded: true`, never a throw — the round
  * is still asked, at the conservative budget.
  *
- * The operator default review depth (plan 036a) is one more row in the same
+ * The operator default review depth is one more row in the same
  * table: `review.level.default` holds a `REVIEW_LEVELS` tier that every App
  * with no depth of its own inherits. An absent row reads `"default"`; a stored
  * value off the vocabulary is untrusted — the default with `degraded: true`,
@@ -105,7 +105,7 @@ export const CHECK_UPDATE_MAX = 15_000;
 /** The audit ledger's target id for the pair (one operator save, one row). */
 const CHECK_BUDGETS_TARGET = "review.check.budgets";
 
-/** PK of the operator default review-depth row (plan 036a). */
+/** PK of the operator default review-depth row. */
 export const REVIEW_LEVEL_KEY = "review.level.default";
 /** Absent row: the tier every App without its own depth inherits. */
 export const REVIEW_LEVEL_DEFAULT: ReviewLevel = "default";

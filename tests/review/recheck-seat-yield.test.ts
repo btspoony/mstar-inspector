@@ -1,6 +1,5 @@
 /**
- * Plan 036b Task 1 (RCA) — the recheck seat's yield boundary at the documented
- * input limits.
+ * The recheck seat's yield boundary at the documented input limits.
  *
  * One fake structured-subagent result per case, driven through the REAL
  * `runRecheckSeat` (`packages/runner/src/recheck.ts`), so each candidate mode
@@ -19,7 +18,7 @@
  *   (f) a round with no budget is `skipped`/`budget` and starts no seat;
  *   (g) a caller abort is `skipped`/`aborted`, not a blamed round.
  *
- * Plan 036b Task 2 adds the budget cases: the ask fits
+ * The budget cases sit in the same world: the ask fits
  * `RECHECK_ASSIGNMENT_MAX_BYTES` at these documented limits with every row still
  * reachable, the fit covers rows before it deepens any row, and a round whose
  * target core cannot fit is `skipped`/`budget` with no seat started. The
@@ -214,7 +213,7 @@ async function run(signal = new AbortController().signal) {
   return runRecheckSeat({ session: {} as never, input: INPUT, model: ["test-model"], signal, runSeat: fakeRunSeat });
 }
 
-describe("036b RCA — recheck seat yield at the documented input limits", () => {
+describe("recheck seat yield at the documented input limits", () => {
   test("the fixture is a max-size round: 25 rows, 100 slices, near the input byte cap", () => {
     expect(INPUT.targets).toHaveLength(RECHECK_MAX_TARGETS);
     expect(INPUT.evidence).toHaveLength(RECHECK_MAX_TARGETS * 4);
@@ -369,9 +368,9 @@ function addressedRow(rowId: string, slice: EvidenceSlice): Record<string, unkno
   };
 }
 
-describe("036b Task 2 — the ask fits the seat's context budget", () => {
+describe("the ask fits the seat's context budget", () => {
   test("a max-size round is asked inside the budget, every row still reachable", async () => {
-    // The RCA's cause: the max-size input is ~270 KB of JSON — a whole 128k
+    // The root cause: the max-size input is ~270 KB of JSON — a whole 128k
     // window of prompt before the seat's own tools or its yield, so the
     // one-shot yield never arrives. The ask must be FITTED instead.
     seatResult = answerAll(INPUT);
