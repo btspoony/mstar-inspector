@@ -354,12 +354,16 @@ export type ConsumerLogFields = {
    * `base...head` is genuinely empty — the prior round already covers this head,
    * so the delivery is acked without a new review body.
    * `check_terminalize_budget_exceeded` / `check_terminalize_failed` /
-   * `check_abandon_released` (spec §7.10/§7.11, union widened ADDITIVELY): the
-   * consumer stopped waiting on the terminalize hook and handed the attempt to
-   * the Check recovery lane; `check_abandon_failed` is that hand-off's own D1
-   * fault (the row then waits for the execution deadline, as before).
+   * `check_abandon_released` / `check_abandon_not_owned` /
+   * `check_abandon_failed` (spec §7.10/§7.11, union widened ADDITIVELY): the
+   * consumer gave the attempt up and handed it to the Check recovery lane.
+   * `check_abandon_released` = the fenced release changed the row;
+   * `check_abandon_not_owned` = it changed nothing because the attempt is no
+   * longer ours (recovery claimed it, the lease expired, or it already ended) —
+   * a legitimate no-op, not a fault; `check_abandon_failed` = the hand-off
+   * itself faulted (a store error).
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -3303,15 +3307,16 @@ async function processMessage(
         if (released) {
           deps.log.warn(
             { ...line, event: "check_abandon_released" },
-            "check attempt released for recovery after the consumer stopped waiting on terminalize",
+            `check attempt released to the recovery lane (${reason})`,
           );
           return true;
         }
-        // The fenced release wrote nothing: recovery already owns the attempt
-        // (or the lease expired). Report it honestly — it is not a release.
+        // The fenced release wrote NOTHING: the attempt is no longer ours to
+        // hand over (recovery already claimed it, its lease expired, or it
+        // already ended). That is a legitimate no-op — never a fault.
         deps.log.warn(
-          { ...line, event: "check_abandon_failed" },
-          "check attempt release wrote nothing (recovery already claimed it, or the lease is no longer live)",
+          { ...line, event: "check_abandon_not_owned" },
+          `check attempt not released — recovery already owns it, or its lease is no longer live (${reason})`,
         );
         return false;
       },
@@ -3319,7 +3324,7 @@ async function processMessage(
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(
           { ...line, event: "check_abandon_failed" },
-          `check attempt release failed (it keeps its execution deadline): ${detail}`,
+          `check attempt release failed (the hand-off itself faulted): ${detail}`,
         );
         return false;
       },

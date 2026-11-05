@@ -330,6 +330,28 @@ function dbFailingOn(db: TestD1, match: string) {
   };
 }
 
+/**
+ * The real D1 double with ONE of the give-up hand-off's two store writes
+ * faulting: `setCheckFallbackDesired` (the intent) or `deferCheckRecovery`
+ * (the release). The lifecycle itself runs unchanged over it, so the failure
+ * travels the real path into the seam's rejection — unlike a seam fake that
+ * would re-implement the writes it is supposed to test.
+ */
+function withHandoffFault(db: TestD1, step: "intent" | "release") {
+  return {
+    prepare: (sql: string) => {
+      if (step === "intent" && sql.includes("desired = 'in_progress'")) {
+        throw new Error("intent write unavailable");
+      }
+      if (step === "release" && /attempts = attempts \+ 1,\s*recovery_state = \?/.test(sql)) {
+        throw new Error("release write unavailable");
+      }
+      return db.prepare(sql);
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+  } as unknown as TestD1;
+}
+
 /** Seed a publication-journal row for the delivered head (the hand-off probe). */
 function seedJournalRow(db: TestD1, headSha: string, phase = "prepared"): void {
   db.raw
@@ -6019,19 +6041,19 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   }, 20_000);
 
   test("check lifecycle: a give-up that did not release keeps the review and claims NO second Check", async () => {
-    // The handoff's two fenced writes — the intent, then the release — are
-    // failed through the SEAM itself: the wrapper reuses the real store
-    // helpers and rejects at the chosen step (or reports a no-op release), so
-    // a statement edit can never silently disarm the fault the way a SQL-text
-    // match could.
+    // `intent`/`release` fault one of the hand-off's two store writes through a
+    // thin DB wrapper while the REAL lifecycle runs; only the legitimate no-op
+    // (a fence that is no longer ours) uses a seam double, because it has to
+    // synthesize `false` without pretending any store wrote anything.
     for (const step of ["intent", "release", "no-op"] as const) {
       reset();
       sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
       sandbox.resolvedSha = SHA2; // the checkout moved on from the payload sha
       const db = await createSeededTestD1();
-      const real = lifecycleFor(db);
+      const store = step === "no-op" ? db : withHandoffFault(db, step);
+      const real = lifecycleFor(store as never);
       const beginCalls: string[] = [];
-      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      const consumer = createReviewConsumer(await makeEnv({ DB: store as never }), testLog, {
         ...testOverrides,
         checks: {
           begin: (input) => {
@@ -6039,30 +6061,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             return real.begin(input);
           },
           terminalize: (input) => real.terminalize(input),
-          abandonTerminalize: async (input) => {
-            if (step === "intent") throw new Error("intent write unavailable");
-            const summary =
-              input.outcome === "superseded"
-                ? CHECK_SUMMARIES.superseded(input.handle.headSha.slice(0, 7))
-                : CHECK_SUMMARIES.unconfirmed;
-            await setCheckFallbackDesired(
-              db,
-              input.handle.attemptId,
-              input.handle.lease,
-              { desired: "failure", title: CHECK_NAME, summary },
-              Date.now(),
-            );
-            if (step === "release") throw new Error("release write unavailable");
-            // A dead fence: the intent exists but nothing was released.
-            if (step === "no-op") return false;
-            return deferCheckRecovery(
-              db,
-              input.handle.attemptId,
-              input.handle.lease,
-              { state: "remote-unconfirmed", nextAttemptMs: Date.now() + 60_000, reason: input.reason },
-              Date.now(),
-            );
-          },
+          abandonTerminalize: step === "no-op" ? async () => false : (input) => real.abandonTerminalize(input),
         },
       });
 
@@ -6077,25 +6076,34 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       expect(early.head_sha, step).toBe(SHA);
       expect(early.holder, step).not.toBeNull();
       expect(early.lease_until_ms, step).not.toBeNull();
-      if (step === "intent") {
-        // The intent write never landed: the row still wants `in_progress`.
-        expect(early.desired, "intent").toBe("in_progress");
-      } else {
-        // The intent landed, the release did not: terminal text, held lease.
+      if (step === "release") {
+        // The intent landed, the release faulted: terminal text, held lease.
         expect(early.desired, step).toBe("failure");
         expect(early.desired_summary, step).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
+      } else {
+        // Nothing landed: the intent write faulted, or the fence was not ours.
+        expect(early.desired, step).toBe("in_progress");
       }
 
       // A Check fault never blocks the review.
       expect(commenterCalls.filter((c) => c.op === "post-prepared"), step).toHaveLength(1);
       expect(publicationRow(db).phase, step).toBe("applied");
 
-      // A throw and a no-op report the SAME honest failure event, never
-      // `check_abandon_released`.
+      // Two different meanings, two events: a faulted write is `_failed`, a
+      // legitimate no-op is `_not_owned`; neither claims a release.
       const failed = logLines.filter((line) => line.fields.event === "check_abandon_failed");
-      expect(failed, step).toHaveLength(1);
-      expect(failed[0]!.fields.attempt_id, step).toBe(early.id);
-      expect(String(failed[0]!.fields.check_reason), step).toContain("newer commit");
+      const notOwned = logLines.filter((line) => line.fields.event === "check_abandon_not_owned");
+      if (step === "no-op") {
+        expect(failed, step).toHaveLength(0);
+        expect(notOwned, step).toHaveLength(1);
+        expect(notOwned[0]!.fields.attempt_id, step).toBe(early.id);
+        expect(String(notOwned[0]!.fields.check_reason), step).toContain("newer commit");
+      } else {
+        expect(failed, step).toHaveLength(1);
+        expect(notOwned, step).toHaveLength(0);
+        expect(failed[0]!.fields.attempt_id, step).toBe(early.id);
+        expect(String(failed[0]!.fields.check_reason), step).toContain("newer commit");
+      }
       expect(logLines.filter((line) => line.fields.event === "check_abandon_released"), step).toHaveLength(0);
     }
   });
@@ -6228,7 +6236,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       ),
     ).toBe(true);
 
-    await hooks.abandonTerminalize({ handle: handle!, reason: "terminalize budget exceeded (100ms)" });
+    // The seam reports whether the RELEASE write changed the row.
+    expect(await hooks.abandonTerminalize({ handle: handle!, reason: "terminalize budget exceeded (100ms)" })).toBe(true);
 
     const released = checkRowFor(db, SHA);
     expect(released.holder).toBeNull();
@@ -6247,7 +6256,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // Recovery now owns the row: a second give-up is a silent no-op.
     expect(await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms!)).not.toBeNull();
     const owned = checkRowFor(db, SHA);
-    await hooks.abandonTerminalize({ handle: handle!, reason: "second give-up" });
+    // Recovery now owns the attempt, so the fenced release writes nothing and
+    // the seam reports that honestly instead of claiming a hand-off.
+    expect(await hooks.abandonTerminalize({ handle: handle!, reason: "second give-up" })).toBe(false);
     expect(checkRowFor(db, SHA)).toEqual(owned);
   });
 
@@ -6276,7 +6287,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       ),
     ).toBe(true);
 
-    await hooks.abandonTerminalize({ handle: handle!, reason: "terminalize budget exceeded (1000ms)" });
+    expect(await hooks.abandonTerminalize({ handle: handle!, reason: "terminalize budget exceeded (1000ms)" })).toBe(true);
 
     const released = checkRowFor(db, SHA);
     // The proof-derived conclusion stands; only the lease and the recovery
