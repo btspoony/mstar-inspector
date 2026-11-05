@@ -225,10 +225,21 @@ type QuotaRead =
   | { ok: true; body: Record<string, unknown> }
   | { ok: false; status: QuotaReadFailure; reason: string };
 
+/** The origin a URL names; `undefined` when it does not parse. */
+function originOf(url: string): string | undefined {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * GET `url` and classify the response into the shared vocabulary, so all nine
- * families mean the same thing by 401/403, 404, transport failure and an
- * unparseable body. Never throws; never logs the key.
+ * GET `url` and classify the response into the shared vocabulary, so every
+ * family means the same thing by 401/403, 404, transport failure and an
+ * unparseable body. Never throws; never logs the key. The credential only ever
+ * travels to `url`'s origin: a 3xx is never followed and a 2xx that reports a
+ * different final origin is refused.
  */
 async function readQuotaJson(
   input: ProbeInput,
@@ -240,6 +251,9 @@ async function readQuotaJson(
     const budgetMs = Math.max(1, input.deadline - Date.now());
     const response = await input.fetch(url, {
       headers: { accept: "application/json", "user-agent": VERIFY_USER_AGENT, ...headers },
+      // A redirect is never followed: `manual` hands any 3xx to the classifier
+      // below instead of replaying the Authorization header at another origin.
+      redirect: "manual",
       signal: AbortSignal.timeout(budgetMs),
     });
     if (response.status === 401 || response.status === 403) {
@@ -250,6 +264,13 @@ async function readQuotaJson(
     if (response.status === 404) return { ok: false, status: "absent", reason: "http 404" };
     if (response.status < 200 || response.status >= 300) {
       return { ok: false, status: "error", reason: `http ${response.status}` };
+    }
+    // Defense in depth for redirects a transparent proxy still performs: a 2xx
+    // whose FINAL URL is on another origin never has its body read. An empty
+    // `response.url` means the platform reported none (a synthetic response),
+    // which is not evidence of a redirect.
+    if (response.url !== "" && originOf(response.url) !== originOf(url)) {
+      return { ok: false, status: "error", reason: "redirected off origin" };
     }
     const body: unknown = await response.json();
     const record = asRecord(body);
@@ -907,23 +928,38 @@ const cursorUsage: UsageProbe = async (input, key) => {
  * table has no usage endpoint and is never probed. The ids are the catalog's
  * own names — the reference implementations' aliases (charm-hyper,
  * minimax-code, zhipu-coding-plan, kimi-code) are not this product's ids.
+ *
+ * Each entry also carries the vendor hosts its probe reaches, derived from the
+ * SAME endpoint constants the probe calls, so the set can never drift from
+ * where the credential actually travels: a stored declaration may only point
+ * at one of them.
  */
-const USAGE_PROBES: Readonly<Record<string, UsageProbe>> = Object.freeze({
-  commandcode: commandCodeUsage,
-  "commandcode-anthropic": commandCodeUsage,
-  "opencode-go": opencodeGoUsage,
-  zai: zaiUsage(ZAI_HOST),
-  "zai-coding-plan": zaiUsage(ZAI_HOST),
-  zhipuai: zaiUsage(ZHIPU_HOST),
-  "zhipuai-coding-plan": zaiUsage(ZHIPU_HOST),
-  "minimax-coding-plan": minimaxUsage(MINIMAX_INTL_HOST),
-  "minimax-cn-coding-plan": minimaxUsage(MINIMAX_CN_HOST),
-  "cline-pass": clineUsage,
-  synthetic: syntheticUsage,
-  umans: umansUsage,
-  hyper: hyperUsage,
-  "kimi-for-coding": kimiUsage,
-  cursor: cursorUsage,
+type UsageProbeEntry = {
+  probe: UsageProbe;
+  hosts: readonly string[];
+};
+
+/** An endpoint constant's host — the unit a declaration's base URL is compared by. */
+function hostOfEndpoint(url: string): string {
+  return new URL(url).host;
+}
+
+const USAGE_PROBES: Readonly<Record<string, UsageProbeEntry>> = Object.freeze({
+  commandcode: { probe: commandCodeUsage, hosts: [hostOfEndpoint(COMMANDCODE_ORIGIN)] },
+  "commandcode-anthropic": { probe: commandCodeUsage, hosts: [hostOfEndpoint(COMMANDCODE_ORIGIN)] },
+  "opencode-go": { probe: opencodeGoUsage, hosts: [hostOfEndpoint(OPENCODE_GO_USAGE_URL)] },
+  zai: { probe: zaiUsage(ZAI_HOST), hosts: [hostOfEndpoint(ZAI_HOST)] },
+  "zai-coding-plan": { probe: zaiUsage(ZAI_HOST), hosts: [hostOfEndpoint(ZAI_HOST)] },
+  zhipuai: { probe: zaiUsage(ZHIPU_HOST), hosts: [hostOfEndpoint(ZHIPU_HOST)] },
+  "zhipuai-coding-plan": { probe: zaiUsage(ZHIPU_HOST), hosts: [hostOfEndpoint(ZHIPU_HOST)] },
+  "minimax-coding-plan": { probe: minimaxUsage(MINIMAX_INTL_HOST), hosts: [hostOfEndpoint(MINIMAX_INTL_HOST)] },
+  "minimax-cn-coding-plan": { probe: minimaxUsage(MINIMAX_CN_HOST), hosts: [hostOfEndpoint(MINIMAX_CN_HOST)] },
+  "cline-pass": { probe: clineUsage, hosts: [hostOfEndpoint(CLINE_USAGE_URL)] },
+  synthetic: { probe: syntheticUsage, hosts: [hostOfEndpoint(SYNTHETIC_QUOTAS_URL)] },
+  umans: { probe: umansUsage, hosts: [hostOfEndpoint(UMANS_USAGE_URL)] },
+  hyper: { probe: hyperUsage, hosts: [hostOfEndpoint(HYPER_CREDITS_URL)] },
+  "kimi-for-coding": { probe: kimiUsage, hosts: [hostOfEndpoint(KIMI_USAGE_URL)] },
+  cursor: { probe: cursorUsage, hosts: [hostOfEndpoint(CURSOR_USAGE_URL)] },
 });
 
 /**
@@ -932,6 +968,15 @@ const USAGE_PROBES: Readonly<Record<string, UsageProbe>> = Object.freeze({
  */
 export function hasUsageProbe(provider: string): boolean {
   return Object.hasOwn(USAGE_PROBES, provider);
+}
+
+/**
+ * The vendor hosts a provider's probe reaches, or `null` when the provider has
+ * no probe. A stored declaration whose base URL points anywhere else is not
+ * this probe's credential — the route refuses it before any request.
+ */
+export function usageProbeHosts(provider: string): readonly string[] | null {
+  return Object.hasOwn(USAGE_PROBES, provider) ? USAGE_PROBES[provider]!.hosts : null;
 }
 
 /**
@@ -955,7 +1000,7 @@ export async function probeProviderUsage(
       absentCause: "no-probe",
     };
   }
-  const probe = USAGE_PROBES[provider]!;
+  const probe = USAGE_PROBES[provider]!.probe;
   try {
     return await probe({ fetch: deps.fetch, deadline: startedAt + (deps.timeoutMs ?? VERIFY_TIMEOUT_MS) }, key);
   } catch {

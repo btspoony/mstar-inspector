@@ -159,7 +159,7 @@ import {
   verifyProviderKey,
   type VerifyFailureReason,
 } from "./provider-verify";
-import { hasUsageProbe, probeProviderUsage } from "./provider-usage";
+import { hasUsageProbe, probeProviderUsage, usageProbeHosts } from "./provider-usage";
 import {
   countUsers,
   deleteWorkspaceMember,
@@ -3520,23 +3520,57 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
  * /api/apps/:appId/keys/usage` with form fields `provider` + `keyId` asks the
  * provider's own quota endpoint with ONE stored key and answers the normalized
  * snapshot. Refusals are ordered by cost: a provider with no probe is refused
- * BEFORE any store read or outbound request (`unsupported_provider`), an id
+ * BEFORE any store read or outbound request (`unsupported_provider`), and so is
+ * a declaration whose base URL points at a host the probe never calls; an id
  * neither pool holds for THIS App — another App's id, or a deleted one — is
  * `unknown_key`. The plaintext only ever reaches the probe's request header:
  * it is never in the response, and a store/decrypt throw is the closed
  * `unexpected` reason rather than a 5xx.
  */
+
+/** A stored declaration's host, or null when its base URL does not parse. */
+function declarationHost(baseUrl: string): string | null {
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return null;
+  }
+}
+
 const appKeyUsageRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const keyId = typeof form.keyId === "string" ? form.keyId.trim() : "";
-  if (!hasUsageProbe(provider)) {
+  const probeHosts = usageProbeHosts(provider);
+  if (probeHosts === null) {
     return c.json({ ok: false, reason: "unsupported_provider" as const }, 400);
   }
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
+    // A template provider's key lives in the declaration pool, and that
+    // declaration carries an operator-chosen base URL. The probe always calls
+    // the vendor's OWN quota host, so a declaration pointing anywhere else is
+    // refused before the key is decrypted or a request leaves the Worker.
+    const declaration = (await store.listCustomProviders(gate.app.id)).find(
+      (row) => row.provider_id === provider,
+    );
+    if (declaration !== undefined) {
+      const declaredHost = declarationHost(declaration.base_url);
+      if (declaredHost === null || !probeHosts.includes(declaredHost)) {
+        const host = declaredHost ?? declaration.base_url;
+        return c.json(
+          {
+            ok: false,
+            reason: "unsupported_provider" as const,
+            message: `The probe targets the vendor's own quota host; this declaration points at ${host}.`,
+            params: { provider, host },
+          },
+          400,
+        );
+      }
+    }
     const stored = await store.getProviderKeyPlaintext(gate.app.id, provider, keyId);
     if (stored === null) return c.json({ ok: false, reason: "unknown_key" as const }, 400);
     const snapshot = await probeProviderUsage({ fetch: verifyFetch }, provider, stored.plainKey);

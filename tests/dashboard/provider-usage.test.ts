@@ -15,15 +15,21 @@ import {
   hasUsageProbe,
   probeProviderUsage,
   resetFrom,
+  usageProbeHosts,
   type UsageDeps,
 } from "../../src/dashboard/provider-usage";
 
-type FetchCall = { url: string; headers: Record<string, string> };
+type FetchCall = { url: string; headers: Record<string, string>; redirect?: "follow" | "error" | "manual" };
 
-/** Canned responses served in order; every call records its URL + headers. */
+/** Canned responses served in order; every call records its URL, headers and
+ *  redirect mode (the credential-origin guard's transport input). */
 function queueFetch(responses: Response[], calls: FetchCall[] = []): UsageDeps["fetch"] {
   return (async (input, init) => {
-    calls.push({ url: String(input), headers: (init?.headers ?? {}) as Record<string, string> });
+    calls.push({
+      url: String(input),
+      headers: (init?.headers ?? {}) as Record<string, string>,
+      redirect: init?.redirect,
+    });
     const next = responses.shift();
     if (next === undefined) throw new Error(`unexpected fetch: ${String(input)}`);
     return next;
@@ -96,6 +102,15 @@ describe("usage probe table", () => {
     for (const id of ["anthropic", "openai", "ollama-cloud", "moonshotai", "minimax", "constructor"]) {
       expect(hasUsageProbe(id)).toBe(false);
     }
+  });
+
+  test("every mapped id advertises the vendor host its probe calls; an unmapped id has none", () => {
+    for (const id of covered) expect(usageProbeHosts(id)?.length ?? 0, id).toBeGreaterThan(0);
+    expect(usageProbeHosts("anthropic")).toBeNull();
+    // Pinned samples of the declaration gate's comparison unit.
+    expect(usageProbeHosts("commandcode")).toEqual(["api.commandcode.ai"]);
+    expect(usageProbeHosts("minimax-cn-coding-plan")).toEqual(["api.minimaxi.com"]);
+    expect(usageProbeHosts("cursor")).toEqual(["api2.cursor.sh"]);
   });
 
   test("an unmapped provider is absent + no-probe with zero outbound requests", async () => {
@@ -200,6 +215,60 @@ describe("bounded transport", () => {
     expect(calls.map((call) => call.url)).toEqual([
       "https://api.commandcode.ai/alpha/whoami",
       "https://api.commandcode.ai/alpha/billing/credits",
+    ]);
+  });
+});
+
+// --- credential origin ---
+
+describe("credential origin", () => {
+  /** A 2xx whose reported FINAL URL is `url` — what a real fetch always reports. */
+  function responseFrom(url: string, body: unknown): Response {
+    const response = json(200, body);
+    Object.defineProperty(response, "url", { value: url });
+    return response;
+  }
+
+  test("a 30x is classified as error and the credential is never replayed", async () => {
+    const calls: FetchCall[] = [];
+    const redirect = new Response(null, { status: 302, headers: { Location: "https://evil.example/usage" } });
+    const snapshot = await probeProviderUsage({ fetch: stubFetch(redirect, calls) }, "hyper", "key-123");
+    expect(snapshot.status).toBe("error");
+    expect(snapshot.reason).toBe("http 302");
+    expect(snapshot.limits).toEqual([]);
+    // The transport is told NOT to follow, so no request reaches the target.
+    expect(calls[0]!.redirect).toBe("manual");
+  });
+
+  test("Command Code's first GET redirecting stops the second request", async () => {
+    const calls: FetchCall[] = [];
+    const redirect = new Response(null, { status: 307, headers: { Location: "https://evil.example/whoami" } });
+    const snapshot = await probeProviderUsage({ fetch: stubFetch(redirect, calls) }, "commandcode", "cc-key");
+    expect(snapshot.status).toBe("error");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.redirect).toBe("manual");
+  });
+
+  test("a 2xx that arrived from another origin is refused before its body is read", async () => {
+    const snapshot = await probeProviderUsage(
+      { fetch: stubFetch(responseFrom("https://evil.example/usage", { balance: 5 })) },
+      "hyper",
+      "key-123",
+    );
+    expect(snapshot.status).toBe("error");
+    expect(snapshot.reason).toBe("redirected off origin");
+    expect(snapshot.limits).toEqual([]);
+  });
+
+  test("a 2xx from the requested origin still parses", async () => {
+    const snapshot = await probeProviderUsage(
+      { fetch: stubFetch(responseFrom("https://hyper.charm.land/credits", { balance: 5 })) },
+      "hyper",
+      "key-123",
+    );
+    expect(snapshot.status).toBe("ok");
+    expect(snapshot.limits).toEqual([
+      { id: "hyper:balance", kind: "balance", remaining: 5, unit: "credits", shared: true },
     ]);
   });
 });

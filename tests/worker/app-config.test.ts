@@ -3787,6 +3787,69 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     expect(url).toBe("https://api.z.ai/api/monitor/usage/quota/limit");
     expect((init.headers as Record<string, string>).authorization).toBe(plainKey);
   });
+
+  test("a declaration pointing away from the vendor's quota host is refused — zero outbound requests", async () => {
+    const { db, app } = await seededWorld();
+    const plainKey = sk("usage-proxy-7777");
+    await configStore(db).upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "commandcode",
+        base_url: "https://proxy.example/v1",
+        api: "openai-completions",
+        model_ids: ["deepseek-v4-flash"],
+      },
+      plainKey,
+    );
+    fetchSpy = spyOn(globalThis, "fetch");
+    const res = await postForm(USAGE, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      provider: "commandcode",
+      keyId: await keyIdOf(plainKey),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      ok: false,
+      reason: "unsupported_provider",
+      message: expect.stringContaining("proxy.example"),
+      params: { provider: "commandcode", host: "proxy.example" },
+    });
+    // The credential never left the Worker.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("the same declaration on the vendor's own host runs the probe", async () => {
+    const { db, app } = await seededWorld();
+    const plainKey = sk("usage-vendor-8888");
+    await configStore(db).upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "commandcode",
+        base_url: "https://api.commandcode.ai/v1",
+        api: "openai-completions",
+        model_ids: ["deepseek-v4-flash"],
+      },
+      plainKey,
+    );
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async (input: string | URL | Request) => {
+        const body = String(input).endsWith("/alpha/whoami")
+          ? { user: { id: "user-1" } }
+          : { data: { credits: { monthlyCredits: 10 } } };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    );
+    const res = await postForm(USAGE, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      provider: "commandcode",
+      keyId: await keyIdOf(plainKey),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      status: "ok",
+      limits: [{ id: "commandcode:balance", kind: "balance", remaining: 10, unit: "credits", shared: true }],
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
 });
 
 // --- custom provider declarations (settings ops) ---
