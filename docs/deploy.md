@@ -435,18 +435,20 @@ survives either: wrangler accepts `keep_vars` only at the top level
 and **rejects it inside an environment block**
 (`Unexpected fields found in env.production field: "keep_vars"`), so an
 automated `wrangler deploy --env production` wipes dashboard-set plain vars.
-The review tier `REVIEW_LEVEL` (`quick`/`default`/`deep`) is unset and
-configured nowhere, and the same `keep_vars` limitation applies to it: a
-`REVIEW_LEVEL` set on the production Worker from the dashboard is wiped by the
-next `wrangler deploy --env production`, so it cannot be relied on until it is
-declared in `env.production.vars` and redeployed. That deployment-wide variable
-is the current build only: the tier belongs to the App (`AGENTS.md`
-§ Configuration surfaces), and moving it onto the App settings surface is
-tracked as a critical issue in the harness issue store. Do not introduce a new
-deployment-wide tunable in the meantime. Neither review control is a
-plain var: per-App `github_apps.review_enabled` (dashboard Pause/Resume) gates
-one App, and the `review_global` server flag gates the enqueue face for every
-App. Both live in D1, unaffected by that limitation (`.env.example`).
+This repo declares no top-level `keep_vars` either, so a dashboard-set plain
+var is not durable on staging.
+
+**No review control is a plain var, and nothing here changes review
+behaviour.** Every review setting is a D1 row read per decision point, so the
+var wipe costs nothing: per-App `github_apps.review_level` (dashboard Settings
+— Quick / Standard / Deep / follow the operator default) with the operator
+default `review_runtime_settings` key `review.level.default`; per-App
+`github_apps.review_enabled` (dashboard Pause/Resume), `review_trigger_mode`,
+`check_min_score` / `check_pass_verdicts`, `sandbox_image_id` and the owner
+allowlist; the `review_global` server flag; and the system/workspace
+concurrency caps. `docs/runtime-configuration.md` is the inventory. There is
+no deployment-wide review depth and no deployment-level brake *var* — do not
+introduce one (`.env.example`).
 
 Sign-in itself needs no plain var: it is open to any GitHub login (§ 6).
 
@@ -1989,16 +1991,18 @@ Operationally that means:
 - **Production D1 starts empty and that is fine**: the first person to sign in
   creates the first workspace. There is no self-promotion to admin and no
   first-login fallback arming to protect against.
-- **`keep_vars: true` in `wrangler.jsonc`** preserves dashboard-managed
-  plaintext vars such as `REVIEW_LEVEL` across a deploy of the **default
-  environment** (the staging Worker). Production does not get this: its deploy
-  is `wrangler deploy --env production`, and `env.production` cannot declare
-  `keep_vars` (rejected inside an environment block), so every production
-  deploy wipes dashboard-set plain vars — see § `env.production.vars` is the
-  plain-var roster. Review control is not a plain var at all: it is two
-  switches, and both live in D1 (hence neither is touched by that wipe) — the
-  per-App `github_apps.review_enabled`, and the `review_global` server flag
-  (absent row = enabled) that closes the enqueue face for every App.
+- **No plain var carries review behaviour.** `wrangler.jsonc` declares no
+  `keep_vars`, and `env.production` cannot declare one anyway (rejected inside
+  an environment block), so a plaintext var hand-set on either Worker — from
+  the dashboard or a one-off `wrangler deploy --var` — is gone after the next
+  deploy. That costs nothing: the only plain vars the Worker reads are
+  `DEPLOYMENT_MODE` and `PLATFORM_OPERATORS`, and both workflows supply them
+  on every deploy (§ `env.production.vars` is the plain-var roster). Review
+  control is D1 rows — per-App `github_apps.review_level` (with the operator
+  default `review.level.default`), per-App `review_enabled` and trigger mode,
+  the per-App Check gate, the `review_global` server flag, and the
+  system/workspace concurrency caps — so no deploy-time variable changes how a
+  review runs (`docs/runtime-configuration.md`).
 
 ## Rollback
 
@@ -2261,6 +2265,12 @@ Deployed image record (DOCS-01 baseline):
 
 ## Ops config
 
+`docs/runtime-configuration.md` is the inventory of every non-secret runtime
+parameter — its layer (system / workspace / per-App / deploy-time), where it is
+stored, and the value an absent row reads as — plus the secrets that stay on
+the secret store. The sections below describe how the review-related ones
+behave.
+
 ### Review triggers (per App)
 
 Each App chooses when its reviews auto-start — the `review_trigger_mode`
@@ -2303,6 +2313,37 @@ filters keyed on the old label stop matching after deploy.
 Contract:
 [`.mstar/specs/review-trigger-policy.md`](../.mstar/specs/review-trigger-policy.md)
 (§2.1 classification matrix, §3 mention grammar).
+
+### Review depth (per App, with an operator default)
+
+Each App chooses how thoroughly its reviews run — `github_apps.review_level`
+(migration `0047`), set on the App's dashboard Settings page:
+
+| Stored | Tenant label | What the consumer runs |
+|---|---|---|
+| `quick` | Quick | Bun fan-out, one seat; 10 min runner budget |
+| `default` | Standard | Bun fan-out, two seats; 10 min runner budget |
+| `deep` | Deep | one parent session (no seat split); 14 min runner budget |
+| `NULL` | Follow operator default (the resolved tier is named in the option) | the operator default below |
+
+The consumer reads the column on the per-message App-row read it already makes
+and resolves the tier once, before admission: `NULL` falls back to the
+`review_runtime_settings` row `review.level.default`, whose own absent-row value
+is `default`. The resolved tier rides the `guard-held` outcome, so the retry
+path never re-reads it. A stored value off the `REVIEW_LEVELS` vocabulary is
+treated as absent, never a throw — a review must still run.
+
+The operator default sits on the `/_internal_admin` runtime page, on the same
+call as the caps: `PATCH /_internal_admin/api/runtime` with
+`{"reviewLevel": "quick" | "default" | "deep"}` (one save writes one
+parameter). It applies only to Apps that have not chosen a depth of their own.
+
+The tier decides three bounds, all defined in `src/pipeline/consumer.ts`:
+`runnerTimeoutMs` (600 s for `quick`/`default`, 840 s for `deep`),
+`reviewGuardTtlSeconds` (2292 s / 2292 s / 2532 s) and
+`guardRetryDelaysSeconds`. None of it is a deploy-time var: a change applies to
+the next message with no redeploy, so one deployment can run two Apps at two
+depths.
 
 ### Owner allowlist and App visibility (per App)
 
@@ -2443,6 +2484,10 @@ at least eight workspaces running at their own maximum. Both caps are read from 
 request cache — so a change applies to the **next** message without a
 redeploy; reviews already running keep their slot until their `review_inflight`
 row expires.
+
+`docs/runtime-configuration.md` lists these two caps, their ranges, the
+per-PR lock and every other non-secret parameter; this section states how they
+behave.
 
 | Cap | Default and maximum | Stored in | Changed by |
 |---|---|---|---|
