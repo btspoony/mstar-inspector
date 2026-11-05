@@ -64,6 +64,7 @@ to the default instead of pinning a value nobody can change.
 | Column | Absent (NULL) default | Accepted values | Changed by | Effect |
 |---|---|---|---|---|
 | `max_concurrent_reviews` (migration `0040`; bounded by `0043`) | `32` | integer `1..32` (an above-maximum stored value is clamped to `32` on read) | workspace owner/admin — dashboard Settings, `PUT /<workspaceRef>/api/settings/concurrency` | This workspace's share of the admission quota; the tenant face never sees or writes the system value |
+| `check_min_score` (migration `0049`) | `60` (`DEFAULT_CHECK_MIN_SCORE`, `src/contracts/review-gate.ts`) | integer `0..100` | workspace owner/admin — dashboard Settings, `PUT /<workspaceRef>/api/settings/check-min-score` | The floor a NEW App of this workspace starts at; `createApp` seeds the App row from it, and an existing App keeps its own stored floor |
 
 ## Per-App layer — `github_apps` columns and their tables
 
@@ -95,7 +96,7 @@ is the last line.
 | `review_enabled` (migration `0008`) | `1` | `0` \| `1` | dashboard Pause/Resume (`POST /apps/:appId/pause` \| `/resume`) | `0` acks new work without reviewing; queued work is untouched |
 | `review_trigger_mode` (migration `0022`) | `every_push` | `open` \| `every_push` \| `manual` | dashboard App Settings, `POST /apps/:appId/review-trigger-mode` | Which PR events auto-enqueue a review |
 | `sandbox_image_id` (migration `0018`) | `omp` | an enabled id from the sandbox image registry | dashboard App Settings, `save-sandbox-image` | Which runtime image runs the review |
-| `check_min_score` (migration `0045`) | `80` | integer `0..100` | dashboard App Settings, `save-check-gate` | Score floor for a passing review Check |
+| `check_min_score` (migration `0045`; seeded on creation from the workspace default, `0049`) | `60` via the create path | integer `0..100` | dashboard App Settings, `save-check-gate` | Score floor for a passing review Check. The column's own DDL default (80) is the historical 0045 value: `createApp` writes the workspace's default (platform default 60) explicitly, so it applies only to rows 0045 materialized on Apps that already existed — those keep 80 until their settings page writes a new floor |
 | `check_pass_verdicts` (migration `0045`) | `["ship it"]` | JSON array of `PR_VERDICTS` spellings | dashboard App Settings, `save-check-gate` | Verdicts that satisfy the gate (an empty set fails closed: nothing can pass) |
 | `allowlist_enabled` (migration `0045`) | `0` | `0` \| `1` | dashboard App Settings, `save-allowlist` | Owner allowlist switch; on with an empty list refuses every owner |
 | `github_visibility` (migration `0045`) | `NULL` = `unknown` | `public` \| `private` \| `unknown` | the App metadata refresh's anonymous probe (not operator-editable) | UI hint only; never gates admission |

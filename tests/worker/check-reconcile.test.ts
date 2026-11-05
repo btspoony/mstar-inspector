@@ -297,7 +297,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
             expect(conclusion.summary).toContain("Review gate met for 0123456 (round 3)");
             expect(conclusion.summary).toContain('verdict "ship it"');
             expect(conclusion.summary).toContain("score 85");
-            expect(conclusion.summary).toContain("floor 80");
+            expect(conclusion.summary).toContain("floor 60");
             return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
           },
         }),

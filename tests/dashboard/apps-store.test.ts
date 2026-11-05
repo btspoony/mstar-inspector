@@ -25,7 +25,12 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
-import { ALLOWLIST_MAX_OWNERS, createAppsStore, parseAppReviewLevel } from "../../src/dashboard/apps-store";
+import {
+  ALLOWLIST_MAX_OWNERS,
+  createAppsStore,
+  parseAppReviewLevel,
+} from "../../src/dashboard/apps-store";
+import { getWorkspaceCheckMinScore } from "../../src/dashboard/runtime-config-store";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import type { D1Like } from "../../src/store/types";
 import type { TestD1 } from "../store/helpers";
@@ -53,6 +58,9 @@ describe("review gate (migration 0045)", () => {
     seedApp(db, "app-gate", { githubAppId: 5001 });
     const store = createAppsStore(db);
 
+    // `seedApp` is a raw INSERT, so this row carries 0045's column default
+    // (80); the create-path default (`DEFAULT_CHECK_MIN_SCORE`, 60) is covered
+    // by its own test below.
     expect(await store.getCheckGate("app-gate")).toEqual({ minScore: 80, passVerdicts: ["ship it"] });
 
     expect(await store.saveCheckGate("app-gate", { minScore: 65, passVerdicts: ["ship it", "needs fixes"] })).toBe(
@@ -132,6 +140,49 @@ describe("review gate (migration 0045)", () => {
 
     expect(await store.saveCheckGate("app-deleted", { minScore: 10, passVerdicts: ["blocked"] })).toBe(false);
     expect(await store.getCheckGate("app-deleted")).toEqual({ minScore: 80, passVerdicts: ["ship it"] });
+  });
+
+  test("a new App inherits the workspace default the caller resolved", async () => {
+    const db = createMigratedTestD1();
+    db.raw.prepare("UPDATE workspaces SET check_min_score = 45 WHERE id = 'default'").run();
+    const store = createAppsStore(db);
+    // The route's shape: read the workspace default, then seed the App with it.
+    const floor = await getWorkspaceCheckMinScore(db, "default");
+    expect(floor).toEqual({ minScore: 45, degraded: false });
+
+    await store.createApp({
+      defaultCheckMinScore: floor.minScore,
+      id: "app-inherit",
+      githubAppId: 5011,
+      githubSlug: null,
+      name: "app-inherit",
+      privateKeyEnc: "enc",
+      webhookSecretEnc: "enc",
+      createdBy: "acme",
+      workspaceId: "default",
+    });
+
+    expect(await store.getCheckGate("app-inherit")).toEqual({ minScore: 45, passVerdicts: ["ship it"] });
+  });
+
+  test("a newly connected App starts at the product default floor (60)", async () => {
+    const db = createMigratedTestD1();
+    const store = createAppsStore(db);
+
+    await store.createApp({
+      id: "app-created",
+      githubAppId: 5010,
+      githubSlug: null,
+      name: "app-created",
+      privateKeyEnc: "enc",
+      webhookSecretEnc: "enc",
+      createdBy: "acme",
+      workspaceId: "default",
+    });
+
+    // The creation path seeds the floor; the column's own default (80) is
+    // 0045's historical value and never applies to a real App.
+    expect(await store.getCheckGate("app-created")).toEqual({ minScore: 60, passVerdicts: ["ship it"] });
   });
 });
 

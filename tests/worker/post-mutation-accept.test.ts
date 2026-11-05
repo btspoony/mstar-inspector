@@ -42,6 +42,8 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0022_app_trigger_mode.sql",
     "0037_github_metadata_attempt.sql",
     "0038_webhook_path_drop.sql",
+    // 0045: createApp writes the review-gate floor explicitly.
+    "0045_review_gate_and_owner_allowlist.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

@@ -6,8 +6,11 @@ category: Added
   completion.** The `mstar-inspector review` Check run concludes `success` only
   when the published review's verdict is one of the App's passing verdicts
   **and** its tally score is at least the App's floor; the defaults are the
-  verdict `ship it` and a floor of 80, so an App that never touches the setting
-  passes only a `ship it` review scoring 80 or more. A confirmed degraded
+  verdict `ship it` and a floor of 60; an App connected from now on starts at
+  its workspace's default (60 unless the workspace chose another), while an App
+  that predates the change keeps the floor it already stored — every App that
+  existed when the gate column was added carries the 80 that migration `0045`
+  materialized, and nothing moves it to 60. A confirmed degraded
   publication, an unconfirmed or expired attempt, an execution failure, a
   published review below the bar, an unreadable App gate and a published review
   without a readable tally all conclude `failure`; `neutral` is no longer
@@ -25,6 +28,12 @@ category: Added
   review can ever pass, and the page warns before saving. A change applies to
   the next Check with no deploy. Migration `0045` is additive: existing rows
   materialize the defaults, so no backfill or settings visit is needed.
+- **The floor a new App starts at is a workspace setting.** The workspace
+  settings page gains a *Review gate default* card (`workspaces.check_min_score`,
+  migration `0049`); connecting an App seeds its floor from that value, and the
+  platform default is 60. Existing Apps keep their own stored floor — the
+  workspace value is a default, not a backfill — and the per-App *Review gate*
+  section remains their writer.
 - **Owner allowlist on the Installed tab — off by default.** With the switch
   off nothing is filtered: every owner is reviewed as before. With it on, the
   App reviews only deliveries whose `repository.owner.login` it lists, on the
@@ -69,8 +78,9 @@ category: Added
 - **按 App 的审查门禁——Check 报的是门禁结果，不再是“执行完成”。**
   `mstar-inspector review` 这个 Check 只有在已发布审查的 verdict 属于该 App 的
   通过集合**且**其 tally 分数不低于该 App 的分数下限时才结论为 `success`；
-  默认值是通过 verdict `ship it` 与下限 80，因此从未改过设置的 App 只会让
-  `ship it` 且得分 80 以上的审查通过。已确认的降级发布、未确认或已过期的尝试、
+  默认值是通过 verdict `ship it` 与下限 60；从此以后接入的 App 以所属工作区的
+  默认值为起始下限（平台默认 60），而在此变更之前就已存在的 App 保留自己已存储的下限
+  ——门禁列加入时已存在的每个 App 带的是迁移 `0045` 物化的 80，没有任何步骤把它改成 60。已确认的降级发布、未确认或已过期的尝试、
   执行失败、未达标的已发布审查、无法读取的 App 门禁配置，以及没有可读 tally 的
   已发布审查，一律结论为 `failure`；`neutral` 不再产生（只留在历史行里）。审查按
   该次尝试自己的 publication id 读取，因此同一 commit 上另一次尝试的行无法决定它，
@@ -83,6 +93,10 @@ category: Added
   零写入。空的 verdict 集合合法且按失败关闭——任何审查都不可能通过，页面会在保存前
   给出警告。改动在下一次 Check 生效，无需部署。迁移 `0045` 是追加式的：已有行会
   自动获得默认值，无需回填或访问设置页。
+- **新 App 的分数下限是工作区设置。** 工作区设置页新增「审查门禁默认值」卡片
+  （`workspaces.check_min_score`，迁移 `0049`）；接入 App 时用该值作为其分数下限，
+  平台默认值为 60。已有 App 保留各自已存储的下限——工作区值只是默认值，不做回填——
+  逐 App 的「审查门禁」区块仍是它们的写入入口。
 - **Installed Tab 上的所有者允许列表——默认关闭。** 开关关闭时不作任何过滤：
   每个所有者都照旧被审查。开启后，App 只审查 `repository.owner.login` 在列表中的
   投递，`pull_request` 触发与 `issue_comment` 提及同样适用；登录名比较不区分大小写，

@@ -1854,6 +1854,36 @@ export function parseStoredConcurrency(body: string): number | null {
   }
 }
 
+/**
+ * The workspace's default review-gate floor for new Apps. `degraded` means the
+ * stored value could not be read, so `minScore` is the platform fallback and
+ * the card must not offer it as if someone had stored it.
+ */
+export type CheckMinScoreSettings = {
+  minScore: number;
+  min: number;
+  max: number;
+  degraded: boolean;
+};
+
+export function parseCheckMinScoreSettings(data: unknown): CheckMinScoreSettings | null {
+  if (!isRecord(data)) return null;
+  const { min_score, min, max, degraded } = data;
+  if (typeof min_score !== "number" || typeof min !== "number" || typeof max !== "number") return null;
+  if (typeof degraded !== "boolean") return null;
+  return { minScore: min_score, min, max, degraded };
+}
+
+/** A write's answer: the stored floor, or null on a body that is not JSON. */
+export function parseStoredCheckMinScore(body: string): number | null {
+  try {
+    const data: unknown = JSON.parse(body);
+    return isRecord(data) && typeof data.min_score === "number" ? data.min_score : null;
+  } catch {
+    return null;
+  }
+}
+
 export function splitModelChain(raw: string | null | undefined): string[] {
   if (!raw) return [];
   return raw

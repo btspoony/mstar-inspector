@@ -139,6 +139,7 @@ import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stage
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
+import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
 
 /** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
@@ -180,7 +181,9 @@ export type GithubAppRow = {
   /**
    * Review-gate score floor (migration 0045): a published review concludes
    * the Check `success` only when its tally score is at least this value.
-   * The DDL CHECK bounds it to 0..100 and seeds 80.
+   * The DDL CHECK bounds it to 0..100. `createApp` seeds it from the
+   * workspace's default (platform default 60); 0045's column default (80)
+   * never applies to a real App.
    */
   check_min_score: number;
   /**
@@ -395,6 +398,13 @@ export type CreateAppInput = {
    * silently mis-home an App and no caller can leave the owner unstated.
    */
   workspaceId: string;
+  /**
+   * The workspace's default review-gate floor for this App, resolved by the
+   * caller (`getWorkspaceCheckMinScore`). Omitted or untrusted → the platform
+   * default. Passed in rather than read here: the store is a leaf, and the
+   * workspace settings read owns the absent/untrusted rule.
+   */
+  defaultCheckMinScore?: number;
 };
 
 export type UpsertInstallationInput = {
@@ -840,6 +850,11 @@ export function createAppsStore(db: AppsStoreD1) {
      * registry's default image ('omp') — the store face for changing it is
      * setSandboxImage. A UNIQUE violation on github_app_id throws — the
      * commit path turns it into `already_connected` (409).
+     *
+     * `check_min_score` is seeded explicitly from `input.defaultCheckMinScore`
+     * (the caller's workspace read; platform default `DEFAULT_CHECK_MIN_SCORE`
+     * when absent), so a new App inherits the tenant's default floor instead of
+     * the column's historical 0045 value.
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
@@ -858,8 +873,8 @@ export function createAppsStore(db: AppsStoreD1) {
           .prepare(
             `INSERT INTO github_apps
                (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-                created_by, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
+                check_min_score, created_by, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
           )
           .bind(
             id,
@@ -868,6 +883,9 @@ export function createAppsStore(db: AppsStoreD1) {
             input.name,
             input.privateKeyEnc,
             input.webhookSecretEnc,
+            isCheckMinScoreValue(input.defaultCheckMinScore)
+              ? input.defaultCheckMinScore
+              : DEFAULT_CHECK_MIN_SCORE,
             input.createdBy,
           ),
         db
@@ -941,6 +959,13 @@ export function createAppsStore(db: AppsStoreD1) {
      * off-vocabulary or not an array also reads as null — the same
      * "unreadable" meaning, so every consumer fails closed instead of
      * inventing a permissive default.
+     *
+     * The floor a NEW App starts at is `input.defaultCheckMinScore` (the
+     * caller's workspace read; platform default `DEFAULT_CHECK_MIN_SCORE`, 60),
+     * seeded by `createApp`.
+     * The column's own `DEFAULT 80` is 0045's historical value: SQLite cannot
+     * alter it without a parent-table rebuild, and that rebuild would run
+     * `pull_requests`' `ON DELETE CASCADE` (0039) against a dropped parent.
      */
     async getCheckGate(appId: string): Promise<CheckGate | null> {
       const row = await db

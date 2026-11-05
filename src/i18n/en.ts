@@ -463,6 +463,19 @@ export const en = {
     concurrencyFailed: "Could not change the review concurrency — try again.",
     /** {max} = this workspace's own maximum. */
     concurrencyRange: "Accepts 1–{max}.",
+    /** The owner/admin review-gate default card for Apps connected later. */
+    checkMinScoreHeading: "Review gate default",
+    checkMinScoreDescription:
+      "The score floor a newly connected App starts at. Existing Apps keep their own floor; change it on that App's settings page.",
+    checkMinScoreLabel: "Default score floor",
+    checkMinScoreSave: "Save default",
+    checkMinScoreSaved: "Review gate default updated.",
+    checkMinScoreFailed: "Could not change the review gate default — try again.",
+    /** {max} = the accepted maximum. */
+    checkMinScoreRange: "Accepts 0–{max}.",
+    /** {max} = the accepted maximum; the shown number is the fallback. */
+    checkMinScoreUnreadable:
+      "The stored default could not be read, so new Apps use the platform default. Saving a value from 0 to {max} sets this workspace's default, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
     /** {max} = this workspace's own maximum; the shown numbers are the fallback. */
     concurrencyUnreadable:
       "The stored review concurrency could not be read, so reviews may be running one at a time. The numbers shown are a fallback. Saving a value from 1 to {max} sets this workspace's value, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
@@ -635,7 +648,7 @@ export const en = {
       triggerModeUnknown: "{mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
       reviewLevelUnknown:
         "{level} is not a review depth — use quick, default, or deep (or inherit to follow the operator default). Nothing was stored.",
-      checkScoreInvalid: "The review gate score must be a whole number from 0 to 100. Nothing was stored.",
+      checkScoreInvalid: "The review gate score must be a whole number from {min} to {max}. Nothing was stored.",
       checkVerdictUnknown:
         "{verdict} is not a review verdict — use one of: {verdicts}. Nothing was stored.",
       allowlistToggleInvalid: "The owner allowlist switch must be on or off. Nothing was stored.",

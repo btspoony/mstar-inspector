@@ -2138,6 +2138,38 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(appRowCount(env)).toBe(1);
   });
 
+  test("an unreadable workspace default fails the commit closed, then retries at the stored floor", async () => {
+    const env = commitEnv();
+    const db = dbOf(env);
+    // A stored value no reader trusts: the column's CHECK refuses it through
+    // the store, so this simulates a foreign writer. Seeding the platform
+    // default here would silently WIDEN the tenant's floor.
+    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.prepare("UPDATE workspaces SET check_min_score = 'abc' WHERE id = 'default'").run();
+    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+
+    const holdValue = await createHoldValue(CONVERSION, "octocat", SESSION_SECRET, START_APP_ID, "default");
+
+    const refused = await doCommit({ env, holdValue });
+    expect(refused.status).toBe(500);
+    expect(appRowCount(env)).toBe(0);
+    // Retryable: the hold is kept (not burned), so the operator can resume.
+    const holdCookie =
+      refused.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    expect(holdCookie).not.toContain("Max-Age=0");
+
+    // Repair the stored floor: a retry seeds the TENANT's value, never the
+    // platform default this read fell back to.
+    db.raw.prepare("UPDATE workspaces SET check_min_score = 90 WHERE id = 'default'").run();
+    const committed = await doCommit({ env, holdValue });
+    expect(committed.status).toBe(302);
+    expect(appRowCount(env)).toBe(1);
+    const seeded = db.raw
+      .query("SELECT check_min_score FROM github_apps WHERE github_app_id = ?")
+      .get(CONVERSION.id) as { check_min_score: number };
+    expect(seeded.check_min_score).toBe(90);
+  });
+
   test("POST /manifest/commit stays an idempotent-recovery path: after a retryable callback 500, the SAME hold resubmits → 302 onboarding + one row", async () => {
     // 1. Callback with a key-less env: the auto-commit fails at encryption and
     // parks the hold cookie (500, zero rows). The signed state carries the
@@ -2590,6 +2622,11 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0022_app_trigger_mode.sql",
   "0037_github_metadata_attempt.sql",
   "0038_webhook_path_drop.sql",
+  // 0045: createApp writes the App's review-gate floor explicitly, so the
+  // commit path needs the gate columns on the post-0038 rebuild.
+  "0045_review_gate_and_owner_allowlist.sql",
+  // 0049: the commit path reads the workspace's default floor before writing.
+  "0049_workspace_check_min_score.sql",
 ] as const;
 
 function createDashboardTestD1(

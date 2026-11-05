@@ -2329,3 +2329,61 @@ describe("migrations/0048_comment_trigger_claims.sql", () => {
     expect(plan).not.toContain("TEMP B-TREE");
   });
 });
+
+describe("migrations/0049_workspace_check_min_score.sql", () => {
+  const SCORE_MIGRATION = "0049_workspace_check_min_score.sql";
+
+  /** A DB shaped like production at 0048: every earlier file, applied in order. */
+  function preScoreDb(): TestD1 {
+    const db = createTestD1();
+    for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
+      (migration) => migrationNumber(migration) < migrationNumber(SCORE_MIGRATION),
+    )) {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  test("adds a nullable, CHECK-guarded column without touching any row", () => {
+    const db = preScoreDb();
+    db.raw
+      .prepare("INSERT INTO workspaces (id, slug, name, created_by, created_at) VALUES ('ws', 'ws', 'ws', 't', datetime('now'))")
+      .run();
+    insertGithubAppRow(db, { id: "app-kept", githubAppId: 9301 });
+    db.raw
+      .prepare("INSERT INTO pull_requests (id, app_id, owner, repo, pr_number, state) VALUES ('pr-1', 'app-kept', 'acme', 'widgets', 7, 'open')")
+      .run();
+
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, SCORE_MIGRATION), "utf8"));
+
+    // The workspace keeps its row and starts at the absent state (the platform
+    // default lives in code, not in a column default that could freeze it).
+    expect(db.raw.query("SELECT check_min_score FROM workspaces WHERE id = 'ws'").get()).toEqual({
+      check_min_score: null,
+    });
+    const column = (
+      db.raw.query("PRAGMA table_info(workspaces)").all() as Array<{ name: string; notnull: number; dflt_value: unknown }>
+    ).find((c) => c.name === "check_min_score");
+    expect(column).toMatchObject({ notnull: 0, dflt_value: null });
+
+    // The migration must never rebuild `github_apps`: that DROP TABLE would
+    // fire `pull_requests`' ON DELETE CASCADE and empty the PR ledger.
+    expect(db.raw.query("SELECT id FROM pull_requests").all()).toEqual([{ id: "pr-1" }]);
+    expect(db.raw.query("SELECT check_min_score FROM github_apps WHERE id = 'app-kept'").get()).toEqual({
+      check_min_score: 80,
+    });
+  });
+
+  test("the CHECK refuses a non-integer or out-of-range floor", () => {
+    const db = createMigratedTestD1();
+    for (const bad of [101, -1, 60.5]) {
+      expect(() =>
+        db.raw.prepare("UPDATE workspaces SET check_min_score = ? WHERE id = 'default'").run(bad),
+      ).toThrow();
+    }
+    db.raw.prepare("UPDATE workspaces SET check_min_score = 0 WHERE id = 'default'").run();
+    expect(db.raw.query("SELECT check_min_score FROM workspaces WHERE id = 'default'").get()).toEqual({
+      check_min_score: 0,
+    });
+  });
+});
