@@ -406,19 +406,30 @@ describe("the ask fits the seat's context budget", () => {
     // Rebuild the documented order from THIS fixture: one slice per row first —
     // every slice in a row's file starts at the same line here, so the nearest
     // one is that file's first catalog entry — then every remaining slice in
-    // catalog order. The ask must be a PREFIX of that order: the budget can
-    // only shorten it, never reorder it or deepen one row while another is
-    // still uncovered.
+    // catalog order. The fit `continue`s past a slice that does not fit, so the
+    // ask is an ordered SUBSEQUENCE of that order: the budget can drop a slice
+    // but never reorder the ones it keeps, and a slice that fits is kept even
+    // when an earlier, larger one was dropped.
     const firstPerRow = INPUT.targets.map(
       (target) => INPUT.evidence.find((slice) => slice.path === target.original.filePath)!,
     );
     const expected = [...firstPerRow, ...INPUT.evidence.filter((slice) => !firstPerRow.includes(slice))];
-    // The budget actually BIT here: without this the prefix check below would
-    // pass on an untruncated ask and stop pinning the fit at all.
+    // The budget actually BIT here: without this the subsequence check below
+    // would pass on an untruncated ask and stop pinning the fit at all.
     expect(asked.evidence.length).toBeLessThan(INPUT.evidence.length);
-    expect(asked.evidence).toEqual(expected.slice(0, asked.evidence.length));
-    // Consequence: the leading block is one slice per row, so distinct paths
-    // covered equal the slice count until every row has one.
+    // Slices arrive parsed, so match by id rather than by reference.
+    const position = new Map(expected.map((slice, index) => [slice.id, index]));
+    let at = -1;
+    for (const slice of asked.evidence) {
+      const next = position.get(slice.id)!;
+      expect(next).toBeGreaterThan(at);
+      expect(expected[next]).toEqual(slice);
+      at = next;
+    }
+    // No row vanished from the ask either: fitting drops evidence, never a target.
+    expect(asked.targets.map((target) => target.rowId)).toEqual(INPUT.targets.map((target) => target.rowId));
+    // Every retained slice still covers a distinct row, so the ask reaches rows
+    // once each before deepening any of them.
     expect(new Set(asked.evidence.map((slice) => slice.path)).size).toBe(asked.evidence.length);
   });
 
