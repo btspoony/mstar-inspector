@@ -807,7 +807,6 @@ export type PullRequestRow = PullRequestHead & {
 
 export type PullRequestReview = {
   verdict: string;
-  summary_md: string;
   model: string;
   provider: string;
   reviewed_at: string;
@@ -933,9 +932,9 @@ function parseLatestReview(value: unknown): { verdict: string; reviewed_at: stri
 }
 
 /**
- * A round ordinal or a wall clock: a finite non-negative integer passes, and
- * anything else is "no value" (`null`) rather than a coerced zero — 0 is a real
- * duration and round 0 never exists.
+ * A round ordinal, a wall clock or a findings tally: a finite non-negative
+ * integer passes, and anything else is "no value" (`null`) rather than a
+ * coerced zero. 0 is a real duration and a real tally; round 0 never exists.
  */
 function nonNegativeInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
@@ -943,7 +942,7 @@ function nonNegativeInteger(value: unknown): number | null {
 
 /**
  * One review entry (QC: the pipeline persists `provider: null`, and
- * model/summary/verdict can be absent too). The nullable text fields
+ * model/verdict can be absent too). The nullable text fields
  * coerce to "" at this boundary so the view never renders null; the
  * entry is dropped only when its timestamp/head anchor is missing. The
  * round facts coerce to their "nothing recorded" face instead of dropping the
@@ -954,14 +953,14 @@ function parsePullRequestReview(value: unknown): PullRequestReview | null {
   if (typeof value.reviewed_at !== "string" || typeof value.head_sha !== "string") return null;
   return {
     verdict: typeof value.verdict === "string" ? value.verdict : "",
-    summary_md: typeof value.summary_md === "string" ? value.summary_md : "",
     model: typeof value.model === "string" ? value.model : "",
     provider: typeof value.provider === "string" ? value.provider : "",
     reviewed_at: value.reviewed_at,
     head_sha: value.head_sha,
     round: nonNegativeInteger(value.round),
-    // A non-numeric tally is zero findings, never NaN in the rendered count.
-    findings: typeof value.findings === "number" && Number.isFinite(value.findings) ? value.findings : 0,
+    // A fractional, negative or non-numeric tally is zero findings, never
+    // "2.5 findings" in the rendered count.
+    findings: nonNegativeInteger(value.findings) ?? 0,
     duration_ms: nonNegativeInteger(value.duration_ms),
   };
 }

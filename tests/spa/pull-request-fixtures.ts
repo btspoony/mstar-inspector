@@ -87,7 +87,6 @@ export const FINDINGS: PullRequestFinding[] = [
 export const REVIEWS: PullRequestReview[] = [
   {
     verdict: "needs fixes",
-    summary_md: "The refresh race is still reachable.",
     model: "kimi-for-coding",
     provider: "openrouter",
     reviewed_at: "2026-11-01 08:00:00",
@@ -100,7 +99,6 @@ export const REVIEWS: PullRequestReview[] = [
   },
   {
     verdict: "ship it",
-    summary_md: "Looks good overall.",
     model: "claude-sonnet-4.5",
     // v1 never records a provider — the separator must disappear with it.
     provider: "",

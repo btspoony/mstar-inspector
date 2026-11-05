@@ -185,7 +185,7 @@ export const zhCN: Dictionary = {
     severityMayFix: "可修复",
     severityNit: "可忽略",
     severityOther: "其他",
-    /** 每条发现正文与审查摘要各有一个折叠控件。 */
+    /** 每条发现正文有一个折叠控件。 */
     expand: "展开",
     collapse: "收起",
     /** 折叠控件的无障碍名称：动作、记录与位置。 */

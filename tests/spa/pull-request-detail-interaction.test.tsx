@@ -323,7 +323,6 @@ describe("pull request detail (mounted)", () => {
     // authoritative source.
     const corpus = Array.from({ length: 12 }, (_, index) => ({
       verdict: index === 0 ? "ship it" : "blocked",
-      summary_md: `Round ${index}`,
       model: `model-${String(index).padStart(2, "0")}`,
       provider: "openrouter",
       reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
@@ -383,7 +382,6 @@ describe("pull request detail (mounted)", () => {
     // failures, and its hidden count must not move when the operator pages.
     const corpus = Array.from({ length: 12 }, (_, index) => ({
       verdict: "ship it",
-      summary_md: `Round ${index}`,
       model: `model-${String(index).padStart(2, "0")}`,
       provider: "",
       reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,

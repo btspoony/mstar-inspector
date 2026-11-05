@@ -216,7 +216,7 @@ export const en = {
     severityMayFix: "May fix",
     severityNit: "Nit",
     severityOther: "Other",
-    /** One fold control per finding body and per review summary. */
+    /** One fold control per finding body. */
     expand: "Expand",
     collapse: "Collapse",
     /** A fold control's accessible name: the action, the record and its position. */

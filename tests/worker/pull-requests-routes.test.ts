@@ -287,11 +287,11 @@ function seedFindings(
 }
 
 describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
-  test("a review with NULL provider / model / summary round-trips as empty strings", async () => {
+  test("a review with NULL provider / model round-trips as empty strings", async () => {
     const db = await fixture();
     // The v1 pipeline always writes reviews.provider NULL (the artifact store
-    // persists the payload's null), and a degraded run may omit model /
-    // summary. The whole detail panel must still parse.
+    // persists the payload's null), and a degraded run may omit model. The
+    // whole detail panel must still parse.
     seedInstallation(db);
     db.raw
       .prepare(
@@ -308,7 +308,7 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<Record<string, unknown>>; total: number };
     expect(body.total).toBe(1);
-    expect(body.items[0]).toMatchObject({ verdict: "comment", summary_md: "", model: "", provider: "" });
+    expect(body.items[0]).toMatchObject({ verdict: "comment", model: "", provider: "" });
   });
 
   test("a repo-wide finding (null file_path) round-trips as ''", async () => {
@@ -352,7 +352,6 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(body.pull_request).not.toHaveProperty("latest_review");
     expect(body.latest_review).toEqual({
       verdict: "comment",
-      summary_md: "",
       model: "",
       provider: "",
       reviewed_at: "2026-01-02 00:00:00",
@@ -380,7 +379,6 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(parsed).not.toBeNull();
     expect(parsed?.latest_review).toEqual({
       verdict: "needs fixes",
-      summary_md: "The race is reachable.",
       model: "kimi-for-coding",
       provider: "openrouter",
       reviewed_at: "2026-01-02 00:00:00",

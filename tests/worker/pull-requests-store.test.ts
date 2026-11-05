@@ -635,7 +635,6 @@ describe("pull request detail reads", () => {
     // authoritative verdict + attribution source.
     expect(head?.latest_review).toEqual({
       verdict: "approve",
-      summary_md: "looks good",
       model: "m1",
       provider: "p1",
       reviewed_at: "2026-01-02 00:00:00",
@@ -668,7 +667,6 @@ describe("pull request detail reads", () => {
 
     const reviews = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, page);
     expect(reviews!.total).toBe(1);
-    expect(reviews!.items[0]!.summary_md).toBe("looks good");
 
     const failures = await store.listPullRequestFailures(APP_ID, "acme", "widgets", 131, page);
     expect(failures!.total).toBe(1);

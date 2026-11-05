@@ -1697,7 +1697,7 @@ export function createAppsStore(db: AppsStoreD1) {
           .bind(appId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha FROM reviews
+            `SELECT verdict, model, provider, reviewed_at, head_sha FROM reviews
              WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
              ORDER BY reviewed_at DESC, rowid DESC LIMIT 1`,
           )
@@ -1882,10 +1882,10 @@ export function createAppsStore(db: AppsStoreD1) {
           .bind(appId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT x.verdict, x.summary_md, x.model, x.provider, x.reviewed_at, x.head_sha,
+            `SELECT x.verdict, x.model, x.provider, x.reviewed_at, x.head_sha,
                     x.round, x.duration_ms,
                     (SELECT COUNT(*) FROM findings f WHERE f.review_id = x.id) AS findings
-             FROM (SELECT id, rowid AS rid, verdict, summary_md, model, provider, reviewed_at,
+             FROM (SELECT id, rowid AS rid, verdict, model, provider, reviewed_at,
                           head_sha, duration_ms,
                           ROW_NUMBER() OVER (ORDER BY reviewed_at ASC, rowid ASC) AS round
                    FROM reviews
@@ -1980,7 +1980,6 @@ export type PullRequestFindingRow = {
 /** One `reviews` row as the detail face reads it — nullable columns honest. */
 export type PullRequestReviewDetailRow = {
   verdict: string;
-  summary_md: string | null;
   model: string | null;
   provider: string | null;
   reviewed_at: string;

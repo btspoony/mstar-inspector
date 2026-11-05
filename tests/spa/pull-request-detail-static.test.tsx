@@ -189,7 +189,7 @@ describe("pull request detail data plane (pure helpers)", () => {
 
   test("a review with provider null parses and renders without a null leak", async () => {
     const reviews = parseRecordPage("reviews", {
-      items: [{ ...REVIEWS[0], verdict: null, summary_md: null, model: null, provider: null }],
+      items: [{ ...REVIEWS[0], verdict: null, model: null, provider: null }],
       total: 1,
     });
     const findings = parseRecordPage("findings", {
@@ -201,7 +201,6 @@ describe("pull request detail data plane (pure helpers)", () => {
     // the payload carries them.
     expect(reviews?.items[0]).toEqual({
       verdict: "",
-      summary_md: "",
       model: "",
       provider: "",
       reviewed_at: "2026-11-01 08:00:00",
@@ -227,6 +226,17 @@ describe("pull request detail data plane (pure helpers)", () => {
       total: 1,
     })?.items[0];
     expect(legacyRound).toMatchObject({ round: null, findings: 0, duration_ms: null });
+    // A fractional or negative tally is not a count: 0, never "2.5 findings".
+    const fractional = parseRecordPage("reviews", {
+      items: [{ ...REVIEWS[0], findings: 2.5 }],
+      total: 1,
+    })?.items[0];
+    expect(fractional?.findings).toBe(0);
+    const negative = parseRecordPage("reviews", {
+      items: [{ ...REVIEWS[0], findings: -3 }],
+      total: 1,
+    })?.items[0];
+    expect(negative?.findings).toBe(0);
     const legacyFinding = parseRecordPage("findings", {
       items: [{ ...FINDINGS[0], review_round: 1.5 }],
       total: 1,
@@ -417,7 +427,6 @@ describe("pull request detail face (static SSR)", () => {
             reviews: page([
               {
                 verdict: "needs fixes",
-                summary_md: "An unattributed round.",
                 model: "",
                 provider: "",
                 reviewed_at: "2026-11-01 08:00:00",
@@ -461,7 +470,7 @@ describe("pull request detail face (static SSR)", () => {
     // band's `data-tone` on the verdict figure, the badge's on the row's pill,
     // the timeline row's on itself. The fixtures are the pre-v1 words too:
     // reading them as alarms by default used to paint `approve` red.
-    const legacy = (verdict: string, summary: string) =>
+    const legacy = (verdict: string) =>
       face(
         {
           // No finding and no failure: the face opens on the reviews, where the
@@ -471,7 +480,6 @@ describe("pull request detail face (static SSR)", () => {
           reviews: page([
             {
               verdict,
-              summary_md: summary,
               model: "kimi-for-coding",
               provider: "openrouter",
               reviewed_at: "2026-11-01 08:00:00",
@@ -495,18 +503,18 @@ describe("pull request detail face (static SSR)", () => {
       }));
     // An approval is quiet on the band and success on the dot and the badge; a
     // change request is an alarm on all three — never one of each.
-    expect(await read(legacy("approve", "Approved on an older round."))).toEqual({
+    expect(await read(legacy("approve"))).toEqual({
       band: null,
       badge: "success",
       timeline: "success",
     });
-    expect(await read(legacy("request_changes", "The race is still reachable."))).toEqual({
+    expect(await read(legacy("request_changes"))).toEqual({
       band: "danger",
       badge: "danger",
       timeline: "danger",
     });
     // An unknown word is not an alarm either: neutral on every surface.
-    expect(await read(legacy("looks fine", "An unknown verdict."))).toEqual({
+    expect(await read(legacy("looks fine"))).toEqual({
       band: null,
       badge: "neutral",
       timeline: "neutral",
@@ -859,7 +867,6 @@ describe("pull request detail face (static SSR)", () => {
         reviews: page([
           {
             verdict: "",
-            summary_md: "The pipeline recorded no verdict.",
             // Provider-only attribution: the row must name the provider.
             model: "",
             provider: "openrouter",
@@ -912,7 +919,6 @@ describe("pull request detail face (static SSR)", () => {
     const reviews = page([
       {
         verdict: "ship it",
-        summary_md: "Everything the last round asked for is in.",
         model: "kimi-for-coding",
         provider: "openrouter",
         reviewed_at: "2026-11-01 09:00:00",
@@ -923,7 +929,6 @@ describe("pull request detail face (static SSR)", () => {
       },
       {
         verdict: "ship it",
-        summary_md: "An older round.",
         model: "kimi-for-coding",
         provider: "",
         reviewed_at: "2026-10-30 09:00:00",
@@ -1017,7 +1022,6 @@ describe("pull request detail face (static SSR)", () => {
     const history = page(
       Array.from({ length: 12 }, (_, index) => ({
         verdict: "needs fixes",
-        summary_md: `Round ${index}`,
         // The timeline's meta line renders the review's model, so a per-review
         // model is the one stable, rendered marker of WHICH rows survived.
         model: `model-${String(index).padStart(2, "0")}`,
@@ -1078,7 +1082,6 @@ describe("pull request detail face (static SSR)", () => {
     const reviews = page(
       Array.from({ length: 3 }, (_, index) => ({
         verdict: "needs fixes",
-        summary_md: `Round ${index}`,
         model: `model-${index}`,
         provider: "",
         reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
@@ -1105,7 +1108,6 @@ describe("pull request detail face (static SSR)", () => {
     const reviews = page(
       Array.from({ length: 6 }, (_, index) => ({
         verdict: "ship it",
-        summary_md: `Round ${index}`,
         model: `model-${index}`,
         provider: "",
         reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
