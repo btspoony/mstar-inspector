@@ -6,9 +6,13 @@
  *   - newest-first capture walks `comments(last:100, before:cursor)` backward
  *     (issue comments + each known thread conversation) and merges nodes
  *     chronologically for presentation/digests
- *   - honest three-valued coverage: complete at ≤2 exhausted pages; the
- *     2-page bound and >200 issue comments / >200 thread replies are
- *     `truncated`; API failure is `unavailable`, never empty/complete
+ *   - honest three-valued coverage: `complete` when the walk exhausts its
+ *     two 100-node pages and the post-walk recheck agrees; `truncated` when an
+ *     older page remains (>200 captured issue comments is unreachable under
+ *     that page bound, so it is not asserted) or when a target thread carries
+ *     >200 replies; `unavailable` on API failure, never empty/complete
+ *   - the digest/context domain excludes the Inspector's own publication
+ *     comments, and that filtering never changes the coverage verdict
  *   - digests match the §7.5 length-delimited JSON scheme over the captured
  *     (sorted) comments; per-thread snapshot identity (root comment, HEAD)
  *   - model-context bounds (`boundDiscussion` — what actually rides the
@@ -26,7 +30,6 @@ import type { Discussion, ThreadSnapshot } from "../../packages/shared/src/reche
 import { issueDigestOf, threadDigestOf, type GraphqlOctokit } from "../../src/pipeline/review-threads";
 import {
   boundDiscussion,
-  DISCUSSION_ISSUE_MAX_COMMENTS,
   DISCUSSION_THREAD_MAX_REPLIES,
   listDiscussionWithOctokit,
   MODEL_ITEM_MAX_CHARS,
@@ -181,11 +184,13 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
     expect(discussion.issueDigest).toBe("");
   });
 
-  test("the 200-comment bound counts the CAPTURED entries: an own-publication-inflated raw totalCount stays complete", async () => {
-    const comments = Array.from({ length: DISCUSSION_ISSUE_MAX_COMMENTS }, (_, i) => spec(`i-${i}`, i));
+  test("a full page of captured entries plus our own publication comment stays complete", async () => {
+    // 100 = one full page; the issue-side truncation signal is pagination
+    // completeness, so no captured-entry count can flip this verdict.
+    const comments = Array.from({ length: 100 }, (_, i) => spec(`i-${i}`, i));
     const own = { ...spec("i-own", 900, "<!-- mstar-inspector:review:v1 round=3 -->\n\n## 📋 Review"), authorType: "Bot", authorLogin: BOT_LOGIN };
     const { octokit } = fakeOctokit({
-      issuePages: [{ comments: [...comments, own], totalCount: DISCUSSION_ISSUE_MAX_COMMENTS + 1, hasPreviousPage: false }],
+      issuePages: [{ comments: [...comments, own], totalCount: 101, hasPreviousPage: false }],
     });
     const discussion = await listDiscussionWithOctokit(octokit, input());
     // The raw connection is over the bound; the digest/model domain is not —

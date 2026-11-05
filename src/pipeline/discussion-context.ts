@@ -8,10 +8,13 @@
  * `fetchThreadConversation` primitive in review-threads.ts). Nodes merge
  * chronologically for presentation/digests only. `totalCount`, exhausted
  * cursors and the page bound distinguish complete, truncated and unavailable
- * captures — API failure is `unavailable`, never empty/complete; >200 issue
- * comments or >200 replies in a target thread is explicitly `truncated`
- * (newest replies still included) — and truncation blocks auto-resolution
- * downstream because the coverage feeds the §7.5 resolve fences.
+ * captures — API failure is `unavailable`, never empty/complete. The issue
+ * side is bounded by the walk itself (two 100-node pages, so at most 200
+ * captured entries), so its truncation signal is pagination completeness —
+ * an older page still present, or a drifted final recheck — never a captured
+ * count; >200 replies in a target thread is explicitly `truncated` (newest
+ * replies still included). Truncation blocks auto-resolution downstream
+ * because the coverage feeds the §7.5 resolve fences.
  *
  * Model context (`boundDiscussion`): 50 items, 1200 chars per item,
  * 8000 total chars, oldest items dropped first. The bounded view IS what
@@ -48,8 +51,6 @@ import {
 // Capture bounds (spec §7.8)
 // ---------------------------------------------------------------------------
 
-/** >200 issue comments → issueCoverage explicitly `truncated`. */
-export const DISCUSSION_ISSUE_MAX_COMMENTS = 200;
 /** >200 replies in a target thread → that thread's coverage `truncated`. */
 export const DISCUSSION_THREAD_MAX_REPLIES = 200;
 
@@ -124,15 +125,13 @@ export async function listDiscussionWithOctokit(octokit: GraphqlOctokit, input: 
   } catch {
     issue = null;
   }
-  // The 200-comment bound counts the CAPTURED (filtered) entries — the
-  // Inspector's own publication comments are not part of the discussion
-  // domain, so they never push a PR into `truncated` (spec §7.8).
+  // Coverage is pagination completeness, never a captured-entry count: the
+  // walk is capped at two 100-node pages, so `fetchIssueComments` cannot
+  // return more than 200 entries. The Inspector's own publication comments
+  // are excluded from the digest/context domain afterwards, so they never
+  // change this verdict either (spec §7.8).
   const issueCoverage: Coverage =
-    issue === null
-      ? "unavailable"
-      : !issue.complete || issue.comments.length > DISCUSSION_ISSUE_MAX_COMMENTS
-        ? "truncated"
-        : "complete";
+    issue === null ? "unavailable" : issue.complete ? "complete" : "truncated";
   const issueDigest = issue !== null && issue.complete ? await issueDigestOf({ headSha: issue.headRefOid, comments: issue.comments }) : "";
   if (issue !== null) {
     for (const entry of issue.comments) {
