@@ -513,9 +513,14 @@ export async function runRecheckSeat(input: {
     // `cause` splits the two skips that both report the closed `reason:
     // "budget"`: this one is the transient tail (the outer deadline is
     // already spent) and is re-evaluated on the next round, never a
-    // configuration fault the operator must fix.
-    console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget", cause: "tail" }));
-    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: null } };
+    // configuration fault the operator must fix. The status error carries the
+    // same cause so the durable document (and the failure row built from it)
+    // tells the two apart without a new wire field.
+    const error = redactedStatusError(
+      "recheck seat skipped (tail): the review's outer deadline left less than the seat's minimum budget",
+    );
+    console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget", cause: "tail", error }));
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error } };
   }
   const ask = fitRecheckInput(input.input, assignmentMaxBytes);
   if (!ask.ok) {
@@ -523,11 +528,13 @@ export async function runRecheckSeat(input: {
     // could hold the ask, so dispatching would only burn the window and lose
     // the round to an absent yield (I-000396). `budget` is the closed reason
     // for "the seat never got room" — the consumer accounts every sent row
-    // `unverifiable`/`budget` and blames none of them. `cause: "config"`
-    // marks it PERMANENT: no later round can fit it until the operator raises
-    // `review.recheck.assignment_max_bytes`, unlike the tail skip above.
+    // `unverifiable`/`budget` and blames none of them. `cause: "config"` says
+    // the shortfall is in what THIS round must ask (its targets + discussion)
+    // against the configured budget, not in the clock: it is per-round, since
+    // a smaller ask can fit, and raising `review.recheck.assignment_max_bytes`
+    // is what fits an ask that keeps overrunning.
     const error = redactedStatusError(
-      `recheck assignment exceeds the seat's context budget: targets + discussion need ` +
+      `recheck seat skipped (config): assignment exceeds the seat's context budget: targets + discussion need ` +
         `at least ${ask.requiredBytes} bytes, the budget is ${assignmentMaxBytes}`,
     );
     console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget", cause: "config", error }));

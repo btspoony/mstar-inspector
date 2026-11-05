@@ -2359,7 +2359,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     });
 
     expect(recheck).toBeNull();
-    expect(recheckStatus).toEqual({
+    expect(recheckStatus).toMatchObject({
       schema: "mstar.recheck-status/v1",
       headSha: RECHECK_SHA,
       outcome: "skipped",
@@ -2367,8 +2367,9 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       rejected: 0,
       rejected_row_ids: [],
       rejected_unnamed: 0,
-      error: null,
     });
+    // The tail skip names its cause in the durable status.
+    expect(recheckStatus!.error).toContain("(tail)");
     // Only the review seat ran — no recheck child was dispatched.
     expect(subagentRequests).toHaveLength(1);
     expect(subagentRequests[0]!.outputSchema).not.toBe(RECHECK_OUTPUT_SCHEMA);

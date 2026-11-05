@@ -18,12 +18,12 @@
  *   (f) a round with no budget is `skipped`/`budget` and starts no seat;
  *   (g) a caller abort is `skipped`/`aborted`, not a blamed round.
  *
- * The budget cases sit in the same world: the ask fits
- * `RECHECK_ASSIGNMENT_MAX_BYTES` at these documented limits with every row still
- * reachable, the fit covers rows before it deepens any row, and a round whose
- * target core cannot fit is `skipped`/`budget` with no seat started. The
- * yield is validated against the catalog the seat RECEIVED, so a citation of
- * a slice the fit omitted drops that row instead of counting it `addressed`.
+ * The budget cases ask the same seat within `RECHECK_ASSIGNMENT_MAX_BYTES`: the
+ * documented limits still reach every row, the fit covers rows before it
+ * deepens any row, and a round whose target core cannot fit is
+ * `skipped`/`budget` with no seat started. The yield is validated against the
+ * catalog the seat RECEIVED, so a citation of a slice the fit omitted drops
+ * that row instead of counting it `addressed`.
  *
  * No case returns `doc: null` with `outcome: "ok"`/`reason: null` — a lost
  * round is always attributable. The consumer's row accounting for (c)/(e) is
@@ -300,6 +300,9 @@ describe("recheck seat yield at the documented input limits", () => {
     const { doc: seatDoc, status } = await run();
     expect(seatDoc).toBeNull();
     expect(status).toMatchObject({ outcome: "skipped", reason: "budget" });
+    // The durable status names the cause, so a tail skip is never confused
+    // with a round that could not fit its own ask.
+    expect(status.error).toContain("(tail)");
     expect(seatCalls).toHaveLength(0);
   });
 
@@ -396,11 +399,21 @@ describe("the ask fits the seat's context budget", () => {
     seatResult = answerAll(INPUT);
     await run();
     const asked = askedDocument(seatCalls[0]!.assignment);
-    const coveredPaths = new Set(asked.evidence.map((slice) => slice.path)).size;
-    // One slice per row comes first, so distinct rows covered EQUAL the slice
-    // count until every row has one (25 rows, 4 slices each in this fixture).
-    expect(asked.evidence.length).toBeLessThan(RECHECK_MAX_TARGETS);
-    expect(coveredPaths).toBe(asked.evidence.length);
+
+    // Rebuild the documented order from THIS fixture: one slice per row first —
+    // every slice in a row's file starts at the same line here, so the nearest
+    // one is that file's first catalog entry — then every remaining slice in
+    // catalog order. The ask must be a PREFIX of that order: the budget can
+    // only shorten it, never reorder it or deepen one row while another is
+    // still uncovered.
+    const firstPerRow = INPUT.targets.map(
+      (target) => INPUT.evidence.find((slice) => slice.path === target.original.filePath)!,
+    );
+    const expected = [...firstPerRow, ...INPUT.evidence.filter((slice) => !firstPerRow.includes(slice))];
+    expect(asked.evidence).toEqual(expected.slice(0, asked.evidence.length));
+    // Consequence: the leading block is one slice per row, so distinct paths
+    // covered equal the slice count until every row has one.
+    expect(new Set(asked.evidence.map((slice) => slice.path)).size).toBe(asked.evidence.length);
   });
 
   test("a citation of a slice the fit omitted drops that row instead of publishing it addressed", async () => {
@@ -548,6 +561,7 @@ describe("the ask budget is the operator's setting, not a runner constant", () =
     expect(seatCalls).toHaveLength(0);
     expect(seatDoc).toBeNull();
     expect(status).toMatchObject({ outcome: "skipped", reason: "budget" });
+    expect(status.error).toContain("(config)");
     expect(status.error).toContain("at least");
     expect(status.error).toContain("the budget is 8192");
   });
@@ -598,6 +612,9 @@ describe("the ask budget is the operator's setting, not a runner constant", () =
     // Transient: the outer deadline is already spent — re-evaluated next round.
     anchorRecheckDeadline(Date.now() - OUTER_RUNNER_CAP_MS.default + 10_000, "default");
     const tail = await errorsOf(() => run());
-    expect(tail).toContainEqual({ event: "recheck_skipped", reason: "budget", cause: "tail" });
+    expect(tail.find((line) => line.event === "recheck_skipped")).toMatchObject({
+      reason: "budget",
+      cause: "tail",
+    });
   });
 });
