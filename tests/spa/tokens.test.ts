@@ -657,6 +657,25 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     }
   });
 
+  test("the walk and the stripper read an extension's case the same way (I-000352)", () => {
+    // One rule, lower-cased before either side reads it: a mixed-case module
+    // is admitted by the walk and its `//` comment is prose to the stripper.
+    // A walk that spelled extensions case-sensitively skipped the file
+    // entirely, leaving the two rules free to disagree again.
+    const dir = mkdtempSync(join(tmpdir(), "consumer-root-"));
+    try {
+      const entry = join(dir, "Card.TSX");
+      writeFileSync(entry, '// bg-(--retired-900)\na = "bg-(--surface-page)";');
+      const walk = consumerWalk([dir]);
+      expect(walk.files).toHaveLength(1);
+      const file = walk.files[0] as string;
+      expect(file.endsWith("Card.TSX")).toBe(true);
+      expect(danglingReferences(file, readFileSync(entry, "utf8"))).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("an unreadable root reports unreadability, never emptiness", () => {
     // A declared root that exists but cannot be listed must not read as a
     // moved/emptied tree: that names the wrong cause and would green-light a

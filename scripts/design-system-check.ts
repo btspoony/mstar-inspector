@@ -67,7 +67,26 @@ export const SPA_ROOT = path.join(ROOT, "src/spa");
 export const PROTOTYPES_ROOT = path.join(ROOT, "src/design-system/prototypes");
 /** The one stylesheet under `src/spa` the token source derives — link 1 owns it. */
 const GENERATED_STYLESHEET = "src/spa/styles/tokens.css";
-const CONSUMER_FILE = /\.(?:css|html|ts|tsx)$/;
+/**
+ * The consumer's comment grammar, from its extension lower-cased once. The
+ * walk and the comment stripper both read this one rule, so a file cannot be
+ * admitted under one extension spelling and stripped under another
+ * (`I-000352`). `null` is not a consumer.
+ */
+type ConsumerKind = "style" | "html" | "script";
+function consumerKind(file: string): ConsumerKind | null {
+  switch (path.extname(file).toLowerCase()) {
+    case ".css":
+      return "style";
+    case ".html":
+      return "html";
+    case ".ts":
+    case ".tsx":
+      return "script";
+    default:
+      return null;
+  }
+}
 
 /**
  * The links that are a `--check` run of a generator, in report order. The
@@ -164,7 +183,7 @@ function walkConsumers(dir: string, failures: string[] = []): string[] {
     if (isDirectory === null) continue;
     if (isDirectory) {
       out.push(...walkConsumers(full, failures));
-    } else if (CONSUMER_FILE.test(entry)) {
+    } else if (consumerKind(entry) !== null) {
       const file = path.relative(ROOT, full);
       if (file !== GENERATED_STYLESHEET) out.push(file);
     }
@@ -231,10 +250,6 @@ const CSS_COMMENT = /\/\*[\s\S]*?\*\//g;
 const HTML_COMMENT = /<!--[\s\S]*?-->/g;
 /** A `<style>` block inside an HTML shell — CSS again, so its comments go too. */
 const STYLE_BLOCK = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
-/** The consumers written as HTML shells rather than as stylesheets. */
-const HTML_FILE = /\.html$/i;
-/** The consumers written as TS/TSX modules; their block comments are CSS's. */
-const SCRIPT_FILE = /\.(?:ts|tsx)$/i;
 /**
  * A script's line comment. Anchored on a comment start — line start or
  * whitespace — so the `//` inside a `"https://…"` literal is not one.
@@ -253,10 +268,11 @@ const SCRIPT_COMMENT = /(?:^|\s)\/\/[^\n]*/gm;
  * over the whole file.
  */
 function withoutComments(file: string, text: string): string {
-  if (SCRIPT_FILE.test(file)) {
+  const kind = consumerKind(file);
+  if (kind === "script") {
     return text.replace(CSS_COMMENT, "").replace(SCRIPT_COMMENT, "");
   }
-  if (!HTML_FILE.test(file)) return text.replace(CSS_COMMENT, "");
+  if (kind !== "html") return text.replace(CSS_COMMENT, "");
   return text
     .replace(HTML_COMMENT, "")
     .replace(STYLE_BLOCK, (_block, open: string, css: string, close: string) =>
