@@ -274,7 +274,8 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
                 rows={filtered}
                 rowKey={(row) => row.id}
                 empty={
-                  query ? (
+                  // No-match copy is only true when there were rows to match.
+                  query && workspaces.length > 0 ? (
                     <EmptyState
                       title={t(locale, "admin.search.emptyTitle")}
                       description={t(locale, "admin.search.emptyDescription")}

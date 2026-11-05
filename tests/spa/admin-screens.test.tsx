@@ -755,6 +755,16 @@ describe("Workspaces screen", () => {
     await surface.close();
   });
 
+  test("an empty list plus a typed query keeps the page empty state", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: [] }));
+    await surface.type('input[type="search"]', "zzz");
+    // Nothing was loaded, so the query has nothing to fail to match.
+    const empty = surface.container.querySelector('[data-slot="empty-state"]');
+    expect(empty?.textContent).toContain("No workspaces");
+    expect(empty?.textContent).not.toContain("No matches");
+    await surface.close();
+  });
+
   test("a zh_CN render shows Chinese copy for the page and the search control", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }), "zh_CN");
     expect(surface.text()).toContain("所有在线工作区。");
@@ -966,6 +976,16 @@ describe("Users screen", () => {
     await surface.type('input[type="search"]', "zzz");
     expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No matches");
     expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).not.toContain("No users");
+    await surface.close();
+  });
+
+  test("an empty list plus a typed query keeps the page empty state", async () => {
+    const surface = await usersScreen(() => json({ users: [] }));
+    await surface.type('input[type="search"]', "zzz");
+    // Nothing was loaded, so the query has nothing to fail to match.
+    const empty = surface.container.querySelector('[data-slot="empty-state"]');
+    expect(empty?.textContent).toContain("No users");
+    expect(empty?.textContent).not.toContain("No matches");
     await surface.close();
   });
 
