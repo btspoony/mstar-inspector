@@ -77,7 +77,7 @@ import {
   suspendCheckRecovery,
 } from "../store/review-checks";
 import type { CheckOwnership, Lease, PublicationProof, PublishedReview } from "../store/review-checks";
-import { findPublicationJournal, PUBLICATION_IN_FLIGHT_PHASES } from "../store/finding-lifecycle";
+import { findPublicationJournal, PUBLICATION_HANDOFF_PHASES } from "../store/finding-lifecycle";
 import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
@@ -1299,11 +1299,26 @@ type PendingPublication =
   | { kind: "unknown" };
 
 async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promise<PendingPublication> {
+  // A readable proof ENDS the wait whatever the journal says: the conclusion
+  // can be decided now.
+  try {
+    const proof = await readPublicationProof(db, {
+      scope: attempt.identity.scope,
+      headSha: attempt.identity.headSha,
+    });
+    if (proof !== null) return { kind: "none" };
+  } catch {
+    return { kind: "unknown" };
+  }
   try {
     const journal = await findPublicationJournal(db, {
       scope: attempt.identity.scope,
       headSha: attempt.identity.headSha,
-      phases: PUBLICATION_IN_FLIGHT_PHASES,
+      // The HAND-OFF phase set, `confirmed` included: a confirmed publication
+      // whose proof is not applied yet also reads as `proof === null`, and
+      // concluding there would freeze an unconfirmed failure that the arriving
+      // proof could no longer correct. The execution deadline bounds the wait.
+      phases: PUBLICATION_HANDOFF_PHASES,
     });
     return journal === null ? { kind: "none" } : { kind: "pending", phase: journal.phase };
   } catch {

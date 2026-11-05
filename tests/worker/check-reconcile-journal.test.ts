@@ -11,7 +11,6 @@
  * the same production surface.
  */
 import { describe, expect, test } from "bun:test";
-import { PUBLICATION_IN_FLIGHT_PHASES } from "../../src/store/finding-lifecycle";
 import {
   CHECK_NAME,
   deferCheckRecovery,
@@ -89,13 +88,10 @@ function countingScript(calls: AdapterCalls): AdapterScript {
 }
 
 describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
-  test("the in-flight phase set is exactly the three unproven phases", () => {
-    // Pinned so dropping a phase from the constant fails HERE, and every phase
-    // below is proven to defer in its own case.
-    expect([...PUBLICATION_IN_FLIGHT_PHASES]).toEqual(["prepared", "sending", "unknown"]);
-  });
-
-  for (const phase of PUBLICATION_IN_FLIGHT_PHASES) {
+  // The phases are ENUMERATED here on purpose: the behaviour cases below are
+  // the contract, so dropping a phase from the wait set fails them rather than
+  // a source-shape assertion.
+  for (const phase of ["prepared", "sending", "unknown"] as const) {
     test(`a ${phase} journal defers the pass, then concludes from the arrived proof`, async () => {
       const db = seededDb();
       const { attempt, id } = await handedOverAttempt(db);
@@ -229,6 +225,68 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       ).toBe(false);
     });
   }
+
+  test("a confirmed journal whose proof is not applied yet still holds the wait", async () => {
+    const db = seededDb();
+    const { attempt, id } = await handedOverAttempt(db);
+    // `confirmed` WITHOUT `proof_json`: the publication exists but its proof is
+    // not readable yet, so concluding now would freeze an unconfirmed failure
+    // that the arriving proof could no longer correct.
+    const journalId = seedJournal(db, SCOPE, SHA, "confirmed");
+
+    const firstStub = stubFetch();
+    let factoryCalls = 0;
+    const scripted = scriptedCredentials(db, countingScript({ adopt: 0, begin: 0, complete: 0 }));
+    try {
+      const first = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scripted(input);
+        },
+      });
+      expect(first.deferred).toBe(1);
+      expect(first.completed).toBe(0);
+    } finally {
+      firstStub.restore();
+    }
+
+    expect(factoryCalls).toBe(0);
+    const waiting = await rawRow(db, id);
+    expect(waiting.terminal_ms).toBeNull();
+    expect(waiting.create_state).toBe("not-sent");
+    expect(waiting.attempts).toBe(1);
+
+    // The proof lands; the row was already `confirmed`.
+    const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ?, payload_json = ? WHERE id = ?`)
+      .run(JSON.stringify(proof), JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 85)), journalId);
+
+    const secondStub = stubFetch();
+    const sent: { desired: string | null } = { desired: null };
+    try {
+      const second = await run(db, {
+        now: () => T0 + 200_000,
+        credentials: scriptedCredentials(db, {
+          ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
+          complete: async (identity, _runId, conclusion) => {
+            sent.desired = conclusion.desired;
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+          },
+        }),
+      });
+      expect(second.completed).toBe(1);
+      expect(second.deferred).toBe(0);
+    } finally {
+      secondStub.restore();
+    }
+
+    expect(sent.desired).toBe("success");
+    const settled = await rawRow(db, id);
+    expect(settled.observed).toBe("success");
+    expect(settled.terminal_ms).not.toBeNull();
+  });
 
   test("an unreadable journal probe defers inside the window instead of terminalizing", async () => {
     const db = seededDb();

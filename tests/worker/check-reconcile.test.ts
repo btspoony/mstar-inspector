@@ -1158,7 +1158,7 @@ async function captureComposition(env: ScheduledEnv, cron = ""): Promise<string[
 }
 
 describe("scheduled composition (spec §7.11)", () => {
-  test("runs runSweep → reconcileReviewLifecycle → reconcileReviewChecks, in that order", async () => {
+  test("the quarter-hour expression composes runSweep → reconcileReviewLifecycle, WITHOUT the Check lane", async () => {
     const db = seededDb();
     // A breached failure window makes the sweep stage emit its alert line, and
     // a due Check row of an App with NO installation mapping makes the real
@@ -1179,15 +1179,19 @@ describe("scheduled composition (spec §7.11)", () => {
 
     const sweepAt = events.indexOf("ops_sweep_alert");
     const lifecycleAt = events.indexOf("ops_lifecycle_reconcile");
-    const checksAt = events.indexOf("ops_check_reconcile");
     expect(sweepAt).toBeGreaterThanOrEqual(0);
     expect(lifecycleAt).toBeGreaterThan(sweepAt);
-    expect(checksAt).toBeGreaterThan(lifecycleAt);
-    // The Checks stage really ran: its durable suspension is present.
-    expect((await rawRow(db, attempt.identity.attemptId)).recovery_state).toBe("suspended");
+    // The Check lane belongs to the MINUTE expression alone: both expressions
+    // fire on :00/:15/:30/:45, so running it here would spend one run's
+    // request budget twice for no extra work.
+    expect(events).not.toContain("ops_check_reconcile");
+    // This pass therefore touched nothing Check-side.
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
   });
 
-  test("a throwing sweep and a throwing lifecycle lane neither stop the Checks lane nor escape the handler", async () => {
+  test("a throwing sweep and a throwing lifecycle lane never escape the handler", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     db.raw.prepare(`DELETE FROM app_installations WHERE app_id = ?`).run(APP);
@@ -1205,13 +1209,13 @@ describe("scheduled composition (spec §7.11)", () => {
     expect(events[0]).toBe("retention_swept_failed");
     expect(events).toContain("ops_sweep_failed");
     expect(events).toContain("ops_lifecycle_reconcile_failed");
-    expect(events).toContain("ops_check_reconcile_failed");
+    // The Check lane is not part of this expression at all.
+    expect(events).not.toContain("ops_check_reconcile");
 
-    // And with a working DB both later lanes still reach their terminal lines.
+    // And with a working DB the lifecycle lane still reaches its terminal line.
     const events2 = await captureComposition({ DB: db as unknown as ScheduledEnv["DB"] });
     expect(events2).toContain("ops_lifecycle_reconcile");
-    expect(events2).toContain("ops_check_reconcile");
-    expect((await rawRow(db, attempt.identity.attemptId)).recovery_state).toBe("suspended");
+    expect(events2).not.toContain("ops_check_reconcile");
   });
 
   test("routes by controller.cron: the minute expression runs the Checks lane ALONE", async () => {
@@ -1241,7 +1245,9 @@ describe("scheduled composition (spec §7.11)", () => {
     const quarter = await captureComposition(env, "*/15 * * * *");
     expect(quarter).toContain("ops_sweep_alert");
     expect(quarter).toContain("ops_lifecycle_reconcile");
-    expect(quarter).toContain("ops_check_reconcile");
+    // The minute expression is the ONLY Check driver — the quarter hour must
+    // not run the same lane a second time.
+    expect(quarter).not.toContain("ops_check_reconcile");
   });
 });
 

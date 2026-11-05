@@ -720,21 +720,23 @@ export default {
   },
   // Cron wiring (AL-6): TWO expressions, routed by `controller.cron`.
   //
-  // `* * * * *` — the Check lane alone (spec §7.11.2). A Check attempt whose
-  // terminalize overran or threw releases its lease immediately, so recovery
-  // must run on the same minute instead of waiting up to fifteen: this is what
-  // turns "terminal state 15 minutes after publication" into "about a minute".
+  // `* * * * *` — the Check lane alone (spec §7.11.2) and its ONLY driver. A
+  // Check attempt whose terminalize overran or threw releases its lease
+  // immediately, so recovery must run on the same minute instead of waiting up
+  // to fifteen: this is what turns "terminal state 15 minutes after
+  // publication" into "about a minute".
   //
   // `*/15 * * * *` — the trailing-24h `review_failures` sweep composed with
-  // the M8 recovery reconciler and the M7 Check recovery reconciler —
-  // runSweep → reconcileReviewLifecycle → reconcileReviewChecks. Every stage
-  // is caught INDEPENDENTLY, so one stage's failure can never break another,
-  // and nothing ever throws out of `scheduled` (a throwing cron handler just
-  // retries into alert noise). The sweep reads D1 only; the reconcilers
-  // additionally read the DASHBOARD_ENCRYPTION_KEY binding to route per-App
-  // recovery credentials (§7.6). Both reconcilers are idempotent, so the
-  // `*/15` minute also running the Check lane costs one no-op pass. All
-  // stages are awaited directly, so no ctx.waitUntil is needed.
+  // the M8 recovery reconciler — runSweep → reconcileReviewLifecycle. Every
+  // stage is caught INDEPENDENTLY, so one stage's failure can never break
+  // another, and nothing ever throws out of `scheduled` (a throwing cron
+  // handler just retries into alert noise). The sweep reads D1 only; the
+  // reconciler additionally reads the DASHBOARD_ENCRYPTION_KEY binding to route
+  // per-App recovery credentials (§7.6). The Check lane is deliberately NOT
+  // part of this composition: both expressions fire on :00/:15/:30/:45, and the
+  // minute expression covers that minute too, so running it here would spend
+  // one run's request budget twice for no extra work. All stages are awaited
+  // directly, so no ctx.waitUntil is needed.
   async scheduled(controller: ScheduledController, env: ScheduledEnv, _ctx: ExecutionContext): Promise<void> {
     if (controller.cron === CHECK_RECOVERY_CRON) {
       await runCheckReconcileStage(env);
@@ -776,6 +778,5 @@ export default {
         "lifecycle reconcile failed",
       );
     }
-    await runCheckReconcileStage(env);
   },
 };

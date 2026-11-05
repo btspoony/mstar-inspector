@@ -56,7 +56,7 @@ import {
   WORKSPACE_CONCURRENCY_DEFAULT,
 } from "../../src/dashboard/runtime-config-store";
 import { REDACTED } from "../../src/pipeline/redact";
-import type { PipelineEnv } from "../../src/pipeline/consumer";
+import type { CheckHandle, PipelineEnv } from "../../src/pipeline/consumer";
 import type { InstallationTokenGrant, ReviewCommenter, UpsertPlan } from "../../src/pipeline/comment";
 import type { CommenterCall } from "../helpers/review-commenter";
 // the Check lifecycle is driven through PRODUCTION code — the real
@@ -65,6 +65,7 @@ import { PreparedSendRejected } from "../../src/pipeline/comment";
 import {
   CHECK_SUMMARIES,
   createCheckLifecycle,
+  decideConclusion,
   createChecksAdapter,
   type CheckRunPayload,
   type ChecksAdapter,
@@ -337,19 +338,36 @@ function dbFailingOn(db: TestD1, match: string) {
  * travels the real path into the seam's rejection — unlike a seam fake that
  * would re-implement the writes it is supposed to test.
  */
-function withHandoffFault(db: TestD1, step: "intent" | "release") {
-  return {
-    prepare: (sql: string) => {
-      if (step === "intent" && sql.includes("desired = 'in_progress'")) {
-        throw new Error("intent write unavailable");
-      }
-      if (step === "release" && /attempts = attempts \+ 1,\s*recovery_state = \?/.test(sql)) {
-        throw new Error("release write unavailable");
-      }
-      return db.prepare(sql);
-    },
-    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
-  } as unknown as TestD1;
+function failingHandoff(db: TestD1, step: "intent" | "release") {
+  // Ordinal 1 is the intent write, ordinal 2 the release write — the fault is
+  // chosen by ORDER, never by SQL text.
+  const failAt = step === "intent" ? 1 : 2;
+  let call = 0;
+  return async (input: {
+    handle: CheckHandle;
+    reason: string;
+    outcome?: "superseded";
+  }): Promise<boolean> => {
+    const conclusion = decideConclusion({
+      proof: null,
+      outcome: input.outcome ?? "superseded",
+      gate: null,
+      review: null,
+      headSha: input.handle.headSha,
+    });
+    call += 1; // the INTENT write
+    if (call === failAt) throw new Error(`hand-off store call ${failAt} unavailable`);
+    await setCheckFallbackDesired(db, input.handle.attemptId, input.handle.lease, conclusion, Date.now());
+    call += 1; // the RELEASE write
+    if (call === failAt) throw new Error(`hand-off store call ${failAt} unavailable`);
+    return deferCheckRecovery(
+      db,
+      input.handle.attemptId,
+      input.handle.lease,
+      { state: "remote-unconfirmed", nextAttemptMs: Date.now() + 60_000, reason: input.reason },
+      Date.now(),
+    );
+  };
 }
 
 /** Seed a publication-journal row for the delivered head (the hand-off probe). */
@@ -5897,6 +5915,35 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     parked.resolve();
   }, 20_000);
 
+  test("check lifecycle: a throwing admission-time begin still publishes, with no Check", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    let beginCalls = 0;
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: async () => {
+          beginCalls += 1;
+          throw new Error("begin boom");
+        },
+        terminalize: async () => {},
+      },
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // ONE admission-time attempt, isolated: the post-`rev-parse` fallback must
+    // NOT claim again for a handle that was never created.
+    expect(beginCalls).toBe(1);
+    expect(checkRows(db)).toHaveLength(0);
+    expect(checkRequests).toHaveLength(0);
+    // The review itself is untouched by the Check failure.
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(logLines.some((line) => line.msg.includes("check begin hook failed"))).toBe(true);
+  });
+
   test("check lifecycle: the Check is claimed BEFORE the container starts, and a matching checkout reuses it", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
@@ -6055,10 +6102,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
       sandbox.resolvedSha = SHA2; // the checkout moved on from the payload sha
       const db = await createSeededTestD1();
-      const store = step === "no-op" ? db : withHandoffFault(db, step);
-      const real = lifecycleFor(store as never);
+      const real = lifecycleFor(db);
       const beginCalls: string[] = [];
-      const consumer = createReviewConsumer(await makeEnv({ DB: store as never }), testLog, {
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
         ...testOverrides,
         checks: {
           begin: (input) => {
@@ -6066,7 +6112,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             return real.begin(input);
           },
           terminalize: (input) => real.terminalize(input),
-          abandonTerminalize: step === "no-op" ? async () => false : (input) => real.abandonTerminalize(input),
+          abandonTerminalize: step === "no-op" ? async () => false : failingHandoff(db, step),
         },
       });
 
@@ -6138,9 +6184,11 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       await consumer(makeBatch(makePayload())); // payload head_sha = SHA
 
       // The contradicted claim is decided BEFORE the dedup read, so it stays
-      // superseded; only the new head's admitted run is closed by the hit.
+      // superseded; only the new head's admitted run is closed by the hit, and
+      // it closes with the head's INHERITED result: both variants have an
+      // unreadable baseline here (no review row / no tally), which fails closed.
       expect(checkRequests.map((r) => r.op), dedup).toEqual(["create", "create", "update"]);
-      expect((checkRequests[2]!.params as ChecksUpdateParams).conclusion, dedup).toBe("neutral");
+      expect((checkRequests[2]!.params as ChecksUpdateParams).conclusion, dedup).toBe("failure");
 
       const early = checkRowFor(db, SHA);
       expect(early.desired, dedup).toBe("failure");
@@ -6148,21 +6196,23 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       expect(early.holder, dedup).toBeNull();
 
       const newHead = checkRowFor(db, SHA2);
-      expect(newHead.desired, dedup).toBe("neutral");
+      expect(newHead.desired, dedup).toBe("failure");
       expect(newHead.terminal_ms, dedup).not.toBeNull();
       expect(commenterCalls.filter((c) => c.op === "post-prepared"), dedup).toHaveLength(0);
     }
   });
 
-  test("check lifecycle: an idempotency hit closes the admitted run before acking", async () => {
+  test("check lifecycle: an idempotency hit closes the admitted run with the head's INHERITED result", async () => {
     reset();
     const db = await createSeededTestD1();
-    // A completed review for the checked-out sha: the delivery is a duplicate.
+    // A completed, gate-PASSING review for the checked-out sha: the delivery is
+    // a duplicate, so its Check must carry THAT review's result. A `neutral`
+    // would mask a failing gate on GitHub's newest same-name run.
     await createArtifactStore(db).put({
       kind: "review",
       key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
       schema: "mstar.review/v1",
-      payload: VALID_OUTPUT,
+      payload: GATED_OUTPUT,
       appId: TEST_APP_ID,
     });
     const adapter = checksAdapterFor(db);
@@ -6174,12 +6224,17 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(makeBatch(makePayload()));
 
     // The claim happens before the dedup read, so the run it created is
-    // terminalized (`neutral`: nothing to review for this head) before ack.
+    // terminalized before ack — carrying the reviewed head's own gate result
+    // through the empty-increment inheritance, not a fresh `neutral`.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
-    expect((checkRequests[1]!.params as ChecksUpdateParams).conclusion).toBe("neutral");
+    const update = checkRequests[1]!.params as ChecksUpdateParams;
+    expect(update.conclusion).toBe("success");
+    expect(update.summary).toContain("is inherited");
+    expect(update.summary).toContain('verdict "ship it"');
+    expect(update.summary).toContain("score 85");
     const row = checkRowFor(db, SHA);
-    expect(row.desired).toBe("neutral");
-    expect(row.observed).toBe("neutral");
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
     expect(row.terminal_ms).not.toBeNull();
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
   });

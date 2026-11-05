@@ -3906,14 +3906,15 @@ async function processMessage(
     if (done) {
       deps.log.info(fields, "KV idempotency hit — ack");
       // The claim now precedes this read, so the run it created must be closed
-      // instead of being left in progress for its execution deadline.
-      await terminalizeCheck(null, "skipped");
+      // — and it must carry THIS head's existing result (inherited like an
+      // empty increment), never a `neutral` that would mask a failing gate.
+      await terminalizeCheck(null, "skipped", headSha);
       return { kind: "ok" };
     }
     const existing = await deps.store.findByIdempotencyKey(key);
     if (existing) {
       deps.log.info(fields, "idempotency hit — ack");
-      await terminalizeCheck(null, "skipped");
+      await terminalizeCheck(null, "skipped", headSha);
       return { kind: "ok" };
     }
     // §7.7 step 2 (second half) — the publication journal: an existing

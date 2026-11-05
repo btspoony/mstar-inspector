@@ -395,17 +395,6 @@ export const PUBLICATION_HANDOFF_PHASES: readonly PublicationRow["phase"][] = [
 ];
 
 /**
- * The journal phases whose proof is still being PRODUCED (spec §7.9/§7.11.2):
- * a Check waiting for that proof must not conclude yet, and must not be
- * terminalized by the recovery lane while the publication can still land.
- */
-export const PUBLICATION_IN_FLIGHT_PHASES: readonly PublicationRow["phase"][] = [
-  "prepared",
-  "sending",
-  "unknown",
-];
-
-/**
  * The publication-journal row for this exact scope/head, oldest first, in any
  * of `phases`. ONE predicate, shared by the delivery hand-off (§7.7 step 2) and
  * the Check recovery lane's wait-for-proof probe (§7.11.2) — two copies of the

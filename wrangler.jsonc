@@ -59,10 +59,11 @@
   // stages) and alerts past threshold via structured log + optional
   // ALERT_WEBHOOK_URL POST. Read-only: the scheduled handler never mutates
   // queue/KV/D1.
-  // `* * * * *` is the Check lane's own cadence (spec §7.11.2): a released
-  // Check attempt must be picked up within a minute, not at the next quarter
-  // hour. `scheduled` routes by the expression, so this costs the sweep and
-  // the publication reconciler nothing.
+  // `* * * * *` is the Check lane's own cadence (spec §7.11.2) and its ONLY
+  // driver: a released Check attempt must be picked up within a minute, not at
+  // the next quarter hour. `scheduled` routes by the expression, so this costs
+  // the sweep and the publication reconciler nothing, and the quarter-hour
+  // branch does not run the Check lane a second time in the same minute.
   "triggers": {
     "crons": ["*/15 * * * *", "* * * * *"]
   },
