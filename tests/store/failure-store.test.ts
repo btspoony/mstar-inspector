@@ -12,9 +12,11 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  ADMISSION_DROP_REASONS,
   createFailureStore,
   FAILURE_STAGES,
   PAGING_EXCLUDED_STAGES,
+  type AdmissionDropReason,
   type FailureStage,
 } from "../../src/store/failure-store";
 import { createMigratedTestD1 } from "./helpers";
@@ -26,6 +28,17 @@ const BASE = {
   pr_number: 42,
   head_sha: "0123456789abcdef0123456789abcdef01234567",
 };
+
+/**
+ * The `review_failures.error` shape a terminal admission drop carries
+ * (`handleGuardHeld`, src/pipeline/consumer.ts), with an arbitrary retry count
+ * and cap pair — these tests own the reader's grouping. The producer→reader
+ * contract is pinned by the consumer test, which feeds the REAL writer row
+ * through `countAdmissionDrops24h()` over the same database.
+ */
+function dropError(reason: AdmissionDropReason): string {
+  return `review dropped after 3 refused retries: ${reason} (system_cap 32, workspace_cap 4) — PR acme/widgets#42, head_sha ${BASE.head_sha}`;
+}
 
 /**
  * The paging classification of every producer stage — the register a stage
@@ -119,5 +132,61 @@ describe("createFailureStore", () => {
     expect((await store.listRecent()).length).toBe(4);
     // Same-second inserts keep a total order via rowid (first written = oldest).
     expect(recent[0]!.stage).toBe("pipeline");
+  });
+
+  test("countAdmissionDrops24h reads every reason at zero on an empty log", async () => {
+    const store = createFailureStore(createMigratedTestD1());
+    expect(await store.countAdmissionDrops24h()).toEqual({
+      "pr-held": 0,
+      "system-cap": 0,
+      "workspace-cap": 0,
+      error: 0,
+    });
+  });
+
+  test("countAdmissionDrops24h groups the terminal drops by reason over the trailing 24h", async () => {
+    const db = createMigratedTestD1();
+    const store = createFailureStore(db);
+    // Three forced refusals of distinct reasons — the operator's contract.
+    for (const reason of ["pr-held", "system-cap", "workspace-cap"] as const) {
+      await store.record({ ...BASE, stage: "pipeline", error: dropError(reason) });
+    }
+    // The fourth reason (admission storage fault) is counted on its own branch.
+    await store.record({ ...BASE, stage: "pipeline", error: dropError("error") });
+    // Not admission drops: an ordinary pipeline failure, a drop-shaped error on
+    // another stage, and a reason token outside the closed vocabulary.
+    await store.record({ ...BASE, stage: "pipeline", error: "comment post failed" });
+    await store.record({ ...BASE, stage: "sandbox", error: dropError("system-cap") });
+    await store.record({
+      ...BASE,
+      stage: "pipeline",
+      error: "review dropped after 3 refused retries: not-a-reason (system_cap 0, workspace_cap 0)",
+    });
+    // A drop outside the 24h window stays invisible. `record` never writes
+    // created_at, so the old row is seeded raw through the same table.
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-25 hours'))`,
+      )
+      .run(
+        crypto.randomUUID(),
+        BASE.installation_id,
+        BASE.owner,
+        BASE.repo,
+        BASE.pr_number,
+        BASE.head_sha,
+        "pipeline",
+        dropError("system-cap"),
+      );
+
+    expect(await store.countAdmissionDrops24h()).toEqual({
+      "pr-held": 1,
+      "system-cap": 1,
+      "workspace-cap": 1,
+      error: 1,
+    });
+    // The reason vocabulary is closed: the operator's four buckets.
+    expect(ADMISSION_DROP_REASONS).toEqual(["pr-held", "system-cap", "workspace-cap", "error"]);
   });
 });

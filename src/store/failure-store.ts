@@ -91,6 +91,25 @@ export type ReviewFailureRow = ReviewFailureInput & {
   created_at: string;
 };
 
+/**
+ * The admission-refusal reasons an operator sees on the runtime page. The
+ * terminal drop row `handleGuardHeld` writes (`src/pipeline/consumer.ts`)
+ * carries the reason only inside its stable error prefix
+ * `review dropped after <n> refused retries: <reason> (…)` — it is not a
+ * column and never becomes a stage value, so the read below derives it.
+ */
+export const ADMISSION_DROP_REASONS = Object.freeze([
+  "pr-held",
+  "system-cap",
+  "workspace-cap",
+  "error",
+] as const);
+
+export type AdmissionDropReason = (typeof ADMISSION_DROP_REASONS)[number];
+
+/** Admission drops in the trailing 24h, one count per reason (absent = 0). */
+export type AdmissionDropCounts = Record<AdmissionDropReason, number>;
+
 export type FailureStore = {
   /**
    * Append one failure event row. Fail-loud: an off-vocabulary stage throws
@@ -106,10 +125,39 @@ export type FailureStore = {
    * second — the order is total and deterministic.
    */
   listRecent(limit?: number): Promise<ReviewFailureRow[]>;
+  /**
+   * Terminal admission drops in the trailing 24h, grouped by the reason token
+   * of the drop row's prefix. One grouped READ over the rows the pipeline
+   * already writes — no new table, writer or stage; every reason is present,
+   * absent ones as 0.
+   */
+  countAdmissionDrops24h(): Promise<AdmissionDropCounts>;
 };
 
 /** Default page size for listRecent when the caller does not bound it. */
 const LIST_RECENT_DEFAULT_LIMIT = 50;
+
+/**
+ * The writer's retry count is the only variable part before the reason, so a
+ * `%` covers it; the open paren ends the reason token. Built from
+ * `ADMISSION_DROP_REASONS` so the union and the SQL cannot diverge (the
+ * `sqlStageList` precedent). Values are compile-time literals — no input
+ * reaches this text.
+ */
+const admissionDropLike = (reason: AdmissionDropReason): string =>
+  `'review dropped after % refused retries: ${reason} (%'`;
+
+const ADMISSION_DROP_SQL = `SELECT CASE
+    ${ADMISSION_DROP_REASONS.map(
+      (reason) => `WHEN error LIKE ${admissionDropLike(reason)} THEN '${reason}'`,
+    ).join("\n    ")}
+  END AS reason,
+  COUNT(*) AS drops
+FROM review_failures
+WHERE stage = 'pipeline'
+  AND created_at > datetime('now', '-24 hours')
+  AND (${ADMISSION_DROP_REASONS.map((reason) => `error LIKE ${admissionDropLike(reason)}`).join("\n    OR ")})
+GROUP BY reason`;
 
 /** Create the failure store over one D1 handle. */
 export function createFailureStore(db: D1Like): FailureStore {
@@ -144,6 +192,17 @@ export function createFailureStore(db: D1Like): FailureStore {
         .bind(limit)
         .all<ReviewFailureRow>();
       return results;
+    },
+
+    async countAdmissionDrops24h(): Promise<AdmissionDropCounts> {
+      const { results } = await db
+        .prepare(ADMISSION_DROP_SQL)
+        .all<{ reason: AdmissionDropReason; drops: number }>();
+      const counts = Object.fromEntries(
+        ADMISSION_DROP_REASONS.map((reason) => [reason, 0]),
+      ) as AdmissionDropCounts;
+      for (const row of results) counts[row.reason] = row.drops;
+      return counts;
     },
   };
 }

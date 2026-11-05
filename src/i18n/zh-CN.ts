@@ -862,6 +862,15 @@ export const zhCN: Dictionary = {
       /** 已存储的预算无法读取——显示的数值是文档默认值。 */
       recheckUnreadable:
         "无法读取已存储的重审提问预算，因此正在使用文档默认值。输入范围内的数值可保存为新值，重新读取会重新检查该行。",
+      /** 流水线在最近 24 小时记录的准入拒绝。 */
+      admissionDropsTitle: "准入拒绝（最近 24 小时）",
+      admissionDropsDescription:
+        "流水线拒绝准入的审查数量，按原因统计。被拒绝的审查从未开始；计数读取流水线已写入的失败记录。",
+      /** 拒绝准入的原因：PR 锁、容量上限或存储故障。 */
+      admissionDropsPrHeld: "PR 正在审查",
+      admissionDropsSystemCap: "系统上限",
+      admissionDropsWorkspaceCap: "工作区上限",
+      admissionDropsError: "存储错误",
       // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
       // 与 /healthz 字段及 release tag 同形。
       version: "版本 {version}",

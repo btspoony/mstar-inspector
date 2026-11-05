@@ -581,6 +581,29 @@ describe("Runtime screen", () => {
     expect(surface.text()).toContain("Effective on the next review: terminalize 10000 ms, update 5000 ms.");
     await surface.close();
   });
+
+  test("the admission-drop card renders all four reasons and their 24h counts", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...RUNTIME,
+        admissionDrops24h: { "pr-held": 3, "system-cap": 1, "workspace-cap": 2, error: 0 },
+      }),
+    );
+    // The card names its window, so a number is never read as "all time".
+    expect(surface.text()).toContain("Admission drops (last 24 hours)");
+    const rendered = Object.fromEntries(
+      [...surface.container.querySelectorAll("[data-admission-drops]")].map((node) => [
+        node.getAttribute("data-admission-drops"),
+        node.textContent,
+      ]),
+    );
+    expect(rendered).toEqual({ "pr-held": "3", "system-cap": "1", "workspace-cap": "2", error: "0" });
+    // Every reason is labelled, not only numbered.
+    for (const label of ["PR in flight", "System cap", "Workspace cap", "Storage error"]) {
+      expect(surface.text()).toContain(label);
+    }
+    await surface.close();
+  });
 });
 
 describe("Workspaces screen", () => {

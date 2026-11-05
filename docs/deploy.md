@@ -2462,7 +2462,7 @@ Observation checklist after a concurrency change:
 
 - [ ] Both blocks carry the same ceiling — the `max_concurrency` literal `250`
       and `max_batch_size: 1` at the top level and inside `env.production`.
-      A ceiling change moves both literals together AND the `250` pin in
+      A ceiling change moves both literals together AND the `250` and `1` pins in
       `tests/contracts/wrangler-env-parity.test.ts`; the accepted runtime ranges are
       driven through their write predicates in
       `src/dashboard/runtime-config-store.test.ts`.
@@ -2473,6 +2473,17 @@ Observation checklist after a concurrency change:
       means retries are outrunning the lock, not that the ceiling is low.
 - [ ] Container count stays under the account's container limit; the ceiling
       is a hard upper bound on simultaneously live sandboxes.
+
+Where the counts are read: a dropped admission has already written one
+`review_failures` row (`stage: "pipeline"`, reason in the error prefix), and
+the `/_internal_admin` runtime page groups the last 24 hours' rows by reason —
+`pr-held` (the PR lock), `system-cap`, `workspace-cap` and `error` (a storage
+fault) — on the same `GET /_internal_admin/api/runtime` read that reports the
+caps, field `admissionDrops24h`. That page is the surface for this signal
+because the 15 min cron sweep (§ Cron failure sweep) pages only above
+`SWEEP_FAILURE_THRESHOLD`. Queue backlog depth and GitHub secondary-rate-limit
+(`429` / `retry-after`) responses have no surface at all: no metric, API field
+or console card reports either, so this count is not a proxy for them.
 
 ### Review concurrency caps (runtime configuration)
 
