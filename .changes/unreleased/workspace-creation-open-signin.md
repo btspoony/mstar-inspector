@@ -13,14 +13,6 @@ category: Changed
   `/<new ref>/apps`), so the creator never depends on sole-workspace resolution
   finding a second workspace. There is no auto-join and no
   first-user-becomes-admin fallback; authority is workspace-scoped from then on.
-- **A recorded removal is the only deny.** The deployment-operator removal of a
-  dashboard user still writes the `removed_logins` tombstone in the same
-  transaction, and sign-in refuses it with the 403 removal page (zero cookies,
-  zero writes) until a deployment operator clears the record — the refusal
-  is enforced at the insert itself, so an in-flight sign-in cannot undo a
-  removal. **Leaving a workspace is not that**: removing someone from a
-  workspace deletes only their `workspace_members` row, so their account,
-  their invites and their GitHub login are untouched.
 - **Deploy wiring loses the allowlist**: the `Verify required ADMIN_LOGINS
   variable` gate, the post-deploy settings assertion and the `--var
   ADMIN_LOGINS:…` plumbing are removed from both workflows, and a bare
@@ -37,11 +29,6 @@ category: Changed
   「唯一工作区」解析能否在存在第二个工作区时命中。没有自动加入，也没有「首位用户成为唯一
   工作区管理员」的
   回退；此后权限一律按工作区判定。
-- **只有「已记录移除」会拒绝登录。** 部署运维者移除某位 dashboard 用户时，仍在同一事务内
-  写入 `removed_logins` 墓碑，登录会以 403 移除页面拒绝（零 cookie、零写入），直到部署运维者
-  清除该记录——拒绝在插入语句本身生效，因此飞行中的登录无法撤销移除。**退出工作区
-  不是移除**：把某人从工作区移除只删除其 `workspace_members` 行，账号、既有邀请与 GitHub
-  登录均不受影响。
 - **部署接线去掉名单**：两个 workflow 删除 `Verify required ADMIN_LOGINS variable`
   门禁、部署后设置断言与 `--var ADMIN_LOGINS:…` 传参；手工部署直接用
   `wrangler deploy`。**升级提示：** 请删除已无用的 GitHub Actions 变量

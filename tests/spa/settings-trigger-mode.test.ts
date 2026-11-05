@@ -199,12 +199,11 @@ describe("mention-string display (spec §3 operator visibility, SSR)", () => {
   test("no github_slug → no mention renders at all (D2 fail-safe; never a placeholder)", () => {
     // Before the first metadata sync there is no real mention target: the
     // hint paragraph stays off the face entirely, the mode control does not.
-    // Structural absence, not a copy literal: without a slug the whole hint
-    // <p> is gone (it owns this control's only paragraph and <code>), so a
-    // regression that renders the paragraph with a conditional <code> fails
-    // here too — and rewording the copy cannot make the assertion vacuous.
+    // Product behaviour, never markup shape: the control owns other
+    // paragraphs (the save-outcome notice), so the assertion is that the
+    // localized hint sentence and the mention target are both absent.
     const html = controlHtml("every_push", "en", null);
-    expect(html).not.toContain("<p");
+    expect(html).not.toContain(t("en", "settings.triggerModeMention"));
     expect(html).not.toContain("<code");
     expect(html).not.toContain('title="@');
     expect(html).toContain('role="radiogroup"');
@@ -214,7 +213,10 @@ describe("mention-string display (spec §3 operator visibility, SSR)", () => {
     const html = controlHtml("every_push");
     const segments = html.indexOf('role="radiogroup"');
     expect(segments).toBeGreaterThan(-1);
-    // Ordering, never a copy fragment: the hint's <code> follows the segments.
+    // The localized hint sentence renders, and its <code> follows the
+    // segments. Asserting the dictionary VALUE (not a literal) keeps the
+    // witness alive under a copy edit.
+    expect(html).toContain(t("en", "settings.triggerModeMention"));
     expect(html.indexOf("<code")).toBeGreaterThan(segments);
     expect(html.indexOf("@acme")).toBeGreaterThan(segments);
   });

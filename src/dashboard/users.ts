@@ -106,8 +106,8 @@ export async function getUserByLogin(
 
 /**
  * Thrown by createUser when a concurrent case-variant row wins the insert
- * (migration 0016 NOCASE unique index) — the invite route maps it to 409
- * duplicate-invite semantics.
+ * (migration 0016 NOCASE unique index). createUser has no production caller
+ * at this head: only fixtures and tests observe this error.
  */
 export class DuplicateLoginError extends Error {
   constructor(login: string) {
@@ -196,8 +196,8 @@ export async function createUser(
       // Case-variant conflict (migration 0016 NOCASE unique index): the row
       // exists under a different casing. The 0003 BINARY UNIQUE does not
       // fire across cases, so ON CONFLICT (github_login) absorbed the
-      // NOCASE-index conflict here — surface it as DuplicateLoginError so
-      // the invite route can answer 409 duplicate-invite semantics (W-1).
+      // NOCASE-index conflict here — surface it as DuplicateLoginError so a
+      // caller can tell a case-variant conflict from a fresh insert (W-1).
       throw new DuplicateLoginError(user.login);
     }
     return existing;
