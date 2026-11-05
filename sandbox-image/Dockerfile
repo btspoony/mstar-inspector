@@ -11,6 +11,9 @@
 # and its lockfile are image inputs, so the container must be rebuilt with them).
 # rebuild: the image's CLI pin and harness clone ref move to 4.2.0
 # (`sandbox-image/cli-global/**` and the pinned ref are image inputs too).
+# rebuild: the runner engine pin and the image's CLI pin + harness clone ref move
+# to 4.2.2 (`packages/runner/**`, `sandbox-image/cli-global/**` and the pinned
+# ref are image inputs; 4.2.2 supersedes the 4.2.0 pin above).
 # rebuild: the report document is now bound to the reviewed head — the runner
 # writes `headSha` from the envelope's `target.head_sha` and the Worker refuses
 # a document bound to another head, so a file left at the fixed path by an
@@ -189,7 +192,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref dac1c781bad900f938d7a752222b9f139dc42222 (tag v4.2.0, bumped 2026-11-04).
+# mstar-harness plugin, pinned ref 98504a71dcf09cfb551847b85e81d33e682e0bd9 (tag v4.2.2, bumped 2026-11-05).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -200,7 +203,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin dac1c781bad900f938d7a752222b9f139dc42222 \
+    && git -C /opt/mstar-harness fetch --depth 1 origin 98504a71dcf09cfb551847b85e81d33e682e0bd9 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && git -C /opt/mstar-harness rev-parse HEAD > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git
