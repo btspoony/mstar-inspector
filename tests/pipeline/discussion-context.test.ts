@@ -50,6 +50,8 @@ type CommentSpec = {
   authorLogin?: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Authenticated provenance the fake GraphQL transport returns. */
+  viewerDidAuthor?: boolean;
 };
 
 type Routes = {
@@ -91,6 +93,7 @@ function fakeOctokit(routes: Routes): { octokit: GraphqlOctokit; calls: Array<{ 
                 createdAt: c.createdAt,
                 updatedAt: c.updatedAt,
                 author: { __typename: c.authorType ?? "Bot", login: c.authorLogin ?? BOT_LOGIN },
+                viewerDidAuthor: c.viewerDidAuthor ?? false,
                 originalCommit: { oid: SHA },
                 pullRequestReview: { id: "PRR_node" },
               })),
@@ -115,6 +118,7 @@ function fakeOctokit(routes: Routes): { octokit: GraphqlOctokit; calls: Array<{ 
                 createdAt: c.createdAt,
                 updatedAt: c.updatedAt,
                 author: { __typename: c.authorType ?? "User", login: c.authorLogin ?? "human-reviewer" },
+                viewerDidAuthor: c.viewerDidAuthor ?? false,
               })),
             },
           },
@@ -167,6 +171,14 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
         })),
       }),
     );
+  });
+
+  test("authenticated provenance crosses the capture seam: viewerDidAuthor → item.ownAuthor", async () => {
+    const own = { ...spec("i-own", 1, "own body"), viewerDidAuthor: true };
+    const other = { ...spec("i-other", 2, "other body"), viewerDidAuthor: false };
+    const { octokit } = fakeOctokit({ issuePages: [{ comments: [own, other] }] });
+    const discussion = await listDiscussionWithOctokit(octokit, input());
+    expect(discussion.items.map((i) => i.ownAuthor)).toEqual([true, false]);
   });
 
   test("the 2-page bound with an older page remaining → truncated (newest replies still included)", async () => {
@@ -351,11 +363,18 @@ describe("boundDiscussion — §7.8 model context", () => {
     expect(bounded.issueModelCoverage).toBe("complete");
   });
 
+  test("own authorship alone does not exclude a body: the marker half is required", () => {
+    const ownButPlain = item(1, "no marker here");
+    ownButPlain.ownAuthor = true;
+    const bounded = boundDiscussion(discussionWith([ownButPlain]));
+    expect(bounded.items).toHaveLength(1);
+  });
+
   test("a HUMAN body copying the bot marker is kept and still truncates the view", () => {
     // Authorship is half the predicate: a human can copy the marker, and that
     // text may be a rebuttal the model must see before anything resolves.
     const spoofed = item(1, `<!-- mstar-inspector:review:v1 round=7 -->\n${"r".repeat(MODEL_TOTAL_MAX_CHARS + 500)}`);
-    spoofed.author = "other-app[bot]"; // another App: authenticated provenance is false
+    // Another App's bot login: it can copy the marker, but provenance is false.
     const bounded = boundDiscussion(discussionWith([spoofed]));
     expect(bounded.items).toHaveLength(1);
     expect(bounded.issueModelCoverage).toBe("truncated");

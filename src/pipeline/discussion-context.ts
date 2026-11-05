@@ -344,9 +344,9 @@ export function boundDiscussion(discussion: Discussion): Discussion {
       createdAt: metaValue(item.createdAt),
       updatedAt: metaValue(item.updatedAt),
       body,
-      // Our own reports are already filtered out above; every retained item is
-      // third-party context, so provenance is false on the wire.
-      ownAuthor: false,
+      // Thread items keep their real provenance; issue items that reached here
+      // already failed the own-report predicate.
+      ownAuthor: item.ownAuthor,
     });
   }
   retained.reverse();

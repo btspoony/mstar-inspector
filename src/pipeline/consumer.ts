@@ -3758,6 +3758,10 @@ async function processMessage(
       }
     }
 
+    /** The settings readers' log adapter: their payload over this message's base fields. */
+    const readerWarn = (readerFields: object, msg?: string): void =>
+      deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg);
+
     // 5. §7.7 step 3 — lifecycle context: apply this scope's pending
     // CONFIRMED journals in original publication order (an older assessment
     // never loses to a newer unapplied recurrence), then capture targets,
@@ -3790,10 +3794,7 @@ async function processMessage(
       if (previousPublicationId !== null) {
         // §7.2 breadth is an operator setting: how many older open rows may
         // join the previous round's own findings (0 = no refill).
-        const backlogFill = await readRecheckBacklogFill(deps.env.DB, {
-          warn: (readerFields, msg) =>
-            deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
-        });
+        const backlogFill = await readRecheckBacklogFill(deps.env.DB, { warn: readerWarn });
         const selection = await selectAssessmentTargets(
           deps.env.DB,
           lifecycleScope,
@@ -4029,10 +4030,7 @@ async function processMessage(
       // §7.10 Check budgets: ONE read per message, taken only once this
       // message can actually produce a Check — a refused or duplicate delivery
       // never pays for it. Every terminal path below shares this pair.
-      checkBudgets = await readCheckBudgets(deps.env.DB, {
-        warn: (readerFields, msg) =>
-          deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
-      });
+      checkBudgets = await readCheckBudgets(deps.env.DB, { warn: readerWarn });
       // One latch per `begin` call, created HERE and never stored anywhere: a
       // later message cannot clear or reuse it, so a detached begin from this
       // message stays abandoned for its whole lifetime (QC1-001 replacement

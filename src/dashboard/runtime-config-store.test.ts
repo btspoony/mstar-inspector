@@ -590,6 +590,38 @@ describe("check budgets", () => {
       degraded: true,
     }));
 
+  test("a stored pair that breaks the writer's relation degrades the read", async () => {
+    // Only an out-of-band write can produce this; the reader is the last fence.
+    const db = fixture();
+    const pairs: Array<[string, string]> = [["5000", "5000"], ["4000", "5000"]];
+    for (const [terminalize, update] of pairs) {
+      const scoped = fixture();
+      scoped.raw
+        .prepare(
+          `INSERT INTO review_runtime_settings (key, value, updated_at)
+           VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+        )
+        .run(CHECK_TERMINALIZE_KEY, terminalize);
+      scoped.raw
+        .prepare(
+          `INSERT INTO review_runtime_settings (key, value, updated_at)
+           VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+        )
+        .run(CHECK_UPDATE_KEY, update);
+      expect(await getCheckBudgets(scoped)).toEqual({
+        terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+        updateMs: CHECK_UPDATE_DEFAULT,
+        degraded: true,
+      });
+    }
+    // The loop's own fixture stays untouched.
+    expect(await getCheckBudgets(db)).toEqual({
+      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+      updateMs: CHECK_UPDATE_DEFAULT,
+      degraded: false,
+    });
+  });
+
   test("an out-of-range pair is refused and writes nothing", async () => {
     const db = fixture();
     for (const pair of [

@@ -3942,6 +3942,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
       const db = await createSeededTestD1();
       seedCheckBudget(db, "review.check.terminalize_timeout_ms", String(configured));
+      // The writer's relation must hold on a pair the reader trusts: the send
+      // budget stays below every configured wait.
+      seedCheckBudget(db, "review.check.update_timeout_ms", "500");
       const handed: Array<Promise<unknown>> = [];
       const consumer = createReviewConsumer(
         await makeEnv({ DB: db as never }),

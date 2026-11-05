@@ -546,7 +546,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
           line
           originalLine
           comments(first: 1) {
-            nodes { id fullDatabaseId body author { __typename login } pullRequestReview { id fullDatabaseId } }
+            nodes { id fullDatabaseId body author { __typename login } viewerDidAuthor pullRequestReview { id fullDatabaseId } }
           }
         }
       }

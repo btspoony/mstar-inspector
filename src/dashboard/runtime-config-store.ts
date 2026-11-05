@@ -485,11 +485,15 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
     );
     const update = parseInRange(row.update_value, CHECK_UPDATE_MIN, CHECK_UPDATE_MAX);
     if (Number.isNaN(terminalize) || Number.isNaN(update)) return degradedCheckBudgets();
-    return {
+    // The writer's cross-field rule must hold on this side too: a stored pair
+    // with terminalize <= update would let the consumer abandon the inline wait
+    // before the bounded send it handed off has finished.
+    const pair = {
       terminalizeMs: terminalize ?? CHECK_TERMINALIZE_DEFAULT,
       updateMs: update ?? CHECK_UPDATE_DEFAULT,
-      degraded: false,
     };
+    if (pair.terminalizeMs <= pair.updateMs) return degradedCheckBudgets();
+    return { ...pair, degraded: false };
   } catch {
     return degradedCheckBudgets();
   }

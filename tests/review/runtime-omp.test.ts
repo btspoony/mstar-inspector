@@ -2414,6 +2414,28 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(recheckStatus).toMatchObject({ outcome: "ok", reason: null });
   });
 
+  test("the settle-time gate stays open near the floor: a seat that started is awaited, not aborted", async () => {
+    // 45 s of outer budget left: recheckBudget floors out at the 30 s minimum,
+    // so the seat starts with 40 s and the settle-time gate (remaining <= 30 s)
+    // does NOT abort it. The old unconditional abort would have.
+    anchorRecheckDeadline(Date.now() - 600_000 + 45_000, "quick");
+    holdSeats = true;
+    const dispatched = [deferred(), deferred(), deferred()];
+    seatDispatchQueue = dispatched.map((entry) => entry.resolve);
+    seatResults = [{ data: validRecheckDoc() }, { data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+
+    const run = ompAgentRuntime.runReview({ ...BASE_INPUT, recheck: recheckInput() });
+    await dispatched[2]!.promise;
+    seatReleases[1]!();
+    seatReleases[2]!();
+    for (let i = 0; i < 50; i += 1) await Promise.resolve();
+
+    expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(false);
+    seatReleases[0]!();
+    const { recheck } = await run;
+    expect(recheck).toEqual(validRecheckDoc());
+  });
+
   test("an exhausted outer budget aborts the still-running recheck instead of blocking the run", async () => {
     // The seat parks until its own signal fires; both review seats deliver.
     holdSeats = true;
