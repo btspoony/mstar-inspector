@@ -76,6 +76,12 @@
  * review code, no runtime dependency.
  */
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
+import {
+  CHECK_MIN_SCORE_MAX,
+  CHECK_MIN_SCORE_MIN,
+  DEFAULT_CHECK_MIN_SCORE,
+  isCheckMinScoreValue,
+} from "../contracts/review-gate";
 import type { DashboardD1 } from "./users";
 
 /** PK of the system row in `review_runtime_settings`. */
@@ -466,6 +472,90 @@ export async function setWorkspaceConcurrency(
   if (update?.meta.changes === 1) return value;
 
   // Zero rows: the target is not a live workspace, so nothing was written.
+  throw new UnknownWorkspaceError(workspaceId);
+}
+
+/**
+ * The floor a newly connected App of this workspace starts at. NULL is the
+ * absent state and reads as the platform default; a stored value outside
+ * 0..100 is untrusted, so the read answers the default with `degraded: true`
+ * rather than inventing a floor nobody stored.
+ */
+export type CheckMinScoreRead = { minScore: number; degraded: boolean };
+
+/** The tenant face's read of the workspace's default floor. */
+export async function getWorkspaceCheckMinScore(
+  db: DashboardD1,
+  workspaceId: string,
+): Promise<CheckMinScoreRead> {
+  try {
+    const row = await db
+      .prepare("SELECT check_min_score AS value FROM workspaces WHERE id = ? AND deleted_at IS NULL")
+      .bind(workspaceId)
+      .first<RuntimeSettingRow>();
+    if (row === null) return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: false };
+    if (row.value === undefined) return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: true };
+    if (row.value === null) return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: false };
+    return isCheckMinScoreValue(row.value)
+      ? { minScore: row.value, degraded: false }
+      : { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: true };
+  } catch {
+    return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: true };
+  }
+}
+
+/**
+ * The ledger's `before` is the floor the workspace was actually RUNNING: the
+ * same mapping the reader applies (NULL stays the absent state, a trusted
+ * integer records itself, anything else records the platform default) — the
+ * concurrency audit's invariant. A raw corrupt value would attribute a floor
+ * that was never in effect.
+ */
+const workspaceCheckMinScoreAuditSql = (value: string) => `CASE
+      WHEN ${value} IS NULL THEN NULL
+      WHEN typeof(${value}) = 'integer' AND ${value} BETWEEN ${CHECK_MIN_SCORE_MIN} AND ${CHECK_MIN_SCORE_MAX}
+        THEN ${value}
+      ELSE ${DEFAULT_CHECK_MIN_SCORE} END`;
+
+const WORKSPACE_CHECK_MIN_SCORE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'workspace.check_min_score.set', 'workspace', ?3,
+         json_object('before', (SELECT ${workspaceCheckMinScoreAuditSql("check_min_score")}
+                                  FROM workspaces WHERE id = ?3),
+                     'after', ?4),
+         ?5
+   WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;
+
+const WORKSPACE_CHECK_MIN_SCORE_UPDATE_SQL = `
+  UPDATE workspaces SET check_min_score = ?2
+   WHERE id = ?1 AND deleted_at IS NULL`;
+
+/**
+ * Set the workspace's default floor for new Apps. Existing Apps keep their own
+ * stored value — this is a default, not a backfill. Audited and refused for an
+ * unknown workspace, the same shape as the concurrency write.
+ */
+export async function setWorkspaceCheckMinScore(
+  db: DashboardD1,
+  workspaceId: string,
+  value: number,
+  actor: string,
+): Promise<number> {
+  if (!isCheckMinScoreValue(value)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `check_min_score must be an integer in ${CHECK_MIN_SCORE_MIN}..${CHECK_MIN_SCORE_MAX}`,
+    );
+  }
+  const now = new Date().toISOString();
+  const [, update] = await db.batch([
+    db
+      .prepare(WORKSPACE_CHECK_MIN_SCORE_AUDIT_SQL)
+      .bind(crypto.randomUUID(), actor, workspaceId, value, now),
+    db.prepare(WORKSPACE_CHECK_MIN_SCORE_UPDATE_SQL).bind(workspaceId, value),
+  ]);
+  if (update?.meta.changes === 1) return value;
   throw new UnknownWorkspaceError(workspaceId);
 }
 

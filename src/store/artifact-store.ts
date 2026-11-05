@@ -191,6 +191,13 @@ export type ReviewArtifactDoc = ArtifactDoc & {
    * Optional; omitted = 0 (byte-compat for every other caller).
    */
   contextIncomplete?: boolean;
+  /**
+   * Wall clock of the round, in milliseconds: the consumer's
+   * `Date.now() - roundStartedAt` at staging time, so the detail face can
+   * show how long each review ran. Optional; omitted = NULL (historical rows
+   * predate the column, and no duration is fabricated for them).
+   */
+  durationMs?: number;
 };
 
 /** The D1 store face: the engine `ArtifactStore` plus the consumer's pre-check. */
@@ -264,8 +271,8 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
       const appId = doc.appId;
       const reviewStmt = db
         .prepare(
-          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id, model, provider, context_incomplete)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id, model, provider, context_incomplete, duration_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO NOTHING`,
         )
         .bind(
@@ -292,6 +299,8 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           // 1/0 (SQLite has no boolean): a capture-failed round is stored but
           // is never an incremental base.
           doc.contextIncomplete === true ? 1 : 0,
+          // The measured round wall clock; NULL for rows that never carried one.
+          doc.durationMs ?? null,
         );
       // raw_output stays NULL on the v1 path: the envelope is authoritative
       // (its 64KB truncation is not losslessly restorable).

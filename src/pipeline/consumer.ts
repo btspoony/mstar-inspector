@@ -4950,6 +4950,9 @@ async function processMessage(
         // never be an incremental base: the flag rides the staged artifact
         // so the put that writes it (here or on recovery) persists it.
         contextIncomplete: staleContext,
+        // The round's own wall clock: the same `roundStartedAt` every budget
+        // check reads, so the stored duration is the run's, not a second clock.
+        durationMs: Date.now() - roundStartedAt,
       },
       lifecycle: lifecycleRound,
       lineIntents,

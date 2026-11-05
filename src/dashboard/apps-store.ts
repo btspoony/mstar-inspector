@@ -139,6 +139,7 @@ import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stage
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
+import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
 
 /** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
@@ -180,7 +181,9 @@ export type GithubAppRow = {
   /**
    * Review-gate score floor (migration 0045): a published review concludes
    * the Check `success` only when its tally score is at least this value.
-   * The DDL CHECK bounds it to 0..100 and seeds 80.
+   * The DDL CHECK bounds it to 0..100. `createApp` seeds it from the
+   * workspace's default (platform default 60); 0045's column default (80)
+   * never applies to a real App.
    */
   check_min_score: number;
   /**
@@ -395,6 +398,13 @@ export type CreateAppInput = {
    * silently mis-home an App and no caller can leave the owner unstated.
    */
   workspaceId: string;
+  /**
+   * The workspace's default review-gate floor for this App, resolved by the
+   * caller (`getWorkspaceCheckMinScore`). Omitted or untrusted → the platform
+   * default. Passed in rather than read here: the store is a leaf, and the
+   * workspace settings read owns the absent/untrusted rule.
+   */
+  defaultCheckMinScore?: number;
 };
 
 export type UpsertInstallationInput = {
@@ -886,6 +896,11 @@ export function createAppsStore(db: AppsStoreD1) {
      * registry's default image ('omp') — the store face for changing it is
      * setSandboxImage. A UNIQUE violation on github_app_id throws — the
      * commit path turns it into `already_connected` (409).
+     *
+     * `check_min_score` is seeded explicitly from `input.defaultCheckMinScore`
+     * (the caller's workspace read; platform default `DEFAULT_CHECK_MIN_SCORE`
+     * when absent), so a new App inherits the tenant's default floor instead of
+     * the column's historical 0045 value.
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
@@ -904,8 +919,8 @@ export function createAppsStore(db: AppsStoreD1) {
           .prepare(
             `INSERT INTO github_apps
                (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-                created_by, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
+                check_min_score, created_by, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
           )
           .bind(
             id,
@@ -914,6 +929,9 @@ export function createAppsStore(db: AppsStoreD1) {
             input.name,
             input.privateKeyEnc,
             input.webhookSecretEnc,
+            isCheckMinScoreValue(input.defaultCheckMinScore)
+              ? input.defaultCheckMinScore
+              : DEFAULT_CHECK_MIN_SCORE,
             input.createdBy,
           ),
         db
@@ -987,6 +1005,13 @@ export function createAppsStore(db: AppsStoreD1) {
      * off-vocabulary or not an array also reads as null — the same
      * "unreadable" meaning, so every consumer fails closed instead of
      * inventing a permissive default.
+     *
+     * The floor a NEW App starts at is `input.defaultCheckMinScore` (the
+     * caller's workspace read; platform default `DEFAULT_CHECK_MIN_SCORE`, 60),
+     * seeded by `createApp`.
+     * The column's own `DEFAULT 80` is 0045's historical value: SQLite cannot
+     * alter it without a parent-table rebuild, and that rebuild would run
+     * `pull_requests`' `ON DELETE CASCADE` (0039) against a dropped parent.
      */
     async getCheckGate(appId: string): Promise<CheckGate | null> {
       const row = await db
@@ -1756,7 +1781,7 @@ export function createAppsStore(db: AppsStoreD1) {
             .bind(appId, owner, repo, prNumber),
           db
             .prepare(
-              `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha FROM reviews
+              `SELECT verdict, model, provider, reviewed_at, head_sha FROM reviews
                WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
                ORDER BY reviewed_at DESC, rowid DESC LIMIT 1`,
             )
@@ -1768,7 +1793,8 @@ export function createAppsStore(db: AppsStoreD1) {
       if (row === undefined) return null;
       return {
         ...row,
-        latest_review: (results[1]!.results[0] as PullRequestReviewDetailRow | undefined) ?? null,
+        latest_review:
+          (results[1]!.results[0] as PullRequestHeadRow["latest_review"] | undefined) ?? null,
         reviewing: reviewingOf(locks, owner, repo, prNumber),
       };
     },
@@ -1853,6 +1879,12 @@ export function createAppsStore(db: AppsStoreD1) {
      * finding is history, not a record the operator still acts on, and the tab
      * count, the dot and the pager must agree with the list.
      *
+     * Each row also carries `review_round`: the ordinal of the round that FIRST
+     * reported it — `first_seen_sha` matched against the PR's reviews ordered
+     * oldest-first (`reviews` oldest → 1). A finding whose sha no review row
+     * carries (history outside the ledger, or a comment-only round) reports
+     * NULL, and the client omits the chip.
+     *
      * The page is ordered by `rowid`, the immutable insert order — `updated_ms`
      * advances every time a review round re-reports an open finding, so
      * ordering by it would move a row between an offset page read and the next
@@ -1871,11 +1903,11 @@ export function createAppsStore(db: AppsStoreD1) {
       // `mergeClass` lands in the catch-all bucket too (the SPA reads it as
       // ""), so the complement must admit NULL explicitly.
       const filter = unclassified
-        ? ` AND (json_extract(original_json, '$.mergeClass') IS NULL
-                 OR json_extract(original_json, '$.mergeClass') NOT IN (${FINDING_SEVERITIES.map(() => "?").join(", ")}))`
+        ? ` AND (json_extract(rf.original_json, '$.mergeClass') IS NULL
+                 OR json_extract(rf.original_json, '$.mergeClass') NOT IN (${FINDING_SEVERITIES.map(() => "?").join(", ")}))`
         : page.severity === undefined || page.severity === null
           ? ""
-          : " AND json_extract(original_json, '$.mergeClass') = ?";
+          : " AND json_extract(rf.original_json, '$.mergeClass') = ?";
       const filterBinds: string[] = unclassified
         ? [...FINDING_SEVERITIES]
         : page.severity === undefined || page.severity === null
@@ -1885,24 +1917,30 @@ export function createAppsStore(db: AppsStoreD1) {
         db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT COUNT(*) AS n FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'${filter}`,
+            `SELECT COUNT(*) AS n FROM review_findings rf
+             WHERE rf.app_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}`,
           )
           .bind(appId, owner, repo, prNumber, ...filterBinds),
         db
           .prepare(
-            `SELECT finding_id,
-                    json_extract(original_json, '$.mergeClass') AS severity,
-                    json_extract(original_json, '$.title') AS title,
-                    json_extract(original_json, '$.filePath') AS file_path,
-                    json_extract(original_json, '$.lineStart') AS line,
-                    json_extract(original_json, '$.body') AS body
-             FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'${filter}
-             ORDER BY rowid DESC
+            `SELECT rf.finding_id,
+                    json_extract(rf.original_json, '$.mergeClass') AS severity,
+                    json_extract(rf.original_json, '$.title') AS title,
+                    json_extract(rf.original_json, '$.filePath') AS file_path,
+                    json_extract(rf.original_json, '$.lineStart') AS line,
+                    json_extract(rf.original_json, '$.body') AS body,
+                    (SELECT rr.rn
+                     FROM (SELECT head_sha,
+                                  ROW_NUMBER() OVER (ORDER BY reviewed_at ASC, rowid ASC) AS rn
+                           FROM reviews
+                           WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?) rr
+                     WHERE rr.head_sha = rf.first_seen_sha) AS review_round
+             FROM review_findings rf
+             WHERE rf.app_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}
+             ORDER BY rf.rowid DESC
              LIMIT ? OFFSET ?`,
           )
-          .bind(appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
+          .bind(appId, owner, repo, prNumber, appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
       ]);
       if (results[0]!.results.length === 0) return null;
       return {
@@ -1914,6 +1952,15 @@ export function createAppsStore(db: AppsStoreD1) {
     /**
      * One page of a PR's reviews, newest first — the history's first page is
      * its latest verdict. `null` = the App's ledger does not hold this PR.
+     *
+     * Each row carries the round ORDINAL and that round's run facts. The
+     * ordinal is the PR's `reviews` ordered oldest-first (`reviewed_at ASC,
+     * rowid ASC`, numbered from 1), computed at read time so historical rows
+     * need no backfill; paging never renumbers, because the window function
+     * covers the whole PR before the newest-first page slice. `duration_ms` is
+     * NULL for rows written before the measurement. `findings` counts the
+     * legacy `findings` rows attributed to that review, across every lifecycle
+     * state — the number of findings that round reported.
      */
     async listPullRequestReviews(
       appId: string,
@@ -1932,9 +1979,15 @@ export function createAppsStore(db: AppsStoreD1) {
           .bind(appId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha
-             FROM reviews WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-             ORDER BY reviewed_at DESC, rowid DESC
+            `SELECT x.verdict, x.model, x.provider, x.reviewed_at, x.head_sha,
+                    x.round, x.duration_ms,
+                    (SELECT COUNT(*) FROM findings f WHERE f.review_id = x.id) AS findings
+             FROM (SELECT id, rowid AS rid, verdict, model, provider, reviewed_at,
+                          head_sha, duration_ms,
+                          ROW_NUMBER() OVER (ORDER BY reviewed_at ASC, rowid ASC) AS round
+                   FROM reviews
+                   WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?) x
+             ORDER BY x.reviewed_at DESC, x.rid DESC
              LIMIT ? OFFSET ?`,
           )
           .bind(appId, owner, repo, prNumber, page.limit, page.offset),
@@ -2017,16 +2070,23 @@ export type PullRequestFindingRow = {
   file_path: string | null;
   line: number | null;
   body: string | null;
+  /** The PR round that first reported it (`reviews` ordered oldest-first); NULL when no review carries its `first_seen_sha`. */
+  review_round: number | null;
 };
 
 /** One `reviews` row as the detail face reads it — nullable columns honest. */
 export type PullRequestReviewDetailRow = {
   verdict: string;
-  summary_md: string | null;
   model: string | null;
   provider: string | null;
   reviewed_at: string;
   head_sha: string;
+  /** The round's ordinal in the PR's oldest-first review history (1 = first published round). */
+  round: number;
+  /** Wall clock of the round in ms; NULL for rows written before the measurement. */
+  duration_ms: number | null;
+  /** Findings this round reported, in every lifecycle state. */
+  findings: number;
 };
 
 export type PullRequestFailureDetailRow = { stage: string; error: string; created_at: string };
@@ -2034,10 +2094,12 @@ export type PullRequestFailureDetailRow = { stage: string; error: string; create
 /**
  * The detail head: the ledger row plus its newest review (whole row, nullable)
  * — the header's authoritative verdict and attribution — and the D11
- * live-inflight projection.
+ * live-inflight projection. The head read is ONE row plus one lookup, so it
+ * carries the review columns alone: the round ordinal/findings tally belong
+ * to the paged reviews section.
  */
 export type PullRequestHeadRow = PullRequestBaseRow & {
-  latest_review: PullRequestReviewDetailRow | null;
+  latest_review: Omit<PullRequestReviewDetailRow, "round" | "duration_ms" | "findings"> | null;
   reviewing: PullRequestReviewing;
 };
 

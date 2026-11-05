@@ -1,0 +1,33 @@
+-- 0049_workspace_check_min_score.sql — the review gate's default floor becomes
+-- a workspace setting.
+--
+-- 0045 gave `github_apps.check_min_score` a column default of 80. That number
+-- is a first guess at how a tally score maps onto a "ship it" verdict, and a
+-- tenant may reasonably want its own starting point for Apps it connects
+-- later. The column therefore becomes nullable on `workspaces`, and
+-- `createApp` seeds the App row from it:
+--
+--   workspaces.check_min_score  INTEGER (nullable) —
+--                    the floor a NEW App of this workspace starts at.
+--                    NULL = the platform default (60, `DEFAULT_CHECK_MIN_SCORE`
+--                    in `src/contracts/review-gate.ts`). No DEFAULT clause: an
+--                    existing workspace must keep reading the platform value
+--                    even if that value later changes, so the absent state is
+--                    the column's own NULL.
+--
+-- Why not change `github_apps`' column default: SQLite has no `ALTER COLUMN`,
+-- and the parent-table rebuild that would carry it runs `DROP TABLE
+-- github_apps` — which fires `pull_requests`' deliberate `ON DELETE CASCADE`
+-- (0039) and deletes every PR ledger row. `PRAGMA defer_foreign_keys` delays
+-- constraint checks, not the cascade action. The create path is the only
+-- writer of a fresh App row (one `INSERT INTO github_apps` site in `src/`,
+-- pinned by a test), so seeding there is the one place the default belongs.
+--
+-- Existing Apps keep their stored floor; the per-App settings face
+-- (`save-check-gate`) remains their writer.
+--
+-- Append-only on the production DB: one nullable `ADD COLUMN`, no rebuild, no
+-- data rewrite, no cascade. Forward-only (SQLite has no down).
+
+ALTER TABLE workspaces ADD COLUMN check_min_score INTEGER
+  CHECK(check_min_score BETWEEN 0 AND 100 AND check_min_score = CAST(check_min_score AS INTEGER));

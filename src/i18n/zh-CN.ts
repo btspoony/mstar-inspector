@@ -148,6 +148,16 @@ export const zhCN: Dictionary = {
     reviews: "审查",
     noReviews: "此拉取请求还没有审查。",
     reviewMeta: "{model} · {provider}",
+    /** 审查行的轮次序号；发现行复用同一文案标明首次报告该发现的轮次。 */
+    reviewRound: "第 {round} 轮",
+    /** 单轮审查报告的发现数（英文区分为单复数两式）。 */
+    reviewFindings: "{count} 项发现",
+    reviewFindingsOne: "{count} 项发现",
+    /** 单轮审查耗时：不足一分钟按秒显示，否则按分秒显示。 */
+    reviewDurationSeconds: "{seconds} 秒",
+    reviewDurationMinutes: "{minutes} 分 {seconds} 秒",
+    /** 耗时 span 的 tooltip（与 head-sha chip 同）：说明这个数值是本轮耗时。 */
+    reviewDurationLabel: "本轮运行耗时",
     failures: "失败",
     noFailures: "此拉取请求没有失败记录。",
     findings: "发现",
@@ -191,7 +201,7 @@ export const zhCN: Dictionary = {
     severityMayFix: "可修复",
     severityNit: "可忽略",
     severityOther: "其他",
-    /** 每条发现正文与审查摘要各有一个折叠控件。 */
+    /** 每条发现正文有一个折叠控件。 */
     expand: "展开",
     collapse: "收起",
     /** 折叠控件的无障碍名称：动作、记录与位置。 */
@@ -390,6 +400,19 @@ export const zhCN: Dictionary = {
     nameSave: "保存名称",
     nameSaved: "工作区名称已更新。",
     nameFailed: "修改工作区名称失败，请重试。",
+    /** 所有者/管理员可见的“新 App 默认审查门禁”卡片。 */
+    checkMinScoreHeading: "审查门禁默认值",
+    checkMinScoreDescription:
+      "新接入 App 的分数下限起始值。已有 App 保留各自的分数下限，请在该 App 的设置页修改。",
+    checkMinScoreLabel: "默认分数下限",
+    checkMinScoreSave: "保存默认值",
+    checkMinScoreSaved: "审查门禁默认值已更新。",
+    checkMinScoreFailed: "无法修改审查门禁默认值——请重试。",
+    /** {max} = 可接受的最大值。 */
+    checkMinScoreRange: "接受 0–{max}。",
+    /** {max} = 可接受的最大值；显示的数字是兜底值。 */
+    checkMinScoreUnreadable:
+      "无法读取已存储的默认值，因此新 App 将使用平台默认值。保存 0–{max} 之间的值会设置本工作区的默认值，重新读取可刷新；若刷新后仍提示，请联系平台运维。",
     concurrencyHeading: "审查并发",
     concurrencyDescription: "此工作区最多同时运行的审查数量。平台可能进一步限制。",
     concurrencyLabel: "并发审查数",
@@ -537,7 +560,7 @@ export const zhCN: Dictionary = {
       triggerModeUnknown: "{mode} 不是有效的审查触发模式 — 可用值为 open、every_push、manual。未存储任何内容。",
       reviewLevelUnknown:
         "{level} 不是有效的评审深度 — 可用值为 quick、default、deep（或 inherit 表示跟随平台默认）。未存储任何内容。",
-      checkScoreInvalid: "审查门禁分数必须是 0 到 100 之间的整数。未存储任何内容。",
+      checkScoreInvalid: "审查门禁分数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
       checkVerdictUnknown: "{verdict} 不是有效的审查结论 — 可用值为：{verdicts}。未存储任何内容。",
       allowlistToggleInvalid: "所有者白名单开关必须为开或关。未存储任何内容。",
       allowlistTooManyOwners: "所有者白名单最多接受 {limit} 个所有者 — 未存储任何内容。请移除部分登录名后重新提交。",

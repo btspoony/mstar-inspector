@@ -22,7 +22,7 @@ import type { Env } from "../../src/worker/env";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
-import { parsePullRequestDetail } from "../../src/spa/pages/data";
+import { parsePullRequestDetail, parseRecordPage } from "../../src/spa/pages/data";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -289,11 +289,11 @@ function seedFindings(
 }
 
 describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
-  test("a review with NULL provider / model / summary round-trips as empty strings", async () => {
+  test("a review with NULL provider / model round-trips as empty strings", async () => {
     const db = await fixture();
     // The v1 pipeline always writes reviews.provider NULL (the artifact store
-    // persists the payload's null), and a degraded run may omit model /
-    // summary. The whole detail panel must still parse.
+    // persists the payload's null), and a degraded run may omit model. The
+    // whole detail panel must still parse.
     seedInstallation(db);
     db.raw
       .prepare(
@@ -310,18 +310,49 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<Record<string, unknown>>; total: number };
     expect(body.total).toBe(1);
-    expect(body.items[0]).toMatchObject({ verdict: "comment", summary_md: "", model: "", provider: "" });
+    expect(body.items[0]).toMatchObject({ verdict: "comment", model: "", provider: "" });
+  });
+
+  test("a review row carries its round, its findings tally and its run time", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    // Two rounds; only the newer one was measured and reported a finding.
+    seedReviews(db, 2);
+    db.raw.prepare("UPDATE reviews SET duration_ms = 42000 WHERE id = 'r-1'").run();
+    db.raw
+      .prepare("INSERT INTO findings (id, review_id, severity, title) VALUES ('f-1', 'r-1', 'must-fix', 'a')")
+      .run();
+
+    const res = await getFace(sectionPath("reviews"), db);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: Array<Record<string, unknown>>; total: number };
+    expect(body.total).toBe(2);
+    // Newest first: round 2 is the measured round with one finding; round 1
+    // predates the measurement and reported none.
+    expect(body.items.map((item) => [item.round, item.findings, item.duration_ms])).toEqual([
+      [2, 1, 42_000],
+      [1, 0, null],
+    ]);
   });
 
   test("a repo-wide finding (null file_path) round-trips as ''", async () => {
     const db = await fixture();
     seedInstallation(db);
-    seedFindings(db, [{ id: "row-1", findingId: "F-1", mergeClass: "nit", filePath: null, lineStart: null }]);
+    // Two rounds: sha-0 is round 1, sha-1 round 2 — the sha seedFindings stamps.
+    seedReviews(db, 2);
+    seedFindings(db, [
+      { id: "row-1", findingId: "F-1", mergeClass: "nit", filePath: null, lineStart: null },
+      { id: "row-2", findingId: "F-2", mergeClass: "must-fix", filePath: "src/a.ts", lineStart: 3 },
+    ]);
+    // A first-seen sha no stored review carries has no round to name.
+    db.raw.prepare("UPDATE review_findings SET first_seen_sha = 'sha-gone' WHERE finding_id = 'F-2'").run();
 
     const res = await getFace(sectionPath("findings"), db);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<Record<string, unknown>> };
-    expect(body.items[0]).toMatchObject({ finding_id: "F-1", file_path: "", line: null });
+    // Newest insert first: the unmatched row, then the round-2 match.
+    expect(body.items[0]).toMatchObject({ finding_id: "F-2", review_round: null });
+    expect(body.items[1]).toMatchObject({ finding_id: "F-1", file_path: "", line: null, review_round: 2 });
   });
 
   test("returns the head row and its counts only — no record arrays", async () => {
@@ -354,7 +385,6 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(body.pull_request).not.toHaveProperty("latest_review");
     expect(body.latest_review).toEqual({
       verdict: "comment",
-      summary_md: "",
       model: "",
       provider: "",
       reviewed_at: "2026-01-02 00:00:00",
@@ -363,7 +393,7 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(body.counts).toEqual({ findings: 2, reviews: 2, failures: 1, must_fix: 1 });
   });
 
-  test("the SPA parser reads this route's own body: the headline keeps its model and provider", async () => {
+  test("the SPA parser reads this route's own body: attribution on the head, the tally on the reviews page", async () => {
     // Cross-boundary: the real route body through the real parser. A field
     // moved to the other end of the envelope re-drifting fails HERE, not only
     // in a component test that feeds a hand-built payload.
@@ -375,19 +405,31 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
          VALUES ('r-attributed', 77, 'acme', 'widgets', 131, 'sha-1', 'needs fixes', 'The race is reachable.', 'kimi-for-coding', 'openrouter', '2026-01-02 00:00:00', 'app-acme')`,
       )
       .run();
+    // The reviewed round reported two findings.
+    db.raw
+      .prepare(
+        `INSERT INTO findings (id, review_id, severity, title)
+         VALUES ('f-1', 'r-attributed', 'must-fix', 'a'), ('f-2', 'r-attributed', 'nit', 'b')`,
+      )
+      .run();
 
     const res = await getFace(detailPath, db);
     expect(res.status).toBe(200);
     const parsed = parsePullRequestDetail(await res.json());
     expect(parsed).not.toBeNull();
+    // The head is the attribution only: no round ordinal, tally or clock —
+    // those belong to the paged section, which is the one place that counts.
     expect(parsed?.latest_review).toEqual({
       verdict: "needs fixes",
-      summary_md: "The race is reachable.",
       model: "kimi-for-coding",
       provider: "openrouter",
       reviewed_at: "2026-01-02 00:00:00",
       head_sha: "sha-1",
     });
+    expect(parsed?.latest_review).not.toHaveProperty("findings");
+    // Same round, read from the page that carries its tally.
+    const reviewsPage = parseRecordPage("reviews", await (await getFace(sectionPath("reviews"), db)).json());
+    expect(reviewsPage?.items[0]).toMatchObject({ round: 1, findings: 2 });
   });
 
   test("each section pages with limit and offset, and defaults to 10 rows", async () => {

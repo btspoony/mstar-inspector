@@ -14,7 +14,7 @@ import { usePathname } from "../router";
 import { workspaceRefOf } from "../routes";
 import { workspaceMembershipForRef } from "../shell";
 import { useLiveMemberships } from "../workspace-memberships";
-import { WorkspaceConcurrencyCard, WorkspaceNameCard } from "./SettingsPage";
+import { WorkspaceCheckMinScoreCard, WorkspaceConcurrencyCard, WorkspaceNameCard } from "./SettingsPage";
 
 export function WorkspaceSettingsPage({ boot }: { boot: SpaBoot }) {
   const live = { ...boot, memberships: useLiveMemberships(boot) };
@@ -37,6 +37,7 @@ export function WorkspaceSettingsPage({ boot }: { boot: SpaBoot }) {
         <div key={ref ?? ""} className="flex flex-col">
           {isOwner ? <WorkspaceNameCard locale={boot.locale} storedName={membership.name} /> : null}
           <WorkspaceConcurrencyCard locale={boot.locale} />
+          <WorkspaceCheckMinScoreCard locale={boot.locale} />
         </div>
       ) : (
         <p className="text-sm text-muted-foreground">{t(boot.locale, "workspace.settingsOwnerOnly")}</p>

@@ -14,6 +14,7 @@
  * one copy serves every suite and tests still switch it per case.
  */
 import { mock } from "bun:test";
+import { DEFAULT_CHECK_MIN_SCORE } from "../../src/contracts/review-gate";
 import type { ReviewOutput } from "../../src/review/schema";
 import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
 import {
@@ -120,10 +121,10 @@ export async function createSeededTestD1(): Promise<TestD1> {
     .prepare(
       `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
-          created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, 424242, 'consumer-test-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+          check_min_score, created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, 424242, 'consumer-test-app', ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
-    .run(TEST_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC);
+    .run(TEST_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC, DEFAULT_CHECK_MIN_SCORE);
   // Production shape (migration 0026): createApp writes the App row and its
   // `app_workspaces` mapping in ONE batch, so no App exists unmapped — the
   // consumer's strict read face resolves a real App. A test that needs an
@@ -189,10 +190,18 @@ export async function seedReviewingApp(
     .prepare(
       `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, review_level,
-          created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+          check_min_score, created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
-    .run(appId, githubAppId, `consumer-test-app-${githubAppId}`, privateKeyEnc, webhookSecretEnc, reviewLevel);
+    .run(
+      appId,
+      githubAppId,
+      `consumer-test-app-${githubAppId}`,
+      privateKeyEnc,
+      webhookSecretEnc,
+      reviewLevel,
+      DEFAULT_CHECK_MIN_SCORE,
+    );
   db.raw
     .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
     .run(appId);

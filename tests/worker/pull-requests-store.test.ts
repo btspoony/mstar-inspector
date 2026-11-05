@@ -656,7 +656,6 @@ describe("pull request detail reads", () => {
     // authoritative verdict + attribution source.
     expect(head?.latest_review).toEqual({
       verdict: "approve",
-      summary_md: "looks good",
       model: "m1",
       provider: "p1",
       reviewed_at: "2026-01-02 00:00:00",
@@ -674,12 +673,21 @@ describe("pull request detail reads", () => {
     const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, page);
     expect(findings!.total).toBe(1);
     expect(findings!.items).toEqual([
-      { finding_id: "F-1", severity: "must-fix", title: "Null deref", file_path: "src/a.ts", line: 12, body: "guard it" },
+      {
+        finding_id: "F-1",
+        severity: "must-fix",
+        title: "Null deref",
+        file_path: "src/a.ts",
+        line: 12,
+        body: "guard it",
+        // This PR's only review carries sha-r1; the finding's first-seen sha
+        // is sha-1, so no round matches.
+        review_round: null,
+      },
     ]);
 
     const reviews = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, page);
     expect(reviews!.total).toBe(1);
-    expect(reviews!.items[0]!.summary_md).toBe("looks good");
 
     const failures = await store.listPullRequestFailures(APP_ID, "acme", "widgets", 131, page);
     expect(failures!.total).toBe(1);
@@ -779,6 +787,58 @@ describe("pull request detail reads", () => {
     const second = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 2, limit: 2 });
     expect(second!.total).toBe(3);
     expect(second!.items.map((review) => review.reviewed_at)).toEqual(["2026-01-02 00:00:00"]);
+  });
+
+  test("a review row carries its round ordinal, run time and that round's findings", async () => {
+    const db = await detailFixture();
+    // Three rounds at increasing clocks: oldest-first numbering is 1..3.
+    seedReview(db, "r1", "2026-01-02 00:00:00");
+    seedReview(db, "r2", "2026-01-03 00:00:00");
+    seedReview(db, "r3", "2026-01-04 00:00:00");
+    // Legacy `findings` rows attributed to round 2 — the count is per review id.
+    db.raw
+      .prepare(
+        `INSERT INTO findings (id, review_id, severity, title)
+         VALUES ('f-1', 'r2', 'must-fix', 'a'), ('f-2', 'r2', 'nit', 'b')`,
+      )
+      .run();
+    // Only the newest round carries a measured clock; the seeded history stays NULL.
+    db.raw.prepare("UPDATE reviews SET duration_ms = 65000 WHERE id = 'r3'").run();
+    // A lifecycle finding whose first-seen sha belongs to round 2…
+    seedFinding(db, { findingId: "F-2", mergeClass: "nit", title: "n", filePath: "src/a.ts", lineStart: 1, body: "b" }, "row-2");
+    db.raw.prepare("UPDATE review_findings SET first_seen_sha = 'sha-r2' WHERE finding_id = 'F-1'").run();
+    const store = createAppsStore(db);
+
+    // Newest-first paging never renumbers: page 1 is rounds 3, 2; page 2 is
+    // the oldest round alone.
+    const first = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 2 });
+    expect(first!.items.map((review) => [review.round, review.findings, review.duration_ms])).toEqual([
+      [3, 0, 65_000],
+      [2, 2, null],
+    ]);
+    const second = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 2, limit: 2 });
+    expect(second!.items.map((review) => review.round)).toEqual([1]);
+
+    // Each finding's round is the review whose head_sha is its first_seen_sha;
+    // F-2 still points at sha-1, which no review carries → NULL.
+    const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
+      offset: 0,
+      limit: 10,
+    });
+    expect(findings!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([
+      ["F-2", null],
+      ["F-1", 2],
+    ]);
+
+    // The severity predicate binds BETWEEN the scope and paging binds, so a
+    // shifted bind would filter, page or count the wrong window.
+    const filtered = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
+      offset: 0,
+      limit: 10,
+      severity: "nit",
+    });
+    expect(filtered!.total).toBe(1);
+    expect(filtered!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([["F-2", null]]);
   });
 
   test("unknown PR number → null head (the route's 404)", async () => {
