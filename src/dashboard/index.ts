@@ -4539,17 +4539,48 @@ function pullRequestWireColumns(row: { title: string | null; state: string; head
   };
 }
 
+type ParseRepoFilterResult =
+  | { ok: true; filter: { owner: string; repo: string } | null }
+  | { ok: false };
+
+/**
+ * `?repo=owner/name` for the ledger list. Absent is no filter. A present value
+ * must be exactly two non-empty segments split on the FIRST `/` (a repo name
+ * contains none) — so `a/b/c`, `a/`, `/b`, `a` and the empty string are all a
+ * 400: a filter the server cannot apply must never answer as an unfiltered
+ * ledger, and silently dropping it would show rows the caller did not ask for.
+ */
+function parseRepoFilter(c: DashboardContext): ParseRepoFilterResult {
+  const raw = c.req.query("repo");
+  if (raw === undefined) return { ok: true, filter: null };
+  const slash = raw.indexOf("/");
+  if (slash <= 0) return { ok: false };
+  const owner = raw.slice(0, slash);
+  const repo = raw.slice(slash + 1);
+  if (repo === "" || repo.includes("/")) return { ok: false };
+  return { ok: true, filter: { owner, repo } };
+}
+
 const appPullRequestsRoute = async (c: DashboardContext) => {
   // Set before the gate: a deny (403) and a 404 are answers about a specific
   // workspace's data too, so no intermediary may cache them either.
   c.header("Cache-Control", "private, no-store");
   const gate = await requireAppManagerJson(c);
   if (!gate.ok) return gate.response;
-  const rows = (await gate.store.listPullRequests(gate.app.id)).map((row) => ({
-    ...row,
-    ...pullRequestWireColumns(row),
-  }));
-  return c.json({ pull_requests: rows });
+  const parsed = parseRepoFilter(c);
+  if (!parsed.ok) return c.json({ error: "invalid repo" }, 400);
+  // The filter is applied by the STORE, inside its bounded window: filtering
+  // the returned rows here would only ever search the newest
+  // PULL_REQUEST_LIST_LIMIT rows, which is the defect this face exists to fix.
+  const rows = await gate.store.listPullRequests(gate.app.id, parsed.filter ?? undefined);
+  // The option set is the App's whole ledger, never a window over it and never
+  // narrowed by the current selection — that is the only way a repository
+  // behind the row cap can be picked at all.
+  const repos = await gate.store.listPullRequestRepos(gate.app.id);
+  return c.json({
+    pull_requests: rows.map((row) => ({ ...row, ...pullRequestWireColumns(row) })),
+    repos,
+  });
 };
 
 /** The record-section paging bounds, enforced here (never a silent default on a bad value). */

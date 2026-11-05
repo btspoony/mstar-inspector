@@ -487,12 +487,24 @@ export const PULL_REQUEST_RETENTION_CAP = 500;
 const PULL_REQUEST_LEDGER_ORDER = "last_seen_at DESC, pr_number DESC";
 
 /**
+ * The repository predicate `listPullRequests` carries. It rides INSIDE the
+ * window — in the row statement's own WHERE and in both aggregate scopes —
+ * never after the cap: a filter applied to the capped rows would hide every
+ * repository whose PRs sit behind PULL_REQUEST_LIST_LIMIT.
+ */
+const PULL_REQUEST_REPO_PREDICATE = " AND owner = ? AND repo = ?";
+
+/**
  * The list's ONE bounded window. Used as the row statement's own predicate and
  * as the scope of both aggregate statements, so the payload is not merely
- * capped: the work is.
+ * capped: the work is. A repository filter narrows the window ITSELF, so the
+ * cap bounds the filtered set and the aggregates keep matching the rows.
  */
-const PULL_REQUEST_WINDOW_SQL = `SELECT owner, repo, pr_number FROM pull_requests
-  WHERE app_id = ? ORDER BY ${PULL_REQUEST_LEDGER_ORDER} LIMIT ?`;
+function pullRequestWindowSql(repoFiltered: boolean): string {
+  return `SELECT owner, repo, pr_number FROM pull_requests
+  WHERE app_id = ?${repoFiltered ? PULL_REQUEST_REPO_PREDICATE : ""}
+  ORDER BY ${PULL_REQUEST_LEDGER_ORDER} LIMIT ?`;
+}
 
 /**
  * Statement 0 of every record-section batch: is this PR on the ledger at all?
@@ -1506,6 +1518,13 @@ export function createAppsStore(db: AppsStoreD1) {
      * ORDER BY + LIMIT), so a large review/failure history behind the window is
      * never scanned or thrown away.
      *
+     * `filter` narrows the WINDOW ITSELF, not the capped rows: the predicate
+     * rides into the row statement and into both aggregate scopes, so the cap
+     * bounds the FILTERED set — a repository whose every PR is older than the
+     * unfiltered window is still reachable, and the aggregates still agree with
+     * the rows. Filtering after the cap would show an empty list for exactly
+     * the repositories the filter exists to reach.
+     *
      * Failure attribution assumes ONE installation per App. `app_installations`
      * permits the same installation id under two App rows, and in that case a
      * failure row would count toward both — accepted, because the alternative
@@ -1521,16 +1540,25 @@ export function createAppsStore(db: AppsStoreD1) {
      * and the detail face's own failure count and history do: one rule, so the
      * tab number, the pager and the rows can never disagree.
      */
-    async listPullRequests(appId: string): Promise<PullRequestRow[]> {
+    async listPullRequests(
+      appId: string,
+      filter?: { owner: string; repo: string },
+    ): Promise<PullRequestRow[]> {
+      // One binding list per window scope: the App, then the repository when
+      // the caller filtered. The row statement takes it once before the limit;
+      // each aggregate takes its own app_id first, then that same list for the
+      // window subquery, then the limit — the order each SQL splices its `?` in.
+      const scope = filter === undefined ? [appId] : [appId, filter.owner, filter.repo];
+      const window = pullRequestWindowSql(filter !== undefined);
       const results = await db.batch([
         db
           .prepare(
             `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-             FROM pull_requests WHERE app_id = ?
+             FROM pull_requests WHERE app_id = ?${filter === undefined ? "" : PULL_REQUEST_REPO_PREDICATE}
              ORDER BY ${PULL_REQUEST_LEDGER_ORDER}
              LIMIT ?`,
           )
-          .bind(appId, PULL_REQUEST_LIST_LIMIT),
+          .bind(...scope, PULL_REQUEST_LIST_LIMIT),
         db
           .prepare(
             `SELECT owner, repo, pr_number, verdict, reviewed_at FROM (
@@ -1539,26 +1567,44 @@ export function createAppsStore(db: AppsStoreD1) {
                         ORDER BY reviewed_at DESC, rowid DESC) AS rn
                FROM reviews
                WHERE app_id = ?
-                 AND (owner, repo, pr_number) IN (${PULL_REQUEST_WINDOW_SQL})
+                 AND (owner, repo, pr_number) IN (${window})
              ) WHERE rn = 1`,
           )
-          .bind(appId, appId, PULL_REQUEST_LIST_LIMIT),
+          .bind(appId, ...scope, PULL_REQUEST_LIST_LIMIT),
         db
           .prepare(
             `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
              WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
-               AND (f.owner, f.repo, f.pr_number) IN (${PULL_REQUEST_WINDOW_SQL})
+               AND (f.owner, f.repo, f.pr_number) IN (${window})
              GROUP BY f.owner, f.repo, f.pr_number`,
           )
-          .bind(appId, appId, PULL_REQUEST_LIST_LIMIT),
+          .bind(appId, ...scope, PULL_REQUEST_LIST_LIMIT),
       ]);
       return assemblePullRequests(
         results[0]!.results as PullRequestBaseRow[],
         results[1]!.results as PullRequestReviewRow[],
         results[2]!.results as PullRequestFailureCountRow[],
       );
+    },
+
+    /**
+     * Every repository this App's ledger holds, `owner/repo`, A–Z — the list
+     * face's whole option set. NO LIMIT: a set capped like the rows would drop
+     * exactly the repositories the filter exists to reach (the ones whose PRs
+     * sit behind PULL_REQUEST_LIST_LIMIT), so it is the ledger's DISTINCT
+     * addresses, not a window over them.
+     */
+    async listPullRequestRepos(appId: string): Promise<string[]> {
+      const result = await db
+        .prepare(
+          `SELECT DISTINCT owner, repo FROM pull_requests WHERE app_id = ?
+           ORDER BY owner, repo`,
+        )
+        .bind(appId)
+        .all<{ owner: string; repo: string }>();
+      return result.results.map((row) => `${row.owner}/${row.repo}`);
     },
 
     /**

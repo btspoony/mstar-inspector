@@ -355,6 +355,108 @@ describe("listPullRequests", () => {
   });
 });
 
+/**
+ * The repository filter and its option set. The reported defect was a filter
+ * applied AFTER the cap: a repository whose PRs all sit behind the newest
+ * `PULL_REQUEST_LIST_LIMIT` rows never appeared — not as an option, and not as
+ * a row once selected. Both halves are pinned here: the option set covers the
+ * whole ledger, and the filter runs INSIDE the window.
+ */
+describe("listPullRequests repository filter + listPullRequestRepos", () => {
+  const BEHIND = { ...PR, repo: "behind" };
+
+  /**
+   * A FULL unfiltered window (`PULL_REQUEST_LIST_LIMIT` newest rows on
+   * `acme/widgets`) plus two OLDER rows on `acme/behind`, which therefore sit
+   * entirely behind the cap.
+   */
+  async function seedCappedLedger(db: TestD1) {
+    seedApp(db);
+    const store = createAppsStore(db);
+    for (let n = 1; n <= PULL_REQUEST_LIST_LIMIT; n++) {
+      await store.upsertPullRequest({
+        ...PR,
+        prNumber: n,
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, n)).toISOString(),
+      });
+    }
+    for (const n of [9001, 9002]) {
+      await store.upsertPullRequest({
+        ...BEHIND,
+        prNumber: n,
+        updatedAt: new Date(Date.UTC(2025, 0, 1, 0, 0, n)).toISOString(),
+      });
+    }
+    db.raw
+      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .run(APP_ID);
+    // A review and a failure on the NEWEST behind-the-cap row: they can only
+    // ride along if the aggregates are scoped to the FILTERED window.
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, reviewed_at)
+         VALUES ('r-behind', 77, 'acme', 'behind', 9002, 'sha-1', 'approve', ?, '2026-02-01 00:00:00')`,
+      )
+      .run(APP_ID);
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+         VALUES ('f-behind', 77, 'acme', 'behind', 9002, 'sha-1', 'runner', 'boom')`,
+      )
+      .run();
+    return store;
+  }
+
+  test("a repository behind the cap is still an option, and filtering reaches its rows", async () => {
+    const db = createMigratedTestD1();
+    const store = await seedCappedLedger(db);
+
+    // The option set is the whole ledger: no LIMIT, so the older repository
+    // is listed even though none of its rows are in the window.
+    expect(await store.listPullRequestRepos(APP_ID)).toEqual(["acme/behind", "acme/widgets"]);
+
+    // The unfiltered list is unchanged: exactly the capped window, and the
+    // behind-the-cap repository has no row in it.
+    const unfiltered = await store.listPullRequests(APP_ID);
+    expect(unfiltered.length).toBe(PULL_REQUEST_LIST_LIMIT);
+    expect(unfiltered.some((row) => row.repo === "behind")).toBe(false);
+
+    // Filtering runs BEFORE the cap, so it reaches rows the window dropped.
+    const filtered = await store.listPullRequests(APP_ID, { owner: "acme", repo: "behind" });
+    expect(filtered.map((row) => row.number).sort()).toEqual([9001, 9002]);
+    // …and the aggregates follow the same filtered window, so the tab's
+    // verdict and failure count cannot disagree with the rows it shows.
+    const newest = filtered.find((row) => row.number === 9002)!;
+    expect(newest.latest_review).toEqual({ verdict: "approve", reviewed_at: "2026-02-01 00:00:00" });
+    expect(newest.failure_count).toBe(1);
+  });
+
+  test("a filtered read is still the three-statement batch", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest(PR);
+    let prepares = 0;
+    const counted = {
+      prepare(query: string) {
+        prepares += 1;
+        return db.prepare(query);
+      },
+      batch: db.batch.bind(db),
+    };
+    await createAppsStore(counted as never).listPullRequests(APP_ID, { owner: "acme", repo: "widgets" });
+    expect(prepares).toBe(3);
+  });
+
+  test("the option set is one App's ledger, never a sibling App's", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    seedApp(db, "other-app", 2002);
+    await createAppsStore(db).upsertPullRequest(PR);
+    await createAppsStore(db).upsertPullRequest({ ...PR, appId: "other-app", repo: "theirs" });
+    expect(await createAppsStore(db).listPullRequestRepos(APP_ID)).toEqual(["acme/widgets"]);
+  });
+});
+
 describe("sweepTerminalPullRequests", () => {
   test("an older `closed` cannot mark a reopened PR, and it survives retention", async () => {
     const db = createMigratedTestD1();
