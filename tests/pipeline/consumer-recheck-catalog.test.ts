@@ -206,7 +206,7 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { recheck?: unknown };
     expect(writtenInput.recheck).toBeUndefined();
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
+    expect(prepared.body).toContain("Reassessed 0/1 prior finding(s)");
     expect(prepared.body).toContain("unverifiable (context-incomplete)");
     expect(prepared.body).not.toContain("unverifiable (no-evidence)");
     expect(prepared.body).toContain("context coverage: unavailable");
@@ -275,7 +275,7 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { recheck?: unknown };
     expect(writtenInput.recheck).toBeUndefined();
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
+    expect(prepared.body).toContain("Reassessed 0/1 prior finding(s)");
     // The reason names the real cause — an unprovable row is not oversized.
     expect(prepared.body).toContain("unverifiable (no-evidence)");
     expect(prepared.body).not.toContain("unverifiable (budget)");

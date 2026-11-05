@@ -116,3 +116,22 @@ export function idemKey(key: IdempotencyKey): string {
   }
   return `idem:${key.installation_id}:${key.owner}/${key.repo}:${key.pr_number}:${key.head_sha}`;
 }
+
+/** The comment-trigger sibling of `IdempotencyKey` — a comment id, no sha. */
+export type IdempotencyCommentKey = {
+  installation_id: number;
+  owner: string;
+  repo: string;
+  pr_number: number;
+  comment_id: number;
+};
+
+/**
+ * Build the KV key for a bot-mention comment:
+ * `idemc:{installation_id}:{owner}/{repo}:{pr_number}:{comment_id}`.
+ * The `idemc:` prefix keeps a comment claim from ever reading as — or
+ * colliding with — a commit claim.
+ */
+export function idemCommentKey(key: IdempotencyCommentKey): string {
+  return `idemc:${key.installation_id}:${key.owner}/${key.repo}:${key.pr_number}:${key.comment_id}`;
+}

@@ -164,14 +164,24 @@ describe("worker entry scheduled wiring", () => {
     } finally {
       defaultSweepLog.warn = originalWarn;
     }
-    // Order-insensitive: the rule is "scheduled never throws and every step
-    // degrades to its OWN warn", not a fixed janitor sequence — pinning
-    // positions made every new best-effort step a test edit.
+    // The rule is "scheduled never throws and every degraded lane warns with
+    // its OWN event", not a fixed composition list: each lane is asserted by
+    // membership so a future independent best-effort step (or a reorder) does
+    // not re-break this test.
     const events = warnCalls.map((call) => call.fields.event);
-    expect(new Set(events)).toEqual(
-      new Set(["retention_swept_failed", "pull_request_retention_swept_failed", "invite_lapse_swept_failed", "ops_sweep_failed"]),
-    );
-    expect(events).toHaveLength(4);
+    for (const laneEvent of [
+      // Migration 0048's outbox re-send is its own independent step.
+      "comment_claim_outbox_failed",
+      "invite_lapse_swept_failed",
+      "ops_sweep_failed",
+      "pull_request_retention_swept_failed",
+      "retention_swept_failed",
+      // The claim budgets are an operator setting: an unreadable settings row
+      // degrades to the documented defaults with its own line.
+      "review_comment_claim_settings_degraded",
+    ] as const) {
+      expect(events).toContain(laneEvent);
+    }
     const sweepFailure = warnCalls.find((call) => call.fields.event === "ops_sweep_failed");
     expect(sweepFailure?.fields.detail).toContain("d1 down");
   });

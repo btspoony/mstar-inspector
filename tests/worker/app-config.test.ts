@@ -7,7 +7,8 @@
  *
  * Production-shaped sequence (the 0004/0005 test precedent): the bun:sqlite
  * double applies 0001/0002, a row is SEEDED into the existing reviews table,
- * and only then do 0003 → 0006 apply in filename order — the append-only
+ * and only then does `APP_CONFIG_BASE_MIGRATIONS` apply — 0003, 0004, 0036
+ * (early: it only touches github_apps), 0005, 0026, 0028 — the append-only
  * assumption is exercised against a DB that already holds data, exactly like
  * `wrangler d1 migrations apply` on production.
  *
@@ -29,7 +30,13 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
-import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
+import { createTestD1, type TestD1 } from "../store/helpers";
+import {
+  APP_CONFIG_BASE_MIGRATIONS,
+  APP_CONFIG_MIGRATIONS,
+  APP_CONFIG_PRE_POOL_MIGRATIONS,
+  applyMigrations,
+} from "../helpers/migration-shapes";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import {
   CUSTOM_PROVIDER_API_IDS,
@@ -68,7 +75,6 @@ import type { D1StatementLike } from "../../src/store/types";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
-const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -103,122 +109,41 @@ function rawCount(db: ReturnType<typeof createTestD1>, table: string): number {
   return row.n;
 }
 
-/** Apply one migration file verbatim (filename order = wrangler order). */
-function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void {
-  db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
-}
-
-const PLAN_13_MIGRATIONS = [
-  "0003_dashboard_users.sql",
-  "0004_github_apps.sql",
-  // 0036 renames github_apps.slug → webhook_path and adds github_slug; every
-  // fixture that seeds an App through createApp needs it (it only touches
-  // github_apps, so applying it early keeps the later files' order intact).
-  "0036_app_identity.sql",
-  "0005_reviews_app_id.sql",
-];
-
 /**
  * Production-shaped DB: 0001/0002 + a seeded review row, then the later
- * migrations in filename order (0006 is applied SEPARATELY by the migration
- * test so an app row can exist before it — the wrangler sequence).
+ * migrations — `APP_CONFIG_BASE_MIGRATIONS` (0006 is applied SEPARATELY by the
+ * migration test so an app row can exist before it — the wrangler sequence).
  */
-function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
+function createPopulatedPre0006D1(): TestD1 {
   const db = createTestD1();
   rawRun(
     db,
     `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
      VALUES ('review-1', 123, 'acme', 'widgets', 42, '0123456789abcdef0123456789abcdef01234567', 'comment', 'ok')`,
   );
-  for (const name of PLAN_13_MIGRATIONS) applyMigration(db, name);
-  // 0026: createApp writes its app_workspaces mapping in the same batch, so
-  // every fixture that seeds an App needs the workspace data plane. Applied
-  // after 0004 (its FK parent); the file only creates new tables.
-  applyMigration(db, "0026_workspaces.sql");
-  // 0028: the SPA boot reads pending invites.
-  applyMigration(db, "0028_workspace_invites.sql");
+  applyMigrations(db, APP_CONFIG_BASE_MIGRATIONS);
   return db;
 }
 
-/**
- * The pre-pool shape (0006 → 0022, filename order): app_provider_keys still
- * carries ONE row per (App, provider) under the two-segment AAD and
- * app_custom_providers still carries its key column. The 0024 migration tests
- * seed this shape, then apply the migration, exactly like the wrangler order
- * on a live deployment.
- */
+/** The pre-pool shape (`APP_CONFIG_PRE_POOL_MIGRATIONS`, 0006 → 0038) the 0024/0025 tests seed. */
 function createPreProviderPoolD1(): TestD1 {
   const db = createPopulatedPre0006D1();
-  applyMigration(db, "0006_app_provider_config.sql");
-  applyMigration(db, "0008_github_apps_ops.sql");
-  applyMigration(db, "0009_app_model_roles.sql");
-  // 0010: the derived tail's 0048 indexes review_failures — the table must
-  // exist before `migrationsAfter(0038)` runs.
-  applyMigration(db, "0010_review_failures.sql");
-  // 0011: the settings page now renders the recent-deliveries
-  // panel from webhook_deliveries on every render — the fixture must carry
-  // the table or every settings route 500s.
-  applyMigration(db, "0011_webhook_deliveries.sql");
-  applyMigration(db, "0012_custom_providers_and_key_updated_at.sql");
-  applyMigration(db, "0015_provider_verification.sql");
-  // 0017: the chains store tests + the settings routes run on
-  // the chains shape (app_model_chains + app_model_chain_seats).
-  applyMigration(db, "0017_app_model_chains.sql");
-  // 0018: the settings routes + the sandbox-image selection run on
-  // the shape carrying github_apps.sandbox_image_id (the custom-provider
-  // collision backstop resolves the App's selected image through it).
-  applyMigration(db, "0018_app_sandbox_images.sql");
-  // 0019: the settings JSON GET reads/writes the five github_*
-  // metadata columns — the route must run on the production shape.
-  applyMigration(db, "0019_github_apps_metadata.sql");
-  // 0022: the settings read face serves github_apps.review_trigger_mode
-  // (the SPA mode control's value) and the trigger-mode route validates
-  // against the CHECK enum — the route tests run on the production shape.
-  applyMigration(db, "0022_app_trigger_mode.sql");
-  // 0023: createUser clears a removal record in the same batch as its insert,
-  // so every membership-creating fixture needs the tombstone table too.
-  applyMigration(db, "0023_removed_logins.sql");
-  // 0037/0038: the metadata-attempt marker plus the github_apps rebuild that
-  // drops the local route key — every App seeded through createApp needs the
-  // post-0038 shape.
-  applyMigration(db, "0037_github_metadata_attempt.sql");
-  applyMigration(db, "0038_webhook_path_drop.sql");
+  applyMigrations(db, APP_CONFIG_PRE_POOL_MIGRATIONS);
   return db;
 }
 
 /**
- * The config routes' shape: the pre-pool one plus 0024/0025 (the per-key pools
- * and their model evidence), 0029/0031–0033 (the support-grant, plan and
- * `server_flags` tables the SPA boot reads) and the index-only 0034/0035.
- * Those are every migration between the parent's last file (0023) and the
- * 0037/0038 tail the parent already applied, so the declared shape has no
- * hole below the derived anchor. The tail itself is `migrationsAfter(0038)` —
- * 0038 being the last file applied by hand — so a new migration joins it with
- * no lockstep edit and nothing between the hand-applied set and the anchor can
- * silently drop out. 0015 matters because the store's key writes maintain the
- * verified_* columns, so every config-store test must run on the 0015-shaped
- * schema. This is the config routes' shape, not a replay of every migration.
+ * The config routes' shape: the pre-pool one plus 0024/0025, 0029/0031–0035
+ * and the derived tail (`migrationsAfter(0038)` — 0038 being the last file
+ * applied by hand). A new migration joins the tail with no lockstep edit,
+ * except when it indexes a table below the anchor: that dependency is
+ * declared once in `TAIL_PREREQUISITES`. 0015 matters because the store's key
+ * writes maintain the verified_* columns, so every config-store test must run
+ * on the 0015-shaped schema.
  */
 function createAppConfigD1(): TestD1 {
   const db = createPreProviderPoolD1();
-  applyMigration(db, "0024_provider_multi_key.sql");
-  applyMigration(db, "0025_provider_model_evidence.sql");
-  // 0029/0031–0033: SPA dispatch reads the support-grant table, the plan
-  // catalogue + subscriptions and `server_flags` while it builds the boot, so
-  // the shell route runs on the production shape.
-  applyMigration(db, "0029_operator_support.sql");
-  applyMigration(db, "0031_plans_usage.sql");
-  applyMigration(db, "0032_unlimited_plan.sql");
-  applyMigration(db, "0033_platform_admin.sql");
-  // 0034/0035 index the support-grant and lapsed-invite predicates: index-only,
-  // and they must follow 0029/0028. They sit here so the derived tail starts at
-  // the last hand-applied file with nothing below it left out.
-  applyMigration(db, "0034_support_grant_indexes.sql");
-  applyMigration(db, "0035_workspace_invite_expiry_index.sql");
-  // The derived tail (0039–…): the settings health face reads the delivery
-  // summary, which names the 0043 source column, and the workspace plan
-  // tables stay complete. A new migration joins here automatically.
-  for (const name of migrationsAfter("0038_webhook_path_drop.sql")) applyMigration(db, name);
+  applyMigrations(db, APP_CONFIG_MIGRATIONS);
   return db;
 }
 
@@ -460,7 +385,7 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
     // exactly the wrangler order on a live deployment.
     seedPreMigrationAppRow(db, "app-pre-0006", "pre-existing");
     return Promise.resolve().then(() => {
-      expect(() => applyMigration(db, "0006_app_provider_config.sql")).not.toThrow();
+      expect(() => applyMigrations(db, ["0006_app_provider_config.sql"])).not.toThrow();
       // Append-only: the seeded review row (app_id NULL = legacy) is untouched.
       const row = db.raw.query("SELECT app_id FROM reviews WHERE id = 'review-1'").get() as {
         app_id: string | null;
@@ -563,7 +488,7 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
     const db = createPopulatedPre0006D1();
     seedPreMigrationAppRow(db, "app-pre-0012", "a");
     const app = { id: "app-pre-0012" };
-    applyMigration(db, "0006_app_provider_config.sql");
+    applyMigrations(db, ["0006_app_provider_config.sql"]);
     // A key row written BEFORE 0012 (the pre-migration column set), under the
     // pre-pool two-segment AAD — what a live deployment carries across.
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
@@ -577,12 +502,12 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
       app.id,
       legacyEnc,
     );
-    expect(() => applyMigration(db, "0012_custom_providers_and_key_updated_at.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0012_custom_providers_and_key_updated_at.sql"])).not.toThrow();
     // 0015 next (the real sequence for these tables): the store's key writes
     // maintain the verified_* columns, so the re-set below must run on the
     // 0015-shaped schema; 0024 last — the pool shape the store now writes to.
-    applyMigration(db, "0015_provider_verification.sql");
-    applyMigration(db, "0024_provider_multi_key.sql");
+    applyMigrations(db, ["0015_provider_verification.sql"]);
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
     const row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
       created_at: string;
       updated_at: string | null;
@@ -602,8 +527,8 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
     expect(afterReset.updated_at > "2026-01-01 00:00:00").toBe(true);
   });
 
-  test("full-file direct run (0001→0012 order) creates app_custom_providers with the AL-23-1 DDL shape", async () => {
-    const db = createPreProviderPoolD1(); // 0001→0022 in filename order (index skips are harmless)
+  test("pre-pool shape (0006 → 0038) creates app_custom_providers with the AL-23-1 DDL shape", async () => {
+    const db = createPreProviderPoolD1(); // 0006 → 0038 via APP_CONFIG_PRE_POOL_MIGRATIONS
     const cols = db.raw.query("PRAGMA table_info(app_custom_providers)").all() as Array<{
       name: string;
       type: string;
@@ -632,7 +557,7 @@ describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
     // A pre-0017 DB (0001–0016) with the pre-chains shape seeded RAW —
     // exactly the wrangler order on a live deployment.
     const db = createPopulatedPre0006D1();
-    for (const name of [
+    applyMigrations(db, [
       "0006_app_provider_config.sql",
       "0008_github_apps_ops.sql",
       "0009_app_model_roles.sql",
@@ -640,9 +565,7 @@ describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
       "0012_custom_providers_and_key_updated_at.sql",
       "0015_provider_verification.sql",
       "0016_users_login_nocase_unique.sql",
-    ]) {
-      applyMigration(db, name);
-    }
+    ]);
     seedPreMigrationAppRow(db, "app-pre-0017", "a");
     const app = { id: "app-pre-0017" };
     rawRun(
@@ -656,7 +579,7 @@ describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
       `INSERT INTO app_model_roles (app_id, role, selector) VALUES (?, 'code-reviewer', 'openai/gpt-5:thinking')`,
       app.id,
     );
-    expect(() => applyMigration(db, "0017_app_model_chains.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0017_app_model_chains.sql"])).not.toThrow();
     // The backfill produced the chains shape from the pre-chains rows:
     // default row (verbatim chain) + seat-<role> named chain + seat ref.
     const chains = db.raw
@@ -703,7 +626,7 @@ describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () =>
       app.id,
       legacyEnc,
     );
-    expect(() => applyMigration(db, "0024_provider_multi_key.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0024_provider_multi_key.sql"])).not.toThrow();
     const cols = db.raw.query("PRAGMA table_info(app_provider_keys)").all() as Array<{ name: string; pk: number }>;
     expect(cols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(["app_id", "provider", "key_id"]);
     // The row is carried over UNCHANGED: D1 migrations are SQL, and SQL cannot
@@ -749,7 +672,7 @@ describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () =>
       app.id,
       legacyEnc,
     );
-    expect(() => applyMigration(db, "0024_provider_multi_key.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0024_provider_multi_key.sql"])).not.toThrow();
     // The declaration keeps its shape MINUS the key material and its
     // verification bookkeeping (both now belong to the key row).
     const declCols = (db.raw.query("PRAGMA table_info(app_custom_providers)").all() as Array<{ name: string }>).map(
@@ -785,7 +708,7 @@ describe("migration 0025_provider_model_evidence.sql (per-key model evidence)", 
   test("rebuilds app_provider_models onto (app_id, provider, key_id) and carries NO aggregate row forward", async () => {
     const db = createPreProviderPoolD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    applyMigration(db, "0024_provider_multi_key.sql");
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
     // The pre-0025 aggregate: one un-attributable row per (App, provider).
     rawRun(
       db,
@@ -793,7 +716,7 @@ describe("migration 0025_provider_model_evidence.sql (per-key model evidence)", 
        VALUES (?, 'anthropic', '["m1","m2"]', '2026-01-01 00:00:00')`,
       app.id,
     );
-    expect(() => applyMigration(db, "0025_provider_model_evidence.sql")).not.toThrow();
+    expect(() => applyMigrations(db, ["0025_provider_model_evidence.sql"])).not.toThrow();
     const cols = db.raw.query("PRAGMA table_info(app_provider_models)").all() as Array<{ name: string; pk: number }>;
     expect(cols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(["app_id", "provider", "key_id"]);
     // The copy is deliberately EMPTY: an aggregate cannot say which key
@@ -978,7 +901,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       app.id,
       legacyEnc,
     );
-    applyMigration(db, "0024_provider_multi_key.sql");
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
     const store = configStore(db);
     // The first read decrypts with the OLD AAD and serves the plaintext …
     expect(await store.getAppConfig(app.id)).toEqual({
@@ -1261,8 +1184,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       app.id,
       legacyEnc,
     );
-    applyMigration(db, "0024_provider_multi_key.sql");
-    applyMigration(db, "0025_provider_model_evidence.sql");
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
+    applyMigrations(db, ["0025_provider_model_evidence.sql"]);
     // Carried verbatim under the sentinel id: only the DELETE's OWN promotion
     // can make the derived id addressable — no list/config call ran before it.
     const carried = db.raw.query("SELECT key_id FROM app_provider_keys").get() as { key_id: string };
@@ -2009,7 +1932,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       JSON.stringify(CUSTOM.model_ids),
       legacyEnc,
     );
-    applyMigration(db, "0024_provider_multi_key.sql");
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
     const store = configStore(db);
     // The legacy row still decrypts through the consumer face and is promoted
     // to the three-segment AAD under its derived id.
@@ -2364,7 +2287,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       JSON.stringify(CUSTOM.model_ids),
       legacyEnc,
     );
-    applyMigration(db, "0024_provider_multi_key.sql");
+    applyMigrations(db, ["0024_provider_multi_key.sql"]);
     const carried = db.raw.query("SELECT key_id FROM app_custom_provider_keys").get() as { key_id: string };
     expect(carried.key_id).toBe("");
     expect(

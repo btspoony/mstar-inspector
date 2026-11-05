@@ -165,27 +165,66 @@ function threadScope(row: { id: string; app_id: string; installation_id: number;
 // ---------------------------------------------------------------------------
 
 /**
- * Open-row selection for the recheck seat: query OPEN rows only, ordered by
- * `COALESCE(last_scheduled_ms, created_ms), id` (oldest waiting first — no
- * newest-updated or permanent never-assessed priority), capped at
- * `ASSESSMENT_TARGET_CAP` (25) regardless of the caller's `limit` so a
- * misbehaving caller cannot break the rotation fairness. Association IDs
- * list the row's ACTIVE (non-superseded) thread associations — superseded
- * ones are dead and never offered again. Unselected rows are NOT returned
- * here; the caller represents them via the aggregate cap count in the
- * round coverage (spec §7.2).
+ * The RECHECKABLE predicate (spec §7.2/§7.4) — ONE copy shared by the
+ * selector and the coverage count, so `selected <= totalOpen` cannot drift
+ * into a lying `capped` remainder. Binds the scope tuple TWICE (the finding
+ * row, then its association probe): bind it with `recheckableScopeBinds`.
+ */
+const RECHECKABLE_WHERE_SQL = `f.app_id = ? AND f.installation_id = ? AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
+         AND (
+           f.state = 'open'
+           OR (
+             f.state = 'addressed'
+             AND EXISTS (
+               SELECT 1 FROM review_threads t
+               WHERE t.app_id = ? AND t.installation_id = ? AND t.owner = ? AND t.repo = ? AND t.pr_number = ?
+                 AND t.finding_row_id = f.id
+                 AND t.superseded_by_publication_id IS NULL
+                 AND t.resolution_state IN ('pending','retry','needs-recheck','local-error')
+             )
+           )
+         )`;
+
+/** The ten binds `RECHECKABLE_WHERE_SQL` expects, in placeholder order. */
+function recheckableScopeBinds(scope: Scope): [string, number, string, string, number, string, number, string, string, number] {
+  return [
+    scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
+    scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
+  ];
+}
+
+/**
+ * Recheckable-row selection for the recheck seat (spec §7.2): OPEN rows plus
+ * ADDRESSED rows that still own a non-superseded association in a non-terminal
+ * state (`pending`/`retry`/`needs-recheck`/`local-error`). The second class is
+ * how a solved-but-unresolved conversation gets another real round: the seat
+ * re-verifies the concern against the CURRENT head and discussion and the
+ * ordinary resolution path (this round's own verified snapshot) resolves it.
+ * Once that association reaches `resolved`/`abandoned` the finding drops back
+ * out, so the rotation keeps only genuinely open rows.
+ *
+ * Ordered by `COALESCE(last_scheduled_ms, created_ms), id` (oldest waiting
+ * first — no newest-updated or permanent never-assessed priority) and capped
+ * at `ASSESSMENT_TARGET_CAP` (25) regardless of the caller's `limit` so a
+ * misbehaving caller cannot break the rotation fairness. Every selected row
+ * advances `last_scheduled_ms` when the publication applies, so a row that
+ * can never be re-proved rotates out instead of starving the ones behind it.
+ * Association IDs list the row's ACTIVE (non-superseded) thread associations
+ * — superseded ones are dead and never offered again. Unselected rows are NOT
+ * returned here; the caller represents them via the aggregate cap count in
+ * the round coverage (spec §7.2/§7.4).
  */
 export async function selectAssessmentTargets(db: D1Like, scope: Scope, limit: number): Promise<RecheckTarget[]> {
   const capped = Math.max(0, Math.min(limit, ASSESSMENT_TARGET_CAP));
   if (capped === 0) return [];
   const rows = await db
     .prepare(
-      `SELECT * FROM review_findings
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'
-       ORDER BY COALESCE(last_scheduled_ms, created_ms), id
+      `SELECT f.* FROM review_findings f
+       WHERE ${RECHECKABLE_WHERE_SQL}
+       ORDER BY COALESCE(f.last_scheduled_ms, f.created_ms), f.id
        LIMIT ?`,
     )
-    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, capped)
+    .bind(...recheckableScopeBinds(scope), capped)
     .all<ReviewFindingRow>();
   const found = rows.results;
   if (found.length === 0) return [];
@@ -218,14 +257,16 @@ export async function selectAssessmentTargets(db: D1Like, scope: Scope, limit: n
   }));
 }
 
-/** Aggregate count of open lifecycle rows for the scope (coverage line). */
-export async function countOpenFindings(db: D1Like, scope: Scope): Promise<number> {
+/**
+ * Aggregate count of RECHECKABLE rows for the scope — the `totalOpen` the
+ * round coverage reports (spec §7.4). It binds the SAME predicate as
+ * `selectAssessmentTargets`, so `selected <= totalOpen` always holds and
+ * `capped` stays the honest remainder instead of going negative.
+ */
+export async function countRecheckableFindings(db: D1Like, scope: Scope): Promise<number> {
   const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM review_findings
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'`,
-    )
-    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
+    .prepare(`SELECT COUNT(*) AS n FROM review_findings f WHERE ${RECHECKABLE_WHERE_SQL}`)
+    .bind(...recheckableScopeBinds(scope))
     .first<{ n: number }>();
   return row?.n ?? 0;
 }
@@ -380,6 +421,70 @@ export async function readPublicationProof(
     .first<{ proof_json: string }>();
   if (row === null) return null;
   return JSON.parse(row.proof_json) as PublicationProof;
+}
+
+/**
+ * The journal phases a DELIVERY hands off (spec §7.7 step 2): everything that
+ * is not terminal for this scope/head, `confirmed` included — its proof is
+ * about to be applied and this delivery still must not re-review the head.
+ */
+export const PUBLICATION_HANDOFF_PHASES: readonly PublicationRow["phase"][] = [
+  "prepared",
+  "sending",
+  "unknown",
+  "confirmed",
+];
+
+/**
+ * The publication-journal row for this exact scope/head in any of `phases`,
+ * with whether that row's OWN proof is readable. ONE predicate, shared by the
+ * delivery hand-off (§7.7 step 2, `order: "oldest"`) and the Check recovery
+ * lane's wait-for-proof probe (§7.11.2, `order: "newest"`) — two copies of the
+ * same SQL would be free to drift apart.
+ *
+ * `hasProof` is deliberately the STRICT condition (`proof_json` present AND
+ * valid JSON): a present-but-corrupt envelope must not end the wait, or the
+ * conclusion path would freeze the unconfirmed failure on a publication whose
+ * real proof is still arriving.
+ */
+export async function findPublicationJournal(
+  db: D1Like,
+  input: {
+    scope: Scope;
+    headSha: string;
+    phases: readonly PublicationRow["phase"][];
+    /**
+     * Which row wins when the head holds more than one (a normal row plus a
+     * degraded one). `oldest` is the delivery hand-off's order (first in flight
+     * wins); `newest` is the Check wait's (the LATEST publication is the one
+     * whose proof is still owed).
+     */
+    order?: "oldest" | "newest";
+  },
+): Promise<{ id: string; phase: PublicationRow["phase"]; hasProof: boolean } | null> {
+  if (input.phases.length === 0) return null;
+  const placeholders = input.phases.map(() => "?").join(", ");
+  const order = input.order === "newest" ? "created_ms DESC, id DESC" : "created_ms, id";
+  const row = await db
+    .prepare(
+      `SELECT id, phase, (proof_json IS NOT NULL AND json_valid(proof_json)) AS has_proof FROM review_publications
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND head_sha = ? AND phase IN (${placeholders})
+       ORDER BY ${order} LIMIT 1`,
+    )
+    .bind(
+      input.scope.appId,
+      input.scope.installationId,
+      input.scope.owner,
+      input.scope.repo,
+      input.scope.prNumber,
+      input.headSha,
+      ...input.phases,
+    )
+    .first<{ id: string; phase: string; has_proof: number }>();
+  return row === null
+    ? null
+    : { id: row.id, phase: row.phase as PublicationRow["phase"], hasProof: row.has_proof === 1 };
 }
 
 /**

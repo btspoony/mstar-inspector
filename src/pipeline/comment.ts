@@ -95,6 +95,12 @@ import {
   type ResolveOutcome,
 } from "./review-threads";
 import { createChecksAdapter, type ChecksAdapter, type ChecksOctokit } from "./checks";
+import {
+  DEGRADED_MARKER_PREFIX,
+  DEGRADED_MARKER_RE,
+  REVIEW_MARKER_PREFIX,
+  REVIEW_MARKER_RE,
+} from "./review-markers";
 
 export type { ListDiscussionInput };
 export type { DiscoveryResult, ResolveOutcome };
@@ -379,9 +385,9 @@ export type ClosureCoverage = {
  */
 function closureCoverageLine(coverage: ClosureCoverage): string {
   return (
-    `Reassessed ${coverage.assessed}/${coverage.selected} open prior finding(s) this round` +
+    `Reassessed ${coverage.assessed}/${coverage.selected} prior finding(s) this round` +
     ` · ${coverage.invalidOutput} invalid-output · ${coverage.omitted} omitted` +
-    ` · ${coverage.capped} over cap · ${coverage.totalOpen} open` +
+    ` · ${coverage.capped} over cap · ${coverage.totalOpen} recheckable` +
     ` · context coverage: ${coverage.contextCoverage}`
   );
 }
@@ -494,39 +500,81 @@ function insertBeforeHeading(body: string, anchor: string, block: string): strin
  * followed by spaces — it turns the line above it into a heading) or a
  * thematic break (any of `-`, `*`, `_` at least three times, optionally
  * spaced); or a code-fence opener (3+ backticks or tildes), which left
- * unclosed runs to the end of the comment. The four raw
- * report fields are model/PR-echoed text, so a spoofed `### Findings` would
- * otherwise steal the anchor the revalidated table is inserted at, a
- * `## 📋 Review` would fork the layout, and a stray `~~~` would swallow every
- * section after it. Up to three leading spaces still count: markdown reads
- * those as the same structure, so the indent is part of the match (4+ spaces
- * is a code block, a structure no heading anchor can be forged in).
+ * unclosed runs to the end of the comment; or a line that opens a block and
+ * reshapes the lines under it — a table row (leading `|`), a blockquote
+ * (leading `>`), or a list item (bullet `-`/`*`/`+`, ordered `1.`/`1)`,
+ * followed by a space or the line end). The four raw report fields are
+ * model/PR-echoed text, so a spoofed `### Findings` would otherwise steal the
+ * anchor the revalidated table is inserted at, a `## 📋 Review` would fork the
+ * layout, and a stray `~~~` would swallow every section after it; a quote or
+ * list lazily absorbs the lines below it, and a table pulls the following
+ * delimiter row into a grid. Up to three leading spaces still count: markdown
+ * reads those as the same structure, so the indent is part of the match (4+
+ * spaces is a code block, a structure no heading anchor can be forged in).
  */
-const REPORT_STRUCTURE_LINE = /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|`{3,}|~{3,})/;
+const REPORT_STRUCTURE_LINE =
+  /^( {0,3})(#{1,6}\s|(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|`{3,}|~{3,}|\||>|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/;
 
 /**
- * Escape the first character of every structure line, so the field stays text:
- * `### Findings` renders literally and is no longer an insertion anchor.
- * Raw HTML is the OTHER structure channel: an unclosed `<details>` routes
- * everything after it on the comment into a collapsed block, so `&` then `<`
- * are escaped (in that order, so the `&lt;` this produces is not re-escaped)
- * and no tag can open. `planToFix` is NOT passed through here — it is already
- * fenced as code.
+ * Neutralize a raw report field so markdown reads it as text, not structure.
+ *
+ * `&` then `<` are escaped, in that order so the `&lt;` this produces is not
+ * re-escaped. Raw HTML is one structure channel: an unclosed `<details>` routes
+ * everything after it on the comment into a collapsed block.
+ *
+ * The other channel is the line itself: one backslash in front of the marker
+ * makes the line text and stops it reshaping the lines under it. After up to
+ * three leading spaces (kept), the line is neutralized when it starts a
+ *
+ * - heading — ATX `#`…`###### `, or a setext underline of `=`/`-`;
+ * - thematic break — a whole line of three or more `-`/`*`/`_`, spaced or not;
+ * - code fence — three or more backticks or tildes, which left open runs to
+ *   the end of the comment;
+ * - table — a line starting `|`, the `|---|` delimiter row included;
+ * - quote — a line starting `>`;
+ * - list item — bullet `-`/`*`/`+`, or ordered `1.`/`1)`, followed by a space
+ *   or the line end.
+ *
+ * Line endings are normalized first (`\r\n` and a lone `\r` → `\n`): a CR is a
+ * line break to markdown too, and left in place it is the line's last
+ * character, so every end-anchored form above misses and `---\r` still opens a
+ * thematic break.
+ *
+ * The escape goes before the marker character, except on an ordered item whose
+ * digits take no escape: there the `.`/`)` is escaped instead. `### Findings`
+ * therefore renders literally and is no longer an insertion anchor, a stray
+ * `~~~` cannot swallow the sections after it, and a quote, list or table
+ * cannot absorb the lines below it.
+ *
+ * Deliberate trade-off: `<https://…>` autolinks, and every other `<…>`, render
+ * as literal text. That is the smaller risk: unescaped, `<` opens raw HTML and
+ * a structure line re-heads the comment, and neither is recoverable once the
+ * comment is published, while a literal URL still reads. A list or quote the
+ * field carried on purpose loses its formatting the same way.
+ *
+ * `planToFix` is NOT passed through here — it is already fenced as code.
  */
 function neutralizeReportText(text: string): string {
   return text
+    .replace(/\r\n?/g, "\n")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .split("\n")
     .map((line) => {
-      const indent = REPORT_STRUCTURE_LINE.exec(line)?.[1];
-      return indent === undefined ? line : `${indent}\\${line.slice(indent.length)}`;
+      const match = REPORT_STRUCTURE_LINE.exec(line);
+      if (match === null) return line;
+      const marker = match[2]!;
+      // An ordered marker's `.`/`)` is the escapable character — markdown only
+      // honours an escape on punctuation, so the digits take none.
+      const at = match[1]!.length + (/^\d/.test(marker) ? marker.length - 1 : 0);
+      return `${line.slice(0, at)}\\${line.slice(at)}`;
     })
     .join("\n");
 }
 
 /**
- * Compose the report sections into an engine-rendered review body:
+ * Compose the report fields into an engine-rendered review body; the tail
+ * sections are appended by `buildReviewBody` through `buildReportTail`.
  *
  *   `## 📋 Review` → overview → (narrative) → `### Revalidated findings` →
  *   `### Findings` → `### Linked-issue AC` → `### ✅ Verified` →
@@ -545,14 +593,6 @@ function neutralizeReportText(text: string): string {
  * revalidated table keeps its position and the layout stays fixed. A missing
  * report writes `none` under every heading — the headings themselves are never
  * deleted.
- */
-export function insertReportSections(rendered: string, report: ReportDoc | null, revalidated: string): string {
-  return `${insertReportFields(rendered, report, revalidated)}\n\n${buildReportTail(report)}`;
-}
-
-/**
- * Compose the report fields INTO the engine layout — the overview and the
- * revalidated table only. The tail is built separately by `buildReportTail`.
  */
 function insertReportFields(rendered: string, report: ReportDoc | null, revalidated: string): string {
   let body = rendered;
@@ -573,6 +613,9 @@ function insertReportFields(rendered: string, report: ReportDoc | null, revalida
   return withRevalidated;
 }
 
+/** What a section body becomes when the tail cannot afford its text. */
+export const TRUNCATION_MARKER = "[... truncated to fit the comment limit ...]";
+
 /**
  * The report tail: `### Linked-issue AC`, `### ✅ Verified`,
  * `### 🗑️ Considered & rejected` and `## 🛠️ Plan to fix`.
@@ -581,42 +624,62 @@ function insertReportFields(rendered: string, report: ReportDoc | null, revalida
  * keeps the head — a tail appended before the clamp is the first thing lost on
  * a long body, exactly the newest sections the report exists to publish. When
  * the tail alone does not fit `limit` (less the blank-line separator and the
- * one-character core cut marker), it degrades in a fixed order:
+ * one-character core cut marker), it degrades in a fixed ladder that keeps
+ * every heading until the final fallback:
  *
  *   1. truncate the plan block — it is the only section with a fence and a
  *      fold, so it is the only one that can be cut without leaving markdown
  *      structure open, and it frees the most bytes; fence and fold stay closed;
- *   2. drop whole sections, lowest value first: rejected → verified →
- *      linked-issue AC. The plan (the most actionable part) is kept last.
+ *   2. replace a section's body with `TRUNCATION_MARKER`, lowest value first:
+ *      rejected → verified → linked-issue AC. The heading stays, so a reader
+ *      sees that the section exists and was cut rather than a section that
+ *      silently vanished;
+ *   3. write `none` under all four headings in their fixed order — the
+ *      shortest form this can return. Only if even that exceeds `limit` does
+ *      the tail contribute nothing: the four headings are its irreducible
+ *      cost, and exceeding `limit` is not an option.
  *
  * Whatever survives is balanced and no longer than `limit`.
  */
 function buildReportTail(report: ReportDoc | null, limit = Number.POSITIVE_INFINITY): string {
   const field = (value: string | undefined): string =>
     value === undefined ? "none" : neutralizeReportText(value);
-  const planHeading = "## 🛠️ Plan to fix";
-  const sections = [
-    `### Linked-issue AC\n\n${field(report?.linkedIssueAc)}`,
-    `### ✅ Verified\n\n${field(report?.verified)}`,
-    `### 🗑️ Considered & rejected\n\n${field(report?.rejected)}`,
-    `${planHeading}\n\n${planBlock(report?.planToFix ?? null)}`,
+  const headings = [
+    "### Linked-issue AC",
+    "### ✅ Verified",
+    "### 🗑️ Considered & rejected",
+    "## 🛠️ Plan to fix",
   ];
+  const bodies = [
+    field(report?.linkedIssueAc),
+    field(report?.verified),
+    field(report?.rejected),
+    planBlock(report?.planToFix ?? null),
+  ];
+  const render = (count = headings.length): string =>
+    headings
+      .slice(0, count)
+      .map((heading, index) => `${heading}\n\n${bodies[index]!}`)
+      .join("\n\n");
   // The caller joins the tail with one blank line and keeps one character for
   // the core's cut marker.
-  let tail = sections.join("\n\n");
-  if (tail.length + 3 <= limit) return tail;
-  const base = sections.slice(0, 3).join("\n\n");
+  const fits = (text: string): boolean => text.length + 3 <= limit;
+
+  let tail = render();
+  if (fits(tail)) return tail;
   // base + "\n\n" + heading + "\n\n" + block + "\n\n" + "…" <= limit.
-  const planBudget = limit - base.length - planHeading.length - 7;
-  sections[3] = `${planHeading}\n\n${planBlock(report?.planToFix ?? null, planBudget)}`;
-  tail = sections.join("\n\n");
-  if (tail.length + 3 <= limit) return tail;
+  const base = render(3);
+  bodies[3] = planBlock(report?.planToFix ?? null, limit - base.length - headings[3]!.length - 7);
+  tail = render();
+  if (fits(tail)) return tail;
   for (const index of [2, 1, 0]) {
-    sections[index] = "";
-    tail = sections.filter((text) => text !== "").join("\n\n");
-    if (tail.length + 3 <= limit) return tail;
+    bodies[index] = TRUNCATION_MARKER;
+    tail = render();
+    if (fits(tail)) return tail;
   }
-  return "";
+  bodies.fill("none");
+  tail = render();
+  return fits(tail) ? tail : "";
 }
 
 // ---------------------------------------------------------------------------
@@ -710,12 +773,6 @@ export function buildPreparedDegradedBody(input: {
 // Single-comment upsert
 // ---------------------------------------------------------------------------
 
-/** Hidden HTML marker prefix — the first line of every review comment body. */
-export const REVIEW_MARKER_PREFIX = "<!-- mstar-inspector:review:v1";
-
-/** Full marker regex: `<!-- mstar-inspector:review:v1 round=N -->`. */
-const REVIEW_MARKER_RE = /^<!-- mstar-inspector:review:v1 round=(\d+) -->/;
-
 /**
  * Parse the round number from a review comment body. Returns null when the
  * body does not start with a well-formed marker (malformed → treated as a
@@ -785,12 +842,6 @@ export function planUpsert(comments: ReviewComment[], excludeIds?: ReadonlySet<n
 // real chain is untouched). One degraded comment per PR, upserted with the
 // same create-on-miss / PATCH-on-hit mechanics.
 // ---------------------------------------------------------------------------
-
-/** Hidden HTML marker prefix — the first line of every degraded comment body. */
-export const DEGRADED_MARKER_PREFIX = "<!-- mstar-inspector:review-degraded:v1";
-
-/** Full marker regex: `<!-- mstar-inspector:review-degraded:v1 round=N -->`. */
-const DEGRADED_MARKER_RE = /^<!-- mstar-inspector:review-degraded:v1 round=(\d+) -->/;
 
 /**
  * Parse the round number from a degraded comment body. Returns null when the
