@@ -21,6 +21,11 @@ category: Fixed
   `skipped`/`budget` with a bounded error naming the required and available bytes, so
   the worker accounts every sent row `unverifiable/budget` instead of spending the
   180s window on a guaranteed empty yield.
+- **The ask budget is an operator setting.** `review.recheck.assignment_max_bytes`
+  (default `65536`, range `8192..262144`) is a system runtime setting on the
+  operator console, read once per round and passed to the runner as a top-level
+  input field — the frozen `mstar.recheck-input/v1` document is unchanged. A model
+  with a larger window can therefore take a larger ask without a redeploy.
 
 <!-- CN -->
 - **大型重审轮现在按席位的上下文预算来提问。** 此前席位的 assignment 会原样嵌入整份
@@ -36,3 +41,7 @@ category: Fixed
   不会启动任何席位：该轮报 `skipped`/`budget`，附带点明所需与可用字节数的有界错误，
   worker 因此把每个已发送行记账为 `unverifiable/budget`，而不是把 180 秒窗口花在一次
   注定空手而归的调用上。
+- **提问预算是运维可配项。** `review.recheck.assignment_max_bytes`（默认 `65536`，
+  范围 `8192..262144`）是运维控制台上的系统运行参数，每轮读取一次并作为 runner 顶层
+  输入字段传入——冻结的 `mstar.recheck-input/v1` 文档不变。窗口更大的模型因此无需重新
+  部署即可承受更大的提问。

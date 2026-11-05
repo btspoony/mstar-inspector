@@ -41,6 +41,10 @@ import {
   CHECK_UPDATE_DEFAULT,
   CHECK_UPDATE_KEY,
   CONCURRENCY_MIN,
+  RECHECK_ASSIGNMENT_DEFAULT,
+  RECHECK_ASSIGNMENT_KEY,
+  RECHECK_ASSIGNMENT_MAX,
+  RECHECK_ASSIGNMENT_MIN,
   REVIEW_LEVEL_DEFAULT,
   REVIEW_LEVEL_KEY,
   RuntimeConfigError,
@@ -51,11 +55,13 @@ import {
   WORKSPACE_CONCURRENCY_MAX,
   getCheckBudgets,
   getEffectiveConcurrency,
+  getRecheckAssignmentMaxBytes,
   getSystemConcurrency,
   getWorkspaceConcurrency,
   readDefaultReviewLevel,
   setCheckBudgets,
   setDefaultReviewLevel,
+  setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
@@ -688,5 +694,99 @@ describe("default review level", () => {
     seedLevel(db, "turbo");
     await setDefaultReviewLevel(db, "deep", ACTOR);
     expect(auditDetails(db, "runtime.review_level.set")).toEqual([{ before: null, after: "deep" }]);
+  });
+});
+
+describe("recheck assignment budget", () => {
+  /** The stored budget row, raw so a refused write is observable. */
+  function storedBudget(db: TestD1): string | null {
+    const row = db.raw
+      .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
+      .get(RECHECK_ASSIGNMENT_KEY) as { value: string } | null;
+    return row?.value ?? null;
+  }
+
+  /** That row as another writer left it, bypassing the store. */
+  function seedBudget(db: TestD1, value: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at)
+         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+      )
+      .run(RECHECK_ASSIGNMENT_KEY, value);
+  }
+
+  test("an absent row reads the runner's documented default without degrading", async () =>
+    expect(await getRecheckAssignmentMaxBytes(fixture())).toEqual({
+      maxBytes: RECHECK_ASSIGNMENT_DEFAULT,
+      degraded: false,
+    }));
+
+  test("a stored value reads back as itself", async () => {
+    const db = fixture();
+    seedBudget(db, "131072");
+    expect(await getRecheckAssignmentMaxBytes(db)).toEqual({ maxBytes: 131_072, degraded: false });
+  });
+
+  test("an untrusted or out-of-range stored value answers the default with degraded: true", async () => {
+    for (const value of ["not-a-number", String(RECHECK_ASSIGNMENT_MIN - 1), String(RECHECK_ASSIGNMENT_MAX + 1), "0"]) {
+      const db = fixture();
+      seedBudget(db, value);
+      expect(await getRecheckAssignmentMaxBytes(db), value).toEqual({
+        maxBytes: RECHECK_ASSIGNMENT_DEFAULT,
+        degraded: true,
+      });
+    }
+  });
+
+  test("a read failure answers the default with degraded: true and never throws", async () =>
+    expect(await getRecheckAssignmentMaxBytes(failingDb)).toEqual({
+      maxBytes: RECHECK_ASSIGNMENT_DEFAULT,
+      degraded: true,
+    }));
+
+  test("an out-of-range or non-integer write is refused and writes nothing", async () => {
+    const db = fixture();
+    for (const value of [
+      RECHECK_ASSIGNMENT_MIN - 1,
+      RECHECK_ASSIGNMENT_MAX + 1,
+      131_072.5,
+      0,
+    ]) {
+      await expect(setRecheckAssignmentMaxBytes(db, value, ACTOR)).rejects.toBeInstanceOf(
+        RuntimeConfigError,
+      );
+    }
+    expect(storedBudget(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("an accepted write lands the row with one audit row, and reads back", async () => {
+    const db = fixture();
+    expect(await setRecheckAssignmentMaxBytes(db, 131_072, ACTOR)).toBe(131_072);
+    expect(storedBudget(db)).toBe("131072");
+    expect(await getRecheckAssignmentMaxBytes(db)).toEqual({ maxBytes: 131_072, degraded: false });
+    expect(auditRows(db)).toEqual([
+      { action: "runtime.recheck_assignment.set", target_id: RECHECK_ASSIGNMENT_KEY },
+    ]);
+    expect(auditDetails(db, "runtime.recheck_assignment.set")).toEqual([
+      { before: { maxBytes: null }, after: { maxBytes: 131_072 } },
+    ]);
+
+    // A second save records the previous value as `before`.
+    await setRecheckAssignmentMaxBytes(db, 200_000, ACTOR);
+    expect(auditDetails(db, "runtime.recheck_assignment.set")[1]).toEqual({
+      before: { maxBytes: 131_072 },
+      after: { maxBytes: 200_000 },
+    });
+  });
+
+  test("a corrupt stored value is audited as null, not as the raw text", async () => {
+    const db = fixture();
+    seedBudget(db, "not-a-number");
+    await setRecheckAssignmentMaxBytes(db, 65_536, ACTOR);
+    expect(auditDetails(db, "runtime.recheck_assignment.set")).toEqual([
+      { before: { maxBytes: null }, after: { maxBytes: 65_536 } },
+    ]);
   });
 });

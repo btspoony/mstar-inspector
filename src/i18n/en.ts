@@ -991,6 +991,20 @@ export const en = {
       /** The stored level could not be read — the shown tier is the documented default. */
       reviewLevelUnreadable:
         "The stored default review depth could not be read, so Apps without their own depth run Standard. Choosing a level saves a new one, and retrying the read re-checks the row.",
+      /** The prior-findings seat's ask budget. */
+      recheckTitle: "Recheck assignment budget",
+      recheckDescription:
+        "How much of a round the prior-findings seat is asked with, in UTF-8 bytes. Every prior finding and the discussion always ride; evidence slices ride until this budget is spent.",
+      recheckLabel: "Assignment budget (bytes)",
+      recheckSave: "Save",
+      recheckSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      recheckFailed: "Could not change the recheck assignment budget.",
+      /** {value} = the budget currently stored (or the documented default). */
+      recheckCurrent: "Effective on the next review: {value} bytes.",
+      /** The stored budget could not be read — the number is the documented default. */
+      recheckUnreadable:
+        "The stored recheck assignment budget could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
       /**
        * Deployment version footer. `{version}` carries the
        * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the

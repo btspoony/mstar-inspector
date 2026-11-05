@@ -848,6 +848,20 @@ export const zhCN: Dictionary = {
       /** 已存储的档位无法读取——显示的档位是文档默认值。 */
       reviewLevelUnreadable:
         "无法读取已存储的默认评审深度，因此未自行选择评审深度的 App 正在使用「标准」。选择档位可保存为新值，重新读取会重新检查该行。",
+      /** 历史发现重审席位的提问预算。 */
+      recheckTitle: "重审提问预算",
+      recheckDescription:
+        "历史发现重审席位单轮可索要的上下文大小（UTF-8 字节）。所有历史发现与讨论始终保留，证据切片在此预算内按序保留。",
+      recheckLabel: "提问预算（字节）",
+      recheckSave: "保存",
+      recheckSaved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      recheckFailed: "修改重审提问预算失败。",
+      /** {value} = 当前存储的预算（或文档默认值）。 */
+      recheckCurrent: "下一轮评审生效：{value} 字节。",
+      /** 已存储的预算无法读取——显示的数值是文档默认值。 */
+      recheckUnreadable:
+        "无法读取已存储的重审提问预算，因此正在使用文档默认值。输入范围内的数值可保存为新值，重新读取会重新检查该行。",
       // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
       // 与 /healthz 字段及 release tag 同形。
       version: "版本 {version}",

@@ -260,20 +260,22 @@ function jsonByteLength(value: unknown): number {
 }
 
 /**
- * The seat's CONTEXT budget for its whole assignment, in UTF-8 bytes (plan
- * 036b Task 2, I-000396). The §7.3 input cap (512 KiB, consumer) is a WIRE
- * cap, not a window: at 3.5–4 bytes per token it is ~131k–150k tokens — a
- * whole 128k window spent before the prompt's own rules, the seat's read-only
- * tool traffic and its yield (25 rows may carry ~140 KB of quote +
- * explanation) are counted, so the one-shot yield never arrives. 64 KiB ≈
- * 16k–18k tokens leaves that window room; `fitRecheckInput` fits the ask to
- * it instead of asking for a document no seat can hold.
+ * The DEFAULT context budget for the seat's whole assignment, in UTF-8 bytes
+ * (issue I-000396), used when the runner input carries no
+ * `recheckAssignmentMaxBytes`. The operator tunes the live value in the
+ * `review.recheck.assignment_max_bytes` system row; this constant is only its
+ * absent-row fallback, never the cap the seat runs with. The §7.3 input cap
+ * (512 KiB, consumer) is a WIRE cap, not a window: at 3.5–4 bytes per token it
+ * is ~131k–150k tokens — a whole 128k window spent before the prompt's own
+ * rules, the seat's read-only tool traffic and its yield (25 rows may carry
+ * ~140 KB of quote + explanation) are counted, so the one-shot yield never
+ * arrives. 64 KiB ≈ 16k–18k tokens leaves that window room; `fitRecheckInput`
+ * fits the ask to it instead of asking for a document no seat can hold.
  */
 export const RECHECK_ASSIGNMENT_MAX_BYTES = 65_536;
 
-/** The ask's fixed prose, and what is left of the budget for the document. */
+/** The ask's fixed prose; the document gets what the budget leaves. */
 const ASSIGNMENT_PROSE_BYTES = utf8Bytes(assignmentText(""));
-const ASSIGNMENT_DOCUMENT_BYTES = RECHECK_ASSIGNMENT_MAX_BYTES - ASSIGNMENT_PROSE_BYTES;
 
 /** How a round can be asked: the fitted input, or the bytes its target core needs. */
 export type RecheckAssignmentFit =
@@ -311,24 +313,28 @@ function evidenceOrder(input: RecheckInput): EvidenceSlice[] {
 /**
  * The input document the seat may be asked with: every target and the
  * discussion always ride (no prior finding may vanish from the ask), the
- * evidence catalog only as far as `RECHECK_ASSIGNMENT_MAX_BYTES` allows.
- * Slices ride UNMODIFIED — one that does not fit is omitted WHOLE, never
- * truncated, so its line numbers stay exact and a quote copied from it still
- * validates. `ok: false` means even targets + discussion cannot be asked: no
- * seat could serve that round, so the caller skips it instead of burning the
- * 180s window on a guaranteed empty yield.
+ * evidence catalog only as far as `maxBytes` allows. Slices ride UNMODIFIED —
+ * one that does not fit is omitted WHOLE, never truncated, so its line numbers
+ * stay exact and a quote copied from it still validates. `ok: false` means
+ * even targets + discussion cannot be asked: no seat could serve that round,
+ * so the caller skips it instead of burning the 180s window on a guaranteed
+ * empty yield.
  */
-export function fitRecheckInput(input: RecheckInput): RecheckAssignmentFit {
-  if (jsonByteLength(input) <= ASSIGNMENT_DOCUMENT_BYTES) return { ok: true, input, omittedSlices: 0 };
+export function fitRecheckInput(
+  input: RecheckInput,
+  maxBytes: number = RECHECK_ASSIGNMENT_MAX_BYTES,
+): RecheckAssignmentFit {
+  const documentBytes = maxBytes - ASSIGNMENT_PROSE_BYTES;
+  if (jsonByteLength(input) <= documentBytes) return { ok: true, input, omittedSlices: 0 };
   // `{...input, evidence: []}` is the same document with an empty catalog:
   // the slice list then grows it by each slice's own bytes plus one separator.
   const core = jsonByteLength({ ...input, evidence: [] });
-  if (core > ASSIGNMENT_DOCUMENT_BYTES) return { ok: false, requiredBytes: core + ASSIGNMENT_PROSE_BYTES };
+  if (core > documentBytes) return { ok: false, requiredBytes: core + ASSIGNMENT_PROSE_BYTES };
   const kept: EvidenceSlice[] = [];
   let bytes = core;
   for (const slice of evidenceOrder(input)) {
     const added = jsonByteLength(slice) + (kept.length === 0 ? 0 : 1);
-    if (bytes + added > ASSIGNMENT_DOCUMENT_BYTES) continue;
+    if (bytes + added > documentBytes) continue;
     kept.push(slice);
     bytes += added;
   }
@@ -491,14 +497,17 @@ export async function runRecheckSeat(input: {
   input: RecheckInput;
   model: string[];
   signal: AbortSignal;
+  /** The operator's ask budget; absent → `RECHECK_ASSIGNMENT_MAX_BYTES`. */
+  assignmentMaxBytes?: number;
 }): Promise<RecheckSeatResult> {
   const headSha = input.input.headSha;
+  const assignmentMaxBytes = input.assignmentMaxBytes ?? RECHECK_ASSIGNMENT_MAX_BYTES;
   const maxRuntimeMs = currentRecheckBudget(Date.now());
   if (maxRuntimeMs === 0) {
     console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget" }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: null } };
   }
-  const ask = fitRecheckInput(input.input);
+  const ask = fitRecheckInput(input.input, assignmentMaxBytes);
   if (!ask.ok) {
     // Targets + discussion alone overrun the seat's context budget: no seat
     // could hold the ask, so dispatching would only burn the window and lose
@@ -507,7 +516,7 @@ export async function runRecheckSeat(input: {
     // `unverifiable`/`budget` and blames none of them.
     const error = redactedStatusError(
       `recheck assignment exceeds the seat's context budget: targets + discussion need ` +
-        `at least ${ask.requiredBytes} bytes, the budget is ${RECHECK_ASSIGNMENT_MAX_BYTES}`,
+        `at least ${ask.requiredBytes} bytes, the budget is ${assignmentMaxBytes}`,
     );
     console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget", error }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error } };

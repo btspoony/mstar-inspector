@@ -133,6 +133,16 @@ export type ReviewLevelConfig = {
   degraded: boolean;
 };
 
+/** The recheck seat's ask budget as the operator API reports it. */
+export type RecheckAssignmentConfig = {
+  /** UTF-8 bytes of assignment the seat may be asked with. */
+  maxBytes: number;
+  min: number;
+  max: number;
+  /** The stored budget could not be read: `maxBytes` is the documented default. */
+  degraded: boolean;
+};
+
 /** The runtime parameters (iteration spec §1.1, spec §7.10). */
 export type RuntimeConfig = {
   concurrency: number;
@@ -149,6 +159,8 @@ export type RuntimeConfig = {
   checkBudgets: CheckBudgetConfig | null;
   /** The default-review-depth surface; `null` under the same older-Worker rule. */
   reviewLevel: ReviewLevelConfig | null;
+  /** The recheck ask-budget surface; `null` under the same older-Worker rule. */
+  recheckAssignment: RecheckAssignmentConfig | null;
 };
 
 function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
@@ -179,6 +191,18 @@ function parseReviewLevel(row: Json): ReviewLevelConfig | null {
   };
 }
 
+function parseRecheckAssignment(row: Json): RecheckAssignmentConfig | null {
+  const raw = row.recheckAssignment;
+  if (raw === undefined) return null;
+  const budget = map(raw, "runtime recheckAssignment");
+  return {
+    maxBytes: num(budget, "maxBytes"),
+    min: num(budget, "min"),
+    max: num(budget, "max"),
+    degraded: bool(budget, "degraded"),
+  };
+}
+
 export async function readRuntime(): Promise<RuntimeConfig> {
   const body = map(await fetchJson(`${BASE}/runtime`), "runtime response");
   return {
@@ -188,6 +212,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     degraded: bool(body, "degraded"),
     checkBudgets: parseCheckBudgets(body),
     reviewLevel: parseReviewLevel(body),
+    recheckAssignment: parseRecheckAssignment(body),
   };
 }
 
@@ -249,6 +274,30 @@ export async function setDefaultReviewLevel(
     if (typeof saved === "string") return { ...stored, value: saved, degraded: false };
   }
   return { ...stored, value, degraded: false };
+}
+
+/**
+ * Save the recheck ask budget, answering the value the server stored. A 2xx
+ * whose body is unreadable still landed the write, so the request value stands
+ * in — the same rule as `setSystemConcurrency`.
+ */
+export async function setRecheckAssignmentMaxBytes(
+  maxBytes: number,
+  stored: RecheckAssignmentConfig,
+): Promise<RecheckAssignmentConfig> {
+  const answer = await write("PATCH", "/runtime", { recheckAssignment: { maxBytes } });
+  if (typeof answer === "object" && answer !== null && "recheckAssignment" in answer) {
+    const saved = answer.recheckAssignment;
+    if (
+      typeof saved === "object" &&
+      saved !== null &&
+      "maxBytes" in saved &&
+      typeof saved.maxBytes === "number"
+    ) {
+      return { ...stored, maxBytes: saved.maxBytes, degraded: false };
+    }
+  }
+  return { ...stored, maxBytes, degraded: false };
 }
 
 export async function readWorkspaces(): Promise<WorkspaceRow[]> {

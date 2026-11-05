@@ -106,6 +106,7 @@ const { anchorRecheckDeadline, OUTER_RUNNER_CAP_MS, RECHECK_ASSIGNMENT_MAX_BYTES
     input: RecheckInput;
     model: string[];
     signal: AbortSignal;
+    assignmentMaxBytes?: number;
   }) => Promise<{ doc: { results: { rowId: string; disposition: string; reason: string; evidence: { sliceId: string } | null }[] } | null; status: { outcome: string; reason: RecheckStatusReason | null; error: string | null; rejected: number; rejected_row_ids: string[]; rejected_unnamed: number } }>;
 };
 
@@ -513,5 +514,51 @@ describe("036b Task 2 — the ask fits the seat's context budget", () => {
     expect(status).toMatchObject({ outcome: "skipped", reason: "budget" });
     expect(status.error).toContain("context budget");
     expect(status.error!.length).toBeLessThanOrEqual(500);
+  });
+});
+
+describe("the ask budget is the operator's setting, not a runner constant", () => {
+  test("a larger budget retains more slices than the documented default", async () => {
+    // The documented default (65,536 B) fits a fraction of the catalog.
+    seatResult = answerAll(INPUT);
+    await run();
+    const defaultRetained = askedDocument(seatCalls[0]!.assignment).evidence.length;
+    seatCalls.length = 0;
+
+    // At the setting's ceiling the same round nearly fits whole.
+    seatResult = answerAll(INPUT);
+    const { status } = await runRecheckSeat({
+      session: {} as never,
+      input: INPUT,
+      model: ["test-model"],
+      signal: new AbortController().signal,
+      assignmentMaxBytes: 262_144,
+    });
+    expect(seatCalls).toHaveLength(1);
+    const assignment = seatCalls[0]!.assignment;
+    expect(Buffer.byteLength(assignment)).toBeLessThanOrEqual(262_144);
+    expect(askedDocument(assignment).evidence.length).toBeGreaterThan(defaultRetained);
+    expect(status).toMatchObject({ outcome: "ok", reason: null });
+  });
+
+  test("a smaller budget trips the skipped/budget path before any seat starts", async () => {
+    // 8,192 B cannot hold this round's target core plus discussion, so the
+    // round is skipped instead of dispatching a seat that cannot hold the ask.
+    seatResult = {
+      stderr: "",
+      structuredOutput: { source: "caller", mode: "strict", status: "unavailable" },
+    };
+    const { doc: seatDoc, status } = await runRecheckSeat({
+      session: {} as never,
+      input: INPUT,
+      model: ["test-model"],
+      signal: new AbortController().signal,
+      assignmentMaxBytes: 8_192,
+    });
+    expect(seatCalls).toHaveLength(0);
+    expect(seatDoc).toBeNull();
+    expect(status).toMatchObject({ outcome: "skipped", reason: "budget" });
+    expect(status.error).toContain("at least");
+    expect(status.error).toContain("the budget is 8192");
   });
 });

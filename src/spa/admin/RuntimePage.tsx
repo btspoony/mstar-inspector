@@ -31,9 +31,11 @@ import {
   readRuntime,
   setCheckBudgets,
   setDefaultReviewLevel,
+  setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
   useLoaded,
   type CheckBudgetConfig,
+  type RecheckAssignmentConfig,
   type ReviewLevelConfig,
 } from "./api";
 import { ConsolePath, Screen } from "./screen";
@@ -53,6 +55,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [terminalizeDraft, setTerminalizeDraft] = useState<string | null>(null);
   const [updateDraft, setUpdateDraft] = useState<string | null>(null);
   const [levelDraft, setLevelDraft] = useState<string | null>(null);
+  const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
   // the terminalize/update relation included — reads as that field's error
@@ -60,7 +63,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [notice, setNotice] = useState<{
     kind: "success" | "error";
     message: string;
-    source: "concurrency" | "checkBudgets" | "reviewLevel";
+    source: "concurrency" | "checkBudgets" | "reviewLevel" | "recheckAssignment";
   } | null>(null);
 
   async function onSubmit(
@@ -181,6 +184,43 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
+  async function onSaveRecheck(
+    event: FormEvent<HTMLFormElement>,
+    stored: RecheckAssignmentConfig,
+  ): Promise<void> {
+    event.preventDefault();
+    if (busy) return; // in-flight guard — no double submit
+    if (concurrencySubmitBlocked(stored.degraded, recheckDraft)) return;
+    // Same browser-side parsing as the concurrency field: the server's range
+    // gate is the only validator.
+    const maxBytes = Number((recheckDraft ?? String(stored.maxBytes)).trim());
+    setBusy(true);
+    setNotice(null);
+    try {
+      const saved = await setRecheckAssignmentMaxBytes(maxBytes, stored);
+      // A 2xx rewrote the row, so it reads as trusted again.
+      update((data) => ({ ...data, recheckAssignment: saved }));
+      setRecheckDraft(null);
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.recheckSaved"),
+        source: "recheckAssignment",
+      });
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.recheckFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+        source: "recheckAssignment",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="flex flex-col gap-6">
       <PageHeader
@@ -202,6 +242,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const budgets = data.checkBudgets;
           // Same older-Worker rule for the default review depth.
           const level = data.reviewLevel;
+          // And for the recheck seat's ask budget.
+          const recheck = data.recheckAssignment;
           return (
           <div className="flex flex-col gap-4">
             <SectionCard tier="secondary">
@@ -406,6 +448,64 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     </Button>
                   ) : null}
                 </form>
+              </CardContent>
+            </SectionCard>
+            )}
+            {recheck === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.recheckTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.recheckDescription")}
+                </p>
+                {notice?.source === "recheckAssignment" ? (
+                  <div className="mt-4">
+                    <PageNotice kind={notice.kind} message={notice.message} />
+                  </div>
+                ) : null}
+                {recheck.degraded ? (
+                  // The number shown is the documented default, not the stored
+                  // setting: the form starts empty so a save cannot pin it.
+                  <div className="mt-4">
+                    <PageNotice kind="warn" message={t(locale, "admin.runtime.recheckUnreadable")} />
+                  </div>
+                ) : null}
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => void onSaveRecheck(event, recheck)}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="recheck-assignment-bytes">
+                      {t(locale, "admin.runtime.recheckLabel")}
+                    </label>
+                    <Input
+                      id="recheck-assignment-bytes"
+                      type="number"
+                      min={recheck.min}
+                      max={recheck.max}
+                      className="w-40"
+                      autoComplete="off"
+                      required
+                      value={recheckDraft ?? (recheck.degraded ? "" : String(recheck.maxBytes))}
+                      onChange={(event) => setRecheckDraft(event.target.value)}
+                    />
+                  </div>
+                  <Button type="submit" disabled={busy}>
+                    {t(locale, "admin.runtime.recheckSave")}
+                  </Button>
+                  {recheck.degraded ? (
+                    <Button type="button" variant="secondary" onClick={reload}>
+                      {t(locale, "common.retry")}
+                    </Button>
+                  ) : null}
+                </form>
+                {recheck.degraded ? null : (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {t(locale, "admin.runtime.recheckCurrent", { value: recheck.maxBytes })}
+                  </p>
+                )}
               </CardContent>
             </SectionCard>
             )}
