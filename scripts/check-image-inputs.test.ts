@@ -561,4 +561,53 @@ describe("image gate CLI", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("an unknown --base refuses instead of passing", () => {
+    const { dir, git } = tempRepo();
+    try {
+      git("add", "-A");
+      git("commit", "-qm", "config");
+
+      // A base that was never fetched, e.g. a truncated CI checkout.
+      const { code, out } = runGate(dir, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", script);
+      expect(code).toBe(1);
+      expect(out).toContain(
+        "could not read the container blocks of wrangler.jsonc at deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      );
+      expect(out).toContain("treat as unverified, not a pass");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a base with no merge base makes the diff unreadable and refuses", () => {
+    const { dir, git } = tempRepo();
+    try {
+      git("add", "-A");
+      git("commit", "-qm", "config");
+      const head = git("rev-parse", "HEAD");
+
+      // The config is readable at this revision, but the unrelated history has
+      // no merge base, so `git diff <base>...HEAD` fails.
+      git("checkout", "-q", "--orphan", "unrelated");
+      git("rm", "-rqf", ".");
+      write(
+        dir,
+        "wrangler.jsonc",
+        '{\n  "containers": [{ "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile" } } }]\n}\n',
+      );
+      write(dir, "sandbox-image/Dockerfile", "# rebuild: unrelated\nFROM scratch\n");
+      git("add", "-A");
+      git("commit", "-qm", "unrelated history");
+      const unrelated = git("rev-parse", "HEAD");
+      git("checkout", "-q", head);
+
+      const { code, out } = runGate(dir, unrelated, script);
+      expect(code).toBe(1);
+      expect(out).toContain("could not read the diff");
+      expect(out).toContain("treat as unverified, not a pass");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
