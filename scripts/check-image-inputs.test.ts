@@ -21,6 +21,7 @@ import {
   familyPattern,
   IMAGE_INPUT_FAMILIES,
   IMAGE_INPUT_PATTERNS,
+  IMAGE_REBUILD_INSTRUCTION,
   readDockerfilePaths,
   touchesImageInput,
   touchesRebuildMarker,
@@ -80,6 +81,21 @@ describe("image input vocabulary parity", () => {
     const declared = [...IMAGE_INPUT_FAMILIES].sort();
     expect([...new Set(agents)].sort()).toEqual(declared);
     expect([...new Set(deploy)].sort()).toEqual(declared);
+  });
+
+  test("the printed instruction is the AGENTS.md section, not a copy of it", () => {
+    const agents = readFileSync(join(REPO_ROOT, "AGENTS.md"), "utf8");
+    // Independent boundaries: a hand copy that drifts, or a generator that
+    // slices only a fragment of the section, misses this exact string.
+    const quoted = agents
+      .slice(
+        agents.indexOf("The review container is built from"),
+        agents.indexOf("\nCheck before merging"),
+      )
+      .trimEnd();
+    expect(IMAGE_REBUILD_INSTRUCTION).toBe(quoted);
+    // The fact the retired hand copy had lost: the doc names the Dockerfile.
+    expect(IMAGE_REBUILD_INSTRUCTION).toContain("sandbox-image/Dockerfile");
   });
 
   test("every COPY source in the Dockerfile is covered by an input family", () => {

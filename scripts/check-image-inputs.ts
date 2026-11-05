@@ -19,6 +19,7 @@
  * diff/config could not be read (an unreadable answer is never a pass).
  */
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 /**
  * Path families the image copies in — the gate's path vocabulary, as globs.
@@ -60,24 +61,31 @@ export function familyPattern(glob: string): RegExp {
 
 export const IMAGE_INPUT_PATTERNS: readonly RegExp[] = IMAGE_INPUT_FAMILIES.map(familyPattern);
 
-/** The instruction from `AGENTS.md` § Sandbox image rebuild, generated from the one family list. */
-export const IMAGE_REBUILD_INSTRUCTION = [
-  "The review container is built from the Dockerfile below, and `wrangler`",
-  "hashes **that file alone** — not the sources the Dockerfile copies in. A change",
-  "to those sources therefore deploys the Worker without rebuilding the image, and",
-  "the container keeps running the previous build: no error, no warning, no",
-  "failing check.",
-  "",
-  "Touch the `# rebuild:` marker block in that Dockerfile in the same commit",
-  "whenever you change any of:",
-  "",
-  ...IMAGE_INPUT_FAMILIES.map((family) => `- \`${family}\``),
-  "",
-  "…or when either container block in `wrangler.jsonc` (top level or",
-  "`env.production`) changes: the container's `name`, its `images` entry, or that",
-  "entry's `dockerfile`/`build_context`. A config edit outside those blocks (vars,",
-  "queues, routes, observability) needs no rebuild.",
-].join("\n");
+/**
+ * The instruction quoted on failure, read from `AGENTS.md` § Sandbox image
+ * rebuild — the section itself, not a copy. A hand copy used to live here and
+ * had already drifted (it named no Dockerfile while the doc names one); the
+ * section is the single source, so the printed text cannot disagree with it.
+ * The bullets are the doc's, and the parity test keeps them equal to
+ * `IMAGE_INPUT_FAMILIES`. Throws, rather than printing a fragment, when the
+ * section it quotes is gone.
+ */
+const AGENTS_SECTION = "## Sandbox image rebuild";
+const INSTRUCTION_START = "The review container is built from";
+const INSTRUCTION_END = "\nCheck before merging";
+
+function agentsRebuildInstruction(): string {
+  const agents = readFileSync(join(import.meta.dir, "..", "AGENTS.md"), "utf8");
+  const heading = agents.indexOf(AGENTS_SECTION);
+  const start = heading < 0 ? -1 : agents.indexOf(INSTRUCTION_START, heading);
+  const end = start < 0 ? -1 : agents.indexOf(INSTRUCTION_END, start);
+  if (start < 0 || end < 0) {
+    throw new Error(`AGENTS.md ${AGENTS_SECTION} no longer holds the instruction this gate quotes`);
+  }
+  return agents.slice(start, end).trimEnd();
+}
+
+export const IMAGE_REBUILD_INSTRUCTION = agentsRebuildInstruction();
 
 /**
  * A JSON object at `value`, or `undefined` for anything else — a config field
