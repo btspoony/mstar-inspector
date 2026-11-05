@@ -652,7 +652,7 @@ describe("check budgets", () => {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_MIN,
       degraded: false,
-      derived: false,
+      derived: true,
     });
 
     // A stored value that already satisfies the relation is returned as is.
@@ -667,7 +667,7 @@ describe("check budgets", () => {
       terminalizeMs: 20_000,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: false,
-      derived: false,
+      derived: true,
     });
 
     // The mirror case: only the send is stored, above the default wait.

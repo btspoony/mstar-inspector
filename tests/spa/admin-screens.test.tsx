@@ -479,6 +479,50 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("an older Worker that omits only `derived` still renders the budget card", async () => {
+    // The predecessor payload carries checkBudgets without the new field: the
+    // whole page must keep rendering, with the stored pair prefilled.
+    const { derived: _derived, ...olderBudgets } = CHECK_BUDGETS;
+    const surface = await runtimeScreen(() =>
+      json({ concurrency: 24, min: 1, max: 256, degraded: false, checkBudgets: olderBudgets }),
+    );
+    expect(surface.text()).toContain("Effective on the next review: 24.");
+    const terminalize = surface.container.querySelector("#check-terminalize-budget") as unknown as HTMLInputElement;
+    expect(terminalize.value).toBe("10000");
+    expect(surface.text()).not.toContain("Only one of these budgets is stored.");
+    await surface.close();
+  });
+
+  test("a derived pair warns, starts both fields empty, and clears the state after a save", async () => {
+    // One side came from the absent-row default: the card must not present it
+    // as a configured value, and a save (which writes both rows) clears it.
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ checkBudgets: { terminalizeMs: 12_000, updateMs: 7_000 } })
+        : json({ concurrency: 24, min: 1, max: 256, degraded: false, checkBudgets: { ...CHECK_BUDGETS, derived: true } }),
+    );
+    expect(surface.text()).toContain("Only one of these budgets is stored.");
+    expect(
+      (surface.container.querySelector("#check-terminalize-budget") as unknown as HTMLInputElement).value,
+    ).toBe("");
+    expect(
+      (surface.container.querySelector("#check-update-budget") as unknown as HTMLInputElement).value,
+    ).toBe("");
+    expect(surface.text()).toContain("(one side derived)");
+
+    await surface.type("#check-terminalize-budget", "12000");
+    await surface.type("#check-update-budget", "7000");
+    const budgetForm = surface.container.querySelector("#check-terminalize-budget")!.closest("form")!;
+    await surface.click(budgetForm.querySelector('button[type="submit"]'));
+
+    // Both rows were written: the warning and the derived line are gone and
+    // the card reads as fully stored again.
+    expect(surface.text()).not.toContain("Only one of these budgets is stored.");
+    expect(surface.text()).not.toContain("(one side derived)");
+    expect(surface.text()).toContain("Effective on the next review: terminalize 12000 ms, update 7000 ms.");
+    await surface.close();
+  });
+
   test("a zh_CN render shows the page's dictionary copy", async () => {
     const surface = await runtimeScreen(() => json(RUNTIME), "zh_CN");
     expect(surface.text()).toContain("运行时参数");

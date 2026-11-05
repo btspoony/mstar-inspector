@@ -164,7 +164,9 @@ function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
     updateMin: num(budgets, "updateMin"),
     updateMax: num(budgets, "updateMax"),
     degraded: bool(budgets, "degraded"),
-    derived: bool(budgets, "derived"),
+    // Tolerant read: the predecessor Worker serves this object without the
+    // field, and that payload must keep the whole page rendering.
+    derived: (budgets as Record<string, unknown>)["derived"] === true,
   };
 }
 
@@ -228,7 +230,8 @@ export async function setCheckBudgets(
     ) {
       const { terminalizeMs, updateMs } = saved;
       if (typeof terminalizeMs === "number" && typeof updateMs === "number") {
-        return { ...stored, terminalizeMs, updateMs, degraded: false };
+        // Both rows were just written, so neither side is derived any more.
+        return { ...stored, terminalizeMs, updateMs, degraded: false, derived: false };
       }
     }
   }

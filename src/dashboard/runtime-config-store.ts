@@ -508,10 +508,14 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
     // the invariant.
     let effectiveTerminalize = terminalize ?? CHECK_TERMINALIZE_DEFAULT;
     let effectiveUpdate = update ?? CHECK_UPDATE_DEFAULT;
-    let derived = false;
+    // `derived` names a HALF-configured pair, not the adjustment: when exactly
+    // one row is stored, the absent side is the documented default and must
+    // never be round-tripped by the admin, even if the effective pair already
+    // satisfies the invariant. Both rows absent is the ordinary "all defaults"
+    // state, which the admin may prefill and save.
+    const derived = (terminalize === undefined) !== (update === undefined);
     if (effectiveTerminalize <= effectiveUpdate) {
       if (terminalize !== undefined && update !== undefined) return degradedCheckBudgets();
-      derived = true;
       if (terminalize === undefined) {
         effectiveTerminalize = Math.max(
           CHECK_TERMINALIZE_MIN,

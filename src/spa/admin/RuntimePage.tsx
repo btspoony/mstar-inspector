@@ -174,6 +174,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           // concurrency card is exactly as before, and nothing renders a bare
           // `undefined`.
           const budgets = data.checkBudgets;
+          // Both rows stored and readable: the only state whose numbers may be
+          // prefilled and saved back. A derived side is not a stored value.
+          const fullyStored = budgets !== null && !budgets.degraded && !budgets.derived;
           const backlogFill = data.recheckBacklogFill;
           return (
           <div className="flex flex-col gap-4">
@@ -258,9 +261,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   </div>
                 ) : null}
                 {!budgets.degraded && budgets.derived ? (
-                  // One side was derived from the absent-row default to keep
-                  // terminalize > update: it is not a configured value, so the
-                  // form starts empty and a save can never pin it.
+                  // One side is the absent-row default (adjusted when needed to
+                  // keep terminalize > update): it is not a configured value, so
+                  // the form starts empty and a save can never pin it.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.checkDerived")} />
                   </div>
@@ -282,8 +285,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       autoComplete="off"
                       required
                       value={
-                        terminalizeDraft ??
-                        (budgets.degraded || budgets.derived ? "" : String(budgets.terminalizeMs))
+                        terminalizeDraft ?? (fullyStored ? String(budgets.terminalizeMs) : "")
                       }
                       onChange={(event) => setTerminalizeDraft(event.target.value)}
                     />
@@ -300,10 +302,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       className="w-32"
                       autoComplete="off"
                       required
-                      value={
-                        updateDraft ??
-                        (budgets.degraded || budgets.derived ? "" : String(budgets.updateMs))
-                      }
+                      value={updateDraft ?? (fullyStored ? String(budgets.updateMs) : "")}
                       onChange={(event) => setUpdateDraft(event.target.value)}
                     />
                   </div>
@@ -324,14 +323,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     })}
                   </p>
                 ) : null}
-                {budgets.degraded || budgets.derived ? null : (
+                {fullyStored ? (
                   <p className="mt-2 text-xs text-muted-foreground">
                     {t(locale, "admin.runtime.checkCurrent", {
                       terminalize: budgets.terminalizeMs,
                       update: budgets.updateMs,
                     })}
                   </p>
-                )}
+                ) : null}
               </CardContent>
             </SectionCard>
             )}
