@@ -546,6 +546,9 @@ describe("Runtime screen", () => {
     expect(surface.text()).toContain("Saved.");
     expect(surface.text()).not.toContain("Only one of these budgets is stored.");
     expect(surface.text()).not.toContain("(one side derived)");
+    // The request values stand in for the absent echo — the card must not keep
+    // presenting the previous stored pair as the freshly saved one.
+    expect(surface.text()).toContain("Effective on the next review: terminalize 12000 ms, update 7000 ms.");
     await surface.close();
   });
 

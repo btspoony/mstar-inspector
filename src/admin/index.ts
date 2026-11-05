@@ -159,8 +159,9 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       updateMin: CHECK_UPDATE_MIN,
       updateMax: CHECK_UPDATE_MAX,
       degraded: budgets.degraded,
-      // Exactly one row is stored: its partner is the absent-row default, so
-      // the admin form must not round-trip it into a stored row.
+      // Exactly one row is stored: its partner is the absent-row default
+      // (adjusted only when the pair would break the relation), so the admin
+      // form must not round-trip it into a stored row.
       derived: budgets.derived,
     },
     // §7.2 recheck breadth: older open rows allowed to join a round's set.

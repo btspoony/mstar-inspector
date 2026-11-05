@@ -967,9 +967,9 @@ export const en = {
       checkFailed: "Could not change the check budgets.",
       /** {terminalize}/{update} = the budgets currently stored (or the documented defaults). */
       checkCurrent: "Effective on the next review: terminalize {terminalize} ms, update {update} ms.",
-      /** One side came from the absent-row default, adjusted to keep the invariant. */
+      /** Exactly one row is stored; its partner is the default, adjusted only when needed. */
       checkDerived:
-        "Only one of these budgets is stored. The other is the documented default (raised only when the inline wait would no longer contain the check update). Enter both values to save them.",
+        "Only one of these budgets is stored. The other is the documented default, adjusted to the nearest legal value only when the pair would otherwise break the inline-wait/update relation. Enter both values to save them.",
       /** {terminalize}/{update} = the effective pair (one side derived, not stored). */
       checkDerivedCurrent: "Effective on the next review: terminalize {terminalize} ms, update {update} ms (one side derived).",
       /** Neither stored budget could be read — the numbers are the documented defaults. */

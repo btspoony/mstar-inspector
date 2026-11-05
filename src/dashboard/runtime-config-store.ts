@@ -473,8 +473,9 @@ function degradedCheckBudgets(): CheckBudgets {
  * row takes the documented default. The effective pair always satisfies the
  * writer's `terminalize > update` rule: when BOTH rows are stored and violate
  * it the answer is the documented defaults with `degraded: true`; when only one
- * row is stored, the absent side is adjusted to the nearest in-range legal
- * value and `derived: true` reports that the pair is not purely stored. A
+ * row is stored, the absent side is the documented default, adjusted to the
+ * nearest in-range legal value ONLY when the pair would otherwise break the
+ * relation, and `derived: true` reports that the pair is not purely stored. A
  * present value the parse cannot trust, a malformed result row or a read
  * failure answers the degraded defaults and never throws — a Check never
  * blocks or delays the review.
