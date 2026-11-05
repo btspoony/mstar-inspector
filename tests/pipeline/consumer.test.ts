@@ -550,6 +550,36 @@ describe("createReviewConsumer", () => {
     expect(sandbox.destroyCalls).toBe(1);
   });
 
+  test("the round's own wall clock rides the staged artifact into reviews.duration_ms", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    // Script only the wall clock (timers stay real): the round starts, the
+    // runner parks, and the clock advances 5 s before it releases. The stored
+    // duration must be exactly that elapsed 5 s from `roundStartedAt` — a
+    // dropped measurement is NULL, a second clock taken at the runner or at
+    // the staging reads 0, and an absolute clock is ~1.7e12.
+    const realNow = Date.now;
+    let clock = realNow();
+    const gate = holdFirstRunner();
+    let durationMs: number | null = null;
+    try {
+      Date.now = () => clock;
+      const round = consumer(makeBatch(makePayload()));
+      await gate.reached;
+      clock += 5_000;
+      gate.release();
+      await round;
+      const row = db.raw.query("SELECT duration_ms FROM reviews").get() as { duration_ms: number | null };
+      durationMs = row.duration_ms;
+    } finally {
+      Date.now = realNow;
+    }
+
+    expect(durationMs).toBe(5_000);
+  });
+
   test("a runner input past Linux's 128 KiB argv cap rides stdin, never an argument", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
