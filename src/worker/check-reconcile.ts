@@ -583,7 +583,7 @@ async function reenableHealthyAppChecks(
   // The current credential digest per pair, so an unchanged envelope is
   // detectable WITHOUT touching the network. A pair whose digest cannot be read
   // yields a null the store's rule handles (F-005).
-  const candidates: { appId: string; installationId: number; currentFingerprint: string | null; proven: boolean }[] = [];
+  const candidates: { appId: string; installationId: number; currentFingerprint: string | null }[] = [];
   for (const pair of suspended) {
     const routing = await checkRoutingRow(db, pair.app_id, pair.installation_id);
     const currentFingerprint = routing === null ? null : await sha256Hex(routing.private_key_enc);
@@ -591,7 +591,6 @@ async function reenableHealthyAppChecks(
       appId: pair.app_id,
       installationId: pair.installation_id,
       currentFingerprint,
-      proven: false,
     });
   }
 

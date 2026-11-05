@@ -1267,12 +1267,12 @@ export async function reenableChecksForApps(
  */
 export async function listReenableableCheckPairs(
   db: D1Like,
-  candidates: { appId: string; installationId: number; currentFingerprint: string | null; proven: boolean }[],
+  candidates: { appId: string; installationId: number; currentFingerprint: string | null }[],
 ): Promise<{ appId: string; installationId: number }[]> {
   if (candidates.length === 0) return [];
   const resumable: { appId: string; installationId: number }[] = [];
   for (const candidate of candidates) {
-    const row = await db
+    const rows = await db
       // shortcut: tenant-bypass — per-pair Check resume probe selecting status
       // flags only; no tenant-facing field. Upgrade: tenant-filter it once the
       // check store becomes workspace-scoped.
@@ -1281,49 +1281,44 @@ export async function listReenableableCheckPairs(
                 ga.review_enabled AS review_enabled
            FROM review_checks rc
            JOIN github_apps ga ON ga.id = rc.app_id
-          WHERE rc.app_id = ? AND rc.installation_id = ? AND rc.recovery_state = 'suspended'
-          LIMIT 1`,
+          WHERE rc.app_id = ? AND rc.installation_id = ? AND rc.recovery_state = 'suspended'`,
       )
       .bind(candidate.appId, candidate.installationId)
-      .first<{
+      .all<{
         holder: string | null;
         last_error: string | null;
         app_status: string;
         app_deleted: string | null;
         review_enabled: number;
       }>();
-    if (row === null) continue;
-    // A live holder is never yanked out from under its owner.
-    if (row.holder !== null) continue;
-    const kind = checkSuspensionKindOf(row.last_error);
-    const active = row.app_status === "active" && row.app_deleted === null;
+    const suspended = rows.results;
+    if (suspended.length === 0) continue;
+    // The resume write flips EVERY suspended row of the pair, so the decision
+    // must hold for every one of them too: one row of an unreleasable kind (a
+    // credential suspension whose envelope is unchanged, or a row still held)
+    // keeps the whole pair suspended. A mixed-kind pair is reachable — a
+    // kill-switch hold is written per row, a credential suspension covers the
+    // pair — so an unordered single-row probe cannot speak for the rest.
+    const active = suspended.every(
+      (row) => row.app_status === "active" && row.app_deleted === null,
+    );
     if (!active) continue;
-    // A `paused` hold (P68-QC-006) is released by exactly one event: the kill
-    // switch being lifted. Until then the row stays out of the due batch, and —
-    // unlike every credential kind — no proof is owed, because nothing about
-    // the credentials was ever in question.
-    if (kind === "paused") {
-      if (row.review_enabled !== 0) {
-        resumable.push({ appId: candidate.appId, installationId: candidate.installationId });
-      }
-      continue;
-    }
-    // A disabled App resumes on status alone: no credential was in question.
-    if (kind === "disabled") {
-      resumable.push({ appId: candidate.appId, installationId: candidate.installationId });
-      continue;
-    }
-    // A live credential proof is the ONLY other legitimate resume.
-    if (candidate.proven) {
-      resumable.push({ appId: candidate.appId, installationId: candidate.installationId });
-      continue;
-    }
-    // No proof: resume when the CURRENT digest is readable and disagrees with
-    // the recorded one — M8's comparison, where a stored null compares unequal
-    // (F-005). An unreadable current digest proves nothing, so the pair stays
-    // suspended rather than being resumed on a guess.
-    const recorded = suspensionCredentialOf(row.last_error);
-    if (candidate.currentFingerprint !== null && recorded !== candidate.currentFingerprint) {
+    const everyRowReleasable = suspended.every((row) => {
+      // A live holder is never yanked out from under its owner.
+      if (row.holder !== null) return false;
+      const kind = checkSuspensionKindOf(row.last_error);
+      // A `paused` hold (P68-QC-006) is released by exactly one event: the
+      // kill switch being lifted. No credential proof is owed.
+      if (kind === "paused") return row.review_enabled !== 0;
+      // A disabled App resumes on status alone: no credential was in question.
+      if (kind === "disabled") return true;
+      // Credential kinds: resume only when the CURRENT digest is readable and
+      // disagrees with the recorded one — M8's comparison, where a stored null
+      // compares unequal (F-005). An unreadable digest proves nothing.
+      const recorded = suspensionCredentialOf(row.last_error);
+      return candidate.currentFingerprint !== null && recorded !== candidate.currentFingerprint;
+    });
+    if (everyRowReleasable) {
       resumable.push({ appId: candidate.appId, installationId: candidate.installationId });
     }
   }

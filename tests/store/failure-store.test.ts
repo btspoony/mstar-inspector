@@ -14,10 +14,7 @@ import { describe, expect, test } from "bun:test";
 import {
   ADMISSION_DROP_REASONS,
   createFailureStore,
-  FAILURE_STAGES,
-  PAGING_EXCLUDED_STAGES,
   type AdmissionDropReason,
-  type FailureStage,
 } from "../../src/store/failure-store";
 import { createMigratedTestD1 } from "./helpers";
 

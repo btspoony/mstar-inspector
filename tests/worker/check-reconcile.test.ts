@@ -24,8 +24,9 @@
  *   - tenant/App isolation on the suspension path, plus the status-driven
  *     re-enable loop
  *   - a throwing dependency cannot escape the handler
- *   - the §7.11 scheduled composition `runSweep` → `reconcileReviewLifecycle`
- *     → `reconcileReviewChecks`, each stage caught independently
+ *   - the §7.11 scheduled composition: `runSweep` → `reconcileReviewLifecycle`
+ *     on the shared cron, `reconcileReviewChecks` on its own every-minute cron,
+ *     each stage caught independently
  */
 import { describe, expect, test } from "bun:test";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
@@ -35,7 +36,6 @@ import {
   CHECK_NAME,
   CHECK_RECONCILE_LIMIT,
   CHECK_RECOVERY_LEASE_MS,
-  claimAttempt,
   claimCheckRecovery,
   rollbackCheckCreateDispatch,
   deferCheckRecovery,
@@ -46,14 +46,8 @@ import {
   checkSuspensionKindOf,
   checkSuspensionReason,
   listReenableableCheckPairs,
-  suspensionCredentialOf,
   suspendCheckRecovery,
-  type CheckAttempt,
   type CheckConclusion,
-  type CheckIdentity,
-  type CheckRemote,
-  type Lease,
-  type PublicationProof,
 } from "../../src/store/review-checks";
 import {
   CHECK_RECONCILE_MAX_REQUESTS,
@@ -2463,7 +2457,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
     // The next pass is still free to prove it.
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP, installationId: SCOPE.installationId, currentFingerprint: "b".repeat(64), proven: false },
+        { appId: APP, installationId: SCOPE.installationId, currentFingerprint: "b".repeat(64) },
       ]),
     ).toEqual([{ appId: APP, installationId: SCOPE.installationId }]);
   });
