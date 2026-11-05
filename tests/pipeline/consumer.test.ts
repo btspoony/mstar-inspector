@@ -3348,6 +3348,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
           createdAt: "2026-09-02T10:00:00Z",
           updatedAt: "2026-09-02T10:00:00Z",
           body: hostile,
+          ownAuthor: false,
         },
       ],
       issueCoverage: "complete",

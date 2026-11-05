@@ -211,6 +211,8 @@ export type ThreadCommentEntry = {
   fullDatabaseId: string;
   authorType: string | null;
   authorLogin: string | null;
+  /** Authenticated provenance: this installation token authored the comment. */
+  viewerDidAuthor: boolean;
   createdAt: string;
   updatedAt: string;
   body: string;
@@ -274,6 +276,7 @@ type GraphqlCommentNode = {
   createdAt?: string | null;
   updatedAt?: string | null;
   author?: GraphqlAuthor;
+  viewerDidAuthor?: boolean | null;
   originalCommit?: { oid?: string | null } | null;
   pullRequestReview?: { id?: string | null; fullDatabaseId?: string | null } | null;
 };
@@ -290,6 +293,7 @@ function entryOf(node: GraphqlCommentNode): ThreadCommentEntry {
     fullDatabaseId: node.fullDatabaseId ?? "",
     authorType: node.author?.__typename ?? null,
     authorLogin: node.author?.login ?? null,
+    viewerDidAuthor: node.viewerDidAuthor === true,
     createdAt: node.createdAt ?? "",
     updatedAt: node.updatedAt ?? "",
     body: node.body ?? "",
@@ -317,6 +321,7 @@ query($id: ID!, $before: String) {
           createdAt
           updatedAt
           author { __typename login }
+          viewerDidAuthor
           originalCommit { oid }
           pullRequestReview { id }
         }
@@ -447,7 +452,7 @@ query($owner: String!, $name: String!, $number: Int!, $before: String) {
       comments(last: 100, before: $before) {
         totalCount
         pageInfo { hasPreviousPage startCursor }
-        nodes { id fullDatabaseId body createdAt updatedAt author { __typename login } }
+        nodes { id fullDatabaseId body createdAt updatedAt author { __typename login } viewerDidAuthor }
       }
     }
   }

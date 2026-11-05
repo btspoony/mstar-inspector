@@ -1779,6 +1779,7 @@ describe("uncertain-publication discovery ownership (spec §7.5/§7.7, P67-QC-01
                 // A DIFFERENT App's bot, with a byte-identical body — the
                 // generic `[bot]` suffix would have accepted this.
                 author: "other-app[bot]",
+                ownAuthor: false,
                 createdAt: "2026-01-01T00:00:00Z",
                 updatedAt: "2026-01-01T00:00:00Z",
                 body,
@@ -1815,6 +1816,7 @@ describe("uncertain-publication discovery ownership (spec §7.5/§7.7, P67-QC-01
                 associationId: null,
                 id: "51",
                 author: "acme-inspector[bot]",
+                ownAuthor: true,
                 createdAt: "2026-01-01T00:00:00Z",
                 updatedAt: "2026-01-01T00:00:00Z",
                 body,

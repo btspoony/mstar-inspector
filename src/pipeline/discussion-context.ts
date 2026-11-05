@@ -83,6 +83,7 @@ function entryToItem(
     createdAt: entry.createdAt,
     updatedAt: entry.updatedAt,
     body: entry.body,
+    ownAuthor: entry.viewerDidAuthor,
   };
 }
 
@@ -284,18 +285,19 @@ function modelBodyOf(body: string, overCap: boolean): string {
  */
 export function boundDiscussion(discussion: Discussion): Discussion {
   // Chronological presentation order (oldest first), then apply the caps.
-  // Bodies this app publishes itself begin with its own marker AND carry a bot
-  // author login: the recheck input already carries every target's original
+  // Bodies this app publishes itself begin with its own marker AND carry
+  // `viewerDidAuthor` — the AUTHENTICATED provenance from the capture, never a
+  // login suffix. The recheck input already carries every target's original
   // finding text, so spending the bounded view on our own history is what made
-  // every busy PR truncate. A human body can copy the marker, so authorship is
-  // part of the predicate — a spoofed marker stays visible and still blocks a
-  // resolve through the model-coverage fence.
+  // every busy PR truncate. A human or another App can copy the marker; they
+  // fail the provenance half, stay visible, and still block a resolve through
+  // the model-coverage fence.
   const ordered = discussion.items
     .filter(
       (item) =>
         !(
           item.source === "issue" &&
-          item.author.endsWith("[bot]") &&
+          item.ownAuthor &&
           /^<!--\s*mstar-inspector:[a-zA-Z-]+:v1\b/.test(item.body.trimStart())
         ),
     )
@@ -342,6 +344,9 @@ export function boundDiscussion(discussion: Discussion): Discussion {
       createdAt: metaValue(item.createdAt),
       updatedAt: metaValue(item.updatedAt),
       body,
+      // Our own reports are already filtered out above; every retained item is
+      // third-party context, so provenance is false on the wire.
+      ownAuthor: false,
     });
   }
   retained.reverse();

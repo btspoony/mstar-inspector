@@ -87,6 +87,7 @@ function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
           createdAt: "2026-09-01T00:00:00Z",
           updatedAt: "2026-09-01T00:00:00Z",
           body: "Please also check the retry path.",
+          ownAuthor: false,
         },
       ],
       issueCoverage: "truncated",
