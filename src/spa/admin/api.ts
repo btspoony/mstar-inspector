@@ -121,16 +121,20 @@ export type CheckBudgetConfig = {
   updateMax: number;
   /** A stored budget could not be read: both numbers are the documented defaults. */
   degraded: boolean;
-  /** Exactly one row is stored; one side is the documented default, not configured. */
-  derived: boolean;
 };
 
-/** The §7.2 recheck backlog refill as the operator API reports it. */
-export type RecheckBacklogFillConfig = {
-  rows: number;
-  min: number;
-  max: number;
-  /** The stored row could not be read: `rows` is the documented default. */
+/** The migration-0048 comment-claim outbox budgets as the operator API reports them. */
+export type CommentClaimConfig = {
+  retryMs: number;
+  maxAttempts: number;
+  outboxCap: number;
+  retryMin: number;
+  retryMax: number;
+  attemptsMin: number;
+  attemptsMax: number;
+  outboxMin: number;
+  outboxMax: number;
+  /** A stored setting could not be read: every number is the documented default. */
   degraded: boolean;
 };
 
@@ -176,8 +180,11 @@ export type RuntimeConfig = {
    * field is absence, not an unreadable setting.
    */
   checkBudgets: CheckBudgetConfig | null;
-  /** The recheck-breadth surface; `null` under the same older-Worker rule. */
-  recheckBacklogFill: RecheckBacklogFillConfig | null;
+  /**
+   * The comment-claim outbox surface; `null` under the same absence rule as
+   * `checkBudgets` (an older Worker behind a newer bundle).
+   */
+  commentClaim: CommentClaimConfig | null;
   /** The default-review-depth surface; `null` under the same older-Worker rule. */
   reviewLevel: ReviewLevelConfig | null;
   /** The recheck ask-budget surface; `null` under the same older-Worker rule. */
@@ -198,24 +205,24 @@ function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
     updateMin: num(budgets, "updateMin"),
     updateMax: num(budgets, "updateMax"),
     degraded: bool(budgets, "degraded"),
-    // Tolerant read: the predecessor Worker serves this object without the
-    // field, and that payload must keep the whole page rendering. It is assumed
-    // fully stored: that Worker's writer always upserts both rows, so a
-    // half-configured pair behind it can only be an out-of-band row, and the
-    // skew window ends with the next Worker deploy.
-    derived: (budgets as Record<string, unknown>)["derived"] === true,
   };
 }
 
-function parseRecheckBacklogFill(row: Json): RecheckBacklogFillConfig | null {
-  const raw = row.recheckBacklogFill;
+function parseCommentClaim(row: Json): CommentClaimConfig | null {
+  const raw = row.commentClaim;
   if (raw === undefined) return null;
-  const fill = map(raw, "runtime recheckBacklogFill");
+  const claim = map(raw, "runtime commentClaim");
   return {
-    rows: num(fill, "rows"),
-    min: num(fill, "min"),
-    max: num(fill, "max"),
-    degraded: bool(fill, "degraded"),
+    retryMs: num(claim, "retryMs"),
+    maxAttempts: num(claim, "maxAttempts"),
+    outboxCap: num(claim, "outboxCap"),
+    retryMin: num(claim, "retryMin"),
+    retryMax: num(claim, "retryMax"),
+    attemptsMin: num(claim, "attemptsMin"),
+    attemptsMax: num(claim, "attemptsMax"),
+    outboxMin: num(claim, "outboxMin"),
+    outboxMax: num(claim, "outboxMax"),
+    degraded: bool(claim, "degraded"),
   };
 }
 
@@ -224,12 +231,10 @@ function parseReviewLevel(row: Json): ReviewLevelConfig | null {
   if (raw === undefined) return null;
   const level = map(raw, "runtime reviewLevel");
   const levels = level.levels;
-  if (!Array.isArray(levels) || levels.some((entry) => typeof entry !== "string")) {
-    throw new Error("admin API: levels is not a string list");
-  }
+  if (!Array.isArray(levels)) throw new Error("admin API: levels is not a list");
   return {
     value: text(level, "value"),
-    levels,
+    levels: levels.filter((entry): entry is string => typeof entry === "string"),
     degraded: bool(level, "degraded"),
   };
 }
@@ -266,7 +271,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     max: num(body, "max"),
     degraded: bool(body, "degraded"),
     checkBudgets: parseCheckBudgets(body),
-    recheckBacklogFill: parseRecheckBacklogFill(body),
+    commentClaim: parseCommentClaim(body),
     reviewLevel: parseReviewLevel(body),
     recheckAssignment: parseRecheckAssignment(body),
     admissionDrops24h: parseAdmissionDrops(body),
@@ -309,30 +314,44 @@ export async function setCheckBudgets(
     ) {
       const { terminalizeMs, updateMs } = saved;
       if (typeof terminalizeMs === "number" && typeof updateMs === "number") {
-        // Both rows were just written, so neither side is derived any more.
-        return { ...stored, terminalizeMs, updateMs, degraded: false, derived: false };
+        return { ...stored, terminalizeMs, updateMs, degraded: false };
       }
     }
   }
-  // A 2xx without a readable echo still landed both rows, so the derived flag
-  // must clear here too — and the request values stand in for the echo.
-  return { ...stored, ...value, degraded: false, derived: false };
+  return { ...stored, ...value, degraded: false };
 }
 
 /**
- * Save the recheck backlog refill, answering the stored value. A 2xx with an
- * unreadable body still landed, so the request value stands in.
+ * Save the three comment-claim outbox settings, answering the trio the server
+ * stored. The range fields ride the loaded config (the echo is the stored
+ * values only); a 2xx with an unreadable body still landed, so the request
+ * value stands in — the same rule as `setSystemConcurrency`.
  */
-export async function setRecheckBacklogFill(
-  rows: number,
-  stored: RecheckBacklogFillConfig,
-): Promise<RecheckBacklogFillConfig> {
-  const answer = await write("PATCH", "/runtime", { recheckBacklogFill: rows });
-  if (typeof answer === "object" && answer !== null && "recheckBacklogFill" in answer) {
-    const saved = answer.recheckBacklogFill;
-    if (typeof saved === "number") return { ...stored, rows: saved, degraded: false };
+export async function setCommentClaimSettings(
+  value: { retryMs: number; maxAttempts: number; outboxCap: number },
+  stored: CommentClaimConfig,
+): Promise<CommentClaimConfig> {
+  const answer = await write("PATCH", "/runtime", { commentClaim: value });
+  if (typeof answer === "object" && answer !== null && "commentClaim" in answer) {
+    const saved = answer.commentClaim;
+    if (
+      typeof saved === "object" &&
+      saved !== null &&
+      "retryMs" in saved &&
+      "maxAttempts" in saved &&
+      "outboxCap" in saved
+    ) {
+      const { retryMs, maxAttempts, outboxCap } = saved;
+      if (
+        typeof retryMs === "number" &&
+        typeof maxAttempts === "number" &&
+        typeof outboxCap === "number"
+      ) {
+        return { ...stored, retryMs, maxAttempts, outboxCap, degraded: false };
+      }
+    }
   }
-  return { ...stored, rows, degraded: false };
+  return { ...stored, ...value, degraded: false };
 }
 
 /**

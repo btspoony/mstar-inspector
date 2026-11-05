@@ -342,7 +342,18 @@ describe("Runtime screen", () => {
     updateMin: 500,
     updateMax: 15_000,
     degraded: false,
-    derived: false,
+  };
+  const COMMENT_CLAIM = {
+    retryMs: 300_000,
+    maxAttempts: 3,
+    outboxCap: 20,
+    retryMin: 30_000,
+    retryMax: 3_600_000,
+    attemptsMin: 1,
+    attemptsMax: 10,
+    outboxMin: 1,
+    outboxMax: 100,
+    degraded: false,
   };
   const RUNTIME = {
     concurrency: 24,
@@ -350,6 +361,7 @@ describe("Runtime screen", () => {
     max: 256,
     degraded: false,
     checkBudgets: CHECK_BUDGETS,
+    commentClaim: COMMENT_CLAIM,
   };
 
   test("a failed read renders the error with a retry that reloads", async () => {
@@ -522,76 +534,6 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
-  test("an older Worker that omits only `derived` still renders the budget card", async () => {
-    // The predecessor payload carries checkBudgets without the new field: the
-    // whole page must keep rendering, with the stored pair prefilled.
-    const { derived: _derived, ...olderBudgets } = CHECK_BUDGETS;
-    const surface = await runtimeScreen(() =>
-      json({ concurrency: 24, min: 1, max: 256, degraded: false, checkBudgets: olderBudgets }),
-    );
-    expect(surface.text()).toContain("Effective on the next review: 24.");
-    const terminalize = surface.container.querySelector("#check-terminalize-budget") as unknown as HTMLInputElement;
-    expect(terminalize.value).toBe("10000");
-    expect(surface.text()).not.toContain("Only one of these budgets is stored.");
-    await surface.close();
-  });
-
-  test("a derived pair warns, starts both fields empty, and clears the state after a save", async () => {
-    // Exactly one row is stored: the card must not present the default as a
-    // configured value, and a save (which writes both rows) clears it.
-    const surface = await runtimeScreen((request) =>
-      request.method === "PATCH"
-        ? json({ checkBudgets: { terminalizeMs: 12_000, updateMs: 7_000 } })
-        : json({ concurrency: 24, min: 1, max: 256, degraded: false, checkBudgets: { ...CHECK_BUDGETS, derived: true } }),
-    );
-    expect(surface.text()).toContain("Only one of these budgets is stored.");
-    expect(
-      (surface.container.querySelector("#check-terminalize-budget") as unknown as HTMLInputElement).value,
-    ).toBe("");
-    expect(
-      (surface.container.querySelector("#check-update-budget") as unknown as HTMLInputElement).value,
-    ).toBe("");
-    expect(surface.text()).toContain("(one side derived)");
-
-    await surface.type("#check-terminalize-budget", "12000");
-    await surface.type("#check-update-budget", "7000");
-    const budgetForm = surface.container.querySelector("#check-terminalize-budget")!.closest("form")!;
-    await surface.click(budgetForm.querySelector('button[type="submit"]'));
-
-    // The save carries what the operator typed, never the derived numbers.
-    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
-      {
-        url: "/_internal_admin/api/runtime",
-        method: "PATCH",
-        body: { checkBudgets: { terminalizeMs: 12_000, updateMs: 7_000 } },
-      },
-    ]);
-    expect(surface.text()).not.toContain("Only one of these budgets is stored.");
-    expect(surface.text()).not.toContain("(one side derived)");
-    expect(surface.text()).toContain("Effective on the next review: terminalize 12000 ms, update 7000 ms.");
-    await surface.close();
-  });
-
-  test("a landed budget save clears the derived state even without a readable echo", async () => {
-    // A 2xx whose body carries no readable checkBudgets still wrote both rows.
-    const surface = await runtimeScreen((request) =>
-      request.method === "PATCH"
-        ? new Response("ok", { status: 200 })
-        : json({ concurrency: 24, min: 1, max: 256, degraded: false, checkBudgets: { ...CHECK_BUDGETS, derived: true } }),
-    );
-    await surface.type("#check-terminalize-budget", "12000");
-    await surface.type("#check-update-budget", "7000");
-    const budgetForm = surface.container.querySelector("#check-terminalize-budget")!.closest("form")!;
-    await surface.click(budgetForm.querySelector('button[type="submit"]'));
-
-    expect(surface.text()).toContain("Saved.");
-    expect(surface.text()).not.toContain("Only one of these budgets is stored.");
-    expect(surface.text()).not.toContain("(one side derived)");
-    // The request values stand in for the absent echo.
-    expect(surface.text()).toContain("Effective on the next review: terminalize 12000 ms, update 7000 ms.");
-    await surface.close();
-  });
-
   test("a zh_CN render shows the page's dictionary copy", async () => {
     const surface = await runtimeScreen(() => json(RUNTIME), "zh_CN");
     expect(surface.text()).toContain("运行时参数");
@@ -650,6 +592,36 @@ describe("Runtime screen", () => {
     expect(surface.text()).toContain("the terminalize timeout must be greater than the check update budget");
     // The rejected write never replaced the stored pair.
     expect(surface.text()).toContain("Effective on the next review: terminalize 10000 ms, update 5000 ms.");
+    await surface.close();
+  });
+
+  test("the comment-trigger card shows the stored trio and one save fires exactly one PATCH", async () => {
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ commentClaim: { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 } })
+        : json(RUNTIME),
+    );
+    const retry = surface.container.querySelector("#claim-retry-budget") as unknown as HTMLInputElement;
+    expect(retry.value).toBe("300000");
+
+    await surface.type("#claim-retry-budget", "60000");
+    await surface.type("#claim-attempts-budget", "5");
+    await surface.type("#claim-outbox-budget", "10");
+    // The third form's submit button is the claim save.
+    const claimForm = surface.container.querySelector("#claim-retry-budget")!.closest("form")!;
+    await surface.click(claimForm.querySelector('button[type="submit"]'));
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { commentClaim: { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 } },
+      },
+    ]);
+    expect(
+      (surface.container.querySelector("#claim-retry-budget") as unknown as HTMLInputElement).value,
+    ).toBe("60000");
+    expect(surface.text()).toContain("Saved.");
     await surface.close();
   });
 

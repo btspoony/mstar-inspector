@@ -840,27 +840,24 @@ export const zhCN: Dictionary = {
       checkFailed: "修改检查预算失败。",
       /** {terminalize}/{update} = 当前存储的预算（或文档默认值）。 */
       checkCurrent: "下一次审查生效值：terminalize {terminalize} 毫秒，update {update} 毫秒。",
-      /** 只存储了一行；另一侧取文档默认值，仅在会破坏不变式时才调整。 */
-      checkDerived:
-        "当前只存储了其中一个预算。另一个取文档默认值，仅当这一对会破坏「内联等待 > 检查更新」的关系时才调整到最近的合法值。要保存请显式输入两个值。",
-      /** {terminalize}/{update} = 生效值（一侧为派生值，不是存储值）。 */
-      checkDerivedCurrent: "下一次审查生效值：terminalize {terminalize} 毫秒，update {update} 毫秒（其中一侧为派生值）。",
       /** 两个已存储的预算都无法读取——数字只是文档默认值。 */
       checkUnreadable:
         "无法读取已存储的检查预算，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
-      backlogFillTitle: "复核积压补位",
-      backlogFillDescription:
-        "上一轮自身的发现之外，每轮最多再补多少条更早的未解决发现进入复检集合。每条都消耗复检座位的预算；0 表示关闭补位。",
-      backlogFillLabel: "每轮补位条数",
-      backlogFillSave: "保存",
-      backlogFillSaved: "已保存。",
+      claimTitle: "评论触发恢复",
+      claimDescription:
+        "cron 如何恢复「已声明但队列发送从未发生」的机器人提及评论：声明后等待多久才重发、允许多少次尝试，以及一次扫描最多重发多少条。",
+      retryLabel: "重试窗口（毫秒）",
+      attemptsLabel: "最大尝试次数",
+      outboxLabel: "每批重发数",
+      claimSave: "保存",
+      claimSaved: "已保存。",
       /** 写入失败且错误无法识别时的兜底文案。 */
-      backlogFillFailed: "修改复核积压补位失败。",
-      /** {value} = 当前存储的补位条数（或文档默认值）。 */
-      backlogFillCurrent: "下一次审查生效值：最多补 {value} 条更早的发现。",
-      /** 已存储的补位条数无法读取——数字只是文档默认值。 */
-      backlogFillUnreadable:
-        "无法读取已存储的复核积压补位，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查该行。",
+      claimFailed: "修改评论触发恢复设置失败。",
+      /** {retry}/{attempts}/{outbox} = 当前存储的设置（或文档默认值）。 */
+      claimCurrent: "下一次扫描生效值：{retry} 毫秒后重试，最多 {attempts} 次，每次最多 {outbox} 条。",
+      /** 所有已存储设置都无法读取——数字只是文档默认值。 */
+      claimUnreadable:
+        "无法读取已存储的评论触发恢复设置，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
       /** App 未自行选择深度时继承的平台默认。 */
       reviewLevelTitle: "评审深度",
       reviewLevelDescription: "适用于尚未自行选择评审深度的 App。",

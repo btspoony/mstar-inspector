@@ -22,7 +22,10 @@
  *   upper bound (a wrong delete of a live guard is worse than a TTL leak).
  * - Bounded janitor writes ride along (webhook_deliveries retention, the
  *   invite lapse flip) beside one optional webhook POST; the rest is reads and
- *   logs. It NEVER mutates queue messages or KV keys.
+ *   logs. The ONE queue write is the comment-claim outbox (migration 0048): a
+ *   `queued` claim older than the retry window has its stored payload re-sent,
+ *   which is what makes "claim before send" survive an isolate dying between
+ *   the two. It NEVER mutates KV keys.
  *
  * Threshold semantics: PER-ATTEMPT rows — a DLQ'd message leaves up to 4
  * rows (one per delivery: 1 initial + max_retries = 3 retries), so `> 5`
@@ -31,6 +34,12 @@
  * env-configurable is a future explicit decision.
  */
 
+import type { Queue } from "@cloudflare/workers-types";
+import type { ReviewJobPayload } from "../contracts/review-job";
+import {
+  readCommentClaimSettings,
+  type CommentClaimSettingsLogFields,
+} from "../pipeline/comment-claim-settings-reader";
 import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createAppsStore } from "../dashboard/apps-store";
@@ -38,6 +47,18 @@ import { expireLapsedInvites } from "../dashboard/invite-store";
 import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../store/failure-store";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
+
+/**
+ * The comment-claim outbox scan (migration 0048). Exported so the index/plan
+ * test asserts THIS statement — projection, the `attempts` predicate and the
+ * operator `LIMIT` included — instead of a copy that can drift away from it.
+ * Binds: `maxAttempts`, `nowMs - retryMs`, `outboxCap`.
+ */
+export const COMMENT_CLAIM_OUTBOX_SQL = `SELECT installation_id, owner, repo, pr_number, comment_id, payload_json
+             FROM comment_trigger_claims
+            WHERE state = 'queued' AND attempts < ? AND queued_ms <= ?
+            ORDER BY queued_ms
+            LIMIT ?`;
 
 /** Breach when `failures_24h > SWEEP_FAILURE_THRESHOLD` (AL-6). */
 export const SWEEP_FAILURE_THRESHOLD = 5;
@@ -122,6 +143,15 @@ export type SweepLedgerRetentionFields =
 export type SweepInviteLapseFields = { event: "invite_lapse_swept_failed"; detail: string };
 
 /**
+ * Comment-claim outbox fields (migration 0048): one line per sweep that did
+ * something — resent claims, claims expired at the cap, failed re-sends. A
+ * sweep with nothing to recover says nothing.
+ */
+export type SweepCommentClaimFields =
+  | { event: "comment_claim_outbox"; resent: number; expired: number; failed: number }
+  | { event: "comment_claim_outbox_failed"; detail: string };
+
+/**
  * The sweep only ever warns: a quiet system logs nothing. A warn-only view
  * of the consumer log channel — the `msg` parameter type is derived from
  * `ConsumerLog["warn"]` so the call shape cannot drift; the field union is
@@ -135,7 +165,10 @@ export type SweepLog = {
       | SweepWarnFields
       | SweepRetentionFields
       | SweepLedgerRetentionFields
-      | SweepInviteLapseFields,
+      | SweepInviteLapseFields
+      | SweepCommentClaimFields
+      // The comment-claim settings reader owns its own degraded warn shape.
+      | CommentClaimSettingsLogFields,
     msg?: Parameters<ConsumerLog["warn"]>[1],
   ) => void;
 };
@@ -152,6 +185,12 @@ export type SweepDeps = {
   fetchImpl?: typeof fetch;
   /** Injectable for tests; defaults to structured JSON lines. */
   log?: SweepLog;
+  /**
+   * Comment-claim outbox sink (migration 0048): the one queue write this sweep
+   * performs. Absent = the outbox lane is skipped (a suite exercising only the
+   * failure sweep needs no queue double).
+   */
+  queue?: Queue<ReviewJobPayload>;
 };
 
 export type SweepResult = {
@@ -259,6 +298,91 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       },
       "workspace invite lapse sweep failed — continuing",
     );
+  }
+  // Comment-claim outbox (migration 0048) — the sweep's ONE queue write. The
+  // worker inserts a claim row BEFORE its queue send, so a row still `queued`
+  // past the retry window is a claim whose send never happened (or whose
+  // isolate died between the claim and the send). Re-sending the stored
+  // payload is what makes delivery at-least-once, while the pipeline's atomic
+  // consume keeps execution at-most-once. Best-effort in the same shape as
+  // every janitor above: a failure warns and never breaks the failure sweep.
+  if (deps.queue !== undefined) {
+    try {
+      // The three budgets are operator settings on the global runtime-config
+      // surface (`review.comment_claim.*`, AGENTS.md 「Configuration surfaces」):
+      // read once per sweep. A degraded read answers the documented defaults
+      // with one structured warn and never throws, so a broken settings row
+      // cannot stop claim recovery.
+      const settings = await readCommentClaimSettings(db, log);
+      const nowMs = Date.now();
+      // Rows at the cap have exhausted every re-send: flip them to `expired`
+      // FIRST, so the selection below can never pick them again. The payload is
+      // dropped in the same statement — a terminal tombstone holds only scope
+      // keys, state and timestamps, and is never deleted (it is the dedup
+      // proof a late redelivery would otherwise re-open).
+      const expired = await db
+        .prepare(
+          `UPDATE comment_trigger_claims SET state = 'expired', payload_json = NULL
+            WHERE state = 'queued' AND attempts >= ?`,
+        )
+        .bind(settings.maxAttempts)
+        .run();
+      const stale = await db
+        .prepare(COMMENT_CLAIM_OUTBOX_SQL)
+        .bind(settings.maxAttempts, nowMs - settings.retryMs, settings.outboxCap)
+        .all<{
+          installation_id: number;
+          owner: string;
+          repo: string;
+          pr_number: number;
+          comment_id: number;
+          payload_json: string;
+        }>();
+      let resent = 0;
+      let resendFailed = 0;
+      for (const claim of stale.results) {
+        // Per row: one poisoned claim (a send that keeps failing) must not
+        // starve the rest of the batch, which is ordered oldest-first.
+        let delivered = false;
+        try {
+          await deps.queue.send(JSON.parse(claim.payload_json) as ReviewJobPayload);
+          delivered = true;
+          resent += 1;
+        } catch {
+          resendFailed += 1;
+        }
+        // Every ATTEMPT counts, delivered or not: a claim that can never be
+        // sent must reach the cap and expire instead of being retried forever.
+        // `queued_ms` restarts the window either way.
+        await db
+          .prepare(
+            `UPDATE comment_trigger_claims SET attempts = attempts + 1, queued_ms = ?
+              WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
+                AND state = 'queued'`,
+          )
+          .bind(nowMs, claim.installation_id, claim.owner, claim.repo, claim.pr_number, claim.comment_id)
+          .run();
+      }
+      if (resent > 0 || expired.meta.changes > 0 || resendFailed > 0) {
+        log.warn(
+          { event: "comment_claim_outbox", resent, expired: expired.meta.changes, failed: resendFailed },
+          "comment trigger outbox recovery",
+        );
+      }
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
+      log.warn(
+        {
+          event: "comment_claim_outbox_failed",
+          detail:
+            detail.length <= SWEEP_LOG_DETAIL_MAX
+              ? detail
+              : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
+        },
+        "comment trigger outbox sweep failed — continuing",
+      );
+    }
   }
   // The window modifier is built from SWEEP_WINDOW_HOURS (the constant is
   // the single source) so the SQL cannot drift from the pinned threshold

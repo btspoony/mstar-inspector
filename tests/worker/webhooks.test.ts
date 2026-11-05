@@ -24,6 +24,7 @@ import {
 
 const SECRET = ["s3cret", "webhook", "secret"].join("-");
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
+const COMMENT_ID = 987654321;
 const APP_SLUG = "test-app";
 const EVERY_PUSH: ReviewTriggerContext = { mode: "every_push", appSlug: APP_SLUG };
 
@@ -59,7 +60,7 @@ function issueCommentBody(
   return JSON.stringify({
     action: "created",
     installation: { id: 123 },
-    comment: { body: `@${APP_SLUG}[bot]` },
+    comment: { body: `@${APP_SLUG}[bot]`, id: COMMENT_ID },
     issue: {
       number: 42,
       user: { login: "test-author" },
@@ -527,9 +528,23 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
         repo: "test-repo",
         pr_number: 42,
         head_sha: null,
+        comment_id: COMMENT_ID,
         action: "created",
         triggered_by: "issue_comment",
       });
+    }
+  });
+
+  test("a comment payload without an id omits comment_id (fail-safe enqueue)", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({ comment: { body: `@${APP_SLUG}[bot]` } }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome.kind).toBe("job");
+    if (outcome.kind === "job") {
+      expect("comment_id" in outcome.payload).toBe(false);
     }
   });
 

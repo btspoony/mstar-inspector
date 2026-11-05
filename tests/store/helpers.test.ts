@@ -5,7 +5,7 @@
  * unchanged and a plain read changing nothing.
  */
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, migrationNumber, migrationsAfter } from "./helpers";
+import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter } from "./helpers";
 
 const AT = "2026-10-27T00:00:00.000Z";
 /** Same shape as the operator store's guarded audit append. */

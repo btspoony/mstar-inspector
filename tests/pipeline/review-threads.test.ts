@@ -779,6 +779,103 @@ async function resolvedFixture(db: TestD1, intent: LineIntent): Promise<Verified
 }
 
 describe("resolveFindingThread — fences, adoption, mutation confirmation", () => {
+  test("our own publication comment never changes the issue digest → the verified resolve is not blocked", async () => {
+    const db = await createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    // The verification was captured BEFORE the review posted: its issue
+    // digest covers ISSUE_A only. The live list now also carries our review
+    // comment — the old domain hashed it and every resolve failed.
+    const verified = await resolvedFixture(db, intent);
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    const ownPublication: ThreadCommentSpec = {
+      id: "i-own",
+      fullDatabaseId: "8002",
+      body: "<!-- mstar-inspector:review:v1 round=1 -->\n\n## 📋 Review",
+      authorType: "Bot",
+      authorLogin: BOT_LOGIN,
+      createdAt: "2026-09-02T09:00:00Z",
+      updatedAt: "2026-09-02T09:00:00Z",
+    };
+    const { octokit, calls } = fakeOctokit({
+      threadPages: [{ comments: [root, REPLY] }],
+      issueComments: { comments: [ISSUE_A, ownPublication] },
+    });
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified,
+    });
+    expect(outcome.kind).toBe("resolved");
+    expect(calls.some((c) => c.kind === "mutation")).toBe(true);
+  });
+
+  test("a human issue comment arriving after the capture still yields needs-recheck (no bless)", async () => {
+    const db = await createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const verified = await resolvedFixture(db, intent); // issue digest over ISSUE_A only
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    const laterHuman: ThreadCommentSpec = {
+      id: "i-human-later",
+      fullDatabaseId: "8003",
+      body: "this is not fixed",
+      createdAt: "2026-09-03T10:00:00Z",
+      updatedAt: "2026-09-03T10:00:00Z",
+    };
+    const { octokit, calls } = fakeOctokit({
+      threadPages: [{ comments: [root, REPLY] }],
+      issueComments: { comments: [ISSUE_A, laterHuman] },
+    });
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified,
+    });
+    expect(outcome).toEqual({ kind: "needs-recheck", reason: "conversation-changed" });
+    expect(calls.some((c) => c.kind === "mutation")).toBe(false);
+  });
+
+  test("a RE-SELECTED addressed row resolves even though a newer publication did not bump its finding", async () => {
+    // The publication fence is addressed-state + this row's verdict, not
+    // `last_publication_id`: a re-selected addressed row is re-verified in a
+    // real round, and the seen upsert never bumps the row's publication.
+    const db = await createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const verified = await resolvedFixture(db, intent);
+    // A NEWER publication (round 2) exists, but it did not re-report this
+    // fingerprint, so the finding still points at the ROUND-1 publication.
+    const newerPubId = uuid(9);
+    const newerBody = "newer overall body";
+    await stagePublication(db, {
+      id: newerPubId,
+      payload: {
+        version: 1,
+        scope: SCOPE,
+        headSha: SHA2,
+        kind: "review",
+        round: 2,
+        targetCommentId: null,
+        body: newerBody,
+        bodySha256: await sha256Hex(newerBody),
+        artifact: null,
+        lifecycle: null,
+        lineIntents: [],
+      },
+      nowMs: 1000,
+    });
+    db.raw.prepare(`UPDATE review_findings SET last_publication_id = ? WHERE id = ?`).run(newerPubId, FINDING_ROW_ID);
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    const { octokit } = fakeOctokit({
+      threadPages: [{ comments: [root, REPLY] }],
+      issueComments: { comments: [ISSUE_A] },
+    });
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified,
+    });
+    expect(outcome.kind).toBe("resolved");
+  });
+
   test("happy path: owned thread resolves, row stores resolved, mutation got the exact threadId", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
@@ -970,7 +1067,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     expect(calls.some((c) => c.kind === "mutation")).toBe(false);
   });
 
-  test("concern no longer addressed by THIS publication → needs-recheck concern-unresolved", async () => {
+  test("a reopened concern (finding state open) → needs-recheck concern-unresolved", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);

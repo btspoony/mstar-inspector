@@ -165,87 +165,69 @@ function threadScope(row: { id: string; app_id: string; installation_id: number;
 // ---------------------------------------------------------------------------
 
 /**
- * The most recent APPLIED review publication of the scope — the previous
- * round, because the current publication is staged only after target
- * selection. `null` on a first review (or when only degraded publications
- * exist): there is then no prior finding set to reassess.
+ * The RECHECKABLE predicate (spec §7.2/§7.4) — ONE copy shared by the
+ * selector and the coverage count, so `selected <= totalOpen` cannot drift
+ * into a lying `capped` remainder. Binds the scope tuple TWICE (the finding
+ * row, then its association probe): bind it with `recheckableScopeBinds`.
  */
-export async function latestAppliedReviewPublicationId(db: D1Like, scope: Scope): Promise<string | null> {
-  const row = await db
-    .prepare(
-      `SELECT id FROM review_publications
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-         AND kind = 'review' AND phase = 'applied'
-       ORDER BY created_ms DESC, id DESC LIMIT 1`,
-    )
-    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
-    .first<{ id: string }>();
-  return row?.id ?? null;
+const RECHECKABLE_WHERE_SQL = `f.app_id = ? AND f.installation_id = ? AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
+         AND (
+           f.state = 'open'
+           OR (
+             f.state = 'addressed'
+             AND EXISTS (
+               SELECT 1 FROM review_threads t
+               WHERE t.app_id = ? AND t.installation_id = ? AND t.owner = ? AND t.repo = ? AND t.pr_number = ?
+                 AND t.finding_row_id = f.id
+                 AND t.superseded_by_publication_id IS NULL
+                 AND t.resolution_state IN ('pending','retry','needs-recheck','local-error')
+             )
+           )
+         )`;
+
+/** The ten binds `RECHECKABLE_WHERE_SQL` expects, in placeholder order. */
+function recheckableScopeBinds(scope: Scope): [string, number, string, string, number, string, number, string, string, number] {
+  return [
+    scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
+    scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
+  ];
 }
 
 /**
- * Open-row selection for the recheck seat. The rows the PREVIOUS round
- * published (`last_publication_id`) that are still open come first — they are
- * the findings this round's commits most plausibly fixed — ordered by
- * `COALESCE(last_scheduled_ms, created_ms), id` (oldest waiting first).
+ * Recheckable-row selection for the recheck seat (spec §7.2): OPEN rows plus
+ * ADDRESSED rows that still own a non-superseded association in a non-terminal
+ * state (`pending`/`retry`/`needs-recheck`/`local-error`). The second class is
+ * how a solved-but-unresolved conversation gets another real round: the seat
+ * re-verifies the concern against the CURRENT head and discussion and the
+ * ordinary resolution path (this round's own verified snapshot) resolves it.
+ * Once that association reaches `resolved`/`abandoned` the finding drops back
+ * out, so the rotation keeps only genuinely open rows.
  *
- * The remaining room up to `ASSESSMENT_TARGET_CAP` (25) is filled from older
- * open rows by the same rotation, bounded by the caller's `backlogFill` (the
- * operator's system setting; 0 disables it). That refill is what keeps a row
- * from starving forever: a previous round larger than the cap, a seat that
- * timed out, or a finding that stopped being re-reported all leave rows behind
- * their own round's publication, and without a refill they would never be
- * selected again.
- *
- * `capped` counts the previous round's own open rows this bound dropped, so the
- * published coverage never blames the older backlog on the cap.
- * Association IDs list the row's ACTIVE (non-superseded) thread associations —
- * superseded ones are dead and never offered again (spec §7.2).
+ * Ordered by `COALESCE(last_scheduled_ms, created_ms), id` (oldest waiting
+ * first — no newest-updated or permanent never-assessed priority) and capped
+ * at `ASSESSMENT_TARGET_CAP` (25) regardless of the caller's `limit` so a
+ * misbehaving caller cannot break the rotation fairness. Every selected row
+ * advances `last_scheduled_ms` when the publication applies, so a row that
+ * can never be re-proved rotates out instead of starving the ones behind it.
+ * Association IDs list the row's ACTIVE (non-superseded) thread associations
+ * — superseded ones are dead and never offered again. Unselected rows are NOT
+ * returned here; the caller represents them via the aggregate cap count in
+ * the round coverage (spec §7.2/§7.4).
  */
-export async function selectAssessmentTargets(
-  db: D1Like,
-  scope: Scope,
-  limit: number,
-  previousPublicationId: string,
-  backlogFill: number,
-): Promise<{ targets: RecheckTarget[]; capped: number }> {
+export async function selectAssessmentTargets(db: D1Like, scope: Scope, limit: number): Promise<RecheckTarget[]> {
   const capped = Math.max(0, Math.min(limit, ASSESSMENT_TARGET_CAP));
-  if (capped === 0) return { targets: [], capped: 0 };
-  const scopeBinds = [scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber] as const;
-  const own = await db
+  if (capped === 0) return [];
+  const rows = await db
     .prepare(
-      `SELECT * FROM review_findings
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-         AND state = 'open' AND last_publication_id = ?
-       ORDER BY COALESCE(last_scheduled_ms, created_ms), id
+      `SELECT f.* FROM review_findings f
+       WHERE ${RECHECKABLE_WHERE_SQL}
+       ORDER BY COALESCE(f.last_scheduled_ms, f.created_ms), f.id
        LIMIT ?`,
     )
-    .bind(...scopeBinds, previousPublicationId, capped)
+    .bind(...recheckableScopeBinds(scope), capped)
     .all<ReviewFindingRow>();
-  const found = [...own.results];
-  const ownTotal = await db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM review_findings
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-         AND state = 'open' AND last_publication_id = ?`,
-    )
-    .bind(...scopeBinds, previousPublicationId)
-    .first<{ n: number }>();
-  const room = capped - found.length;
-  if (room > 0 && backlogFill > 0) {
-    const backlog = await db
-      .prepare(
-        `SELECT * FROM review_findings
-         WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-           AND state = 'open' AND last_publication_id <> ?
-         ORDER BY COALESCE(last_scheduled_ms, created_ms), id
-         LIMIT ?`,
-      )
-      .bind(...scopeBinds, previousPublicationId, Math.min(room, backlogFill))
-      .all<ReviewFindingRow>();
-    found.push(...backlog.results);
-  }
-  if (found.length === 0) return { targets: [], capped: 0 };
+  const found = rows.results;
+  if (found.length === 0) return [];
 
   const placeholders = found.map(() => "?").join(",");
   const threads = await db
@@ -263,29 +245,28 @@ export async function selectAssessmentTargets(
     else list.push(thread.id);
   }
 
-  return {
-    targets: found.map((row) => ({
-      rowId: row.id,
-      findingId: row.finding_id,
-      original: JSON.parse(row.original_json) as OriginalFinding,
-      firstSeenSha: row.first_seen_sha,
-      lastAssessment: row.last_assessment_json === null
-        ? null
-        : (JSON.parse(row.last_assessment_json) as Assessment),
-      associationIds: associations.get(row.id) ?? [],
-    })),
-    capped: Math.max(0, (ownTotal?.n ?? 0) - own.results.length),
-  };
+  return found.map((row) => ({
+    rowId: row.id,
+    findingId: row.finding_id,
+    original: JSON.parse(row.original_json) as OriginalFinding,
+    firstSeenSha: row.first_seen_sha,
+    lastAssessment: row.last_assessment_json === null
+      ? null
+      : (JSON.parse(row.last_assessment_json) as Assessment),
+    associationIds: associations.get(row.id) ?? [],
+  }));
 }
 
-/** Aggregate count of open lifecycle rows for the scope (coverage line). */
-export async function countOpenFindings(db: D1Like, scope: Scope): Promise<number> {
+/**
+ * Aggregate count of RECHECKABLE rows for the scope — the `totalOpen` the
+ * round coverage reports (spec §7.4). It binds the SAME predicate as
+ * `selectAssessmentTargets`, so `selected <= totalOpen` always holds and
+ * `capped` stays the honest remainder instead of going negative.
+ */
+export async function countRecheckableFindings(db: D1Like, scope: Scope): Promise<number> {
   const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM review_findings
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'`,
-    )
-    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
+    .prepare(`SELECT COUNT(*) AS n FROM review_findings f WHERE ${RECHECKABLE_WHERE_SQL}`)
+    .bind(...recheckableScopeBinds(scope))
     .first<{ n: number }>();
   return row?.n ?? 0;
 }

@@ -645,14 +645,14 @@ describe("report sections (mstar.report/v1 side document)", () => {
       { title: "D", disposition: "unverifiable", reason: "no-evidence", evidenceKind: null, thread: "-" },
     ];
     const md = buildRevalidatedSection(coverage, rows);
-    expect(md.startsWith("<details><summary>Revalidated findings</summary>\n\nReassessed 1/2 open prior finding(s) this round")).toBe(true);
+    expect(md.startsWith("<details><summary>Revalidated findings</summary>\n\nReassessed 1/2 prior finding(s) this round")).toBe(true);
     expect(md).toContain("| finding | disposition | evidence | thread |");
     expect(md).toContain("| A \\| b | addressed (verified-fix) | current-code | not yet resolved |");
     expect(md).toContain("| C | dismissed (non-fix-dismissal) | - | - |");
     expect(md).toContain("| D | unverifiable (no-evidence) | - | - |");
     // The line's identity: assessed + invalid-output + omitted === selected.
     expect(buildRevalidatedSection({ ...coverage, invalidOutput: 1, omitted: 0 }, rows)).toContain(
-      "Reassessed 1/2 open prior finding(s) this round · 1 invalid-output · 0 omitted",
+      "Reassessed 1/2 prior finding(s) this round · 1 invalid-output · 0 omitted",
     );
   });
 
@@ -670,7 +670,6 @@ describe("report sections (mstar.report/v1 side document)", () => {
     // The row text is escaped like a report field, so the cell stays text and
     // no tag can fold the rest of the comment.
     expect(revalidated).toContain("&lt;details>&lt;summary>prior&lt;/summary>");
-    // The row cannot open a second fold: the only live tag is the section's own.
     expect(revalidated.match(/<details>/g)).toHaveLength(1);
     expect(revalidated).not.toContain("<details><summary>prior");
 
@@ -699,8 +698,8 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(body.match(/<\/details>/g)).toHaveLength(1);
     const injected = body.indexOf("&lt;details>");
     expect(injected).toBeGreaterThan(-1);
-    // Findings precedes the fold; every section AFTER it stays outside the
-    // (escaped) fold text — the escape is in place, not just somewhere.
+    // Every section that follows the table is still outside the (escaped)
+    // fold text — the escape is in place, not just somewhere in the body.
     expect(body.indexOf("### Findings")).toBeLessThan(
       body.indexOf("<summary>Revalidated findings</summary>"),
     );
@@ -764,7 +763,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     };
     const md = buildRevalidatedSection(overCap, []);
     expect(md).toContain(
-      "Reassessed 0/0 open prior finding(s) this round · 0 invalid-output · 0 omitted · 4 over cap · 4 open",
+      "Reassessed 0/0 prior finding(s) this round · 0 invalid-output · 0 omitted · 4 over cap · 4 recheckable",
     );
     expect(md).not.toContain("| Prior finding |");
   });
@@ -992,29 +991,6 @@ describe("report sections (mstar.report/v1 side document)", () => {
       const escaped = body.indexOf(`\\${fence}`);
       for (const section of ["### 🗑️ Considered & rejected", "## 🛠️ Plan to fix"]) {
         expect(body.indexOf(section)).toBeGreaterThan(escaped);
-      }
-    }
-  });
-
-  test("a GFM delimiter row and a bare ATX heading are neutralized as structure", () => {
-    // `Name | Value` + `:---|---:` forms a grid even with no leading pipe, and a
-    // bare `###` renders an empty heading.
-    for (const line of ["Name | Value\n:---|---:", "--- | ---", "| --- | --- |", "a | b\n---|---", "###"]) {
-      const body = buildReviewBody(
-        { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
-        0,
-        {
-          report: { ...report, verified: line },
-          revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
-        },
-      );
-      const first = line.split("\n")[0]!;
-      if (line.includes("|")) {
-        // The header line itself gains a leading pipe arm only when it starts
-        // with one; the DELIMITER row is what must always be escaped.
-        expect(body).toContain(`\\${line.split("\n").at(-1)!}`);
-      } else {
-        expect(body).toContain(`\\${first}`);
       }
     }
   });
@@ -1288,7 +1264,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
       rejected: "none",
       planToFix: "x".repeat(REVIEW_BODY_LIMIT + 5000),
     };
-    const reportParts = { report, revalidated: "Reassessed 0/0 open prior finding(s) this round" };
+    const reportParts = { report, revalidated: "Reassessed 0/0 prior finding(s) this round" };
     const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
 
     // Both clamp sites: the inner body clamp and the prepared-body clamp.

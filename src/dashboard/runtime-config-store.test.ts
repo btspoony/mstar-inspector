@@ -38,14 +38,15 @@ import { describe, expect, test } from "bun:test";
 import {
   CHECK_TERMINALIZE_DEFAULT,
   CHECK_TERMINALIZE_KEY,
-  CHECK_TERMINALIZE_MIN,
   CHECK_UPDATE_DEFAULT,
-  CHECK_UPDATE_MIN,
   CHECK_UPDATE_KEY,
+  COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+  COMMENT_CLAIM_ATTEMPTS_KEY,
+  COMMENT_CLAIM_OUTBOX_DEFAULT,
+  COMMENT_CLAIM_OUTBOX_KEY,
+  COMMENT_CLAIM_RETRY_DEFAULT,
+  COMMENT_CLAIM_RETRY_KEY,
   CONCURRENCY_MIN,
-  RECHECK_BACKLOG_FILL_DEFAULT,
-  RECHECK_BACKLOG_FILL_KEY,
-  RECHECK_BACKLOG_FILL_MAX,
   RECHECK_ASSIGNMENT_DEFAULT,
   RECHECK_ASSIGNMENT_KEY,
   RECHECK_ASSIGNMENT_MAX,
@@ -59,14 +60,14 @@ import {
   WORKSPACE_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_MAX,
   getCheckBudgets,
-  getRecheckBacklogFill,
+  getCommentClaimSettings,
   getEffectiveConcurrency,
   getRecheckAssignmentMaxBytes,
   getSystemConcurrency,
   getWorkspaceConcurrency,
   readDefaultReviewLevel,
   setCheckBudgets,
-  setRecheckBacklogFill,
+  setCommentClaimSettings,
   setDefaultReviewLevel,
   setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
@@ -511,155 +512,7 @@ describe("runtime-config-store", () => {
   });
 });
 
-describe("recheck backlog refill", () => {
-  test("an absent row answers the documented default without degrading", async () =>
-    expect(await getRecheckBacklogFill(fixture())).toEqual({
-      rows: RECHECK_BACKLOG_FILL_DEFAULT,
-      degraded: false,
-    }));
-
-  test("an untrusted or out-of-range stored value answers the default with degraded: true", async () => {
-    for (const value of ["not-a-number", "-1", String(RECHECK_BACKLOG_FILL_MAX + 1)]) {
-      const db = fixture();
-      db.raw
-        .prepare(
-          `INSERT INTO review_runtime_settings (key, value, updated_at)
-           VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
-        )
-        .run(RECHECK_BACKLOG_FILL_KEY, value);
-      expect(await getRecheckBacklogFill(db), value).toEqual({
-        rows: RECHECK_BACKLOG_FILL_DEFAULT,
-        degraded: true,
-      });
-    }
-  });
-
-  test("a read failure answers the default with degraded: true and never throws", async () =>
-    expect(await getRecheckBacklogFill(failingDb)).toEqual({
-      rows: RECHECK_BACKLOG_FILL_DEFAULT,
-      degraded: true,
-    }));
-
-  test("an out-of-range write is refused and writes nothing", async () => {
-    const db = fixture();
-    for (const value of [-1, RECHECK_BACKLOG_FILL_MAX + 1, 2.5]) {
-      await expect(setRecheckBacklogFill(db, value, ACTOR)).rejects.toBeInstanceOf(RuntimeConfigError);
-    }
-    expect(auditRows(db)).toEqual([]);
-  });
-
-  test("an accepted write lands the row with one audit row, and reads back", async () => {
-    const db = fixture();
-    expect(await setRecheckBacklogFill(db, 7, ACTOR)).toBe(7);
-    expect(await getRecheckBacklogFill(db)).toEqual({ rows: 7, degraded: false });
-    expect(auditRows(db)).toEqual([
-      { action: "runtime.recheck.backlog_fill.set", target_id: RECHECK_BACKLOG_FILL_KEY },
-    ]);
-    expect(auditDetails(db, "runtime.recheck.backlog_fill.set")).toEqual([
-      { before: null, after: 7 },
-    ]);
-    // A second save records the previous value as `before`.
-    await setRecheckBacklogFill(db, 0, ACTOR);
-    expect(await getRecheckBacklogFill(db)).toEqual({ rows: 0, degraded: false });
-    expect(auditDetails(db, "runtime.recheck.backlog_fill.set")[1]).toEqual({
-      before: 7,
-      after: 0,
-    });
-  });
-});
-
 describe("check budgets", () => {
-  test("a stored pair that breaks the writer's relation degrades the read", async () => {
-    // Only an out-of-band write can produce this; the reader is the last fence.
-    const pairs: Array<[string, string]> = [["5000", "5000"], ["4000", "5000"]];
-    for (const [terminalize, update] of pairs) {
-      const scoped = fixture();
-      scoped.raw
-        .prepare(
-          `INSERT INTO review_runtime_settings (key, value, updated_at)
-           VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
-        )
-        .run(CHECK_TERMINALIZE_KEY, terminalize);
-      scoped.raw
-        .prepare(
-          `INSERT INTO review_runtime_settings (key, value, updated_at)
-           VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
-        )
-        .run(CHECK_UPDATE_KEY, update);
-      expect(await getCheckBudgets(scoped)).toEqual({
-        terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
-        updateMs: CHECK_UPDATE_DEFAULT,
-        degraded: true,
-        derived: false,
-      });
-    }
-  });
-
-  test("a single stored budget keeps its value; the absent side is adjusted to the invariant", async () => {
-    // The operator wrote only the wait, below the default send budget. The
-    // stored value stays; the absent side is tightened so the effective pair
-    // still contains the send (never a trusted 1 s wait over a 5 s send, and
-    // never a silent widening to the 10 s default).
-    const waitOnly = fixture();
-    waitOnly.raw
-      .prepare(
-        `INSERT INTO review_runtime_settings (key, value, updated_at)
-         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
-      )
-      .run(CHECK_TERMINALIZE_KEY, "1000");
-    expect(await getCheckBudgets(waitOnly)).toEqual({
-      terminalizeMs: 1_000,
-      updateMs: 999,
-      degraded: false,
-      derived: true,
-    });
-
-    // A lone send below the default wait needs no derivation at all.
-    const smallSend = fixture();
-    smallSend.raw
-      .prepare(
-        `INSERT INTO review_runtime_settings (key, value, updated_at)
-         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
-      )
-      .run(CHECK_UPDATE_KEY, CHECK_UPDATE_MIN);
-    expect(await getCheckBudgets(smallSend)).toEqual({
-      terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
-      updateMs: CHECK_UPDATE_MIN,
-      degraded: false,
-      derived: true,
-    });
-
-    // A stored value that already satisfies the relation is returned as is.
-    const alreadyValid = fixture();
-    alreadyValid.raw
-      .prepare(
-        `INSERT INTO review_runtime_settings (key, value, updated_at)
-         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
-      )
-      .run(CHECK_TERMINALIZE_KEY, "20000");
-    expect(await getCheckBudgets(alreadyValid)).toEqual({
-      terminalizeMs: 20_000,
-      updateMs: CHECK_UPDATE_DEFAULT,
-      degraded: false,
-      derived: true,
-    });
-
-    // The mirror case: only the send is stored, above the default wait.
-    const sendOnly = fixture();
-    sendOnly.raw
-      .prepare(
-        `INSERT INTO review_runtime_settings (key, value, updated_at)
-         VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
-      )
-      .run(CHECK_UPDATE_KEY, "12000");
-    expect(await getCheckBudgets(sendOnly)).toEqual({
-      terminalizeMs: 12_001,
-      updateMs: 12_000,
-      degraded: false,
-      derived: true,
-    });
-  });
-
   /** Both stored budget rows, raw, keyed by PK. */
   function storedBudgetsRaw(db: TestD1): Record<string, string> {
     const rows = db.raw
@@ -673,7 +526,6 @@ describe("check budgets", () => {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: false,
-      derived: false,
     }));
 
   test("an untrusted or out-of-range stored value answers the defaults with degraded: true", async () => {
@@ -689,7 +541,6 @@ describe("check budgets", () => {
         terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
         updateMs: CHECK_UPDATE_DEFAULT,
         degraded: true,
-        derived: false,
       });
     }
   });
@@ -699,7 +550,6 @@ describe("check budgets", () => {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: true,
-      derived: false,
     }));
 
   test("an out-of-range pair is refused and writes nothing", async () => {
@@ -748,7 +598,6 @@ describe("check budgets", () => {
       terminalizeMs: 12_000,
       updateMs: 7_000,
       degraded: false,
-      derived: false,
     });
     expect(auditRows(db)).toEqual([
       { action: "runtime.check_budgets.set", target_id: "review.check.budgets" },
@@ -765,6 +614,111 @@ describe("check budgets", () => {
     expect(auditDetails(db, "runtime.check_budgets.set")[1]).toEqual({
       before: { terminalizeMs: 12_000, updateMs: 7_000 },
       after: { terminalizeMs: 9_000, updateMs: 6_000 },
+    });
+  });
+});
+
+describe("comment-claim settings", () => {
+  /** Every stored runtime-config row, raw, keyed by PK. */
+  function storedRows(db: TestD1): Record<string, string> {
+    const rows = db.raw
+      .prepare("SELECT key, value FROM review_runtime_settings ORDER BY key")
+      .all() as Array<{ key: string; value: string }>;
+    return Object.fromEntries(rows.map((row) => [row.key, row.value]));
+  }
+
+  test("absent rows fall back to the documented defaults without degrading", async () =>
+    expect(await getCommentClaimSettings(fixture())).toEqual({
+      retryMs: COMMENT_CLAIM_RETRY_DEFAULT,
+      maxAttempts: COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+      outboxCap: COMMENT_CLAIM_OUTBOX_DEFAULT,
+      degraded: false,
+    }));
+
+  test("an untrusted or out-of-range stored value answers the defaults with degraded: true", async () => {
+    for (const [key, value] of [
+      [COMMENT_CLAIM_RETRY_KEY, "fast"],
+      // Below the 30 s floor: a window that short would duplicate an in-flight send.
+      [COMMENT_CLAIM_RETRY_KEY, "1000"],
+      [COMMENT_CLAIM_ATTEMPTS_KEY, "0"],
+      [COMMENT_CLAIM_ATTEMPTS_KEY, "11"],
+      [COMMENT_CLAIM_OUTBOX_KEY, "0"],
+      [COMMENT_CLAIM_OUTBOX_KEY, "101"],
+    ] as const) {
+      const db = fixture();
+      db.raw
+        .prepare(
+          `INSERT INTO review_runtime_settings (key, value, updated_at)
+           VALUES (?1, ?2, '2026-11-05T00:00:00.000Z')`,
+        )
+        .run(key, value);
+      expect(await getCommentClaimSettings(db), `${key}=${value}`).toEqual({
+        retryMs: COMMENT_CLAIM_RETRY_DEFAULT,
+        maxAttempts: COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+        outboxCap: COMMENT_CLAIM_OUTBOX_DEFAULT,
+        degraded: true,
+      });
+    }
+  });
+
+  test("a read failure answers the defaults with degraded: true and never throws", async () =>
+    expect(await getCommentClaimSettings(failingDb)).toEqual({
+      retryMs: COMMENT_CLAIM_RETRY_DEFAULT,
+      maxAttempts: COMMENT_CLAIM_ATTEMPTS_DEFAULT,
+      outboxCap: COMMENT_CLAIM_OUTBOX_DEFAULT,
+      degraded: true,
+    }));
+
+  test("an out-of-range value is refused and writes nothing", async () => {
+    const db = fixture();
+    for (const value of [
+      { retryMs: 29_999, maxAttempts: 3, outboxCap: 20 },
+      { retryMs: 3_600_001, maxAttempts: 3, outboxCap: 20 },
+      { retryMs: 300_000.5, maxAttempts: 3, outboxCap: 20 },
+      { retryMs: 300_000, maxAttempts: 0, outboxCap: 20 },
+      { retryMs: 300_000, maxAttempts: 11, outboxCap: 20 },
+      { retryMs: 300_000, maxAttempts: 3, outboxCap: 0 },
+      { retryMs: 300_000, maxAttempts: 3, outboxCap: 101 },
+    ]) {
+      await expect(setCommentClaimSettings(db, value, ACTOR)).rejects.toBeInstanceOf(
+        RuntimeConfigError,
+      );
+    }
+    expect(storedRows(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("an accepted trio lands three rows with one audit row, and reads back", async () => {
+    const db = fixture();
+    expect(
+      await setCommentClaimSettings(db, { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 }, ACTOR),
+    ).toEqual({ retryMs: 60_000, maxAttempts: 5, outboxCap: 10 });
+    expect(storedRows(db)).toEqual({
+      [COMMENT_CLAIM_RETRY_KEY]: "60000",
+      [COMMENT_CLAIM_ATTEMPTS_KEY]: "5",
+      [COMMENT_CLAIM_OUTBOX_KEY]: "10",
+    });
+    expect(await getCommentClaimSettings(db)).toEqual({
+      retryMs: 60_000,
+      maxAttempts: 5,
+      outboxCap: 10,
+      degraded: false,
+    });
+    expect(auditRows(db)).toEqual([
+      { action: "runtime.comment_claim.set", target_id: "review.comment_claim.budgets" },
+    ]);
+    expect(auditDetails(db, "runtime.comment_claim.set")).toEqual([
+      {
+        before: { retryMs: null, maxAttempts: null, outboxCap: null },
+        after: { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 },
+      },
+    ]);
+
+    // A second save records the previous trio as `before`.
+    await setCommentClaimSettings(db, { retryMs: 45_000, maxAttempts: 2, outboxCap: 4 }, ACTOR);
+    expect(auditDetails(db, "runtime.comment_claim.set")[1]).toEqual({
+      before: { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 },
+      after: { retryMs: 45_000, maxAttempts: 2, outboxCap: 4 },
     });
   });
 });

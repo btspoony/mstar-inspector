@@ -983,27 +983,25 @@ export const en = {
       checkFailed: "Could not change the check budgets.",
       /** {terminalize}/{update} = the budgets currently stored (or the documented defaults). */
       checkCurrent: "Effective on the next review: terminalize {terminalize} ms, update {update} ms.",
-      /** Exactly one row is stored; its partner is the default, adjusted only when needed. */
-      checkDerived:
-        "Only one of these budgets is stored. The other is the documented default, adjusted to the nearest legal value only when the pair would otherwise break the inline-wait/update relation. Enter both values to save them.",
-      /** {terminalize}/{update} = the effective pair (one side derived, not stored). */
-      checkDerivedCurrent: "Effective on the next review: terminalize {terminalize} ms, update {update} ms (one side derived).",
       /** Neither stored budget could be read — the numbers are the documented defaults. */
       checkUnreadable:
         "The stored check budgets could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
-      backlogFillTitle: "Recheck backlog",
-      backlogFillDescription:
-        "How many older open findings may join a round's recheck set after the previous round's own findings. Each target costs the recheck seat budget; 0 turns the refill off.",
-      backlogFillLabel: "Older findings per round",
-      backlogFillSave: "Save",
-      backlogFillSaved: "Saved.",
+      claimTitle: "Comment-trigger recovery",
+      claimDescription:
+        "How the cron recovers a bot-mention comment whose queue send never happened: how long a claimed comment waits before it is re-sent, how many attempts it gets, and how many claims one sweep re-sends.",
+      retryLabel: "Retry window (ms)",
+      attemptsLabel: "Max attempts",
+      outboxLabel: "Outbox batch",
+      claimSave: "Save",
+      claimSaved: "Saved.",
       /** Fallback when the write fails with an unrecognised error. */
-      backlogFillFailed: "Could not change the recheck backlog refill.",
-      /** {value} = the refill currently stored (or the documented default). */
-      backlogFillCurrent: "Effective on the next review: up to {value} older findings.",
-      /** The stored refill could not be read — the number is the documented default. */
-      backlogFillUnreadable:
-        "The stored recheck backlog refill could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
+      claimFailed: "Could not change the comment-trigger recovery settings.",
+      /** {retry}/{attempts}/{outbox} = the stored settings (or the documented defaults). */
+      claimCurrent:
+        "Effective on the next sweep: retry after {retry} ms, {attempts} attempts, {outbox} claims per sweep.",
+      /** No stored setting could be read — the numbers are the documented defaults. */
+      claimUnreadable:
+        "The stored comment-trigger recovery settings could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
       /** The operator default an App without its own depth inherits. */
       reviewLevelTitle: "Review depth",
       reviewLevelDescription: "Applies to Apps that have not chosen their own review depth.",

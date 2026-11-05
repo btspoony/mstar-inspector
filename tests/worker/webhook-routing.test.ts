@@ -666,7 +666,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const body = JSON.stringify({
       action: "created",
       installation: { id: 123 },
-      comment: { body: "@app-x please take another look" },
+      comment: { body: "@app-x please take another look", id: 900000001 },
       issue: { number: 7, pull_request: {}, user: { login: "alice" } },
       repository: { name: "test-repo", owner: { login: "alice" } },
       sender: { type: "User", login: "alice" },
@@ -687,6 +687,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       repo: "test-repo",
       pr_number: 7,
       head_sha: null,
+      comment_id: 900000001,
       action: "created",
       triggered_by: "issue_comment",
       appRef: { appId: appRow.id },
@@ -713,7 +714,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const mentionBody = JSON.stringify({
       action: "created",
       installation: { id: 123 },
-      comment: { body: "@app-x" },
+      comment: { body: "@app-x", id: 900000002 },
       issue: { number: 7, pull_request: {}, user: { login: "alice" } },
       repository: { name: "test-repo", owner: { login: "alice" } },
       sender: { type: "User", login: "alice" },
@@ -730,6 +731,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(sent[0]).toMatchObject({
       pr_number: 7,
       head_sha: null,
+      comment_id: 900000002,
       triggered_by: "issue_comment",
       appRef: { appId: appRow.id },
     });

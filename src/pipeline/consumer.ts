@@ -102,10 +102,9 @@ import { computeFindingFingerprint } from "../store/fingerprint";
 import {
   applyPublishedLifecycle,
   claimPublication,
-  countOpenFindings,
+  countRecheckableFindings,
   findPublicationJournal,
   hasUnprovenDegradedPublication,
-  latestAppliedReviewPublicationId,
   PUBLICATION_HANDOFF_PHASES,
   markPublicationFailed,
   recordPublicationProof,
@@ -218,7 +217,6 @@ import {
   CHECK_TERMINALIZE_DEFAULT,
   CHECK_UPDATE_DEFAULT,
   readCheckBudgets,
-  readRecheckBacklogFill,
   type CheckBudgets,
 } from "./check-budgets-reader";
 
@@ -365,7 +363,7 @@ export type ConsumerLogFields = {
    * a legitimate no-op, not a fault; `check_abandon_failed` = the hand-off
    * itself faulted (a store error).
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_recheck_backlog_fill_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -1891,11 +1889,7 @@ function reconcileRecheckRound(input: {
   // snapshot fences actually captured this round. The ISSUE side needs its
   // FETCH and its MODEL view complete plus a digest: a model that never saw
   // part of the human discussion could miss a rebuttal or a still-open
-  // concern, so that evidence never authorizes a resolve. Reports this app
-  // published itself are excluded from the model view before the caps
-  // (`boundDiscussion`), so our own history no longer truncates it. The TARGET
-  // THREAD the verdict was proved against keeps BOTH its fetch and model
-  // coverage complete.
+  // concern, so that evidence never authorizes a resolve.
   const resolutions: { associationId: string; verified: VerifiedResolution }[] = [];
   for (const target of targets) {
     const assessment = outcomeByRowId.get(target.rowId);
@@ -1970,14 +1964,16 @@ function emptyDiscussion(nowMs: number): Discussion {
 }
 
 /**
- * The round's context coverage (§7.4): complete only when the issue FETCH and
- * its MODEL view are both complete AND every captured thread snapshot (fetch
- * AND model coverage) is complete — a truncated or unavailable capture view
- * never labels a round complete.
+ * The round's context coverage (§7.4): complete only when the issue capture
+ * AND every captured thread snapshot (fetch AND model coverage) are
+ * complete — a truncated or unavailable capture never labels a round
+ * complete.
  */
 function roundContextCoverage(discussion: Discussion): Coverage {
   if (discussion.issueCoverage === "unavailable") return "unavailable";
-  if (discussion.issueCoverage !== "complete" || discussion.issueModelCoverage !== "complete") return "truncated";
+  if (discussion.issueCoverage !== "complete" || discussion.issueModelCoverage !== "complete") {
+    return "truncated";
+  }
   for (const thread of discussion.threads) {
     if (thread.coverage !== "complete" || thread.modelCoverage !== "complete") return "truncated";
   }
@@ -3506,11 +3502,41 @@ async function processMessage(
 
   try {
     baseFields = toBaseFields(payload);
-
-    /** The settings readers' log adapter: their payload over this message's base fields. */
-    const readerWarn = (readerFields: object, msg?: string): void =>
-      deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg);
-
+    // Durable per-comment claim (migration 0048) — the atomic step that turns
+    // at-least-once queue delivery into at-most-once execution. The worker
+    // already inserted the row `queued` before it enqueued, so the conditional
+    // UPDATE below decides which delivery runs: a queue redelivery, an outbox
+    // re-send, or a delivery arriving after the 24h KV claim lapsed all find
+    // `state` no longer `queued` and ack without running.
+    //
+    // Deliberately BEFORE the level/credential resolution: the claim must be
+    // recorded even when the run itself fails, because a comment-triggered
+    // review is re-run by posting a new comment (a new id), never by replaying
+    // this one (the documented accepted limit).
+    //
+    // The payload is cleared in the same statement: it is only needed while
+    // `queued` (the outbox re-send), and the row itself lives on as the
+    // tombstone that refuses every later delivery of this comment.
+    if (payload.comment_id !== undefined) {
+      const claimed = await deps.env.DB.prepare(
+        `UPDATE comment_trigger_claims SET state = 'consumed', consumed_ms = ?, payload_json = NULL
+          WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
+            AND state = 'queued'`,
+      )
+        .bind(
+          Date.now(),
+          payload.installation_id,
+          payload.owner,
+          payload.repo,
+          payload.pr_number,
+          payload.comment_id,
+        )
+        .run();
+      if (claimed.meta.changes === 0) {
+        deps.log.info(baseFields, "comment trigger already claimed — ack without running");
+        return { kind: "ok" };
+      }
+    }
     // Credential resolution FIRST (lock L4 — consumer-side),
     // before the guard/sandbox: app → D1 row gated
     // missing/deleted/disabled (throw → retry/DLQ, byte-identical) then
@@ -3789,7 +3815,10 @@ async function processMessage(
     if (deps.checks !== undefined) {
       // §7.10 Check budgets: ONE read per message, taken only once this
       // message can actually produce a Check; every terminal path shares it.
-      checkBudgets = await readCheckBudgets(deps.env.DB, { warn: readerWarn });
+      checkBudgets = await readCheckBudgets(deps.env.DB, {
+        warn: (readerFields, msg) =>
+          deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
+      });
       const earlyHeadSha = payload.head_sha || (await readPrHead(deps, payload))?.headSha || null;
       if (earlyHeadSha !== null) {
         checkClaimAttempted = true;
@@ -4062,29 +4091,10 @@ async function processMessage(
 
     let targets: RecheckTarget[] = [];
     let totalOpen = 0;
-    // The previous round's own rows this bound dropped (coverage line).
-    let previousCapped = 0;
     let captureFailed = false;
     try {
-      // The previous round is the newest APPLIED review publication: this
-      // round's own publication is staged only after the seat returns. A first
-      // round publishes nothing yet, so there is no finding set to reassess.
-      const previousPublicationId = await latestAppliedReviewPublicationId(deps.env.DB, lifecycleScope);
-      if (previousPublicationId !== null) {
-        // §7.2 breadth is an operator setting: how many older open rows may
-        // join the previous round's own findings (0 = no refill).
-        const backlogFill = await readRecheckBacklogFill(deps.env.DB, { warn: readerWarn });
-        const selection = await selectAssessmentTargets(
-          deps.env.DB,
-          lifecycleScope,
-          ASSESSMENT_TARGET_CAP,
-          previousPublicationId,
-          backlogFill,
-        );
-        targets = selection.targets;
-        previousCapped = selection.capped;
-      }
-      totalOpen = await countOpenFindings(deps.env.DB, lifecycleScope);
+      targets = await selectAssessmentTargets(deps.env.DB, lifecycleScope, ASSESSMENT_TARGET_CAP);
+      totalOpen = await countRecheckableFindings(deps.env.DB, lifecycleScope);
     } catch (err) {
       captureFailed = true;
       const detail = err instanceof Error ? err.message : String(err);
@@ -4677,10 +4687,10 @@ async function processMessage(
     if (targets.length > 0) {
       const status = recheck?.status ?? null;
       const recheckOutcome = status?.outcome ?? "absent";
-      // The runner stops an unfinished seat only on review failure or when the
-      // outer deadline leaves no room (spec §7.8): the round answered nothing
-      // because it was STOPPED, not because it ran and lost. That is neither a
-      // failure row nor an `invalid-output` for a row the seat never answered.
+      // The runner cancels an unfinished seat when the main review settles
+      // (spec §7.8): the round answered nothing because it was STOPPED, not
+      // because it ran and lost. That is neither a failure row nor an
+      // `invalid-output` for a row the seat never answered.
       const roundCancelled = recheckOutcome === "skipped" && status?.reason === "aborted";
       // The status document belongs to the SEAT; a round whose document was
       // lost has its real cause on the read side (absent / overflow /
@@ -4769,9 +4779,7 @@ async function processMessage(
       assessed: reconciled.assessedCount,
       invalidOutput: reconciled.invalidOutputCount,
       omitted: reconciled.unansweredCount,
-      // Only the previous round's own rows can be cap-dropped; the older
-      // backlog is reached through the bounded refill, not blamed on the cap.
-      capped: previousCapped,
+      capped: Math.max(0, totalOpen - targets.length),
       contextCoverage,
     };
     const queuedAssociations = new Set(reconciled.resolutions.map((r) => r.associationId));

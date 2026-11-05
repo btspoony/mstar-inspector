@@ -10,17 +10,10 @@ import {
   CHECK_TERMINALIZE_DEFAULT,
   CHECK_TERMINALIZE_KEY,
   CHECK_UPDATE_DEFAULT,
-  RECHECK_BACKLOG_FILL_DEFAULT,
-  RECHECK_BACKLOG_FILL_KEY,
 } from "../dashboard/runtime-config-store";
 import type { DashboardD1 } from "../dashboard/users";
 import { createMigratedTestD1 } from "../../tests/store/helpers";
-import {
-  readCheckBudgets,
-  readRecheckBacklogFill,
-  type BacklogFillLogFields,
-  type CheckBudgetsLogFields,
-} from "./check-budgets-reader";
+import { readCheckBudgets, type CheckBudgetsLogFields } from "./check-budgets-reader";
 
 function spyLog<T>(): { calls: Array<{ fields: T; msg?: string }>; warn: (fields: T, msg?: string) => void } {
   const calls: Array<{ fields: T; msg?: string }> = [];
@@ -53,7 +46,6 @@ describe("readCheckBudgets", () => {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: false,
-      derived: false,
     });
     expect(log.calls).toEqual([]);
   });
@@ -66,33 +58,12 @@ describe("readCheckBudgets", () => {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: true,
-      derived: false,
     });
     expect(log.calls).toHaveLength(1);
     expect(log.calls[0]!.fields).toEqual({
       event: "review_check_budgets_degraded",
       terminalize_ms: CHECK_TERMINALIZE_DEFAULT,
       update_ms: CHECK_UPDATE_DEFAULT,
-    });
-  });
-});
-
-describe("readRecheckBacklogFill", () => {
-  test("an absent row answers the default silently", async () => {
-    const log = spyLog<BacklogFillLogFields>();
-    expect(await readRecheckBacklogFill(db(), log)).toBe(RECHECK_BACKLOG_FILL_DEFAULT);
-    expect(log.calls).toEqual([]);
-  });
-
-  test("a degraded read emits exactly ONE warn with the default", async () => {
-    const log = spyLog<BacklogFillLogFields>();
-    const target = db();
-    await seed(target, RECHECK_BACKLOG_FILL_KEY, "-1");
-    expect(await readRecheckBacklogFill(target, log)).toBe(RECHECK_BACKLOG_FILL_DEFAULT);
-    expect(log.calls).toHaveLength(1);
-    expect(log.calls[0]!.fields).toEqual({
-      event: "review_recheck_backlog_fill_degraded",
-      rows: RECHECK_BACKLOG_FILL_DEFAULT,
     });
   });
 });
