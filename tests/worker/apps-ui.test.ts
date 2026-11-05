@@ -67,6 +67,9 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0007_reviews_app_id_index.sql",
     "0008_github_apps_ops.sql",
     "0009_app_model_roles.sql",
+    // 0010: the derived tail's 0048 indexes review_failures, so the table this
+    // hand-listed shape skipped must exist before the tail runs.
+    "0010_review_failures.sql",
     "0011_webhook_deliveries.sql",
     "0012_custom_providers_and_key_updated_at.sql",
     "0022_app_trigger_mode.sql",
