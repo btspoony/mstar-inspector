@@ -499,12 +499,19 @@ export async function runRecheckSeat(input: {
   signal: AbortSignal;
   /** The operator's ask budget; absent → `RECHECK_ASSIGNMENT_MAX_BYTES`. */
   assignmentMaxBytes?: number;
+  /** The structured-seat runner; tests inject a fake instead of mocking the SDK. */
+  runSeat?: typeof runStructuredSubagent;
 }): Promise<RecheckSeatResult> {
   const headSha = input.input.headSha;
   const assignmentMaxBytes = input.assignmentMaxBytes ?? RECHECK_ASSIGNMENT_MAX_BYTES;
+  const runSeat = input.runSeat ?? runStructuredSubagent;
   const maxRuntimeMs = currentRecheckBudget(Date.now());
   if (maxRuntimeMs === 0) {
-    console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget" }));
+    // `cause` splits the two skips that both report the closed `reason:
+    // "budget"`: this one is the transient tail (the outer deadline is
+    // already spent) and is re-evaluated on the next round, never a
+    // configuration fault the operator must fix.
+    console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget", cause: "tail" }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: null } };
   }
   const ask = fitRecheckInput(input.input, assignmentMaxBytes);
@@ -513,17 +520,27 @@ export async function runRecheckSeat(input: {
     // could hold the ask, so dispatching would only burn the window and lose
     // the round to an absent yield (I-000396). `budget` is the closed reason
     // for "the seat never got room" — the consumer accounts every sent row
-    // `unverifiable`/`budget` and blames none of them.
+    // `unverifiable`/`budget` and blames none of them. `cause: "config"`
+    // marks it PERMANENT: no later round can fit it until the operator raises
+    // `review.recheck.assignment_max_bytes`, unlike the tail skip above.
     const error = redactedStatusError(
       `recheck assignment exceeds the seat's context budget: targets + discussion need ` +
         `at least ${ask.requiredBytes} bytes, the budget is ${assignmentMaxBytes}`,
     );
-    console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget", error }));
+    console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget", cause: "config", error }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error } };
+  }
+  if (ask.omittedSlices > 0) {
+    // The ask fits but the catalog was starved: the round still runs, so
+    // without this line a systematically tight budget shows up only as
+    // unexplained `context-incomplete` rows in the published review.
+    console.error(
+      JSON.stringify({ event: "recheck_fitted", omitted: ask.omittedSlices, budget: assignmentMaxBytes }),
+    );
   }
   let gate: RecheckGateResult;
   try {
-    const result = await runStructuredSubagent({
+    const result = await runSeat({
       session: input.session,
       invocationKind: "task",
       assignment: recheckAssignment(ask.input),

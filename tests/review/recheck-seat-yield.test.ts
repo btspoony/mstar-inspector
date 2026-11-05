@@ -31,22 +31,30 @@
  * pinned by tests/pipeline/consumer-recheck-status.test.ts ("a failed seat
  * status with no document makes the round attributable").
  *
- * The `?test=` query keeps this file's `recheck.ts` instance off any sibling's
- * mock registry key (bun's mock.module registry is process-global).
+ * The fake seat rides the `runSeat` seam `runRecheckSeat` takes: this file
+ * installs no `mock.module`, so it cannot leak a stub into a sibling file
+ * whose imports resolve the same SDK specifier.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import * as realStructuredSubagent from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import type { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import {
   MODEL_ITEM_MAX_CHARS,
   MODEL_MAX_ITEMS,
   MODEL_TOTAL_MAX_CHARS,
   RECHECK_MAX_TARGETS,
+  RECHECK_STATUS_ERROR_MAX_CHARS,
   validateRecheckDoc,
   type EvidenceSlice,
   type RecheckInput,
-  type RecheckStatusReason,
 } from "../../packages/shared/src/recheck-wire";
+import {
+  anchorRecheckDeadline,
+  OUTER_RUNNER_CAP_MS,
+  RECHECK_ASSIGNMENT_MAX_BYTES,
+  resetRecheckAnchor,
+  runRecheckSeat,
+} from "../../packages/runner/src/recheck";
 
 /** The SDK's settled `SingleResult` slice `runRecheckSeat` reads. */
 type FakeSeatResult = {
@@ -65,56 +73,35 @@ let seatAnswer: ((asked: RecheckInput) => FakeSeatResult) | null = null;
 let seatReject: Error | null = null;
 const seatCalls: { assignment: string }[] = [];
 
-// The real namespace is spread into the stub: Bun's module-mock registry is
-// process-global, so a replacement that dropped the SDK's other exports made
-// every sibling importing them (the SDK barrel's
-// `buildStructuredSubagentRecoveryHint`) fail to link.
-mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
-  ...realStructuredSubagent,
-  runStructuredSubagent: mock(async (request: { assignment: string }) => {
-    seatCalls.push(request);
-    if (seatReject !== null) throw seatReject;
-    const reply = seatAnswer === null ? seatResult : seatAnswer(askedDocument(request.assignment));
-    return {
-      result: {
-        index: 0,
-        id: `seat-${seatCalls.length}`,
-        agent: "mstar-review-seat",
-        exitCode: reply.error !== undefined ? 1 : 0,
-        output: "",
-        stderr: reply.stderr,
-        error: reply.error,
-        structuredOutput: reply.structuredOutput,
-      },
-      policy: {},
-      mergeSummary: "",
-      changesApplied: null,
-      artifactsDir: "/tmp/fake-artifacts",
-      temporaryArtifacts: true,
-    };
-  }),
-}));
-
-// Dynamic import: the mock must be registered before recheck.ts evaluates its
-// structured-subagent import. The query suffix gives this file its own module
-// registry key, so a sibling that mocks the same runner path cannot bind here.
-const RECHECK_SPEC = "../../packages/runner/src/recheck.ts?test=recheck-seat-yield";
-const { anchorRecheckDeadline, OUTER_RUNNER_CAP_MS, RECHECK_ASSIGNMENT_MAX_BYTES, resetRecheckAnchor, runRecheckSeat } = (await import(
-  RECHECK_SPEC
-)) as {
-  anchorRecheckDeadline: (startMs: number, level: "quick" | "default" | "deep") => void;
-  OUTER_RUNNER_CAP_MS: Record<"quick" | "default" | "deep", number>;
-  /** The seat's assignment budget (plan 036b Task 2). */
-  RECHECK_ASSIGNMENT_MAX_BYTES: number;
-  resetRecheckAnchor: () => void;
-  runRecheckSeat: (input: {
-    session: unknown;
-    input: RecheckInput;
-    model: string[];
-    signal: AbortSignal;
-    assignmentMaxBytes?: number;
-  }) => Promise<{ doc: { results: { rowId: string; disposition: string; reason: string; evidence: { sliceId: string } | null }[] } | null; status: { outcome: string; reason: RecheckStatusReason | null; error: string | null; rejected: number; rejected_row_ids: string[]; rejected_unnamed: number } }>;
-};
+/**
+ * The injected seat seam: it records the ask and answers from the per-case
+ * state above, returning the settled `SingleResult` shape `runRecheckSeat`
+ * reads. `runRecheckSeat` defaults to the real SDK call, so production is
+ * unaffected by this file. The cast keeps the SDK's full result shape out of
+ * this file — the fake answers only the slice the seat reads.
+ */
+const fakeRunSeat = (async (request: { assignment: string }) => {
+  seatCalls.push(request);
+  if (seatReject !== null) throw seatReject;
+  const reply = seatAnswer === null ? seatResult : seatAnswer(askedDocument(request.assignment));
+  return {
+    result: {
+      index: 0,
+      id: `seat-${seatCalls.length}`,
+      agent: "mstar-review-seat",
+      exitCode: reply.error !== undefined ? 1 : 0,
+      output: "",
+      stderr: reply.stderr,
+      error: reply.error,
+      structuredOutput: reply.structuredOutput,
+    },
+    policy: {},
+    mergeSummary: "",
+    changesApplied: null,
+    artifactsDir: "/tmp/fake-artifacts",
+    temporaryArtifacts: true,
+  };
+}) as unknown as typeof runStructuredSubagent;
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -223,13 +210,8 @@ afterEach(() => {
   resetRecheckAnchor();
 });
 
-afterAll(() => {
-  // Registry hygiene: a sibling file must not inherit this file's seat stub.
-  mock.restore();
-});
-
 async function run(signal = new AbortController().signal) {
-  return runRecheckSeat({ session: {} as never, input: INPUT, model: ["test-model"], signal });
+  return runRecheckSeat({ session: {} as never, input: INPUT, model: ["test-model"], signal, runSeat: fakeRunSeat });
 }
 
 describe("036b RCA — recheck seat yield at the documented input limits", () => {
@@ -512,6 +494,7 @@ describe("036b Task 2 — the ask fits the seat's context budget", () => {
       input: oversized,
       model: ["test-model"],
       signal: new AbortController().signal,
+      runSeat: fakeRunSeat,
     });
     expect(seatCalls).toHaveLength(0);
     expect(seatDoc).toBeNull();
@@ -519,7 +502,7 @@ describe("036b Task 2 — the ask fits the seat's context budget", () => {
     // uses); the consumer accounts every sent row `unverifiable`/`budget`.
     expect(status).toMatchObject({ outcome: "skipped", reason: "budget" });
     expect(status.error).toContain("context budget");
-    expect(status.error!.length).toBeLessThanOrEqual(500);
+    expect(status.error!.length).toBeLessThanOrEqual(RECHECK_STATUS_ERROR_MAX_CHARS);
   });
 });
 
@@ -539,6 +522,7 @@ describe("the ask budget is the operator's setting, not a runner constant", () =
       model: ["test-model"],
       signal: new AbortController().signal,
       assignmentMaxBytes: 262_144,
+      runSeat: fakeRunSeat,
     });
     expect(seatCalls).toHaveLength(1);
     const assignment = seatCalls[0]!.assignment;
@@ -560,11 +544,61 @@ describe("the ask budget is the operator's setting, not a runner constant", () =
       model: ["test-model"],
       signal: new AbortController().signal,
       assignmentMaxBytes: 8_192,
+      runSeat: fakeRunSeat,
     });
     expect(seatCalls).toHaveLength(0);
     expect(seatDoc).toBeNull();
     expect(status).toMatchObject({ outcome: "skipped", reason: "budget" });
     expect(status.error).toContain("at least");
     expect(status.error).toContain("the budget is 8192");
+  });
+
+  test("a fitted ask and both budget skips leave an attributable record", async () => {
+    /** The structured JSON lines the seat writes to stderr during `body`. */
+    const errorsOf = async (body: () => Promise<unknown>) => {
+      const written: string[] = [];
+      const original = console.error;
+      console.error = (...args: unknown[]) => {
+        written.push(args.map(String).join(" "));
+      };
+      try {
+        await body();
+      } finally {
+        console.error = original;
+      }
+      return written.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line) as Record<string, unknown>);
+    };
+
+    // A fitted ask still runs, so it must say what the budget starved.
+    seatResult = answerAll(INPUT);
+    const fitted = await errorsOf(() => run());
+    const asked = askedDocument(seatCalls[0]!.assignment);
+    expect(fitted).toContainEqual({
+      event: "recheck_fitted",
+      omitted: INPUT.evidence.length - asked.evidence.length,
+      budget: RECHECK_ASSIGNMENT_MAX_BYTES,
+    });
+
+    // Permanent: no tail state can fit this ask — the operator's budget is
+    // too small, so the skip names itself instead of looking transient.
+    const starved = await errorsOf(() =>
+      runRecheckSeat({
+        session: {} as never,
+        input: INPUT,
+        model: ["test-model"],
+        signal: new AbortController().signal,
+        assignmentMaxBytes: 8_192,
+        runSeat: fakeRunSeat,
+      }),
+    );
+    expect(starved.find((line) => line.event === "recheck_skipped")).toMatchObject({
+      reason: "budget",
+      cause: "config",
+    });
+
+    // Transient: the outer deadline is already spent — re-evaluated next round.
+    anchorRecheckDeadline(Date.now() - OUTER_RUNNER_CAP_MS.default + 10_000, "default");
+    const tail = await errorsOf(() => run());
+    expect(tail).toContainEqual({ event: "recheck_skipped", reason: "budget", cause: "tail" });
   });
 });

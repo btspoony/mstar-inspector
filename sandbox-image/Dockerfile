@@ -7,6 +7,16 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the recheck seat's ask is now fitted to the operator's byte budget and its yield is
+# validated against the catalog the seat actually received. Only image inputs changed —
+# `packages/runner/src/**` (the fitting, the validation-against-received-catalog and the
+# `recheck_fitted`/`recheck_skipped cause` records) and `packages/shared/src/**` (the wire
+# validators it calls) — with no manifest or CLI pin move. A stale image still embeds the whole
+# up-to-512 KiB `mstar.recheck-input/v1` document in one assignment, so a large round keeps asking
+# for more prompt than the seat holds, its yield never arrives, and the round lands
+# `failed`/`seat-failed` (status `unavailable`, I-000396) — the Worker cannot correct that from
+# outside, and nothing here reports how much catalog the budget starved.
+#
 # rebuild: the runner's pinned engine moves to 4.2.0 (`packages/runner/package.json`
 # and its lockfile are image inputs, so the container must be rebuilt with them).
 # rebuild: the image's CLI pin and harness clone ref move to 4.2.0
@@ -27,9 +37,6 @@
 # before its first model turn.
 # rebuild: the shim COPY is digest-pinned, so a rebuild no longer depends on what
 # the mutable 1.0.0 tag resolves to at build time.
-# rebuild: the recheck seat's ask is fitted to an operator-set byte budget and its yield is
-# validated against the catalog the seat actually received; the image's runner sources changed
-# without any manifest or CLI pin change.
 # rebuild: the runner marks its `incomplete`-cause composition as engine-owned
 # staging (the engine should derive the fact from seat results, not accept a
 # consumer's string), so the removal is scheduled rather than discovered.

@@ -129,7 +129,10 @@ export type FailureStore = {
    * Terminal admission drops in the trailing 24h, grouped by the reason token
    * of the drop row's prefix. One grouped READ over the rows the pipeline
    * already writes — no new table, writer or stage; every reason is present,
-   * absent ones as 0.
+   * absent ones as 0. The `stage = 'pipeline'` + `created_at` window is served
+   * by the partial index `idx_review_failures_pipeline_created` (migration
+   * 0048), so this per-page-load read scans drop rows only, never the other
+   * stages' traffic.
    */
   countAdmissionDrops24h(): Promise<AdmissionDropCounts>;
 };
