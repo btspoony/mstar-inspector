@@ -679,11 +679,18 @@ export function PullRequestDetailView({
             the one fact an operator must not miss. Each trigger's accessible
             name is the label and the count with a separator — the visible
             spans alone would announce "Findings3". */}
-        {/* The record pill and the findings filter share one toolbar row: the
-            pill hugs the left, the filter (findings only, and only while the
-            PR has findings to narrow) sits at the row's right edge. */}
-        <div data-slot="record-toolbar" className="flex items-center justify-between gap-(--spacing-4)">
-          <TabsList variant="default" aria-label={t(locale, "pullRequests.recordsLabel")}>
+        {/* At xl the content region is two columns — column 1 stacks the
+            record toolbar over the record list, column 2 is the 16rem aside —
+            so the aside's first card tops out level with the toolbar row. The
+            record pill hugs the left of the toolbar row, the filter (findings
+            only, and only while the PR has findings to narrow) sits at the
+            row's right edge; the grid row gap spaces toolbar from content. */}
+        <div className="mt-(--spacing-6) grid grid-cols-1 gap-(--spacing-6) xl:grid-cols-[minmax(0,1fr)_16rem] xl:gap-(--spacing-8)">
+        <div
+          data-slot="record-toolbar"
+          className="flex flex-wrap items-center justify-between gap-(--spacing-4)"
+        >
+          <TabsList variant="default" aria-label={t(locale, "pullRequests.recordsLabel")} className="min-w-0">
           <TabsTrigger
             value="findings"
             aria-label={t(locale, "pullRequests.familyTabName", {
@@ -750,7 +757,7 @@ export function PullRequestDetailView({
               >
                 <SelectTrigger
                   size="sm"
-                  className="min-w-40"
+                  className="min-w-40 shrink-0"
                   aria-label={t(locale, "pullRequests.filterSeverity")}
                 >
                   <SelectValue placeholder={t(locale, "pullRequests.filterAll")} />
@@ -767,11 +774,6 @@ export function PullRequestDetailView({
             </div>
           ) : null}
         </div>
-
-        {/* At xl the content region is two columns — the record list and a
-            16rem aside — so the aside's first card tops out level with the
-            toolbar row. Below xl everything stacks full-width. */}
-        <div className="mt-(--spacing-6) grid grid-cols-1 gap-(--spacing-6) xl:grid-cols-[minmax(0,1fr)_16rem] xl:gap-(--spacing-8)">
           <div className="min-w-0 flex-1">
             <TabsContent value="findings">
               {records.findings.status === "error" ? (

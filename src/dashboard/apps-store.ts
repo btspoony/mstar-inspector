@@ -1972,7 +1972,9 @@ export function createAppsStore(db: AppsStoreD1) {
      * across every lifecycle state — the number of findings that round
      * reported. `severity_counts` is the same rows tallied per severity as
      * JSON text, built from the rows themselves so a class added later needs
-     * no statement edit; NULL when the round reported none.
+     * no statement edit; an empty JSON object (`{}`) when the round reported
+     * none — `json_group_object` over zero grouped rows yields `{}`, never
+     * NULL.
      */
     async listPullRequestReviews(
       appId: string,
@@ -2109,8 +2111,8 @@ export type PullRequestReviewDetailRow = {
   duration_ms: number | null;
   /** Findings this round reported, in every lifecycle state. */
   findings: number;
-  /** Those findings per severity as JSON object text (`{"must-fix":2}`); NULL when none. */
-  severity_counts: string | null;
+  /** Those findings per severity as JSON object text (`{"must-fix":2}`); `{}` when none. */
+  severity_counts: string;
 };
 
 export type PullRequestFailureDetailRow = { stage: string; error: string; created_at: string };

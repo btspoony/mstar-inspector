@@ -1662,19 +1662,32 @@ describe("pull request detail face (static SSR)", () => {
     expect([...order].sort((a, b) => a - b)).toEqual(order);
   });
 
-  test("the content region is a two-column grid at xl and the aside tops the toolbar row", () => {
-    const markup = face();
-    // Structure, read off the grid slots: the aside owns column 2, row 1, so
-    // its first card's top edge is level with the record-toolbar row; below
-    // xl the single column stacks the aside full-width after the content.
-    expect(markup).toContain("xl:grid-cols-[minmax(0,1fr)_16rem]");
-    expect(markup).toContain("xl:col-start-2 xl:row-start-1");
-    const toolbarAt = markup.indexOf('data-slot="record-toolbar"');
-    const asideAt = markup.indexOf('aria-label="' + t("en", "pullRequests.asideFacts") + '"');
-    expect(toolbarAt).toBeGreaterThan(-1);
-    expect(asideAt).toBeGreaterThan(-1);
-    // The toolbar row renders before the aside opens — one grid row, level tops.
-    expect(toolbarAt).toBeLessThan(asideAt);
+  test("the aside shares the content grid with the toolbar row and tops it at column 2 row 1", async () => {
+    // Structure, not class strings: the toolbar is the grid's first child, the
+    // content column and the aside are its other children, and the aside's
+    // placement classes anchor it to column 2 row 1 — so at xl its first
+    // card's top edge is level with the toolbar row. Below xl the single
+    // column stacks the aside full-width after the content.
+    const layout = await withMarkup(face(), (container) => {
+      const toolbar = container.querySelector('[data-slot="record-toolbar"]');
+      const aside = container.querySelector("aside");
+      const grid = toolbar?.parentElement ?? null;
+      return {
+        toolbarIsGridChild: grid !== null,
+        gridHoldsAside: grid !== null && aside?.parentElement === grid,
+        toolbarFirst: grid?.firstElementChild === toolbar,
+        asideAnchored:
+          aside !== null &&
+          aside.classList.contains("xl:col-start-2") &&
+          aside.classList.contains("xl:row-start-1"),
+      };
+    });
+    expect(layout).toEqual({
+      toolbarIsGridChild: true,
+      gridHoldsAside: true,
+      toolbarFirst: true,
+      asideAnchored: true,
+    });
   });
 });
 
