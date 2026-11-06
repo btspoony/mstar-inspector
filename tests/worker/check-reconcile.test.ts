@@ -2688,8 +2688,8 @@ function publishingScript(sent: { desired?: string; summary?: string }): Adapter
 
 /**
  * One `review_failures` row for this suite's scope/head. `createdAtMs` pins the
- * row's instant, which is the only way to place a drop on the far side of the
- * attempt's own creation: the column's default is the wall clock.
+ * row's instant — the column's default is the wall clock — so a caller can put
+ * a drop where a real consumer would have written it.
  */
 function recordFailure(db: TestD1, stage: string, error: string, createdAtMs: number = Date.now()): void {
   db.raw
@@ -2791,45 +2791,18 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.terminal_ms).not.toBeNull();
   });
 
-  test("an admission drop is terminal: the head can publish nothing more", async () => {
-    const db = seededDb();
-    const { id } = await abandonedAttempt(db);
-    recordFailure(db, "pipeline", "review dropped after 3 refused retries: pr-held (admission)");
-
-    const stub = stubFetch();
-    const sent: { desired?: string; summary?: string } = {};
-    let deferred = -1;
-    try {
-      const summary = await run(db, {
-        now: () => T0 + 120_000,
-        credentials: scriptedCredentials(db, publishingScript(sent)),
-      });
-      deferred = summary.deferred;
-      expect(summary.completed).toBe(1);
-    } finally {
-      stub.restore();
-    }
-
-    // Nothing more can land for this head, so the wait is over on this pass.
-    expect(deferred).toBe(0);
-    expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(UNCONFIRMED);
-    const row = await rawRow(db, id);
-    expect(row.observed).toBe("failure");
-    expect(row.terminal_ms).not.toBeNull();
-  });
-
-  test("an admission drop written BEFORE this attempt was created does not end the wait", async () => {
+  test("an admission-drop row never ends the wait: the publication still decides", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
-    // The row a PREVIOUS attempt's admission drop left for this same head. The
-    // table is append-only, so it outlives the attempt it belongs to — and says
-    // nothing about whether the re-triggered attempt can publish.
+    // The drop row the consumer wrote for this head. It acks FIRST and records
+    // the row AFTER, best-effort and with no attempt identity, so nothing ties
+    // it to THIS attempt — a prior or interleaved attempt's drop looks exactly
+    // like this one and says nothing about whether this attempt can publish.
     recordFailure(
       db,
       "pipeline",
       "review dropped after 3 refused retries: pr-held (admission)",
-      attempt.createdMs - 60_000,
+      T0 + 1_000,
     );
 
     const stub = stubFetch();
@@ -2848,15 +2821,16 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // Still waiting: the prior attempt's drop proved nothing, so no conclusion
-    // was frozen, no attempt was spent and no credential was minted.
+    // Still waiting: the drop proved nothing, so no conclusion was frozen, no
+    // attempt was spent and no credential was minted.
     expect(factoryCalls).toBe(0);
     const waitingRow = await rawRow(db, id);
     expect(waitingRow.terminal_ms).toBeNull();
     expect(waitingRow.attempts).toBe(1);
     expect(waitingRow.desired).toBe("in_progress");
+    expect(waitingRow.observed).toBe("unknown");
 
-    // The publication this attempt was re-triggered for then lands and decides.
+    // The publication lands and decides the row.
     seedPublication(db, SCOPE, SHA, proofFor(attempt.identity), "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
     const sent: { desired?: string; summary?: string } = {};
     const secondStub = stubFetch();
@@ -2876,40 +2850,6 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(sent.desired).toBe("success");
     const row = await rawRow(db, id);
     expect(row.observed).toBe("success");
-    expect(row.terminal_ms).not.toBeNull();
-  });
-
-  test("an admission drop written AFTER this attempt was created still ends the wait", async () => {
-    const db = seededDb();
-    const { attempt, id } = await abandonedAttempt(db);
-    // THIS attempt's own drop: it acked without a publication, so nothing more
-    // can land for the head and the wait is over on this pass.
-    recordFailure(
-      db,
-      "pipeline",
-      "review dropped after 3 refused retries: system-cap (admission)",
-      attempt.createdMs + 1_000,
-    );
-
-    const stub = stubFetch();
-    const sent: { desired?: string; summary?: string } = {};
-    let deferred = -1;
-    try {
-      const summary = await run(db, {
-        now: () => T0 + 120_000,
-        credentials: scriptedCredentials(db, publishingScript(sent)),
-      });
-      deferred = summary.deferred;
-      expect(summary.completed).toBe(1);
-    } finally {
-      stub.restore();
-    }
-
-    expect(deferred).toBe(0);
-    expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(UNCONFIRMED);
-    const row = await rawRow(db, id);
-    expect(row.observed).toBe("failure");
     expect(row.terminal_ms).not.toBeNull();
   });
 
