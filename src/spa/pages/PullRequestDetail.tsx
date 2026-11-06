@@ -679,15 +679,21 @@ export function PullRequestDetailView({
             the one fact an operator must not miss. Each trigger's accessible
             name is the label and the count with a separator — the visible
             spans alone would announce "Findings3". */}
-        {/* At xl the content region is two columns — column 1 stacks the
-            record toolbar over the record list, column 2 is the 16rem aside —
-            so the aside's first card tops out level with the toolbar row. The
-            record pill hugs the left of the toolbar row, the filter (findings
-            only, and only while the PR has findings to narrow) sits at the
-            row's right edge; the row gap stays --spacing-6 while --spacing-8
-            applies only between the columns, and the aside spans both rows so
-            its height never sizes the toolbar track. */}
-        <div className="mt-(--spacing-6) grid grid-cols-1 gap-(--spacing-6) xl:grid-cols-[minmax(0,1fr)_16rem] xl:gap-x-(--spacing-8)">
+        {/* At xl the content region is two columns — a flex row whose main
+            column stacks the record toolbar over the record list, with the
+            16rem aside as its sibling. `xl:items-start` tops the aside out at
+            the shell's top (= the toolbar's top), and because flex items size
+            independently a tall aside can never push the record list down —
+            a spanning grid item would split its height across both auto rows.
+            The record pill hugs the left of the toolbar row, the filter
+            (findings only, and only while the PR has findings to narrow) sits
+            at the row's right edge; the column gap stays --spacing-6, and
+            --spacing-8 applies only between the columns at xl. */}
+        <div
+          data-slot="record-layout"
+          className="mt-(--spacing-6) flex flex-col gap-(--spacing-6) xl:flex-row xl:items-start xl:gap-(--spacing-8)"
+        >
+        <div data-slot="record-main" className="flex min-w-0 flex-1 flex-col gap-(--spacing-6)">
         <div
           data-slot="record-toolbar"
           className="flex flex-wrap items-center justify-between gap-(--spacing-4)"
@@ -1187,10 +1193,11 @@ export function PullRequestDetailView({
               )}
             </TabsContent>
           </div>
+        </div>
 
           <aside
             aria-label={t(locale, "pullRequests.asideFacts")}
-            className="flex w-full flex-col gap-(--spacing-4) xl:col-start-2 xl:row-start-1 xl:row-span-2"
+            className="flex w-full flex-col gap-(--spacing-4) xl:w-64"
           >
             <section className="flex flex-col gap-2.5 rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5">
               <h2 className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)">
