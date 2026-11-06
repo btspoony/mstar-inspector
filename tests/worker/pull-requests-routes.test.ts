@@ -345,6 +345,33 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     ]);
   });
 
+  test("each reviews page row carries its per-severity finding counts", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    // Two rounds: the newer one reported three findings across two classes,
+    // the older one reported none.
+    seedReviews(db, 2);
+    for (const [id, severity] of [
+      ["f-1", "must-fix"],
+      ["f-2", "must-fix"],
+      ["f-3", "should-fix"],
+    ] as const) {
+      db.raw
+        .prepare("INSERT INTO findings (id, review_id, severity, title) VALUES (?, 'r-1', ?, 'a')")
+        .run(id, severity);
+    }
+
+    const res = await getFace(sectionPath("reviews"), db);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: Array<{ round: number; severity_counts: string }> };
+    // Newest first. The tally is JSON text the client parses once; the round
+    // that reported no findings carries the empty aggregate, never a
+    // fabricated zero class.
+    expect(body.items.map((item) => item.round)).toEqual([2, 1]);
+    expect(JSON.parse(body.items[0]!.severity_counts)).toEqual({ "must-fix": 2, "should-fix": 1 });
+    expect(["", "{}"]).toContain(body.items[1]!.severity_counts);
+  });
+
   test("a repo-wide finding (null file_path) round-trips as ''", async () => {
     const db = await fixture();
     seedInstallation(db);

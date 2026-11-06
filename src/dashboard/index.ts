@@ -5025,6 +5025,7 @@ const appPullRequestRecordsRoute = async (
         head_sha: review.head_sha,
         round: review.round,
         findings: review.findings,
+        severity_counts: review.severity_counts ?? "",
         duration_ms: review.duration_ms,
       })),
       total: page.total,
