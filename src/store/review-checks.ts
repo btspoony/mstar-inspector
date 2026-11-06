@@ -147,6 +147,12 @@ export type CheckAttempt = {
   executionDeadlineMs: number;
   attempts: number;
   terminalMs: number | null;
+  /**
+   * When this attempt was ADMITTED. The proof wait uses it to attribute a
+   * publication: only a journal row staged at or after this instant can be the
+   * publication this attempt set in motion.
+   */
+  createdAtMs: number;
 };
 
 /** The remote facts an adapter read from GitHub (spec §7.9) — evidence, not opinion. */
@@ -322,6 +328,7 @@ function attemptOf(row: ReviewCheckRow): CheckAttempt {
     executionDeadlineMs: row.execution_deadline_ms,
     attempts: row.attempts,
     terminalMs: row.terminal_ms,
+    createdAtMs: row.created_ms,
   };
 }
 

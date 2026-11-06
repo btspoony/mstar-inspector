@@ -139,6 +139,11 @@ export function proofFor(identity: CheckIdentity, kind: "review" | "degraded" = 
   };
 }
 
+/**
+ * A journal row carrying persisted proof. It is staged BEFORE `T0` by default
+ * (an earlier generation's publication); pass `stagedAtMs` for a row staged
+ * after an attempt was admitted — the abandoned-attempt-then-published shape.
+ */
 export function seedPublication(
   db: TestD1,
   scope: Scope,
@@ -146,6 +151,7 @@ export function seedPublication(
   proof: PublicationProof,
   phase = "confirmed",
   payload: unknown = {},
+  stagedAtMs: number = T0 - 20_000,
 ): void {
   db.raw
     .prepare(
@@ -166,9 +172,9 @@ export function seedPublication(
       phase,
       JSON.stringify(payload),
       JSON.stringify(proof),
-      T0 - 20_000,
-      T0 - 10_000,
-      T0 - 10_000,
+      stagedAtMs,
+      stagedAtMs + 10_000,
+      stagedAtMs + 10_000,
     );
 }
 
@@ -184,9 +190,18 @@ export function linkPublication(db: TestD1, attemptId: string, publicationId: st
 
 /**
  * An in-flight (or given-phase) publication-journal row for the exact
- * scope/head with NO persisted proof — the journal hand-off state.
+ * scope/head with NO persisted proof — the journal hand-off state. It is
+ * staged by default AFTER an attempt claimed at `T0`, as production does (the
+ * message that publishes stages the row itself); pass `stagedAtMs` to place it
+ * elsewhere, e.g. before an attempt's admission for a previous generation.
  */
-export function seedJournal(db: TestD1, scope: Scope, headSha: string, phase: string): string {
+export function seedJournal(
+  db: TestD1,
+  scope: Scope,
+  headSha: string,
+  phase: string,
+  stagedAtMs: number = T0 + 1_000,
+): string {
   const id = `journal-${phase}`;
   db.raw
     .prepare(
@@ -204,8 +219,8 @@ export function seedJournal(db: TestD1, scope: Scope, headSha: string, phase: st
       scope.prNumber,
       headSha,
       phase,
-      T0 - 20_000,
-      T0 - 10_000,
+      stagedAtMs,
+      stagedAtMs,
     );
   return id;
 }

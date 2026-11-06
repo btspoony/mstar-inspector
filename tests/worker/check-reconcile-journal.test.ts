@@ -297,15 +297,14 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
   test("an OLDER proof on another journal row never ends the wait", async () => {
     const db = seededDb();
     const { attempt, id } = await handedOverAttempt(db);
-    // An older DEGRADED publication for the same head already has proof; the
-    // publication THIS attempt owns is a newer NORMAL one, still prepared. Only
-    // the linked row's own proof may decide — an older head proof would freeze
-    // a degraded failure while the normal review was still in flight.
+    // A DEGRADED publication for the same head already has proof; the
+    // publication THIS attempt owns is a newer NORMAL one, still prepared. Both
+    // are staged after this attempt's admission, so the wait is bound to the
+    // NEWEST — an older head proof would freeze a degraded failure while the
+    // normal review was still in flight.
     const degraded = proofFor(attempt.identity, "degraded");
-    seedPublication(db, SCOPE, SHA, degraded, "confirmed", reviewPayload(SCOPE, SHA, "needs fixes", 40));
-    db.raw.prepare(`UPDATE review_publications SET created_ms = ? WHERE id = ?`).run(T0 - 30_000, degraded.publicationId);
-    const journalId = seedJournal(db, SCOPE, SHA, "prepared");
-    db.raw.prepare(`UPDATE review_publications SET created_ms = ? WHERE id = ?`).run(T0 - 10_000, journalId);
+    seedPublication(db, SCOPE, SHA, degraded, "confirmed", reviewPayload(SCOPE, SHA, "needs fixes", 40), T0 + 1_000);
+    const journalId = seedJournal(db, SCOPE, SHA, "prepared", T0 + 2_000);
     linkPublication(db, id, journalId);
 
     const stub = stubFetch();
@@ -363,6 +362,173 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(closed.publication_id).toBe(journalId); // the NEWEST row's proof
     expect(String(closed.desired_summary)).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
     expect(closed.observed).toBe("success");
+  });
+
+  /**
+   * The state `abandonUnterminalized` leaves behind: the lease released at the
+   * first backoff rung, NO frozen intent and `publication_id` still NULL —
+   * abandonment is not a conclusion, so the reconciler owes the row one.
+   */
+  async function abandonedRow(db: TestD1) {
+    const { attempt, lease } = await claim(db, { nowMs: T0, executionDeadlineMs: DEADLINE });
+    const id = attempt.identity.attemptId;
+    expect(
+      await deferCheckRecovery(
+        db,
+        id,
+        lease,
+        {
+          state: "remote-unconfirmed",
+          nextAttemptMs: T0 + 60_000,
+          reason: "the creating invocation was abandoned by the consumer budget",
+        },
+        T0,
+      ),
+    ).toBe(true);
+    return { attempt, id };
+  }
+
+  test("an abandoned attempt concludes from the newest journal row's proof, with that id", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedRow(db);
+    // The consumer abandoned this attempt before it linked anything, then the
+    // SAME message published: the journal row for this head — staged after this
+    // attempt was admitted — holds the proof, and the row carries no
+    // `publication_id` of its own. Its exact id is what the Check must conclude
+    // from; waiting for a self-link would freeze the unconfirmed failure at the
+    // deadline while the review comment exists.
+    const proof = { ...proofFor(attempt.identity, "review"), publicationId: "pub-published-after-abandon" };
+    seedPublication(db, SCOPE, SHA, proof, "applied", reviewPayload(SCOPE, SHA, "ship it", 85), T0 + 1_000);
+
+    const stub = stubFetch();
+    const sent: { desired: string | null; summary: string | null } = { desired: null, summary: null };
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: scriptedCredentials(db, {
+          ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
+          complete: async (identity, _runId, conclusion) => {
+            sent.desired = conclusion.desired;
+            sent.summary = conclusion.summary;
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+          },
+        }),
+      });
+      expect(summary.examined).toBe(1);
+      expect(summary.completed).toBe(1);
+      expect(summary.deferred).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    // Gate-derived from the published envelope (85 ≥ the App's floor).
+    expect(sent.desired).toBe("success");
+    expect(sent.summary).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
+    const row = await rawRow(db, id);
+    expect(row.publication_id).toBe(proof.publicationId);
+    expect(row.observed).toBe("success");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("an abandoned attempt defers while the newest journal row has no proof", async () => {
+    const db = seededDb();
+    const { id } = await abandonedRow(db);
+    seedJournal(db, SCOPE, SHA, "prepared");
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    const scripted = scriptedCredentials(db, countingScript({ adopt: 0, begin: 0, complete: 0 }));
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scripted(input);
+        },
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+      expect(summary.unconfirmed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    expect(factoryCalls).toBe(0);
+    const row = await rawRow(db, id);
+    expect(row.publication_id).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    expect(row.desired).toBe("in_progress");
+    expect(row.observed).toBe("unknown");
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+  });
+
+  test("a previous generation's proof never ends an abandoned attempt's wait", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedRow(db);
+    // The previous generation's DEGRADED publication for this head already has
+    // proof and is staged after admission; this attempt's own normal row is
+    // NEWER and still has no proof. The wait is bound to that newest row: a
+    // proof on the older one would freeze a degraded failure while the review
+    // this attempt is producing was still in flight.
+    const prior = { ...proofFor(attempt.identity, "degraded"), publicationId: "pub-previous-generation" };
+    seedPublication(db, SCOPE, SHA, prior, "applied", reviewPayload(SCOPE, SHA, "needs fixes", 40), T0 + 1_000);
+    seedJournal(db, SCOPE, SHA, "sending", T0 + 2_000);
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    const scripted = scriptedCredentials(db, countingScript({ adopt: 0, begin: 0, complete: 0 }));
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scripted(input);
+        },
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    expect(factoryCalls).toBe(0);
+    const row = await rawRow(db, id);
+    expect(row.publication_id).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    expect(row.observed).toBe("unknown");
+  });
+
+  test("a previous generation's proof with no journal row of this attempt's never ends the wait", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedRow(db);
+    // Nothing this attempt staged exists: the only publication for the head was
+    // staged before it was admitted. The abandoned row has no link of its own,
+    // so the wait continues to the deadline instead of adopting that proof.
+    const prior = { ...proofFor(attempt.identity), publicationId: "pub-only-previous-generation" };
+    seedPublication(db, SCOPE, SHA, prior, "applied", reviewPayload(SCOPE, SHA, "ship it", 90));
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    const scripted = scriptedCredentials(db, countingScript({ adopt: 0, begin: 0, complete: 0 }));
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scripted(input);
+        },
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    expect(factoryCalls).toBe(0);
+    const row = await rawRow(db, id);
+    expect(row.publication_id).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    expect(row.observed).toBe("unknown");
   });
 
   test("the attempt's OWN linked proof ends the wait even while its phase is prepared", async () => {

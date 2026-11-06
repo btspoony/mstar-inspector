@@ -436,6 +436,18 @@ export const PUBLICATION_HANDOFF_PHASES: readonly PublicationRow["phase"][] = [
 ];
 
 /**
+ * The phases the Check lane's proof wait may attribute to an attempt (§7.11.2):
+ * the delivery hand-off set plus `applied`. A publication that already applied
+ * its proof is exactly the abandoned-attempt case — the attempt was released
+ * with no `publication_id` link while its own review published, so `applied`
+ * is the state its proof is normally found in.
+ */
+export const PUBLICATION_PROOF_WAIT_PHASES: readonly PublicationRow["phase"][] = [
+  ...PUBLICATION_HANDOFF_PHASES,
+  "applied",
+];
+
+/**
  * The publication-journal row for this exact scope/head in any of `phases`,
  * with whether that row's OWN proof is readable. ONE predicate, shared by the
  * delivery hand-off (§7.7 step 2, `order: "oldest"`) and the Check recovery
@@ -460,16 +472,25 @@ export async function findPublicationJournal(
      * whose proof is still owed).
      */
     order?: "oldest" | "newest";
+    /**
+     * Only rows staged at or after this instant are reported. The Check wait
+     * passes the attempt's own admission time: one row exists per
+     * scope/head/kind, so a row staged earlier belongs to an earlier generation
+     * of the same head and its proof is never this attempt's.
+     */
+    stagedAtOrAfterMs?: number;
   },
 ): Promise<{ id: string; phase: PublicationRow["phase"]; hasProof: boolean } | null> {
   if (input.phases.length === 0) return null;
   const placeholders = input.phases.map(() => "?").join(", ");
   const order = input.order === "newest" ? "created_ms DESC, id DESC" : "created_ms, id";
+  const stagedFloor =
+    input.stagedAtOrAfterMs === undefined ? "" : "AND created_ms >= ?";
   const row = await db
     .prepare(
       `SELECT id, phase, (proof_json IS NOT NULL AND json_valid(proof_json)) AS has_proof FROM review_publications
        WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-         AND head_sha = ? AND phase IN (${placeholders})
+         AND head_sha = ? AND phase IN (${placeholders}) ${stagedFloor}
        ORDER BY ${order} LIMIT 1`,
     )
     .bind(
@@ -480,6 +501,7 @@ export async function findPublicationJournal(
       input.scope.prNumber,
       input.headSha,
       ...input.phases,
+      ...(input.stagedAtOrAfterMs === undefined ? [] : [input.stagedAtOrAfterMs]),
     )
     .first<{ id: string; phase: string; has_proof: number }>();
   return row === null
