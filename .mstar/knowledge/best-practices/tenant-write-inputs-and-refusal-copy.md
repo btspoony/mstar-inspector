@@ -9,7 +9,7 @@ severity: medium
 
 # Tenant write inputs and refusal copy
 
-Three rules the inspector proved in production-shaped code, with the failure each one prevents.
+Four rules the inspector proved in production-shaped code, with the failure each one prevents.
 
 ## 1. Tenant ownership is a required input, never a lookup
 

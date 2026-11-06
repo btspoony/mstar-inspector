@@ -837,6 +837,7 @@ export const zhCN: Dictionary = {
         "无法连接该 App — 无法读取此工作区的默认评分下限，因此没有存储任何内容。修复该设置后再重新提交即可。",
       floorRepair: "前往",
       floorRepairLink: "工作区设置",
+      floorRepairEnd: "。",
       workspaceRequired:
         "此部署有多个工作区，App 需要归属其中一个 — 请先进入某个工作区，再从那里创建 App。",
       workspaceGone:

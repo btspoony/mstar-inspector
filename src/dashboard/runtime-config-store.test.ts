@@ -996,6 +996,19 @@ describe("workspace check_min_score default", () => {
     expect(auditDetails(db, ACTION)).toEqual([{ before: null, after: 75 }]);
   });
 
+  test("an out-of-range integer stored by a foreign writer also records the absent state", async () => {
+    const db = fixture();
+    // Wrong TYPE (the case above) and wrong RANGE are separate trust failures:
+    // only the audit CASE's BETWEEN guard refuses 150, so dropping that guard
+    // must fail here.
+    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.prepare("UPDATE workspaces SET check_min_score = 150 WHERE id = ?").run(WS);
+    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+
+    await setWorkspaceCheckMinScore(db, WS, 75, ACTOR);
+    expect(auditDetails(db, ACTION)).toEqual([{ before: null, after: 75 }]);
+  });
+
   test("a retired workspace is absent, and a read failure answers the default, flagged", async () => {
     const db = fixture();
     db.raw

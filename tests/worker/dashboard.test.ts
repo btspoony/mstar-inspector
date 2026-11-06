@@ -2207,10 +2207,11 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(refused.status).toBe(500);
     expect(appRowCount(env)).toBe(0);
     // One wording for both routes: the copy names the workspace setting the
-    // operator can repair — not the database.
+    // operator can repair — not the database — and links that page.
     const refusedBody = await refused.text();
     expect(refusedBody).toContain("default score floor cannot be read");
     expect(refusedBody).not.toContain("The App could not be stored");
+    expect(refusedBody).toContain('href="/dashboard/default/settings"');
     // Retryable: the callback parks the hold so /manifest/confirm can resume.
     const holdCookie =
       refused.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";

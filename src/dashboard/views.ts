@@ -542,8 +542,11 @@ export function manifestErrorPage(
         "/dashboard/manifest/confirm",
       )
     : wrapPhraseAsLink(t(locale, "manifest.error.retry"), "/dashboard", "/dashboard");
+  // The link is not sentence-final: the clause carries its own locale-owned
+  // terminator, so English gets "." and Chinese gets "。" from the dictionary
+  // instead of one locale inheriting the other's punctuation.
   const repairHtml = repair
-    ? `${escapeHtml(repair.phrase)} <a href="${escapeHtml(repair.href)}">${escapeHtml(repair.text)}</a> `
+    ? `${escapeHtml(repair.phrase)} <a href="${escapeHtml(repair.href)}">${escapeHtml(repair.text)}</a>${escapeHtml(t(locale, "manifest.error.floorRepairEnd"))} `
     : "";
   return page(
     t(locale, "manifest.error.title"),

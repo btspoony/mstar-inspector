@@ -983,9 +983,11 @@ export const en = {
        */
       workspaceFloorUnreadable:
         "The App could not be connected — this workspace's default score floor cannot be read, so nothing was stored. Repair the setting, then resubmit.",
-      /** Lead-in to the settings link: "Repair it in [workspace settings]". */
+      /** The repair clause: "Repair it in [workspace settings]<floorRepairEnd>". */
       floorRepair: "Repair it in",
       floorRepairLink: "workspace settings",
+      /** Ends the clause after the link, so the next sentence starts cleanly. */
+      floorRepairEnd: ".",
       workspaceRequired:
         "This deployment has more than one workspace, so an App needs to know which it belongs to — open a workspace and create the App from there.",
       workspaceGone:
