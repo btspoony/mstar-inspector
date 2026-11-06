@@ -182,7 +182,9 @@ function groupMeta(
   const api = group.declaration?.api ?? catalog?.api ?? null;
   const baseUrl = group.declaration?.base_url ?? catalog?.base_url ?? null;
   if (api === null || baseUrl === null) return null;
-  return { api, baseUrl, modelIds: group.declaration?.model_ids ?? catalog?.models ?? [] };
+  // The disclosure states the provider's CATALOG vocabulary (its real model
+  // directory); the stored declaration is what the model picker edits.
+  return { api, baseUrl, modelIds: catalog?.models ?? group.declaration?.model_ids ?? [] };
 }
 
 /**

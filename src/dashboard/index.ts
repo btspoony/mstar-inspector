@@ -3690,11 +3690,11 @@ const REVIEW_LEVEL_INHERIT = "inherit";
  * its seat references atomically (seats fall back to the default chain).
  * add-custom-provider / remove-custom-provider = the
  * custom-provider declarations section: every AL-23-1/AL-23-2 bound (id
- * grammar, https-only baseUrl, three-form api enum, model_ids 1..32 × ≤128,
+ * grammar, https-only baseUrl, three-form api enum, model_ids 1..128 × ≤128,
  * key required ≤4096) is a 400 with zero writes; the key is encrypted
  * inside the store and never echoed. update-provider-models = the declared
  * provider's model-list editor: it rewrites ONE declaration's model_ids in
- * place under the same 1..32 × ≤128 bound, touching neither the endpoint nor
+ * place under the same 1..128 × ≤128 bound, touching neither the endpoint nor
  * the key pool, and answers the same keyed 400 when that declaration is
  * absent. save-sandbox-image = the
  * App's runtime-harness selection (mounted into the sandbox image): only ENABLED
@@ -3947,7 +3947,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // (QC wave-1 W-1 — ark-plan would be silently dead at synthesis), at
     // most MAX_CUSTOM_PROVIDER_COUNT declarations per App (QC wave-1 W-2,
     // growth-only — updating an existing id always proceeds), baseUrl
-    // https-only ≤2048, api one of the three-form enum, model_ids 1..32
+    // https-only ≤2048, api one of the three-form enum, model_ids 1..128
     // entries × ≤128 chars, key required and ≤ the existing 4096 cap. The
     // key is encrypted inside the store and never echoed back.
     const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
@@ -4320,7 +4320,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // face's model list stops being read-only without re-declaring the provider
     // (base_url / api / the key pool are untouched, so the endpoint lock does
     // not apply). The bounds mirror add-custom-provider, and the store
-    // re-validates the same 1..32 × ≤128 set as its backstop. The declaration
+    // re-validates the same 1..128 × ≤128 set as its backstop. The declaration
     // is deliberately NOT pre-read: the store's UPDATE is gated on the row
     // existing, so an absent declaration (including one removed while the form
     // was open) surfaces as the same keyed 400 instead of a read-then-write
