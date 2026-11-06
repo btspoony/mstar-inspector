@@ -54,6 +54,7 @@ import {
   applyMigrations,
 } from "../helpers/migration-shapes";
 import {
+  CHECK_TERMINALIZE_DEFAULT,
   REVIEW_LEVEL_KEY,
   SYSTEM_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_DEFAULT,
@@ -156,6 +157,7 @@ import {
   queueState,
   reset as resetHarness,
   reviewGuardTtlSeconds,
+  ROUND_BUDGET_MS,
   runnerTimeoutMs,
   sandbox,
   testLog,
@@ -2905,6 +2907,21 @@ describe("createReviewConsumer", () => {
     expect(reviewGuardTtlSeconds("quick")).toBe(2292);
     expect(reviewGuardTtlSeconds("default")).toBe(2292);
     expect(reviewGuardTtlSeconds("deep")).toBe(2532);
+  });
+
+  test("round budget: the deep worst case is runner + begin hook + terminalize, 48s under the cap", () => {
+    // deep is the worst tier; the begin hook and the terminalize hook ride the
+    // same 900s window as the paid runner, so the deepest tier's arithmetic is
+    // their sum. Every term is pinned by value: a move in any one of them, in
+    // the cap, or in the margin must fail this case, not drift silently.
+    expect(runnerTimeoutMs("deep")).toBe(840_000);
+    expect(CHECK_HOOK_TIMEOUT_MS).toBe(2_000);
+    expect(CHECK_TERMINALIZE_DEFAULT).toBe(10_000);
+    const deepestTierMs =
+      runnerTimeoutMs("deep") + CHECK_HOOK_TIMEOUT_MS + CHECK_TERMINALIZE_DEFAULT;
+    expect(deepestTierMs).toBe(852_000);
+    expect(deepestTierMs).toBeLessThan(ROUND_BUDGET_MS);
+    expect(ROUND_BUDGET_MS - deepestTierMs).toBe(48_000);
   });
 
   test("a maximal round issues exactly the steps the guard TTL bills", async () => {
