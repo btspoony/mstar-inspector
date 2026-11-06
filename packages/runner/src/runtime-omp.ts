@@ -634,10 +634,21 @@ function waitTick(intervalMs: number, done: Promise<void>): Promise<boolean> {
  * not nudged: an `aside` would start a fresh turn and a `steer` could resume one
  * — either would restart a seat that already returned.
  */
-async function nudgeSession(session: AgentSession | null | undefined, nudge: SeatNudge): Promise<void> {
+/** The cross-agent session surface a nudge needs: the registry exposes
+ *  AgentSessionHandle, a dispatched seat holds its own AgentSession — both
+ *  answer these three members. */
+type NudgeableSession = {
+  readonly isStreaming: boolean;
+  prompt(text: string, options?: { streamingBehavior?: "steer" | "followUp" | "aside" }): Promise<boolean>;
+  steer(text: string): Promise<void>;
+};
+
+async function nudgeSession(session: NudgeableSession | null | undefined, nudge: SeatNudge): Promise<void> {
   if (!session?.isStreaming) return;
   if (nudge.deliverAs === "aside") {
-    await session.sendUserMessage(nudge.text, { deliverAs: "aside" });
+    // The registry hands out an AgentSessionHandle, which exposes the same
+    // non-interrupting delivery through `prompt(..., { streamingBehavior })`.
+    await session.prompt(nudge.text, { streamingBehavior: "aside" });
     return;
   }
   await session.steer(nudge.text);

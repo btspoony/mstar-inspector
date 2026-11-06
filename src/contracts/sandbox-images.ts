@@ -104,7 +104,7 @@ export type SandboxImagePins = {
  * commit — a tag cannot yield the deref sha. The Dockerfile's `ref`/`tag`
  * comment pair, the engine manifest and the lock rows are hand-synced to it.
  */
-export const HARNESS_VERSION = "4.2.2";
+export const HARNESS_VERSION = "4.2.3";
 
 /** The `omp` image's build pins — the single declaration of its versioned inputs. */
 export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
