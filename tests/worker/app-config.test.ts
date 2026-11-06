@@ -45,6 +45,7 @@ import {
   InvalidModelChainNameError,
   InvalidModelSelectorError,
   MAX_KEYS_PER_PROVIDER,
+  MAX_CUSTOM_PROVIDER_MODEL_IDS,
   MAX_MODEL_SELECTOR_LENGTH,
   MAX_PROVIDER_KEY_LENGTH,
   MODEL_ROLE_IDS,
@@ -4410,6 +4411,97 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const [decl] = await store.listCustomProviders(app.id);
     expect(decl!.api).toBe("openai-completions"); // the catalog's protocol
     expect(decl!.model_ids).toEqual(["subconscious/glm-5.2", "subconscious/tim-qwen3.6-27b"]);
+  });
+
+  test("add-template-provider clips a wider-than-store catalog vocabulary to the 32-entry bound", async () => {
+    const { db, app } = await seededWorld();
+    // nano-gpt carries the snapshot's widest vocabulary — well past the store
+    // bound the declaration gate enforces.
+    const catalogModels = PROVIDER_CATALOG["nano-gpt"]!.models;
+    expect(catalogModels.length).toBeGreaterThan(MAX_CUSTOM_PROVIDER_MODEL_IDS);
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "nano-gpt",
+      key: sk("nano-gpt-key"),
+    });
+    expect(res.status).toBe(200);
+    const [decl] = await configStore(db).listCustomProviders(app.id);
+    expect(decl!.provider_id).toBe("nano-gpt");
+    expect(decl!.model_ids).toEqual(catalogModels.slice(0, MAX_CUSTOM_PROVIDER_MODEL_IDS));
+  });
+
+  test("update-provider-models rewrites one declaration's model_ids; the payload serves the new list", async () => {
+    const { db, app } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a, fresh-b , fresh-c",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Saved the my-custom model list for mallorys-app");
+    // The stored declaration carries the parsed list — and neither the
+    // endpoint nor the key pool moved with it.
+    const [decl] = await configStore(db).listCustomProviders(app.id);
+    expect(decl).toEqual({
+      provider_id: "my-custom",
+      base_url: CUSTOM_FORM.base_url!,
+      api: "openai-completions",
+      model_ids: ["fresh-a", "fresh-b", "fresh-c"],
+      has_keys: true,
+    });
+    // The settings payload the SPA re-reads reflects the new list.
+    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    expect(payload.status).toBe(200);
+    const body = (await payload.json()) as {
+      custom_providers: Array<{ provider_id: string; model_ids: string[] }>;
+    };
+    expect(body.custom_providers.find((p) => p.provider_id === "my-custom")!.model_ids).toEqual([
+      "fresh-a",
+      "fresh-b",
+      "fresh-c",
+    ]);
+  });
+
+  test("update-provider-models refuses an undeclared provider with the keyed 400, zero writes", async () => {
+    const { db } = await seededWorld();
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "ghost",
+      model_ids: "m1",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      key: "settings.error.customProviderUndeclared",
+      params: { provider: "ghost" },
+    });
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+  });
+
+  test("update-provider-models refuses 0 and 33 model ids with the existing bound keys, zero writes", async () => {
+    const { db, app } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const before = await configStore(db).listCustomProviders(app.id);
+    const empty = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "  ,  ",
+    });
+    expect(empty.status).toBe(400);
+    const emptyBody = (await empty.json()) as { key: string };
+    expect(emptyBody.key).toBe("settings.error.modelIdsRequired");
+    const tooMany = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: Array.from({ length: MAX_CUSTOM_PROVIDER_MODEL_IDS + 1 }, (_, i) => `m${i}`).join(","),
+    });
+    expect(tooMany.status).toBe(400);
+    expect(await tooMany.json()).toMatchObject({
+      key: "settings.error.modelIdsTooMany",
+      params: { count: MAX_CUSTOM_PROVIDER_MODEL_IDS + 1, limit: MAX_CUSTOM_PROVIDER_MODEL_IDS },
+    });
+    // Neither refusal touched the stored declaration.
+    expect(await configStore(db).listCustomProviders(app.id)).toEqual(before);
   });
 
   test("remove-custom-provider deletes the row; an unknown id is a tolerant no-op", async () => {

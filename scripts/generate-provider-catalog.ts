@@ -220,11 +220,6 @@ const CUSTOM_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 const DEFAULT_MODEL_COUNT = 5;
 
-/** Breadth template models prefill cap: at most the first 20
- *  model ids per provider, deterministic snapshot order — template prefill
- *  only, bounding the settings payload. */
-const TEMPLATE_MODEL_PREFILL_CAP = 20;
-
 type BreadthAudit = {
   /** Rule (a) skips: snapshot keys consumed as a builtin sourceKey. */
   excludedSourceKeys: string[];
@@ -349,7 +344,10 @@ export function buildCatalog(
       // The snapshot carries NO protocol field — the ecosystem-norm default
       // for the directory; curated templates keep their own value.
       api: "openai-completions",
-      models: source.model_ids.slice(0, TEMPLATE_MODEL_PREFILL_CAP),
+      // The FULL snapshot vocabulary: the settings face shows a configured
+      // provider's real model list, and the add-template-provider flow clips
+      // it to the store's own 32-entry bound at materialization time.
+      models: source.model_ids,
       doc: source.doc ?? null,
     };
     audit.breadthCount += 1;
@@ -453,7 +451,7 @@ export function buildCatalog(
           envName: null,
           baseUrl: record.baseUrl,
           api: record.api,
-          models: record.models.slice(0, TEMPLATE_MODEL_PREFILL_CAP),
+          models: record.models,
           doc: null,
         };
         audit.ompRowCount += 1;
@@ -484,8 +482,6 @@ async function main(): Promise<void> {
  *     ${audit.dedupedKeys.map((key) => `${key} → ${TEMPLATE_DEDUPE_SNAPSHOT_KEYS[key]}`).join(", ") || "(none)"} (the curated entry is preserved verbatim)
  *   - rule (c) skipped, failing CUSTOM_PROVIDER_ID_PATTERN (${audit.idPatternFails.length} additional
  *     after rules a/b): ${wrapList(audit.idPatternFails)}
- *   - models prefill cap: at most the first ${TEMPLATE_MODEL_PREFILL_CAP} model ids per provider
- *     (deterministic snapshot order — template prefill only)
  * omp provider union (omp ${omp.source.version}, vendored ${omp.source.extracted} — every omp
  * API-key provider id names its rule; ${omp.ompProviderIds.length} providers → ${audit.ompRowCount} template rows):
  *   - (a) already in the catalog (builtin or template) (${audit.ompAlreadyPresent.length}): ${wrapList(audit.ompAlreadyPresent)}
@@ -496,7 +492,7 @@ async function main(): Promise<void> {
  *     non-{account_id} URL placeholder (${audit.ompNotMaterializable.length}):
  *     ${wrapList(audit.ompNotMaterializable)}
  *   - union rows are \`template\` tier with a null envName; prefill is the omp seed
- *     vocabulary capped at ${TEMPLATE_MODEL_PREFILL_CAP} (empty when omp ships none)
+ *     vocabulary verbatim (empty when omp ships none)
  *   - \`commandcode\` is mixed-protocol and therefore two rows — \`commandcode\`
  *     (openai-responses) and \`commandcode-anthropic\` (anthropic-messages) — because a
  *     custom-provider declaration carries exactly one protocol`;

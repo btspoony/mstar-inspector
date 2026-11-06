@@ -45,7 +45,7 @@ export const zhCN: Dictionary = {
       hoursAgo: "{count} 小时前",
       dayAgo: "{count} 天前",
       daysAgo: "{count} 天前",
-      /** 将来时（formatUntil）— 用量对话框的重置时间。 */
+      /** 将来时（formatUntil）— 用量面板的重置时间。 */
       inMinute: "{count} 分钟后",
       inMinutes: "{count} 分钟后",
       inHour: "{count} 小时后",
@@ -627,6 +627,18 @@ export const zhCN: Dictionary = {
       verifiedAt: "{time} 验证通过",
       modelCount: "{count} 个模型",
       modelCountOne: "{count} 个模型",
+      models: {
+        trigger: "编辑模型",
+        title: "{label} 的模型",
+        searchLabel: "筛选模型 id",
+        searchPlaceholder: "筛选模型 id…",
+        selectAll: "全选",
+        selectNone: "全不选",
+        counter: "已选 {selected} / {max} — 每个提供方最多 {max} 个模型 id。",
+        capReached: "已达 {max} 个模型上限 — 请先取消勾选再添加。",
+        noMatch: "没有匹配「{query}」的模型。",
+        save: "保存模型",
+      },
       stepPick: "选择",
       stepConfigure: "配置",
       back: "返回",
@@ -646,14 +658,12 @@ export const zhCN: Dictionary = {
       customIdRequired: "{provider} 已被占用 — 请为此声明填写新的 id。",
       submitFailed: "该请求未到达服务端即失败 — 未存储任何内容。",
       /**
-       * 每密钥用量探测：密钥行的操作按钮、其打开的对话框，以及四种形态
+       * 每密钥用量探测：密钥行的操作按钮、其在该行下方展开的面板，以及四种形态
        * — ok（窗口条 / 余额）、unauthorized、absent、error。线上的诊断
        * reason 从不原样渲染。
        */
       usage: {
         action: "用量",
-        title: "{label} 用量",
-        refresh: "刷新",
         error: "暂时无法读取该密钥的用量。",
         unauthorized: "提供方拒绝了该密钥 — 可能已撤销或过期。",
         absentNoProbe: "该提供方没有用量探测。",

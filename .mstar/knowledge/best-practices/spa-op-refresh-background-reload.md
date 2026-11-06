@@ -60,3 +60,11 @@ With the design-language composed state patterns (`PageSkeleton`/`EmptyState`/`E
 - Op-triggered refetches (invite/role/remove, verify, settings saves) reload with `{ background: true }` — page stays mounted, outcomes ride the PageNotice/notice channel.
 - InsightsPage variant: the gate is `state === "loading" && data === null` (data-retention form) so filter-change reloads keep the page mounted; failure paths must always land on `role="alert"` ErrorState/notice, never the skeleton.
 - Pins should assert the negative: op call sites pass `{ background: true }` and no bare `await load()` remains on op paths.
+
+## Background reload hands out new array identities — seed open editors on the open transition
+
+A background reload replaces the payload, so every array inside it (`group.declaration.model_ids`, key rows, chain lists) arrives with a fresh identity even when its contents are byte-identical. An editor dialog that seeds its local state from such an array in an effect keyed on `[open, payloadArray]` therefore re-runs on every unrelated op that lands while the dialog is open — silently discarding what the operator has typed or checked. The same shape bites any component whose state is "a copy of server state".
+
+Rule: seed **once per open transition**. Track the previous `open` in a ref (or split the effects) and reset local state only on `closed → open`; treat a same-content new identity as no change. If a mid-edit server change genuinely must win, make that an explicit affordance, never an implicit effect.
+
+Pin it with a test that re-renders the component with an equal-content, new-identity prop while open and asserts the in-progress selection survives — a content-equality assertion alone passes both before and after the fix.

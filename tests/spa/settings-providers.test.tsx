@@ -325,6 +325,83 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
       cleanup();
     }
   });
+
+  test("a large catalog vocabulary renders fully but the disclosure list carries the scroll bound", async () => {
+    // The groupMeta() catalog fallback now carries the full snapshot
+    // vocabulary (hundreds of ids): every id must stay reachable, but the
+    // list must not grow the card unboundedly.
+    const modelIds = Array.from({ length: 594 }, (_, i) => `model-${i}`);
+    const { win, cleanup } = installDom("http://localhost/dashboard/ws/settings");
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      await act(async () => {
+        root.render(
+          createElement(ProvidersSection, {
+            locale: "en" as const,
+            payload: managePayload({
+              provider_catalog: [
+                catalogEntry("workers-ai", "template", {
+                  base_url: "https://api.test",
+                  api: "openai-completions",
+                  models: modelIds,
+                }),
+              ],
+              keys: [keyRow("workers-ai", "solo")],
+            }),
+            onVerify: async () => ({ kind: "success" as const, message: "" }),
+            onSettings: async () => ({ kind: "success" as const, message: "" }),
+            onPending: () => {},
+            notice: null,
+            removeOutcome: null,
+            onOutcome: () => {},
+          }),
+        );
+      });
+
+      const toggle = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "settings.providers.expand"),
+      );
+      if (!(toggle instanceof win.HTMLElement)) throw new Error("expand control is missing");
+      await act(async () => {
+        toggle.click();
+      });
+
+      const region = container.querySelector("#provider-models-workers-ai");
+      if (!(region instanceof win.HTMLElement)) throw new Error("the model-id region is missing");
+      // House pattern (provider-combobox list): height cap + internal scroll.
+      expect(region.classList.contains("max-h-72")).toBe(true);
+      expect(region.classList.contains("overflow-y-auto")).toBe(true);
+      // Truthfulness: the count line and the rendered list stay in agreement.
+      expect(region.children.length).toBe(modelIds.length);
+
+      await act(async () => {
+        root.unmount();
+      });
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("model picker trigger", () => {
+  test("a declaration group renders the edit trigger in its meta line; a key-only template group renders none", () => {
+    const html = render(
+      managePayload({
+        provider_catalog: [
+          catalogEntry("workers-ai", "template", { base_url: "https://api.test", api: "openai-completions", models: ["a"] }),
+        ],
+        keys: [keyRow("workers-ai", "b")],
+        custom_providers: [{ provider_id: "my-gateway", base_url: "https://gw.test/v1", api: "openai-completions", model_ids: ["m1"] }],
+      }),
+    );
+    const trigger = `>${t("en", "settings.providers.models.trigger")}</button>`;
+    // The template group has a meta line (catalog endpoint) but no declaration — no trigger.
+    expect(groupOf(html, "workers-ai label")).not.toContain(trigger);
+    // The custom declaration owns the picker flow.
+    expect(groupOf(html, "my-gateway")).toContain(trigger);
+  });
 });
 
 describe("remove routes stay intact", () => {

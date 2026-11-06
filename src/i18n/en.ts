@@ -62,7 +62,7 @@ export const en = {
       hoursAgo: "{count} hours ago",
       dayAgo: "{count} day ago",
       daysAgo: "{count} days ago",
-      /** Future tense (formatUntil) — the usage dialog's reset stamps. */
+      /** Future tense (formatUntil) — the usage panel's reset stamps. */
       inMinute: "in {count} minute",
       inMinutes: "in {count} minutes",
       inHour: "in {count} hour",
@@ -737,6 +737,23 @@ export const en = {
       verifiedAt: "verified {time}",
       modelCount: "{count} models",
       modelCountOne: "{count} model",
+      /**
+       * The model picker: the meta-line trigger, the dialog faces, and the
+       * 32-id cap stated in the counter. `common` has no save key — the
+       * picker's save label lives here.
+       */
+      models: {
+        trigger: "Edit models",
+        title: "Models for {label}",
+        searchLabel: "Filter model ids",
+        searchPlaceholder: "Filter model ids…",
+        selectAll: "Select all",
+        selectNone: "Select none",
+        counter: "{selected} / {max} selected — at most {max} model ids per provider.",
+        capReached: "At the {max}-model cap — uncheck one to add another.",
+        noMatch: 'No models match "{query}".',
+        save: "Save models",
+      },
       /** The two-step add-provider dialog: its indicator, its back step and its in-progress copy. */
       stepPick: "Choose",
       stepConfigure: "Configure",
@@ -761,14 +778,13 @@ export const en = {
       customIdRequired: "{provider} is taken — enter a new id for this declaration.",
       submitFailed: "That request failed before it reached the server — nothing was stored.",
       /**
-       * The per-key usage probe: the key-row action, the dialog it opens,
-       * and the four faces — ok (window bar / balance), unauthorized,
-       * absent, error. The wire's diagnostic `reason` never renders verbatim.
+       * The per-key usage probe: the key-row action, the inline panel it
+       * reveals under the row, and the four faces — ok (window bar /
+       * balance), unauthorized, absent, error. The wire's diagnostic
+       * `reason` never renders verbatim.
        */
       usage: {
         action: "Usage",
-        title: "Usage for {label}",
-        refresh: "Refresh",
         error: "Could not read this key's usage right now.",
         unauthorized: "The provider rejected this key — it may be revoked or expired.",
         absentNoProbe: "This provider has no usage probe.",
