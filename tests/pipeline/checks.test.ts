@@ -1149,6 +1149,48 @@ describe("frozen terminal intent (spec §7.9)", () => {
   });
 });
 
+describe("per-call update budget (spec §7.10)", () => {
+  test("a terminalize per-call bound fires on an adapter built without its own fallback", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    // The adapter carries NO `updateBudgetMs` of its own, so only the caller's
+    // per-call value can end this send (its fallback is the 5 s default).
+    const fake = fakeChecks({ update: () => Promise.withResolvers<CheckRunPayload>().promise });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const startedAt = Date.now();
+    await lifecycle.terminalize({
+      handle: {
+        attemptId: attempt.identity.attemptId,
+        scope: attempt.identity.scope,
+        githubAppId: attempt.identity.githubAppId,
+        headSha: SHA,
+        lease,
+      },
+      publicationId: null,
+      outcome: "publication-unknown",
+      updateBudgetMs: 100,
+    });
+
+    // The update WAS sent and the per-call bound ended it: the 5 s fallback
+    // would neither finish this fast nor name 100 ms as the bound.
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(fake.updates).toHaveLength(1);
+    const row = await rowOf(db, attempt);
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.last_error).toContain("exceeded 100ms");
+    // A timed-out send may still have landed: `observed` never advances here.
+    expect(row.observed).toBe("unknown");
+  });
+});
+
 describe("abandonment is not a conclusion (spec §7.10 / §7.9)", () => {
   test("an abandoned begin leaves no terminal intent, only the honest recovery state", async () => {
     const db = await seededDb();

@@ -55,6 +55,7 @@ import {
 } from "../helpers/migration-shapes";
 import {
   CHECK_TERMINALIZE_DEFAULT,
+  CHECK_UPDATE_DEFAULT,
   REVIEW_LEVEL_KEY,
   SYSTEM_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_DEFAULT,
@@ -4915,6 +4916,36 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.observed).toBe("success");
   });
 
+  test("check budgets: an untrusted terminalize value degrades to the documented defaults with ONE warn, and the review still lands", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    // A PRESENT value the reader cannot trust: BOTH budgets answer their
+    // documented defaults, announced exactly once on the consumer's channel.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "not-a-number");
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    const degraded = logLines.filter((line) => line.fields.event === "review_check_budgets_degraded");
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0]!.fields).toMatchObject({
+      terminalize_ms: CHECK_TERMINALIZE_DEFAULT,
+      update_ms: CHECK_UPDATE_DEFAULT,
+    });
+    // Degradation is a warn, never a behaviour change: the review publishes and
+    // its Check still concludes from the proof under the defaults.
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(reviewCount(db)).toBe(1);
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+  });
+
   test("check lifecycle: a same-SHA mention journal handoff claims no attempt and runs no Check", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -5265,10 +5296,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(current.terminal_ms).not.toBeNull();
   });
 
-  test("check lifecycle: a hung terminal hook cannot hold the published review past its 10s terminalize bound", async () => {
+  test("check lifecycle: a hung terminal hook cannot hold the published review past its configured terminalize bound", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // A SMALL configured pair, so this case pays ~1 s instead of the 10 s
+    // absent-row default. The documented default itself is pinned by the
+    // degraded-budget case above (its warn carries both defaults) — this case
+    // is the wall-clock containment, not the default's value.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1200");
+    seedCheckBudget(db, "review.check.update_timeout_ms", "500");
     const real = lifecycleFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
@@ -5282,11 +5319,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     });
     const startedAt = Date.now();
 
-    // §7.10 (amended): the terminalize hook owns its own 10 s budget — the
-    // begin hook keeps CHECK_HOOK_TIMEOUT_MS below. The bound is pinned by
-    // value (module constants cannot be statically imported here: the
-    // workerd shim must load first).
-    const TERMINALIZE_BUDGET_MS = 10_000;
+    // §7.10 (amended): the terminalize hook owns its own budget — the begin
+    // hook keeps CHECK_HOOK_TIMEOUT_MS below — and the read pair is what
+    // bounds the wait.
+    const TERMINALIZE_BUDGET_MS = 1_200;
     await consumer(makeBatch(makePayload()));
 
     const elapsed = Date.now() - startedAt;
