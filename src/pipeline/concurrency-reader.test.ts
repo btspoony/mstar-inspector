@@ -12,7 +12,8 @@
  *     logs nothing
  *   - a workspace cap below the system cap stays distinct from it
  *   - a degraded read returns the conservative cap (1, i.e. serial) for both
- *     levels, never throws, and logs EXACTLY one structured warn
+ *     levels, never throws, and logs EXACTLY one structured warn carrying the
+ *     store's reason
  *   - both degradation paths warn: a throwing read, and a PRESENT value the
  *     store cannot trust
  */
@@ -82,12 +83,19 @@ describe("readReviewConcurrency", () => {
   test("a failed read answers the conservative cap and logs exactly one warn", async () => {
     const { warns, log } = capture();
     const read = readReviewConcurrency(failingDb, WS, log);
-    expect(await read).toEqual({ system: 1, workspace: 1, effective: 1, degraded: true });
+    expect(await read).toEqual({
+      system: 1,
+      workspace: 1,
+      effective: 1,
+      degraded: true,
+      reason: "read-failed",
+    });
     expect(warns).toHaveLength(1);
-    expect(warns[0]?.fields).toMatchObject({
+    expect(warns[0]?.fields).toEqual({
       event: "review_concurrency_degraded",
       workspace_id: WS,
       effective: 1,
+      degraded_reason: "read-failed",
     });
   });
 
@@ -104,7 +112,9 @@ describe("readReviewConcurrency", () => {
       workspace: 1,
       effective: 1,
       degraded: true,
+      reason: "untrusted",
     });
     expect(warns).toHaveLength(1);
+    expect(warns[0]?.fields.degraded_reason).toBe("untrusted");
   });
 });

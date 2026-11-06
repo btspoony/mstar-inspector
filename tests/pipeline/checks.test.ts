@@ -50,6 +50,7 @@ import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
   createChecksAdapter,
+  createCheckBeginLatch,
   createCheckLifecycle,
   decideConclusion,
   remoteBelongsTo,
@@ -1145,6 +1146,108 @@ describe("frozen terminal intent (spec §7.9)", () => {
     });
     expect(result.kind).toBe("unavailable");
     expect(fake.updates).toHaveLength(0);
+  });
+});
+
+describe("per-call update budget (spec §7.10)", () => {
+  test("a terminalize per-call bound fires on an adapter built without its own fallback", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    // The adapter carries NO `updateBudgetMs` of its own, so only the caller's
+    // per-call value can end this send (its fallback is the 5 s default).
+    const fake = fakeChecks({ update: () => Promise.withResolvers<CheckRunPayload>().promise });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const startedAt = Date.now();
+    await lifecycle.terminalize({
+      handle: {
+        attemptId: attempt.identity.attemptId,
+        scope: attempt.identity.scope,
+        githubAppId: attempt.identity.githubAppId,
+        headSha: SHA,
+        lease,
+      },
+      publicationId: null,
+      outcome: "publication-unknown",
+      updateBudgetMs: 100,
+    });
+
+    // The update WAS sent and the per-call bound ended it: the 5 s fallback
+    // would neither finish this fast nor name 100 ms as the bound.
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(fake.updates).toHaveLength(1);
+    const row = await rowOf(db, attempt);
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.last_error).toContain("exceeded 100ms");
+    // A timed-out send may still have landed: `observed` never advances here.
+    expect(row.observed).toBe("unknown");
+  });
+});
+
+describe("abandonment is not a conclusion (spec §7.10 / §7.9)", () => {
+  test("an abandoned begin leaves no terminal intent, only the honest recovery state", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const fake = fakeChecks({
+      create: (params) => ({
+        id: 4242,
+        name: params.name,
+        head_sha: params.head_sha,
+        external_id: params.external_id,
+        status: "in_progress",
+        conclusion: null,
+        app: { id: GITHUB_APP_ID },
+      }),
+    });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+    // The consumer's 2 s bound elapsed while this create ran: the latch is
+    // already tripped when the lifecycle reads it.
+    const latch = createCheckBeginLatch();
+    latch.abandon();
+
+    const handle = await lifecycle.begin({
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+      latch,
+    });
+    expect(handle).toBeNull();
+    // The create DID run, and the run id is retained so recovery adopts it.
+    expect(fake.creates).toHaveLength(1);
+
+    const row = (await db.prepare(`SELECT * FROM review_checks WHERE head_sha = ?`).bind(SHA).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(row.check_run_id).toBe(4242);
+    // No terminal intent: freezing one is what left a red Check behind a review
+    // that published afterwards. The reconciler owes this conclusion.
+    expect(row.desired).toBe("in_progress");
+    expect(row.desired_title).toBeNull();
+    expect(row.desired_summary).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    // Released with the honest recovery state (a request was spent) and the
+    // first backoff rung; no attempt burned beyond the claim's own.
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toBe(T0 + 60_000);
   });
 });
 

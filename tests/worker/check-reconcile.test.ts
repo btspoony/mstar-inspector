@@ -39,6 +39,7 @@ import {
   claimCheckRecovery,
   rollbackCheckCreateDispatch,
   deferCheckRecovery,
+  getCheckAttempt,
   listCheckReconcileBatch,
   retryCheckRecovery,
   setCheckCreateState,
@@ -47,6 +48,7 @@ import {
   checkSuspensionReason,
   listReenableableCheckPairs,
   suspendCheckRecovery,
+  type CheckAttempt,
   type CheckConclusion,
 } from "../../src/store/review-checks";
 import {
@@ -61,7 +63,7 @@ import {
   type CheckReconcileSummary,
   type CheckTransport,
 } from "../../src/worker/check-reconcile";
-import { CheckRequestNotDispatched, isRequestNotDispatched, type ChecksAdapter } from "../../src/pipeline/checks";
+import { CheckRequestNotDispatched, isRequestNotDispatched, createCheckBeginLatch, createCheckLifecycle, type ChecksAdapter } from "../../src/pipeline/checks";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { defaultReconcileLog } from "../../src/worker/lifecycle-reconcile";
 import { defaultSweepLog } from "../../src/worker/sweep";
@@ -164,15 +166,16 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     expect((await rawRow(db, attempt.identity.attemptId)).terminal_ms).toBeNull();
   });
 
-  test("an in_progress attempt is not due before its EXECUTION deadline", async () => {
+  test("an unreleased in_progress attempt is not due before its EXECUTION deadline", async () => {
     const db = seededDb();
     const { attempt } = await claim(db, { nowMs: T0, executionDeadlineMs: T0 + 900_000 });
-    // Released and backoff-due, but the execution deadline is still ahead.
+    // Nobody released this row to recovery (no due time was ever recorded), so
+    // nothing but the deadline can make it due — bookkeeping is not release.
     db.raw
-      .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, attempts = 1, next_attempt_ms = ? WHERE id = ?`)
-      .run(T0, attempt.identity.attemptId);
-    const summary = await run(db, { now: () => T0 + 60_000, credentials: scriptedCredentials(db) });
-    expect(summary.examined).toBe(0);
+      .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, attempts = 1 WHERE id = ?`)
+      .run(attempt.identity.attemptId);
+    expect(await listCheckReconcileBatch(db, T0 + 60_000)).toHaveLength(0);
+    expect(await listCheckReconcileBatch(db, T0 + 900_000)).toHaveLength(1);
   });
 
   test("a not-yet-due row and a row at the attempt cap are both left alone", async () => {
@@ -2597,5 +2600,334 @@ describe("configured Check update budget (spec §7.10)", () => {
     expect(warns.filter((event) => event === "ops_check_reconcile_budgets_degraded")).toHaveLength(1);
     // A degraded settings read never fails the pass.
     expect(summary.errors).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Abandonment is not a conclusion: the wait for the persisted proof
+// ---------------------------------------------------------------------------
+
+/** The attempt's own execution deadline — the wait's hard stop. */
+const FUTURE_DEADLINE = T0 + 900_000;
+
+/**
+ * The row a REAL abandonment leaves behind, driven through the production seam.
+ * `createCheckLifecycle.begin` creates the run, finds its own latch already
+ * tripped (the consumer's begin budget elapsed while the create ran) and hands
+ * the attempt to recovery: the run id is attached so recovery adopts it,
+ * `desired` stays `in_progress` because abandonment concludes nothing, and the
+ * release records the first backoff rung as the row's own due time.
+ */
+async function abandonedAttempt(db: TestD1): Promise<{ attempt: CheckAttempt; id: string }> {
+  const transport: CheckTransport = {
+    boundMs: () => CHECK_RECONCILE_PER_REQUEST_MS,
+    fetchImpl: (input, init) => fetch(input, init),
+  };
+  const lifecycle = createCheckLifecycle({
+    db,
+    nowMs: () => T0,
+    getAdapter: () =>
+      scriptedAdapter(
+        db,
+        {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({
+            kind: "ready",
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+          }),
+        },
+        transport,
+      ),
+    getCheckGate: async () => null,
+  });
+  const latch = createCheckBeginLatch();
+  latch.abandon();
+
+  const handle = await lifecycle.begin({
+    scope: SCOPE,
+    githubAppId: NUMERIC_APP,
+    headSha: SHA,
+    triggeredBy: "octocat",
+    action: "review",
+    executionDeadlineMs: FUTURE_DEADLINE,
+    latch,
+  });
+  expect(handle).toBeNull();
+
+  const row = (await db.prepare(`SELECT * FROM review_checks WHERE head_sha = ?`).bind(SHA).first()) as
+    | { id: string }
+    | null;
+  const id = row?.id;
+  if (id === undefined || id === null) throw new Error("the abandoned begin left no attempt row");
+  const attempt = await getCheckAttempt(db, id);
+  if (attempt === null) throw new Error("the abandoned begin left no readable attempt");
+
+  // The real post-abandonment state this suite is about — no hand-set intent.
+  expect(attempt.desired).toBe("in_progress");
+  expect(attempt.createState).toBe("known");
+  expect(attempt.recoveryState).toBe("remote-unconfirmed");
+  return { attempt, id };
+}
+
+/** A script that creates the run, finds it in progress and records the send. */
+function publishingScript(sent: { desired?: string; summary?: string }): AdapterScript {
+  return {
+    adopt: async () => ({ kind: "absent" }),
+    begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+    fetch: async (identity, checkRunId) => ({
+      kind: "found",
+      remote: remoteFor(identity, { id: checkRunId, status: "in_progress", conclusion: null }),
+    }),
+    complete: async (identity, _runId, conclusion) => {
+      sent.desired = conclusion.desired;
+      sent.summary = conclusion.summary;
+      return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+    },
+  };
+}
+
+function recordFailure(db: TestD1, stage: string, error: string): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(crypto.randomUUID(), SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA, stage, error);
+}
+
+describe("the publication-proof wait decides when abandonment may conclude (spec §7.9)", () => {
+  test("no proof and a future deadline: the pass defers and spends no attempt", async () => {
+    const db = seededDb();
+    const { id } = await abandonedAttempt(db);
+    // The whole point of the released-row eligibility: a row whose intent is
+    // still `in_progress` is SELECTED long before its execution deadline.
+    expect(await listCheckReconcileBatch(db, T0 + 120_000)).toHaveLength(1);
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    const events: Array<Record<string, unknown>> = [];
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        log: { warn: () => {}, info: (fields) => void events.push(fields) },
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      expect(summary.examined).toBe(1);
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+      expect(summary.unconfirmed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    // Nothing was minted and no attempt was spent: the row is simply not
+    // concludable while the head can still publish, and abandonment froze no
+    // conclusion of its own.
+    expect(factoryCalls).toBe(0);
+    const row = await rawRow(db, id);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.execution_deadline_ms).toBe(FUTURE_DEADLINE);
+    expect(row.attempts).toBe(1);
+    expect(row.desired).toBe("in_progress");
+    expect(row.desired_title).toBeNull();
+    expect(row.desired_summary).toBeNull();
+    expect(row.observed).toBe("unknown");
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+
+    // The journal probe found nothing to report; the still-publishable verdict
+    // is what held the wait, and the line says so.
+    const deferred = events.filter((fields) => fields.event === "check_recovery_deferred_pending_publication");
+    expect(deferred).toHaveLength(1);
+    expect(deferred[0]!.probe_state).toBe("none");
+  });
+
+  test("a proof that lands before the deadline yields the gate-derived conclusion", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    let deferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    // The unconfirmed fallback is NOT what ships: the proof decided, and the
+    // row's intent was still `in_progress` when the pass selected it.
+    expect(deferred).toBe(0);
+    expect(sent.desired).toBe("success");
+    expect(sent.summary).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("success");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("an admission drop is terminal: the head can publish nothing more", async () => {
+    const db = seededDb();
+    const { id } = await abandonedAttempt(db);
+    recordFailure(db, "pipeline", "review dropped after 3 refused retries: pr-held (admission)");
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    let deferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    // Nothing more can land for this head, so the wait is over on this pass.
+    expect(deferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(UNCONFIRMED);
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("a parse-stage failure row is NOT terminal: the degraded publication still decides", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    // The parse branch records this row FIRST and only then publishes the
+    // degraded comment. With no journal yet it proves nothing about the head.
+    recordFailure(db, "parse", "model output failed validation");
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    // Deferred, not concluded: no conclusion was frozen and no attempt spent.
+    expect(factoryCalls).toBe(0);
+    const deferredRow = await rawRow(db, id);
+    expect(deferredRow.terminal_ms).toBeNull();
+    expect(deferredRow.attempts).toBe(1);
+    expect(deferredRow.desired).toBe("in_progress");
+    expect(deferredRow.desired_summary).toBeNull();
+    expect(deferredRow.observed).toBe("unknown");
+
+    // The degrade path lands its publication: applied proof for this head.
+    seedPublication(db, SCOPE, SHA, proofFor(attempt.identity, "degraded"), "applied");
+
+    const sent: { desired?: string; summary?: string } = {};
+    const secondStub = stubFetch();
+    let secondDeferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 180_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      secondDeferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      secondStub.restore();
+    }
+
+    // The proof decides — a degraded publication never passes the gate.
+    expect(secondDeferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe("Review output was invalid; a degraded summary comment was published.");
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("a retryable infra failure keeps the row open: the retry can still publish", async () => {
+    const db = seededDb();
+    const { id } = await abandonedAttempt(db);
+    recordFailure(db, "runner", "the review run exited 1");
+
+    const stub = stubFetch();
+    const events: Array<Record<string, unknown>> = [];
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        log: { warn: () => {}, info: (fields) => void events.push(fields) },
+        credentials: scriptedCredentials(db),
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    const row = await rawRow(db, id);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.attempts).toBe(1);
+    expect(row.observed).toBe("unknown");
+    expect(
+      events.some((fields) => fields.event === "check_recovery_deferred_pending_publication"),
+    ).toBe(true);
+  });
+
+  test("an elapsed deadline still concludes failure/unconfirmed (existing semantics)", async () => {
+    const db = seededDb();
+    // The abandoned claim's own deadline has already passed: no wait applies.
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    // Both writes are fenced on the claim's OWN live lease, so they land at the
+    // claim instant, before that lease runs out.
+    expect(
+      await setCheckDesired(db, id, lease, { desired: "failure", title: CHECK_NAME, summary: UNCONFIRMED }, null, CLAIM_AT),
+    ).toBe(true);
+    expect(
+      await deferCheckRecovery(
+        db,
+        id,
+        lease,
+        { state: "remote-unconfirmed", nextAttemptMs: EXPIRED_DEADLINE, reason: "terminalize budget exceeded" },
+        CLAIM_AT,
+      ),
+    ).toBe(true);
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    let deferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    expect(deferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(UNCONFIRMED);
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
   });
 });

@@ -20,6 +20,7 @@
 import {
   getCheckBudgets,
   type CheckBudgets,
+  type DegradedReason,
 } from "../dashboard/runtime-config-store";
 import type { DashboardD1 } from "../dashboard/users";
 
@@ -32,6 +33,10 @@ export type CheckBudgetsLogFields = {
   /** The budgets the reader answered with — always the documented defaults. */
   terminalize_ms: number;
   update_ms: number;
+  /** Why the read degraded; the store's cause, never a re-derivation. Its own
+   * key because the consumer channel's `reason` is the closed admission
+   * vocabulary. */
+  degraded_reason?: DegradedReason;
 };
 
 /** Warn-only view of the consumer's log channel; the fields are this module's payload (see the header). */
@@ -55,6 +60,7 @@ export async function readCheckBudgets(
         event: "review_check_budgets_degraded",
         terminalize_ms: budgets.terminalizeMs,
         update_ms: budgets.updateMs,
+        degraded_reason: budgets.reason,
       },
       "check budgets read degraded — using the documented defaults",
     );

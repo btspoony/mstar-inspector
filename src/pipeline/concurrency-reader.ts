@@ -17,8 +17,15 @@
  * so it cannot ride `ConsumerLogFields` (the same reason `SweepLog` exists).
  * A caller adapting its job log keeps its own fields and spreads these.
  */
-import { getEffectiveConcurrency, type EffectiveConcurrency } from "../dashboard/runtime-config-store";
+import {
+  getEffectiveConcurrency,
+  type DegradedReason,
+  type EffectiveConcurrency,
+} from "../dashboard/runtime-config-store";
 import type { DashboardD1 } from "../dashboard/users";
+
+/** The store's degraded cause, re-exported for the consumer's log schema. */
+export type { DegradedReason };
 
 /** The one warn payload this reader emits. */
 export type ReviewConcurrencyLogFields = {
@@ -26,6 +33,10 @@ export type ReviewConcurrencyLogFields = {
   workspace_id: string;
   /** The cap the reader answered with — always the conservative 1 when degraded. */
   effective: number;
+  /** Why the read degraded; the store's cause, never a re-derivation. Its own
+   * key because the consumer channel's `reason` is the closed admission
+   * vocabulary. */
+  degraded_reason?: DegradedReason;
 };
 
 /** Warn-only view of the consumer's log channel; the fields are this module's payload (see the header). */
@@ -51,7 +62,12 @@ export async function readReviewConcurrency(
   const caps = await getEffectiveConcurrency(db, workspaceId);
   if (caps.degraded) {
     log.warn(
-      { event: "review_concurrency_degraded", workspace_id: workspaceId, effective: caps.effective },
+      {
+        event: "review_concurrency_degraded",
+        workspace_id: workspaceId,
+        effective: caps.effective,
+        degraded_reason: caps.reason,
+      },
       "review concurrency read degraded — admitting at the conservative cap (serial)",
     );
   }

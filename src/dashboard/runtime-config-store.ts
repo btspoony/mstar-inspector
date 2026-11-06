@@ -188,8 +188,21 @@ function parseWorkspaceStored(value: unknown): number | undefined {
   return Math.min(parsed, WORKSPACE_CONCURRENCY_MAX);
 }
 
+/**
+ * Why a degraded read could not trust its answer: the statement threw
+ * (`read-failed`), the result row lacked a selected field (`malformed`), or the
+ * stored value was present but not one the parse accepts (`untrusted`). Present
+ * only when `degraded` is true — an absent setting is not a degradation.
+ */
+export type DegradedReason = "read-failed" | "malformed" | "untrusted";
+
 /** One single-level read: the cap, plus whether the stored value could be trusted. */
-export type ConcurrencyRead = { concurrency: number; degraded: boolean };
+export type ConcurrencyRead = {
+  concurrency: number;
+  degraded: boolean;
+  /** The degradation's cause; absent from a trustworthy read. */
+  reason?: DegradedReason;
+};
 
 /**
  * One cap from one result row. Only `row === null` is an absent setting, so the
@@ -202,11 +215,13 @@ function resolveRow(
   parse: (value: unknown) => number | undefined,
 ): ConcurrencyRead {
   if (row === null) return { concurrency: fallback, degraded: false };
-  if (row.value === undefined) return { concurrency: CONCURRENCY_MIN, degraded: true };
+  if (row.value === undefined) {
+    return { concurrency: CONCURRENCY_MIN, degraded: true, reason: "malformed" };
+  }
   const parsed = parse(row.value);
   if (parsed === undefined) return { concurrency: fallback, degraded: false };
   return Number.isNaN(parsed)
-    ? { concurrency: CONCURRENCY_MIN, degraded: true }
+    ? { concurrency: CONCURRENCY_MIN, degraded: true, reason: "untrusted" }
     : { concurrency: parsed, degraded: false };
 }
 
@@ -233,6 +248,8 @@ export type EffectiveConcurrency = {
   workspace: number;
   effective: number;
   degraded: boolean;
+  /** The degradation's cause; absent from a trustworthy read. */
+  reason?: DegradedReason;
 };
 
 /** One `review_runtime_settings` row. The declared `value` type constrains nothing a row actually carries. */
@@ -253,7 +270,7 @@ export async function getSystemConcurrency(db: DashboardD1): Promise<Concurrency
       parseInRange(value, CONCURRENCY_MIN, SYSTEM_CONCURRENCY_MAX),
     );
   } catch {
-    return { concurrency: CONCURRENCY_MIN, degraded: true };
+    return { concurrency: CONCURRENCY_MIN, degraded: true, reason: "read-failed" };
   }
 }
 
@@ -277,19 +294,20 @@ export async function getWorkspaceConcurrency(
       .first<RuntimeSettingRow>();
     return resolveRow(row, WORKSPACE_CONCURRENCY_DEFAULT, parseWorkspaceStored);
   } catch {
-    return { concurrency: CONCURRENCY_MIN, degraded: true };
+    return { concurrency: CONCURRENCY_MIN, degraded: true, reason: "read-failed" };
   }
 }
 
 /**
- * The untrusted-read answer: serial, flagged.
+ * The untrusted-read answer: serial, flagged with its cause.
  */
-function degradedConcurrency(): EffectiveConcurrency {
+function degradedConcurrency(reason: DegradedReason): EffectiveConcurrency {
   return {
     system: CONCURRENCY_MIN,
     workspace: CONCURRENCY_MIN,
     effective: CONCURRENCY_MIN,
     degraded: true,
+    reason,
   };
 }
 
@@ -317,20 +335,20 @@ export async function getEffectiveConcurrency(
     // is untrustworthy, not that both settings are absent. A present row whose
     // selected fields are missing is untrusted for the same reason — only a NULL
     // column means the setting is absent.
-    if (row === null) return degradedConcurrency();
+    if (row === null) return degradedConcurrency("malformed");
     if (row.system_value === undefined || row.workspace_value === undefined) {
-      return degradedConcurrency();
+      return degradedConcurrency("malformed");
     }
     const storedSystem = parseInRange(row.system_value, CONCURRENCY_MIN, SYSTEM_CONCURRENCY_MAX);
     const storedWorkspace = parseWorkspaceStored(row.workspace_value);
     if (Number.isNaN(storedSystem) || Number.isNaN(storedWorkspace)) {
-      return degradedConcurrency();
+      return degradedConcurrency("untrusted");
     }
     const system = storedSystem ?? SYSTEM_CONCURRENCY_DEFAULT;
     const workspace = storedWorkspace ?? WORKSPACE_CONCURRENCY_DEFAULT;
     return { system, workspace, effective: Math.min(system, workspace), degraded: false };
   } catch {
-    return degradedConcurrency();
+    return degradedConcurrency("read-failed");
   }
 }
 
@@ -572,17 +590,24 @@ export class UnknownWorkspaceError extends RuntimeConfigError {
  * `degraded: true` means at least one stored value was untrusted or the read
  * failed, so BOTH answers are the documented defaults.
  */
-export type CheckBudgets = { terminalizeMs: number; updateMs: number; degraded: boolean };
+export type CheckBudgets = {
+  terminalizeMs: number;
+  updateMs: number;
+  degraded: boolean;
+  /** The degradation's cause; absent from a trustworthy read. */
+  reason?: DegradedReason;
+};
 
 /** The pair an accepted write carries. */
 export type CheckBudgetValues = { terminalizeMs: number; updateMs: number };
 
-/** The untrusted/failed-read answer: the documented defaults, flagged. */
-function degradedCheckBudgets(): CheckBudgets {
+/** The untrusted/failed-read answer: the documented defaults, flagged with its cause. */
+function degradedCheckBudgets(reason: DegradedReason): CheckBudgets {
   return {
     terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
     updateMs: CHECK_UPDATE_DEFAULT,
     degraded: true,
+    reason,
   };
 }
 
@@ -605,9 +630,9 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
       .first<{ terminalize_value?: unknown; update_value?: unknown }>();
     // This query always yields exactly one row; no row means the answer itself
     // is untrustworthy, and a missing field is malformed rather than absent.
-    if (row === null) return degradedCheckBudgets();
+    if (row === null) return degradedCheckBudgets("malformed");
     if (row.terminalize_value === undefined || row.update_value === undefined) {
-      return degradedCheckBudgets();
+      return degradedCheckBudgets("malformed");
     }
     const terminalize = parseInRange(
       row.terminalize_value,
@@ -615,14 +640,16 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
       CHECK_TERMINALIZE_MAX,
     );
     const update = parseInRange(row.update_value, CHECK_UPDATE_MIN, CHECK_UPDATE_MAX);
-    if (Number.isNaN(terminalize) || Number.isNaN(update)) return degradedCheckBudgets();
+    if (Number.isNaN(terminalize) || Number.isNaN(update)) {
+      return degradedCheckBudgets("untrusted");
+    }
     return {
       terminalizeMs: terminalize ?? CHECK_TERMINALIZE_DEFAULT,
       updateMs: update ?? CHECK_UPDATE_DEFAULT,
       degraded: false,
     };
   } catch {
-    return degradedCheckBudgets();
+    return degradedCheckBudgets("read-failed");
   }
 }
 
