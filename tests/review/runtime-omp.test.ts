@@ -173,8 +173,9 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 function fakeSeatSession(id: string): { isStreaming: boolean } & Record<string, unknown> {
   return {
     isStreaming: true,
-    sendUserMessage: mock(async (text: string, options?: { deliverAs?: string }) => {
-      nudgeCalls.push({ id, deliverAs: options?.deliverAs ?? "turn", text });
+    prompt: mock(async (text: string, options?: { streamingBehavior?: string }) => {
+      nudgeCalls.push({ id, deliverAs: options?.streamingBehavior ?? "turn", text });
+      return true;
     }),
     steer: mock(async (text: string) => {
       nudgeCalls.push({ id, deliverAs: "steer", text });
@@ -229,9 +230,6 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
         get isStreaming() {
           return parentStreaming;
         },
-        sendUserMessage: mock(async (text: string, options?: { deliverAs?: string }) => {
-          nudgeCalls.push({ id: PARENT_SESSION_ID, deliverAs: options?.deliverAs ?? "turn", text });
-        }),
         steer: mock(async (text: string) => {
           nudgeCalls.push({ id: PARENT_SESSION_ID, deliverAs: "steer", text });
         }),
@@ -239,7 +237,14 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
           yieldListeners.push(listener);
           return () => {};
         }),
-        prompt: mock(async (text: string) => {
+        prompt: mock(async (text: string, options?: { streamingBehavior?: string }) => {
+          // A supervision delivery states its streaming behaviour; it injects
+          // into the live turn instead of starting one, so it must not touch
+          // the turn gate below.
+          if (options?.streamingBehavior !== undefined) {
+            nudgeCalls.push({ id: PARENT_SESSION_ID, deliverAs: options.streamingBehavior, text });
+            return true;
+          }
           promptTexts.push(text);
           // The turn is live: a test can now drive the clock and later release
           // it (no gate → returns as before).

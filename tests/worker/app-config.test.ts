@@ -2344,7 +2344,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       { model_ids: ["ok", " "] }, // blank model id entry
       { model_ids: ["ok", "   "] }, // whitespace-only model id entry
       { model_ids: ["ok", "x".repeat(129)] }, // over-length model id
-      { model_ids: Array.from({ length: 33 }, (_, i) => `m${i}`) }, // over 32 items
+      { model_ids: Array.from({ length: MAX_CUSTOM_PROVIDER_MODEL_IDS + 1 }, (_, i) => `m${i}`) }, // over the store bound
     ];
     for (const patch of bad) {
       await expect(
@@ -4061,7 +4061,10 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       { patch: { api: "google-vertex" }, label: "api outside the AL-23-1 enum" },
       { patch: { model_ids: "  ,  " }, label: "empty model_ids" },
       { patch: { model_ids: `ok, ${"x".repeat(129)}` }, label: "model id over 128 chars" },
-      { patch: { model_ids: Array.from({ length: 33 }, (_, i) => `m${i}`).join(",") }, label: "over 32 model ids" },
+      {
+        patch: { model_ids: Array.from({ length: MAX_CUSTOM_PROVIDER_MODEL_IDS + 1 }, (_, i) => `m${i}`).join(",") },
+        label: "over the store's model-id bound",
+      },
       { patch: { key: "" }, label: "empty key" },
       { patch: { key: "k".repeat(4097) }, label: "key over 4096 chars" },
     ];
@@ -4410,7 +4413,9 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(created.status).toBe(200);
     const [decl] = await store.listCustomProviders(app.id);
     expect(decl!.api).toBe("openai-completions"); // the catalog's protocol
-    expect(decl!.model_ids).toEqual(["subconscious/glm-5.2", "subconscious/tim-qwen3.6-27b"]);
+    expect(decl!.model_ids).toEqual(
+      [...PROVIDER_CATALOG["subconscious"]!.models].slice(0, MAX_CUSTOM_PROVIDER_MODEL_IDS),
+    );
   });
 
   test("add-template-provider clips a wider-than-store catalog vocabulary to the 32-entry bound", async () => {

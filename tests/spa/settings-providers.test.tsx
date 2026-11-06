@@ -383,6 +383,68 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
       cleanup();
     }
   });
+
+  test("the disclosure states the provider's catalog vocabulary, not the stored declaration", async () => {
+    // "Which models does this provider offer" is a catalog fact; the stored
+    // declaration (what the App exposes) is edited in the picker. A stale
+    // declaration must not make the provider look like it offers two models.
+    const { win, cleanup } = installDom("http://localhost/dashboard/ws/settings");
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      await act(async () => {
+        root.render(
+          createElement(ProvidersSection, {
+            locale: "en" as const,
+            payload: managePayload({
+              provider_catalog: [
+                catalogEntry("workers-ai", "template", {
+                  base_url: "https://api.test",
+                  api: "openai-completions",
+                  models: ["catalog-a", "catalog-b", "catalog-c"],
+                }),
+              ],
+              keys: [keyRow("workers-ai", "solo")],
+              custom_providers: [
+                {
+                  provider_id: "workers-ai",
+                  base_url: "https://api.test",
+                  api: "openai-completions",
+                  model_ids: ["stale-a", "stale-b"],
+                },
+              ],
+            }),
+            onVerify: async () => ({ kind: "success" as const, message: "" }),
+            onSettings: async () => ({ kind: "success" as const, message: "" }),
+            onPending: () => {},
+            notice: null,
+            removeOutcome: null,
+            onOutcome: () => {},
+          }),
+        );
+      });
+
+      const toggle = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "settings.providers.expand"),
+      );
+      if (!(toggle instanceof win.HTMLElement)) throw new Error("expand control is missing");
+      await act(async () => {
+        toggle.click();
+      });
+
+      const region = container.querySelector("#provider-models-workers-ai");
+      if (!(region instanceof win.HTMLElement)) throw new Error("the model-id region is missing");
+      const rendered = [...region.querySelectorAll("li")].map((li) => li.textContent);
+      expect(rendered).toEqual(["catalog-a", "catalog-b", "catalog-c"]);
+
+      await act(async () => {
+        root.unmount();
+      });
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 describe("model picker trigger", () => {

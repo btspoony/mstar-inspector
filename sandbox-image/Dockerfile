@@ -35,6 +35,11 @@
 # rebuild: the runner engine pin and the image's CLI pin + harness clone ref move
 # to 4.2.2 (`packages/runner/**`, `sandbox-image/cli-global/**` and the pinned
 # ref are image inputs; 4.2.2 supersedes the 4.2.0 pin above).
+# rebuild: the runner's engine pin, the CLI pin and the harness clone ref move
+# to 4.2.3, and the runner's omp SDK pin moves to 18.17.0, together with the
+# root manifest and both lockfiles (`packages/runner/**`,
+# `sandbox-image/cli-global/**` and the pinned ref are image inputs; a stale
+# image would run the previous engine and SDK against this Worker).
 # rebuild: the report document is now bound to the reviewed head — the runner
 # writes `headSha` from the envelope's `target.head_sha` and the Worker refuses
 # a document bound to another head, so a file left at the fixed path by an
@@ -127,7 +132,7 @@
 # provenance) to each captured item. The container copies
 # `packages/shared/src/**`, so a stale image would run a runner built against
 # the previous shape.
-# rebuild: the runner's omp SDK pin moves to 18.16.0 along with the root
+# rebuild: the runner's omp SDK pin moves to 18.17.0 along with the root
 # manifest, so both lockfiles resolve the same SDK (`packages/runner/
 # package.json` and its lockfile are image inputs).
 # rebuild: a comment-only edit — the CLI pin note no longer cites the deleted
@@ -231,7 +236,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref 98504a71dcf09cfb551847b85e81d33e682e0bd9 (tag v4.2.2, bumped 2026-11-05).
+# mstar-harness plugin, pinned ref abf3167d3ee7db0d0593d034fbc99330663a4669 (tag v4.2.3, bumped 2026-11-06).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -242,7 +247,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin 98504a71dcf09cfb551847b85e81d33e682e0bd9 \
+    && git -C /opt/mstar-harness fetch --depth 1 origin abf3167d3ee7db0d0593d034fbc99330663a4669 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && git -C /opt/mstar-harness rev-parse HEAD > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git
@@ -318,7 +323,7 @@ RUN sh /opt/verify-cli-shim.sh
 RUN mkdir -p /opt/omp-agent
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
 
-# lockfile (omp SDK 18.13.3 = packages/runner/package.json). `--omit=optional` is NOT used:
+# lockfile (omp SDK 18.17.0 = packages/runner/package.json). `--omit=optional` is NOT used:
 # pi-natives ships its platform binary as an optional dep, so omitting optionals
 # breaks the runner at load (T4 live smoke). Size control instead prunes the
 # transformers tree (local-embedding models only — the runner uses the remote

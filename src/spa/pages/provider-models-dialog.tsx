@@ -18,8 +18,9 @@ import type { SpaBoot } from "../boot";
 import { StepDialog } from "../components/StepDialog";
 import { NoticeRegion, type OpNotice } from "./PageNotice";
 
-/** The store's per-declaration ceiling; the server refuses anything above it. */
-export const MAX_PROVIDER_MODEL_IDS = 32;
+/** The store's per-declaration ceiling (MAX_CUSTOM_PROVIDER_MODEL_IDS in
+ *  src/dashboard/app-config-store.ts); the server refuses anything above it. */
+export const MAX_PROVIDER_MODEL_IDS = 128;
 
 export function ProviderModelsDialog({
   locale,

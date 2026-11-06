@@ -32,8 +32,47 @@ const OMP_SNAPSHOT = JSON.parse(
   readFileSync(join(REPO_ROOT, "scripts/provider-catalog/omp-api-key-providers.json"), "utf8"),
 ) as {
   source: { version: string; extracted: string };
-  providers: { id: string; api: string; baseUrl: string | null; models: string[] }[];
+  ownsSnapshotKeys?: string[];
+  providers: {
+    id: string;
+    label: string;
+    env: string;
+    api: string;
+    baseUrl: string | null;
+    models: string[];
+    sourceProviderId?: string;
+  }[];
+  ompProviderIds: string[];
+  excluded: {
+    alias: Record<string, string>;
+    nonModel: string[];
+    oauthOrDeviceCode: string[];
+    notMaterializable: Record<string, string>;
+  };
 };
+
+/** The pinned models.dev snapshot the generator reads (the provenance pin). */
+const SNAPSHOT_PATH = join(REPO_ROOT, "scripts/provider-catalog/models.dev-2026-11-06.json");
+const GENERATOR_SOURCE = readFileSync(join(REPO_ROOT, "scripts/generate-provider-catalog.ts"), "utf8");
+/** The builtin sourceKeys, extracted from the generator's BUILTIN_ORDER
+ *  table (the SSOT — a sourceKey change must update this lock in the same commit). */
+const BUILTIN_SOURCE_KEYS = [...GENERATOR_SOURCE.matchAll(/sourceKey: "([^"]+)"/g)].map((m) => m[1]!);
+const DEDUPED_SNAPSHOT_KEYS = ["cloudflare-workers-ai"];
+const SNAPSHOT = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8")) as Record<string, {
+  name: string;
+  api: string | null;
+  doc: string | null;
+  model_ids: string[];
+}>;
+/** Snapshot keys that become breadth rows: not a builtin sourceKey, not the
+ *  curated dedupe, not taken over by a mixed-protocol omp row, id-grammar valid. */
+const BREADTH_KEYS = Object.keys(SNAPSHOT).filter(
+  (key) =>
+    !BUILTIN_SOURCE_KEYS.includes(key) &&
+    !DEDUPED_SNAPSHOT_KEYS.includes(key) &&
+    !(OMP_SNAPSHOT.ownsSnapshotKeys ?? []).includes(key) &&
+    CUSTOM_PROVIDER_ID_PATTERN.test(key),
+);
 
 describe("shared provider mapping", () => {
   test("PROVIDER_ENV_NAMES is the frozen env-name snapshot of PROVIDERS", () => {
@@ -69,8 +108,8 @@ describe("provider catalog tiers (spec §5; breadth)", () => {
       expect(template.map(([entryId]) => entryId), id).toContain(id);
       expect(PROVIDER_CATALOG[id]!.tier, id).toBe("template");
     }
-    // workers-ai + the 194 committed breadth rows + the 16 union rows.
-    expect(template).toHaveLength(1 + 194 + unionIds.length);
+    // workers-ai + the committed breadth rows + the union rows.
+    expect(template).toHaveLength(1 + BREADTH_KEYS.length + unionIds.length);
     expect(Object.keys(PROVIDER_CATALOG)).toHaveLength(19 + template.length);
     expect(Object.keys(PROVIDERS)).toEqual(builtin.map(([id]) => id));
     expect(Object.keys(TEMPLATE_PROVIDERS)).toEqual(template.map(([id]) => id));
@@ -181,20 +220,11 @@ describe("PROVIDER_IDS_COMMON display tier (AD-547)", () => {
 describe("provider catalog breadth enumeration (spec § Providers contract 2)", () => {
   const repoRoot = join(import.meta.dir, "../..");
   const generatorPath = join(repoRoot, "scripts/generate-provider-catalog.ts");
-  const snapshotPath = join(repoRoot, "scripts/provider-catalog/models.dev-2026-09-04.json");
-  const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8")) as Record<string, {
-    name: string;
-    api: string | null;
-    doc: string | null;
-    model_ids: string[];
-  }>;
-  // The builtin sourceKeys, extracted from the generator's BUILTIN_ORDER
-  // table (the SSOT — a sourceKey change must update this lock's input in
-  // the same commit).
-  const generatorSource = readFileSync(generatorPath, "utf8");
-  const builtinSourceKeys = [...generatorSource.matchAll(/sourceKey: "([^"]+)"/g)].map((m) => m[1]!);
+  const snapshot = SNAPSHOT;
+  const generatorSource = GENERATOR_SOURCE;
+  const builtinSourceKeys = BUILTIN_SOURCE_KEYS;
   // Breadth rule (b): snapshot keys deduped into a hand-curated template.
-  const dedupedSnapshotKeys = ["cloudflare-workers-ai"];
+  const dedupedSnapshotKeys = DEDUPED_SNAPSHOT_KEYS;
 
   test("the generator's id-pattern copy is byte-equal to the dashboard CUSTOM_PROVIDER_ID_PATTERN", () => {
     // The generator hardcodes the store's grammar as a literal (zero
@@ -205,12 +235,7 @@ describe("provider catalog breadth enumeration (spec § Providers contract 2)", 
 
   test("every snapshot key is exactly one of: breadth template row, builtin sourceKey, dedupe, or id-grammar skip", () => {
     const templateIds = new Set(Object.keys(TEMPLATE_PROVIDERS));
-    const expectedBreadth = Object.keys(snapshot).filter(
-      (key) =>
-        !builtinSourceKeys.includes(key) &&
-        !dedupedSnapshotKeys.includes(key) &&
-        CUSTOM_PROVIDER_ID_PATTERN.test(key),
-    );
+    const expectedBreadth = BREADTH_KEYS;
     // No excluded snapshot key appears as a TEMPLATE row (rule (a) prevents
     // duplicate vendor rows like a `google` template beside the `gemini`
     // builtin; plan-time verification: 18 sourceKey exclusions, 1 dedupe,
@@ -224,18 +249,12 @@ describe("provider catalog breadth enumeration (spec § Providers contract 2)", 
       expect(templateIds.has(key), key).toBe(true);
       expect(PROVIDER_CATALOG[key]!.tier, key).toBe("template");
     }
-    // 194 breadth + 19 builtin + 1 curated template + the omp union rows.
-    expect(expectedBreadth).toHaveLength(194);
-    expect(templateIds.size).toBe(195 + OMP_SNAPSHOT.providers.length);
+    // breadth rows + 19 builtin + 1 curated template + the omp union rows.
+    expect(templateIds.size).toBe(BREADTH_KEYS.length + 1 + OMP_SNAPSHOT.providers.length);
   });
 
   test("snapshot-derived entries follow the breadth mapping (label/baseUrl/api/models/doc, full model vocabulary)", () => {
-    const expectedBreadth = Object.keys(snapshot).filter(
-      (key) =>
-        !builtinSourceKeys.includes(key) &&
-        !dedupedSnapshotKeys.includes(key) &&
-        CUSTOM_PROVIDER_ID_PATTERN.test(key),
-    );
+    const expectedBreadth = BREADTH_KEYS;
     for (const key of expectedBreadth) {
       const source = snapshot[key]!;
       const entry = PROVIDER_CATALOG[key]!;
@@ -261,15 +280,13 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
   const contractPath = join(repoRoot, "src/contracts/provider-catalog.generated.ts");
   const facePath = join(repoRoot, "src/pipeline/provider-catalog.ts");
   const generatorPath = join(repoRoot, "scripts/generate-provider-catalog.ts");
-  const snapshotPath = join(repoRoot, "scripts/provider-catalog/models.dev-2026-09-04.json");
-
   test("the committed models.dev snapshot is present, parseable, and the generator's only input", () => {
-    const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8")) as Record<string, unknown>;
+    const snapshot = SNAPSHOT as Record<string, unknown>;
     expect(Object.keys(snapshot).length).toBeGreaterThan(0);
     const generator = readFileSync(generatorPath, "utf8");
     // The pin is the committed snapshot file — provenance is the vendored
     // JSON, never a network source.
-    expect(generator).toContain("models.dev-2026-09-04.json");
+    expect(generator).toContain("models.dev-2026-11-06.json");
     // Zero authoring-time network: the generator reads only the snapshot.
     expect(generator).not.toMatch(/\bfetch\s*\(/);
   });
@@ -282,14 +299,14 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
     expect(source).not.toMatch(/^import\s/m);
     expect(source).not.toMatch(/from\s+"[.][.]?\//);
     // The provenance header names the pinned snapshot and the authoring path.
-    expect(source).toContain("models.dev-2026-09-04.json");
+    expect(source).toContain("models.dev-2026-11-06.json");
     expect(source).toContain("DO NOT EDIT BY");
   });
 
   test("the generated header's skip-count audit names every exclusion rule and its count", () => {
     const source = readFileSync(contractPath, "utf8");
-    // 213 snapshot keys → 194 breadth rows; each rule names its skip count.
-    expect(source).toContain("213 snapshot keys → 194 breadth template entries");
+    // Every snapshot key is accounted for; each rule names its skip count.
+    expect(source).toContain(`${Object.keys(SNAPSHOT).length} snapshot keys → ${BREADTH_KEYS.length} breadth template entries`);
     expect(source).toMatch(/rule \(a\) excluded as a builtin sourceKey \(18/);
     expect(source).toContain("wafer.ai");
     expect(source).toMatch(/rule \(b\) deduped into a hand-curated template \(1\)/);
@@ -340,7 +357,7 @@ describe("generator breadth-collision guard (audit DEBT-46-05)", () => {
   // The committed snapshot, seeded with a colliding breadth-eligible key per
   // test case. buildCatalog is imported pure (the generator's read/write tail
   // is gated behind import.meta.main) — no writer spawn, no file I/O.
-  const snapshot = JSON.parse(readFileSync(join(repoRoot, "scripts/provider-catalog/models.dev-2026-09-04.json"), "utf8")) as Record<
+  const snapshot = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8")) as Record<
     string,
     { id: string; name: string; env: string[]; api: string | null; doc: string | null; model_ids: string[] }
   >;
@@ -370,26 +387,29 @@ describe("generator breadth-collision guard (audit DEBT-46-05)", () => {
     // Object.prototype property — an `in`-based guard would throw a
     // collision that does not exist. The guard is own-property based, so
     // the seeded key must pass through as an ordinary breadth template row.
-    const { catalog, audit } = buildCatalog(seeded("constructor", "Constructor Impersonator"));
+    const { catalog, audit } = buildCatalog(seeded("constructor", "Constructor Impersonator"), OMP_SNAPSHOT);
     const entry = catalog["constructor"] as { tier: string; label: string };
     expect(Object.hasOwn(catalog, "constructor")).toBe(true);
     expect(entry.tier).toBe("template");
     expect(entry.label).toBe("Constructor Impersonator");
-    expect(audit.breadthCount).toBe(195); // 194 committed breadth rows + the seeded key
+    expect(audit.breadthCount).toBe(BREADTH_KEYS.length + 1); // committed breadth rows + the seeded key
   });
 
   test("the guard is unreachable with the committed snapshot (audit: no collision today)", () => {
     // Snapshot only: the union pass is a separate, optional input.
     const { catalog, audit } = buildCatalog(snapshot);
-    expect(Object.keys(catalog)).toHaveLength(214);
-    expect(audit.breadthCount).toBe(194);
+    // Without the union input, the mixed-protocol omp-owned keys are not
+    // excluded, so the snapshot alone contributes those rows too.
+    const snapshotOnlyBreadth = BREADTH_KEYS.length + (OMP_SNAPSHOT.ownsSnapshotKeys ?? []).length;
+    expect(Object.keys(catalog)).toHaveLength(19 + 1 + snapshotOnlyBreadth);
+    expect(audit.breadthCount).toBe(snapshotOnlyBreadth);
   });
 });
 
 describe("omp provider union (third generator input)", () => {
   const unionIds = OMP_SNAPSHOT.providers.map((record) => record.id);
   const snapshotOnly = JSON.parse(
-    readFileSync(join(REPO_ROOT, "scripts/provider-catalog/models.dev-2026-09-04.json"), "utf8"),
+    readFileSync(SNAPSHOT_PATH, "utf8"),
   ) as Record<string, never>;
 
   test("every union record is a template row with a valid id, a materializable api and a label", () => {
@@ -408,12 +428,12 @@ describe("omp provider union (third generator input)", () => {
     }
   });
 
-  test("commandcode is mixed-protocol: two rows, no typesafe prefill, typesafe kept on its own row", () => {
-    // One custom-provider declaration carries exactly one protocol, so the
-    // Responses and Messages surfaces are separate template rows.
+  test("commandcode is mixed-protocol: one row per protocol, no typesafe prefill", () => {
+    // One custom-provider declaration carries exactly one protocol, so every
+    // served protocol is a separate template row.
     expect(PROVIDER_CATALOG["commandcode"]).toMatchObject({
       tier: "template",
-      api: "openai-responses",
+      api: "openai-completions",
       baseUrl: "https://api.commandcode.ai/provider/v1",
     });
     expect(PROVIDER_CATALOG["commandcode-anthropic"]).toMatchObject({
@@ -421,12 +441,39 @@ describe("omp provider union (third generator input)", () => {
       api: "anthropic-messages",
       baseUrl: "https://api.commandcode.ai/provider",
     });
-    for (const id of ["commandcode", "commandcode-anthropic"]) {
+    expect(PROVIDER_CATALOG["commandcode-responses"]).toMatchObject({
+      tier: "template",
+      api: "openai-responses",
+    });
+    for (const id of ["commandcode", "commandcode-anthropic", "commandcode-responses"]) {
       expect(PROVIDER_CATALOG[id]!.models.length, id).toBeGreaterThan(0);
       expect(PROVIDER_CATALOG[id]!.models as readonly string[], id).not.toContain("typesafe/jev");
     }
     // The judge wire keeps its own row.
-    expect(PROVIDER_CATALOG["typesafe"]).toMatchObject({ tier: "template", api: "typesafe" });
+    expect(PROVIDER_CATALOG["commandcode-typesafe"]).toMatchObject({ tier: "template", api: "typesafe" });
+  });
+
+  test("an owned models.dev key is only taken over when a materializable record replaces it", () => {
+    const owned = OMP_SNAPSHOT.ownsSnapshotKeys ?? [];
+    expect(owned.length).toBeGreaterThan(0);
+    for (const key of owned) {
+      // A replacement row exists for the key itself or for a per-protocol id.
+      const replacement = OMP_SNAPSHOT.providers.filter(
+        (record) => record.id === key || record.sourceProviderId === key,
+      );
+      expect(replacement.length, key).toBeGreaterThan(0);
+      expect(PROVIDER_CATALOG[key], key).toBeDefined();
+      expect(PROVIDER_CATALOG[key]!.tier, key).toBe("template");
+    }
+    // Regression lock: `google-vertex` spans several protocols but ships no
+    // API-key env, so it has no replacement record. Taking its models.dev key
+    // over would drop the provider from the catalog entirely.
+    expect(owned).not.toContain("google-vertex");
+    expect(PROVIDER_CATALOG["google-vertex"]).toMatchObject({
+      tier: "template",
+      baseUrl: SNAPSHOT["google-vertex"]!.api ?? null,
+      api: "openai-completions",
+    });
   });
 
   test("the union adds no builtin row — the runner allowlist stays at 19", () => {

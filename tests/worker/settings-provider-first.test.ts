@@ -812,7 +812,9 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
     expect(declared[0]!.base_url).toBe("https://api.subconscious.dev/v1");
     expect(declared[0]!.api).toBe("openai-completions");
     // The prefill vocabulary is the breadth entry's snapshot model list.
-    expect(declared[0]!.model_ids).toEqual(["subconscious/glm-5.2", "subconscious/tim-qwen3.6-27b"]);
+    expect(declared[0]!.model_ids).toEqual(
+      [...PROVIDER_CATALOG["subconscious"]!.models].slice(0, 32),
+    );
   });
 
   test("a base_url form override replaces the catalog prefill and materializes through the same validators", async () => {
@@ -1819,7 +1821,6 @@ describe("GET settings provider_catalog usage_probe (per-key usage action)", () 
     "synthetic",
     "umans",
     "hyper",
-    "kimi-for-coding",
     "cursor",
   ];
 

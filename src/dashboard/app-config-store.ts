@@ -509,14 +509,14 @@ const keyIdEncoder = new TextEncoder();
  * Custom-provider declaration bounds (AL-23-2 verdict): provider id
  * `[a-z0-9][a-z0-9-]{0,63}` (the credential-payload pool key the consumer
  * emits),
- * baseUrl https-only ≤2048, model_ids 1..32 entries × ≤128 characters
+ * baseUrl https-only ≤2048, model_ids 1..128 entries × ≤128 characters
  * (AL-23-1).
  * The route answers 400 first; the store re-validates as the backstop for
  * direct callers (the ProviderKeyTooLongError pattern).
  */
 export const CUSTOM_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH = 2048;
-export const MAX_CUSTOM_PROVIDER_MODEL_IDS = 32;
+export const MAX_CUSTOM_PROVIDER_MODEL_IDS = 128;
 export const MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH = 128;
 /**
  * Declarations per App bound (QC wave-1 W-2): the last AL-23-2 input
