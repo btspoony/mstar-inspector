@@ -1,6 +1,6 @@
 ---
 module: dashboard / provider usage probing
-date: 2026-11-05
+date: 2026-11-06
 problem_type: best_practice
 category: best-practices
 severity: medium
