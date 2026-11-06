@@ -6,7 +6,7 @@
  * tone, and the fold/copy labels. No React import — the component module owns
  * state, effects and JSX, and these rules are pinnable without a DOM.
  */
-import { FINDING_SEVERITIES } from "../../contracts/finding-severity";
+import { FINDING_SEVERITIES, isFindingSeverity } from "../../contracts/finding-severity";
 import { t, type Locale } from "../../i18n";
 import { formatRelativeTime } from "../relative-time";
 import { CATCH_ALL_SEVERITY } from "./data";
@@ -39,9 +39,6 @@ export const SEVERITY_GROUPS = FINDING_SEVERITIES.map((severity) => ({
   severity,
   ...SEVERITY_PRESENTATION[severity],
 }));
-
-/** The classes `SEVERITY_GROUPS` names; every other spelling is `other`. */
-const KNOWN_SEVERITIES = new Set<string>(SEVERITY_GROUPS.map((group) => group.severity));
 
 /** The bucket every spelling outside the table lands in, rendered last. */
 const OTHER_BUCKET = {
@@ -95,7 +92,7 @@ export function severityGroups(
     tone: group.tone,
     items: indexed.filter(({ finding }) => finding.severity === group.severity),
   }));
-  const other = indexed.filter(({ finding }) => !KNOWN_SEVERITIES.has(finding.severity));
+  const other = indexed.filter(({ finding }) => !isFindingSeverity(finding.severity));
   if (other.length > 0) {
     groups.push({
       key: OTHER_BUCKET.key,
@@ -128,7 +125,7 @@ export function reviewClassCounts(
   })).filter(({ count }) => count > 0);
   let other = 0;
   for (const [key, count] of Object.entries(counts)) {
-    if (!KNOWN_SEVERITIES.has(key)) other += count;
+    if (!isFindingSeverity(key)) other += count;
   }
   if (other > 0) {
     rows.push({ key: OTHER_BUCKET.key, label: t(locale, OTHER_BUCKET.labelKey), count: other });

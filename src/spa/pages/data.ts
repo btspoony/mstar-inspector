@@ -1049,11 +1049,12 @@ function parsePullRequestReview(value: unknown): PullRequestReview | null {
 /**
  * The per-severity tally rides the wire as JSON text; the producer emits an
  * empty JSON object (`{}`) for a round that reported nothing. Anything
- * unreadable or malformed still degrades to `{}` — the row renders, it just
- * carries no class breakdown.
+ * unreadable or malformed — including the tolerated legacy/mocked empty
+ * string — still degrades to `{}` via the parse catch: the row renders, it
+ * just carries no class breakdown.
  */
 function parseSeverityCounts(raw: unknown): Record<string, number> {
-  if (typeof raw !== "string" || raw === "") return {};
+  if (typeof raw !== "string") return {};
   try {
     const parsed: unknown = JSON.parse(raw);
     return isNumberRecord(parsed) ? parsed : {};

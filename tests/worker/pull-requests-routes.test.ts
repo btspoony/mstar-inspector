@@ -373,7 +373,9 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     // fabricated zero class.
     expect(body.items.map((item) => item.round)).toEqual([2, 1]);
     expect(JSON.parse(body.items[0]!.severity_counts)).toEqual({ "must-fix": 2, "should-fix": 1 });
-    expect(["", "{}"]).toContain(body.items[1]!.severity_counts);
+    // The round that reported no findings carries the empty aggregate
+    // (`"{}"`), never a fabricated zero class.
+    expect(body.items[1]!.severity_counts).toBe("{}");
   });
 
   test("a repo-wide finding (null file_path) round-trips as ''", async () => {

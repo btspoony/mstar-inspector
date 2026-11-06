@@ -1721,11 +1721,18 @@ describe("pull request detail face (static SSR)", () => {
   test("the reading order runs toolbar, record list, then aside", async () => {
     // Product behaviour, not DOM topology: a screen reader or keyboard user
     // meets the toolbar (its TabsList labelled `recordsLabel`), then the
-    // record list, then the aside's facts (`asideFacts`). The flex mechanism
-    // that places them is proven by the design-system reference page, not by
-    // this test.
+    // record list, then the aside's facts (`asideFacts`). The retained
+    // `data-slot` hooks are test hooks, not product landmarks.
+    //
+    // What this pins: toolbar < list < aside in document order AND the aside
+    // is not nested inside the main column or the record list (compareDocumentPosition's
+    // FOLLOWING bit is also true for a containing node, so document order alone
+    // cannot catch a nested-aside regression). The flex mechanism that places
+    // them side by side at the xl breakpoint (`xl:flex-row`) is not statically
+    // assertable here — it is a browser/E2E surface, recorded as unverified.
     const layout = await withMarkup(face(), (container) => {
       const tabsList = container.querySelector(`[aria-label="${t("en", "pullRequests.recordsLabel")}"]`);
+      const recordMain = container.querySelector('[data-slot="record-main"]');
       const recordList = container.querySelector('[data-slot="record-list"]');
       const asideFacts = container.querySelector(`[aria-label="${t("en", "pullRequests.asideFacts")}"]`);
       // compareDocumentPosition FOLLOWING bit (4; `Node` is not global in the DOM harness).
@@ -1739,16 +1746,22 @@ describe("pull request detail face (static SSR)", () => {
         (recordList.compareDocumentPosition(asideFacts) & 4) !== 0;
       return {
         toolbarLabelled: tabsList !== null,
+        recordMainExists: recordMain !== null,
         recordListExists: recordList !== null,
         asideLabelled: asideFacts !== null,
         inDocumentOrder: listAfterToolbar && asideAfterList,
+        asideOutsideMain: recordMain !== null && asideFacts !== null && !recordMain.contains(asideFacts),
+        asideOutsideList: recordList !== null && asideFacts !== null && !recordList.contains(asideFacts),
       };
     });
     expect(layout).toEqual({
       toolbarLabelled: true,
+      recordMainExists: true,
       recordListExists: true,
       asideLabelled: true,
       inDocumentOrder: true,
+      asideOutsideMain: true,
+      asideOutsideList: true,
     });
   });
 });
