@@ -851,8 +851,6 @@ export type PullRequestReview = {
   head_sha: string;
   /** Ordinal of this round in the PR's oldest-first review history; `null` when the payload carries none. */
   round: number | null;
-  /** Findings this round reported; the parser refuses a row without a real tally. */
-  findings: number;
   /** Wall clock of the round in ms; `null` for rows written before the measurement. */
   duration_ms: number | null;
   /** The round's findings tallied per severity class (wire JSON text, parsed). */
@@ -1027,16 +1025,15 @@ function nonNegativeInteger(value: unknown): number | null {
  * One review entry (QC: the pipeline persists `provider: null`, and
  * model/verdict can be absent too). The nullable text fields
  * coerce to "" at this boundary so the view never renders null; the round
- * ordinal and clock coerce to `null`. The tally is REQUIRED: the paged route
- * counts it with `COUNT(*)`, so a row without a real count would have to
- * print a fabricated 0 — a claim the round reported nothing. The row is
- * refused instead and the page reports it in `dropped`.
+ * ordinal and clock coerce to `null`. The per-class tally degrades to `{}`
+ * when absent or malformed — the row renders, it just carries no breakdown;
+ * the numeric total the row used to hard-require feeds no render, so the
+ * parser no longer gates on it (a producer change to that column must not
+ * silently delete every review row).
  */
 function parsePullRequestReview(value: unknown): PullRequestReview | null {
   if (!isRecord(value)) return null;
   if (typeof value.reviewed_at !== "string" || typeof value.head_sha !== "string") return null;
-  const findings = nonNegativeInteger(value.findings);
-  if (findings === null) return null;
   return {
     verdict: typeof value.verdict === "string" ? value.verdict : "",
     model: typeof value.model === "string" ? value.model : "",
@@ -1044,7 +1041,6 @@ function parsePullRequestReview(value: unknown): PullRequestReview | null {
     reviewed_at: value.reviewed_at,
     head_sha: value.head_sha,
     round: positiveInteger(value.round),
-    findings,
     duration_ms: nonNegativeInteger(value.duration_ms),
     severity_counts: parseSeverityCounts(value.severity_counts),
   };

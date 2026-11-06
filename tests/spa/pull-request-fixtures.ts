@@ -28,7 +28,7 @@ import type {
   RecordPageItems,
   RecordSection,
 } from "../../src/spa/pages/data";
-import { isFindingSeverity } from "../../src/contracts/finding-severity";
+import { isFindingSeverity, MUST_FIX_SEVERITY } from "../../src/contracts/finding-severity";
 import { installDom } from "./dom";
 
 /** The head row both faces carry: the list adds its aggregates, the detail its totals. */
@@ -96,7 +96,6 @@ export const REVIEWS: PullRequestReview[] = [
     head_sha: "aaa111bbb222",
     // The second round: the first is the older row below.
     round: 2,
-    findings: 2,
     // 1m 5s — the minutes+seconds form.
     duration_ms: 65_000,
     // The per-severity breakdown the wire sends as JSON text.
@@ -110,7 +109,6 @@ export const REVIEWS: PullRequestReview[] = [
     reviewed_at: "2026-10-30 08:00:00",
     head_sha: "f00d12c1",
     round: 1,
-    findings: 1,
     // Historical row: no measured clock, so the row omits the time.
     duration_ms: null,
     severity_counts: { nit: 1 },
@@ -181,20 +179,21 @@ export type DetailScene = { detail: PullRequestDetailPayload; pages: RecordPages
  * stub will serve. `latest` overrides the head's newest review (the headline's
  * only source), leaving the section pages untouched.
  *
- * `mustFix` is the head's own must-fix tally and is NEVER derived from the
- * page under test: the page a caller overrides is a window (a later offset, a
- * severity filter), while the head describes the PR. It defaults to the
- * untouched first page's tally; a scene whose PR really has other must-fix
- * rows states its own. Callers keep it within the scene's findings total — a
- * PR with no finding cannot claim a must-fix one — and the fixture does not
- * enforce that: a clamp here would silently rewrite the stated fact and make
- * the head agree with whichever page the test loaded.
+ * `mustFix` is the head's own must-fix tally and is NEVER derived from a
+ * window the page under test does not describe: by default it is the
+ * must-fix count of the scene's findings page, so a scene whose page holds
+ * only may-fix/nit rows claims none. A caller with a genuinely filtered or
+ * paged window whose PR really has other must-fix rows states its own; an
+ * explicit `0` stays `0`. Callers keep it within the scene's findings
+ * total — a PR with no finding cannot claim a must-fix one — and the
+ * fixture does not enforce that: a clamp here would silently rewrite the
+ * stated fact and make the head agree with whichever page the test loaded.
  */
 export function scene(
   over: Partial<RecordPages> = {},
   row: Partial<PullRequestHead> = {},
   latest: Partial<PullRequestLatestReview> | null = DETAIL.latest_review,
-  mustFix: number = MUST_FIX,
+  mustFix?: number,
 ): DetailScene {
   const pages: RecordPages = { ...RECORDS, ...over };
   const base = DETAIL.latest_review;
@@ -205,7 +204,8 @@ export function scene(
         findings: pages.findings.total,
         reviews: pages.reviews.total,
         failures: pages.failures.total,
-        must_fix: mustFix,
+        must_fix:
+          mustFix ?? pages.findings.items.filter((finding) => finding.severity === MUST_FIX_SEVERITY).length,
       },
       latest_review: latest === null || base === null ? null : { ...base, ...latest },
     },
@@ -357,8 +357,14 @@ export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: 
       const applied = Math.min(limit, sceneValue.pages[section].limit ?? limit);
       // The page's declared `total` is authoritative: the head was built from
       // it, so a scene can state a total its served window never reaches. A
-      // findings filter has no declared total of its own — like the route, it
-      // reports the rows it filtered.
+      // FILTERED findings read is different: the route totals it with a
+      // family-wide COUNT, so the stub counts matched rows across the scene's
+      // declared corpus (`pages.findings.items`), never across the offset/
+      // limit window being served. A scene whose page is a window of a larger
+      // corpus cannot answer a filtered total (the unseen rows' classes are
+      // unknown), so mounted suites assert filtered pager totals only on
+      // corpus-complete scenes; the worker suite pins the route's filtered
+      // count.
       const filtered = section === "findings" && (severity !== "" || unclassified);
       return jsonResponse({
         items: rows.slice(offset, offset + applied),

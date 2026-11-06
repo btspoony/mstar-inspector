@@ -205,7 +205,7 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(defaultFamily({ findings: 0, reviews: 2, failures: 0, must_fix: 0 })).toBe("reviews");
   });
 
-  test("a review with provider null parses without a null leak, and a row without a real tally is refused", async () => {
+  test("a review with provider null parses without a null leak, and the retired numeric total no longer gates the row", async () => {
     const reviews = parseRecordPage("reviews", {
       // The wire sends the per-severity tally as JSON text, never an object.
       items: [
@@ -233,7 +233,6 @@ describe("pull request detail data plane (pure helpers)", () => {
       reviewed_at: "2026-11-01 08:00:00",
       head_sha: "aaa111bbb222",
       round: 2,
-      findings: 2,
       duration_ms: 65_000,
       severity_counts: { "must-fix": 1, nit: 1 },
     });
@@ -259,44 +258,42 @@ describe("pull request detail data plane (pure helpers)", () => {
       items: [{ ...REVIEWS[0], round: "2", duration_ms: -1 }],
       total: 1,
     })?.items[0];
-    expect(legacyRound).toMatchObject({ round: null, findings: 2, duration_ms: null });
+    expect(legacyRound).toMatchObject({ round: null, duration_ms: null });
     // Round 0 is not a round either: the history numbers from 1.
     const zeroRound = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], round: 0 }],
       total: 1,
     })?.items[0];
     expect(zeroRound?.round).toBeNull();
-    // The tally is REQUIRED: the paged route counts it with `COUNT(*)`, so a
-    // row without one is refused (and reported in `dropped`).
-    const withoutTally = parseRecordPage("reviews", {
-      items: [{ ...REVIEWS[0], findings: undefined }],
-      total: 1,
-    });
-    expect(withoutTally?.items).toEqual([]);
-    expect(withoutTally?.dropped).toBe(1);
-    // Present-but-malformed is not a count either: a string, a fraction or a
-    // negative number all refuse the row.
-    for (const findings of ["2", 2.5, -3]) {
-      const refused = parseRecordPage("reviews", { items: [{ ...REVIEWS[0], findings }], total: 1 });
-      expect(refused?.items).toEqual([]);
-      expect(refused?.dropped).toBe(1);
+    // The numeric total the row used to hard-require is retired: it feeds no
+    // render, so a row without one — absent, or a leftover string — must
+    // still parse, carrying its per-class tally.
+    const wireTally = JSON.stringify(REVIEWS[0]!.severity_counts);
+    for (const row of [
+      { ...REVIEWS[0], findings: undefined, severity_counts: wireTally },
+      { ...REVIEWS[0], findings: "2", severity_counts: wireTally },
+    ]) {
+      const accepted = parseRecordPage("reviews", { items: [row], total: 1 });
+      expect(accepted?.items).toHaveLength(1);
+      expect(accepted?.items[0]?.severity_counts).toEqual({ "must-fix": 1, nit: 1 });
     }
-    // A real zero is a count: the parser keeps 0, 1 and 3 as parsed. The
-    // total itself feeds no render — the review row prints only the
-    // per-class pairs — so nothing here pins a label branch on it.
-    const tallies = parseRecordPage("reviews", {
-      items: [
-        { ...REVIEWS[0], findings: 0, severity_counts: "" },
-        { ...REVIEWS[0], findings: 1, severity_counts: '{"nit":1}' },
-        { ...REVIEWS[0], findings: 3, severity_counts: '{"should-fix":2,"must-fix":1,"nit":0,"unknown":9}' },
-      ],
-      total: 3,
-    });
-    expect(tallies?.items.map((review) => review.findings)).toEqual([0, 1, 3]);
     // Rendered: a round without a tally renders its verdict alone; per-class
     // pairs print in SEVERITY_GROUPS order — zero classes are omitted, never
     // printed as 0, and an off-vocabulary spelling sums into the `other`
     // bucket (the same catch-all the findings list uses).
+    const tallies = parseRecordPage("reviews", {
+      items: [
+        { ...REVIEWS[0], severity_counts: "" },
+        { ...REVIEWS[0], severity_counts: '{"nit":1}' },
+        { ...REVIEWS[0], severity_counts: '{"should-fix":2,"must-fix":1,"nit":0,"unknown":9}' },
+      ],
+      total: 3,
+    });
+    expect(tallies?.items.map((review) => review.severity_counts)).toEqual([
+      {},
+      { nit: 1 },
+      { "should-fix": 2, "must-fix": 1, nit: 0, unknown: 9 },
+    ]);
     const tallyMarkup = render(
       { ...DETAIL, counts: { ...DETAIL.counts, findings: 0, reviews: 3, failures: 0, must_fix: 0 } },
       recordsOf({ ...RECORDS, findings: page([]), failures: page([]), reviews: tallies ?? page([]) }),
@@ -524,7 +521,6 @@ describe("pull request detail face (static SSR)", () => {
                 reviewed_at: "2026-11-01 08:00:00",
                 head_sha: "aaa111b",
                 round: 1,
-                findings: 0,
                 duration_ms: null,
                 severity_counts: {},
               },
@@ -578,7 +574,6 @@ describe("pull request detail face (static SSR)", () => {
               reviewed_at: "2026-11-01 08:00:00",
               head_sha: "aaa111bbb222",
               round: 1,
-                findings: 0,
                 duration_ms: null,
                 severity_counts: {},
               },
@@ -972,7 +967,6 @@ describe("pull request detail face (static SSR)", () => {
             reviewed_at: "2026-11-01 08:00:00",
             head_sha: "aaa111b",
             round: 1,
-            findings: 0,
             duration_ms: null,
             severity_counts: {},
           },
@@ -1024,7 +1018,6 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: "2026-11-01 09:00:00",
         head_sha: "aaa111b",
         round: 2,
-        findings: 3,
         duration_ms: 65_000,
         severity_counts: { "must-fix": 2, nit: 1 },
       },
@@ -1035,7 +1028,6 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: "2026-10-30 09:00:00",
         head_sha: "bbb222c",
         round: 1,
-        findings: 1,
         duration_ms: null,
         severity_counts: { nit: 1 },
       },
@@ -1049,7 +1041,6 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: "2026-10-29 09:00:00",
         head_sha: "ccc333d",
         round: null,
-        findings: 0,
         duration_ms: null,
         severity_counts: {},
       },
@@ -1179,7 +1170,6 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: "2026-11-01 09:00:00",
         head_sha: "legacy1a",
         round: 3,
-        findings: 3,
         duration_ms: null,
         severity_counts: { critical: 2, info: 1 },
       },
@@ -1190,7 +1180,6 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: "2026-10-30 09:00:00",
         head_sha: "mixed01a",
         round: 2,
-        findings: 3,
         duration_ms: null,
         severity_counts: { "must-fix": 1, critical: 2 },
       },
@@ -1202,7 +1191,6 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: "2026-10-29 09:00:00",
         head_sha: "known001",
         round: 1,
-        findings: 6,
         duration_ms: null,
         severity_counts: { nit: 1, "should-fix": 3, "must-fix": 2 },
       },
@@ -1296,7 +1284,6 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
         head_sha: `sha${index}`,
         round: 12 - index,
-        findings: 0,
         duration_ms: null,
         severity_counts: {},
       })),
@@ -1354,7 +1341,6 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
         head_sha: `sha${index}`,
         round: 3 - index,
-        findings: 0,
         duration_ms: null,
         severity_counts: {},
       })),
@@ -1381,7 +1367,6 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
         head_sha: `sha${index}`,
         round: 6 - index,
-        findings: 0,
         duration_ms: null,
         severity_counts: {},
       })),

@@ -5024,7 +5024,6 @@ const appPullRequestRecordsRoute = async (
         reviewed_at: review.reviewed_at,
         head_sha: review.head_sha,
         round: review.round,
-        findings: review.findings,
         severity_counts: review.severity_counts,
         duration_ms: review.duration_ms,
       })),

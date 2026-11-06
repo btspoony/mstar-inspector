@@ -323,7 +323,7 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(body.items[0]).toMatchObject({ verdict: "comment", model: "", provider: "" });
   });
 
-  test("a review row carries its round, its findings tally and its run time", async () => {
+  test("a review row carries its round, its per-class tally and its run time; the retired numeric total is not on the wire", async () => {
     const db = await fixture();
     seedInstallation(db);
     // Two rounds; only the newer one was measured and reported a finding.
@@ -337,12 +337,16 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<Record<string, unknown>>; total: number };
     expect(body.total).toBe(2);
-    // Newest first: round 2 is the measured round with one finding; round 1
-    // predates the measurement and reported none.
-    expect(body.items.map((item) => [item.round, item.findings, item.duration_ms])).toEqual([
-      [2, 1, 42_000],
-      [1, 0, null],
+    // Newest first: round 2 is the measured round with one must-fix finding;
+    // round 1 predates the measurement and reported none. The retired
+    // `findings` total no longer rides the wire — the row's count claim is
+    // the per-class tally alone.
+    expect(body.items.map((item) => [item.round, item.duration_ms])).toEqual([
+      [2, 42_000],
+      [1, null],
     ]);
+    expect(body.items[0]).not.toHaveProperty("findings");
+    expect(JSON.parse(String(body.items[0]!.severity_counts))).toEqual({ "must-fix": 1 });
   });
 
   test("each reviews page row carries its per-severity finding counts", async () => {
@@ -465,7 +469,8 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     expect(parsed?.latest_review).not.toHaveProperty("findings");
     // Same round, read from the page that carries its tally.
     const reviewsPage = parseRecordPage("reviews", await (await getFace(sectionPath("reviews"), db)).json());
-    expect(reviewsPage?.items[0]).toMatchObject({ round: 1, findings: 2 });
+    expect(reviewsPage?.items[0]).toMatchObject({ round: 1 });
+    expect(reviewsPage?.items[0]?.severity_counts).toEqual({ "must-fix": 1, nit: 1 });
   });
 
   test("each section pages with limit and offset, and defaults to 10 rows", async () => {
