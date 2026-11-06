@@ -1956,14 +1956,14 @@ export function createAppsStore(db: AppsStoreD1) {
      * its latest verdict. `null` = the App's ledger does not hold this PR.
      *
      * Each row carries the round ORDINAL and that round's run facts. The
-     * ordinal is `review_publications.payload_json.round` for the row's head
-     * sha — the same publication round `review_findings.first_seen_round`
-     * stores, so a finding and the review that reported it print the same
-     * number. Historical rows without a journal row fall back to the PR's
-     * `reviews` ordered oldest-first (`reviewed_at ASC, rowid ASC`, from 1),
-     * which is what the pre-journal faces displayed. Paging never renumbers,
-     * because both expressions cover the whole PR before the newest-first page
-     * slice. `duration_ms` is NULL for rows written before the measurement.
+     * ordinal is `reviews.round`, the publication round the consumer stamped
+     * at insert — the same value `review_findings.first_seen_round` stores, so
+     * a finding and the review that reported it print the same number. Rows
+     * written before that column fall back to the PR's `reviews` ordered
+     * oldest-first (`reviewed_at ASC, rowid ASC`, from 1), which is what the
+     * pre-column faces displayed; paging never renumbers, because both
+     * expressions cover the whole PR before the newest-first page slice.
+     * `duration_ms` is NULL for rows written before the measurement.
      * `findings` counts the legacy `findings` rows attributed to that review,
      * across every lifecycle state — the number of findings that round
      * reported.
@@ -1991,13 +1991,7 @@ export function createAppsStore(db: AppsStoreD1) {
              FROM (SELECT r.id, r.rowid AS rid, r.verdict, r.model, r.provider, r.reviewed_at,
                           r.head_sha, r.duration_ms,
                           COALESCE(
-                            (SELECT json_extract(p.payload_json, '$.round')
-                             FROM review_publications p
-                             WHERE p.app_id = r.app_id AND p.installation_id = r.installation_id
-                               AND p.owner = r.owner AND p.repo = r.repo AND p.pr_number = r.pr_number
-                               AND p.head_sha = r.head_sha AND p.kind = 'review'
-                             ORDER BY p.created_ms ASC, p.rowid ASC
-                             LIMIT 1),
+                            r.round,
                             ROW_NUMBER() OVER (ORDER BY r.reviewed_at ASC, r.rowid ASC)
                           ) AS round
                    FROM reviews r

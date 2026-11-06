@@ -39,6 +39,12 @@ export type ReviewRow = {
    * is the authoritative, losslessly restorable document.
    */
   envelope: string | null;
+  /**
+   * Publication round ordinal the consumer stamped at insert (migration
+   * 0050); NULL on rows written before the column — the detail read falls
+   * back to the `reviewed_at` ordinal for those.
+   */
+  round: number | null;
 };
 
 /**

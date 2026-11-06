@@ -1,0 +1,16 @@
+-- 0050_reviews_round.sql — the publication round ordinal, stored per review.
+--
+-- The detail face prints one "Round N" chip on a finding and on the review
+-- that reported it. Findings read `review_findings.first_seen_round` (the
+-- lifecycle ordinal, migration 0020); reviews previously derived their
+-- ordinal from `reviewed_at` order, which numbers a different population: the
+-- artifact upsert keeps ONE `reviews` row per distinct head sha
+-- (`ON CONFLICT ... DO NOTHING`), so a re-review of an unchanged head adds no
+-- row and the derived ordinal collapses the two faces onto different numbers.
+--
+-- `round` is the publication round the consumer already stamps onto the
+-- lifecycle (`review_publications.payload_json.round`), copied here at insert
+-- so this public result table never reads the private journal (spec
+-- review-lifecycle §7.1 Visibility). NULL on rows written before this column;
+-- the read falls back to the `reviewed_at` ordinal for those.
+ALTER TABLE reviews ADD COLUMN round INTEGER;
