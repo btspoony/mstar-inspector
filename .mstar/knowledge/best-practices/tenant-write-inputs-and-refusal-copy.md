@@ -1,3 +1,12 @@
+---
+module: dashboard tenant writes, manifests, workspace settings
+date: 2026-10-30
+last_updated: 2026-11-06
+problem_type: best_practice
+category: best-practices
+severity: medium
+---
+
 # Tenant write inputs and refusal copy
 
 Three rules the inspector proved in production-shaped code, with the failure each one prevents.
@@ -42,9 +51,26 @@ Any predicate that counts per tenant (created workspaces, seats, review quota) p
 
 The discriminating test is two actors: A creates up to the limit; B joins A's tenants as a member; B creates its first own row and succeeds. A deployment-wide count refuses B; a membership-based count refuses B at zero; only the per-creator count lets B through. Add that case in the same change that introduces the predicate, not in a later hardening pass.
 
+## 4. A fail-closed branch may not borrow the generic failure outcome
+
+Two faces of one mistake, both found in the same workspace-floor read.
+
+**The operator face.** The App-connect path computed a distinct cause (`workspace_gate_unreadable`), logged it, and then returned the generic database-rejection outcome. Both routes sharing that commit rendered the transient-D1 page, whose only advice is "resubmit" — for a state resubmission cannot change. The repair lived on a settings card the page never named.
+
+**The history face.** The same read answers the platform default with `degraded: true` for a value it does not trust, and the only consumer fails closed on `degraded`, so that default never took effect. The audit ledger nevertheless wrote it as `before`, attributing a threshold no workspace ever ran with.
+
+**Rule.** When a branch fails closed on a value it refuses, the outcome it returns and the ledger row it writes must both describe the state that actually held, not the fallback the reader computed on the way there. A distinct computed cause needs a distinct outcome arm and a page that names a repair the product can perform; a value the reader refused records as absent, never as the default it degraded to.
+
+**Shape.** One outcome arm; every route that shares the commit maps it; one shared repair-link helper so the copy and the href cannot drift; the hold kept, because the state is retryable after repair rather than permanently refused. Ledger side: the audit `before` mirrors the trust predicate — a trusted integer records itself, absent and untrusted record `NULL`.
+
+**Why the shortcut survives review.** It is invisible to tests that assert only the status code: two different causes returning `500` satisfy the same assertion, and a ledger assertion that pins the degraded default passes too, because the code and the test encoded the same wrong mapping. Assert the distinguishing copy and the distinguishing ledger value, not the status.
+
 ## Evidence map
 
 - `src/dashboard/apps-store.ts` — required `workspaceId`, live-row refusal, no fallback reader.
 - `src/dashboard/workspace-limits.ts` — pure predicate over an injected limits object; the header records the non-atomic-reservation limit and its upgrade trigger.
 - `src/dashboard/workspace-store.ts` — `countLiveWorkspacesCreatedBy` (`COUNT(*)` over `created_by = ? AND deleted_at IS NULL`), not a membership join.
 - Tests that pin these: the apps-store create tests, the workspace-limit boundary tests, the two-actor creation test, and the invite/last-owner route tests.
+- `src/dashboard/runtime-config-store.ts` — the floor audit's `before` CASE mirrors `isCheckMinScoreValue`; the reader's `degraded` flag is the runtime authority, the ledger's `NULL` is the history contract.
+- `src/dashboard/index.ts` — `ManifestCommitOutcome.workspace_gate_unreadable` and its two route arms; `floorRepairLink` keeps copy and href together.
+- Tests that pin these: the runtime-config-store audit cases (trusted / absent / unreadable), and the two manifest dashboard cases (commit route and callback route) that assert the repair copy, the settings href, the absent `dbRejected` lead, and the kept hold.
