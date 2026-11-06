@@ -327,6 +327,25 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
   });
 });
 
+describe("model picker trigger", () => {
+  test("a declaration group renders the edit trigger in its meta line; a key-only template group renders none", () => {
+    const html = render(
+      managePayload({
+        provider_catalog: [
+          catalogEntry("workers-ai", "template", { base_url: "https://api.test", api: "openai-completions", models: ["a"] }),
+        ],
+        keys: [keyRow("workers-ai", "b")],
+        custom_providers: [{ provider_id: "my-gateway", base_url: "https://gw.test/v1", api: "openai-completions", model_ids: ["m1"] }],
+      }),
+    );
+    const trigger = `>${t("en", "settings.providers.models.trigger")}</button>`;
+    // The template group has a meta line (catalog endpoint) but no declaration — no trigger.
+    expect(groupOf(html, "workers-ai label")).not.toContain(trigger);
+    // The custom declaration owns the picker flow.
+    expect(groupOf(html, "my-gateway")).toContain(trigger);
+  });
+});
+
 describe("remove routes stay intact", () => {
   test("a key row keeps its per-key remove control and a declaration keeps its card-level one", () => {
     const html = render(

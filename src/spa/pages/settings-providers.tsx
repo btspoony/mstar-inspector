@@ -9,6 +9,7 @@ import { formatRelativeTime } from "../relative-time";
 import type { CatalogProvider, SettingsManagePayload } from "./data";
 import { NoticeRegion, type OpNotice } from "./PageNotice";
 import { AddKeyDialog, AddProviderDialog } from "./providers-dialogs";
+import { ProviderModelsDialog } from "./provider-models-dialog";
 import { providerGroups, type ProviderGroup } from "./providers-groups";
 import type { PendingAction } from "./SettingsPage";
 import { UsageDialog } from "./usage-dialog";
@@ -136,6 +137,8 @@ export function ProvidersSection({
               onAddKey={() =>
                 setAddKeyTarget({ provider: group.providerId, label: group.label, count: group.keys.length })
               }
+              onSettings={onSettings}
+              onOutcome={onOutcome}
             />
           ))
         )}
@@ -196,6 +199,8 @@ function ProviderGroupCard({
   removeNotice,
   onPending,
   onAddKey,
+  onSettings,
+  onOutcome,
 }: {
   locale: SpaBoot["locale"];
   /** The numeric GitHub App id — the usage probe posts under `/api/apps/:appId`. */
@@ -208,8 +213,14 @@ function ProviderGroupCard({
   onPending: (action: PendingAction) => void;
   /** Opens this group's add-key dialog — the second key no longer detours through the catalog. */
   onAddKey: () => void;
+  /** The settings op submit (the model picker posts `update-provider-models` through it). */
+  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
+  /** Where the model picker's completed flow reports its outcome. */
+  onOutcome: (notice: OpNotice) => void;
 }) {
   const [modelsOpen, setModelsOpen] = useState(false);
+  // The model picker is a declaration-only flow: no declaration, no trigger.
+  const [modelsEditOpen, setModelsEditOpen] = useState(false);
   // The key row whose usage dialog is open; null = no probe flow. Every key
   // of the group shares the provider, so the group's catalog entry decides
   // whether the row's usage action exists at all.
@@ -338,6 +349,16 @@ function ProviderGroupCard({
             >
               {t(locale, modelsOpen ? "settings.providers.collapse" : "settings.providers.expand")}
             </button>
+            {group.declaration !== null ? (
+              <button
+                type="button"
+                className="text-(--tone-accent-fg)"
+                aria-haspopup="dialog"
+                onClick={() => setModelsEditOpen(true)}
+              >
+                {t(locale, "settings.providers.models.trigger")}
+              </button>
+            ) : null}
           </div>
         ) : null}
         {meta && modelsOpen ? (
@@ -365,6 +386,19 @@ function ProviderGroupCard({
         keyId={usageTarget?.keyId ?? ""}
         onClose={() => setUsageTarget(null)}
       />
+      {group.declaration === null ? null : (
+        <ProviderModelsDialog
+          locale={locale}
+          open={modelsEditOpen}
+          onOpenChange={setModelsEditOpen}
+          provider={group.providerId}
+          label={group.label}
+          storedModelIds={group.declaration.model_ids}
+          catalogModelIds={catalog?.models ?? []}
+          onSettings={onSettings}
+          onOutcome={onOutcome}
+        />
+      )}
     </GroupCard>
   );
 }

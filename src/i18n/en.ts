@@ -737,6 +737,23 @@ export const en = {
       verifiedAt: "verified {time}",
       modelCount: "{count} models",
       modelCountOne: "{count} model",
+      /**
+       * The model picker: the meta-line trigger, the dialog faces, and the
+       * 32-id cap stated in the counter. `common` has no save key — the
+       * picker's save label lives here.
+       */
+      models: {
+        trigger: "Edit models",
+        title: "Models for {label}",
+        searchLabel: "Filter model ids",
+        searchPlaceholder: "Filter model ids…",
+        selectAll: "Select all",
+        selectNone: "Select none",
+        counter: "{selected} / {max} selected — at most {max} model ids per provider.",
+        capReached: "At the {max}-model cap — uncheck one to add another.",
+        noMatch: 'No models match "{query}".',
+        save: "Save models",
+      },
       /** The two-step add-provider dialog: its indicator, its back step and its in-progress copy. */
       stepPick: "Choose",
       stepConfigure: "Configure",
