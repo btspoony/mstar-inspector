@@ -397,9 +397,12 @@ function ProviderGroupCard({
           // surface, so this fill is dead there and the border carries the well.
           // The knowledge base's surface-tokens-can-collapse-across-themes.md
           // records the token arithmetic.
+          // A catalog fallback can carry the full snapshot vocabulary
+          // (hundreds of ids), so the list scrolls internally instead of
+          // growing the card unboundedly (house combobox pattern).
           <ul
             id={modelsId}
-            className="mt-2 flex flex-wrap gap-x-3 gap-y-1 rounded-(--radius-control) border border-(--border-default) bg-(--surface-page) px-3 py-2 font-mono text-xs text-muted-foreground"
+            className="mt-2 flex max-h-72 flex-wrap gap-x-3 gap-y-1 overflow-y-auto rounded-(--radius-control) border border-(--border-default) bg-(--surface-page) px-3 py-2 font-mono text-xs text-muted-foreground"
           >
             {meta.modelIds.map((modelId) => (
               <li key={modelId}>{modelId}</li>
