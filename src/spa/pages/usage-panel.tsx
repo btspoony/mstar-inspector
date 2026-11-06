@@ -33,6 +33,12 @@ type UsagePhase = "loading" | "ready" | "failed";
 const CELL_SEGMENTS = ["session", "week", "month"] as const;
 type CellSegment = (typeof CELL_SEGMENTS)[number];
 
+/**
+ * The mounted panels, youngest last. Every provider card owns its own open
+ * panel, so several coexist; Escape dismisses only the last one opened.
+ */
+const openPanels: object[] = [];
+
 export function UsagePanel({
   locale,
   appId,
@@ -90,16 +96,27 @@ export function UsagePanel({
     if (open) void probe();
   }, [open, probe]);
 
-  // Escape collapses the disclosure; closing also bumps the generation.
+  // Escape collapses this panel only: panels in different cards coexist, so
+  // just the one opened last owns the key, and an open modal layer above it
+  // (the model picker, a step dialog) keeps its own Escape. Closing also
+  // bumps the generation.
   useEffect(() => {
     if (!open) return;
+    const token = {};
+    openPanels.push(token);
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (openPanels[openPanels.length - 1] !== token) return;
+      if (document.querySelector('[role="dialog"], [role="alertdialog"]') !== null) return;
       generation.current += 1;
       onClose();
     };
     document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      const at = openPanels.indexOf(token);
+      if (at !== -1) openPanels.splice(at, 1);
+    };
   }, [open, onClose]);
 
   if (!open) return null;
@@ -150,7 +167,12 @@ function UsageFace({ locale, snapshot }: { locale: SpaBoot["locale"]; snapshot: 
   return (
     <div className="flex flex-col gap-3">
       {cells.length > 0 ? (
-        <ul className="grid grid-cols-3 gap-3">
+        <ul
+          className="grid gap-3"
+          // Cells share the row: a snapshot reporting one window fills it
+          // instead of painting a third of it.
+          style={{ gridTemplateColumns: `repeat(${cells.length}, minmax(0, 1fr))` }}
+        >
           {cells.map((cell) => (
             <UsageCell key={cell.segment} locale={locale} segment={cell.segment} limit={cell.limit} />
           ))}

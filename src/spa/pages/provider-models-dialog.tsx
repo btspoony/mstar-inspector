@@ -47,11 +47,9 @@ export function ProviderModelsDialog({
   onOutcome: (notice: OpNotice) => void;
 }) {
   // Catalog order first, then stored ids the catalog no longer lists (older
-  // declarations) — listed and checked, never silently dropped.
-  const allIds = [
-    ...catalogModelIds,
-    ...storedModelIds.filter((id) => !catalogModelIds.includes(id)),
-  ];
+  // declarations) — listed and checked, never silently dropped. The Set also
+  // folds duplicate stored ids into one row: the write path never deduped.
+  const allIds = [...new Set([...catalogModelIds, ...storedModelIds])];
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set(storedModelIds));
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
@@ -79,6 +77,9 @@ export function ProviderModelsDialog({
   const needle = query.trim().toLowerCase();
   const filtered = needle === "" ? allIds : allIds.filter((id) => id.toLowerCase().includes(needle));
   const atCap = selected.size >= MAX_PROVIDER_MODEL_IDS;
+  // Select-all acts on the rendered list, so it has nothing to do once every
+  // visible id is checked — the cap alone never disables it.
+  const allFilteredSelected = filtered.every((id) => selected.has(id));
 
   function toggle(id: string): void {
     setSelected((current) => {
@@ -95,7 +96,7 @@ export function ProviderModelsDialog({
   function selectAll(): void {
     setSelected((current) => {
       const next = new Set(current);
-      for (const id of allIds) {
+      for (const id of filtered) {
         if (next.size >= MAX_PROVIDER_MODEL_IDS) break;
         next.add(id);
       }
@@ -145,7 +146,7 @@ export function ProviderModelsDialog({
           <Button type="button" variant="outline" onClick={() => setSelected(new Set())} disabled={busy}>
             {t(locale, "settings.providers.models.selectNone")}
           </Button>
-          <Button type="button" variant="outline" onClick={selectAll} disabled={busy || atCap}>
+          <Button type="button" variant="outline" onClick={selectAll} disabled={busy || allFilteredSelected}>
             {t(locale, "settings.providers.models.selectAll")}
           </Button>
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>

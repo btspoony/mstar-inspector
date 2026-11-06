@@ -200,7 +200,17 @@ describe("ProviderModelsDialog", () => {
       const unchecked = view.checkboxes().filter((box) => !box.checked);
       expect(unchecked).toHaveLength(1);
       expect(unchecked[0]?.disabled).toBe(true);
-      expect(view.buttonByLabel("settings.providers.models.selectAll")?.disabled).toBe(true);
+      // Select-all reflects the visible list, so the cap alone does not
+      // disable it — and it cannot push the selection past the bound.
+      const selectAll = view.buttonByLabel("settings.providers.models.selectAll");
+      expect(selectAll?.disabled).toBe(false);
+      await view.click(selectAll);
+      expect(view.dialog()?.textContent).toContain(
+        t(locale, "settings.providers.models.counter", {
+          selected: MAX_PROVIDER_MODEL_IDS,
+          max: MAX_PROVIDER_MODEL_IDS,
+        }),
+      );
       // Unchecking one re-enables the unchecked box and drops the cap note.
       await view.click(view.checkboxes()[0]);
       expect(view.checkboxes().at(-1)?.disabled).toBe(false);
@@ -224,6 +234,46 @@ describe("ProviderModelsDialog", () => {
       await view.click(view.buttonByLabel("settings.providers.models.selectAll"));
       expect(view.checkboxes().every((box) => box.checked)).toBe(true);
       expect(view.saveButton()?.disabled).toBe(false);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("select-all acts on the rendered list, never on ids the filter hides", async () => {
+    const view = await mount({
+      catalogModelIds: ["alpha-1", "beta-2", "alpha-3"],
+      storedModelIds: [],
+    });
+    try {
+      await view.type(view.search(), "alpha");
+      expect(view.checkboxes()).toHaveLength(2);
+
+      await view.click(view.buttonByLabel("settings.providers.models.selectAll"));
+      expect(view.checkboxes().every((box) => box.checked)).toBe(true);
+      // What the operator saw is what got selected: the hidden id stays out.
+      expect(view.dialog()?.textContent).toContain(
+        t(locale, "settings.providers.models.counter", { selected: 2, max: MAX_PROVIDER_MODEL_IDS }),
+      );
+      await view.type(view.search(), "");
+      expect(view.checkboxes().map((box) => box.checked)).toEqual([true, false, true]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a duplicated stored id renders one row, not two rows sharing one checkbox", async () => {
+    const view = await mount({
+      catalogModelIds: CATALOG,
+      storedModelIds: ["legacy-model", "legacy-model"],
+    });
+    try {
+      expect(view.checkboxes().map((box) => box.nextElementSibling?.textContent)).toEqual([
+        ...CATALOG,
+        "legacy-model",
+      ]);
+      expect(view.dialog()?.textContent).toContain(
+        t(locale, "settings.providers.models.counter", { selected: 1, max: MAX_PROVIDER_MODEL_IDS }),
+      );
     } finally {
       await view.cleanup();
     }

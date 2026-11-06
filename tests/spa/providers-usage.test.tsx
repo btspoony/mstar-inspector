@@ -152,6 +152,13 @@ async function mount(payload: SettingsManagePayload) {
 
   const panel = (): HTMLElement | null =>
     win.document.querySelector('[data-slot="usage-panel"]') as unknown as HTMLElement | null;
+  const pressEscape = async () => {
+    await act(async () => {
+      (win.document as unknown as Document).dispatchEvent(
+        new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as unknown as Event,
+      );
+    });
+  };
   const click = async (target: Element | null) => {
     await act(async () => {
       target?.dispatchEvent(
@@ -178,6 +185,7 @@ async function mount(payload: SettingsManagePayload) {
   return {
     win,
     panel,
+    pressEscape,
     click,
     flush,
     usageButton,
@@ -508,6 +516,119 @@ describe("UsagePanel — inline probe under the owning row", () => {
       expect(text).toContain(t(locale, "settings.providers.usage.error"));
       expect(text).not.toContain("upstream exploded");
       expect(view.panel()?.querySelector('[data-slot="usage-bar"]')).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a snapshot reporting only session fills the row instead of a third of it", async () => {
+    queue.push(() => new Response(snapshotBody({
+      limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" }],
+    })));
+    const view = await mount(probedPayload());
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const cells = [...(view.panel()?.querySelectorAll('[data-slot="usage-cell"]') ?? [])];
+      expect(cells).toHaveLength(1);
+      // The grid tracks the surviving cells, so the lone bar spans the row.
+      expect((cells[0]?.parentElement as HTMLElement | null)?.style.gridTemplateColumns).toBe(
+        "repeat(1, minmax(0, 1fr))",
+      );
+    } finally {
+      await view.cleanup();
+    }
+
+    // Two windows share the row: the second bar sits beside the first, never
+    // stranded in the middle column of a three-track grid.
+    queue.push(() => new Response(snapshotBody({
+      limits: [
+        { id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" },
+        { id: "commandcode:month", kind: "window", usedFraction: 0.6, unit: "percent" },
+      ],
+    })));
+    const pair = await mount(probedPayload());
+    try {
+      await pair.click(pair.usageButton());
+      await pair.flush();
+      const cells = [...(pair.panel()?.querySelectorAll('[data-slot="usage-cell"]') ?? [])];
+      expect(cells).toHaveLength(2);
+      expect((cells[0]?.parentElement as HTMLElement | null)?.style.gridTemplateColumns).toBe(
+        "repeat(2, minmax(0, 1fr))",
+      );
+    } finally {
+      await pair.cleanup();
+    }
+  });
+
+  test("one Escape dismisses only the panel opened last", async () => {
+    const other = "othercode";
+    queue.push(() => new Response(snapshotBody({
+      limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" }],
+    })));
+    queue.push(() => new Response(snapshotBody({
+      limits: [{ id: "othercode:session", kind: "window", usedFraction: 0.5, unit: "percent" }],
+    })));
+    const view = await mount(managePayload({
+      keys: [keyRow(probedProvider), keyRow(other, { keyId: "bbbb9999dddd8888", last4: "1234" })],
+      provider_catalog: [
+        catalogEntry(probedProvider, { usage_probe: true }),
+        catalogEntry(other, { label: "Other Code", usage_probe: true }),
+      ],
+    }));
+    try {
+      await view.click(view.rowUsageButton("9f2c"));
+      await view.flush();
+      await view.click(view.rowUsageButton("1234"));
+      await view.flush();
+      const open = () => [...(view.win.document.querySelectorAll('[data-slot="usage-panel"]') as unknown as HTMLElement[])];
+      expect(open()).toHaveLength(2);
+
+      // The first card's panel is untouched by an Escape aimed at the last one.
+      await view.pressEscape();
+      expect(open()).toHaveLength(1);
+      expect(open()[0]?.textContent).toContain(
+        t(locale, "settings.providers.usage.windowRemaining", { percent: 70 }),
+      );
+
+      await view.pressEscape();
+      expect(open()).toHaveLength(0);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("Escape with a model dialog open leaves the panel up", async () => {
+    queue.push(() => new Response(snapshotBody({
+      limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" }],
+    })));
+    const view = await mount(managePayload({
+      keys: [keyRow(probedProvider)],
+      custom_providers: [
+        { provider_id: probedProvider, base_url: "https://api.test/v1", api: "openai-completions", model_ids: ["m-1"] },
+      ],
+      provider_catalog: [catalogEntry(probedProvider, { usage_probe: true, models: ["m-1", "m-2"] })],
+    }));
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      expect(view.panel()).not.toBeNull();
+
+      const buttons = () => [...(view.win.document.querySelectorAll("button") as unknown as HTMLButtonElement[])];
+      await view.click(
+        buttons().find((button) => button.textContent === t(locale, "settings.providers.models.trigger")) ?? null,
+      );
+      expect(view.win.document.querySelector('[role="dialog"]')).not.toBeNull();
+
+      // The modal layer owns Escape: the panel behind it stays.
+      await view.pressEscape();
+      expect(view.panel()).not.toBeNull();
+
+      // With the modal gone the next Escape reaches the panel again.
+      await view.click(buttons().find((button) => button.textContent === t(locale, "common.cancel")) ?? null);
+      expect(view.win.document.querySelector('[role="dialog"]')).toBeNull();
+      await view.pressEscape();
+      expect(view.panel()).toBeNull();
     } finally {
       await view.cleanup();
     }
