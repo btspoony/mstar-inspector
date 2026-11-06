@@ -1,22 +1,32 @@
 /**
- * The per-key usage action and dialog:
+ * The per-key usage action and its inline panel:
  *
  * - a key row whose catalog entry lacks `usage_probe` renders no usage
  *   control (DoD 1);
- * - opening the dialog posts `provider` + `keyId` to `/keys/usage`, passes
- *   through `loading`, and renders the snapshot face;
- * - Refresh re-posts the same body and replaces the rendered snapshot
- *   (two fetch calls, DoD 3);
- * - the `unauthorized` and `absent` faces render their own copy and no bar;
- * - a `window` limit renders the remaining share and the future reset time,
- *   a `balance` limit the remaining amount with its unit.
+ * - no probe leaves the client before the row's usage action is clicked —
+ *   mounting the settings page issues no provider quota request;
+ * - the first click posts `provider` + `keyId` to `/keys/usage` once and
+ *   renders the panel under that key's row; a second click re-posts the
+ *   same body and replaces the rendered snapshot (the re-click IS the
+ *   refresh — there is deliberately no cache);
+ * - a snapshot reporting session + week + month windows renders three
+ *   cells in that order, each with its own bar and remaining share;
+ * - a snapshot whose windows are only unknown dimensions falls back to one
+ *   line per window — no information is dropped, no vendor id text renders;
+ * - a reported balance renders as the muted bottom line; a snapshot with
+ *   no balance renders no such line;
+ * - `unauthorized` / `absent` / `error` render a danger or muted line and
+ *   never a fabricated bar;
+ * - no dialog role exists anywhere in the tree — the numbers live under
+ *   the row, not over the page.
  *
- * Mounted, because the dialog lives in a Radix portal and probes on open.
+ * Mounted, because the panel probes on open and the probe/late-response
+ * guard is lifecycle behavior.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
-import { t, type DictionaryKey } from "../../src/i18n";
+import { t } from "../../src/i18n";
 import type { SpaBoot } from "../../src/spa/boot";
 import {
   parseUsageSnapshot,
@@ -140,8 +150,8 @@ async function mount(payload: SettingsManagePayload) {
   await act(async () => root.render(element));
   await act(async () => {});
 
-  const dialog = (): HTMLElement | null =>
-    win.document.querySelector('[role="dialog"]') as unknown as HTMLElement | null;
+  const panel = (): HTMLElement | null =>
+    win.document.querySelector('[data-slot="usage-panel"]') as unknown as HTMLElement | null;
   const click = async (target: Element | null) => {
     await act(async () => {
       target?.dispatchEvent(
@@ -157,13 +167,21 @@ async function mount(payload: SettingsManagePayload) {
     [...(win.document.querySelectorAll("button") as unknown as HTMLButtonElement[])].find(
       (button) => button.textContent === t(locale, "settings.providers.usage.action"),
     ) ?? null;
+  /** The usage button of the key row whose identity names `last4`. */
+  const rowUsageButton = (last4: string): HTMLButtonElement | null => {
+    const row = [...(win.document.querySelectorAll('[data-slot="list-row"]') as unknown as HTMLElement[])].find(
+      (candidate) => candidate.textContent?.includes(last4),
+    );
+    return (row?.querySelector("button") as HTMLButtonElement | null) ?? null;
+  };
 
   return {
     win,
-    dialog,
+    panel,
     click,
     flush,
     usageButton,
+    rowUsageButton,
     calls,
     cleanup: async () => {
       await act(async () => root.unmount());
@@ -241,26 +259,32 @@ describe("the key-row usage action", () => {
     }
   });
 
-  test("a probed provider renders the outline usage control before Remove", async () => {
+  test("a probed provider renders the usage disclosure before Remove, and mounting issues no probe", async () => {
     const view = await mount(probedPayload());
     try {
       const button = view.usageButton();
       expect(button).not.toBeNull();
-      expect(button?.getAttribute("aria-haspopup")).toBe("dialog");
+      // A disclosure, not a dialog trigger: it names its expanded state.
+      expect(button?.getAttribute("aria-haspopup")).toBeNull();
+      expect(button?.getAttribute("aria-expanded")).toBe("false");
       const row = button?.closest('[data-slot="list-row"]') as HTMLElement | null;
       const rowButtons = [...(row?.querySelectorAll("button") ?? [])] as HTMLButtonElement[];
       expect(rowButtons.map((b) => b.textContent)).toEqual([
         t(locale, "settings.providers.usage.action"),
         t(locale, "settings.remove"),
       ]);
+      // Opening the settings page issues no provider quota request — the
+      // row's action is the only trigger.
+      expect(view.calls).toHaveLength(0);
+      expect(view.panel()).toBeNull();
     } finally {
       await view.cleanup();
     }
   });
 });
 
-describe("UsageDialog — probe on open and refresh", () => {
-  test("opening posts provider + keyId and passes loading to the snapshot face", async () => {
+describe("UsagePanel — inline probe under the owning row", () => {
+  test("clicking posts once and renders the panel under that row, passing loading first", async () => {
     // The first answer is hand-settled so the loading face is observable
     // before the snapshot replaces it.
     const gate = Promise.withResolvers<Response>();
@@ -268,10 +292,15 @@ describe("UsageDialog — probe on open and refresh", () => {
     const view = await mount(probedPayload());
     try {
       await view.click(view.usageButton());
-      // The dialog names the provider label and the masked tail, then loads.
-      expect(view.dialog()?.textContent).toContain(t(locale, "settings.providers.usage.title", { label: "Command Code" }));
-      expect(view.dialog()?.textContent).toContain(t(locale, "settings.keyEnding", { last4: "9f2c" }));
-      expect(view.dialog()?.textContent).toContain(t(locale, "common.loading"));
+      // The panel renders under the owning row and starts on the loading face.
+      const loadingPanel = view.panel();
+      expect(loadingPanel).not.toBeNull();
+      expect(loadingPanel?.textContent).toContain(t(locale, "common.loading"));
+      const row = view.usageButton()?.closest('[data-slot="list-row"]') as HTMLElement | null;
+      // The panel renders inside the same wrapper as its row, directly under it.
+      expect(loadingPanel?.parentElement?.previousElementSibling).toBe(row);
+      // No dialog overlays the page.
+      expect(view.win.document.querySelector('[role="dialog"]')).toBeNull();
 
       await act(async () => {
         gate.resolve(
@@ -292,17 +321,17 @@ describe("UsageDialog — probe on open and refresh", () => {
       expect(body.get("keyId")).toBe("deadbeefcafe1234");
 
       // The window face: remaining share, hairline bar, future reset time.
-      const text = view.dialog()?.textContent ?? "";
+      const text = view.panel()?.textContent ?? "";
       expect(text).toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 70 }));
       expect(text).toContain("resets in 3 hours");
-      const bar = view.dialog()?.querySelector('[data-slot="usage-bar"]') as HTMLElement | null;
+      const bar = view.panel()?.querySelector('[data-slot="usage-bar"]') as HTMLElement | null;
       expect(bar).not.toBeNull();
     } finally {
       await view.cleanup();
     }
   });
 
-  test("refresh re-posts the same body and replaces the snapshot", async () => {
+  test("clicking again re-posts the same body and replaces the snapshot", async () => {
     queue.push(() => new Response(snapshotBody({
       limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" }],
     })));
@@ -313,20 +342,17 @@ describe("UsageDialog — probe on open and refresh", () => {
     try {
       await view.click(view.usageButton());
       await view.flush();
-      expect(view.dialog()?.textContent).toContain(
+      expect(view.panel()?.textContent).toContain(
         t(locale, "settings.providers.usage.windowRemaining", { percent: 70 }),
       );
 
-      const refresh = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
-        (button) => button.textContent === t(locale, "settings.providers.usage.refresh"),
-      ) as HTMLButtonElement | undefined;
-      expect(refresh).toBeDefined();
-      await view.click(refresh ?? null);
+      // The re-click IS the refresh: it re-probes, never a cached bar.
+      await view.click(view.usageButton());
       await view.flush();
 
       expect(view.calls).toHaveLength(2);
       expect(view.calls[1]!.body).toBe(view.calls[0]!.body);
-      const text = view.dialog()?.textContent ?? "";
+      const text = view.panel()?.textContent ?? "";
       expect(text).toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 30 }));
       expect(text).not.toContain(
         t(locale, "settings.providers.usage.windowRemaining", { percent: 70 }),
@@ -336,24 +362,101 @@ describe("UsageDialog — probe on open and refresh", () => {
     }
   });
 
-  test("a balance limit renders the remaining amount with its unit and the account-wide label", async () => {
+  test("session + week + month windows render three cells in that order, each with its own bar", async () => {
     queue.push(() => new Response(snapshotBody({
-      limits: [{ id: "hyper:credits", kind: "balance", remaining: 12.5, unit: "credits", shared: true }],
+      limits: [
+        { id: "commandcode:month", kind: "window", usedFraction: 0.6, unit: "percent" },
+        { id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" },
+        { id: "commandcode:week", kind: "window", usedFraction: 0.45, unit: "percent" },
+      ],
     })));
     const view = await mount(probedPayload());
     try {
       await view.click(view.usageButton());
       await view.flush();
-      const text = view.dialog()?.textContent ?? "";
-      expect(text).toContain("12.5 credits remaining");
-      expect(text).toContain(t(locale, "settings.providers.usage.shared"));
-      expect(view.dialog()?.querySelector('[data-slot="usage-bar"]')).toBeNull();
+      const cells = [...(view.panel()?.querySelectorAll('[data-slot="usage-cell"]') ?? [])] as HTMLElement[];
+      expect(cells).toHaveLength(3);
+      // The wire order is month/session/week; the cells render in the fixed
+      // session → week → month order with each window's own remaining share.
+      const labels = cells.map((cell) => (cell.querySelector("p") as HTMLElement | null)?.textContent ?? "");
+      expect(labels).toEqual([
+        t(locale, "settings.providers.usage.window.session"),
+        t(locale, "settings.providers.usage.window.week"),
+        t(locale, "settings.providers.usage.window.month"),
+      ]);
+      const shares = cells.map((cell) => cell.textContent ?? "");
+      expect(shares[0]).toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 70 }));
+      expect(shares[1]).toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 55 }));
+      expect(shares[2]).toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 40 }));
+      const bars = view.panel()?.querySelectorAll('[data-slot="usage-bar"]');
+      expect(bars?.length).toBe(3);
     } finally {
       await view.cleanup();
     }
   });
 
-  test("a balance limit without a remaining amount renders no fabricated zero", async () => {
+  test("windows of only unknown dimensions fall back to one line per window, no bars", async () => {
+    queue.push(() => new Response(snapshotBody({
+      limits: [
+        { id: "cursor:planUsage", kind: "window", usedFraction: 0.4, unit: "percent" },
+        { id: "vendor:rolling", kind: "window", usedFraction: 0.2, unit: "percent" },
+      ],
+    })));
+    const view = await mount(probedPayload());
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const panel = view.panel();
+      expect(panel?.querySelector('[data-slot="usage-bar"]')).toBeNull();
+      const text = panel?.textContent ?? "";
+      // One distinguishable line per window: numbered generic labels, each
+      // with its own remaining share; the vendor id text never renders.
+      expect(text).toContain(t(locale, "settings.providers.usage.limit.generic", { index: 1 }));
+      expect(text).toContain(t(locale, "settings.providers.usage.limit.generic", { index: 2 }));
+      expect(text).toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 60 }));
+      expect(text).toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 80 }));
+      expect(text).not.toContain("planUsage");
+      expect(text).not.toContain("rolling");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a reported balance renders as the muted bottom line; no balance renders none", async () => {
+    queue.push(() => new Response(snapshotBody({
+      limits: [
+        { id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" },
+        { id: "hyper:credits", kind: "balance", remaining: 12.5, unit: "credits", shared: true },
+      ],
+    })));
+    const view = await mount(probedPayload());
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const text = view.panel()?.textContent ?? "";
+      expect(text).toContain("12.5 credits remaining");
+      expect(text).toContain(t(locale, "settings.providers.usage.shared"));
+      // A balance is a line, never a bar.
+      expect(view.panel()?.querySelectorAll('[data-slot="usage-bar"]')).toHaveLength(1);
+    } finally {
+      await view.cleanup();
+    }
+
+    queue.push(() => new Response(snapshotBody({
+      limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" }],
+    })));
+    const second = await mount(probedPayload());
+    try {
+      await second.click(second.usageButton());
+      await second.flush();
+      const text = second.panel()?.textContent ?? "";
+      expect(text).not.toContain("credits remaining");
+    } finally {
+      await second.cleanup();
+    }
+  });
+
+  test("a balance without a remaining amount renders no fabricated zero", async () => {
     queue.push(() => new Response(snapshotBody({
       limits: [{ id: "hyper:credits", kind: "balance", unit: "credits" }],
     })));
@@ -361,7 +464,7 @@ describe("UsageDialog — probe on open and refresh", () => {
     try {
       await view.click(view.usageButton());
       await view.flush();
-      const text = view.dialog()?.textContent ?? "";
+      const text = view.panel()?.textContent ?? "";
       expect(text).not.toContain("0 credits remaining");
       expect(text).toContain(t(locale, "settings.providers.usage.absentNothing"));
     } finally {
@@ -375,8 +478,8 @@ describe("UsageDialog — probe on open and refresh", () => {
     try {
       await view.click(view.usageButton());
       await view.flush();
-      expect(view.dialog()?.textContent).toContain(t(locale, "settings.providers.usage.unauthorized"));
-      expect(view.dialog()?.querySelector('[data-slot="usage-bar"]')).toBeNull();
+      expect(view.panel()?.textContent).toContain(t(locale, "settings.providers.usage.unauthorized"));
+      expect(view.panel()?.querySelector('[data-slot="usage-bar"]')).toBeNull();
     } finally {
       await view.cleanup();
     }
@@ -388,8 +491,8 @@ describe("UsageDialog — probe on open and refresh", () => {
     try {
       await view.click(view.usageButton());
       await view.flush();
-      expect(view.dialog()?.textContent).toContain(t(locale, "settings.providers.usage.absentNothing"));
-      expect(view.dialog()?.querySelector('[data-slot="usage-bar"]')).toBeNull();
+      expect(view.panel()?.textContent).toContain(t(locale, "settings.providers.usage.absentNothing"));
+      expect(view.panel()?.querySelector('[data-slot="usage-bar"]')).toBeNull();
     } finally {
       await view.cleanup();
     }
@@ -401,160 +504,16 @@ describe("UsageDialog — probe on open and refresh", () => {
     try {
       await view.click(view.usageButton());
       await view.flush();
-      const text = view.dialog()?.textContent ?? "";
+      const text = view.panel()?.textContent ?? "";
       expect(text).toContain(t(locale, "settings.providers.usage.error"));
       expect(text).not.toContain("upstream exploded");
+      expect(view.panel()?.querySelector('[data-slot="usage-bar"]')).toBeNull();
     } finally {
       await view.cleanup();
     }
   });
 
-  test("Escape dismisses the dialog", async () => {
-    queue.push(() => new Response(snapshotBody({ limits: [] })));
-    const view = await mount(probedPayload());
-    try {
-      await view.click(view.usageButton());
-      await view.flush();
-      expect(view.dialog()).not.toBeNull();
-      await act(async () => {
-        view.win.document.dispatchEvent(new view.win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-      });
-      expect(view.dialog()).toBeNull();
-    } finally {
-      await view.cleanup();
-    }
-  });
-
-  test("each limit row carries a distinguishable semantic label from its id segment", async () => {
-    queue.push(() => new Response(snapshotBody({
-      limits: [
-        { id: "cline-pass:session", kind: "window", usedFraction: 0.12, unit: "percent" },
-        { id: "cline-pass:week", kind: "window", usedFraction: 0.45, unit: "percent" },
-        { id: "cline-pass:month", kind: "window", usedFraction: 0.6, unit: "percent" },
-        { id: "umans:concurrency", kind: "window", usedFraction: 0.5, unit: "percent" },
-        { id: "hyper:balance", kind: "balance", remaining: 95, unit: "credits" },
-        // An unknown segment gets the numbered generic label — the raw id
-        // text (possible vendor bucket name) never renders.
-        { id: "vendor:rolling", kind: "window", usedFraction: 0.2, unit: "percent" },
-      ],
-    })));
-    const view = await mount(probedPayload());
-    try {
-      await view.click(view.usageButton());
-      await view.flush();
-      const rows = [...(view.dialog()?.querySelectorAll("li") ?? [])] as HTMLElement[];
-      const labels = rows.map((row) => (row.querySelector("p") as HTMLElement | null)?.textContent ?? "");
-      // Distinguishable: every row's label is unique and the known segments
-      // map through the dictionary.
-      expect(new Set(labels).size).toBe(labels.length);
-      const segments = ["session", "week", "month", "concurrency", "balance"] as const;
-      for (const segment of segments) {
-        const key = `settings.providers.usage.window.${segment}` as DictionaryKey;
-        expect(labels).toContain(t(locale, key));
-      }
-      expect(labels).toContain(t(locale, "settings.providers.usage.limit.generic", { index: 6 }));
-      expect(rows.some((row) => row.textContent?.includes("rolling"))).toBe(false);
-    } finally {
-      await view.cleanup();
-    }
-  });
-
-  test("cursor-shaped vendor bucket ids render no vendor text and stay distinguishable", async () => {
-    queue.push(() => new Response(snapshotBody({
-      limits: [
-        { id: "cursor:planUsage", kind: "window", usedFraction: 0.4, unit: "percent" },
-        { id: "cursor:billing", kind: "window", usedFraction: 0.8, unit: "percent" },
-      ],
-    })));
-    const view = await mount(probedPayload());
-    try {
-      await view.click(view.usageButton());
-      await view.flush();
-      const text = view.dialog()?.textContent ?? "";
-      expect(text).not.toContain("planUsage");
-      expect(text).not.toContain("billing");
-      const labels = [...(view.dialog()?.querySelectorAll("li > p.font-medium") ?? [])].map(
-        (node) => (node as HTMLElement).textContent,
-      );
-      expect(labels).toEqual([
-        t(locale, "settings.providers.usage.limit.generic", { index: 1 }),
-        t(locale, "settings.providers.usage.limit.generic", { index: 2 }),
-      ]);
-    } finally {
-      await view.cleanup();
-    }
-  });
-
-  test("a single unknown-segment limit gets the unnumbered generic label", async () => {
-    queue.push(() => new Response(snapshotBody({
-      limits: [{ id: "cursor:planUsage", kind: "window", usedFraction: 0.4, unit: "percent" }],
-    })));
-    const view = await mount(probedPayload());
-    try {
-      await view.click(view.usageButton());
-      await view.flush();
-      const text = view.dialog()?.textContent ?? "";
-      expect(text).toContain(t(locale, "settings.providers.usage.limit.genericSingle"));
-      expect(text).not.toContain("planUsage");
-    } finally {
-      await view.cleanup();
-    }
-  });
-
-  test("reopening for another key paints the loading face, not the previous key's snapshot", async () => {
-    queue.push(
-      () =>
-        new Response(snapshotBody({
-          limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.7, unit: "percent" }],
-        })),
-    );
-    const gateB = Promise.withResolvers<Response>();
-    queue.push(() => gateB.promise);
-    const keys = [
-      keyRow(probedProvider),
-      keyRow(probedProvider, { keyId: "bbbb9999dddd8888", last4: "1234" }),
-    ];
-    const view = await mount(probedPayload({}, keys));
-    const rowUsageButton = (last4: string): HTMLButtonElement | null => {
-      const row = [...(view.win.document.querySelectorAll('[data-slot="list-row"]') as unknown as HTMLElement[])].find(
-        (candidate) => candidate.textContent?.includes(last4),
-      );
-      return (row?.querySelector("button") as HTMLButtonElement | null) ?? null;
-    };
-    const remainingOf = (percent: number) => t(locale, "settings.providers.usage.windowRemaining", { percent });
-    try {
-      // Key A opens and resolves: 30% remaining.
-      await view.click(rowUsageButton("9f2c"));
-      await view.flush();
-      expect(view.dialog()?.textContent).toContain(remainingOf(30));
-
-      // Close, then open key B with its probe still gated: the first painted
-      // frame must be the loading face, never A's 30% under B's title.
-      const cancel = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
-        (button) => button.textContent === t(locale, "common.cancel"),
-      ) as HTMLButtonElement | undefined;
-      await view.click(cancel ?? null);
-      expect(view.dialog()).toBeNull();
-      await view.click(rowUsageButton("1234"));
-      const firstFrame = view.dialog()?.textContent ?? "";
-      expect(firstFrame).toContain(t(locale, "common.loading"));
-      expect(firstFrame).not.toContain(remainingOf(30));
-
-      // B answers: its own snapshot replaces the loading face.
-      await act(async () => {
-        gateB.resolve(new Response(snapshotBody({
-          limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.2, unit: "percent" }],
-        })));
-      });
-      await view.flush();
-      expect(view.dialog()?.textContent).toContain(remainingOf(80));
-      expect(view.calls).toHaveLength(2);
-    } finally {
-      await view.cleanup();
-    }
-  });
-
-  test("a probe that resolves after close or under another key is discarded", async () => {
+  test("a probe that resolves after the panel moved to another key is discarded", async () => {
     const gateA = Promise.withResolvers<Response>();
     const gateB = Promise.withResolvers<Response>();
     queue.push(() => gateA.promise);
@@ -564,26 +523,13 @@ describe("UsageDialog — probe on open and refresh", () => {
       keyRow(probedProvider, { keyId: "bbbb9999dddd8888", last4: "1234" }),
     ];
     const view = await mount(probedPayload({}, keys));
-    /** The usage button of the key row whose identity names `last4`. */
-    const rowUsageButton = (last4: string): HTMLButtonElement | null => {
-      const row = [...(view.win.document.querySelectorAll('[data-slot="list-row"]') as unknown as HTMLElement[])].find(
-        (candidate) => candidate.textContent?.includes(last4),
-      );
-      return (row?.querySelector("button") as HTMLButtonElement | null) ?? null;
-    };
+    const remainingOf = (percent: number) => t(locale, "settings.providers.usage.windowRemaining", { percent });
     try {
-      // Key A opens; its probe stays in flight.
-      await view.click(rowUsageButton("9f2c"));
-      expect(view.dialog()?.textContent).toContain(t(locale, "common.loading"));
-      const cancel = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
-        (button) => button.textContent === t(locale, "common.cancel"),
-      ) as HTMLButtonElement | undefined;
-      await view.click(cancel ?? null);
-      expect(view.dialog()).toBeNull();
-
-      // Key B opens; its probe also stays in flight.
-      await view.click(rowUsageButton("1234"));
-      expect(view.dialog()?.textContent).toContain(t(locale, "common.loading"));
+      // Key A's probe stays in flight; opening key B closes A's panel.
+      await view.click(view.rowUsageButton("9f2c"));
+      expect(view.panel()?.textContent).toContain(t(locale, "common.loading"));
+      await view.click(view.rowUsageButton("1234"));
+      expect(view.panel()?.textContent).toContain(t(locale, "common.loading"));
 
       // B answers first under its own key: 30% remaining sticks.
       await act(async () => {
@@ -592,9 +538,7 @@ describe("UsageDialog — probe on open and refresh", () => {
         })));
       });
       await view.flush();
-      expect(view.dialog()?.textContent).toContain(
-        t(locale, "settings.providers.usage.windowRemaining", { percent: 30 }),
-      );
+      expect(view.panel()?.textContent).toContain(remainingOf(30));
 
       // A's late answer must not replace B's snapshot (no 70% from key A).
       await act(async () => {
@@ -603,9 +547,9 @@ describe("UsageDialog — probe on open and refresh", () => {
         })));
       });
       await view.flush();
-      const text = view.dialog()?.textContent ?? "";
-      expect(text).toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 30 }));
-      expect(text).not.toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 70 }));
+      const text = view.panel()?.textContent ?? "";
+      expect(text).toContain(remainingOf(30));
+      expect(text).not.toContain(remainingOf(70));
       expect(view.calls).toHaveLength(2);
     } finally {
       await view.cleanup();

@@ -12,7 +12,7 @@ import { AddKeyDialog, AddProviderDialog } from "./providers-dialogs";
 import { ProviderModelsDialog } from "./provider-models-dialog";
 import { providerGroups, type ProviderGroup } from "./providers-groups";
 import type { PendingAction } from "./SettingsPage";
-import { UsageDialog } from "./usage-dialog";
+import { UsagePanel } from "./usage-panel";
 
 /**
  * AC-10: exactly one verification label per key row, from the four store
@@ -221,10 +221,12 @@ function ProviderGroupCard({
   const [modelsOpen, setModelsOpen] = useState(false);
   // The model picker is a declaration-only flow: no declaration, no trigger.
   const [modelsEditOpen, setModelsEditOpen] = useState(false);
-  // The key row whose usage dialog is open; null = no probe flow. Every key
+  // The key row whose usage panel is open, with its probe generation (the
+  // re-click bumps the nonce, remounting the panel = re-probe). At most one
+  // panel per group: another key's usage action closes this one. Every key
   // of the group shares the provider, so the group's catalog entry decides
   // whether the row's usage action exists at all.
-  const [usageTarget, setUsageTarget] = useState<{ keyId: string; last4: string } | null>(null);
+  const [usageFor, setUsageFor] = useState<{ keyId: string; nonce: number } | null>(null);
   const meta = groupMeta(group, catalog);
   // The disclosure region's id uses the provider id verbatim. Custom provider
   // ids are stored under the slug grammar (`[a-z0-9][a-z0-9-]{0,63}`), so no
@@ -271,56 +273,85 @@ function ProviderGroupCard({
           <ListRowGroup>
             {group.keys.map((key) => {
               const status = KEY_STATUS[key.verifiedStatus ?? "unverified"];
+              const usage = usageFor !== null && usageFor.keyId === key.keyId ? usageFor : null;
+              const usagePanelId = `usage-panel-${key.keyId}`;
               return (
-                <ListRow
-                  key={key.keyId}
-                  identity={
-                    key.last4
-                      ? t(locale, "settings.keyEnding", { last4: key.last4 })
-                      : t(locale, "settings.keyTooShort")
-                  }
-                  status={<StatusBadge tone={status.tone}>{t(locale, status.label)}</StatusBadge>}
-                  // AC-11: the timestamp is this secondary slot, never the label.
-                  meta={
-                    key.verifiedStatus === "ok" && key.verifiedAt
-                      ? t(locale, "settings.providers.verifiedAt", {
-                          time: formatRelativeTime(key.verifiedAt, locale),
-                        })
-                      : key.updatedAt
-                        ? t(locale, "settings.updated", { time: formatRelativeTime(key.updatedAt, locale) })
-                        : null
-                  }
-                  actions={
-                    <>
-                      {catalog?.usage_probe === true ? (
+                // The wrapper keeps the row + its panel one divide-y unit: the
+                // divider lands on the wrapper, the panel sits under its row.
+                <div key={key.keyId}>
+                  <ListRow
+                    identity={
+                      key.last4
+                        ? t(locale, "settings.keyEnding", { last4: key.last4 })
+                        : t(locale, "settings.keyTooShort")
+                    }
+                    status={<StatusBadge tone={status.tone}>{t(locale, status.label)}</StatusBadge>}
+                    // AC-11: the timestamp is this secondary slot, never the label.
+                    meta={
+                      key.verifiedStatus === "ok" && key.verifiedAt
+                        ? t(locale, "settings.providers.verifiedAt", {
+                            time: formatRelativeTime(key.verifiedAt, locale),
+                          })
+                        : key.updatedAt
+                          ? t(locale, "settings.updated", { time: formatRelativeTime(key.updatedAt, locale) })
+                          : null
+                    }
+                    actions={
+                      <>
+                        {catalog?.usage_probe === true ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            aria-expanded={usage !== null}
+                            // The panel mounts only while open, so the control
+                            // never names a missing element.
+                            aria-controls={usage !== null ? usagePanelId : undefined}
+                            onClick={() =>
+                              setUsageFor((current) =>
+                                current !== null && current.keyId === key.keyId
+                                  ? { keyId: key.keyId, nonce: current.nonce + 1 }
+                                  : { keyId: key.keyId, nonce: 0 },
+                              )
+                            }
+                          >
+                            {t(locale, "settings.providers.usage.action")}
+                          </Button>
+                        ) : null}
                         <Button
                           type="button"
-                          variant="outline"
+                          variant="destructive"
                           size="sm"
-                          aria-haspopup="dialog"
-                          onClick={() => setUsageTarget({ keyId: key.keyId, last4: key.last4 })}
+                          onClick={() =>
+                            onPending({
+                              kind: "remove-key",
+                              provider: key.provider,
+                              keyId: key.keyId,
+                              last4: key.last4,
+                            })
+                          }
                         >
-                          {t(locale, "settings.providers.usage.action")}
+                          {t(locale, "settings.remove")}
                         </Button>
-                      ) : null}
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="sm"
-                        onClick={() =>
-                          onPending({
-                            kind: "remove-key",
-                            provider: key.provider,
-                            keyId: key.keyId,
-                            last4: key.last4,
-                          })
-                        }
-                      >
-                        {t(locale, "settings.remove")}
-                      </Button>
-                    </>
-                  }
-                />
+                      </>
+                    }
+                  />
+                  {usage === null ? null : (
+                    <div id={usagePanelId}>
+                      <UsagePanel
+                        // The keyed remount IS the refresh: a re-click bumps
+                        // the nonce, a fresh panel re-posts the same probe.
+                        key={`${key.keyId}:${usage.nonce}`}
+                        locale={locale}
+                        appId={appId}
+                        provider={group.providerId}
+                        keyId={key.keyId}
+                        open
+                        onClose={() => setUsageFor(null)}
+                      />
+                    </div>
+                  )}
+                </div>
               );
             })}
           </ListRowGroup>
@@ -376,16 +407,6 @@ function ProviderGroupCard({
           </ul>
         ) : null}
       </GroupCardBody>
-      <UsageDialog
-        locale={locale}
-        appId={appId}
-        open={usageTarget !== null}
-        provider={group.providerId}
-        label={group.label}
-        last4={usageTarget?.last4 ?? ""}
-        keyId={usageTarget?.keyId ?? ""}
-        onClose={() => setUsageTarget(null)}
-      />
       {group.declaration === null ? null : (
         <ProviderModelsDialog
           locale={locale}

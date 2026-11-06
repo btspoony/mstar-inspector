@@ -100,6 +100,14 @@ describe("ListRow", () => {
     expect(secondRow).not.toContain('data-slot="list-row-actions"');
   });
 
+  test("the actions slot separates multiple controls with the control gap", () => {
+    // The destructive action must never sit flush against the row's other
+    // control — the gap is the operator-visible spacing, pinned here
+    // because a regression renders it only in the composed providers row.
+    const actions = between('data-slot="list-row-actions"', "</div>");
+    expect(actions).toContain("gap-(--spacing-2)");
+  });
+
   test("no literal color values", () => {
     expect(html).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
     expect(html).not.toContain("rgb(");

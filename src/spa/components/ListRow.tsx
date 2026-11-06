@@ -64,7 +64,7 @@ export function ListRow({
         </span>
       ) : null}
       {actions ? (
-        <span data-slot="list-row-actions" className="ml-auto flex items-center">
+        <span data-slot="list-row-actions" className="ml-auto flex items-center gap-(--spacing-2)">
           {actions}
         </span>
       ) : null}
