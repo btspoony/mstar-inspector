@@ -526,6 +526,26 @@ function creationDeniedResponse(c: DashboardContext, message: string): Response 
 }
 
 /**
+ * The repair affordance for an unreadable workspace floor: the settings route
+ * of the workspace the flow addresses, so the copy and its href cannot drift
+ * between the callback and commit switches. A target that is not `ok` has no
+ * workspace page to repair from — the message then carries the instruction
+ * alone.
+ */
+function floorRepairLink(
+  locale: Locale,
+  target: CreationTarget,
+): { phrase: string; text: string; href: string } | null {
+  return target.kind === "ok"
+    ? {
+        phrase: t(locale, "manifest.error.floorRepair"),
+        text: t(locale, "manifest.error.floorRepairLink"),
+        href: `/dashboard/${target.workspaceRef}/settings`,
+      }
+    : null;
+}
+
+/**
  * The post-authentication landing page. `/dashboard` (the root workbench) has
  * no workspace segment, so its data reads have no base to hang off; every
  * signed-in producer (OAuth callback, the login bounce) names a workspace route
@@ -1449,6 +1469,17 @@ dashboardApp.get("/manifest/callback", async (c) => {
     case "already_connected":
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
       return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
+    case "workspace_gate_unreadable":
+      parkHold();
+      return c.html(
+        manifestErrorPage(
+          t(locale, "manifest.error.workspaceFloorUnreadable"),
+          true,
+          locale,
+          floorRepairLink(locale, target),
+        ),
+        500,
+      );
     case "db_rejected":
       parkHold();
       return c.html(manifestErrorPage(t(locale, "manifest.error.dbRejected"), true, locale), 500);
@@ -1524,6 +1555,18 @@ dashboardApp.post("/manifest/commit", async (c) => {
     case "already_connected":
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
       return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
+    // Nothing to park: the submitted hold cookie IS this route's hold, so it
+    // stays for the repair-then-resubmit retry — same as `db_rejected` below.
+    case "workspace_gate_unreadable":
+      return c.html(
+        manifestErrorPage(
+          t(locale, "manifest.error.workspaceFloorUnreadable"),
+          true,
+          locale,
+          floorRepairLink(locale, target),
+        ),
+        500,
+      );
     case "db_rejected":
       return c.html(manifestErrorPage(t(locale, "manifest.error.dbRejected"), true, locale), 500);
   }
@@ -1538,6 +1581,7 @@ type ManifestCommitOutcome =
   | { kind: "db_unbound" }
   | { kind: "encrypt_failed" }
   | { kind: "already_connected" }
+  | { kind: "workspace_gate_unreadable" }
   | { kind: "db_rejected" };
 
 /**
@@ -1549,8 +1593,9 @@ type ManifestCommitOutcome =
  * PK, which IS the start-minted app id — the same value the manifest's
  * webhook URL carries);
  * login_mismatch / already_connected = non-retryable (the caller burns the
- * hold); db_unbound / encrypt_failed / db_rejected = retryable (the caller
- * keeps the hold so /manifest/confirm can resume).
+ * hold); db_unbound / encrypt_failed / workspace_gate_unreadable /
+ * db_rejected = retryable (the caller keeps the hold so /manifest/confirm can
+ * resume).
  * Zero upstream calls: encryption + a local D1 write only.
  */
 async function commitManifestApp(args: {
@@ -1609,10 +1654,11 @@ async function commitManifestApp(args: {
     // The workspace's own default is unreadable (a failed read, or a stored
     // value no reader trusts). Seeding the platform default here would
     // silently WIDEN a floor the tenant may have set higher, so the commit
-    // fails closed: the hold is kept and the operator retries once the stored
-    // value is repaired.
+    // fails closed before anything is written. This is not a database
+    // rejection: the hold is kept and the operator retries once the stored
+    // workspace setting is repaired.
     logManifestFailure("commit", "db_error", { error_type: "workspace_gate_unreadable" });
-    return { kind: "db_rejected" };
+    return { kind: "workspace_gate_unreadable" };
   }
   try {
     const row = await apps.createApp({

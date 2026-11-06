@@ -1672,9 +1672,12 @@ describe("/dashboard manifest routes", () => {
     // A pre-apps DB: users + the workspace plane, but no github_apps table.
     // The creation gate resolves the caller as the workspace owner, and the
     // inline commit then fails on the missing table: retryable, hold parked
-    // for the resume path.
+    // for the resume path. The workspace floor column must exist (0049; it
+    // only alters `workspaces`) so the floor read SUCCEEDS and the failure
+    // under test stays the missing-table write, not an unreadable setting.
     const db = seededDashboardD1(3);
     applyMigrationFile(db.raw, "0026_workspaces.sql");
+    applyMigrationFile(db.raw, "0049_workspace_check_min_score.sql");
     db.raw
       .prepare(
         `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
@@ -1692,6 +1695,11 @@ describe("/dashboard manifest routes", () => {
       env,
     );
     expect(res.status).toBe(500);
+    // A genuine storage failure keeps the database copy: it is not the
+    // unreadable-workspace-setting failure.
+    const failedBody = await res.text();
+    expect(failedBody).toContain("the dashboard database rejected the write");
+    expect(failedBody).not.toContain("default score floor cannot be read");
     const holdCookie = res.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
     expect(holdCookie).toBeTruthy();
     const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
@@ -2153,6 +2161,12 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const refused = await doCommit({ env, holdValue });
     expect(refused.status).toBe(500);
     expect(appRowCount(env)).toBe(0);
+    // The page must name the workspace setting the operator can repair — not
+    // the database — and hand them the settings page to repair it.
+    const refusedBody = await refused.text();
+    expect(refusedBody).toContain("default score floor cannot be read");
+    expect(refusedBody).not.toContain("The App could not be stored");
+    expect(refusedBody).toContain('href="/dashboard/default/settings"');
     // Retryable: the hold is kept (not burned), so the operator can resume.
     const holdCookie =
       refused.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
@@ -2168,6 +2182,40 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       .query("SELECT check_min_score FROM github_apps WHERE github_app_id = ?")
       .get(CONVERSION.id) as { check_min_score: number };
     expect(seeded.check_min_score).toBe(90);
+  });
+
+  test("an unreadable workspace default fails the callback auto-commit closed on the same floor page", async () => {
+    // The flow's OWN write (GET /manifest/callback converts + commits in one
+    // request) must refuse the same degraded read as the resubmit route above:
+    // seeding the platform default here would widen the tenant's floor.
+    stubGitHubConversionOnly();
+    const env = commitEnv();
+    const db = dbOf(env);
+    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.prepare("UPDATE workspaces SET check_min_score = 'abc' WHERE id = 'default'").run();
+    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const state = await createManifestStateValue(SESSION_SECRET, START_APP_ID, "default");
+
+    const refused = await worker.fetch(
+      dashboardRequest(
+        `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_STATE_COOKIE}=${state}`,
+      ),
+      env,
+    );
+    expect(refused.status).toBe(500);
+    expect(appRowCount(env)).toBe(0);
+    // One wording for both routes: the copy names the workspace setting the
+    // operator can repair — not the database.
+    const refusedBody = await refused.text();
+    expect(refusedBody).toContain("default score floor cannot be read");
+    expect(refusedBody).not.toContain("The App could not be stored");
+    // Retryable: the callback parks the hold so /manifest/confirm can resume.
+    const holdCookie =
+      refused.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    expect(holdCookie).toBeTruthy();
+    expect(holdCookie).not.toContain("Max-Age=0");
   });
 
   test("POST /manifest/commit stays an idempotent-recovery path: after a retryable callback 500, the SAME hold resubmits → 302 onboarding + one row", async () => {
