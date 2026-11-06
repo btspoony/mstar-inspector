@@ -761,6 +761,33 @@ export function isValidCustomProviderBaseUrl(raw: string): boolean {
   }
 }
 
+/**
+ * The model_ids bound, stated ONCE: 1..MAX_CUSTOM_PROVIDER_MODEL_IDS entries,
+ * each non-blank and ≤ MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH characters. Shared
+ * by the declaration gate (assertCustomProvider) and the in-place model-list
+ * update, so the two write paths can never disagree on the bound.
+ */
+export function assertCustomProviderModelIds(modelIds: readonly string[]): void {
+  if (modelIds.length === 0) {
+    throw new InvalidCustomProviderError("custom provider model_ids must not be empty");
+  }
+  if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
+    throw new InvalidCustomProviderError(
+      `custom provider model_ids exceed the ${MAX_CUSTOM_PROVIDER_MODEL_IDS}-entry limit`,
+    );
+  }
+  for (const id of modelIds) {
+    if (id.trim() === "") {
+      throw new InvalidCustomProviderError("custom provider model_ids must not contain empty entries");
+    }
+    if (id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH) {
+      throw new InvalidCustomProviderError(
+        `custom provider model id exceeds the ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH}-character limit`,
+      );
+    }
+  }
+}
+
 function assertCustomProvider(decl: AppCustomProvider, plainKey: string, capabilityHostIds: readonly string[]): void {
   if (!CUSTOM_PROVIDER_ID_PATTERN.test(decl.provider_id)) {
     throw new InvalidCustomProviderError(
@@ -796,24 +823,7 @@ function assertCustomProvider(decl: AppCustomProvider, plainKey: string, capabil
       `unknown custom provider API ${JSON.stringify(decl.api)} (expected one of: ${CUSTOM_PROVIDER_API_IDS.join(", ")})`,
     );
   }
-  if (decl.model_ids.length === 0) {
-    throw new InvalidCustomProviderError("custom provider model_ids must not be empty");
-  }
-  if (decl.model_ids.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
-    throw new InvalidCustomProviderError(
-      `custom provider model_ids exceed the ${MAX_CUSTOM_PROVIDER_MODEL_IDS}-entry limit`,
-    );
-  }
-  for (const id of decl.model_ids) {
-    if (id.trim() === "") {
-      throw new InvalidCustomProviderError("custom provider model_ids must not contain empty entries");
-    }
-    if (id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH) {
-      throw new InvalidCustomProviderError(
-        `custom provider model id exceeds the ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH}-character limit`,
-      );
-    }
-  }
+  assertCustomProviderModelIds(decl.model_ids);
   if (plainKey === "") {
     throw new InvalidCustomProviderError("custom provider API key is required at declaration");
   }
@@ -2049,6 +2059,36 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         db.prepare(`DELETE FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`).bind(appId, providerId),
       ]);
       return res[1]!.meta.changes > 0;
+    },
+
+    /**
+     * Rewrite ONE declaration's model_ids IN PLACE — the settings face's
+     * model-list editor. Only the vocabulary moves: base_url / api / the key
+     * pool are untouched, so the endpoint lock does not apply (no retained
+     * credential was verified against a model list) and created_at stays the
+     * declaration's birth time. The SAME bound the declaration gate applies is
+     * re-checked here (assertCustomProviderModelIds) — model_ids is real
+     * runtime input, synthesized into the per-review models.yml, so an empty or
+     * over-bound list is refused before any write.
+     *
+     * A zero-row UPDATE means the declaration is absent (never a no-op
+     * success): the settings route answers the keyed 400, so a stale dialog
+     * cannot report a saved list that nothing holds. Its atomicity is also why
+     * the route needs no declaration read of its own — a declaration removed
+     * between a read and this write still refuses.
+     */
+    async updateCustomProviderModels(appId: string, providerId: string, modelIds: string[]): Promise<void> {
+      assertCustomProviderModelIds(modelIds);
+      const res = await db
+        .prepare(
+          `UPDATE app_custom_providers SET model_ids = ?, updated_at = datetime('now')
+            WHERE app_id = ? AND provider_id = ?`,
+        )
+        .bind(JSON.stringify(modelIds), appId, providerId)
+        .run();
+      if (res.meta.changes === 0) {
+        throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(providerId)} is not declared for this app`);
+      }
     },
 
     /**

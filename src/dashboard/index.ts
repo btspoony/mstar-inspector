@@ -3692,7 +3692,11 @@ const REVIEW_LEVEL_INHERIT = "inherit";
  * custom-provider declarations section: every AL-23-1/AL-23-2 bound (id
  * grammar, https-only baseUrl, three-form api enum, model_ids 1..32 × ≤128,
  * key required ≤4096) is a 400 with zero writes; the key is encrypted
- * inside the store and never echoed. save-sandbox-image = the
+ * inside the store and never echoed. update-provider-models = the declared
+ * provider's model-list editor: it rewrites ONE declaration's model_ids in
+ * place under the same 1..32 × ≤128 bound, touching neither the endpoint nor
+ * the key pool, and answers the same keyed 400 when that declaration is
+ * absent. save-sandbox-image = the
  * App's runtime-harness selection (mounted into the sandbox image): only ENABLED
  * src/contracts/sandbox-images.ts registry ids are storable (unknown or
  * disabled → 400, nothing stored). save-review-level = the App's review depth
@@ -4223,15 +4227,12 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         api: String(template.api),
       });
     }
-    const modelIds = [...template.models];
+    // The catalog now carries each template's FULL vocabulary — clip it to the
+    // store's own bound so a widened snapshot can never trip the 400 below (the
+    // operator edits the list afterwards through update-provider-models).
+    const modelIds = [...template.models].slice(0, MAX_CUSTOM_PROVIDER_MODEL_IDS);
     if (modelIds.length === 0) {
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateNoModels);
-    }
-    if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelIdsTooMany, {
-        count: modelIds.length,
-        limit: MAX_CUSTOM_PROVIDER_MODEL_IDS,
-      });
     }
     if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelIdTooLong, {
@@ -4312,6 +4313,55 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.github_app_id, `Materialized the ${template.label} template as custom provider ${templateId} for ${appDisplayName(gate.app)} — its key is stored encrypted and injected by environment variable name.`,
+    );
+  }
+  if (op === "update-provider-models") {
+    // Edit ONE declared provider's model vocabulary in place — the settings
+    // face's model list stops being read-only without re-declaring the provider
+    // (base_url / api / the key pool are untouched, so the endpoint lock does
+    // not apply). The bounds mirror add-custom-provider, and the store
+    // re-validates the same 1..32 × ≤128 set as its backstop. The declaration
+    // is deliberately NOT pre-read: the store's UPDATE is gated on the row
+    // existing, so an absent declaration (including one removed while the form
+    // was open) surfaces as the same keyed 400 instead of a read-then-write
+    // race that would report a save nothing holds.
+    const providerId = typeof form.provider === "string" ? form.provider.trim() : "";
+    const modelIds = parseModelChain(typeof form.model_ids === "string" ? form.model_ids : "");
+    if (providerId === "") {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerIdRequired);
+    }
+    if (!CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerIdInvalid);
+    }
+    if (modelIds.length === 0) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelIdsRequired);
+    }
+    if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelIdsTooMany, {
+        count: modelIds.length,
+        limit: MAX_CUSTOM_PROVIDER_MODEL_IDS,
+      });
+    }
+    if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelIdTooLong, {
+        limit: MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
+      });
+    }
+    try {
+      await store.updateCustomProviderModels(gate.app.id, providerId, modelIds);
+    } catch (err) {
+      logSettingsFailure("update_provider_models", gate.app.id, err);
+      if (err instanceof InvalidCustomProviderError) {
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.customProviderUndeclared, {
+          provider: providerId,
+        });
+      }
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(
+      c,
+      gate.app.github_app_id,
+      `Saved the ${providerId} model list for ${appDisplayName(gate.app)}.`,
     );
   }
   if (op === "remove-custom-provider") {
