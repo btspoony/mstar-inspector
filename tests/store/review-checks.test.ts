@@ -579,11 +579,11 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(row.last_error).toBe("403 checks:write missing");
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
-    // The release clears the lease, but the row still wants `in_progress`: the
-    // selector admits it only at its EXECUTION deadline, never at the backoff
-    // time or at `updated_ms`.
-    expect(await listCheckReconcileBatch(db, T0 + CHECK_BACKOFF_MS[0]!)).toEqual([]);
-    expect(await listCheckReconcileBatch(db, DEADLINE)).toHaveLength(1);
+    // The release clears the lease and records its own due time. A row still
+    // wanting `in_progress` is therefore a candidate on that backoff — the proof
+    // it was released for may already be persisted — not merely at the deadline.
+    expect(await listCheckReconcileBatch(db, T0 + CHECK_BACKOFF_MS[0]!)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0 + CHECK_BACKOFF_MS[0]! - 1)).toEqual([]);
   });
 
   test("setCheckDesired freezes the intent, keeps the row nonterminal and bounds the summary", async () => {
@@ -739,15 +739,13 @@ describe("setCheckFallbackDesired (give-up fallback, spec §7.9/§7.10)", () => 
 describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
   test("the claim repeats the FULL selector predicate, not just liveness", async () => {
     const db = seededDb();
-    const { attempt, lease } = await claim(db);
+    const { attempt } = await claim(db);
     const id = attempt.identity.attemptId;
     const beforeDeadline = DEADLINE - 1;
 
-    // A free lease alone is not enough: the row still wants `in_progress` and
-    // its execution deadline has not arrived, so it is NOT due.
-    expect(
-      await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: 0, reason: "release" }, T0),
-    ).toBe(true);
+    // A free lease alone is not enough: nothing released this row (it carries no
+    // due time) and its execution deadline has not arrived, so it is NOT due.
+    db.raw.prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`).run(id);
     expect(await claimCheckRecovery(db, id, "reconciler", beforeDeadline)).toBeNull();
 
     // At the execution deadline it becomes due (the same rule the selector uses).
@@ -848,9 +846,8 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
-    // A terminal intent is what makes an attempt recovery-eligible at all
-    // (§7.11.2: a row still wanting `in_progress` waits for its execution
-    // deadline). Release the lease on top of that.
+    // A release records the row's own due time; the terminal intent it may
+    // carry is what recovery sends once it owns the row.
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     expect(await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0)).toBe(true);
     const reacquired = await claimCheckRecovery(db, id, "reconciler", T0 + 1);
@@ -1032,13 +1029,28 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     expect(await listCheckReconcileBatch(db, backoff + 1_000_000, CHECK_MAX_ATTEMPTS + 1, 25)).toHaveLength(1);
   });
 
-  test("an in_progress attempt becomes due only at its EXECUTION deadline", async () => {
+  test("a released in_progress attempt is due on its own backoff, before its EXECUTION deadline", async () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
-    expect(await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: 0, reason: "release" }, T0)).toBe(true);
+    expect(
+      await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0 + 1_000, reason: "release" }, T0),
+    ).toBe(true);
+    expect(await listCheckReconcileBatch(db, T0 + 999)).toEqual([]);
+    expect((await listCheckReconcileBatch(db, T0 + 1_000)).map((r) => r.identity.attemptId)).toEqual([id]);
+    // …and that is long before the deadline the old rule waited for.
+    expect(T0 + 1_000).toBeLessThan(attempt.executionDeadlineMs);
+  });
+
+  test("an in_progress attempt nobody released is due only at its EXECUTION deadline", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    // A dead lease is not a release: no due time was ever recorded.
+    db.raw.prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`).run(attempt.identity.attemptId);
     expect(await listCheckReconcileBatch(db, attempt.executionDeadlineMs - 1)).toEqual([]);
-    expect((await listCheckReconcileBatch(db, attempt.executionDeadlineMs)).map((r) => r.identity.attemptId)).toEqual([id]);
+    expect((await listCheckReconcileBatch(db, attempt.executionDeadlineMs)).map((r) => r.identity.attemptId)).toEqual([
+      attempt.identity.attemptId,
+    ]);
   });
 
   test("ordering is oldest-due first and the limit is honoured", async () => {

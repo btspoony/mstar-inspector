@@ -5497,12 +5497,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(beforeDue).toBeNull();
     expect(checkRowFor(db, SHA).holder).toBeNull();
 
-    // The integrated claim repeats the FULL candidate predicate (spec §7.11.2),
-    // and this row still WANTS `in_progress`: its execution deadline is the
-    // instant that makes it due. Before it, no claim; at it, the same
-    // attempt/identity is claimed and owns the terminal decision.
-    expect(await claimCheckRecovery(db, released.id, "reconciler", released.execution_deadline_ms - 1)).toBeNull();
-    const reacquired = await claimCheckRecovery(db, released.id, "reconciler", released.execution_deadline_ms);
+    // The integrated claim repeats the FULL candidate predicate (spec §7.11.2).
+    // This row was RELEASED, so its own recorded backoff is the due instant —
+    // the lane may own it long before the execution deadline and decide from
+    // whatever proof lands in that window.
+    expect(await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms! - 1)).toBeNull();
+    const reacquired = await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms!);
     expect(reacquired).not.toBeNull();
     await hooks.terminalize({
       handle: {
@@ -5607,12 +5607,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBe(checkState.clockMs + 60_000);
     // The integrated claim repeats the FULL candidate predicate (spec §7.11.2):
-    // lease-free and past its backoff, but still wanting `in_progress`, so it is
-    // due only at its execution deadline. Before that instant no claim; exactly
-    // at it the same attempt and identity are claimed.
+    // lease-free and past its recorded backoff, the RELEASED row is claimable
+    // before its execution deadline — nothing about `desired` withholds it.
     expect(await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms! - 1)).toBeNull();
-    expect(await claimCheckRecovery(db, row.id, "reconciler", row.execution_deadline_ms - 1)).toBeNull();
-    const claim = await claimCheckRecovery(db, row.id, "reconciler", row.execution_deadline_ms);
+    const claim = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!);
     expect(claim?.holder).toBe("reconciler");
   });
 
@@ -5807,13 +5805,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBeLessThan(row.execution_deadline_ms);
 
-    // (3) Until that deadline the row is NOT recoverable — `desired` still wants
-    //     `in_progress`, and no bookkeeping makes an attempt due. At the
-    //     deadline the reconciler owns it, still without a second create.
+    // (3) The release made the row due on its own backoff rung, BEFORE the
+    //     deadline: the lane owns it there even though `desired` still wants
+    //     `in_progress` — the conclusion it owes is the one a proof that lands
+    //     in that window will decide. No second create is ever issued.
     const early = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!);
-    expect(early).toBeNull();
-    const atDeadline = await claimCheckRecovery(db, row.id, "reconciler", row.execution_deadline_ms!);
-    expect(atDeadline).not.toBeNull();
+    expect(early).not.toBeNull();
+    expect(row.next_attempt_ms).toBeLessThan(row.execution_deadline_ms);
     expect(checkRequests.filter((r) => r.op === "create")).toHaveLength(1);
   });
 

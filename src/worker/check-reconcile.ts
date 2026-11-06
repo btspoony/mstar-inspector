@@ -800,7 +800,8 @@ async function reconcileCheckAttempt(
     const pending = await probePendingPublication(db, row);
     const waiting =
       pending.kind !== "none" ||
-      ((await readProof(db, row.identity)) === null && (await reviewCanStillPublish(db, row.identity)));
+      ((await readProof(db, row.identity, row.publicationId)) === null &&
+        (await reviewCanStillPublish(db, row.identity)));
     if (waiting) {
       const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now());
       if (waitingLease === null) return;
