@@ -784,8 +784,6 @@ export const en = {
        */
       usage: {
         action: "Usage",
-        title: "Usage for {label}",
-        refresh: "Refresh",
         error: "Could not read this key's usage right now.",
         unauthorized: "The provider rejected this key — it may be revoked or expired.",
         absentNoProbe: "This provider has no usage probe.",

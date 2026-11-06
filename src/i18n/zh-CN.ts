@@ -664,8 +664,6 @@ export const zhCN: Dictionary = {
        */
       usage: {
         action: "用量",
-        title: "{label} 用量",
-        refresh: "刷新",
         error: "暂时无法读取该密钥的用量。",
         unauthorized: "提供方拒绝了该密钥 — 可能已撤销或过期。",
         absentNoProbe: "该提供方没有用量探测。",
