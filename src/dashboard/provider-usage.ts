@@ -23,8 +23,8 @@
  *
  * | catalog ids                                                        | endpoint (auth)                                                        | limits |
  * |--------------------------------------------------------------------|------------------------------------------------------------------------|--------|
- * | commandcode, commandcode-anthropic                                 | GET …/alpha/whoami then …/alpha/billing/credits (Bearer)               | fiveHour/weekly windows + credit balance (org pool when whoami names one) |
- * | opencode-go                                                        | GET https://opencode.ai/zen/go/v1/usage (Bearer)                       | usage.rolling / usage.weekly |
+ * | commandcode, commandcode-anthropic                                 | GET …/alpha/whoami then …/alpha/billing/credits (Bearer)               | fiveHour/weekly windows + `month` pool (monthlyCredits) carrying `extraRemaining` (purchased+free), or a bare balance when the account has no monthly pool |
+ * | opencode-go                                                        | GET https://opencode.ai/zen/go/v1/usage (Bearer)                       | usage.rolling / usage.weekly / usage.monthly |
  * | zai, zai-coding-plan                                               | GET https://api.z.ai/api/monitor/usage/quota/limit (key verbatim)      | hour/week-unit limits |
  * | zhipuai, zhipuai-coding-plan                                       | GET https://open.bigmodel.cn/api/monitor/usage/quota/limit (verbatim)  | hour/week-unit limits |
  * | minimax-coding-plan                                                | GET https://api.minimax.io/v1/token_plan/remains (Bearer)              | model_remains interval + weekly |
@@ -56,6 +56,9 @@ export type UsageLimit = {
   usedFraction?: number;
   /** Balance amount, or a window's remaining count when the vendor states it. */
   remaining?: number;
+  /** On-demand amount held beside `remaining`: real money the vendor granted
+   *  outside the dimension's own pool. Same cell, labelled apart. */
+  extraRemaining?: number;
   limit?: number;
   unit: "percent" | "requests" | "credits" | "usd" | "tokens";
   /** Epoch milliseconds. */
@@ -396,28 +399,31 @@ const commandCodeUsage: UsageProbe = async (input, key) => {
     }
     const credits = asRecord(body.credits);
     if (credits !== undefined) {
-      const components = [
-        creditComponent(credits.monthlyCredits),
-        creditComponent(credits.purchasedCredits),
-        creditComponent(credits.freeCredits),
-      ];
-      // A present-but-unreadable component makes the TOTAL unknowable: summing
-      // only the readable ones would publish a partial balance as the account's
-      // credits, so the balance limit is dropped whole rather than zero-filling
-      // the gap. An absent component legitimately contributes nothing.
-      if (components.every((component) => component !== null)) {
-        const readable = components.filter((component): component is number => component !== undefined);
-        // A pay-as-you-go account has no windowLimits at all: one balance
-        // limit, never a fabricated 0 % window.
-        if (readable.length > 0) {
-          limits.push({
-            id: "commandcode:balance",
-            kind: "balance",
-            remaining: readable.reduce((sum, component) => sum + component, 0),
-            unit: "credits",
-            shared: true,
-          });
-        }
+      const monthly = creditComponent(credits.monthlyCredits);
+      const purchased = creditComponent(credits.purchasedCredits);
+      const free = creditComponent(credits.freeCredits);
+      // A month cell exists only when the vendor states a monthly pool: a
+      // pay-as-you-go account has no month at all, and labelling its purchases
+      // "monthly" would invent a period that does not exist. When both are
+      // stated they share one cell as two amounts — the subscription budget
+      // that resets with the period, and the on-demand credits that never do —
+      // so the quota row still grows no second line for the same dimension. An
+      // unreadable component is omitted, never zero-filled; zero adds nothing.
+      const onDemand = purchased === null || free === null ? undefined : (purchased ?? 0) + (free ?? 0);
+      const extra = onDemand !== undefined && onDemand > 0 ? onDemand : undefined;
+      if (typeof monthly === "number") {
+        limits.push({
+          id: "commandcode:month",
+          kind: "balance",
+          remaining: monthly,
+          ...(extra !== undefined ? { extraRemaining: extra } : {}),
+          unit: "credits",
+          shared: true,
+        });
+      } else if (extra !== undefined) {
+        // No month to attach it to: the purchases stand on their own balance,
+        // outside the dimensional row.
+        limits.push({ id: "commandcode:balance", kind: "balance", remaining: extra, unit: "credits", shared: true });
       }
     }
     return limits;
@@ -430,9 +436,10 @@ const OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
 const OPENCODE_GO_WINDOWS = [
   { key: "rolling", id: "session" },
   { key: "weekly", id: "week" },
+  { key: "monthly", id: "month" },
 ] as const;
-// The monthly window anchors on the subscription anniversary, not a 30-day
-// span, so it is not a usable week window and is deliberately dropped.
+// The monthly bucket anchors on the subscription anniversary, not a 30-day
+// span, so it keeps its own `month` id instead of being relabelled a week.
 
 /** `percent` is USED percent; `status: "rate-limited"` outranks it. */
 const opencodeGoUsage: UsageProbe = async (input, key) => {

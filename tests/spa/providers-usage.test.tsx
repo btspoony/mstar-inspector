@@ -403,6 +403,54 @@ describe("UsagePanel — inline probe under the owning row", () => {
     }
   });
 
+  test("an amount-only monthly pool claims the third cell with no fabricated bar", async () => {
+    queue.push(() => new Response(snapshotBody({
+      limits: [
+        { id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" },
+        { id: "commandcode:week", kind: "window", usedFraction: 0.45, unit: "percent" },
+        { id: "commandcode:month", kind: "balance", remaining: 15.09, extraRemaining: 25, unit: "credits", shared: true },
+      ],
+    })));
+    const view = await mount(probedPayload());
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const cells = [...(view.panel()?.querySelectorAll('[data-slot="usage-cell"]') ?? [])] as HTMLElement[];
+      expect(cells).toHaveLength(3);
+      const month = cells[2]!;
+      expect((month.querySelector("p") as HTMLElement | null)?.textContent).toBe(
+        t(locale, "settings.providers.usage.window.month"),
+      );
+      // No stated cap → the cell states the amount it has and draws no bar.
+      expect(month.textContent).toContain(
+        t(locale, "settings.providers.usage.balanceRemaining", {
+          amount: 15.09,
+          unit: t(locale, "settings.providers.usage.unit.credits"),
+        }),
+      );
+      // On-demand credits are a second amount in the SAME cell, never a second
+      // row, and the cell still draws no bar.
+      expect(month.textContent).toContain(
+        t(locale, "settings.providers.usage.extraRemaining", {
+          amount: 25,
+          unit: t(locale, "settings.providers.usage.unit.credits"),
+        }),
+      );
+      expect(month.querySelector('[data-slot="usage-bar"]')).toBeNull();
+      expect(view.panel()?.querySelectorAll('[data-slot="usage-bar"]')).toHaveLength(2);
+      // One row, three columns — the amount cell shares the same row as the bars.
+      expect((cells[0]?.parentElement as HTMLElement | null)?.style.gridTemplateColumns).toBe(
+        "repeat(3, minmax(0, 1fr))",
+      );
+      // Nothing is repeated below the row: the panel holds exactly these cells.
+      expect(view.panel()?.querySelectorAll("li")).toHaveLength(3);
+      expect((view.panel()?.textContent?.match(/15\.09/g) ?? [])).toHaveLength(1);
+      expect((view.panel()?.textContent?.match(/25/g) ?? [])).toHaveLength(1);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   test("windows of only unknown dimensions fall back to one line per window, no bars", async () => {
     queue.push(() => new Response(snapshotBody({
       limits: [

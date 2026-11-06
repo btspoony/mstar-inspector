@@ -341,7 +341,7 @@ describe("commandcode", () => {
     },
   });
 
-  test("reads whoami then the org credit pool: windows + balance", async () => {
+  test("reads whoami then the org credit pool: windows, monthly pool, on-demand balance", async () => {
     const calls: FetchCall[] = [];
     const snapshot = await probeProviderUsage(
       { fetch: queueFetch([whoami, credits], calls) },
@@ -369,11 +369,20 @@ describe("commandcode", () => {
         resetsAt: 1_760_604_800_000,
         limit: 500,
       },
-      { id: "commandcode:balance", kind: "balance", remaining: 125, unit: "credits", shared: true },
+      // One month cell carries both amounts: 100 of subscription budget and the
+      // 25 of on-demand credits, labelled apart — never a second row.
+      {
+        id: "commandcode:month",
+        kind: "balance",
+        remaining: 100,
+        extraRemaining: 25,
+        unit: "credits",
+        shared: true,
+      },
     ]);
   });
 
-  test("a balance-only (pay-as-you-go) account yields one balance limit, never a window", async () => {
+  test("a monthly-only account yields the month cell alone, never a window", async () => {
     const calls: FetchCall[] = [];
     const snapshot = await probeProviderUsage(
       { fetch: queueFetch([json(200, { user: { id: "user-1" } }), json(200, { data: { credits: { monthlyCredits: 42 } } })], calls) },
@@ -383,7 +392,7 @@ describe("commandcode", () => {
     expect(calls[1]!.url).toBe("https://api.commandcode.ai/alpha/billing/credits");
     expect(snapshot.status).toBe("ok");
     expect(snapshot.limits).toEqual([
-      { id: "commandcode:balance", kind: "balance", remaining: 42, unit: "credits", shared: true },
+      { id: "commandcode:month", kind: "balance", remaining: 42, unit: "credits", shared: true },
     ]);
   });
 
@@ -407,10 +416,10 @@ describe("commandcode", () => {
       "cc-key",
     );
     expect(snapshot.status).toBe("ok");
-    expect(snapshot.limits.map((limit) => limit.id)).toEqual(["commandcode:week", "commandcode:balance"]);
+    expect(snapshot.limits.map((limit) => limit.id)).toEqual(["commandcode:week", "commandcode:month"]);
   });
 
-  test("a present-but-unreadable credit component drops the whole balance instead of zero-filling it", async () => {
+  test("an unreadable on-demand component drops only that amount, never the month pool", async () => {
     const snapshot = await probeProviderUsage(
       {
         fetch: queueFetch([
@@ -421,12 +430,15 @@ describe("commandcode", () => {
       "commandcode",
       "cc-key",
     );
-    // 105 would be a total the payload never stated: the balance is dropped.
-    expect(snapshot.limits).toEqual([]);
-    expect(snapshot.status).toBe("error");
+    // 105 would be an on-demand total the payload never stated: that line is
+    // dropped, while the month (100) is stated and stays.
+    expect(snapshot.limits).toEqual([
+      { id: "commandcode:month", kind: "balance", remaining: 100, unit: "credits", shared: true },
+    ]);
+    expect(snapshot.status).toBe("ok");
 
-    // The drop is scoped to the balance limit — the account's windows still
-    // render instead of the whole snapshot collapsing.
+    // The drop is scoped to that balance — the windows and the month cell
+    // still render instead of the whole snapshot collapsing.
     const withWindows = await probeProviderUsage(
       {
         fetch: queueFetch([
@@ -443,7 +455,84 @@ describe("commandcode", () => {
       "cc-key",
     );
     expect(withWindows.status).toBe("ok");
-    expect(withWindows.limits.map((limit) => limit.id)).toEqual(["commandcode:week"]);
+    expect(withWindows.limits.map((limit) => limit.id)).toEqual(["commandcode:week", "commandcode:month"]);
+  });
+
+  test("without a month pool, purchases stand as a plain balance and never as a monthly cell", async () => {
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: queueFetch([
+          json(200, { user: { id: "user-1" } }),
+          json(200, { data: { credits: { monthlyCredits: "n/a", purchasedCredits: 20 } } }),
+        ]),
+      },
+      "commandcode",
+      "cc-key",
+    );
+    expect(snapshot.status).toBe("ok");
+    expect(snapshot.limits).toEqual([
+      { id: "commandcode:balance", kind: "balance", remaining: 20, unit: "credits", shared: true },
+    ]);
+  });
+
+  test("an absent component contributes nothing while the stated one still counts", async () => {
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: queueFetch([
+          json(200, { user: { id: "user-1" } }),
+          json(200, { data: { credits: { monthlyCredits: 100, freeCredits: 5 } } }),
+        ]),
+      },
+      "commandcode",
+      "cc-key",
+    );
+    expect(snapshot.status).toBe("ok");
+    expect(snapshot.limits).toEqual([
+      { id: "commandcode:month", kind: "balance", remaining: 100, extraRemaining: 5, unit: "credits", shared: true },
+    ]);
+  });
+
+  test("a pay-as-you-go account reports its purchases without inventing a month", async () => {
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: queueFetch([
+          json(200, { user: { id: "user-1" } }),
+          json(200, { data: { credits: { purchasedCredits: 12, freeCredits: 3 } } }),
+        ]),
+      },
+      "commandcode",
+      "cc-key",
+    );
+    expect(snapshot.status).toBe("ok");
+    expect(snapshot.limits).toEqual([
+      { id: "commandcode:balance", kind: "balance", remaining: 15, unit: "credits", shared: true },
+    ]);
+  });
+
+  test("a zeroed on-demand pool adds no second amount, so the row stays three cells", async () => {
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: queueFetch([
+          json(200, { user: { id: "user-1" } }),
+          json(200, {
+            data: {
+              credits: { monthlyCredits: 15.091559163, purchasedCredits: 0, freeCredits: 0 },
+              windowLimits: {
+                fiveHour: { used: 30, cap: 100, resetAt: 1_760_000_000 },
+                weekly: { used: 250, cap: 500, resetAt: 1_760_604_800 },
+              },
+            },
+          }),
+        ]),
+      },
+      "commandcode",
+      "cc-key",
+    );
+    expect(snapshot.limits.map((limit) => limit.id)).toEqual([
+      "commandcode:session",
+      "commandcode:week",
+      "commandcode:month",
+    ]);
   });
 
   test("a rejected credential on whoami is unauthorized", async () => {
@@ -455,7 +544,7 @@ describe("commandcode", () => {
 // --- family: opencode-go ---
 
 describe("opencode-go", () => {
-  test("keeps the rolling and weekly windows and drops the monthly bucket", async () => {
+  test("keeps every window the payload reports, monthly included", async () => {
     const calls: FetchCall[] = [];
     const snapshot = await probeProviderUsage(
       {
@@ -490,7 +579,32 @@ describe("opencode-go", () => {
         unit: "percent",
         resetsAt: Date.parse("2026-11-10T10:00:00.000Z"),
       },
+      {
+        id: "opencode-go:month",
+        kind: "window",
+        usedFraction: 0.1,
+        unit: "percent",
+        resetsAt: Date.parse("2026-12-01T00:00:00.000Z"),
+      },
     ]);
+  });
+
+  test("a payload without a monthly bucket yields two windows, never a fabricated third", async () => {
+    const snapshot = await probeProviderUsage(
+      {
+        fetch: stubFetch(
+          json(200, {
+            usage: {
+              rolling: { percent: 32, status: "ok" },
+              weekly: { percent: 80, status: "ok" },
+            },
+          }),
+        ),
+      },
+      "opencode-go",
+      "zen-key",
+    );
+    expect(snapshot.limits.map((limit) => limit.id)).toEqual(["opencode-go:session", "opencode-go:week"]);
   });
 });
 

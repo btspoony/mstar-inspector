@@ -8,15 +8,19 @@
  * shows a stale bar. A generation guard discards responses that resolve
  * after the panel closed or moved on to another key.
  *
- * Four faces on the snapshot: `ok` renders the known window dimensions
- * (session / week / month) as a three-cell bar row — a hairline bar
- * (`--surface-inset` track, `--tone-accent-solid` fill) with the remaining
- * share and its future reset time — windows of unknown dimensions fall back
- * to one line per window so nothing is dropped, and a balance renders as
- * the muted bottom line; `unauthorized` and `error` are danger notices;
- * `absent` is a muted line. The wire's diagnostic `reason` is never
- * rendered verbatim. A transport/HTTP/parse failure renders the same danger
- * notice as the wire's `error` face.
+ * Four faces on the snapshot: `ok` renders the known dimensions
+ * (session / week / month) as one row of one to three cells in that fixed
+ * order. A cell comes from any limit whose id segment names one of those
+ * dimensions — a window draws a hairline bar (`--surface-inset` track,
+ * `--tone-accent-solid` fill) with the remaining share and its future reset
+ * time, while an amount-only pool states its remaining amount and, when the
+ * payload carries one, the on-demand amount beside it, with no bar invented
+ * for a fraction the vendor never gave. Windows of unknown dimensions fall
+ * back to one line per window so nothing is dropped, and every balance outside
+ * those dimensions renders as the muted bottom line. `unauthorized` and
+ * `error` are danger notices; `absent` is a muted line. The wire's diagnostic
+ * `reason` is never rendered verbatim. A transport/HTTP/parse failure renders
+ * the same danger notice as the wire's `error` face.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { t, isDictionaryKey } from "../../i18n";
@@ -154,16 +158,19 @@ function UsageFace({ locale, snapshot }: { locale: SpaBoot["locale"]; snapshot: 
     return <PageNotice kind="error" message={t(locale, "settings.providers.usage.error")} />;
   }
   const windows = snapshot.limits.filter((limit) => limit.kind === "window");
+  // A cell is claimed by any limit whose id segment names a known dimension —
+  // a window with a percentage, or a balance the vendor states only as an
+  // amount (Command Code's monthly pool). The cell draws no bar without a
+  // fraction; it never invents one.
   const cells = CELL_SEGMENTS.map((segment) => ({
     segment,
-    limit: windows.find((windowLimit) => segmentOf(windowLimit) === segment),
+    limit: snapshot.limits.find((limit) => segmentOf(limit) === segment),
   })).filter((cell): cell is { segment: CellSegment; limit: UsageLimit } => cell.limit !== undefined);
+  const cellIds = new Set(cells.map((cell) => cell.limit.id));
   // Windows outside the known dimensions get a line each — no bar, but no
   // dropped information either.
-  const lines = windows.filter(
-    (limit) => !(CELL_SEGMENTS as readonly string[]).includes(segmentOf(limit)),
-  );
-  const balances = snapshot.limits.filter((limit) => limit.kind !== "window");
+  const lines = windows.filter((limit) => !cellIds.has(limit.id));
+  const balances = snapshot.limits.filter((limit) => limit.kind !== "window" && !cellIds.has(limit.id));
   return (
     <div className="flex flex-col gap-3">
       {cells.length > 0 ? (
@@ -222,6 +229,25 @@ function windowDetailLines(locale: SpaBoot["locale"], limit: UsageLimit): string
   const lines: string[] = [];
   if (remainingPct !== null) {
     lines.push(t(locale, "settings.providers.usage.windowRemaining", { percent: remainingPct }));
+  } else if (typeof limit.remaining === "number") {
+    // An amount-only cell (no stated cap): the remaining total is the whole
+    // truth it has, so it says that rather than nothing.
+    lines.push(
+      t(locale, "settings.providers.usage.balanceRemaining", {
+        amount: limit.remaining,
+        unit: t(locale, `settings.providers.usage.unit.${limit.unit}`),
+      }),
+    );
+  }
+  // On-demand credits live in the same cell as the pool they sit beside; they
+  // are a second amount, never a second row.
+  if (typeof limit.extraRemaining === "number") {
+    lines.push(
+      t(locale, "settings.providers.usage.extraRemaining", {
+        amount: limit.extraRemaining,
+        unit: t(locale, `settings.providers.usage.unit.${limit.unit}`),
+      }),
+    );
   }
   if (typeof limit.resetsAt === "number") {
     lines.push(t(locale, "settings.providers.usage.resets", { time: formatUntil(limit.resetsAt, locale) }));

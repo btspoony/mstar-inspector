@@ -792,6 +792,8 @@ export const en = {
         windowRemaining: "{percent}% remaining",
         resets: "resets {time}",
         balanceRemaining: "{amount} {unit} remaining",
+        /** Credits held beside the pool in the same cell: granted, never reset. */
+        extraRemaining: "+ {amount} {unit} on-demand",
         /** One account-wide pool behind several keys, never a per-key allowance. */
         shared: "account-wide",
         /** Semantic per-row labels derived from the normalized limit id's segment after the last ":". */

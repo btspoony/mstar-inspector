@@ -671,6 +671,8 @@ export const zhCN: Dictionary = {
         windowRemaining: "剩余 {percent}%",
         resets: "{time} 重置",
         balanceRemaining: "剩余 {amount} {unit}",
+        /** On-demand credits shown beside the pool in the same cell: bought once, never reset. */
+        extraRemaining: "另有 {amount} {unit} 加购",
         /** 多个密钥共享同一个账户级额度池，而非每密钥独立额度。 */
         shared: "账户级共享",
         /** 每行标签：取自规范化 limit id 最后一个 ":" 后的语义段。 */
