@@ -782,7 +782,7 @@ export function PullRequestDetailView({
             </div>
           ) : null}
         </div>
-          <div className="min-w-0 flex-1">
+          <div data-slot="record-list" className="min-w-0 flex-1">
             <TabsContent value="findings">
               {records.findings.status === "error" ? (
                 <ErrorState

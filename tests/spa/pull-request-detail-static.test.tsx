@@ -1667,28 +1667,39 @@ describe("pull request detail face (static SSR)", () => {
     // column stacks the toolbar over the record list, with the aside as the
     // main column's sibling, so a tall aside can never size the list's start.
     // Below xl the same DOM stacks toolbar → list → aside in one column.
+    // Toolbar and list are located independently by their data-slot, so each
+    // assertion can fail: the order pin fails if the list moves above the
+    // toolbar, the parent pins fail if either leaves the main column.
     const layout = await withMarkup(face(), (container) => {
       const toolbar = container.querySelector('[data-slot="record-toolbar"]');
+      const recordList = container.querySelector('[data-slot="record-list"]');
       const aside = container.querySelector("aside");
-      const main = toolbar?.parentElement ?? null;
-      const shell = main?.parentElement ?? null;
-      const recordList = toolbar?.nextElementSibling ?? null;
+      const main = container.querySelector('[data-slot="record-main"]');
+      const shell = container.querySelector('[data-slot="record-layout"]');
+      const siblings = Array.from(main?.children ?? []);
+      const toolbarPrecedesList =
+        toolbar !== null &&
+        recordList !== null &&
+        siblings.indexOf(toolbar) !== -1 &&
+        siblings.indexOf(recordList) > siblings.indexOf(toolbar);
       return {
-        shellIsRecordLayout: shell?.dataset.slot === "record-layout",
-        mainIsRecordMain: main?.dataset.slot === "record-main",
-        toolbarPrecedesList:
-          recordList !== null && recordList !== aside && main?.lastElementChild === recordList,
-        toolbarAndListShareParent:
-          toolbar !== null && recordList !== null && recordList.parentElement === main,
+        toolbarExists: toolbar !== null,
+        recordListExists: recordList !== null,
+        toolbarAndListShareMain: toolbar?.parentElement === main && recordList?.parentElement === main,
+        toolbarPrecedesList: Boolean(toolbarPrecedesList),
+        mainIsRecordMain: main?.getAttribute("data-slot") === "record-main",
+        shellIsRecordLayout: shell?.getAttribute("data-slot") === "record-layout",
         asideIsShellChild: aside !== null && aside.parentElement === shell,
         asideOutsideMain: aside !== null && aside.parentElement !== main,
       };
     });
     expect(layout).toEqual({
-      shellIsRecordLayout: true,
-      mainIsRecordMain: true,
+      toolbarExists: true,
+      recordListExists: true,
+      toolbarAndListShareMain: true,
       toolbarPrecedesList: true,
-      toolbarAndListShareParent: true,
+      mainIsRecordMain: true,
+      shellIsRecordLayout: true,
       asideIsShellChild: true,
       asideOutsideMain: true,
     });
