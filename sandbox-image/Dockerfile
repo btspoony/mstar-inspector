@@ -122,6 +122,9 @@
 # rebuild: the runner's omp SDK pin moves to 18.16.0 along with the root
 # manifest, so both lockfiles resolve the same SDK (`packages/runner/
 # package.json` and its lockfile are image inputs).
+# rebuild: a comment-only edit — the CLI pin note no longer cites the deleted
+# pin suite. No build input changes; the marker exists because wrangler hashes
+# this file, so any textual change still rebuilds the image.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and
@@ -253,7 +256,7 @@ RUN sh /opt/verify-seat-supervision.sh
 # discipline — the repo manifest `^` range exception does NOT extend to the
 # image; the version lives only in the committed global-install manifest
 # `sandbox-image/cli-global/package.json`, whose exact pin equals
-# `HARNESS_VERSION` (asserted by tests/review/pin.test.ts). The CLI's OWN
+# `HARNESS_VERSION` by hand. The CLI's OWN
 # dependency tree is pinned by the committed `bun.lock` beside it: `bun add
 # --global` re-resolved those caret ranges on every build (I-000009), while
 # `bun install --frozen-lockfile` replays the recorded, integrity-hashed set
