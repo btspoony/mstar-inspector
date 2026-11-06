@@ -1664,28 +1664,41 @@ describe("pull request detail face (static SSR)", () => {
 
   test("the aside shares the content grid with the toolbar row and tops it at column 2 row 1", async () => {
     // Structure, not class strings: the toolbar is the grid's first child, the
-    // content column and the aside are its other children, and the aside's
-    // placement classes anchor it to column 2 row 1 — so at xl its first
-    // card's top edge is level with the toolbar row. Below xl the single
+    // content column and the aside are its other children. The aside's
+    // placement classes anchor it to column 2 row 1 spanning both rows, so at
+    // xl its first card's top edge is level with the toolbar row while its
+    // height lands in the spanned rows, never sizing the toolbar track. The
+    // toolbar carries no row placement of its own (single automatic row 1),
+    // and the content column follows it in DOM order so auto-placement puts
+    // it on row 2 once column 2 is claimed by the aside. Below xl the single
     // column stacks the aside full-width after the content.
     const layout = await withMarkup(face(), (container) => {
       const toolbar = container.querySelector('[data-slot="record-toolbar"]');
       const aside = container.querySelector("aside");
       const grid = toolbar?.parentElement ?? null;
+      const contentColumn = toolbar?.nextElementSibling ?? null;
       return {
         toolbarIsGridChild: grid !== null,
         gridHoldsAside: grid !== null && aside?.parentElement === grid,
         toolbarFirst: grid?.firstElementChild === toolbar,
+        contentFollowsToolbar: contentColumn !== null && contentColumn !== aside,
+        toolbarSingleRow:
+          toolbar !== null &&
+          !toolbar.className.includes("row-start") &&
+          !toolbar.className.includes("row-span"),
         asideAnchored:
           aside !== null &&
           aside.classList.contains("xl:col-start-2") &&
-          aside.classList.contains("xl:row-start-1"),
+          aside.classList.contains("xl:row-start-1") &&
+          aside.classList.contains("xl:row-span-2"),
       };
     });
     expect(layout).toEqual({
       toolbarIsGridChild: true,
       gridHoldsAside: true,
       toolbarFirst: true,
+      contentFollowsToolbar: true,
+      toolbarSingleRow: true,
       asideAnchored: true,
     });
   });
