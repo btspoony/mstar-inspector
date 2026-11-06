@@ -1365,11 +1365,13 @@ const admissionDropLike = (reason: string): string =>
  * Whether the head on this attempt can still produce a publication. Only a
  * PERSISTED row that proves nothing more can land may end the wait:
  *
- * - `review_failures`: the TERMINAL writers only — the parse-fail degrade path
- *   (`stage = 'parse'`) and an admission drop (the row's stable error prefix).
- *   The infra stages (`runner` / `sandbox` / `pipeline` / `usage` / `recheck`)
- *   are per-attempt events written before a queue retry, so a retry can still
- *   publish and they keep waiting.
+ * - `review_failures`: an admission drop (the row's stable error prefix) — the
+ *   drop acks WITHOUT any publication, so nothing can land afterwards. The
+ *   parse-fail degrade path records `stage = 'parse'` BEFORE it still publishes
+ *   the degraded comment (journal + proof), so that row proves nothing: its
+ *   proof, or the execution deadline, decides. The infra stages (`runner` /
+ *   `sandbox` / `pipeline` / `usage` / `recheck`) are per-attempt events written
+ *   before a queue retry, so a retry can still publish and they keep waiting.
  * - `reviews`: written only at publication, so a row for the head proves the
  *   publication already landed even when the journal or its proof is missing.
  *
@@ -1383,7 +1385,7 @@ async function reviewCanStillPublish(db: D1Like, identity: CheckIdentity): Promi
       .prepare(
         `SELECT 1 AS terminal FROM review_failures
           WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?
-            AND (stage = 'parse' OR ${ADMISSION_DROP_REASONS.map(() => "error LIKE ?").join(" OR ")})
+            AND (${ADMISSION_DROP_REASONS.map(() => "error LIKE ?").join(" OR ")})
           LIMIT 1`,
       )
       .bind(

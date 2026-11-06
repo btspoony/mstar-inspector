@@ -2775,39 +2775,91 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.terminal_ms).not.toBeNull();
   });
 
-  const terminalWriters = [
-    { stage: "parse", error: "model output failed validation" },
-    { stage: "pipeline", error: "review dropped after 3 refused retries: pr-held (admission)" },
-  ] as const;
-  for (const writer of terminalWriters) {
-    test(`a terminal ${writer.stage === "parse" ? "parse failure" : "admission drop"} concludes on this pass`, async () => {
-      const db = seededDb();
-      const { id } = await abandonedAttempt(db);
-      recordFailure(db, writer.stage, writer.error);
+  test("an admission drop is terminal: the head can publish nothing more", async () => {
+    const db = seededDb();
+    const { id } = await abandonedAttempt(db);
+    recordFailure(db, "pipeline", "review dropped after 3 refused retries: pr-held (admission)");
 
-      const stub = stubFetch();
-      const sent: { desired?: string; summary?: string } = {};
-      let deferred = -1;
-      try {
-        const summary = await run(db, {
-          now: () => T0 + 120_000,
-          credentials: scriptedCredentials(db, publishingScript(sent)),
-        });
-        deferred = summary.deferred;
-        expect(summary.completed).toBe(1);
-      } finally {
-        stub.restore();
-      }
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    let deferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
 
-      // Nothing more can land for this head, so the wait is over on this pass.
-      expect(deferred).toBe(0);
-      expect(sent.desired).toBe("failure");
-      expect(sent.summary).toBe(UNCONFIRMED);
-      const row = await rawRow(db, id);
-      expect(row.observed).toBe("failure");
-      expect(row.terminal_ms).not.toBeNull();
-    });
-  }
+    // Nothing more can land for this head, so the wait is over on this pass.
+    expect(deferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(UNCONFIRMED);
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("a parse-stage failure row is NOT terminal: the degraded publication still decides", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    // The parse branch records this row FIRST and only then publishes the
+    // degraded comment. With no journal yet it proves nothing about the head.
+    recordFailure(db, "parse", "model output failed validation");
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    // Deferred, not concluded: no conclusion was frozen and no attempt spent.
+    expect(factoryCalls).toBe(0);
+    const deferredRow = await rawRow(db, id);
+    expect(deferredRow.terminal_ms).toBeNull();
+    expect(deferredRow.attempts).toBe(1);
+    expect(deferredRow.desired).toBe("in_progress");
+    expect(deferredRow.desired_summary).toBeNull();
+    expect(deferredRow.observed).toBe("unknown");
+
+    // The degrade path lands its publication: applied proof for this head.
+    seedPublication(db, SCOPE, SHA, proofFor(attempt.identity, "degraded"), "applied");
+
+    const sent: { desired?: string; summary?: string } = {};
+    const secondStub = stubFetch();
+    let secondDeferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 180_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      secondDeferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      secondStub.restore();
+    }
+
+    // The proof decides — a degraded publication never passes the gate.
+    expect(secondDeferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe("Review output was invalid; a degraded summary comment was published.");
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
 
   test("a retryable infra failure keeps the row open: the retry can still publish", async () => {
     const db = seededDb();
