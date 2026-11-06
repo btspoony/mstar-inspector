@@ -11,14 +11,16 @@
  *     three-valued coverage and its model-context caps (quoted from the
  *     shared constants, never retyped), output contract = one yield of the
  *     recheck doc; deterministic;
- *   - recheckBudget: min(the full recheck cap, deadline - now - 5s), 0 = skip
+ *   - recheckBudget: min(the caller's cap — `RECHECK_MAX_RUNTIME_MS` by
+ *     default, the tier's clock in production, deadline - now - 5s), 0 = skip
  *     below the contract's minimum remaining (boundary: exactly the floor
  *     stays);
  *   - anchorRecheckDeadline/currentRecheckBudget/resetRecheckAnchor: the
- *     §7.8 outer caps per tier (the engine's `PR_REVIEW_TIER_BUDGETS` table,
- *     never a literal here); unset anchor degrades to the full recheck cap
- *     from "now"; re-anchoring overrides; the reset returns the process to
- *     that unanchored state;
+ *     budget is the anchored TIER's own clock (pinned here as literal
+ *     effective caps, never recomputed from the implementation's formula)
+ *     bounded by the outer guard less the publication tail; unset anchor
+ *     degrades to the default tier's cap from "now"; re-anchoring overrides;
+ *     the reset returns the process to that unanchored state;
  *   - remainingSoftMinutes / remainingOuterMs: the tier's SOFT wall-clock
  *     clock (negative past the cap, never clamped) versus the outer exec
  *     guard, both pure views over the same anchor;
@@ -29,7 +31,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 
 import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 
-import { anchorRecheckDeadline, currentRecheckBudget, OUTER_RUNNER_CAP_MS, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget, recheckRoundStatus, remainingOuterMs, remainingSoftMinutes, resetRecheckAnchor } from "../../packages/runner/src/recheck";
+import { anchorRecheckDeadline, currentRecheckBudget, OUTER_RUNNER_CAP_MS, PUBLICATION_TAIL_MS, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget, recheckRoundStatus, remainingOuterMs, remainingSoftMinutes, resetRecheckAnchor } from "../../packages/runner/src/recheck";
 import { MODEL_ITEM_MAX_CHARS, MODEL_MAX_ITEMS, MODEL_TOTAL_MAX_CHARS, RECHECK_MAX_RUNTIME_MS, RECHECK_MIN_REMAINING_MS, type Assessment, type RecheckGateResult, type RecheckInput, type RecheckRowRejection } from "../../packages/shared/src/recheck-wire";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -231,7 +233,7 @@ describe("recheckAssignment", () => {
   });
 });
 
-describe("recheckBudget (spec §7.8: min(180000, deadline-now-5000); 0 = skip)", () => {
+describe("recheckBudget (spec §7.8: min(cap, deadline-now-5000); 0 = skip)", () => {
   test("caps at the full 180,000ms when the outer deadline is far", () => {
     expect(recheckBudget(1_000_000 + 600_000, 600_000)).toBe(180_000);
     expect(recheckBudget(600_000 + 185_000, 600_000)).toBe(180_000);
@@ -264,10 +266,34 @@ describe("recheckBudget (spec §7.8: min(180000, deadline-now-5000); 0 = skip)",
     expect(recheckBudget(Number.NaN, 600_000)).toBe(0);
     expect(recheckBudget(600_000, Number.NaN)).toBe(0);
     expect(recheckBudget(Number.POSITIVE_INFINITY, 600_000)).toBe(0);
+    expect(recheckBudget(600_000 + 600_000, 600_000, Number.NaN)).toBe(0);
+    expect(recheckBudget(1_200_000, 600_000, -1)).toBe(0);
+  });
+
+  test("a caller-supplied cap replaces the default — and the floor still decides", () => {
+    // The tier's clock (540,000ms for default) is wider than the old 180s cap
+    // and narrower than the deadline: the caller's figure is the cap.
+    expect(recheckBudget(600_000 + 600_000, 600_000, 540_000)).toBe(540_000);
+    // A cap below the contract's minimum is a skip, never a short seat.
+    expect(recheckBudget(600_000 + 600_000, 600_000, RECHECK_MIN_REMAINING_MS - 1)).toBe(0);
   });
 });
 
-describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 outer caps)", () => {
+/**
+ * The cap each tier actually gets, as a literal table — NOT a copy of the
+ * implementation's `min` formula, so the expectation cannot move with the
+ * implementation. Quick's 5-minute clock fits inside its 9-minute outer
+ * window (300,000); default's 10-minute clock is bounded by the outer guard's
+ * 60s tail (600,000 - 60,000 = 540,000); deep's 15-minute clock is bounded by
+ * its 14-minute outer guard (840,000 - 60,000 = 780,000).
+ */
+const TIER_CAP_MS: Record<keyof typeof OUTER_RUNNER_CAP_MS, number> = {
+  quick: 300_000,
+  default: 540_000,
+  deep: 780_000,
+};
+
+describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 tier budgets)", () => {
   // bun's module registry is process-global, so the anchor is shared across
   // test files. Every case starts from the UNSET state instead of depending on
   // another case's leftover anchor or on declaration order.
@@ -275,34 +301,45 @@ describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 outer caps)", () =
     resetRecheckAnchor();
   });
 
-  test("no anchor (or a far-future one) yields the full recheck cap from now", () => {
-    expect(currentRecheckBudget(Date.now())).toBe(RECHECK_MAX_RUNTIME_MS);
+  test("no anchor yields the default tier's cap from now — never a fixed 180s", () => {
+    expect(currentRecheckBudget(Date.now())).toBe(TIER_CAP_MS.default);
+    // I-000431: the round reads up to 25 published findings, so the tier's
+    // clock is the budget; 180s survives only as the pure function's default.
+    expect(TIER_CAP_MS.default).toBeGreaterThan(RECHECK_MAX_RUNTIME_MS);
   });
 
-  test("quick/default: the tier's outer cap — the seat shares the review deadline", () => {
+  test("quick/default: the tier's own clock — the seat shares the review deadline", () => {
     const start = Date.now();
     const cap = OUTER_RUNNER_CAP_MS.quick;
     anchorRecheckDeadline(start, "quick");
-    // Immediately after start the recheck cap dominates.
-    expect(currentRecheckBudget(start)).toBe(RECHECK_MAX_RUNTIME_MS);
-    // Near the outer deadline: whatever remains, minus the 5s start margin.
-    expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - 5_000)).toBe(RECHECK_MIN_REMAINING_MS);
+    // Immediately after start the tier's clock dominates.
+    expect(currentRecheckBudget(start)).toBe(TIER_CAP_MS.quick);
+    // Near the outer deadline: whatever remains less the publication tail, down
+    // to the contract's floor.
+    expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - PUBLICATION_TAIL_MS)).toBe(
+      RECHECK_MIN_REMAINING_MS,
+    );
     // 1ms less: below the floor → skip.
-    expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - 4_999)).toBe(0);
+    expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - PUBLICATION_TAIL_MS + 1)).toBe(0);
     // At/past the outer deadline there is nothing left — never a fresh cap.
     expect(currentRecheckBudget(start + cap)).toBe(0);
     expect(currentRecheckBudget(start + cap + 100_000)).toBe(0);
   });
 
-  test("deep: the taller outer cap — still budgeted late in the run", () => {
+  test("deep: the taller tier clock, bounded by the outer guard's tail", () => {
     const start = Date.now();
     const cap = OUTER_RUNNER_CAP_MS.deep;
     anchorRecheckDeadline(start, "deep");
-    expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - 5_000)).toBe(RECHECK_MIN_REMAINING_MS);
-    // Late but inside deep's cap the full recheck cap still fits; the SAME
+    // Deep's 15-minute tier clock is wider than its 14-minute outer guard, so
+    // the guard minus the publication tail is what decides.
+    expect(currentRecheckBudget(start)).toBe(TIER_CAP_MS.deep);
+    expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - PUBLICATION_TAIL_MS)).toBe(
+      RECHECK_MIN_REMAINING_MS,
+    );
+    // Late but inside deep's cap the tail-bounded budget still runs; the SAME
     // instant under quick's shorter cap has nothing left.
     const late = start + OUTER_RUNNER_CAP_MS.quick + 1_000;
-    expect(currentRecheckBudget(late)).toBe(RECHECK_MAX_RUNTIME_MS);
+    expect(currentRecheckBudget(late)).toBe(cap - (late - start) - PUBLICATION_TAIL_MS);
     anchorRecheckDeadline(start, "quick");
     expect(currentRecheckBudget(late)).toBe(0);
   });
@@ -312,17 +349,16 @@ describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 outer caps)", () =
     const start = Date.now();
     anchorRecheckDeadline(start, "default");
     // Under the OLD quick deadline (start_of_test + cap) this instant would
-    // already be past — only the override makes a budget available.
-    expect(currentRecheckBudget(start + 500_000)).toBe(
-      Math.min(RECHECK_MAX_RUNTIME_MS, OUTER_RUNNER_CAP_MS.default - 500_000 - 5_000),
-    );
+    // already be past — only the override makes a budget available: 100,000ms
+    // of outer guard left less the 60s publication tail.
+    expect(currentRecheckBudget(start + 500_000)).toBe(40_000);
   });
 
   test("resetRecheckAnchor returns the process to the unset state", () => {
     anchorRecheckDeadline(Date.now() - 10 * 60_000, "quick");
     expect(currentRecheckBudget(Date.now())).toBe(0);
     resetRecheckAnchor();
-    expect(currentRecheckBudget(Date.now())).toBe(RECHECK_MAX_RUNTIME_MS);
+    expect(currentRecheckBudget(Date.now())).toBe(TIER_CAP_MS.default);
     expect(remainingSoftMinutes(Date.now())).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
   });
 });

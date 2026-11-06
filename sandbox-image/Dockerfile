@@ -7,6 +7,14 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the recheck seat's budget is the anchored TIER's wall clock (quick
+# 300s / default 600s / deep 900s, bounded by the outer guard's 60s publication
+# tail) instead of a fixed 180s, and a failed round's status now names the
+# child's `abortReason` and then its exit code. Both live in
+# `packages/runner/src/recheck.ts`: a stale image still kills the seat at 180s
+# while it is reading prior findings and still records a bare
+# "(status unavailable)" with no attribution (I-000431).
+#
 # rebuild: the recheck seat fits its ask to the operator's byte budget and validates
 # the yield against the catalog the seat actually received. Both behaviours live in
 # `packages/runner/src/recheck.ts` (the fitting and the received-catalog validation,
