@@ -4050,14 +4050,15 @@ async function processMessage(
         fields,
         `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
       );
-      // Deliberately NOT terminalized: recovery already owns a publication for
-      // this head, and the honest Check conclusion is that publication's proof
-      // — a premature `neutral` here would outlive the proof that corrects it.
-      // The admitted claim is RELEASED instead (remote-unconfirmed + the first
-      // backoff rung), so the minute lane adopts this run and concludes from
-      // that proof; leaving it on the visitor's 15-minute lease would close it
-      // red on a commit whose review was published — the symptom this change
-      // exists to remove.
+      // Deliberately NOT terminalized: this attempt published nothing, and the
+      // publication on this head belongs to an earlier generation — a proof
+      // this attempt never linked, so it can never decide this attempt's Check
+      // (spec §7.9/§7.11.2). A premature `neutral` here would outlive the run
+      // that still owns the lease. The admitted claim is RELEASED instead
+      // (remote-unconfirmed + the first backoff rung), so the recoverer waits
+      // out THIS attempt's execution deadline and closes it with the honest
+      // unconfirmed failure rather than freezing a conclusion under a live
+      // lease.
       if (checkHandle !== null) await abandonCheck(checkHandle, "publication journal handoff");
       return { kind: "ok" };
     }

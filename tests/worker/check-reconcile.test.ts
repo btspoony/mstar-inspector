@@ -91,6 +91,7 @@ import {
   agreeingScript,
   asEnv,
   claim,
+  linkPublication,
   proofFor,
   rawRow,
   remoteFor,
@@ -282,8 +283,10 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     const proof = proofFor(attempt.identity, "review");
     // The gate reads the review THIS publication carried, never the scope/SHA
     // `reviews` projection (see `readPublishedReview`), so the envelope lives in
-    // the publication payload.
+    // the publication payload. The publication is the one THIS attempt linked
+    // in its own intent write — a head-matched proof alone decides nothing.
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
+    linkPublication(db, attempt.identity.attemptId, proof.publicationId);
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, {
@@ -322,7 +325,9 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
   test("a confirmed degraded publication concludes failure, not neutral", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    seedPublication(db, SCOPE, SHA, proofFor(attempt.identity, "degraded"), "applied");
+    const degraded = proofFor(attempt.identity, "degraded");
+    seedPublication(db, SCOPE, SHA, degraded, "applied");
+    linkPublication(db, attempt.identity.attemptId, degraded.publicationId);
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, {
@@ -383,6 +388,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     // case is about.
     const proof = proofFor(attempt.identity);
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 96));
+    linkPublication(db, attempt.identity.attemptId, proof.publicationId);
     // The gate and the review payload are the two reads a failing D1 keeps
     // failing; after migration 0045 a corrupt `check_pass_verdicts` no longer
     // throws either — `getCheckGate` reports it as null, the same UNREADABLE
@@ -421,19 +427,22 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
   test("a newly discovered proof CORRECTS a persisted unknown failure to success on the same run", async () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db);
-    // The consumer already froze an unconfirmed failure with no proof link.
+    // The consumer already froze an unconfirmed failure, linking the publication
+    // whose send came back unknown (`terminalizeCheck(publicationId,
+    // "publication-unknown")`) — that link is the ONLY way the proof can still
+    // turn up for this attempt.
+    const proof = proofFor(attempt.identity, "review");
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 92));
     expect(
       await setCheckDesired(
         db,
         attempt.identity.attemptId,
         lease,
         { desired: "failure", title: CHECK_NAME, summary: "unconfirmed" },
-        null,
+        proof.publicationId,
         CLAIM_AT,
       ),
     ).toBe(true);
-    const proof = proofFor(attempt.identity, "review");
-    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 92));
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, {
@@ -470,6 +479,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     const { attempt } = await claim(db);
     const proof = proofFor(attempt.identity, "review");
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 95));
+    linkPublication(db, attempt.identity.attemptId, proof.publicationId);
     seedReview(db, SCOPE, SHA, "blocked", 40);
     const fetchStub = stubFetch();
     try {
@@ -2761,11 +2771,14 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(deferred[0]!.probe_state).toBe("none");
   });
 
-  test("a proof that lands before the deadline yields the gate-derived conclusion", async () => {
+  test("a proof linked to THIS attempt ends the wait before the deadline and decides", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
     const proof = proofFor(attempt.identity);
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
+    // The link the attempt's own intent write records. Without it the proof
+    // below is just a head-matched row and proves nothing about this attempt.
+    linkPublication(db, id, proof.publicationId);
 
     const stub = stubFetch();
     const sent: { desired?: string; summary?: string } = {};
@@ -2830,8 +2843,11 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(waitingRow.desired).toBe("in_progress");
     expect(waitingRow.observed).toBe("unknown");
 
-    // The publication lands and decides the row.
-    seedPublication(db, SCOPE, SHA, proofFor(attempt.identity), "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
+    // The publication lands and decides the row — linked by this attempt, which
+    // is what makes it this attempt's proof at all.
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
+    linkPublication(db, id, proof.publicationId);
     const sent: { desired?: string; summary?: string } = {};
     const secondStub = stubFetch();
     let secondDeferred = -1;
@@ -2891,8 +2907,11 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(waitingRow.observed).toBe("unknown");
 
     // THIS attempt's own publication lands its proof, whose envelope is the one
-    // the gate reads — not the stale `reviews` row above.
-    seedPublication(db, SCOPE, SHA, proofFor(attempt.identity), "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
+    // the gate reads — not the stale `reviews` row above. It decides only
+    // because this attempt linked it.
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
+    linkPublication(db, id, proof.publicationId);
     const sent: { desired?: string; summary?: string } = {};
     const secondStub = stubFetch();
     let secondDeferred = -1;
@@ -2913,6 +2932,91 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     const row = await rawRow(db, id);
     expect(row.observed).toBe("success");
     expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("a PRIOR attempt's proof never ends the wait: only a proof linked to this attempt can", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    // Attempt A published this head and its proof is applied and readable. This
+    // attempt is a same-SHA re-trigger abandoned pre-publication, with no
+    // `publication_id` link — so nothing ties A's proof to it. Adopting that
+    // envelope would freeze THIS Check on a review this attempt never produced,
+    // and `idx_check_one_open` would make the freeze permanent.
+    const prior = { ...proofFor(attempt.identity), publicationId: `pub-prior-${attempt.identity.attemptId}` };
+    seedPublication(db, SCOPE, SHA, prior, "applied", reviewPayload(SCOPE, SHA, "ship it", 90));
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    // Deferred with nothing frozen: the prior proof ended no wait, spent no
+    // attempt and minted no credential.
+    expect(factoryCalls).toBe(0);
+    const waitingRow = await rawRow(db, id);
+    expect(waitingRow.publication_id).toBeNull();
+    expect(waitingRow.terminal_ms).toBeNull();
+    expect(waitingRow.attempts).toBe(1);
+    expect(waitingRow.desired).toBe("in_progress");
+    expect(waitingRow.observed).toBe("unknown");
+
+    // Offering the same prior proof at the next rung changes nothing.
+    const secondStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 180_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      secondStub.restore();
+    }
+    expect(factoryCalls).toBe(0);
+    expect((await rawRow(db, id)).terminal_ms).toBeNull();
+
+    // THIS attempt's own publication lands and is linked: now it decides. One
+    // publication per scope/head/kind exists, so a same-head re-trigger owns the
+    // degraded row (its review row could only ever be the prior attempt's). The
+    // conclusion is that row's — failure for a degraded publication — and never
+    // the prior review proof's success.
+    const own = { ...proofFor(attempt.identity, "degraded"), publicationId: `pub-own-${attempt.identity.attemptId}` };
+    seedPublication(db, SCOPE, SHA, own, "confirmed");
+    linkPublication(db, id, own.publicationId);
+    const sent: { desired?: string; summary?: string } = {};
+    const thirdStub = stubFetch();
+    let thirdDeferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 240_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      thirdDeferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      thirdStub.restore();
+    }
+
+    expect(thirdDeferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe("Review output was invalid; a degraded summary comment was published.");
+    const row = await rawRow(db, id);
+    expect(row.publication_id).toBe(own.publicationId);
+    expect(row.observed).toBe("failure");
   });
 
   test("a parse-stage failure row is NOT terminal: the degraded publication still decides", async () => {
@@ -2947,8 +3051,11 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(deferredRow.desired_summary).toBeNull();
     expect(deferredRow.observed).toBe("unknown");
 
-    // The degrade path lands its publication: applied proof for this head.
-    seedPublication(db, SCOPE, SHA, proofFor(attempt.identity, "degraded"), "applied");
+    // The degrade path lands its publication: applied proof, linked by the
+    // attempt that published it.
+    const degraded = proofFor(attempt.identity, "degraded");
+    seedPublication(db, SCOPE, SHA, degraded, "applied");
+    linkPublication(db, id, degraded.publicationId);
 
     const sent: { desired?: string; summary?: string } = {};
     const secondStub = stubFetch();

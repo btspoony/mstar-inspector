@@ -26,6 +26,7 @@ import {
   T0,
   UNCONFIRMED,
   claim,
+  linkPublication,
   proofFor,
   rawRow,
   remoteFor,
@@ -97,6 +98,9 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       const db = seededDb();
       const { attempt, id } = await handedOverAttempt(db);
       const journalId = seedJournal(db, SCOPE, SHA, phase);
+      // The journal row IS this attempt's own publication — the link its intent
+      // write records. Without it no proof on this head can decide the attempt.
+      linkPublication(db, id, journalId);
 
       const firstStub = stubFetch();
       const calls = { adopt: 0, begin: 0, complete: 0 };
@@ -234,6 +238,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     // not readable yet, so concluding now would freeze an unconfirmed failure
     // that the arriving proof could no longer correct.
     const journalId = seedJournal(db, SCOPE, SHA, "confirmed");
+    linkPublication(db, id, journalId);
 
     const firstStub = stubFetch();
     let factoryCalls = 0;
@@ -292,15 +297,16 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
   test("an OLDER proof on another journal row never ends the wait", async () => {
     const db = seededDb();
     const { attempt, id } = await handedOverAttempt(db);
-    // An older DEGRADED publication for the same head already has proof; a
-    // newer NORMAL publication is still prepared. Only the newest hand-off
-    // row's own proof may end the wait — an older one would freeze a degraded
-    // failure while the normal review was still in flight.
+    // An older DEGRADED publication for the same head already has proof; the
+    // publication THIS attempt owns is a newer NORMAL one, still prepared. Only
+    // the linked row's own proof may decide — an older head proof would freeze
+    // a degraded failure while the normal review was still in flight.
     const degraded = proofFor(attempt.identity, "degraded");
     seedPublication(db, SCOPE, SHA, degraded, "confirmed", reviewPayload(SCOPE, SHA, "needs fixes", 40));
     db.raw.prepare(`UPDATE review_publications SET created_ms = ? WHERE id = ?`).run(T0 - 30_000, degraded.publicationId);
     const journalId = seedJournal(db, SCOPE, SHA, "prepared");
     db.raw.prepare(`UPDATE review_publications SET created_ms = ? WHERE id = ?`).run(T0 - 10_000, journalId);
+    linkPublication(db, id, journalId);
 
     const stub = stubFetch();
     let factoryCalls = 0;
@@ -359,10 +365,11 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(closed.observed).toBe("success");
   });
 
-  test("the journal's OWN proof ends the wait even while its phase is prepared", async () => {
+  test("the attempt's OWN linked proof ends the wait even while its phase is prepared", async () => {
     const db = seededDb();
     const { attempt, id } = await handedOverAttempt(db);
     const journalId = seedJournal(db, SCOPE, SHA, "prepared");
+    linkPublication(db, id, journalId);
     // The proof is readable on the waiting row itself, so the conclusion can be
     // decided now — the phase alone does not keep the wait alive.
     const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
