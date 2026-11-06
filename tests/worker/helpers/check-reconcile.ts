@@ -173,6 +173,16 @@ export function seedPublication(
 }
 
 /**
+ * Attach a publication to the attempt — the link the attempt's OWN intent write
+ * records in `review_checks.publication_id`. Only a linked publication's proof
+ * can decide that attempt's Check (spec §7.9): another generation's publication
+ * for the same head proves nothing about this attempt.
+ */
+export function linkPublication(db: TestD1, attemptId: string, publicationId: string): void {
+  db.raw.prepare(`UPDATE review_checks SET publication_id = ? WHERE id = ?`).run(publicationId, attemptId);
+}
+
+/**
  * An in-flight (or given-phase) publication-journal row for the exact
  * scope/head with NO persisted proof — the journal hand-off state.
  */

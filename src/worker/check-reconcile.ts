@@ -778,17 +778,18 @@ async function reconcileCheckAttempt(
   // §7.11.2 step 2a — the publication-proof WAIT, decided BEFORE any credential
   // work: a row that is only waiting must not mint GitHub requests, and it must
   // not push terminal rows behind its App-identity probe. While the exact
-  // scope/head still owns an in-flight journal (or that read is unreadable) and
-  // the execution deadline is ahead, the row is not concludable yet: claim it
-  // (D1 only) and give the claim straight back, spending no attempt.
+  // scope/head still owns an in-flight journal (or that read is unreadable), or
+  // this attempt has no readable proof of its OWN, and the execution deadline is
+  // ahead, the row is not concludable yet: claim it (D1 only) and give the claim
+  // straight back, spending no attempt.
   //
-  // A missing journal is NOT the end of the wait: the review may simply not
-  // have prepared its publication yet, so a row with no readable proof keeps
-  // waiting until one exists or the deadline passes. No row of another table
-  // ends it early: neither `reviews` nor `review_failures` carries attempt
-  // identity, so on a same-SHA re-trigger a PRIOR attempt's row for the head
-  // looks exactly like this attempt's own and would freeze this attempt's Check
-  // as `failure` while its own publication is still in flight.
+  // Neither a missing journal nor a head-matched proof ends the wait. A review
+  // may simply not have prepared its publication yet — and on a same-SHA
+  // re-trigger a PRIOR attempt's publication for the head is not this attempt's:
+  // its proof is only readable through the `publication_id` this attempt's own
+  // intent write linked, so an unlinked row keeps waiting until that link exists
+  // or the deadline passes. Neither `reviews` nor `review_failures` carries
+  // attempt identity either, so their rows cannot end it early.
   if (now() < row.executionDeadlineMs) {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6): a waiting
     // row whose App is disabled/deleted or whose installation mapping vanished
@@ -1253,21 +1254,32 @@ async function pairUnusableReason(db: D1Like, scope: Scope): Promise<CheckCreden
 }
 
 /**
- * Read the exact-scope persisted publication proof (normal proof preferred
- * over degraded, `publicationId` first when supplied). A read failure is
- * UNPROVEN, never "not published".
+ * The proof of the publication THIS attempt owns — the one its own intent write
+ * linked into `publication_id` (spec §7.9). Unlinked (`publicationId` absent) is
+ * UNPROVEN, exactly like a linked row whose proof is not readable yet or a
+ * failed read; `null` never means "not published".
+ *
+ * There is deliberately no head-keyed fallback. Under RL-12 a re-trigger reuses
+ * the head, so another generation's publication for the SAME scope/SHA is
+ * indistinguishable from this attempt's own except by that link; adopting its
+ * proof would freeze this attempt's Check from an envelope it never published,
+ * and the frozen row could never be corrected.
  */
 async function readProof(
   db: D1Like,
   identity: CheckIdentity,
   publicationId?: string | null,
 ): Promise<PublicationProof | null> {
+  if (publicationId === null || publicationId === undefined) return null;
   try {
-    return await readPublicationProof(db, {
+    const proof = await readPublicationProof(db, {
       scope: identity.scope,
       headSha: identity.headSha,
-      ...(publicationId === null || publicationId === undefined ? {} : { publicationId }),
+      publicationId,
     });
+    // The store reader prefers the linked row but still falls back to another
+    // row of the same head; only the linked row's own proof is this attempt's.
+    return proof !== null && proof.publicationId === publicationId ? proof : null;
   } catch {
     return null;
   }
@@ -1346,7 +1358,9 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
     // nothing in flight to report — the caller's own proof read decides whether
     // the row is concludable.
     if (journal === null) return { kind: "none" };
-    // THIS row's own proof ends the wait; anything else keeps waiting.
+    // A readable proof on that row ends the PROBE's part of the wait; whether
+    // the row is concludable is still the caller's attempt-owned proof read —
+    // an attempt that never linked a publication owns nothing to conclude from.
     return journal.hasProof ? { kind: "none" } : { kind: "pending", phase: journal.phase };
   } catch {
     return { kind: "unknown" };
