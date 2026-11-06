@@ -64,3 +64,7 @@ Adding/updating providers, refreshing the models.dev snapshot, onboarding anothe
 
 - `scripts/generate-provider-catalog.ts` — generator with snapshot header + idempotency.
 - `add-template-provider` op (settings POST family) — workers-ai materialization reference.
+
+## Widening the catalog vocabulary is a payload AND a DOM decision
+
+The generated `provider_catalog[].models` list feeds three places: the settings payload, the card's model disclosure, and (through `groupMeta`'s `declaration?.model_ids ?? catalog?.models` fallback) the disclosure's contents for any group without a stored declaration. Removing a prefill cap therefore doubles the cost: the JSON grows (one snapshot provider alone carries ~594 ids, ~125 KB raw / ~30 KB gzipped across the file), and any surface that renders the array unbounded grows with it. Bound the rendering with a scroll cap whenever the array is widened, and keep the store bound (`MAX_CUSTOM_PROVIDER_MODEL_IDS`) as the separate limit on what may be persisted.
