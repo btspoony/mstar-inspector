@@ -2212,6 +2212,9 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(refusedBody).toContain("default score floor cannot be read");
     expect(refusedBody).not.toContain("The App could not be stored");
     expect(refusedBody).toContain('href="/dashboard/default/settings"');
+    // The clause's terminator rides directly after the link, so a dropped or
+    // misplaced end is visible instead of a bare link at the sentence edge.
+    expect(refusedBody).toContain(">workspace settings</a>.");
     // Retryable: the callback parks the hold so /manifest/confirm can resume.
     const holdCookie =
       refused.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
