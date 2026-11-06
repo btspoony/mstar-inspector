@@ -560,7 +560,7 @@ export async function applyPublishedLifecycle(
     .first<{ present: number }>();
   if (stored === null) {
     const store = createArtifactStore(db);
-    await store.put(payload.artifact);
+    await store.put({ ...payload.artifact, round: payload.round });
   }
 
   // Step 2 — the lifecycle writes in db.batches of at most

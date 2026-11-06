@@ -558,6 +558,25 @@ describe("createArtifactStore().put — optional summary", () => {
   });
 });
 
+describe("createArtifactStore().put — publication round", () => {
+  test("stores the round the consumer staged; absent stays NULL", async () => {
+    const db = createSeededTestD1();
+    const store = createArtifactStore(db);
+    await store.put(reviewDoc({ round: 4 }));
+    await store.put(reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "a".repeat(40) }) }));
+
+    const rows = db.raw
+      .query("SELECT head_sha, round FROM reviews ORDER BY round")
+      .all() as Array<{ head_sha: string; round: number | null }>;
+    // Rows written before migration 0050 keep the column NULL; the detail
+    // read falls back to the reviewed_at ordinal for them.
+    expect(rows).toEqual([
+      { head_sha: "a".repeat(40), round: null },
+      { head_sha: SHA, round: 4 },
+    ]);
+  });
+});
+
 describe("createArtifactStore().get", () => {
   test("returns the parsed envelope for a v1 row", async () => {
     const db = createSeededTestD1();

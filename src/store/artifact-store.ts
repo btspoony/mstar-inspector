@@ -198,6 +198,14 @@ export type ReviewArtifactDoc = ArtifactDoc & {
    * predate the column, and no duration is fabricated for them).
    */
   durationMs?: number;
+  /**
+   * The publication round ordinal this review reports — the same value the
+   * lifecycle stamps onto `review_findings.first_seen_round`, so both detail
+   * faces print one number space. Optional; omitted = NULL (rows written
+   * before migration 0050, and direct unit callers) and the read falls back
+   * to the `reviewed_at` ordinal.
+   */
+  round?: number | null;
 };
 
 /** The D1 store face: the engine `ArtifactStore` plus the consumer's pre-check. */
@@ -271,8 +279,8 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
       const appId = doc.appId;
       const reviewStmt = db
         .prepare(
-          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id, model, provider, context_incomplete, duration_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id, model, provider, context_incomplete, duration_ms, round)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO NOTHING`,
         )
         .bind(
@@ -301,6 +309,9 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           doc.contextIncomplete === true ? 1 : 0,
           // The measured round wall clock; NULL for rows that never carried one.
           doc.durationMs ?? null,
+          // The publication round, so the findings and reviews faces share one
+          // ordinal space; NULL on rows written before migration 0050.
+          doc.round ?? null,
         );
       // raw_output stays NULL on the v1 path: the envelope is authoritative
       // (its 64KB truncation is not losslessly restorable).

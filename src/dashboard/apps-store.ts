@@ -1880,10 +1880,17 @@ export function createAppsStore(db: AppsStoreD1) {
      * count, the dot and the pager must agree with the list.
      *
      * Each row also carries `review_round`: the ordinal of the round that FIRST
-     * reported it — `first_seen_sha` matched against the PR's reviews ordered
-     * oldest-first (`reviews` oldest → 1). A finding whose sha no review row
-     * carries (history outside the ledger, or a comment-only round) reports
-     * NULL, and the client omits the chip.
+     * reported it, read from `review_findings.first_seen_round` — the value
+     * the lifecycle write stamped when the row was inserted. It is stored, not
+     * derived from `reviews`. The divergence source is the artifact upsert's
+     * `ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO
+     * NOTHING` (`store/artifact-store.ts`): one `reviews` row per distinct
+     * head_sha, so a second review of the same head inserts no row and a
+     * derived ordinal would number the two faces from different populations.
+     * A published round with zero findings still writes its `reviews` row, and
+     * a failed round never owns a finding. Migration 0020 creates the table
+     * with `first_seen_round INTEGER NOT NULL` and no predecessor, so every
+     * row has one and the read needs no COALESCE.
      *
      * The page is ordered by `rowid`, the immutable insert order — `updated_ms`
      * advances every time a review round re-reports an open finding, so
@@ -1929,18 +1936,13 @@ export function createAppsStore(db: AppsStoreD1) {
                     json_extract(rf.original_json, '$.filePath') AS file_path,
                     json_extract(rf.original_json, '$.lineStart') AS line,
                     json_extract(rf.original_json, '$.body') AS body,
-                    (SELECT rr.rn
-                     FROM (SELECT head_sha,
-                                  ROW_NUMBER() OVER (ORDER BY reviewed_at ASC, rowid ASC) AS rn
-                           FROM reviews
-                           WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?) rr
-                     WHERE rr.head_sha = rf.first_seen_sha) AS review_round
+                    rf.first_seen_round AS review_round
              FROM review_findings rf
              WHERE rf.app_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}
              ORDER BY rf.rowid DESC
              LIMIT ? OFFSET ?`,
           )
-          .bind(appId, owner, repo, prNumber, appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
+          .bind(appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
       ]);
       if (results[0]!.results.length === 0) return null;
       return {
@@ -1954,13 +1956,17 @@ export function createAppsStore(db: AppsStoreD1) {
      * its latest verdict. `null` = the App's ledger does not hold this PR.
      *
      * Each row carries the round ORDINAL and that round's run facts. The
-     * ordinal is the PR's `reviews` ordered oldest-first (`reviewed_at ASC,
-     * rowid ASC`, numbered from 1), computed at read time so historical rows
-     * need no backfill; paging never renumbers, because the window function
-     * covers the whole PR before the newest-first page slice. `duration_ms` is
-     * NULL for rows written before the measurement. `findings` counts the
-     * legacy `findings` rows attributed to that review, across every lifecycle
-     * state — the number of findings that round reported.
+     * ordinal is `reviews.round`, the publication round the consumer stamped
+     * at insert — the same value `review_findings.first_seen_round` stores, so
+     * a finding and the review that reported it print the same number. Rows
+     * written before that column fall back to the PR's `reviews` ordered
+     * oldest-first (`reviewed_at ASC, rowid ASC`, from 1), which is what the
+     * pre-column faces displayed; paging never renumbers, because both
+     * expressions cover the whole PR before the newest-first page slice.
+     * `duration_ms` is NULL for rows written before the measurement.
+     * `findings` counts the legacy `findings` rows attributed to that review,
+     * across every lifecycle state — the number of findings that round
+     * reported.
      */
     async listPullRequestReviews(
       appId: string,
@@ -1982,11 +1988,14 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT x.verdict, x.model, x.provider, x.reviewed_at, x.head_sha,
                     x.round, x.duration_ms,
                     (SELECT COUNT(*) FROM findings f WHERE f.review_id = x.id) AS findings
-             FROM (SELECT id, rowid AS rid, verdict, model, provider, reviewed_at,
-                          head_sha, duration_ms,
-                          ROW_NUMBER() OVER (ORDER BY reviewed_at ASC, rowid ASC) AS round
-                   FROM reviews
-                   WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?) x
+             FROM (SELECT r.id, r.rowid AS rid, r.verdict, r.model, r.provider, r.reviewed_at,
+                          r.head_sha, r.duration_ms,
+                          COALESCE(
+                            r.round,
+                            ROW_NUMBER() OVER (ORDER BY r.reviewed_at ASC, r.rowid ASC)
+                          ) AS round
+                   FROM reviews r
+                   WHERE r.app_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) x
              ORDER BY x.reviewed_at DESC, x.rid DESC
              LIMIT ? OFFSET ?`,
           )
@@ -2070,8 +2079,8 @@ export type PullRequestFindingRow = {
   file_path: string | null;
   line: number | null;
   body: string | null;
-  /** The PR round that first reported it (`reviews` ordered oldest-first); NULL when no review carries its `first_seen_sha`. */
-  review_round: number | null;
+  /** The stored ordinal of the round that first reported it (`review_findings.first_seen_round`). */
+  review_round: number;
 };
 
 /** One `reviews` row as the detail face reads it — nullable columns honest. */
@@ -2081,7 +2090,11 @@ export type PullRequestReviewDetailRow = {
   provider: string | null;
   reviewed_at: string;
   head_sha: string;
-  /** The round's ordinal in the PR's oldest-first review history (1 = first published round). */
+  /**
+   * The stored publication round (`reviews.round`), which can skip ordinals.
+   * Rows written before migration 0050 fall back to their position in the
+   * PR's oldest-first review history (1 = first).
+   */
   round: number;
   /** Wall clock of the round in ms; NULL for rows written before the measurement. */
   duration_ms: number | null;

@@ -882,7 +882,7 @@ export type PullRequestFinding = {
   /** `null` on file-level findings with no line anchor. */
   line: number | null;
   body: string;
-  /** The review round that first reported it; `null` when no review carries its first-seen sha. */
+  /** The stored round that first reported it; `null` only when the payload is not a positive integer. */
   review_round: number | null;
 };
 

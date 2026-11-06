@@ -553,13 +553,13 @@ describe("sweepTerminalPullRequests", () => {
 
 describe("pull request detail reads", () => {
   /** One review row for `PR`'s repo. */
-  function seedReview(db: TestD1, id: string, reviewedAt: string, verdict = "approve"): void {
+  function seedReview(db: TestD1, id: string, reviewedAt: string, verdict = "approve", round: number | null = null): void {
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, app_id)
-         VALUES (?, 99, 'acme', 'widgets', 131, ?, ?, 'looks good', 'm1', 'p1', ?, ?)`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, app_id, round)
+         VALUES (?, 99, 'acme', 'widgets', 131, ?, ?, 'looks good', 'm1', 'p1', ?, ?, ?)`,
       )
-      .run(id, `sha-${id}`, verdict, reviewedAt, APP_ID);
+      .run(id, `sha-${id}`, verdict, reviewedAt, APP_ID, round);
   }
 
   async function detailFixture(): Promise<TestD1> {
@@ -680,9 +680,8 @@ describe("pull request detail reads", () => {
         file_path: "src/a.ts",
         line: 12,
         body: "guard it",
-        // This PR's only review carries sha-r1; the finding's first-seen sha
-        // is sha-1, so no round matches.
-        review_round: null,
+        // The round that first reported it, read from the lifecycle row.
+        review_round: 1,
       },
     ]);
 
@@ -804,9 +803,11 @@ describe("pull request detail reads", () => {
       .run();
     // Only the newest round carries a measured clock; the seeded history stays NULL.
     db.raw.prepare("UPDATE reviews SET duration_ms = 65000 WHERE id = 'r3'").run();
-    // A lifecycle finding whose first-seen sha belongs to round 2…
+    // Choose the round that FIRST reported each finding.
     seedFinding(db, { findingId: "F-2", mergeClass: "nit", title: "n", filePath: "src/a.ts", lineStart: 1, body: "b" }, "row-2");
-    db.raw.prepare("UPDATE review_findings SET first_seen_sha = 'sha-r2' WHERE finding_id = 'F-1'").run();
+    db.raw
+      .prepare("UPDATE review_findings SET first_seen_sha = 'sha-r2', first_seen_round = 2 WHERE finding_id = 'F-1'")
+      .run();
     const store = createAppsStore(db);
 
     // Newest-first paging never renumbers: page 1 is rounds 3, 2; page 2 is
@@ -819,14 +820,15 @@ describe("pull request detail reads", () => {
     const second = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 2, limit: 2 });
     expect(second!.items.map((review) => review.round)).toEqual([1]);
 
-    // Each finding's round is the review whose head_sha is its first_seen_sha;
-    // F-2 still points at sha-1, which no review carries → NULL.
+    // Each finding's round is its stored `first_seen_round`. F-2 was first
+    // reported in round 1 and no `reviews` row carries its sha-1, which the
+    // old derived read reported as NULL; the stored ordinal still names it.
     const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
       offset: 0,
       limit: 10,
     });
     expect(findings!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([
-      ["F-2", null],
+      ["F-2", 1],
       ["F-1", 2],
     ]);
 
@@ -838,7 +840,54 @@ describe("pull request detail reads", () => {
       severity: "nit",
     });
     expect(filtered!.total).toBe(1);
-    expect(filtered!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([["F-2", null]]);
+    expect(filtered!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([["F-2", 1]]);
+  });
+
+  test("a finding's round survives a round with no reviews row", async () => {
+    const db = await detailFixture();
+    // One published round; a later round failed or only carried comments, so
+    // it inserted no `reviews` row and the ledger ordinal would shift or
+    // vanish. The finding's stored round still names the round that saw it.
+    seedReview(db, "r1", "2026-01-02 00:00:00");
+    seedFinding(
+      db,
+      { findingId: "F-3", mergeClass: "nit", title: "n", filePath: "src/a.ts", lineStart: 2, body: "b" },
+      "row-3",
+      "open",
+      3,
+      5,
+    );
+    const store = createAppsStore(db);
+    const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
+    expect(findings!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([
+      ["F-3", 3],
+      ["F-1", 1],
+    ]);
+  });
+
+  test("the stored round wins over the ordinal the head sha would derive", async () => {
+    const db = await detailFixture();
+    // Two published heads. sha-r2's review row stored round 3 — two later
+    // rounds re-reviewed a head the artifact upsert dedupes — while the
+    // reviews ledger can only number it 2. Both faces must print the stored
+    // value, so a derived-with-fallback read cannot pass this.
+    seedReview(db, "r1", "2026-01-02 00:00:00");
+    seedReview(db, "r2", "2026-01-03 00:00:00", "approve", 3);
+    db.raw
+      .prepare("UPDATE review_findings SET first_seen_sha = 'sha-r2', first_seen_round = 3 WHERE finding_id = 'F-1'")
+      .run();
+    const store = createAppsStore(db);
+
+    const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
+    expect(findings!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([["F-1", 3]]);
+
+    const reviews = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
+    // Newest first: r2 carries its stored round; r1 has none and keeps the
+    // ledger fallback.
+    expect(reviews!.items.map((review) => [review.head_sha, review.round])).toEqual([
+      ["sha-r2", 3],
+      ["sha-r1", 1],
+    ]);
   });
 
   test("unknown PR number → null head (the route's 404)", async () => {
@@ -897,6 +946,8 @@ function seedFinding(
   finding: { findingId: string; mergeClass: string; title: string; filePath: string; lineStart: number; body: string },
   rowId = "row-1",
   state: "open" | "addressed" | "dismissed" = "open",
+  firstSeenRound = 1,
+  lastSeenRound = firstSeenRound,
 ): void {
   // Two findings can share one publication: the first call creates it.
   db.raw
@@ -912,7 +963,7 @@ function seedFinding(
          (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
           first_seen_round, last_seen_round, state, created_ms, updated_ms)
-       VALUES (?, ?, 99, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', 1, 1, ?, 1, 1)`,
+       VALUES (?, ?, 99, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', ?, ?, ?, 1, 1)`,
     )
     .run(
       rowId,
@@ -928,6 +979,8 @@ function seedFinding(
         category: null,
         fingerprintHint: null,
       }),
+      firstSeenRound,
+      lastSeenRound,
       state,
     );
 }

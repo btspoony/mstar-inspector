@@ -380,6 +380,22 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
 });
 
 describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", () => {
+  test("stamps the publication round onto the stored reviews row", async () => {
+    const db = createSeededTestD1();
+    // Round 4 is deliberately not the positional fallback (1): dropping the
+    // `round: payload.round` hand-off leaves the column NULL, which reads as 1.
+    const pay = payload({ round: 4, lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }) });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
+
+    expect(db.raw.query("SELECT round FROM reviews").get()).toEqual({ round: 4 });
+    const finding = db.raw.prepare("SELECT first_seen_round FROM review_findings WHERE id = 'row-1'").get() as {
+      first_seen_round: number;
+    };
+    expect(finding.first_seen_round).toBe(4);
+  });
+
   test("happy path: store.put rows + lifecycle rows + applied mark in order", async () => {
     const db = createSeededTestD1();
     const pay = payload({
