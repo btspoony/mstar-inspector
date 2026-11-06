@@ -127,6 +127,9 @@
 # provenance) to each captured item. The container copies
 # `packages/shared/src/**`, so a stale image would run a runner built against
 # the previous shape.
+# rebuild: the runner's omp SDK pin moves to 18.16.0 along with the root
+# manifest, so both lockfiles resolve the same SDK (`packages/runner/
+# package.json` and its lockfile are image inputs).
 # rebuild: a comment-only edit — the CLI pin note no longer cites the deleted
 # pin suite. No build input changes; the marker exists because wrangler hashes
 # this file, so any textual change still rebuilds the image.
