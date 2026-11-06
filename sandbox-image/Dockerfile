@@ -119,6 +119,9 @@
 # provenance) to each captured item. The container copies
 # `packages/shared/src/**`, so a stale image would run a runner built against
 # the previous shape.
+# rebuild: the runner's omp SDK pin moves to 18.16.0 along with the root
+# manifest, so both lockfiles resolve the same SDK (`packages/runner/
+# package.json` and its lockfile are image inputs).
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and
