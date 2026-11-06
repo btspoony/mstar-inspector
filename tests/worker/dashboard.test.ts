@@ -2184,6 +2184,40 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(seeded.check_min_score).toBe(90);
   });
 
+  test("an unreadable workspace default fails the callback auto-commit closed on the same floor page", async () => {
+    // The flow's OWN write (GET /manifest/callback converts + commits in one
+    // request) must refuse the same degraded read as the resubmit route above:
+    // seeding the platform default here would widen the tenant's floor.
+    stubGitHubConversionOnly();
+    const env = commitEnv();
+    const db = dbOf(env);
+    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.prepare("UPDATE workspaces SET check_min_score = 'abc' WHERE id = 'default'").run();
+    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const state = await createManifestStateValue(SESSION_SECRET, START_APP_ID, "default");
+
+    const refused = await worker.fetch(
+      dashboardRequest(
+        `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_STATE_COOKIE}=${state}`,
+      ),
+      env,
+    );
+    expect(refused.status).toBe(500);
+    expect(appRowCount(env)).toBe(0);
+    // One wording for both routes: the copy names the workspace setting the
+    // operator can repair — not the database.
+    const refusedBody = await refused.text();
+    expect(refusedBody).toContain("default score floor cannot be read");
+    expect(refusedBody).not.toContain("The App could not be stored");
+    // Retryable: the callback parks the hold so /manifest/confirm can resume.
+    const holdCookie =
+      refused.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    expect(holdCookie).toBeTruthy();
+    expect(holdCookie).not.toContain("Max-Age=0");
+  });
+
   test("POST /manifest/commit stays an idempotent-recovery path: after a retryable callback 500, the SAME hold resubmits → 302 onboarding + one row", async () => {
     // 1. Callback with a key-less env: the auto-commit fails at encryption and
     // parks the hold cookie (500, zero rows). The signed state carries the
