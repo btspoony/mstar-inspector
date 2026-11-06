@@ -783,9 +783,12 @@ async function reconcileCheckAttempt(
   // (D1 only) and give the claim straight back, spending no attempt.
   //
   // A missing journal is NOT the end of the wait: the review may simply not
-  // have prepared its publication yet. Without a persisted proof the wait also
-  // holds while the head can still publish — only an already-applied review
-  // says a publication for this head has landed.
+  // have prepared its publication yet, so a row with no readable proof keeps
+  // waiting until one exists or the deadline passes. No row of another table
+  // ends it early: neither `reviews` nor `review_failures` carries attempt
+  // identity, so on a same-SHA re-trigger a PRIOR attempt's row for the head
+  // looks exactly like this attempt's own and would freeze this attempt's Check
+  // as `failure` while its own publication is still in flight.
   if (now() < row.executionDeadlineMs) {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6): a waiting
     // row whose App is disabled/deleted or whose installation mapping vanished
@@ -798,9 +801,7 @@ async function reconcileCheckAttempt(
     }
     const pending = await probePendingPublication(db, row);
     const waiting =
-      pending.kind !== "none" ||
-      ((await readProof(db, row.identity, row.publicationId)) === null &&
-        (await reviewCanStillPublish(db, row.identity)));
+      pending.kind !== "none" || (await readProof(db, row.identity, row.publicationId)) === null;
     if (waiting) {
       const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now());
       if (waitingLease === null) return;
@@ -1342,8 +1343,8 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
       order: "newest",
     });
     // No journal at all: nothing has been handed off yet, so THIS probe has
-    // nothing in flight to report — the caller decides whether the head can
-    // still publish.
+    // nothing in flight to report — the caller's own proof read decides whether
+    // the row is concludable.
     if (journal === null) return { kind: "none" };
     // THIS row's own proof ends the wait; anything else keeps waiting.
     return journal.hasProof ? { kind: "none" } : { kind: "pending", phase: journal.phase };
@@ -1353,51 +1354,14 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
 }
 
 /**
- * Whether the head on this attempt can still produce a publication. Only a
- * PERSISTED row that proves a publication for this head already LANDED may end
- * the wait: `reviews` is written only at publication, so a row for the head
- * proves it even when the journal or its proof is missing (same head means the
- * same diff).
- *
- * No `review_failures` row can end this wait. The admission-drop row is written
- * best-effort AFTER the consumer's ack (`handleGuardHeld`), carries no attempt
- * identity, and nothing orders it against a newer attempt's creation — so a
- * drop may belong to a prior, superseded attempt for the same head, and
- * reading it as "this attempt publishes nothing" would freeze this attempt's
- * Check as `failure` before its own publication could land. A drop therefore
- * waits like any other no-proof row: the publication proof, or the execution
- * deadline, decides.
- *
- * An unreadable read is "still possible": the execution deadline, not a failed
- * read, is what ends this wait.
- */
-async function reviewCanStillPublish(db: D1Like, identity: CheckIdentity): Promise<boolean> {
-  const { installationId, owner, repo, prNumber } = identity.scope;
-  try {
-    const applied = await db
-      .prepare(
-        `SELECT 1 AS applied FROM reviews
-          WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?
-          LIMIT 1`,
-      )
-      .bind(installationId, owner, repo, prNumber, identity.headSha)
-      .first();
-    return applied === null;
-  } catch {
-    return true;
-  }
-}
-
-/**
  * The terminal conclusion for a due attempt (spec §7.9 matrix): a persisted
  * publication proof decides the conclusion against the App gate — a normal
  * publication only succeeds when the applied review meets it — regardless of
  * how the attempt expired. The no-proof branch runs only once the wait above
- * has ended: the execution deadline passed, or an applied publication for the
- * head proves one already landed — which makes the honest unconfirmed `failure`
- * the conclusion. An intent the consumer already persisted is preserved
- * verbatim unless a proof-derived correction applies. `gate` is the App's
- * stored gate; `null` means it could not be read, so a proof-derived
+ * has ended: the execution deadline passed, which makes the honest unconfirmed
+ * `failure` the conclusion. An intent the consumer already persisted is
+ * preserved verbatim unless a proof-derived correction applies. `gate` is the
+ * App's stored gate; `null` means it could not be read, so a proof-derived
  * conclusion fails closed instead of assuming a default.
  */
 function terminalConclusion(

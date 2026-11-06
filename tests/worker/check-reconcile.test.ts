@@ -2754,8 +2754,8 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.lease_until_ms).toBeNull();
     expect(row.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
 
-    // The journal probe found nothing to report; the still-publishable verdict
-    // is what held the wait, and the line says so.
+    // The journal probe found nothing to report AND no readable proof exists:
+    // the missing proof is what held the wait, and the line says so.
     const deferred = events.filter((fields) => fields.event === "check_recovery_deferred_pending_publication");
     expect(deferred).toHaveLength(1);
     expect(deferred[0]!.probe_state).toBe("none");
@@ -2848,6 +2848,68 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
 
     expect(secondDeferred).toBe(0);
     expect(sent.desired).toBe("success");
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("success");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("a reviews row from an EARLIER attempt never ends the wait: this attempt's own proof decides", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    // `reviews` holds ONE row per scope/SHA and is written at publication — but
+    // it carries no attempt identity. On a re-trigger of the SAME head this row
+    // is the PRIOR attempt's, and nothing distinguishes it from the row THIS
+    // attempt would write: reading it as "the publication already landed" would
+    // conclude unconfirmed `failure` while this attempt's publication is still
+    // in flight and could never correct the frozen Check.
+    seedReview(db, SCOPE, SHA, "needs fixes", 40);
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    // Deferred, not concluded: the earlier row proved nothing about THIS
+    // attempt, so no conclusion was frozen and nothing was minted.
+    expect(factoryCalls).toBe(0);
+    const waitingRow = await rawRow(db, id);
+    expect(waitingRow.terminal_ms).toBeNull();
+    expect(waitingRow.attempts).toBe(1);
+    expect(waitingRow.desired).toBe("in_progress");
+    expect(waitingRow.desired_summary).toBeNull();
+    expect(waitingRow.observed).toBe("unknown");
+
+    // THIS attempt's own publication lands its proof, whose envelope is the one
+    // the gate reads — not the stale `reviews` row above.
+    seedPublication(db, SCOPE, SHA, proofFor(attempt.identity), "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
+    const sent: { desired?: string; summary?: string } = {};
+    const secondStub = stubFetch();
+    let secondDeferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 180_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      secondDeferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      secondStub.restore();
+    }
+
+    expect(secondDeferred).toBe(0);
+    expect(sent.desired).toBe("success");
+    expect(sent.summary).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
     const row = await rawRow(db, id);
     expect(row.observed).toBe("success");
     expect(row.terminal_ms).not.toBeNull();
