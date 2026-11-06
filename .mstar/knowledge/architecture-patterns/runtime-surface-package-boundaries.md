@@ -33,7 +33,6 @@ Executable guards:
 - `tests/contracts/shared-boundary.test.ts` — no runtime engine/omp/zod import, no path escaping `packages/shared/src`.
 - `tests/contracts/bundle-boundary.test.ts` — `Bun.build` metafile `inputs`: Worker graph has no `node_modules/@oh-my-pi/`, runner graph has no `node_modules/hono` / `node_modules/@octokit/`.
 - `tests/review/runtime-boundary.test.ts` — the image admits only `packages/runner/src` + `packages/shared/src`; a reappearing `COPY src/...` fails.
-- `tests/review/pin.test.ts` — engine resolves to the same version in the root lock, the runner lock, and the image pin.
 
 ## Image layout
 

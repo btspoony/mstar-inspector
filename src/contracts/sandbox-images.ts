@@ -75,9 +75,9 @@ export type SandboxImageHost = {
  *
  * The Dockerfile cannot read this module: this image is built with no build
  * args and no env (image contains runtime only, never App configuration), so
- * its literals are a second, unavoidable copy. `tests/review/pin.test.ts`
- * locks that copy to this declaration — a bump edits exactly here plus the
- * matching Dockerfile line, and drift between the two fails the pin suite.
+ * its literals are a second, unavoidable copy. Nothing compares the two
+ * automatically — a bump edits this declaration and the matching Dockerfile
+ * line together.
  */
 export type SandboxImagePins = {
   /** Debian base image manifest digest (linux/amd64). */
@@ -101,9 +101,8 @@ export type SandboxImagePins = {
 /**
  * The one mstar-harness release the image pins: both version fields below
  * carry it, so a bump changes a single literal. `harnessRef` stays a literal
- * commit — a tag cannot yield the deref sha. `tests/review/pin.test.ts` binds
- * the Dockerfile's `ref`/`tag` pair, the engine manifest and the lock rows to
- * this value.
+ * commit — a tag cannot yield the deref sha. The Dockerfile's `ref`/`tag`
+ * comment pair, the engine manifest and the lock rows are hand-synced to it.
  */
 export const HARNESS_VERSION = "4.2.2";
 
