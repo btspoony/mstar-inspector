@@ -6,7 +6,7 @@
  * tone, and the fold/copy labels. No React import — the component module owns
  * state, effects and JSX, and these rules are pinnable without a DOM.
  */
-import { FINDING_SEVERITIES } from "../../contracts/finding-severity";
+import { FINDING_SEVERITIES, isFindingSeverity } from "../../contracts/finding-severity";
 import { t, type Locale } from "../../i18n";
 import { formatRelativeTime } from "../relative-time";
 import { CATCH_ALL_SEVERITY } from "./data";
@@ -86,14 +86,13 @@ export function severityGroups(
   findings: readonly PullRequestFinding[],
 ): SeverityGroup[] {
   const indexed = findings.map((finding, index) => ({ finding, index }));
-  const known = new Set<string>(SEVERITY_GROUPS.map((group) => group.severity));
   const groups: SeverityGroup[] = SEVERITY_GROUPS.map((group) => ({
     key: group.severity,
     label: t(locale, group.labelKey),
     tone: group.tone,
     items: indexed.filter(({ finding }) => finding.severity === group.severity),
   }));
-  const other = indexed.filter(({ finding }) => !known.has(finding.severity));
+  const other = indexed.filter(({ finding }) => !isFindingSeverity(finding.severity));
   if (other.length > 0) {
     groups.push({
       key: OTHER_BUCKET.key,
@@ -103,6 +102,35 @@ export function severityGroups(
     });
   }
   return groups.filter((group) => group.items.length > 0);
+}
+
+/** One rendered `label count` pair on a review row's second line. */
+export type ReviewClassCount = { key: string; label: string; count: number };
+
+/**
+ * A review round's tally as the row's second line reads it: the merge-class
+ * vocabulary in `SEVERITY_GROUPS` order (non-zero only), then one `other`
+ * entry summing every spelling outside the vocabulary. M1-era rounds tallied
+ * `critical | warning | suggestion | info`; those keys are not in the
+ * vocabulary, so without this bucket they would render no breakdown at all.
+ */
+export function reviewClassCounts(
+  locale: Locale,
+  counts: Record<string, number>,
+): ReviewClassCount[] {
+  const rows: ReviewClassCount[] = SEVERITY_GROUPS.map((group) => ({
+    key: group.severity,
+    label: t(locale, group.labelKey),
+    count: counts[group.severity] ?? 0,
+  })).filter(({ count }) => count > 0);
+  let other = 0;
+  for (const [key, count] of Object.entries(counts)) {
+    if (!isFindingSeverity(key)) other += count;
+  }
+  if (other > 0) {
+    rows.push({ key: OTHER_BUCKET.key, label: t(locale, OTHER_BUCKET.labelKey), count: other });
+  }
+  return rows;
 }
 
 /** A tone the timeline and the verdict surfaces can wear. */

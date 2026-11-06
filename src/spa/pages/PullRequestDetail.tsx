@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, ChevronRight, Copy, ExternalLink } from "lucide-react";
 import { MUST_FIX_SEVERITY } from "../../contracts/finding-severity";
 import { t } from "../../i18n";
@@ -26,6 +26,7 @@ import { ReviewingBadge } from "./ReviewingBadge";
 import {
   appPullRequestDetailUrl,
   appPullRequestRecordsUrl,
+  githubCommitUrl,
   githubPullRequestUrl,
   githubRepoUrl,
   parsePullRequestDetail,
@@ -45,6 +46,7 @@ import {
   formatReviewDuration,
   recordId,
   reviewAttribution,
+  reviewClassCounts,
   SEVERITY_FILTER_OPTIONS,
   severityGroups,
   timelineRows,
@@ -405,9 +407,9 @@ const TIMELINE_DOT: Record<ActivityTone, string> = {
   neutral: "bg-(--border-strong)",
 };
 
-/** The round chip: a review row's ordinal, reused by the finding row it first reported. */
+/** The round chip: a review row's ordinal, reused by the finding row it first reported. An inset pill — no border, surface fill, label-12. */
 const ROUND_CHIP =
-  "rounded-(--radius-control) border border-(--border-default) px-1.5 py-0.5 tabular-nums text-(--text-muted)";
+  "rounded-(--radius-pill) bg-(--surface-inset) px-1.5 py-0.5 text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tabular-nums text-(--text-muted)";
 
 /**
  * The detail face — pure `t()` + data rendering, no window/router access.
@@ -677,7 +679,26 @@ export function PullRequestDetailView({
             the one fact an operator must not miss. Each trigger's accessible
             name is the label and the count with a separator — the visible
             spans alone would announce "Findings3". */}
-        <TabsList variant="default" aria-label={t(locale, "pullRequests.recordsLabel")}>
+        {/* At xl the content region is two columns — a flex row whose main
+            column stacks the record toolbar over the record list, with the
+            16rem aside as its sibling. `xl:items-start` tops the aside out at
+            the shell's top (= the toolbar's top), and because flex items size
+            independently a tall aside can never push the record list down —
+            a spanning grid item would split its height across both auto rows.
+            The record pill hugs the left of the toolbar row, the filter
+            (findings only, and only while the PR has findings to narrow) sits
+            at the row's right edge; the column gap stays --spacing-6, and
+            --spacing-8 applies only between the columns at xl. */}
+        <div
+          data-slot="record-layout"
+          className="mt-(--spacing-6) flex flex-col gap-(--spacing-6) xl:flex-row xl:items-start xl:gap-(--spacing-8)"
+        >
+        <div data-slot="record-main" className="flex min-w-0 flex-1 flex-col gap-(--spacing-6)">
+        <div
+          data-slot="record-toolbar"
+          className="flex flex-wrap items-center justify-between gap-(--spacing-4)"
+        >
+          <TabsList variant="default" aria-label={t(locale, "pullRequests.recordsLabel")} className="min-w-0">
           <TabsTrigger
             value="findings"
             aria-label={t(locale, "pullRequests.familyTabName", {
@@ -728,41 +749,41 @@ export function PullRequestDetailView({
             ) : null}
           </TabsTrigger>
         </TabsList>
-
-        <div className="mt-(--spacing-6) flex flex-col gap-(--spacing-6) xl:flex-row xl:items-start xl:gap-(--spacing-8)">
-          <div className="min-w-0 flex-1">
+          {/* Changing the filter reloads from page one and the pager then
+              counts the filtered total. It reads the committed filter (the one
+              the loaded rows answer to), so it stays inert while a new one is
+              in flight. Rendered only for the findings family while the PR
+              has findings — for the other families the row is the pill alone. */}
+          {family === "findings" && counts.findings > 0 ? (
+            <div data-slot="severity-filter" className="flex items-center gap-2">
+              <Select
+                value={records.findings.severity === "" ? SEVERITY_ALL : records.findings.severity}
+                disabled={records.findings.status === "loading"}
+                onValueChange={(next) =>
+                  onLoadPage("findings", { offset: 0, severity: next === SEVERITY_ALL ? "" : next })
+                }
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="min-w-40 shrink-0"
+                  aria-label={t(locale, "pullRequests.filterSeverity")}
+                >
+                  <SelectValue placeholder={t(locale, "pullRequests.filterAll")} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={SEVERITY_ALL}>{t(locale, "pullRequests.filterAll")}</SelectItem>
+                  {SEVERITY_FILTER_OPTIONS.map((option) => (
+                    <SelectItem key={option.key} value={option.key}>
+                      {t(locale, option.labelKey)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
+        </div>
+          <div data-slot="record-list" className="min-w-0 flex-1">
             <TabsContent value="findings">
-              {/* The filter sits above the list; changing it reloads from page
-                  one and the pager then counts the filtered total. It reads the
-                  committed filter (the one the loaded rows answer to), so it
-                  stays inert while a new one is in flight. */}
-              {counts.findings === 0 ? null : (
-                <div className="mb-(--spacing-4) flex items-center gap-2">
-                  <Select
-                    value={records.findings.severity === "" ? SEVERITY_ALL : records.findings.severity}
-                    disabled={records.findings.status === "loading"}
-                    onValueChange={(next) =>
-                      onLoadPage("findings", { offset: 0, severity: next === SEVERITY_ALL ? "" : next })
-                    }
-                  >
-                    <SelectTrigger
-                      size="sm"
-                      className="min-w-40"
-                      aria-label={t(locale, "pullRequests.filterSeverity")}
-                    >
-                      <SelectValue placeholder={t(locale, "pullRequests.filterAll")} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={SEVERITY_ALL}>{t(locale, "pullRequests.filterAll")}</SelectItem>
-                      {SEVERITY_FILTER_OPTIONS.map((option) => (
-                        <SelectItem key={option.key} value={option.key}>
-                          {t(locale, option.labelKey)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
               {records.findings.status === "error" ? (
                 <ErrorState
                   locale={locale}
@@ -828,13 +849,6 @@ export function PullRequestDetailView({
                             >
                               <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
                                 <span className="min-w-0 flex-1 text-sm font-medium">{finding.title}</span>
-                                {/* The round that FIRST reported this finding, as the
-                                    lifecycle stored it. */}
-                                {finding.review_round === null ? null : (
-                                  <span data-slot="finding-round" className={ROUND_CHIP}>
-                                    {t(locale, "pullRequests.reviewRound", { round: finding.review_round })}
-                                  </span>
-                                )}
                                 {/* A coerced-empty file_path (repo-wide finding)
                                     renders no location at all — never a bare `:line`. */}
                                 {location === "" ? null : (
@@ -855,24 +869,34 @@ export function PullRequestDetailView({
                               >
                                 {finding.body}
                               </p>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="xs"
-                                className="self-start text-(--text-muted)"
-                                aria-expanded={open}
-                                aria-controls={id}
-                                aria-label={foldLabel(locale, open, finding.title, position + 1)}
-                                onClick={() =>
-                                  setOpenFindings((previous) => ({ ...previous, [findingKey]: !open }))
-                                }
-                              >
-                                <ChevronRight
-                                  aria-hidden="true"
-                                  className={cn("transition-transform", open && "rotate-90")}
-                                />
-                                {t(locale, open ? "pullRequests.collapse" : "pullRequests.expand")}
-                              </Button>
+                              {/* The bottom row pairs the fold control with the
+                                  round that FIRST reported this finding (as the
+                                  lifecycle stored it), opposite it on the right. */}
+                              <div data-slot="finding-actions" className="flex items-center gap-2">
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="xs"
+                                  className="self-start text-(--text-muted)"
+                                  aria-expanded={open}
+                                  aria-controls={id}
+                                  aria-label={foldLabel(locale, open, finding.title, position + 1)}
+                                  onClick={() =>
+                                    setOpenFindings((previous) => ({ ...previous, [findingKey]: !open }))
+                                  }
+                                >
+                                  <ChevronRight
+                                    aria-hidden="true"
+                                    className={cn("transition-transform", open && "rotate-90")}
+                                  />
+                                  {t(locale, open ? "pullRequests.collapse" : "pullRequests.expand")}
+                                </Button>
+                                {finding.review_round === null ? null : (
+                                  <span data-slot="finding-round" className={cn(ROUND_CHIP, "ml-auto")}>
+                                    {t(locale, "pullRequests.reviewRound", { round: finding.review_round })}
+                                  </span>
+                                )}
+                              </div>
                             </li>
                           );
                         })}
@@ -913,71 +937,116 @@ export function PullRequestDetailView({
                     {reviewsPage.items.map((review, index) => {
                       const attribution = reviewAttribution(locale, review);
                       const durationLabel = t(locale, "pullRequests.reviewDurationLabel");
+                      // Line 2: the verdict, then one `label count` pair per
+                      // non-zero class in vocabulary order, with one `other`
+                      // aggregate for tally keys outside the vocabulary (the
+                      // M1 era's critical/warning/suggestion/info). A round
+                      // with no counts renders its verdict alone.
+                      const countLine: ReactNode[] = [];
+                      if (review.verdict !== "") {
+                        countLine.push(
+                          <StatusBadge key="verdict" tone={verdictTone(review.verdict)}>
+                            {review.verdict}
+                          </StatusBadge>,
+                        );
+                      }
+                      for (const group of reviewClassCounts(locale, review.severity_counts)) {
+                        countLine.push(
+                          <span
+                            key={group.key}
+                            data-slot="review-class-count"
+                            data-severity={group.key}
+                            className="text-(--text-muted)"
+                          >
+                            {group.label}{" "}
+                            <span className="tabular-nums">{group.count}</span>
+                          </span>,
+                        );
+                      }
                       return (
                         <li
                           key={`${review.reviewed_at}-${review.head_sha}-${index}`}
                           className={cn(
-                            "flex flex-col gap-2 rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5",
+                            "flex items-center gap-(--spacing-4) rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5",
                             index === 0 ? "border-(--border-strong)" : "",
                           )}
                         >
-                          <div
-                            data-slot="review-head"
-                            className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-(length:--typo-label-12-size) leading-(--typo-label-12-line)"
-                          >
-                            {/* A coerced-empty verdict is no verdict: no pill,
-                                and the row starts at its attribution. */}
-                            {review.verdict === "" ? null : (
-                              <StatusBadge tone={verdictTone(review.verdict)}>{review.verdict}</StatusBadge>
-                            )}
-                            {/* The round's ordinal in the PR's history; a
-                                payload that predates it has no chip. */}
-                            {review.round === null ? null : (
-                              <span data-slot="review-round" className={ROUND_CHIP}>
-                                {t(locale, "pullRequests.reviewRound", { round: review.round })}
-                              </span>
-                            )}
-                            {/* An unattributed review (v1 records no model) gets
-                                no empty span — the row starts at whatever it
-                                does carry. */}
-                            {attribution === "" ? null : (
-                              <span className="text-(--text-muted)">{attribution}</span>
-                            )}
-                            <span data-slot="review-findings" className="tabular-nums text-(--text-muted)">
-                              {t(
-                                locale,
-                                review.findings === 1
-                                  ? "pullRequests.reviewFindingsOne"
-                                  : "pullRequests.reviewFindings",
-                                { count: review.findings },
+                          <div className="flex min-w-0 flex-1 flex-col gap-1">
+                            <div
+                              data-slot="review-head"
+                              className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-(length:--typo-label-12-size) leading-(--typo-label-12-line)"
+                            >
+                              {/* The round's ordinal in the PR's history; a
+                                  payload that predates it has no chip. */}
+                              {review.round === null ? null : (
+                                <span data-slot="review-round" className={ROUND_CHIP}>
+                                  {t(locale, "pullRequests.reviewRound", { round: review.round })}
+                                </span>
                               )}
-                            </span>
-                            {/* Historical rows carry no measured clock: the
-                                row simply omits the time. The label is real
-                                text: the span carries no role, so a tooltip
-                                alone would leave the value announced bare. */}
-                            {review.duration_ms === null ? null : (
-                              <span
-                                data-slot="review-duration"
-                                className="tabular-nums text-(--text-muted)"
-                                title={durationLabel}
+                              {/* The short sha opens the round's commit on
+                                  GitHub; the accessible name names the commit. */}
+                              {review.head_sha === "" ? null : (
+                                <a
+                                  data-slot="head-sha"
+                                  href={githubCommitUrl(pr.owner, pr.repo, review.head_sha)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  aria-label={t(locale, "pullRequests.openCommitOnGithub", {
+                                    sha: review.head_sha.slice(0, 7),
+                                  })}
+                                  className="inline-flex items-center gap-1 rounded-(--radius-control) border border-(--border-default) px-1.5 py-0.5 font-mono text-(--text-muted) underline-offset-2 hover:underline"
+                                >
+                                  {review.head_sha.slice(0, 7)}
+                                  <ExternalLink aria-hidden="true" className="size-3" />
+                                </a>
+                              )}
+                              {/* An unattributed review (v1 records no model) gets
+                                  no empty span — the row starts at whatever it
+                                  does carry. */}
+                              {attribution === "" ? null : (
+                                <span className="text-(--text-muted)">{attribution}</span>
+                              )}
+                              {/* Historical rows carry no measured clock: the
+                                  row simply omits the time. The label is real
+                                  text: the span carries no role, so a tooltip
+                                  alone would leave the value announced bare. */}
+                              {review.duration_ms === null ? null : (
+                                <span
+                                  data-slot="review-duration"
+                                  className="tabular-nums text-(--text-muted)"
+                                  title={durationLabel}
+                                >
+                                  <span className="sr-only">{durationLabel}</span>
+                                  {formatReviewDuration(locale, review.duration_ms)}
+                                </span>
+                              )}
+                            </div>
+                            {countLine.length === 0 ? null : (
+                              <div
+                                data-slot="review-counts"
+                                className="flex flex-wrap items-center text-(length:--typo-label-12-size) leading-(--typo-label-12-line)"
                               >
-                                <span className="sr-only">{durationLabel}</span>
-                                {formatReviewDuration(locale, review.duration_ms)}
-                              </span>
+                                {countLine.map((node, position) => (
+                                  <Fragment key={position}>
+                                    {position === 0 ? null : (
+                                      <span aria-hidden="true" className="text-(--text-faint)">
+                                        {" · "}
+                                      </span>
+                                    )}
+                                    {node}
+                                  </Fragment>
+                                ))}
+                              </div>
                             )}
-                            <span className="ml-auto tabular-nums text-(--text-faint)" title={review.reviewed_at}>
-                              {formatRelativeTime(review.reviewed_at, locale)}
-                            </span>
-                            {review.head_sha === "" ? null : (
-                              <span
-                                data-slot="head-sha"
-                                className="rounded-(--radius-control) border border-(--border-default) px-1.5 py-0.5 font-mono text-(--text-muted)"
-                                title={t(locale, "pullRequests.headSha")}
-                              >
-                                {review.head_sha.slice(0, 7)}
-                              </span>
-                            )}
+                          </div>
+                          {/* The relative time owns the row's right block, centered
+                              against the two lines. */}
+                          <div
+                            data-slot="review-time"
+                            className="flex w-20 shrink-0 items-center justify-center self-stretch tabular-nums text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--text-faint)"
+                            title={review.reviewed_at}
+                          >
+                            {formatRelativeTime(review.reviewed_at, locale)}
                           </div>
                         </li>
                       );
@@ -1123,10 +1192,11 @@ export function PullRequestDetailView({
               )}
             </TabsContent>
           </div>
+        </div>
 
           <aside
             aria-label={t(locale, "pullRequests.asideFacts")}
-            className="flex w-full shrink-0 flex-col gap-(--spacing-4) xl:w-64"
+            className="flex w-full flex-col gap-(--spacing-4) xl:w-64"
           >
             <section className="flex flex-col gap-2.5 rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5">
               <h2 className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)">

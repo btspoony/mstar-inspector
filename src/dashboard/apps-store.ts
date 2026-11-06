@@ -1970,7 +1970,11 @@ export function createAppsStore(db: AppsStoreD1) {
      * `duration_ms` is NULL for rows written before the measurement.
      * `findings` counts the legacy `findings` rows attributed to that review,
      * across every lifecycle state — the number of findings that round
-     * reported.
+     * reported. `severity_counts` is the same rows tallied per severity as
+     * JSON text, built from the rows themselves so a class added later needs
+     * no statement edit; an empty JSON object (`{}`) when the round reported
+     * none — `json_group_object` over zero grouped rows yields `{}`, never
+     * NULL.
      */
     async listPullRequestReviews(
       appId: string,
@@ -1991,7 +1995,10 @@ export function createAppsStore(db: AppsStoreD1) {
           .prepare(
             `SELECT x.verdict, x.model, x.provider, x.reviewed_at, x.head_sha,
                     x.round, x.duration_ms,
-                    (SELECT COUNT(*) FROM findings f WHERE f.review_id = x.id) AS findings
+                    (SELECT COUNT(*) FROM findings f WHERE f.review_id = x.id) AS findings,
+                    (SELECT json_group_object(f.severity, f.n)
+                       FROM (SELECT severity, COUNT(*) AS n FROM findings
+                              WHERE review_id = x.id GROUP BY severity) f) AS severity_counts
              FROM (SELECT r.id, r.rowid AS rid, r.verdict, r.model, r.provider, r.reviewed_at,
                           r.head_sha, r.duration_ms,
                           COALESCE(
@@ -2104,6 +2111,8 @@ export type PullRequestReviewDetailRow = {
   duration_ms: number | null;
   /** Findings this round reported, in every lifecycle state. */
   findings: number;
+  /** Those findings per severity as JSON object text (`{"must-fix":2}`); `{}` when none. */
+  severity_counts: string;
 };
 
 export type PullRequestFailureDetailRow = { stage: string; error: string; created_at: string };
@@ -2116,7 +2125,10 @@ export type PullRequestFailureDetailRow = { stage: string; error: string; create
  * to the paged reviews section.
  */
 export type PullRequestHeadRow = PullRequestBaseRow & {
-  latest_review: Omit<PullRequestReviewDetailRow, "round" | "duration_ms" | "findings"> | null;
+  latest_review: Omit<
+    PullRequestReviewDetailRow,
+    "round" | "duration_ms" | "findings" | "severity_counts"
+  > | null;
   reviewing: PullRequestReviewing;
 };
 

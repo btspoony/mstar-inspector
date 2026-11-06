@@ -329,8 +329,8 @@ describe("pull request detail (mounted)", () => {
       head_sha: `sha${index}`,
       // Newest first, so index 0 is the PR's last round (12).
       round: 12 - index,
-      findings: 0,
       duration_ms: null,
+      severity_counts: {},
     }));
     // The head read's newest review carries the attribution alone.
     const { verdict, model, provider, reviewed_at, head_sha } = corpus[0]!;
@@ -389,8 +389,8 @@ describe("pull request detail (mounted)", () => {
       reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
       head_sha: `sha${index}`,
       round: 12 - index,
-      findings: 0,
       duration_ms: null,
+      severity_counts: {},
     }));
     // Newest of all, so the failure is one of the seven rows the cap shows.
     const failure = { stage: "sandbox", error: "exit 1", created_at: "2026-11-02 00:00:00" };
@@ -467,6 +467,13 @@ describe("pull request detail (mounted)", () => {
       expect(last).toContain("severity=must-fix");
       expect(container.textContent ?? "").not.toContain("Nit 1");
       expect(container.textContent ?? "").toContain("Must 0");
+      // The pager totals the filter over the WHOLE family, like the route: 12
+      // matched rows sit outside the served window too, so the range names
+      // 1–10 of 12 — a corpus-derived total the stub can only answer because
+      // this scene's page IS its declared corpus.
+      expect(container.querySelector('[data-slot="pager-range"]')?.textContent).toBe(
+        t("en", "pullRequests.pageRange", { from: 1, to: 10, total: 12 }),
+      );
 
       // Reset to All: the sentinel maps back to NO `severity` param (the route
       // 400s any spelling outside its vocabulary, `all` included), and the

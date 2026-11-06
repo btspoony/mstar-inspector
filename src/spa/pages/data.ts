@@ -851,10 +851,10 @@ export type PullRequestReview = {
   head_sha: string;
   /** Ordinal of this round in the PR's oldest-first review history; `null` when the payload carries none. */
   round: number | null;
-  /** Findings this round reported; the parser refuses a row without a real tally. */
-  findings: number;
   /** Wall clock of the round in ms; `null` for rows written before the measurement. */
   duration_ms: number | null;
+  /** The round's findings tallied per severity class (wire JSON text, parsed). */
+  severity_counts: Record<string, number>;
 };
 
 /**
@@ -1025,16 +1025,15 @@ function nonNegativeInteger(value: unknown): number | null {
  * One review entry (QC: the pipeline persists `provider: null`, and
  * model/verdict can be absent too). The nullable text fields
  * coerce to "" at this boundary so the view never renders null; the round
- * ordinal and clock coerce to `null`. The tally is REQUIRED: the paged route
- * counts it with `COUNT(*)`, so a row without a real count would have to
- * print a fabricated 0 — a claim the round reported nothing. The row is
- * refused instead and the page reports it in `dropped`.
+ * ordinal and clock coerce to `null`. The per-class tally degrades to `{}`
+ * when absent or malformed — the row renders, it just carries no breakdown;
+ * the numeric total the row used to hard-require feeds no render, so the
+ * parser no longer gates on it (a producer change to that column must not
+ * silently delete every review row).
  */
 function parsePullRequestReview(value: unknown): PullRequestReview | null {
   if (!isRecord(value)) return null;
   if (typeof value.reviewed_at !== "string" || typeof value.head_sha !== "string") return null;
-  const findings = nonNegativeInteger(value.findings);
-  if (findings === null) return null;
   return {
     verdict: typeof value.verdict === "string" ? value.verdict : "",
     model: typeof value.model === "string" ? value.model : "",
@@ -1042,9 +1041,26 @@ function parsePullRequestReview(value: unknown): PullRequestReview | null {
     reviewed_at: value.reviewed_at,
     head_sha: value.head_sha,
     round: positiveInteger(value.round),
-    findings,
     duration_ms: nonNegativeInteger(value.duration_ms),
+    severity_counts: parseSeverityCounts(value.severity_counts),
   };
+}
+
+/**
+ * The per-severity tally rides the wire as JSON text; the producer emits an
+ * empty JSON object (`{}`) for a round that reported nothing. Anything
+ * unreadable or malformed — including the tolerated legacy/mocked empty
+ * string — still degrades to `{}` via the parse catch: the row renders, it
+ * just carries no class breakdown.
+ */
+function parseSeverityCounts(raw: unknown): Record<string, number> {
+  if (typeof raw !== "string") return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isNumberRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function parsePullRequestFailure(value: unknown): PullRequestFailure | null {
@@ -1248,6 +1264,11 @@ export function githubRepoUrl(owner: string, repo: string): string {
 /** The PR on GitHub: the same repository address plus its `/pull/<number>`. */
 export function githubPullRequestUrl(owner: string, repo: string, number: number): string {
   return `${githubRepoUrl(owner, repo)}/pull/${encodeURIComponent(String(number))}`;
+}
+
+/** One commit of the PR's head on GitHub: the repository address plus `/commit/<sha>`. */
+export function githubCommitUrl(owner: string, repo: string, sha: string): string {
+  return `${githubRepoUrl(owner, repo)}/commit/${encodeURIComponent(sha)}`;
 }
 
 /**

@@ -19,6 +19,7 @@ import {
   appPullRequestDetailUrl,
   appPullRequestRecordsUrl,
   CATCH_ALL_SEVERITY,
+  githubCommitUrl,
   githubPullRequestUrl,
   githubRepoUrl,
   parsePullRequestDetail,
@@ -26,6 +27,7 @@ import {
   type PullRequestDetail,
   type PullRequestLatestReview,
   type PullRequestHead,
+  type PullRequestReview,
 } from "../../src/spa/pages/data";
 import {
   PullRequestDetail as PullRequestDetailFace,
@@ -129,6 +131,10 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(githubRepoUrl("a/b", "x?y#z")).toBe("https://github.com/a%2Fb/x%3Fy%23z");
     expect(githubPullRequestUrl("acme", "web", 42)).toBe("https://github.com/acme/web/pull/42");
     expect(githubPullRequestUrl("a/b", "x?y", 7)).toBe("https://github.com/a%2Fb/x%3Fy/pull/7");
+    expect(githubCommitUrl("acme", "web", "aaa111b")).toBe("https://github.com/acme/web/commit/aaa111b");
+    expect(githubCommitUrl("a/b", "x?y", "sha/with?chars#")).toBe(
+      "https://github.com/a%2Fb/x%3Fy/commit/sha%2Fwith%3Fchars%23",
+    );
   });
 
   test("the detail parser keeps the envelope strict; a page drops drifted entries", () => {
@@ -199,9 +205,18 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(defaultFamily({ findings: 0, reviews: 2, failures: 0, must_fix: 0 })).toBe("reviews");
   });
 
-  test("a review with provider null parses without a null leak, and a row without a real tally is refused", async () => {
+  test("a review with provider null parses without a null leak, and the retired numeric total no longer gates the row", async () => {
     const reviews = parseRecordPage("reviews", {
-      items: [{ ...REVIEWS[0], verdict: null, model: null, provider: null }],
+      // The wire sends the per-severity tally as JSON text, never an object.
+      items: [
+        {
+          ...REVIEWS[0],
+          verdict: null,
+          model: null,
+          provider: null,
+          severity_counts: JSON.stringify(REVIEWS[0]!.severity_counts),
+        },
+      ],
       total: 1,
     });
     const findings = parseRecordPage("findings", {
@@ -210,7 +225,7 @@ describe("pull request detail data plane (pure helpers)", () => {
     });
     // The nullable text fields coerce to "" at the parse boundary; the
     // address fields pass through untouched. The round facts ride through when
-    // the payload carries them.
+    // the payload carries them, and the JSON tally parses into a record.
     expect(reviews?.items[0]).toEqual({
       verdict: "",
       model: "",
@@ -218,8 +233,8 @@ describe("pull request detail data plane (pure helpers)", () => {
       reviewed_at: "2026-11-01 08:00:00",
       head_sha: "aaa111bbb222",
       round: 2,
-      findings: 2,
       duration_ms: 65_000,
+      severity_counts: { "must-fix": 1, nit: 1 },
     });
     expect(findings?.items[0]).toEqual({
       finding_id: "f-1",
@@ -230,6 +245,12 @@ describe("pull request detail data plane (pure helpers)", () => {
       body: "",
       review_round: 1,
     });
+    // The tally text is tolerant: absent, empty, or malformed all degrade to
+    // `{}` — the row still renders, it just carries no class breakdown.
+    for (const severity_counts of [undefined, "", "{not json}", "[1,2]", '{"a":"1"}']) {
+      const degraded = parseRecordPage("reviews", { items: [{ ...REVIEWS[0], severity_counts }], total: 1 });
+      expect(degraded?.items[0]?.severity_counts).toEqual({});
+    }
     // A payload that predates the round fields still renders its row: the
     // ordinal and clock are "no value" (`null`), and the row keeps its real
     // tally.
@@ -237,54 +258,57 @@ describe("pull request detail data plane (pure helpers)", () => {
       items: [{ ...REVIEWS[0], round: "2", duration_ms: -1 }],
       total: 1,
     })?.items[0];
-    expect(legacyRound).toMatchObject({ round: null, findings: 2, duration_ms: null });
+    expect(legacyRound).toMatchObject({ round: null, duration_ms: null });
     // Round 0 is not a round either: the history numbers from 1.
     const zeroRound = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], round: 0 }],
       total: 1,
     })?.items[0];
     expect(zeroRound?.round).toBeNull();
-    // The tally is REQUIRED: the paged route counts it with `COUNT(*)`, so a
-    // row without one is refused (and reported in `dropped`) rather than
-    // printed as a fabricated "0 findings".
-    const withoutTally = parseRecordPage("reviews", {
-      items: [{ ...REVIEWS[0], findings: undefined }],
-      total: 1,
-    });
-    expect(withoutTally?.items).toEqual([]);
-    expect(withoutTally?.dropped).toBe(1);
-    // Present-but-malformed is not a count either: a string, a fraction or a
-    // negative number all refuse the row.
-    for (const findings of ["2", 2.5, -3]) {
-      const refused = parseRecordPage("reviews", { items: [{ ...REVIEWS[0], findings }], total: 1 });
-      expect(refused?.items).toEqual([]);
-      expect(refused?.dropped).toBe(1);
+    // The numeric total the row used to hard-require is retired: it feeds no
+    // render, so a row without one — absent, or a leftover string — must
+    // still parse, carrying its per-class tally.
+    const wireTally = JSON.stringify(REVIEWS[0]!.severity_counts);
+    for (const row of [
+      { ...REVIEWS[0], findings: undefined, severity_counts: wireTally },
+      { ...REVIEWS[0], findings: "2", severity_counts: wireTally },
+    ]) {
+      const accepted = parseRecordPage("reviews", { items: [row], total: 1 });
+      expect(accepted?.items).toHaveLength(1);
+      expect(accepted?.items[0]?.severity_counts).toEqual({ "must-fix": 1, nit: 1 });
     }
-    // A real zero is a count, and the label branches on exactly one: 0 and 3
-    // print their own number, only 1 takes the singular form.
+    // Rendered: a round without a tally renders its verdict alone; per-class
+    // pairs print in SEVERITY_GROUPS order — zero classes are omitted, never
+    // printed as 0, and an off-vocabulary spelling sums into the `other`
+    // bucket (the same catch-all the findings list uses).
     const tallies = parseRecordPage("reviews", {
       items: [
-        { ...REVIEWS[0], findings: 0 },
-        { ...REVIEWS[0], findings: 1 },
-        { ...REVIEWS[0], findings: 3 },
+        { ...REVIEWS[0], severity_counts: "" },
+        { ...REVIEWS[0], severity_counts: '{"nit":1}' },
+        { ...REVIEWS[0], severity_counts: '{"should-fix":2,"must-fix":1,"nit":0,"unknown":9}' },
       ],
       total: 3,
     });
-    expect(tallies?.items.map((review) => review.findings)).toEqual([0, 1, 3]);
-    // Rendered: a zero tally is a figure, and the 1-vs-N branch shows on the
-    // row that reported exactly one.
+    expect(tallies?.items.map((review) => review.severity_counts)).toEqual([
+      {},
+      { nit: 1 },
+      { "should-fix": 2, "must-fix": 1, nit: 0, unknown: 9 },
+    ]);
     const tallyMarkup = render(
       { ...DETAIL, counts: { ...DETAIL.counts, findings: 0, reviews: 3, failures: 0, must_fix: 0 } },
       recordsOf({ ...RECORDS, findings: page([]), failures: page([]), reviews: tallies ?? page([]) }),
     );
-    expect(
-      await withMarkup(tallyMarkup, (container) =>
-        [...container.querySelectorAll('[data-slot="review-findings"]')].map((count) => count.textContent ?? ""),
-      ),
-    ).toEqual([
-      t("en", "pullRequests.reviewFindings", { count: 0 }),
-      t("en", "pullRequests.reviewFindingsOne", { count: 1 }),
-      t("en", "pullRequests.reviewFindings", { count: 3 }),
+    const classLines = await withMarkup(tallyMarkup, (container) =>
+      [...container.querySelectorAll('[data-slot="review-counts"]')].map((line) => line.textContent ?? ""),
+    );
+    // All three rows carry REVIEWS[0]'s "needs fixes" verdict: the empty tally
+    // renders the verdict alone; the nit tally prints that pair; the third row
+    // orders must-fix before should-fix (SEVERITY_GROUPS order), drops the
+    // zero nit, and rolls the off-vocabulary "unknown" class into `other`.
+    expect(classLines).toEqual([
+      "needs fixes",
+      `needs fixes · ${t("en", "pullRequests.severityNit")} 1`,
+      `needs fixes · ${t("en", "pullRequests.severityMustFix")} 1 · ${t("en", "pullRequests.severityShouldFix")} 2 · ${t("en", "pullRequests.severityOther")} 9`,
     ]);
     const legacyFinding = parseRecordPage("findings", {
       items: [{ ...FINDINGS[0], review_round: 1.5 }],
@@ -497,8 +521,8 @@ describe("pull request detail face (static SSR)", () => {
                 reviewed_at: "2026-11-01 08:00:00",
                 head_sha: "aaa111b",
                 round: 1,
-                findings: 0,
                 duration_ms: null,
+                severity_counts: {},
               },
             ]),
           },
@@ -550,9 +574,9 @@ describe("pull request detail face (static SSR)", () => {
               reviewed_at: "2026-11-01 08:00:00",
               head_sha: "aaa111bbb222",
               round: 1,
-              findings: 0,
-              duration_ms: null,
-            },
+                duration_ms: null,
+                severity_counts: {},
+              },
           ]),
         },
         {},
@@ -943,8 +967,8 @@ describe("pull request detail face (static SSR)", () => {
             reviewed_at: "2026-11-01 08:00:00",
             head_sha: "aaa111b",
             round: 1,
-            findings: 0,
             duration_ms: null,
+            severity_counts: {},
           },
         ]),
       },
@@ -985,8 +1009,8 @@ describe("pull request detail face (static SSR)", () => {
     expect(read.meta).not.toContain(" · ·");
   });
 
-  test("a clean detail opens on the reviews family: rounds, findings counts and run times", async () => {
-    const reviews = page([
+  test("a clean detail opens on the reviews family: two-line rows, commit links and per-class counts", async () => {
+    const reviews = page<PullRequestReview>([
       {
         verdict: "ship it",
         model: "kimi-for-coding",
@@ -994,8 +1018,8 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: "2026-11-01 09:00:00",
         head_sha: "aaa111b",
         round: 2,
-        findings: 3,
         duration_ms: 65_000,
+        severity_counts: { "must-fix": 2, nit: 1 },
       },
       {
         verdict: "ship it",
@@ -1004,20 +1028,21 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: "2026-10-30 09:00:00",
         head_sha: "bbb222c",
         round: 1,
-        findings: 1,
         duration_ms: null,
+        severity_counts: { nit: 1 },
       },
       {
-        // A round that carries no ordinal and no measured clock still renders;
-        // its zero tally prints as "0 findings", not as a missing figure.
+        // A round that carries no ordinal, no measured clock and no tally
+        // still renders: no chip, no time, and the verdict alone on its
+        // second line.
         verdict: "ship it",
         model: "kimi-for-coding",
         provider: "",
         reviewed_at: "2026-10-29 09:00:00",
         head_sha: "ccc333d",
         round: null,
-        findings: 0,
         duration_ms: null,
+        severity_counts: {},
       },
     ]);
     const markup = face(
@@ -1027,9 +1052,30 @@ describe("pull request detail face (static SSR)", () => {
     );
     const read = await withMarkup(markup, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
-      heads: container.querySelectorAll('[data-slot="review-head"]').length,
+      rows: [...container.querySelectorAll('[data-slot="review-head"]')].map((head) => {
+        const row = head.closest("li")!;
+        return {
+          // Two lines: the head row and the counts row inside one flex-1 block.
+          lines: row.querySelectorAll('[data-slot="review-head"], [data-slot="review-counts"]').length,
+          head: head.textContent ?? "",
+          counts: row.querySelector('[data-slot="review-counts"]')?.textContent ?? null,
+          // The relative time left line 1: it now owns the fixed right block.
+          timeInHead: head.textContent?.includes(formatRelativeTime("2026-11-01 09:00:00", "en")) ?? false,
+          time: row.querySelector('[data-slot="review-time"]')?.textContent ?? null,
+          timeBlock: row.querySelector('[data-slot="review-time"]') !== null,
+          sha: (() => {
+            const link = row.querySelector<HTMLElement>('[data-slot="head-sha"]');
+            return link === null
+              ? null
+              : {
+                  href: link.getAttribute("href"),
+                  label: link.getAttribute("aria-label"),
+                  text: link.textContent ?? "",
+                };
+          })(),
+        };
+      }),
       rounds: [...container.querySelectorAll('[data-slot="review-round"]')].map((chip) => chip.textContent ?? ""),
-      counts: [...container.querySelectorAll('[data-slot="review-findings"]')].map((count) => count.textContent ?? ""),
       // Only the measured round prints a time; the historical rows omit it.
       // The label must be real TEXT inside the span (its accessible name) —
       // a null here fails the assertion below, so removing it cannot pass.
@@ -1041,7 +1087,7 @@ describe("pull request detail face (static SSR)", () => {
         duration.getAttribute("title"),
       ),
       // The summary body and its expand/collapse control are gone: a review
-      // row is its head line alone.
+      // row is its two lines alone.
       foldControls: container.querySelectorAll('[role="tabpanel"] button[aria-expanded][aria-controls]').length,
       bodies: [...container.querySelectorAll('[role="tabpanel"] p')].map((body) => body.textContent ?? ""),
       // No provider means no dangling separator: the attributed row reads
@@ -1051,15 +1097,44 @@ describe("pull request detail face (static SSR)", () => {
     }));
     expect(read.selected).toEqual([false, true, false]);
     // Three rows render; only the two carrying an ordinal print a chip.
-    expect(read.heads).toBe(3);
+    expect(read.rows).toHaveLength(3);
+    expect(read.rows.every((row) => row.lines === 2)).toBe(true);
+    expect(read.rows.every((row) => row.timeBlock)).toBe(true);
     expect(read.rounds).toEqual([
       t("en", "pullRequests.reviewRound", { round: 2 }),
       t("en", "pullRequests.reviewRound", { round: 1 }),
     ]);
-    expect(read.counts).toEqual([
-      t("en", "pullRequests.reviewFindings", { count: 3 }),
-      t("en", "pullRequests.reviewFindingsOne", { count: 1 }),
-      t("en", "pullRequests.reviewFindings", { count: 0 }),
+    // Line 2: the verdict, then one `label count` pair per non-zero class in
+    // SEVERITY_GROUPS order; the tally-less round renders its verdict alone.
+    expect(read.rows.map((row) => row.counts)).toEqual([
+      `ship it · ${t("en", "pullRequests.severityMustFix")} 2 · ${t("en", "pullRequests.severityNit")} 1`,
+      `ship it · ${t("en", "pullRequests.severityNit")} 1`,
+      "ship it",
+    ]);
+    // The relative time lives in the right block, never in line 1.
+    expect(read.rows.map((row) => row.time)).toEqual([
+      formatRelativeTime("2026-11-01 09:00:00", "en"),
+      formatRelativeTime("2026-10-30 09:00:00", "en"),
+      formatRelativeTime("2026-10-29 09:00:00", "en"),
+    ]);
+    expect(read.rows.every((row) => !row.timeInHead)).toBe(true);
+    // The short sha is an external link naming the commit.
+    expect(read.rows.map((row) => row.sha)).toEqual([
+      {
+        href: "https://github.com/acme/web/commit/aaa111b",
+        label: t("en", "pullRequests.openCommitOnGithub", { sha: "aaa111b" }),
+        text: "aaa111b",
+      },
+      {
+        href: "https://github.com/acme/web/commit/bbb222c",
+        label: t("en", "pullRequests.openCommitOnGithub", { sha: "bbb222c" }),
+        text: "bbb222c",
+      },
+      {
+        href: "https://github.com/acme/web/commit/ccc333d",
+        label: t("en", "pullRequests.openCommitOnGithub", { sha: "ccc333d" }),
+        text: "ccc333d",
+      },
     ]);
     const durationLabel = t("en", "pullRequests.reviewDurationLabel");
     expect(read.durations).toEqual([
@@ -1081,16 +1156,95 @@ describe("pull request detail face (static SSR)", () => {
     expect(markup).not.toContain(t("en", "pullRequests.noReviews"));
   });
 
-  test("a finding row names the round that first reported it", async () => {
+  test("a legacy-era tally rolls its non-vocabulary keys into one Other count", async () => {
+    // M1 reviews tallied critical | warning | suggestion | info; none of
+    // those spellings is in the merge-class vocabulary. The row must still
+    // carry a per-category breakdown: the unknown keys sum into the single
+    // `other` bucket the findings list already uses, and no known class is
+    // fabricated for them.
+    const reviews = page<PullRequestReview>([
+      {
+        verdict: "comment",
+        model: "claude",
+        provider: "",
+        reviewed_at: "2026-11-01 09:00:00",
+        head_sha: "legacy1a",
+        round: 3,
+        duration_ms: null,
+        severity_counts: { critical: 2, info: 1 },
+      },
+      {
+        verdict: "ship it",
+        model: "kimi-for-coding",
+        provider: "",
+        reviewed_at: "2026-10-30 09:00:00",
+        head_sha: "mixed01a",
+        round: 2,
+        duration_ms: null,
+        severity_counts: { "must-fix": 1, critical: 2 },
+      },
+      {
+        // All-known tallies keep vocabulary order and stay per-class.
+        verdict: "ship it",
+        model: "kimi-for-coding",
+        provider: "",
+        reviewed_at: "2026-10-29 09:00:00",
+        head_sha: "known001",
+        round: 1,
+        duration_ms: null,
+        severity_counts: { nit: 1, "should-fix": 3, "must-fix": 2 },
+      },
+    ]);
+    const read = await withMarkup(
+      face({ findings: page([]), failures: page([]), reviews }),
+      (container) =>
+        [...container.querySelectorAll('[data-slot="review-counts"]')].map((line) => ({
+          text: line.textContent ?? "",
+          severities: [...line.querySelectorAll('[data-slot="review-class-count"]')].map(
+            (slot) => slot.getAttribute("data-severity"),
+          ),
+        })),
+    );
+    const otherLabel = t("en", "pullRequests.severityOther");
+    expect(read).toEqual([
+      // One aggregate for the whole legacy tally — never a fabricated
+      // `critical`/`info` pair.
+      { text: `comment · ${otherLabel} 3`, severities: [CATCH_ALL_SEVERITY] },
+      // The known class keeps its own slot, in front of the aggregate.
+      {
+        text: `ship it · ${t("en", "pullRequests.severityMustFix")} 1 · ${otherLabel} 2`,
+        severities: ["must-fix", CATCH_ALL_SEVERITY],
+      },
+      // All-known rounds render in vocabulary order, unchanged.
+      {
+        text: `ship it · ${t("en", "pullRequests.severityMustFix")} 2 · ${t("en", "pullRequests.severityShouldFix")} 3 · ${t("en", "pullRequests.severityNit")} 1`,
+        severities: ["must-fix", "should-fix", "nit"],
+      },
+    ]);
+  });
+
+  test("a finding row names the round that first reported it, from the card's bottom row", async () => {
     // The default face opens on findings, so its rows are the rendered list.
+    // The round chip lives in the card's bottom row, opposite the fold
+    // button — not beside the title.
     const rounds = await withMarkup(face(), (container) =>
-      [...container.querySelectorAll('[data-slot="finding"]')].map(
-        (row) => row.querySelector('[data-slot="finding-round"]')?.textContent ?? null,
-      ),
+      [...container.querySelectorAll('[data-slot="finding"]')].map((row) => {
+        const chip = row.querySelector('[data-slot="finding-round"]');
+        if (chip === null) return null;
+        const actions = chip.closest('[data-slot="finding-actions"]');
+        return {
+          text: chip.textContent ?? "",
+          inBottomRow: actions !== null,
+          // The bottom row also holds the fold control.
+          withFoldButton:
+            actions?.querySelector('button[aria-expanded][aria-controls]') !== null &&
+            actions?.querySelector('[data-slot="finding-round"]') === chip,
+        };
+      }),
     );
     expect(rounds).toEqual([
-      t("en", "pullRequests.reviewRound", { round: 1 }),
-      t("en", "pullRequests.reviewRound", { round: 2 }),
+      { text: t("en", "pullRequests.reviewRound", { round: 1 }), inBottomRow: true, withFoldButton: true },
+      { text: t("en", "pullRequests.reviewRound", { round: 2 }), inBottomRow: true, withFoldButton: true },
       // No stored review carries this finding's first-seen sha: no chip, not
       // an empty one.
       null,
@@ -1130,8 +1284,8 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
         head_sha: `sha${index}`,
         round: 12 - index,
-        findings: 0,
         duration_ms: null,
+        severity_counts: {},
       })),
     );
     const markup = face(
@@ -1187,8 +1341,8 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
         head_sha: `sha${index}`,
         round: 3 - index,
-        findings: 0,
         duration_ms: null,
+        severity_counts: {},
       })),
       30,
     );
@@ -1213,8 +1367,8 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
         head_sha: `sha${index}`,
         round: 6 - index,
-        findings: 0,
         duration_ms: null,
+        severity_counts: {},
       })),
     );
     // Nothing was dropped: every entry renders and the truncation row is absent
@@ -1408,15 +1562,26 @@ describe("pull request detail face (static SSR)", () => {
     expect((await read(30)).range).toBe(t("en", "pullRequests.pageRange", { from: 20, to: 20, total: 20 }));
   });
 
-  test("the findings filter is present only while the PR has findings", async () => {
+  test("the findings filter lives in the toolbar row, only while the PR has findings", async () => {
     const filter = async (markup: string) =>
       withMarkup(markup, (container) => {
         const trigger = container.querySelector('[role="combobox"]');
-        return { present: trigger !== null, name: trigger?.getAttribute("aria-label") ?? "" };
+        const toolbar = container.querySelector('[data-slot="record-toolbar"]');
+        const findingsPanel = container.querySelector('[role="tabpanel"][data-state="active"]');
+        return {
+          present: trigger !== null,
+          name: trigger?.getAttribute("aria-label") ?? "",
+          // The filter shares the record pill's toolbar row, at its right
+          // edge — never inside the findings body.
+          inToolbar: toolbar !== null && toolbar.querySelector('[role="combobox"]') !== null,
+          inFindingsBody: findingsPanel?.querySelector('[role="combobox"]') !== null,
+        };
       });
     expect(await filter(face())).toEqual({
       present: true,
       name: t("en", "pullRequests.filterSeverity"),
+      inToolbar: true,
+      inFindingsBody: false,
     });
     // No findings to filter: the control is noise, so it is absent.
     expect((await filter(face({ findings: page([]) }))).present).toBe(false);
@@ -1551,6 +1716,53 @@ describe("pull request detail face (static SSR)", () => {
       t("en", "pullRequests.timelineFirstSeen"),
     ]);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  test("the reading order runs toolbar, record list, then aside", async () => {
+    // Product behaviour, not DOM topology: a screen reader or keyboard user
+    // meets the toolbar (its TabsList labelled `recordsLabel`), then the
+    // record list, then the aside's facts (`asideFacts`). The retained
+    // `data-slot` hooks are test hooks, not product landmarks.
+    //
+    // What this pins: toolbar < list < aside in document order AND the aside
+    // is not nested inside the main column or the record list (compareDocumentPosition's
+    // FOLLOWING bit is also true for a containing node, so document order alone
+    // cannot catch a nested-aside regression). The flex mechanism that places
+    // them side by side at the xl breakpoint (`xl:flex-row`) is not statically
+    // assertable here — it is a browser/E2E surface, recorded as unverified.
+    const layout = await withMarkup(face(), (container) => {
+      const tabsList = container.querySelector(`[aria-label="${t("en", "pullRequests.recordsLabel")}"]`);
+      const recordMain = container.querySelector('[data-slot="record-main"]');
+      const recordList = container.querySelector('[data-slot="record-list"]');
+      const asideFacts = container.querySelector(`[aria-label="${t("en", "pullRequests.asideFacts")}"]`);
+      // compareDocumentPosition FOLLOWING bit (4; `Node` is not global in the DOM harness).
+      const listAfterToolbar =
+        tabsList !== null &&
+        recordList !== null &&
+        (tabsList.compareDocumentPosition(recordList) & 4) !== 0;
+      const asideAfterList =
+        recordList !== null &&
+        asideFacts !== null &&
+        (recordList.compareDocumentPosition(asideFacts) & 4) !== 0;
+      return {
+        toolbarLabelled: tabsList !== null,
+        recordMainExists: recordMain !== null,
+        recordListExists: recordList !== null,
+        asideLabelled: asideFacts !== null,
+        inDocumentOrder: listAfterToolbar && asideAfterList,
+        asideOutsideMain: recordMain !== null && asideFacts !== null && !recordMain.contains(asideFacts),
+        asideOutsideList: recordList !== null && asideFacts !== null && !recordList.contains(asideFacts),
+      };
+    });
+    expect(layout).toEqual({
+      toolbarLabelled: true,
+      recordMainExists: true,
+      recordListExists: true,
+      asideLabelled: true,
+      inDocumentOrder: true,
+      asideOutsideMain: true,
+      asideOutsideList: true,
+    });
   });
 });
 
