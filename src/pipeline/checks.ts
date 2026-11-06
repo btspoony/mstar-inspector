@@ -1222,13 +1222,14 @@ export type CheckLifecycle = {
  * second row, no second remote run.
  *
  * `terminalize` decides from PERSISTED proof, never from the code path that
- * called it: the proof is read by exact App/scope/SHA with this attempt's
- * publication id preferred, `setCheckDesired` freezes that intent BEFORE the
- * one bounded remote update, and `observed` advances ONLY from a response the
- * adapter validated. Every write is fenced on the handle's live lease, so a
- * stale/lost holder writes nothing — and the attempt stays recoverable
- * (`pending`/`remote-unconfirmed` + backoff) for the scheduled lane, never
- * blocking or delaying the review.
+ * called it: only this attempt's OWN publication is read — RL-12 head reuse
+ * makes any head-keyed fallback another generation's proof, so an attempt
+ * that published nothing has none — `setCheckDesired` freezes that intent
+ * BEFORE the one bounded remote update, and `observed` advances ONLY from a
+ * response the adapter validated. Every write is fenced on the handle's live
+ * lease, so a stale/lost holder writes nothing — and the attempt stays
+ * recoverable (`pending`/`remote-unconfirmed` + backoff) for the scheduled
+ * lane, never blocking or delaying the review.
  */
 export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
   /**
@@ -1393,23 +1394,33 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
 
     async terminalize(input) {
       const { handle } = input;
-      // PROOF decides (spec §7.9): exact App/scope/SHA, this attempt's
-      // publication id preferred. `null` is UNPROVEN — never "not published" —
-      // which is why an unconfirmed send must conclude `failure`, not success.
-      // The APPLIED review follows that SAME proof publication: RL-12 lets a
-      // second attempt share the head SHA, so the scope/SHA `reviews` row may
-      // be an earlier attempt's result and must not decide this one. The gate
-      // and the review are consulted ONLY inside `decideConclusion`'s branches,
-      // so without a proof and without an inherited head both reads are skipped
-      // rather than issued and discarded; a review payload without a readable
-      // tally stays unreadable, never a pass, and an unreadable gate row fails
-      // closed the same way. An EMPTY increment reads the reviewed head's
-      // `reviews` row instead — the head whose content this round covers.
-      const proof = await readPublicationProof(deps.db, {
-        scope: handle.scope,
-        headSha: handle.headSha,
-        publicationId: input.publicationId ?? undefined,
-      });
+      // PROOF decides (spec §7.9): the publication THIS attempt published.
+      // `null` is UNPROVEN — never "not published" — which is why an
+      // unconfirmed send must conclude `failure`, not success. Only the linked
+      // publication proves anything: RL-12 lets a re-trigger reuse the head
+      // SHA, so the reader's head fallback would adopt ANOTHER generation's
+      // row (the oldest one) and freeze this attempt's Check from an envelope
+      // it never published. Without an own publication id and without an
+      // inherited head that is the only thing the read could return, so it is
+      // not issued at all (the recovery lane's `readProof` applies the same
+      // rule). The APPLIED review follows that SAME proof publication: the
+      // scope/SHA `reviews` row may be an earlier attempt's result and must
+      // not decide this one. The gate and the review are consulted ONLY inside
+      // `decideConclusion`'s branches, so without a proof and without an
+      // inherited head both reads are skipped rather than issued and
+      // discarded; a review payload without a readable tally stays unreadable,
+      // never a pass, and an unreadable gate row fails closed the same way. An
+      // EMPTY increment reads the reviewed head's `reviews` row instead — the
+      // head whose content this round covers.
+      const ownPublicationId = input.publicationId ?? undefined;
+      const proof =
+        ownPublicationId === undefined && input.inheritedHeadSha === undefined
+          ? null
+          : await readPublicationProof(deps.db, {
+              scope: handle.scope,
+              headSha: handle.headSha,
+              publicationId: ownPublicationId,
+            });
       const gateAndReview: readonly [ReviewGate | null, PublishedReview | null] =
         proof !== null
           ? await Promise.all([
