@@ -147,6 +147,12 @@ export type CheckAttempt = {
   executionDeadlineMs: number;
   attempts: number;
   terminalMs: number | null;
+  /**
+   * The instant this attempt generation began (`created_ms`). It is the
+   * boundary an attempt-scoped read of an append-only table is measured from:
+   * rows written before it belong to some other attempt.
+   */
+  createdMs: number;
 };
 
 /** The remote facts an adapter read from GitHub (spec §7.9) — evidence, not opinion. */
@@ -322,6 +328,7 @@ function attemptOf(row: ReviewCheckRow): CheckAttempt {
     executionDeadlineMs: row.execution_deadline_ms,
     attempts: row.attempts,
     terminalMs: row.terminal_ms,
+    createdMs: row.created_ms,
   };
 }
 
