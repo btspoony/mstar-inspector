@@ -331,6 +331,7 @@ describe("pull request detail (mounted)", () => {
       round: 12 - index,
       findings: 0,
       duration_ms: null,
+      severity_counts: {},
     }));
     // The head read's newest review carries the attribution alone.
     const { verdict, model, provider, reviewed_at, head_sha } = corpus[0]!;
@@ -391,6 +392,7 @@ describe("pull request detail (mounted)", () => {
       round: 12 - index,
       findings: 0,
       duration_ms: null,
+      severity_counts: {},
     }));
     // Newest of all, so the failure is one of the seven rows the cap shows.
     const failure = { stage: "sandbox", error: "exit 1", created_at: "2026-11-02 00:00:00" };

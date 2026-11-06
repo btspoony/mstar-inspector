@@ -99,6 +99,8 @@ export const REVIEWS: PullRequestReview[] = [
     findings: 2,
     // 1m 5s — the minutes+seconds form.
     duration_ms: 65_000,
+    // The per-severity breakdown the wire sends as JSON text.
+    severity_counts: { "must-fix": 1, nit: 1 },
   },
   {
     verdict: "ship it",
@@ -111,6 +113,7 @@ export const REVIEWS: PullRequestReview[] = [
     findings: 1,
     // Historical row: no measured clock, so the row omits the time.
     duration_ms: null,
+    severity_counts: { nit: 1 },
   },
 ];
 

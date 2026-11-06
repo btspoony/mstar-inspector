@@ -143,6 +143,8 @@ export const zhCN: Dictionary = {
     openOnGithub: "在 GitHub 打开 {owner}/{repo}#{number}",
     /** 侧栏仓库值的可访问名称：该仓库的 GitHub 地址。 */
     openRepoOnGithub: "在 GitHub 打开 {owner}/{repo}",
+    /** 审查行提交链接的可访问名称：短 SHA 打开的提交。 */
+    openCommitOnGithub: "在 GitHub 打开提交 {sha}",
     /** 短 SHA 徽标的悬浮提示。 */
     headSha: "头部 SHA",
     reviews: "审查",
@@ -150,9 +152,6 @@ export const zhCN: Dictionary = {
     reviewMeta: "{model} · {provider}",
     /** 审查行的轮次序号；发现行复用同一文案标明首次报告该发现的轮次。 */
     reviewRound: "第 {round} 轮",
-    /** 单轮审查报告的发现数（英文区分为单复数两式）。 */
-    reviewFindings: "{count} 项发现",
-    reviewFindingsOne: "{count} 项发现",
     /** 单轮审查耗时：不足一分钟按秒显示，否则按分秒显示。 */
     reviewDurationSeconds: "{seconds} 秒",
     reviewDurationMinutes: "{minutes} 分 {seconds} 秒",

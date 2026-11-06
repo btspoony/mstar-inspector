@@ -167,6 +167,8 @@ export const en = {
     openOnGithub: "Open {owner}/{repo}#{number} on GitHub",
     /** The aside repo value's accessible name: the repository's GitHub address. */
     openRepoOnGithub: "Open {owner}/{repo} on GitHub",
+    /** The review row's commit link: names the commit the short sha opens. */
+    openCommitOnGithub: "Open commit {sha} on GitHub",
     /** The short-sha chip's tooltip. */
     headSha: "Head SHA",
     reviews: "Reviews",
@@ -174,9 +176,6 @@ export const en = {
     reviewMeta: "{model} · {provider}",
     /** A review row's round ordinal. The findings row reuses it for the round that first reported the finding. */
     reviewRound: "Round {round}",
-    /** Findings one review round reported, and its singular pair (`XxxOne` convention). */
-    reviewFindings: "{count} findings",
-    reviewFindingsOne: "{count} finding",
     /** A round's wall clock: sub-minute runs read in seconds, longer ones as m/s. */
     reviewDurationSeconds: "{seconds}s",
     reviewDurationMinutes: "{minutes}m {seconds}s",

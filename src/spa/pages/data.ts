@@ -855,6 +855,8 @@ export type PullRequestReview = {
   findings: number;
   /** Wall clock of the round in ms; `null` for rows written before the measurement. */
   duration_ms: number | null;
+  /** The round's findings tallied per severity class (Task 1 wire JSON text, parsed). */
+  severity_counts: Record<string, number>;
 };
 
 /**
@@ -1044,7 +1046,23 @@ function parsePullRequestReview(value: unknown): PullRequestReview | null {
     round: positiveInteger(value.round),
     findings,
     duration_ms: nonNegativeInteger(value.duration_ms),
+    severity_counts: parseSeverityCounts(value.severity_counts),
   };
+}
+
+/**
+ * The per-severity tally rides the wire as JSON text ("" when the round
+ * reported nothing). Anything unreadable or malformed degrades to `{}` — the
+ * row still renders, it just carries no class breakdown.
+ */
+function parseSeverityCounts(raw: unknown): Record<string, number> {
+  if (typeof raw !== "string" || raw === "") return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isNumberRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function parsePullRequestFailure(value: unknown): PullRequestFailure | null {
@@ -1248,6 +1266,11 @@ export function githubRepoUrl(owner: string, repo: string): string {
 /** The PR on GitHub: the same repository address plus its `/pull/<number>`. */
 export function githubPullRequestUrl(owner: string, repo: string, number: number): string {
   return `${githubRepoUrl(owner, repo)}/pull/${encodeURIComponent(String(number))}`;
+}
+
+/** One commit of the PR's head on GitHub: the repository address plus `/commit/<sha>`. */
+export function githubCommitUrl(owner: string, repo: string, sha: string): string {
+  return `${githubRepoUrl(owner, repo)}/commit/${encodeURIComponent(sha)}`;
 }
 
 /**
