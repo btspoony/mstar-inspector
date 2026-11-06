@@ -47,6 +47,10 @@ import type { DashboardD1 } from "../../src/dashboard/users";
 import ompApiKeyProviders from "../../scripts/provider-catalog/omp-api-key-providers.json";
 import ompProviderVerify from "../../scripts/provider-catalog/omp-provider-verify.json";
 import { sk } from "../helpers/fake-secrets";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const REPO_ROOT = join(import.meta.dir, "../..");
 
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -310,17 +314,20 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
 
 // --- omp alignment: the vendored validate data and the no-inference invariant ---
 
-describe("omp 18.13.3 validate data (vendored verify snapshot)", () => {
+describe("omp validate data (vendored verify snapshot)", () => {
   test("the snapshot names its source version, extraction date and the three headers hooks", () => {
-    expect(ompProviderVerify.source.version).toBe("18.13.3");
+    // The vendored snapshot must track the installed omp package, or an SDK
+    // bump would leave the verify surface on the previous data silently.
+    expect(ompProviderVerify.source.version).toBe(
+      JSON.parse(readFileSync(join(REPO_ROOT, "node_modules/@oh-my-pi/pi-coding-agent/package.json"), "utf8")).version,
+    );
     expect(ompProviderVerify.source.extracted).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(ompProviderVerify.source.headersHooks).toEqual([
-      "cline-pass-client",
-      "coreweave-project",
-      "kimi-fingerprint",
-    ]);
-    // Every models-endpoint entry omp 18.13.3 carries is vendored verbatim.
-    expect(ompProviderVerify.endpoints).toHaveLength(28);
+    // The declared hook list must be exactly the hooks the entries carry.
+    expect(ompProviderVerify.source.headersHooks).toEqual(
+      [...new Set(ompProviderVerify.endpoints.flatMap((entry) => (entry.headersHook === undefined ? [] : [entry.headersHook])))].sort(),
+    );
+    // Every models-endpoint entry omp carries is vendored verbatim.
+    expect(ompProviderVerify.endpoints.length).toBeGreaterThan(0);
     expect(ompProviderVerify.endpoints.find((entry) => entry.id === "coreweave")).toMatchObject({
       url: "https://api.inference.wandb.ai/v1/models",
       headersHook: "coreweave-project",

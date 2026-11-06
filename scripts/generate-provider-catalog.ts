@@ -14,9 +14,9 @@
  * packages/{shared,runner}/src).
  *
  * Inputs (three pinned):
- *   1. `scripts/provider-catalog/models.dev-2026-09-04.json` — a trimmed
+ *   1. `scripts/provider-catalog/models.dev-2026-11-06.json` — a trimmed
  *      snapshot of the ai-sdk ecosystem directory dataset (models.dev,
- *      fetched 2026-09-04 from https://models.dev/api.json; trimmed to the
+ *      fetched 2026-11-06 from https://models.dev/api.json; trimmed to the
  *      fields this generator consumes: id / name / env / api / doc /
  *      model_ids). The snapshot date is the pin — regeneration against a
  *      newer snapshot is a deliberate, reviewed act. In this snapshot the
@@ -58,7 +58,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const SNAPSHOT_PATH = path.resolve("scripts/provider-catalog/models.dev-2026-09-04.json");
+const SNAPSHOT_PATH = path.resolve("scripts/provider-catalog/models.dev-2026-11-06.json");
 const OMP_SNAPSHOT_PATH = path.resolve("scripts/provider-catalog/omp-api-key-providers.json");
 const OUT_PATH = path.resolve("src/contracts/provider-catalog.generated.ts");
 
@@ -85,6 +85,8 @@ type OmpSnapshot = {
     sourceProviderId?: string;
   }[];
   ompProviderIds: string[];
+  /** models.dev snapshot keys a mixed-protocol omp provider takes over. */
+  ownsSnapshotKeys?: string[];
   excluded: {
     alias: Record<string, string>;
     nonModel: string[];
@@ -218,7 +220,6 @@ const TEMPLATE_DEDUPE_SNAPSHOT_KEYS: Record<string, string> = {
  */
 const CUSTOM_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
-const DEFAULT_MODEL_COUNT = 5;
 
 type BreadthAudit = {
   /** Rule (a) skips: snapshot keys consumed as a builtin sourceKey. */
@@ -239,6 +240,8 @@ type BreadthAudit = {
   ompNotMaterializable: string[];
   /** omp union: records that became template rows. */
   ompRowCount: number;
+  /** models.dev keys skipped because a mixed-protocol omp row owns them. */
+  ompOwnedKeys: string[];
 };
 
 /** The template `api` vocabulary — mirrors CUSTOM_PROVIDER_API_IDS in
@@ -268,7 +271,8 @@ export function buildCatalog(
     if (spec.sourceKey !== undefined && source === undefined) {
       throw new Error(`snapshot is missing source key ${JSON.stringify(spec.sourceKey)} — stale snapshot?`);
     }
-    const models = (source?.model_ids ?? []).slice(0, spec.modelCount ?? DEFAULT_MODEL_COUNT);
+    const sourceModels = source?.model_ids ?? [];
+    const models = spec.modelCount === undefined ? sourceModels : sourceModels.slice(0, spec.modelCount);
     catalog[spec.id] = {
       label: spec.label,
       tier: "builtin",
@@ -303,6 +307,7 @@ export function buildCatalog(
     ompNonModel: [],
     ompNotMaterializable: [],
     ompRowCount: 0,
+    ompOwnedKeys: [],
   };
   // Snapshot insertion order (JSON.parse preserves it for non-numeric keys)
   // is the deterministic breadth order — the pinned file's own sequence.
@@ -316,6 +321,12 @@ export function buildCatalog(
     // must not match the dedupe table through the prototype chain.
     if (Object.hasOwn(TEMPLATE_DEDUPE_SNAPSHOT_KEYS, key)) {
       audit.dedupedKeys.push(key);
+      continue;
+    }
+    // A mixed-protocol omp provider needs one declaration per protocol, which
+    // a single models.dev row cannot express — the omp union owns that key.
+    if (omp !== undefined && (omp.ownsSnapshotKeys ?? []).includes(key)) {
+      audit.ompOwnedKeys.push(key);
       continue;
     }
     if (!CUSTOM_PROVIDER_ID_PATTERN.test(key)) {
@@ -482,6 +493,8 @@ async function main(): Promise<void> {
  *     ${audit.dedupedKeys.map((key) => `${key} → ${TEMPLATE_DEDUPE_SNAPSHOT_KEYS[key]}`).join(", ") || "(none)"} (the curated entry is preserved verbatim)
  *   - rule (c) skipped, failing CUSTOM_PROVIDER_ID_PATTERN (${audit.idPatternFails.length} additional
  *     after rules a/b): ${wrapList(audit.idPatternFails)}
+ *   - rule (d) omp-owned mixed-protocol keys (${audit.ompOwnedKeys.length}): the union ships one
+ *     row per protocol below, so the single models.dev row is not emitted: ${wrapList(audit.ompOwnedKeys)}
  * omp provider union (omp ${omp.source.version}, vendored ${omp.source.extracted} — every omp
  * API-key provider id names its rule; ${omp.ompProviderIds.length} providers → ${audit.ompRowCount} template rows):
  *   - (a) already in the catalog (builtin or template) (${audit.ompAlreadyPresent.length}): ${wrapList(audit.ompAlreadyPresent)}
@@ -493,8 +506,8 @@ async function main(): Promise<void> {
  *     ${wrapList(audit.ompNotMaterializable)}
  *   - union rows are \`template\` tier with a null envName; prefill is the omp seed
  *     vocabulary verbatim (empty when omp ships none)
- *   - \`commandcode\` is mixed-protocol and therefore two rows — \`commandcode\`
- *     (openai-responses) and \`commandcode-anthropic\` (anthropic-messages) — because a
+ *   - a mixed-protocol omp provider ships one row per protocol (e.g. \`commandcode\`
+ *     plus \`commandcode-anthropic\` / \`-responses\` / \`-typesafe\`) because a
  *     custom-provider declaration carries exactly one protocol`;
 
   const moduleSource = `/**
@@ -503,7 +516,7 @@ async function main(): Promise<void> {
  * an explicit, reviewable regeneration commit.
  *
  * Source: pinned models.dev snapshot
- * \`scripts/provider-catalog/models.dev-2026-09-04.json\` (fetched 2026-09-04
+ * \`scripts/provider-catalog/models.dev-2026-11-06.json\` (fetched 2026-11-06
  * from https://models.dev/api.json; the \`api\` field carries the base URL)
  * + the omp-facing override table in the generator (labels / env-name
  * contract / workers-ai template) + the vendored omp provider snapshot
