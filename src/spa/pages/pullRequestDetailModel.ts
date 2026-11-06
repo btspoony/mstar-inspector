@@ -105,6 +105,36 @@ export function severityGroups(
   return groups.filter((group) => group.items.length > 0);
 }
 
+/** One rendered `label count` pair on a review row's second line. */
+export type ReviewClassCount = { key: string; label: string; count: number };
+
+/**
+ * A review round's tally as the row's second line reads it: the merge-class
+ * vocabulary in `SEVERITY_GROUPS` order (non-zero only), then one `other`
+ * entry summing every spelling outside the vocabulary. M1-era rounds tallied
+ * `critical | warning | suggestion | info`; those keys are not in the
+ * vocabulary, so without this bucket they would render no breakdown at all.
+ */
+export function reviewClassCounts(
+  locale: Locale,
+  counts: Record<string, number>,
+): ReviewClassCount[] {
+  const known = new Set<string>(SEVERITY_GROUPS.map((group) => group.severity));
+  const rows: ReviewClassCount[] = SEVERITY_GROUPS.map((group) => ({
+    key: group.severity,
+    label: t(locale, group.labelKey),
+    count: counts[group.severity] ?? 0,
+  })).filter(({ count }) => count > 0);
+  let other = 0;
+  for (const [key, count] of Object.entries(counts)) {
+    if (!known.has(key)) other += count;
+  }
+  if (other > 0) {
+    rows.push({ key: OTHER_BUCKET.key, label: t(locale, OTHER_BUCKET.labelKey), count: other });
+  }
+  return rows;
+}
+
 /** A tone the timeline and the verdict surfaces can wear. */
 export type ActivityTone = "danger" | "success" | "neutral";
 

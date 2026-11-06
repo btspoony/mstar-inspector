@@ -46,8 +46,8 @@ import {
   formatReviewDuration,
   recordId,
   reviewAttribution,
+  reviewClassCounts,
   SEVERITY_FILTER_OPTIONS,
-  SEVERITY_GROUPS,
   severityGroups,
   timelineRows,
   verdictTone,
@@ -938,9 +938,10 @@ export function PullRequestDetailView({
                       const attribution = reviewAttribution(locale, review);
                       const durationLabel = t(locale, "pullRequests.reviewDurationLabel");
                       // Line 2: the verdict, then one `label count` pair per
-                      // non-zero severity class in vocabulary order. Classes
-                      // outside the vocabulary are ignored; a round with no
-                      // counts renders its verdict alone.
+                      // non-zero class in vocabulary order, with one `other`
+                      // aggregate for tally keys outside the vocabulary (the
+                      // M1 era's critical/warning/suggestion/info). A round
+                      // with no counts renders its verdict alone.
                       const countLine: ReactNode[] = [];
                       if (review.verdict !== "") {
                         countLine.push(
@@ -949,18 +950,16 @@ export function PullRequestDetailView({
                           </StatusBadge>,
                         );
                       }
-                      for (const group of SEVERITY_GROUPS) {
-                        const count = review.severity_counts[group.severity] ?? 0;
-                        if (count === 0) continue;
+                      for (const group of reviewClassCounts(locale, review.severity_counts)) {
                         countLine.push(
                           <span
-                            key={group.severity}
+                            key={group.key}
                             data-slot="review-class-count"
-                            data-severity={group.severity}
+                            data-severity={group.key}
                             className="text-(--text-muted)"
                           >
-                            {t(locale, group.labelKey)}{" "}
-                            <span className="tabular-nums">{count}</span>
+                            {group.label}{" "}
+                            <span className="tabular-nums">{group.count}</span>
                           </span>,
                         );
                       }

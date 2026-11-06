@@ -294,8 +294,9 @@ describe("pull request detail data plane (pure helpers)", () => {
     });
     expect(tallies?.items.map((review) => review.findings)).toEqual([0, 1, 3]);
     // Rendered: a round without a tally renders its verdict alone; per-class
-    // pairs print in SEVERITY_GROUPS order — zero classes and off-vocabulary
-    // spellings are omitted, never printed as 0.
+    // pairs print in SEVERITY_GROUPS order — zero classes are omitted, never
+    // printed as 0, and an off-vocabulary spelling sums into the `other`
+    // bucket (the same catch-all the findings list uses).
     const tallyMarkup = render(
       { ...DETAIL, counts: { ...DETAIL.counts, findings: 0, reviews: 3, failures: 0, must_fix: 0 } },
       recordsOf({ ...RECORDS, findings: page([]), failures: page([]), reviews: tallies ?? page([]) }),
@@ -306,11 +307,11 @@ describe("pull request detail data plane (pure helpers)", () => {
     // All three rows carry REVIEWS[0]'s "needs fixes" verdict: the empty tally
     // renders the verdict alone; the nit tally prints that pair; the third row
     // orders must-fix before should-fix (SEVERITY_GROUPS order), drops the
-    // zero nit, and ignores the off-vocabulary "unknown" class.
+    // zero nit, and rolls the off-vocabulary "unknown" class into `other`.
     expect(classLines).toEqual([
       "needs fixes",
       `needs fixes · ${t("en", "pullRequests.severityNit")} 1`,
-      `needs fixes · ${t("en", "pullRequests.severityMustFix")} 1 · ${t("en", "pullRequests.severityShouldFix")} 2`,
+      `needs fixes · ${t("en", "pullRequests.severityMustFix")} 1 · ${t("en", "pullRequests.severityShouldFix")} 2 · ${t("en", "pullRequests.severityOther")} 9`,
     ]);
     const legacyFinding = parseRecordPage("findings", {
       items: [{ ...FINDINGS[0], review_round: 1.5 }],
@@ -1162,6 +1163,76 @@ describe("pull request detail face (static SSR)", () => {
     expect(read.olderHead).not.toContain(" · ");
     expect(markup).not.toContain("Everything the last round asked for is in.");
     expect(markup).not.toContain(t("en", "pullRequests.noReviews"));
+  });
+
+  test("a legacy-era tally rolls its non-vocabulary keys into one Other count", async () => {
+    // M1 reviews tallied critical | warning | suggestion | info; none of
+    // those spellings is in the merge-class vocabulary. The row must still
+    // carry a per-category breakdown: the unknown keys sum into the single
+    // `other` bucket the findings list already uses, and no known class is
+    // fabricated for them.
+    const reviews = page<PullRequestReview>([
+      {
+        verdict: "comment",
+        model: "claude",
+        provider: "",
+        reviewed_at: "2026-11-01 09:00:00",
+        head_sha: "legacy1a",
+        round: 3,
+        findings: 3,
+        duration_ms: null,
+        severity_counts: { critical: 2, info: 1 },
+      },
+      {
+        verdict: "ship it",
+        model: "kimi-for-coding",
+        provider: "",
+        reviewed_at: "2026-10-30 09:00:00",
+        head_sha: "mixed01a",
+        round: 2,
+        findings: 3,
+        duration_ms: null,
+        severity_counts: { "must-fix": 1, critical: 2 },
+      },
+      {
+        // All-known tallies keep vocabulary order and stay per-class.
+        verdict: "ship it",
+        model: "kimi-for-coding",
+        provider: "",
+        reviewed_at: "2026-10-29 09:00:00",
+        head_sha: "known001",
+        round: 1,
+        findings: 6,
+        duration_ms: null,
+        severity_counts: { nit: 1, "should-fix": 3, "must-fix": 2 },
+      },
+    ]);
+    const read = await withMarkup(
+      face({ findings: page([]), failures: page([]), reviews }),
+      (container) =>
+        [...container.querySelectorAll('[data-slot="review-counts"]')].map((line) => ({
+          text: line.textContent ?? "",
+          severities: [...line.querySelectorAll('[data-slot="review-class-count"]')].map(
+            (slot) => slot.getAttribute("data-severity"),
+          ),
+        })),
+    );
+    const otherLabel = t("en", "pullRequests.severityOther");
+    expect(read).toEqual([
+      // One aggregate for the whole legacy tally — never a fabricated
+      // `critical`/`info` pair.
+      { text: `comment · ${otherLabel} 3`, severities: [CATCH_ALL_SEVERITY] },
+      // The known class keeps its own slot, in front of the aggregate.
+      {
+        text: `ship it · ${t("en", "pullRequests.severityMustFix")} 1 · ${otherLabel} 2`,
+        severities: ["must-fix", CATCH_ALL_SEVERITY],
+      },
+      // All-known rounds render in vocabulary order, unchanged.
+      {
+        text: `ship it · ${t("en", "pullRequests.severityMustFix")} 2 · ${t("en", "pullRequests.severityShouldFix")} 3 · ${t("en", "pullRequests.severityNit")} 1`,
+        severities: ["must-fix", "should-fix", "nit"],
+      },
+    ]);
   });
 
   test("a finding row names the round that first reported it, from the card's bottom row", async () => {
