@@ -1882,11 +1882,15 @@ export function createAppsStore(db: AppsStoreD1) {
      * Each row also carries `review_round`: the ordinal of the round that FIRST
      * reported it, read from `review_findings.first_seen_round` — the value
      * the lifecycle write stamped when the row was inserted. It is stored, not
-     * derived from `reviews`: a round that failed or carried only comments has
-     * no `reviews` row, and a round counter that advances without one would
-     * shift every later derived ordinal. Migration 0020 creates the table with
-     * `first_seen_round INTEGER NOT NULL` and no predecessor, so every row has
-     * one and the read needs no COALESCE.
+     * derived from `reviews`. The divergence source is the artifact upsert's
+     * `ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO
+     * NOTHING` (`store/artifact-store.ts`): one `reviews` row per distinct
+     * head_sha, so a second review of the same head inserts no row and a
+     * derived ordinal would number the two faces from different populations.
+     * A published round with zero findings still writes its `reviews` row, and
+     * a failed round never owns a finding. Migration 0020 creates the table
+     * with `first_seen_round INTEGER NOT NULL` and no predecessor, so every
+     * row has one and the read needs no COALESCE.
      *
      * The page is ordered by `rowid`, the immutable insert order — `updated_ms`
      * advances every time a review round re-reports an open finding, so
@@ -1952,13 +1956,17 @@ export function createAppsStore(db: AppsStoreD1) {
      * its latest verdict. `null` = the App's ledger does not hold this PR.
      *
      * Each row carries the round ORDINAL and that round's run facts. The
-     * ordinal is the PR's `reviews` ordered oldest-first (`reviewed_at ASC,
-     * rowid ASC`, numbered from 1), computed at read time so historical rows
-     * need no backfill; paging never renumbers, because the window function
-     * covers the whole PR before the newest-first page slice. `duration_ms` is
-     * NULL for rows written before the measurement. `findings` counts the
-     * legacy `findings` rows attributed to that review, across every lifecycle
-     * state — the number of findings that round reported.
+     * ordinal is `review_publications.payload_json.round` for the row's head
+     * sha — the same publication round `review_findings.first_seen_round`
+     * stores, so a finding and the review that reported it print the same
+     * number. Historical rows without a journal row fall back to the PR's
+     * `reviews` ordered oldest-first (`reviewed_at ASC, rowid ASC`, from 1),
+     * which is what the pre-journal faces displayed. Paging never renumbers,
+     * because both expressions cover the whole PR before the newest-first page
+     * slice. `duration_ms` is NULL for rows written before the measurement.
+     * `findings` counts the legacy `findings` rows attributed to that review,
+     * across every lifecycle state — the number of findings that round
+     * reported.
      */
     async listPullRequestReviews(
       appId: string,
@@ -1980,11 +1988,20 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT x.verdict, x.model, x.provider, x.reviewed_at, x.head_sha,
                     x.round, x.duration_ms,
                     (SELECT COUNT(*) FROM findings f WHERE f.review_id = x.id) AS findings
-             FROM (SELECT id, rowid AS rid, verdict, model, provider, reviewed_at,
-                          head_sha, duration_ms,
-                          ROW_NUMBER() OVER (ORDER BY reviewed_at ASC, rowid ASC) AS round
-                   FROM reviews
-                   WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?) x
+             FROM (SELECT r.id, r.rowid AS rid, r.verdict, r.model, r.provider, r.reviewed_at,
+                          r.head_sha, r.duration_ms,
+                          COALESCE(
+                            (SELECT json_extract(p.payload_json, '$.round')
+                             FROM review_publications p
+                             WHERE p.app_id = r.app_id AND p.installation_id = r.installation_id
+                               AND p.owner = r.owner AND p.repo = r.repo AND p.pr_number = r.pr_number
+                               AND p.head_sha = r.head_sha AND p.kind = 'review'
+                             ORDER BY p.created_ms ASC, p.rowid ASC
+                             LIMIT 1),
+                            ROW_NUMBER() OVER (ORDER BY r.reviewed_at ASC, r.rowid ASC)
+                          ) AS round
+                   FROM reviews r
+                   WHERE r.app_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) x
              ORDER BY x.reviewed_at DESC, x.rid DESC
              LIMIT ? OFFSET ?`,
           )

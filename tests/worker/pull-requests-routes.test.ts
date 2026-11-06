@@ -260,6 +260,7 @@ function seedFindings(
     filePath: string | null;
     lineStart: number | null;
     firstSeenRound?: number;
+    lastSeenRound?: number;
   }>,
 ): void {
   db.raw
@@ -292,7 +293,7 @@ function seedFindings(
           fingerprintHint: null,
         }),
         entry.firstSeenRound ?? 1,
-        entry.firstSeenRound ?? 1,
+        entry.lastSeenRound ?? entry.firstSeenRound ?? 1,
       );
   }
 }
@@ -347,20 +348,18 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
   test("a repo-wide finding (null file_path) round-trips as ''", async () => {
     const db = await fixture();
     seedInstallation(db);
-    // Two rounds: sha-0 is round 1, sha-1 round 2 — the sha seedFindings stamps.
-    seedReviews(db, 2);
+    // The ordinal is stored on the lifecycle row: the first-seen sha is
+    // irrelevant to the read, and the last-seen round differs so a
+    // first/last column mix-up cannot pass.
     seedFindings(db, [
-      { id: "row-1", findingId: "F-1", mergeClass: "nit", filePath: null, lineStart: null, firstSeenRound: 2 },
-      { id: "row-2", findingId: "F-2", mergeClass: "must-fix", filePath: "src/a.ts", lineStart: 3, firstSeenRound: 3 },
+      { id: "row-1", findingId: "F-1", mergeClass: "nit", filePath: null, lineStart: null, firstSeenRound: 2, lastSeenRound: 1 },
+      { id: "row-2", findingId: "F-2", mergeClass: "must-fix", filePath: "src/a.ts", lineStart: 3, firstSeenRound: 3, lastSeenRound: 2 },
     ]);
-    // Round 3 inserted no `reviews` row (a failed or comment-only round), so
-    // its first-seen sha matches nothing; the stored ordinal still names it.
-    db.raw.prepare("UPDATE review_findings SET first_seen_sha = 'sha-gone' WHERE finding_id = 'F-2'").run();
 
     const res = await getFace(sectionPath("findings"), db);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<Record<string, unknown>> };
-    // Newest insert first: the round-3 row, then the round-2 match.
+    // Newest insert first: the round-3 row, then the round-2 row.
     expect(body.items[0]).toMatchObject({ finding_id: "F-2", review_round: 3 });
     expect(body.items[1]).toMatchObject({ finding_id: "F-1", file_path: "", line: null, review_round: 2 });
   });

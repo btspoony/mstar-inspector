@@ -828,8 +828,8 @@ export function PullRequestDetailView({
                             >
                               <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
                                 <span className="min-w-0 flex-1 text-sm font-medium">{finding.title}</span>
-                                {/* The round that FIRST reported this finding; a
-                                    finding no stored review carries has none. */}
+                                {/* The round that FIRST reported this finding, as the
+                                    lifecycle stored it. */}
                                 {finding.review_round === null ? null : (
                                   <span data-slot="finding-round" className={ROUND_CHIP}>
                                     {t(locale, "pullRequests.reviewRound", { round: finding.review_round })}

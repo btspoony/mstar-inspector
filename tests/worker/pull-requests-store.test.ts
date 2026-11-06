@@ -855,12 +855,45 @@ describe("pull request detail reads", () => {
       "row-3",
       "open",
       3,
+      2,
     );
     const store = createAppsStore(db);
     const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
     expect(findings!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([
       ["F-3", 3],
       ["F-1", 1],
+    ]);
+  });
+
+  test("the stored round wins over the ordinal the head sha would derive", async () => {
+    const db = await detailFixture();
+    // Two published heads. sha-r2's publication stamped round 3 — two later
+    // rounds re-reviewed a head the artifact upsert dedupes — while the
+    // reviews ledger can only number it 2. Both faces must print the stored
+    // value, so a derived-with-fallback read cannot pass this.
+    seedReview(db, "r1", "2026-01-02 00:00:00");
+    seedReview(db, "r2", "2026-01-03 00:00:00");
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+         VALUES ('p2', ?, 99, 'acme', 'widgets', 131, 'sha-r2', 'review', 'applied', '{"round":3}', 2, 2)`,
+      )
+      .run(APP_ID);
+    db.raw
+      .prepare("UPDATE review_findings SET first_seen_sha = 'sha-r2', first_seen_round = 3 WHERE finding_id = 'F-1'")
+      .run();
+    const store = createAppsStore(db);
+
+    const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
+    expect(findings!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([["F-1", 3]]);
+
+    const reviews = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
+    // Newest first: r2 carries the publication round; r1 has no journal row
+    // and keeps the ledger fallback.
+    expect(reviews!.items.map((review) => [review.head_sha, review.round])).toEqual([
+      ["sha-r2", 3],
+      ["sha-r1", 1],
     ]);
   });
 
@@ -921,6 +954,7 @@ function seedFinding(
   rowId = "row-1",
   state: "open" | "addressed" | "dismissed" = "open",
   firstSeenRound = 1,
+  lastSeenRound = firstSeenRound,
 ): void {
   // Two findings can share one publication: the first call creates it.
   db.raw
@@ -953,7 +987,7 @@ function seedFinding(
         fingerprintHint: null,
       }),
       firstSeenRound,
-      firstSeenRound,
+      lastSeenRound,
       state,
     );
 }
