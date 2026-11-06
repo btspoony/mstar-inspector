@@ -185,6 +185,15 @@ const RECHECK_ROW_BUDGET = 25;
 
 export const RECHECK_MAX_TARGETS = RECHECK_ROW_BUDGET;
 export const ASSESSMENT_TARGET_CAP = RECHECK_ROW_BUDGET;
+/**
+ * §7.8: the DEFAULT cap of the pure budget function — a caller with no review
+ * tier. The effective cap is the tier's own wall clock
+ * (`PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes`, quick 300,000 /
+ * default 600,000 / deep 900,000ms) bounded by the outer guard's publication
+ * tail: the runner derives it in `packages/runner/src/recheck.ts`. It is NOT
+ * a ceiling — a fixed 180s killed the seat while it was still reading prior
+ * findings (I-000431).
+ */
 export const RECHECK_MAX_RUNTIME_MS = 180_000;
 export const RECHECK_MIN_REMAINING_MS = 30_000;
 export const RECHECK_FILE_MAX_BYTES = 262_144;

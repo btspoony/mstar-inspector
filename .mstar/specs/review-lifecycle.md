@@ -253,7 +253,7 @@ export type RecheckStatus = {
 };
 export const RECHECK_MAX_TARGETS = 25;
 export const ASSESSMENT_TARGET_CAP = 25;
-export const RECHECK_MAX_RUNTIME_MS = 180_000;
+export const RECHECK_MAX_RUNTIME_MS = 180_000; // default cap only — the runner uses the tier's clock
 export const RECHECK_MIN_REMAINING_MS = 30_000;
 export const RECHECK_FILE_MAX_BYTES = 262_144;
 export type RecheckRowRejection = { rowId: string | null; index: number; error: string };
@@ -424,7 +424,7 @@ export function publishPrepared(input: { row: PublicationRow; lease: Lease }): P
 
 Model context caps: 50 items, 1200 chars per item, 8000 total chars, oldest items dropped first. Any omission/body truncation changes relevant modelCoverage to truncated even if fetch completed. Per-target original concern is never silently truncated. All text is wrapped as untrusted evidence with bounded escaped metadata; neutralize delimiters/Inspector marker syntax and control characters. No thread IDs are sourced from model text. Raw complete bodies are used only in-memory for SHA-256 snapshot hashing, not logged. A block describes its exact coverage and capture time.
 
-**Budget:** existing outer runner caps remain quick/default 600,000ms and deep 840,000ms. Start recheck concurrently at the beginning of model work, with `maxRuntimeMs = min(180000, outerDeadline-now-5000)`, skip if <30,000ms. The SDK already exposes `runStructuredSubagent({outputSchema,schemaMode:'strict',maxRuntimeMs,signal,enableLsp:false,enableIrc:false})`; use its abort signal, not a Promise.race that leaves work running. When normal review finishes, await the already-running recheck on its own remaining budget (bounded by the same outer deadline, so it can never outlive the run) and publish with budget coverage; abort it only on normal-review failure or when the outer deadline leaves no room to finish. **Never start or await a fresh 180s after normal review**. On normal-review failure abort recheck too. Teardown stays inside the existing outer deadline; no guard/queue budget increases.
+**Budget:** existing outer runner caps remain quick/default 600,000ms and deep 840,000ms. Start recheck concurrently at the beginning of model work, with the anchored TIER's own wall clock as the cap (`PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes`: quick 300,000ms, default 600,000ms, deep 900,000ms — the same clock the review seats run on, because a round re-reads up to 25 published findings), bounded by `outerDeadline-now-60,000` so the tail keeps its publication room and clamped again to `outerDeadline-now-5,000`; skip if under 30,000ms. `RECHECK_MAX_RUNTIME_MS` (180,000ms) is only the default cap of the pure function, never a ceiling. The SDK already exposes `runStructuredSubagent({outputSchema,schemaMode:'strict',maxRuntimeMs,signal,enableLsp:false,enableIrc:false})`; use its abort signal, not a Promise.race that leaves work running. When normal review finishes, await the already-running recheck on its own remaining budget (bounded by the same outer deadline, so it can never outlive the run) and publish with budget coverage; abort it only on normal-review failure or when the outer deadline leaves no room to finish. **Never start or await a fresh cap after normal review**. On normal-review failure abort recheck too. Teardown stays inside the existing outer deadline; no guard/queue budget increases.
 
 Quick/default: a separate structured child on the existing read-only ToolSession alongside normal seat calls, separate result slot. Deep: a dedicated read-only recheck AgentSession/ToolSession, not a second prompt/subagent yield stream on the deep parent's session (its listener captures terminal yields). Create/install the read-only seat definition once before concurrent work and remove it once both sessions settle; never concurrent agent-file writes/cleanup. Both sessions share only the immutable clone/evidence and remain inside the same token-removal boundary; no harness skill modifications. Recheck uses the existing review-seat model selection; engine synthesis/deep parent yield remain untouched.
 
@@ -432,7 +432,7 @@ Quick/default: a separate structured child on the existing read-only ToolSession
 export type ReviewRunResult = { envelope: MstarReviewV1; recheck: RecheckDoc | null };
 // AgentRuntimeRunInput gains optional recheck: RecheckInput; other fields unchanged.
 // AgentRuntime.runReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult>
-export function recheckBudget(outerDeadlineMs: number, nowMs: number): number; // 0 = skip
+export function recheckBudget(outerDeadlineMs: number, nowMs: number, capMs?: number): number; // 0 = skip
 ```
 
 Runner stdout remains envelope JSON only, exit codes unchanged. Optional `--recheck-out` emits the separate validated JSON file; no targets/invalid output emits no file. Worker reads it through an audited fixed-path bounded read (262144 bytes plus overflow detection), not arbitrary model file paths. Existing callers/runtime doubles unwrap `envelope`; no envelope field/category/hint overloading.

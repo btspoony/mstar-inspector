@@ -12,15 +12,22 @@
  * guarded by tests/review/runtime-boundary.test.ts).
  *
  * Budget (spec §7.8): existing outer runner caps remain quick/default
- * 600,000ms and deep 840,000ms. `recheckBudget` = min(180000,
- * outerDeadline - now - 5000), 0 = skip (below 30,000ms remaining). The
+ * 600,000ms and deep 840,000ms. The seat's cap is the anchored TIER's own
+ * clock (`PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes` — quick 300,000ms,
+ * default 600,000ms, deep 900,000ms), bounded by
+ * `outerDeadline - now - 60,000` so publication keeps its tail;
+ * `recheckBudget(outerDeadline, now, cap)` then clamps to that cap and to
+ * `outerDeadline - now - 5000`, 0 = skip (below 30,000ms remaining). The
  * runner anchors the ABSOLUTE outer deadline once per process
  * (`anchorRecheckDeadline(startMs, level)`); the seat evaluates
  * `currentRecheckBudget(Date.now())` at start so a late start shrinks toward
- * the shared deadline — a fresh 180s after the normal review is structurally
+ * the shared deadline — a fresh cap after the normal review is structurally
  * impossible (the seat only ever starts concurrently, and the caller awaits
  * it on that same budget; it aborts the seat only on review failure or when
- * the outer deadline leaves no room).
+ * the outer deadline leaves no room). `RECHECK_MAX_RUNTIME_MS` survives only
+ * as `recheckBudget`'s DEFAULT cap: a seat that must read up to 25 prior
+ * findings cannot work inside a fixed 180s while the review seats get the
+ * tier's full clock (I-000431).
  *
  * Failure contract: ANY seat failure/timeout/invalid payload logs one
  * structured stderr event and resolves `{ doc: null, status }` — it never
@@ -38,7 +45,7 @@
  * dispatch head (soft).
  */
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent";
-import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import { runStructuredSubagent, type StructuredSubagentResult } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 import {
   MODEL_ITEM_MAX_CHARS,
@@ -134,7 +141,8 @@ export const OUTER_RUNNER_CAP_MS: Record<ReviewLevel, number> = {
 /**
  * The absolute outer deadline the runner anchored for this process
  * (`anchorRecheckDeadline`); `undefined` = no anchor (direct runtime/test
- * use) — the seat then gets the full 180s cap from "now".
+ * use) — the seat then gets the tier's unanchored budget: its cap bounded by
+ * the unanchored outer guard less the publication tail.
  */
 let anchoredDeadlineMs: number | undefined;
 
@@ -168,8 +176,8 @@ export function anchorRecheckDeadline(startMs: number, level: ReviewLevel): void
 }
 
 /**
- * Drop every anchor: the process returns to the unanchored state (full 180s
- * recheck cap from "now", the default tier's full soft cap). Tests use it
+ * Drop every anchor: the process returns to the unanchored state (the default
+ * tier's full cap from "now", the default tier's full soft cap). Tests use it
  * between cases instead of choreographing a "neutral" far-future anchor, so no
  * case depends on another's leftover state — bun's module registry is
  * process-global, so that state is shared across test files.
@@ -216,24 +224,51 @@ export function remainingOuterMs(nowMs: number, level: ReviewLevel = anchoredSof
 }
 
 /**
- * The recheck budget available at `nowMs` given the anchored deadline
- * (full 180s cap from `nowMs` when no anchor was set). Pure view over
- * `recheckBudget` — exported for tests; `runRecheckSeat` calls it internally.
+ * The tail of the outer guard a seat leaves for the runner's own work after it
+ * stops (merge, synthesize, validate, publish) — reserved by both the review
+ * seat fan-out and the recheck seat. A seat that claimed it could deliver its
+ * findings after the run had already published.
+ */
+export const PUBLICATION_TAIL_MS = 60_000;
+
+/**
+ * The recheck budget available at `nowMs` given the anchored deadline and
+ * TIER. The cap is the tier's own wall clock
+ * (`PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes`) — the same clock the
+ * review seats run on, because a recheck round re-reads up to 25 published
+ * findings and a fixed 180s killed it mid-read (I-000431) — bounded by
+ * `outerDeadline - now - PUBLICATION_TAIL_MS` so the tail keeps its
+ * publication room. Unanchored → the tier's unanchored budget, its cap bounded
+ * by the unanchored outer guard less the publication tail, mirroring
+ * `remainingOuterMs`. Pure view over `recheckBudget` — exported for tests;
+ * `runRecheckSeat` calls it internally.
  */
 export function currentRecheckBudget(nowMs: number): number {
-  return recheckBudget(anchoredDeadlineMs ?? nowMs + RECHECK_MAX_RUNTIME_MS + RECHECK_START_MARGIN_MS, nowMs);
+  const level = anchoredSoftLevel ?? "default";
+  const outerDeadlineMs = anchoredDeadlineMs ?? nowMs + OUTER_RUNNER_CAP_MS[level];
+  const tierCapMs = PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes * 60_000;
+  return recheckBudget(
+    outerDeadlineMs,
+    nowMs,
+    Math.min(tierCapMs, outerDeadlineMs - nowMs - PUBLICATION_TAIL_MS),
+  );
 }
 
 /**
- * Recheck wall-clock budget (spec §7.8): `min(180000, outerDeadline - now -
+ * Recheck wall-clock budget (spec §7.8): `min(capMs, outerDeadline - now -
  * 5000)`; 0 = skip. Below `RECHECK_MIN_REMAINING_MS` of remaining budget the
  * seat is skipped entirely — a seat that cannot plausibly finish must not eat
  * the tail of the outer deadline. The floor is the contract constant (spec
- * §7.3), never a re-typed literal.
+ * §7.3), never a re-typed literal. `capMs` defaults to
+ * `RECHECK_MAX_RUNTIME_MS`, the fixed fallback for a caller with no tier.
  */
-export function recheckBudget(outerDeadlineMs: number, nowMs: number): number {
-  if (!Number.isFinite(outerDeadlineMs) || !Number.isFinite(nowMs)) return 0;
-  const budget = Math.min(RECHECK_MAX_RUNTIME_MS, outerDeadlineMs - nowMs - RECHECK_START_MARGIN_MS);
+export function recheckBudget(
+  outerDeadlineMs: number,
+  nowMs: number,
+  capMs: number = RECHECK_MAX_RUNTIME_MS,
+): number {
+  if (!Number.isFinite(outerDeadlineMs) || !Number.isFinite(nowMs) || !Number.isFinite(capMs)) return 0;
+  const budget = Math.min(capMs, outerDeadlineMs - nowMs - RECHECK_START_MARGIN_MS);
   if (budget < RECHECK_MIN_REMAINING_MS) return 0;
   return budget;
 }
@@ -327,7 +362,7 @@ function evidenceOrder(input: RecheckInput): EvidenceSlice[] {
  * one that does not fit is omitted WHOLE, never truncated, so its line numbers
  * stay exact and a quote copied from it still validates. `ok: false` means
  * even targets + discussion cannot be asked: no seat could serve that round,
- * so the caller skips it instead of burning the 180s window on a guaranteed
+ * so the caller skips it instead of burning the seat's window on a guaranteed
  * empty yield.
  */
 export function fitRecheckInput(
@@ -433,14 +468,20 @@ function redactedStatusError(text: string): string {
 }
 
 /** Unwrap the strict-validated structured payload of the recheck child. */
-function recheckStructuredData(result: Awaited<ReturnType<typeof runStructuredSubagent>>): unknown {
+function recheckStructuredData(result: StructuredSubagentResult): unknown {
   const single = result.result;
   if (single.error) {
     throw new Error(`recheck seat failed: ${single.error}`);
   }
   const structured = single.structuredOutput;
   if (!structured || structured.status !== "valid" || structured.data === undefined) {
-    const detail = structured?.error ?? single.stderr.slice(-200);
+    // Attribution order: the validator's own text, then the child's cap
+    // reason, then its stderr tail, then its exit code. A capped child settles
+    // with `exitCode: 1` and no `error`/stderr and the SDK only says
+    // `unavailable` (I-000431), so the first two sources are what names the
+    // seat's wall clock instead of a bare status.
+    const detail =
+      structured?.error || single.abortReason || single.stderr.slice(-200) || `exit ${single.exitCode ?? "unknown"}`;
     throw new Error(
       `recheck seat produced no valid structured output (status ${structured?.status ?? "absent"})` +
         `${detail ? `: ${detail}` : ""}`,
@@ -526,10 +567,10 @@ export async function runRecheckSeat(input: {
     // same cause so the durable document (and the failure row built from it)
     // tells the two apart without a new wire field. Both figures are the ones
     // the skip was decided on: what the outer deadline actually left, and the
-    // outer time the seat's minimum budget plus the start margin needs.
+    // outer time the seat's minimum budget plus the publication tail needs.
     const error = redactedStatusError(
       `recheck seat skipped (tail): the review's outer deadline left ${remainingOuterMs(nowMs)}ms, ` +
-        `the seat needs at least ${RECHECK_MIN_REMAINING_MS + RECHECK_START_MARGIN_MS}ms`,
+        `the seat needs at least ${RECHECK_MIN_REMAINING_MS + PUBLICATION_TAIL_MS}ms`,
     );
     console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget", cause: "tail", error }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error } };
