@@ -1153,7 +1153,7 @@ export type CheckLifecycle = {
      * OPTIONAL per-invocation abandonment latch owned by the caller. When the
      * caller's §7.10 budget elapses it trips `abandon()`, and this `begin` then
      * stops attaching a created run on behalf of a caller that is gone —
-     * leaving the attempt with a terminal obligation instead (see
+     * handing the attempt to the recovery lane instead (see
      * `abandonUnterminalized`). Omitted → this invocation is never abandoned,
      * which is the non-consumer (test/recovery) default.
      */
@@ -1244,19 +1244,21 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
   /**
    * A lease carried by an invocation the CONSUMER has already abandoned (the
    * §7.10 two-second hook budget elapsed). A refused attach or unavailable send
-   * must not leave such an attempt holding a lease nothing will terminalize:
-   * the recovery lane would not select it until its execution deadline (the
-   * integrated claim still requires `desired <> 'in_progress' OR
-   * execution_deadline_ms <= now`). The attempt is therefore released NOW with
-   * an explicit terminalized intent, so recovery is due after the first backoff
-   * rung instead of up to fifteen minutes later — identity, the attached run id
-   * and any sent-request truth are all preserved.
+   * must not leave such an attempt holding a lease nothing will terminalize, so
+   * the attempt is released NOW with the honest recovery state (`pending`, or
+   * `remote-unconfirmed` when a request was spent) — identity, the attached run
+   * id and any sent-request truth are all preserved.
    *
-   * Both the release and the intent write are fenced on the live lease, so an
-   * attempt whose lease has genuinely expired is untouched by this path — its
-   * own expiry is what the deadline rule already covers. A refused-marker
-   * failure when no request was dispatched is the exception: the lease is
-   * provably dead in that case, and the identity fence is the honest one.
+   * No terminal intent is written here. Abandonment is not a conclusion: the
+   * frozen `failure` / unconfirmed summary this path used to write froze a
+   * Check before the publication could prove itself, which is how a review that
+   * published successfully kept a red Check. The conclusion belongs to the
+   * reconciler, which derives it from the persisted publication proof (or from
+   * the elapsed execution deadline).
+   *
+   * The release is fenced on the live lease, so an attempt whose lease has
+   * genuinely expired is untouched by this path — its own expiry is what the
+   * deadline rule already covers.
    */
   const abandonUnterminalized = async (
     attemptId: string,
@@ -1264,29 +1266,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     reason: string,
     requestsSpent: boolean,
   ): Promise<void> => {
-    const fence = fenceFor(lease);
-    const frozen = await setCheckDesired(
-      deps.db,
-      attemptId,
-      fence.lease,
-      {
-        desired: "failure",
-        title: CHECK_NAME,
-        summary: CHECK_SUMMARIES.unconfirmed,
-      },
-      null,
-      fence.nowMs,
-    );
-    if (frozen) {
-      await releaseForRecovery(attemptId, fence.lease, reason, requestsSpent);
-      return;
-    }
-    if (!requestsSpent) {
-      // No request was dispatched, so nothing may exist remotely: the
-      // identity-fenced release is the correct one even though the lease is
-      // dead (that is exactly why the intent write above refused).
-      await releaseForRecovery(attemptId, fence.lease, reason, false);
-    }
+    await releaseForRecovery(attemptId, lease, reason, requestsSpent);
   };
 
   /**
@@ -1322,12 +1302,13 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
   /**
    * Record the run a cancelled invocation created, then hand the attempt to
    * recovery. The id is attached first — the durable fact recovery needs to
-   * ADOPT this run instead of creating a second one — and the terminal intent
-   * plus the released lease make the row due after the first backoff rung
-   * rather than at the execution deadline. Every write is fenced on the live
-   * lease: if the lease died while the create ran, the attach is refused and
-   * the row keeps exactly what the adapter persisted (`sending` for the
-   * adopt-only state the deadline rule already covers).
+   * ADOPT this run instead of creating a second one — and the released lease
+   * leaves the row recoverable with no conclusion of its own: the reconciler
+   * decides it from the persisted publication proof, or once the execution
+   * deadline passes. Every write is fenced on the live lease: if the lease died
+   * while the create ran, the attach is refused and the row keeps exactly what
+   * the adapter persisted (`sending` for the adopt-only state the deadline rule
+   * already covers).
    */
   const adoptLateCreatedRun = async (identity: CheckIdentity, lease: Lease, remoteId: number): Promise<void> => {
     const fence = fenceFor(lease);

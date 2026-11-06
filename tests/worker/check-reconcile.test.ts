@@ -2599,3 +2599,237 @@ describe("configured Check update budget (spec §7.10)", () => {
     expect(summary.errors).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Abandonment is not a conclusion: the wait for the persisted proof
+// ---------------------------------------------------------------------------
+
+/** The attempt's own execution deadline — the wait's hard stop. */
+const FUTURE_DEADLINE = T0 + 900_000;
+
+/**
+ * The row an abandoned hook leaves behind: the claim released with the honest
+ * recovery state, no proof, and the unconfirmed fallback still frozen from the
+ * abandonment (the reconciler, not the abandoner, must decide it).
+ */
+async function abandonedAttempt(db: TestD1) {
+  const { attempt, lease } = await claim(db, { nowMs: T0, executionDeadlineMs: FUTURE_DEADLINE });
+  const id = attempt.identity.attemptId;
+  expect(
+    await setCheckDesired(db, id, lease, { desired: "failure", title: CHECK_NAME, summary: UNCONFIRMED }, null, T0),
+  ).toBe(true);
+  expect(
+    await deferCheckRecovery(
+      db,
+      id,
+      lease,
+      { state: "remote-unconfirmed", nextAttemptMs: T0 + 60_000, reason: "terminalize budget exceeded" },
+      T0,
+    ),
+  ).toBe(true);
+  return { attempt, id };
+}
+
+/** A script that creates the run, finds it in progress and records the send. */
+function publishingScript(sent: { desired?: string; summary?: string }): AdapterScript {
+  return {
+    adopt: async () => ({ kind: "absent" }),
+    begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+    fetch: async (identity, checkRunId) => ({
+      kind: "found",
+      remote: remoteFor(identity, { id: checkRunId, status: "in_progress", conclusion: null }),
+    }),
+    complete: async (identity, _runId, conclusion) => {
+      sent.desired = conclusion.desired;
+      sent.summary = conclusion.summary;
+      return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+    },
+  };
+}
+
+function recordFailure(db: TestD1, stage: string, error: string): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(crypto.randomUUID(), SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA, stage, error);
+}
+
+describe("the publication-proof wait decides when abandonment may conclude (spec §7.9)", () => {
+  test("no proof and a future deadline: the pass defers and spends no attempt", async () => {
+    const db = seededDb();
+    const { id } = await abandonedAttempt(db);
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    const events: Array<Record<string, unknown>> = [];
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        log: { warn: () => {}, info: (fields) => void events.push(fields) },
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      expect(summary.examined).toBe(1);
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+      expect(summary.unconfirmed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    // Nothing was minted and no attempt was spent: the row is simply not
+    // concludable while the head can still publish.
+    expect(factoryCalls).toBe(0);
+    const row = await rawRow(db, id);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.attempts).toBe(1);
+    expect(row.desired).toBe("failure");
+    expect(row.desired_summary).toBe(UNCONFIRMED);
+    expect(row.observed).toBe("unknown");
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+
+    // The journal probe found nothing to report; the still-publishable verdict
+    // is what held the wait, and the line says so.
+    const deferred = events.filter((fields) => fields.event === "check_recovery_deferred_pending_publication");
+    expect(deferred).toHaveLength(1);
+    expect(deferred[0]!.probe_state).toBe("none");
+  });
+
+  test("a proof that lands before the deadline yields the gate-derived conclusion", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    let deferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    // The frozen unconfirmed failure is NOT what ships: the proof decided.
+    expect(deferred).toBe(0);
+    expect(sent.desired).toBe("success");
+    expect(sent.summary).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("success");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
+  const terminalWriters = [
+    { stage: "parse", error: "model output failed validation" },
+    { stage: "pipeline", error: "review dropped after 3 refused retries: pr-held (admission)" },
+  ] as const;
+  for (const writer of terminalWriters) {
+    test(`a terminal ${writer.stage === "parse" ? "parse failure" : "admission drop"} concludes on this pass`, async () => {
+      const db = seededDb();
+      const { id } = await abandonedAttempt(db);
+      recordFailure(db, writer.stage, writer.error);
+
+      const stub = stubFetch();
+      const sent: { desired?: string; summary?: string } = {};
+      let deferred = -1;
+      try {
+        const summary = await run(db, {
+          now: () => T0 + 120_000,
+          credentials: scriptedCredentials(db, publishingScript(sent)),
+        });
+        deferred = summary.deferred;
+        expect(summary.completed).toBe(1);
+      } finally {
+        stub.restore();
+      }
+
+      // Nothing more can land for this head, so the wait is over on this pass.
+      expect(deferred).toBe(0);
+      expect(sent.desired).toBe("failure");
+      expect(sent.summary).toBe(UNCONFIRMED);
+      const row = await rawRow(db, id);
+      expect(row.observed).toBe("failure");
+      expect(row.terminal_ms).not.toBeNull();
+    });
+  }
+
+  test("a retryable infra failure keeps the row open: the retry can still publish", async () => {
+    const db = seededDb();
+    const { id } = await abandonedAttempt(db);
+    recordFailure(db, "runner", "the review run exited 1");
+
+    const stub = stubFetch();
+    const events: Array<Record<string, unknown>> = [];
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        log: { warn: () => {}, info: (fields) => void events.push(fields) },
+        credentials: scriptedCredentials(db),
+      });
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    const row = await rawRow(db, id);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.attempts).toBe(1);
+    expect(row.observed).toBe("unknown");
+    expect(
+      events.some((fields) => fields.event === "check_recovery_deferred_pending_publication"),
+    ).toBe(true);
+  });
+
+  test("an elapsed deadline still concludes failure/unconfirmed (existing semantics)", async () => {
+    const db = seededDb();
+    // The abandoned claim's own deadline has already passed: no wait applies.
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    // Both writes are fenced on the claim's OWN live lease, so they land at the
+    // claim instant, before that lease runs out.
+    expect(
+      await setCheckDesired(db, id, lease, { desired: "failure", title: CHECK_NAME, summary: UNCONFIRMED }, null, CLAIM_AT),
+    ).toBe(true);
+    expect(
+      await deferCheckRecovery(
+        db,
+        id,
+        lease,
+        { state: "remote-unconfirmed", nextAttemptMs: EXPIRED_DEADLINE, reason: "terminalize budget exceeded" },
+        CLAIM_AT,
+      ),
+    ).toBe(true);
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    let deferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    expect(deferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(UNCONFIRMED);
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+});

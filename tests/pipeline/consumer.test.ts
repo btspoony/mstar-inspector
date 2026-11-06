@@ -5661,7 +5661,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.next_attempt_ms).toBeGreaterThan(Date.now());
   });
 
-  test("check lifecycle: a real begin that outlives the budget still leaves a prompt terminal obligation", async () => {
+  test("check lifecycle: a real begin that outlives the budget leaves its run recoverable, not concluded", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -5728,9 +5728,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(publicationRow(db).phase).toBe("applied");
     expect(kvPuts).toHaveLength(1);
 
-    // (2) The late real begin attached its run and, being abandoned, left the
-    //     attempt with a TERMINAL obligation instead of an in_progress row
-    //     waiting for the execution deadline.
+    // (2) The late real begin attached its run and, being abandoned, handed the
+    //     attempt to recovery with NO conclusion of its own: abandoning is not
+    //     terminalizing, so the reconciler decides from the persisted proof (or
+    //     at the execution deadline).
     await held.promise;
     // The detached begin continues asynchronously: wait for its durable result
     // (the attach) rather than guessing a delay.
@@ -5739,20 +5740,25 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     }
     const row = checkRowFor(db, SHA);
     expect(row.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
-    expect(row.desired).toBe("failure");
-    expect(row.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    expect(row.desired).toBe("in_progress");
+    expect(row.desired_title).toBeNull();
+    expect(row.desired_summary).toBeNull();
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
-    // Released: no lease held, and the first backoff rung — not 15 minutes.
+    // Released: no lease held, and the first backoff rung recorded.
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBeLessThan(row.execution_deadline_ms);
 
-    // (3) The recovery lane can now complete it WITHOUT creating a second run.
-    const reacquired = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!);
-    expect(reacquired).not.toBeNull();
+    // (3) Until that deadline the row is NOT recoverable — `desired` still wants
+    //     `in_progress`, and no bookkeeping makes an attempt due. At the
+    //     deadline the reconciler owns it, still without a second create.
+    const early = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!);
+    expect(early).toBeNull();
+    const atDeadline = await claimCheckRecovery(db, row.id, "reconciler", row.execution_deadline_ms!);
+    expect(atDeadline).not.toBeNull();
     expect(checkRequests.filter((r) => r.op === "create")).toHaveLength(1);
   });
 
@@ -5836,8 +5842,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     }
 
     // A still followed the ABANDONED path: its run is attached (adoptable) and
-    // it carries a terminal obligation with a bounded recovery time — not the
-    // unobservable normal handle a stale shared flag would have produced.
+    // it carries NO conclusion of its own — not the unobservable normal handle a
+    // stale shared flag would have produced.
     const rowA = checkRowForPr(db, 42);
     // The run attached to A is exactly the one A created (B's create resolved
     // first while A was held, so the numeric id is not A's to predict).
@@ -5847,8 +5853,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         (r) => r.op === "create" && (r.params as { external_id?: string }).external_id === rowA.external_id,
       ),
     ).toBe(true);
-    expect(rowA.desired).toBe("failure");
-    expect(rowA.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    expect(rowA.desired).toBe("in_progress");
+    expect(rowA.desired_summary).toBeNull();
     expect(rowA.observed).toBe("unknown");
     expect(rowA.holder).toBeNull();
     expect(rowA.lease_until_ms).toBeNull();
