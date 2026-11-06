@@ -856,13 +856,16 @@ export function createAppsStore(db: AppsStoreD1) {
   /**
    * The App's live review locks, keyed by (owner, repo, pr_number) — or `null`
    * when the read failed, because a failed read IS the `unknown` wire value
-   * (D16) and must not fail the whole PR face. ONE statement regardless of N:
-   * the live set is bounded by the concurrency caps, and the join keeps it
-   * inside this App's installations (the same attribution the failure count
-   * uses). `expires_at > now` is the pipeline's own acquire predicate, and the
-   * bound instant uses the ISO-8601-with-milliseconds form that column is
-   * written in — the one form it orders correctly as text. Keys fold case
-   * because the lock stores lowercase while the ledger keeps GitHub's spelling.
+   * (D16) and must not fail the whole PR face. That `null` is silent in the
+   * payload, so the catch also emits one `dashboard_live_lock_read_failed`
+   * warn carrying the `app_id` — the only trace of which App degraded. ONE
+   * statement regardless of N: the live set is bounded by the concurrency
+   * caps, and the join keeps it inside this App's installations (the same
+   * attribution the failure count uses). `expires_at > now` is the pipeline's
+   * own acquire predicate, and the bound instant uses the
+   * ISO-8601-with-milliseconds form that column is written in — the one form
+   * it orders correctly as text. Keys fold case because the lock stores
+   * lowercase while the ledger keeps GitHub's spelling.
    */
   async function liveReviewLocks(
     appId: string,
@@ -879,6 +882,7 @@ export function createAppsStore(db: AppsStoreD1) {
         .all<PullRequestLockRow>();
       return new Map(results.map((row) => [pullRequestKey(row.owner, row.repo, row.pr_number), row]));
     } catch {
+      console.warn(JSON.stringify({ event: "dashboard_live_lock_read_failed", app_id: appId }));
       return null;
     }
   }

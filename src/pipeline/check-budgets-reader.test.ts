@@ -42,11 +42,13 @@ async function seed(target: DashboardD1, key: string, value: string): Promise<vo
 describe("readCheckBudgets", () => {
   test("absent rows answer the defaults silently", async () => {
     const log = spyLog<CheckBudgetsLogFields>();
-    expect(await readCheckBudgets(db(), log)).toEqual({
+    const budgets = await readCheckBudgets(db(), log);
+    expect(budgets).toEqual({
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: false,
     });
+    expect(Object.hasOwn(budgets, "reason")).toBe(false);
     expect(log.calls).toEqual([]);
   });
 
@@ -58,12 +60,14 @@ describe("readCheckBudgets", () => {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: true,
+      reason: "untrusted",
     });
     expect(log.calls).toHaveLength(1);
     expect(log.calls[0]!.fields).toEqual({
       event: "review_check_budgets_degraded",
       terminalize_ms: CHECK_TERMINALIZE_DEFAULT,
       update_ms: CHECK_UPDATE_DEFAULT,
+      degraded_reason: "untrusted",
     });
   });
 });

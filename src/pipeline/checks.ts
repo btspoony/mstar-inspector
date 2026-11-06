@@ -1153,7 +1153,7 @@ export type CheckLifecycle = {
      * OPTIONAL per-invocation abandonment latch owned by the caller. When the
      * caller's §7.10 budget elapses it trips `abandon()`, and this `begin` then
      * stops attaching a created run on behalf of a caller that is gone —
-     * leaving the attempt with a terminal obligation instead (see
+     * handing the attempt to the recovery lane instead (see
      * `abandonUnterminalized`). Omitted → this invocation is never abandoned,
      * which is the non-consumer (test/recovery) default.
      */
@@ -1222,13 +1222,14 @@ export type CheckLifecycle = {
  * second row, no second remote run.
  *
  * `terminalize` decides from PERSISTED proof, never from the code path that
- * called it: the proof is read by exact App/scope/SHA with this attempt's
- * publication id preferred, `setCheckDesired` freezes that intent BEFORE the
- * one bounded remote update, and `observed` advances ONLY from a response the
- * adapter validated. Every write is fenced on the handle's live lease, so a
- * stale/lost holder writes nothing — and the attempt stays recoverable
- * (`pending`/`remote-unconfirmed` + backoff) for the scheduled lane, never
- * blocking or delaying the review.
+ * called it: only this attempt's OWN publication is read — RL-12 head reuse
+ * makes any head-keyed fallback another generation's proof, so an attempt
+ * that published nothing has none — `setCheckDesired` freezes that intent
+ * BEFORE the one bounded remote update, and `observed` advances ONLY from a
+ * response the adapter validated. Every write is fenced on the handle's live
+ * lease, so a stale/lost holder writes nothing — and the attempt stays
+ * recoverable (`pending`/`remote-unconfirmed` + backoff) for the scheduled
+ * lane, never blocking or delaying the review.
  */
 export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
   /**
@@ -1244,19 +1245,21 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
   /**
    * A lease carried by an invocation the CONSUMER has already abandoned (the
    * §7.10 two-second hook budget elapsed). A refused attach or unavailable send
-   * must not leave such an attempt holding a lease nothing will terminalize:
-   * the recovery lane would not select it until its execution deadline (the
-   * integrated claim still requires `desired <> 'in_progress' OR
-   * execution_deadline_ms <= now`). The attempt is therefore released NOW with
-   * an explicit terminalized intent, so recovery is due after the first backoff
-   * rung instead of up to fifteen minutes later — identity, the attached run id
-   * and any sent-request truth are all preserved.
+   * must not leave such an attempt holding a lease nothing will terminalize, so
+   * the attempt is released NOW with the honest recovery state (`pending`, or
+   * `remote-unconfirmed` when a request was spent) — identity, the attached run
+   * id and any sent-request truth are all preserved.
    *
-   * Both the release and the intent write are fenced on the live lease, so an
-   * attempt whose lease has genuinely expired is untouched by this path — its
-   * own expiry is what the deadline rule already covers. A refused-marker
-   * failure when no request was dispatched is the exception: the lease is
-   * provably dead in that case, and the identity fence is the honest one.
+   * No terminal intent is written here. Abandonment is not a conclusion: the
+   * frozen `failure` / unconfirmed summary this path used to write froze a
+   * Check before the publication could prove itself, which is how a review that
+   * published successfully kept a red Check. The conclusion belongs to the
+   * reconciler, which derives it from the persisted publication proof (or from
+   * the elapsed execution deadline).
+   *
+   * The release is fenced on the live lease, so an attempt whose lease has
+   * genuinely expired is untouched by this path — its own expiry is what the
+   * deadline rule already covers.
    */
   const abandonUnterminalized = async (
     attemptId: string,
@@ -1264,29 +1267,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     reason: string,
     requestsSpent: boolean,
   ): Promise<void> => {
-    const fence = fenceFor(lease);
-    const frozen = await setCheckDesired(
-      deps.db,
-      attemptId,
-      fence.lease,
-      {
-        desired: "failure",
-        title: CHECK_NAME,
-        summary: CHECK_SUMMARIES.unconfirmed,
-      },
-      null,
-      fence.nowMs,
-    );
-    if (frozen) {
-      await releaseForRecovery(attemptId, fence.lease, reason, requestsSpent);
-      return;
-    }
-    if (!requestsSpent) {
-      // No request was dispatched, so nothing may exist remotely: the
-      // identity-fenced release is the correct one even though the lease is
-      // dead (that is exactly why the intent write above refused).
-      await releaseForRecovery(attemptId, fence.lease, reason, false);
-    }
+    await releaseForRecovery(attemptId, lease, reason, requestsSpent);
   };
 
   /**
@@ -1322,12 +1303,13 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
   /**
    * Record the run a cancelled invocation created, then hand the attempt to
    * recovery. The id is attached first — the durable fact recovery needs to
-   * ADOPT this run instead of creating a second one — and the terminal intent
-   * plus the released lease make the row due after the first backoff rung
-   * rather than at the execution deadline. Every write is fenced on the live
-   * lease: if the lease died while the create ran, the attach is refused and
-   * the row keeps exactly what the adapter persisted (`sending` for the
-   * adopt-only state the deadline rule already covers).
+   * ADOPT this run instead of creating a second one — and the released lease
+   * leaves the row recoverable with no conclusion of its own: the reconciler
+   * decides it from the persisted publication proof, or once the execution
+   * deadline passes. Every write is fenced on the live lease: if the lease died
+   * while the create ran, the attach is refused and the row keeps exactly what
+   * the adapter persisted (`sending` for the adopt-only state the deadline rule
+   * already covers).
    */
   const adoptLateCreatedRun = async (identity: CheckIdentity, lease: Lease, remoteId: number): Promise<void> => {
     const fence = fenceFor(lease);
@@ -1412,23 +1394,43 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
 
     async terminalize(input) {
       const { handle } = input;
-      // PROOF decides (spec §7.9): exact App/scope/SHA, this attempt's
-      // publication id preferred. `null` is UNPROVEN — never "not published" —
-      // which is why an unconfirmed send must conclude `failure`, not success.
-      // The APPLIED review follows that SAME proof publication: RL-12 lets a
-      // second attempt share the head SHA, so the scope/SHA `reviews` row may
-      // be an earlier attempt's result and must not decide this one. The gate
-      // and the review are consulted ONLY inside `decideConclusion`'s branches,
-      // so without a proof and without an inherited head both reads are skipped
-      // rather than issued and discarded; a review payload without a readable
-      // tally stays unreadable, never a pass, and an unreadable gate row fails
-      // closed the same way. An EMPTY increment reads the reviewed head's
-      // `reviews` row instead — the head whose content this round covers.
-      const proof = await readPublicationProof(deps.db, {
-        scope: handle.scope,
-        headSha: handle.headSha,
-        publicationId: input.publicationId ?? undefined,
-      });
+      // PROOF decides (spec §7.9): the publication THIS attempt published.
+      // `null` is UNPROVEN — never "not published" — which is why an
+      // unconfirmed send must conclude `failure`, not success. Only the linked
+      // publication proves anything: RL-12 lets a re-trigger reuse the head
+      // SHA, so the reader's head fallback would adopt ANOTHER generation's
+      // row (the oldest one) and freeze this attempt's Check from an envelope
+      // it never published. Without an own publication id and without an
+      // inherited head that is the only thing the read could return, so it is
+      // not issued at all (the recovery lane's `readProof` applies the same
+      // rule). The APPLIED review follows that SAME proof publication: the
+      // scope/SHA `reviews` row may be an earlier attempt's result and must
+      // not decide this one. The gate and the review are consulted ONLY inside
+      // `decideConclusion`'s branches, so without a proof and without an
+      // inherited head both reads are skipped rather than issued and
+      // discarded; a review payload without a readable tally stays unreadable,
+      // never a pass, and an unreadable gate row fails closed the same way. An
+      // EMPTY increment reads the reviewed head's `reviews` row instead — the
+      // head whose content this round covers.
+      const ownPublicationId = input.publicationId ?? undefined;
+      const readProof =
+        ownPublicationId === undefined && input.inheritedHeadSha === undefined
+          ? null
+          : await readPublicationProof(deps.db, {
+              scope: handle.scope,
+              headSha: handle.headSha,
+              publicationId: ownPublicationId,
+            });
+      // The reader prefers the linked row but still falls back to another row
+      // with a readable proof for the same head — under RL-12 that is a PRIOR
+      // generation's applied publication (one row per scope/head/kind, so a
+      // re-trigger owns the degraded row and can only ever see an older
+      // `review` row). That proof is not this attempt's: a foreign publication
+      // id is UNPROVEN, exactly as the recovery lane's `readProof` treats it.
+      const proof =
+        readProof !== null && ownPublicationId !== undefined && readProof.publicationId !== ownPublicationId
+          ? null
+          : readProof;
       const gateAndReview: readonly [ReviewGate | null, PublishedReview | null] =
         proof !== null
           ? await Promise.all([

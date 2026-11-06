@@ -138,6 +138,8 @@ export type CheckAttempt = {
   identity: CheckIdentity;
   lease: Lease | null;
   checkRunId: number | null;
+  /** The proof link the row already carries — the selector's copy of it. */
+  publicationId: string | null;
   createState: CheckCreateState;
   desired: CheckDesired;
   observed: CheckObserved;
@@ -145,6 +147,12 @@ export type CheckAttempt = {
   executionDeadlineMs: number;
   attempts: number;
   terminalMs: number | null;
+  /**
+   * When this attempt was ADMITTED. The proof wait uses it to attribute a
+   * publication: only a journal row staged at or after this instant can be the
+   * publication this attempt set in motion.
+   */
+  createdAtMs: number;
 };
 
 /** The remote facts an adapter read from GitHub (spec §7.9) — evidence, not opinion. */
@@ -312,6 +320,7 @@ function attemptOf(row: ReviewCheckRow): CheckAttempt {
       ? null
       : { holder: row.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms },
     checkRunId: row.check_run_id,
+    publicationId: row.publication_id,
     createState: row.create_state as CheckCreateState,
     desired: row.desired as CheckDesired,
     observed: row.observed as CheckObserved,
@@ -319,6 +328,7 @@ function attemptOf(row: ReviewCheckRow): CheckAttempt {
     executionDeadlineMs: row.execution_deadline_ms,
     attempts: row.attempts,
     terminalMs: row.terminal_ms,
+    createdAtMs: row.created_ms,
   };
 }
 
@@ -689,10 +699,16 @@ function isUniqueViolation(error: unknown): boolean {
  *
  * Repeating the selector is not redundancy: selection alone grants no
  * ownership (§7.11.2 step 1), and a row selected as due can stop being due
- * before this statement runs — a backoff moved forward, the attempt cap
- * reached, or `desired` becoming `in_progress` under a still-live execution
- * deadline. Every one of those is re-checked HERE, at the claim, against the
+ * before this statement runs — a backoff moved forward or the attempt cap
+ * reached. Every one of those is re-checked HERE, at the claim, against the
  * SAME claim-time `nowMs` the selector would use.
+ *
+ * `desired = 'in_progress'` is not by itself disqualifying: a row RELEASED to
+ * recovery (an abandoned hook, a failed send) may still owe a conclusion from
+ * a proof that has not arrived yet, and its release recorded that due time, so
+ * it is eligible on `next_attempt_ms` — before the execution deadline. A row
+ * with NO due time has not been released to recovery and stays withheld until
+ * the deadline.
  *
  * Deliberately spends NO attempt: a budget deferral must not burn a retry
  * (§7.11.2 step 5) — the caller releases the claim instead.
@@ -718,9 +734,10 @@ export async function claimCheckRecovery(
           AND attempts < ?
           AND (next_attempt_ms IS NULL OR next_attempt_ms <= ?)
           AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
-          AND (desired <> 'in_progress' OR execution_deadline_ms <= ?)`,
+          AND (desired <> 'in_progress' OR execution_deadline_ms <= ?
+               OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?))`,
     )
-    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, maxAttempts, nowMs, nowMs, nowMs)
+    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, maxAttempts, nowMs, nowMs, nowMs, nowMs)
     .run();
   if (claim.meta.changes !== 1) return null;
   const row = await db
@@ -1335,9 +1352,16 @@ export async function listReenableableCheckPairs(
 /**
  * Due Check-reconcile batch (spec §7.11.2): ONE bound `nowMs` at every
  * predicate position, `attempts < maxAttempts`, ORDER BY
- * `COALESCE(next_attempt_ms, created_ms), id`, LIMIT. A row still wanting
- * `in_progress` becomes eligible only after its EXECUTION deadline — neither
- * bookkeeping nor a renewed recovery lease makes an attempt due.
+ * `COALESCE(next_attempt_ms, created_ms), id`, LIMIT.
+ *
+ * A row still wanting `in_progress` with NO recorded due time is the live-work
+ * shape: neither bookkeeping nor a renewed recovery lease makes it eligible
+ * before its EXECUTION deadline. A row RELEASED to recovery carries its own
+ * due time (`releaseForRecovery` writes the first backoff rung), so it is due
+ * on `next_attempt_ms` — the proof it was released for may already be
+ * persisted, and waiting out the deadline would freeze the released state for
+ * up to fifteen minutes. The deadline stays in the predicate for the rows
+ * nobody released.
  */
 export async function listCheckReconcileBatch(
   db: D1Like,
@@ -1353,11 +1377,12 @@ export async function listCheckReconcileBatch(
           AND attempts < ?
           AND (next_attempt_ms IS NULL OR next_attempt_ms <= ?)
           AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
-          AND (desired <> 'in_progress' OR execution_deadline_ms <= ?)
+          AND (desired <> 'in_progress' OR execution_deadline_ms <= ?
+               OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?))
         ORDER BY COALESCE(next_attempt_ms,created_ms),id
         LIMIT ?`,
     )
-    .bind(maxAttempts, nowMs, nowMs, nowMs, limit)
+    .bind(maxAttempts, nowMs, nowMs, nowMs, nowMs, limit)
     .all<ReviewCheckRow>();
   return results.map(attemptOf);
 }

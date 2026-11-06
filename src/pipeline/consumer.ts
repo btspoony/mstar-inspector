@@ -213,7 +213,7 @@ import {
   type InflightKey,
   type InflightRefusal,
 } from "../store/inflight-store";
-import { readReviewConcurrency } from "./concurrency-reader";
+import { readReviewConcurrency, type DegradedReason } from "./concurrency-reader";
 import {
   CHECK_TERMINALIZE_DEFAULT,
   CHECK_UPDATE_DEFAULT,
@@ -397,6 +397,13 @@ export type ConsumerLogFields = {
   effective?: number;
   /** The degraded recheck ask-budget read's value (the runner's documented default). */
   max_bytes?: number;
+  /**
+   * Why a degraded settings read answered conservatively — the runtime-config
+   * store's cause (`read-failed` / `malformed` / `untrusted`), relayed by the
+   * concurrency and check-budget readers. Its own key because `reason` here is
+   * the closed admission vocabulary.
+   */
+  degraded_reason?: DegradedReason;
   /**
    * Review admission (§1.3): WHY the in-flight guard held this message —
    * `pr-held` (this PR already has a live review), `system-cap` /
@@ -630,6 +637,27 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
  * the admission TTL, which only bounds how long the row may be held — is the
  * clock a best-effort step must fit inside. The paid runner owns its own
  * `runnerTimeoutMs(level)` out of the same window.
+ *
+ * Deepest tier (`deep`), worst case at the documented budgets:
+ *   runnerTimeoutMs("deep")      840_000
+ *   CHECK_HOOK_TIMEOUT_MS          2_000  (begin hook, before the model work)
+ *   CHECK_TERMINALIZE_DEFAULT     10_000  (terminalize hook, every terminal path)
+ *                               ---------
+ *                                852_000  → 48_000 of the 900_000 window left.
+ *
+ * That sum covers ONLY the paid runner and the two Check hooks. The steps that
+ * share the window around them are NOT in it: admission/claim, container
+ * create + token mint + clone + rev-parse, the dedup/journal reads, diff
+ * capture, recheck reads, PR context capture (always skipped at `deep`), and
+ * the runner input write before the run; then the bounded report/recheck
+ * reads, inline resolution (`INLINE_RESOLVE_BUDGET_MS`), the comment publish
+ * and the D1 puts after it. Those spend the 48_000 margin, so the sum must
+ * stay below the cap for every step to fit.
+ *
+ * The terminalize term is the default: an operator may configure it up to
+ * 30_000 (`CHECK_TERMINALIZE_MAX`), which leaves 28_000. Pinned by
+ * consumer.test.ts (round-budget case) — any change to a term, the cap or the
+ * margin re-derives that pin.
  */
 export const ROUND_BUDGET_MS = 900_000;
 
@@ -937,7 +965,9 @@ export const CHECK_EXECUTION_WINDOW_MS = 900_000;
 /**
  * Begin-hook budget (spec §7.10: "The begin hook has ≤2 requests / 2 seconds
  * of consumer wait"). Exported because it is the containment bound the Check
- * lifecycle must honour, and the two hook-timeout cases pin it by value.
+ * lifecycle must honour, and the two hook-timeout cases pin it by value. It
+ * rides the same round window as the runner — the deep worst-case sum is
+ * documented on `ROUND_BUDGET_MS`.
  */
 export const CHECK_HOOK_TIMEOUT_MS = 2_000;
 
@@ -4020,14 +4050,15 @@ async function processMessage(
         fields,
         `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
       );
-      // Deliberately NOT terminalized: recovery already owns a publication for
-      // this head, and the honest Check conclusion is that publication's proof
-      // — a premature `neutral` here would outlive the proof that corrects it.
-      // The admitted claim is RELEASED instead (remote-unconfirmed + the first
-      // backoff rung), so the minute lane adopts this run and concludes from
-      // that proof; leaving it on the visitor's 15-minute lease would close it
-      // red on a commit whose review was published — the symptom this change
-      // exists to remove.
+      // Deliberately NOT terminalized: this attempt published nothing, and the
+      // publication on this head belongs to an earlier generation — a proof
+      // this attempt never linked, so it can never decide this attempt's Check
+      // (spec §7.9/§7.11.2). A premature `neutral` here would outlive the run
+      // that still owns the lease. The admitted claim is RELEASED instead
+      // (remote-unconfirmed + the first backoff rung), so the recoverer waits
+      // out THIS attempt's execution deadline and closes it with the honest
+      // unconfirmed failure rather than freezing a conclusion under a live
+      // lease.
       if (checkHandle !== null) await abandonCheck(checkHandle, "publication journal handoff");
       return { kind: "ok" };
     }

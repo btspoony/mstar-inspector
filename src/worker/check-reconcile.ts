@@ -76,8 +76,8 @@ import {
   suspendCheckForPause,
   suspendCheckRecovery,
 } from "../store/review-checks";
-import type { CheckOwnership, Lease, PublicationProof, PublishedReview } from "../store/review-checks";
-import { findPublicationJournal, PUBLICATION_HANDOFF_PHASES } from "../store/finding-lifecycle";
+import type { CheckIdentity, CheckOwnership, Lease, PublicationProof, PublishedReview } from "../store/review-checks";
+import { findPublicationJournal, PUBLICATION_PROOF_WAIT_PHASES } from "../store/finding-lifecycle";
 import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
@@ -778,9 +778,22 @@ async function reconcileCheckAttempt(
   // §7.11.2 step 2a — the publication-proof WAIT, decided BEFORE any credential
   // work: a row that is only waiting must not mint GitHub requests, and it must
   // not push terminal rows behind its App-identity probe. While the exact
-  // scope/head still owns an in-flight journal (or that read is unreadable) and
-  // the execution deadline is ahead, the row is not concludable yet: claim it
-  // (D1 only) and give the claim straight back, spending no attempt.
+  // scope/head still owes a proof, and the execution deadline is ahead, the row
+  // is not concludable yet: claim it (D1 only) and give the claim straight
+  // back, spending no attempt.
+  //
+  // The publication that answers for this attempt is the NEWEST journal row for
+  // the exact scope/head staged after this attempt was admitted — one row
+  // exists per scope/head/kind, so an older row belongs to an earlier
+  // generation of the same head. Its readable proof ENDS the wait and is read
+  // by that exact id: abandonment is not a conclusion, so an abandoned attempt
+  // keeps its own `publication_id` NULL, and once its review publishes that
+  // row's id is the only proof its Check can conclude from. Otherwise only this
+  // attempt's own `publication_id` link counts — never a head-matched proof, so
+  // the wait is bounded by that link or, failing it, by the deadline. Neither
+  // `reviews` nor `review_failures` carries attempt identity either, so their
+  // rows cannot end it early.
+  let proofPublicationId: string | null = row.publicationId;
   if (now() < row.executionDeadlineMs) {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6): a waiting
     // row whose App is disabled/deleted or whose installation mapping vanished
@@ -792,7 +805,16 @@ async function reconcileCheckAttempt(
       return;
     }
     const pending = await probePendingPublication(db, row);
-    if (pending.kind !== "none") {
+    // `pending` (a readable journal row still without proof) and `unknown` (an
+    // unreadable journal read) both defer. `proven` supplies the id to conclude
+    // from; `none` leaves the decision to this attempt's own link, and a null
+    // link keeps waiting — the publication may simply not be prepared yet.
+    if (pending.kind === "proven") proofPublicationId = pending.publicationId;
+    const waiting =
+      pending.kind === "pending" ||
+      pending.kind === "unknown" ||
+      (await readProof(db, row.identity, proofPublicationId)) === null;
+    if (waiting) {
       const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now());
       if (waitingLease === null) return;
       const nextAttemptMs = now() + CHECK_BACKOFF_MS[0]!;
@@ -844,8 +866,9 @@ async function reconcileCheckAttempt(
   // 2. Proof by exact App/scope/SHA, preferring this attempt's publication id.
   //    M8's lane precedes this one and owns read-only discovery; the Check
   //    lane only ever READS what that lane persisted — never a send, replay
-  //    or paid re-review.
-  const proof = await readProof(db, owned);
+  //    or paid re-review. The id is the wait's attributed one (the newest
+  //    journal row's own publication), falling back to the link the claim read.
+  const proof = await readProof(db, owned.identity, proofPublicationId ?? owned.publicationId);
   // The gate decision needs the App's stored gate and the review THIS proof
   // published. A missing or corrupt gate row, or a tallies-free review, is
   // unreadable, so it can never be corrected into a success (spec §7.9).
@@ -1243,17 +1266,32 @@ async function pairUnusableReason(db: D1Like, scope: Scope): Promise<CheckCreden
 }
 
 /**
- * Read the exact-scope persisted publication proof (normal proof preferred
- * over degraded, this attempt's publication id first). A read failure is
- * UNPROVEN, never "not published".
+ * The proof of the publication THIS attempt owns — the one its own intent write
+ * linked into `publication_id` (spec §7.9). Unlinked (`publicationId` absent) is
+ * UNPROVEN, exactly like a linked row whose proof is not readable yet or a
+ * failed read; `null` never means "not published".
+ *
+ * There is deliberately no head-keyed fallback. Under RL-12 a re-trigger reuses
+ * the head, so another generation's publication for the SAME scope/SHA is
+ * indistinguishable from this attempt's own except by that link; adopting its
+ * proof would freeze this attempt's Check from an envelope it never published,
+ * and the frozen row could never be corrected.
  */
-async function readProof(db: D1Like, owned: CheckOwnership): Promise<PublicationProof | null> {
+async function readProof(
+  db: D1Like,
+  identity: CheckIdentity,
+  publicationId?: string | null,
+): Promise<PublicationProof | null> {
+  if (publicationId === null || publicationId === undefined) return null;
   try {
-    return await readPublicationProof(db, {
-      scope: owned.identity.scope,
-      headSha: owned.identity.headSha,
-      ...(owned.publicationId === null ? {} : { publicationId: owned.publicationId }),
+    const proof = await readPublicationProof(db, {
+      scope: identity.scope,
+      headSha: identity.headSha,
+      publicationId,
     });
+    // The store reader prefers the linked row but still falls back to another
+    // row of the same head; only the linked row's own proof is this attempt's.
+    return proof !== null && proof.publicationId === publicationId ? proof : null;
   } catch {
     return null;
   }
@@ -1299,39 +1337,57 @@ async function readRecoveryReview(
 }
 
 /**
- * The §7.11.2 proof-wait probe's THREE answers: a journal is in flight, there
- * is none, or the journal table could not be read. "unknown" is deliberately
- * distinct from "none": swallowing a read failure into "nothing pending" would
- * terminalize the unconfirmed failure on a publication that can still land
- * seconds later. The wait is bounded by the execution deadline, so treating
- * "unknown" as "keep waiting" can never loop forever.
+ * The §7.11.2 proof-wait probe's FOUR answers: a readable journal row still
+ * without proof (`pending`), a readable journal row that HAS proved itself
+ * (`proven`), no journal row for this attempt (`none`), or the journal table
+ * could not be read (`unknown`). "unknown" is deliberately distinct from
+ * "none": swallowing a read failure into "nothing pending" would terminalize
+ * the unconfirmed failure on a publication that can still land seconds later.
+ * The wait is bounded by the execution deadline, so treating "unknown" as
+ * "keep waiting" can never loop forever.
+ *
+ * Every end-of-wait answer carries the journal row's own publication id, so the
+ * caller decides from that exact publication and never from a head match.
  */
 type PendingPublication =
   | { kind: "pending"; phase: string }
+  | { kind: "proven"; publicationId: string }
   | { kind: "none" }
   | { kind: "unknown" };
 
 async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promise<PendingPublication> {
-  // The wait is bound to ONE journal row — the NEWEST hand-off row for this
-  // head — because that is the publication whose proof is still owed. A proof
-  // on some other row (an older degraded publication, say) proves nothing about
-  // this one: letting it end the wait would freeze a degraded failure while a
-  // newer normal publication was still in flight.
+  // The wait is bound to ONE journal row — the NEWEST row staged since this
+  // attempt was admitted — because that is the publication whose proof is
+  // still owed. A proof on some other row (an older degraded publication, or a
+  // previous generation's row for the same head) proves nothing about this
+  // one: letting it end the wait would freeze a degraded failure while a newer
+  // normal publication was still in flight.
   try {
     const journal = await findPublicationJournal(db, {
       scope: attempt.identity.scope,
       headSha: attempt.identity.headSha,
-      // The HAND-OFF phase set, `confirmed` included: a confirmed publication
-      // whose proof is not applied yet also reads as `proof === null`, and
-      // concluding there would freeze an unconfirmed failure that the arriving
-      // proof could no longer correct. The execution deadline bounds the wait.
-      phases: PUBLICATION_HANDOFF_PHASES,
+      // The hand-off set, `confirmed` included, plus `applied`: a confirmed
+      // publication whose proof is not applied yet also reads as `proof ===
+      // null`, and an abandoned attempt's publication is normally found
+      // already applied. Concluding on the former would freeze an unconfirmed
+      // failure that the arriving proof could no longer correct; the latter is
+      // the proof the attempt owes its conclusion to.
+      phases: PUBLICATION_PROOF_WAIT_PHASES,
       order: "newest",
+      // A publication is staged by the message that will publish it, so a row
+      // staged before this attempt was admitted belongs to an earlier
+      // generation — its proof is not this attempt's to conclude from.
+      stagedAtOrAfterMs: attempt.createdAtMs,
     });
-    // No journal at all: nothing is in flight, so the wait is over.
+    // No journal row: nothing has been handed off for this attempt yet, so THIS
+    // probe has nothing to report — the caller's own linked proof read decides
+    // whether the row is concludable.
     if (journal === null) return { kind: "none" };
-    // THIS row's own proof ends the wait; anything else keeps waiting.
-    return journal.hasProof ? { kind: "none" } : { kind: "pending", phase: journal.phase };
+    // A readable proof on that row ends the wait; the caller reads it by the
+    // id returned here, exactly as it always did (never a head fallback).
+    return journal.hasProof
+      ? { kind: "proven", publicationId: journal.id }
+      : { kind: "pending", phase: journal.phase };
   } catch {
     return { kind: "unknown" };
   }
@@ -1341,10 +1397,11 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
  * The terminal conclusion for a due attempt (spec §7.9 matrix): a persisted
  * publication proof decides the conclusion against the App gate — a normal
  * publication only succeeds when the applied review meets it — regardless of
- * how the attempt expired; an expired attempt with no proof is the honest
- * unconfirmed `failure`. An intent the consumer already persisted is preserved
- * verbatim unless a proof-derived correction applies. `gate` is the App's
- * stored gate; `null` means it could not be read, so a proof-derived
+ * how the attempt expired. The no-proof branch runs only once the wait above
+ * has ended: the execution deadline passed, which makes the honest unconfirmed
+ * `failure` the conclusion. An intent the consumer already persisted is
+ * preserved verbatim unless a proof-derived correction applies. `gate` is the
+ * App's stored gate; `null` means it could not be read, so a proof-derived
  * conclusion fails closed instead of assuming a default.
  */
 function terminalConclusion(

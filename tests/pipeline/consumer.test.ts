@@ -54,6 +54,8 @@ import {
   applyMigrations,
 } from "../helpers/migration-shapes";
 import {
+  CHECK_TERMINALIZE_DEFAULT,
+  CHECK_UPDATE_DEFAULT,
   REVIEW_LEVEL_KEY,
   SYSTEM_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_DEFAULT,
@@ -86,6 +88,7 @@ import {
   setCheckDesired,
 } from "../../src/store/review-checks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
+import { reconcileReviewChecks } from "../../src/worker/check-reconcile";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
@@ -156,6 +159,7 @@ import {
   queueState,
   reset as resetHarness,
   reviewGuardTtlSeconds,
+  ROUND_BUDGET_MS,
   runnerTimeoutMs,
   sandbox,
   testLog,
@@ -2743,6 +2747,8 @@ describe("createReviewConsumer", () => {
     expect(warnLine).toBeDefined();
     expect(warnLine!.fields.workspace_id).toBe("default");
     expect(warnLine!.fields.effective).toBe(1);
+    // The line names the store's cause, not just that it degraded.
+    expect(warnLine!.fields.degraded_reason).toBe("read-failed");
     // The conservative cap still admits an idle deployment, and the row is
     // released normally.
     expect(reviewCount(db)).toBe(1);
@@ -2905,6 +2911,21 @@ describe("createReviewConsumer", () => {
     expect(reviewGuardTtlSeconds("quick")).toBe(2292);
     expect(reviewGuardTtlSeconds("default")).toBe(2292);
     expect(reviewGuardTtlSeconds("deep")).toBe(2532);
+  });
+
+  test("round budget: the deep worst case is runner + begin hook + terminalize, 48s under the cap", () => {
+    // deep is the worst tier; the begin hook and the terminalize hook ride the
+    // same 900s window as the paid runner, so the deepest tier's arithmetic is
+    // their sum. Every term is pinned by value: a move in any one of them, in
+    // the cap, or in the margin must fail this case, not drift silently.
+    expect(runnerTimeoutMs("deep")).toBe(840_000);
+    expect(CHECK_HOOK_TIMEOUT_MS).toBe(2_000);
+    expect(CHECK_TERMINALIZE_DEFAULT).toBe(10_000);
+    const deepestTierMs =
+      runnerTimeoutMs("deep") + CHECK_HOOK_TIMEOUT_MS + CHECK_TERMINALIZE_DEFAULT;
+    expect(deepestTierMs).toBe(852_000);
+    expect(deepestTierMs).toBeLessThan(ROUND_BUDGET_MS);
+    expect(ROUND_BUDGET_MS - deepestTierMs).toBe(48_000);
   });
 
   test("a maximal round issues exactly the steps the guard TTL bills", async () => {
@@ -4898,6 +4919,36 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.observed).toBe("success");
   });
 
+  test("check budgets: an untrusted terminalize value degrades to the documented defaults with ONE warn, and the review still lands", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    // A PRESENT value the reader cannot trust: BOTH budgets answer their
+    // documented defaults, announced exactly once on the consumer's channel.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "not-a-number");
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    const degraded = logLines.filter((line) => line.fields.event === "review_check_budgets_degraded");
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0]!.fields).toMatchObject({
+      terminalize_ms: CHECK_TERMINALIZE_DEFAULT,
+      update_ms: CHECK_UPDATE_DEFAULT,
+    });
+    // Degradation is a warn, never a behaviour change: the review publishes and
+    // its Check still concludes from the proof under the defaults.
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(reviewCount(db)).toBe(1);
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+  });
+
   test("check lifecycle: a same-SHA mention journal handoff claims no attempt and runs no Check", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -5248,10 +5299,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(current.terminal_ms).not.toBeNull();
   });
 
-  test("check lifecycle: a hung terminal hook cannot hold the published review past its 10s terminalize bound", async () => {
+  test("check lifecycle: a hung terminal hook cannot hold the published review past its configured terminalize bound", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // A SMALL configured pair, so this case pays ~1 s instead of the 10 s
+    // absent-row default. The documented default itself is pinned by the
+    // degraded-budget case above (its warn carries both defaults) — this case
+    // is the wall-clock containment, not the default's value.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1200");
+    seedCheckBudget(db, "review.check.update_timeout_ms", "500");
     const real = lifecycleFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
@@ -5265,11 +5322,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     });
     const startedAt = Date.now();
 
-    // §7.10 (amended): the terminalize hook owns its own 10 s budget — the
-    // begin hook keeps CHECK_HOOK_TIMEOUT_MS below. The bound is pinned by
-    // value (module constants cannot be statically imported here: the
-    // workerd shim must load first).
-    const TERMINALIZE_BUDGET_MS = 10_000;
+    // §7.10 (amended): the terminalize hook owns its own budget — the begin
+    // hook keeps CHECK_HOOK_TIMEOUT_MS below — and the read pair is what
+    // bounds the wait.
+    const TERMINALIZE_BUDGET_MS = 1_200;
     await consumer(makeBatch(makePayload()));
 
     const elapsed = Date.now() - startedAt;
@@ -5442,12 +5498,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(beforeDue).toBeNull();
     expect(checkRowFor(db, SHA).holder).toBeNull();
 
-    // The integrated claim repeats the FULL candidate predicate (spec §7.11.2),
-    // and this row still WANTS `in_progress`: its execution deadline is the
-    // instant that makes it due. Before it, no claim; at it, the same
-    // attempt/identity is claimed and owns the terminal decision.
-    expect(await claimCheckRecovery(db, released.id, "reconciler", released.execution_deadline_ms - 1)).toBeNull();
-    const reacquired = await claimCheckRecovery(db, released.id, "reconciler", released.execution_deadline_ms);
+    // The integrated claim repeats the FULL candidate predicate (spec §7.11.2).
+    // This row was RELEASED, so its own recorded backoff is the due instant —
+    // the lane may own it long before the execution deadline and decide from
+    // whatever proof lands in that window.
+    expect(await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms! - 1)).toBeNull();
+    const reacquired = await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms!);
     expect(reacquired).not.toBeNull();
     await hooks.terminalize({
       handle: {
@@ -5552,12 +5608,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBe(checkState.clockMs + 60_000);
     // The integrated claim repeats the FULL candidate predicate (spec §7.11.2):
-    // lease-free and past its backoff, but still wanting `in_progress`, so it is
-    // due only at its execution deadline. Before that instant no claim; exactly
-    // at it the same attempt and identity are claimed.
+    // lease-free and past its recorded backoff, the RELEASED row is claimable
+    // before its execution deadline — nothing about `desired` withholds it.
     expect(await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms! - 1)).toBeNull();
-    expect(await claimCheckRecovery(db, row.id, "reconciler", row.execution_deadline_ms - 1)).toBeNull();
-    const claim = await claimCheckRecovery(db, row.id, "reconciler", row.execution_deadline_ms);
+    const claim = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!);
     expect(claim?.holder).toBe("reconciler");
   });
 
@@ -5661,7 +5715,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.next_attempt_ms).toBeGreaterThan(Date.now());
   });
 
-  test("check lifecycle: a real begin that outlives the budget still leaves a prompt terminal obligation", async () => {
+  test("check lifecycle: a real begin that outlives the budget leaves its run recoverable, not concluded", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -5728,9 +5782,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(publicationRow(db).phase).toBe("applied");
     expect(kvPuts).toHaveLength(1);
 
-    // (2) The late real begin attached its run and, being abandoned, left the
-    //     attempt with a TERMINAL obligation instead of an in_progress row
-    //     waiting for the execution deadline.
+    // (2) The late real begin attached its run and, being abandoned, handed the
+    //     attempt to recovery with NO conclusion of its own: abandoning is not
+    //     terminalizing, so the reconciler decides from the persisted proof (or
+    //     at the execution deadline).
     await held.promise;
     // The detached begin continues asynchronously: wait for its durable result
     // (the attach) rather than guessing a delay.
@@ -5739,21 +5794,131 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     }
     const row = checkRowFor(db, SHA);
     expect(row.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
-    expect(row.desired).toBe("failure");
-    expect(row.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    expect(row.desired).toBe("in_progress");
+    expect(row.desired_title).toBeNull();
+    expect(row.desired_summary).toBeNull();
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
-    // Released: no lease held, and the first backoff rung — not 15 minutes.
+    // Released: no lease held, and the first backoff rung recorded.
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBeLessThan(row.execution_deadline_ms);
 
-    // (3) The recovery lane can now complete it WITHOUT creating a second run.
-    const reacquired = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!);
-    expect(reacquired).not.toBeNull();
+    // (3) The release made the row due on its own backoff rung, BEFORE the
+    //     deadline: the lane owns it there even though `desired` still wants
+    //     `in_progress` — the conclusion it owes is the one a proof that lands
+    //     in that window will decide. No second create is ever issued.
+    const early = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!);
+    expect(early).not.toBeNull();
+    expect(row.next_attempt_ms).toBeLessThan(row.execution_deadline_ms);
     expect(checkRequests.filter((r) => r.op === "create")).toHaveLength(1);
+  });
+
+  test("check lifecycle: an attempt abandoned by the begin budget concludes from the publication it went on to make", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    // The create outlives the consumer's 2 s begin budget, so the lifecycle
+    // abandons the attempt — row released, NO conclusion, `publication_id`
+    // NULL — while the SAME message goes on to publish its review.
+    const held = Promise.withResolvers<void>();
+    const base = scriptedChecks();
+    const adapter = createChecksAdapter({
+      db,
+      nowMs: () => Date.now(),
+      getOctokit: async () => ({
+        rest: {
+          checks: {
+            ...base.rest.checks,
+            async create(params) {
+              // Recorded at ISSUE, then held past the budget.
+              checkRequests.push({
+                op: "create",
+                params: params as unknown as Record<string, unknown>,
+                sandboxCalls: sandbox.calls.length,
+                commenterCalls: commenterCalls.length,
+              });
+              await held.promise;
+              const id = (checkRunSeq += 1);
+              const run: CheckRunPayload = {
+                id,
+                name: params.name,
+                head_sha: params.head_sha,
+                external_id: params.external_id,
+                status: "in_progress",
+                conclusion: null,
+                app: { id: TEST_GITHUB_APP_ID },
+              };
+              checkRuns.set(id, run);
+              return { data: run };
+            },
+          },
+        },
+      }),
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    setTimeout(() => held.resolve(), CHECK_HOOK_TIMEOUT_MS + 500);
+    await consumer(makeBatch(makePayload()));
+
+    // The message published regardless: the journal row is applied with proof.
+    const publication = publicationRow(db);
+    expect(publication.phase).toBe("applied");
+    expect(publication.proof_json).not.toBeNull();
+
+    // The abandoned begin then attaches its run and hands the attempt over with
+    // no conclusion of its own and no publication link.
+    for (let attempt = 0; attempt < 200 && checkRowFor(db, SHA).next_attempt_ms === null; attempt += 1) {
+      await Bun.sleep(5);
+    }
+    const abandoned = checkRowFor(db, SHA);
+    expect(abandoned.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
+    expect(abandoned.publication_id).toBeNull();
+    expect(abandoned.desired).toBe("in_progress");
+    expect(abandoned.recovery_state).toBe("remote-unconfirmed");
+    expect(abandoned.terminal_ms).toBeNull();
+
+    // ONE reconciler pass at the released row's own due time — inside the
+    // execution deadline — concludes the Check from THAT publication's proof:
+    // the newest journal row for this head was staged by this attempt, so its
+    // exact id is the proof this attempt owes a conclusion to.
+    const dueAt = abandoned.next_attempt_ms!;
+    expect(dueAt).toBeLessThan(abandoned.execution_deadline_ms);
+    // The reconciler's D1 pair gate reads the App/installation mapping the
+    // production route always carries; this suite seeds the App only.
+    db.raw
+      .prepare(
+        `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+         VALUES (?, ?, 123, 'acme', datetime('now'))`,
+      )
+      .run(`inst-${TEST_APP_ID}-123`, TEST_APP_ID);
+    const summary = await reconcileReviewChecks({ DB: db as never } as never, {
+      now: () => dueAt,
+      credentials: async () => ({ kind: "ok" as const, paused: false, adapter: checksAdapterFor(db, () => dueAt) }),
+      log: { warn: () => {}, info: () => {} },
+    });
+
+    expect(summary.examined).toBe(1);
+    expect(summary.completed).toBe(1);
+    expect(summary.deferred).toBe(0);
+    expect(summary.unconfirmed).toBe(0);
+    // Gate-derived: the published review meets the App gate.
+    const update = checkRequests.filter((r) => r.op === "update").at(-1);
+    expect(update).toBeDefined();
+    expect(update!.params.conclusion).toBe("success");
+    expect(String(update!.params.summary)).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
+
+    // The conclusion write links the publication it was decided from, so the
+    // row is no longer unlinked and the frozen Check is the published one.
+    const settled = checkRowFor(db, SHA);
+    expect(settled.publication_id).toBe(publication.id);
+    expect(settled.observed).toBe("success");
+    expect(settled.terminal_ms).not.toBeNull();
   });
 
   test("check lifecycle: a later message cannot un-abandon an earlier detached begin", async () => {
@@ -5836,8 +6001,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     }
 
     // A still followed the ABANDONED path: its run is attached (adoptable) and
-    // it carries a terminal obligation with a bounded recovery time — not the
-    // unobservable normal handle a stale shared flag would have produced.
+    // it carries NO conclusion of its own — not the unobservable normal handle a
+    // stale shared flag would have produced.
     const rowA = checkRowForPr(db, 42);
     // The run attached to A is exactly the one A created (B's create resolved
     // first while A was held, so the numeric id is not A's to predict).
@@ -5847,8 +6012,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         (r) => r.op === "create" && (r.params as { external_id?: string }).external_id === rowA.external_id,
       ),
     ).toBe(true);
-    expect(rowA.desired).toBe("failure");
-    expect(rowA.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    expect(rowA.desired).toBe("in_progress");
+    expect(rowA.desired_summary).toBeNull();
     expect(rowA.observed).toBe("unknown");
     expect(rowA.holder).toBeNull();
     expect(rowA.lease_until_ms).toBeNull();

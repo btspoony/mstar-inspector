@@ -9,7 +9,7 @@
  * this file pins the READ shape (latest review, failure count, findings
  * projection), not the pipeline that writes those tables.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { createAppsStore, PULL_REQUEST_LIST_LIMIT } from "../../src/dashboard/apps-store";
 import { releaseInflight } from "../../src/store/inflight-store";
@@ -1145,23 +1145,49 @@ describe("reviewing-now projection (D11/D16)", () => {
     });
   }
 
+  /** The store with only the LOCK read faulting — the rest of the face answers. */
+  function lockFaultStore(db: TestD1) {
+    return createAppsStore({
+      prepare(sql: string) {
+        if (sql.includes("review_inflight")) throw new Error("D1_ERROR: dead binding");
+        return db.prepare(sql);
+      },
+      batch: db.batch.bind(db),
+    } as never);
+  }
+
   test("a failed inflight read is unknown on both faces, never idle", async () => {
     const db = createMigratedTestD1();
     await seedLedger(db);
     seedLock(db);
     // Only the LOCK read faults: the rest of the face still answers, so the
     // failure must degrade that one field instead of failing the payload.
-    const failing = {
-      prepare(sql: string) {
-        if (sql.includes("review_inflight")) throw new Error("D1_ERROR: dead binding");
-        return db.prepare(sql);
-      },
-      batch: db.batch.bind(db),
-    };
-    const store = createAppsStore(failing as never);
+    const store = lockFaultStore(db);
     expect((await store.listPullRequests(APP_ID)).rows[0]!.reviewing).toEqual({ state: "unknown" });
     expect((await store.getPullRequestHead(APP_ID, "acme", "widgets", 131))!.reviewing).toEqual({
       state: "unknown",
     });
+  });
+
+  test("a failed inflight read emits exactly one attributed warn; a good read none", async () => {
+    const db = createMigratedTestD1();
+    await seedLedger(db);
+    seedLock(db);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect((await createAppsStore(db).listPullRequests(APP_ID)).rows[0]!.reviewing.state).toBe("live");
+      expect(warn).not.toHaveBeenCalled();
+
+      expect((await lockFaultStore(db).listPullRequests(APP_ID)).rows[0]!.reviewing).toEqual({
+        state: "unknown",
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(warn.mock.calls[0]![0]))).toEqual({
+        event: "dashboard_live_lock_read_failed",
+        app_id: APP_ID,
+      });
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -19,6 +19,8 @@
  *     coerced (`["16"]`, `true` and `{}` all degrade)
  *   - a read failure answers the conservative cap with `degraded: true` and
  *     never throws (both readers)
+ *   - a degraded answer names its cause — `read-failed`, `malformed` or
+ *     `untrusted`; a trustworthy read carries no `reason` at all
  *   - a workspace value above its maximum is clamped to the maximum by the
  *     read, so a deploy-window write cannot degrade that workspace to serial
  *   - a retired workspace (`deleted_at` set) is ABSENT to both reads — the
@@ -59,6 +61,7 @@ import {
   SYSTEM_CONCURRENCY_MAX,
   WORKSPACE_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_MAX,
+  type EffectiveConcurrency,
   getCheckBudgets,
   getCommentClaimSettings,
   getEffectiveConcurrency,
@@ -162,11 +165,20 @@ function dbWithValues(setting: { system: unknown; workspace: unknown }): Dashboa
 }
 
 describe("runtime-config-store", () => {
-  test("absent system row falls back to 256", async () =>
-    expect(await getSystemConcurrency(fixture())).toEqual({
-      concurrency: SYSTEM_CONCURRENCY_DEFAULT,
+  test("absent system row falls back to 256, with no degraded reason", async () => {
+    const read = await getSystemConcurrency(fixture());
+    expect(read).toEqual({ concurrency: SYSTEM_CONCURRENCY_DEFAULT, degraded: false });
+    // Absent is not degraded: a trustworthy read carries no cause at all.
+    expect(Object.hasOwn(read, "reason")).toBe(false);
+    const effective = await getEffectiveConcurrency(fixture(), WS);
+    expect(effective).toEqual({
+      system: SYSTEM_CONCURRENCY_DEFAULT,
+      workspace: WORKSPACE_CONCURRENCY_DEFAULT,
+      effective: WORKSPACE_CONCURRENCY_DEFAULT,
       degraded: false,
-    }));
+    });
+    expect(Object.hasOwn(effective, "reason")).toBe(false);
+  });
 
   test("effective is the smaller of the two caps", async () => {
     const db = fixture();
@@ -198,8 +210,13 @@ describe("runtime-config-store", () => {
       workspace: CONCURRENCY_MIN,
       effective: CONCURRENCY_MIN,
       degraded: true,
+      reason: "untrusted",
     });
-    expect(await getSystemConcurrency(db)).toEqual({ concurrency: CONCURRENCY_MIN, degraded: true });
+    expect(await getSystemConcurrency(db)).toEqual({
+      concurrency: CONCURRENCY_MIN,
+      degraded: true,
+      reason: "untrusted",
+    });
   });
 
   test("a present but unparseable workspace value degrades to the conservative cap", async () => {
@@ -210,6 +227,7 @@ describe("runtime-config-store", () => {
       workspace: CONCURRENCY_MIN,
       effective: CONCURRENCY_MIN,
       degraded: true,
+      reason: "untrusted",
     });
   });
 
@@ -222,6 +240,7 @@ describe("runtime-config-store", () => {
     expect(await getEffectiveConcurrency(db, WS)).toMatchObject({
       effective: CONCURRENCY_MIN,
       degraded: true,
+      reason: "untrusted",
     });
   });
 
@@ -250,6 +269,7 @@ describe("runtime-config-store", () => {
     expect(await getWorkspaceConcurrency(failingDb, WS)).toEqual({
       concurrency: CONCURRENCY_MIN,
       degraded: true,
+      reason: "read-failed",
     }));
 
   test("an unreadable result row degrades instead of guessing defaults", async () => {
@@ -270,21 +290,27 @@ describe("runtime-config-store", () => {
       workspace: CONCURRENCY_MIN,
       effective: CONCURRENCY_MIN,
       degraded: true,
+      reason: "malformed",
     });
   });
 
   test("a present row with a missing field degrades instead of defaulting", async () => {
     // A row that exists but does not carry the selected column: absent is
     // `first() === null`, so a missing field must be untrusted, not a default.
-    const degraded = {
+    const degraded: EffectiveConcurrency = {
       system: CONCURRENCY_MIN,
       workspace: CONCURRENCY_MIN,
       effective: CONCURRENCY_MIN,
       degraded: true,
+      reason: "malformed",
     };
     for (const row of [{}, { workspace_value: 16 }, { system_value: "8" }]) {
       const db = dbWithRow(row);
-      expect(await getSystemConcurrency(db)).toEqual({ concurrency: CONCURRENCY_MIN, degraded: true });
+      expect(await getSystemConcurrency(db)).toEqual({
+        concurrency: CONCURRENCY_MIN,
+        degraded: true,
+        reason: "malformed",
+      });
       expect(await getEffectiveConcurrency(db, WS)).toEqual(degraded);
     }
   });
@@ -296,13 +322,18 @@ describe("runtime-config-store", () => {
     const untrusted = [["16"], true, { nested: "16" }, new Uint8Array([8])];
     for (const bad of untrusted) {
       const db = dbWithValues({ system: bad, workspace: bad });
-      const degraded = {
+      const degraded: EffectiveConcurrency = {
         system: CONCURRENCY_MIN,
         workspace: CONCURRENCY_MIN,
         effective: CONCURRENCY_MIN,
         degraded: true,
+        reason: "untrusted",
       };
-      expect(await getSystemConcurrency(db)).toEqual({ concurrency: CONCURRENCY_MIN, degraded: true });
+      expect(await getSystemConcurrency(db)).toEqual({
+        concurrency: CONCURRENCY_MIN,
+        degraded: true,
+        reason: "untrusted",
+      });
       expect(await getEffectiveConcurrency(db, WS)).toEqual(degraded);
     }
     // One untrusted field is enough: the trusted sibling never rescues the read.
@@ -316,6 +347,7 @@ describe("runtime-config-store", () => {
       workspace: CONCURRENCY_MIN,
       effective: CONCURRENCY_MIN,
       degraded: true,
+      reason: "untrusted",
     });
   });
 
@@ -343,6 +375,7 @@ describe("runtime-config-store", () => {
       workspace: CONCURRENCY_MIN,
       effective: CONCURRENCY_MIN,
       degraded: true,
+      reason: "read-failed",
     }));
 
   test("a workspace value above its own maximum is refused and writes nothing", async () => {
@@ -523,12 +556,15 @@ describe("check budgets", () => {
     return Object.fromEntries(rows.map((row) => [row.key, row.value]));
   }
 
-  test("absent rows fall back to the documented defaults without degrading", async () =>
-    expect(await getCheckBudgets(fixture())).toEqual({
+  test("absent rows fall back to the documented defaults, with no degraded reason", async () => {
+    const budgets = await getCheckBudgets(fixture());
+    expect(budgets).toEqual({
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: false,
-    }));
+    });
+    expect(Object.hasOwn(budgets, "reason")).toBe(false);
+  });
 
   test("an untrusted or out-of-range stored value answers the defaults with degraded: true", async () => {
     for (const value of ["not-a-number", "999999", "0"]) {
@@ -543,6 +579,7 @@ describe("check budgets", () => {
         terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
         updateMs: CHECK_UPDATE_DEFAULT,
         degraded: true,
+        reason: "untrusted",
       });
     }
   });
@@ -552,6 +589,7 @@ describe("check budgets", () => {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: true,
+      reason: "read-failed",
     }));
 
   test("an out-of-range pair is refused and writes nothing", async () => {
