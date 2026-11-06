@@ -40,6 +40,9 @@ export const SEVERITY_GROUPS = FINDING_SEVERITIES.map((severity) => ({
   ...SEVERITY_PRESENTATION[severity],
 }));
 
+/** The classes `SEVERITY_GROUPS` names; every other spelling is `other`. */
+const KNOWN_SEVERITIES = new Set<string>(SEVERITY_GROUPS.map((group) => group.severity));
+
 /** The bucket every spelling outside the table lands in, rendered last. */
 const OTHER_BUCKET = {
   key: CATCH_ALL_SEVERITY,
@@ -86,14 +89,13 @@ export function severityGroups(
   findings: readonly PullRequestFinding[],
 ): SeverityGroup[] {
   const indexed = findings.map((finding, index) => ({ finding, index }));
-  const known = new Set<string>(SEVERITY_GROUPS.map((group) => group.severity));
   const groups: SeverityGroup[] = SEVERITY_GROUPS.map((group) => ({
     key: group.severity,
     label: t(locale, group.labelKey),
     tone: group.tone,
     items: indexed.filter(({ finding }) => finding.severity === group.severity),
   }));
-  const other = indexed.filter(({ finding }) => !known.has(finding.severity));
+  const other = indexed.filter(({ finding }) => !KNOWN_SEVERITIES.has(finding.severity));
   if (other.length > 0) {
     groups.push({
       key: OTHER_BUCKET.key,
@@ -119,7 +121,6 @@ export function reviewClassCounts(
   locale: Locale,
   counts: Record<string, number>,
 ): ReviewClassCount[] {
-  const known = new Set<string>(SEVERITY_GROUPS.map((group) => group.severity));
   const rows: ReviewClassCount[] = SEVERITY_GROUPS.map((group) => ({
     key: group.severity,
     label: t(locale, group.labelKey),
@@ -127,7 +128,7 @@ export function reviewClassCounts(
   })).filter(({ count }) => count > 0);
   let other = 0;
   for (const [key, count] of Object.entries(counts)) {
-    if (!known.has(key)) other += count;
+    if (!KNOWN_SEVERITIES.has(key)) other += count;
   }
   if (other > 0) {
     rows.push({ key: OTHER_BUCKET.key, label: t(locale, OTHER_BUCKET.labelKey), count: other });

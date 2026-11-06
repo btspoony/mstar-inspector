@@ -855,7 +855,7 @@ export type PullRequestReview = {
   findings: number;
   /** Wall clock of the round in ms; `null` for rows written before the measurement. */
   duration_ms: number | null;
-  /** The round's findings tallied per severity class (Task 1 wire JSON text, parsed). */
+  /** The round's findings tallied per severity class (wire JSON text, parsed). */
   severity_counts: Record<string, number>;
 };
 
@@ -1051,9 +1051,10 @@ function parsePullRequestReview(value: unknown): PullRequestReview | null {
 }
 
 /**
- * The per-severity tally rides the wire as JSON text ("" when the round
- * reported nothing). Anything unreadable or malformed degrades to `{}` — the
- * row still renders, it just carries no class breakdown.
+ * The per-severity tally rides the wire as JSON text; the producer emits an
+ * empty JSON object (`{}`) for a round that reported nothing. Anything
+ * unreadable or malformed still degrades to `{}` — the row renders, it just
+ * carries no class breakdown.
  */
 function parseSeverityCounts(raw: unknown): Record<string, number> {
   if (typeof raw !== "string" || raw === "") return {};

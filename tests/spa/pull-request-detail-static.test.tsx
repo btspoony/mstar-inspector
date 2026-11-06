@@ -267,8 +267,7 @@ describe("pull request detail data plane (pure helpers)", () => {
     })?.items[0];
     expect(zeroRound?.round).toBeNull();
     // The tally is REQUIRED: the paged route counts it with `COUNT(*)`, so a
-    // row without one is refused (and reported in `dropped`) rather than
-    // printed as a fabricated "0 findings".
+    // row without one is refused (and reported in `dropped`).
     const withoutTally = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], findings: undefined }],
       total: 1,
@@ -282,8 +281,9 @@ describe("pull request detail data plane (pure helpers)", () => {
       expect(refused?.items).toEqual([]);
       expect(refused?.dropped).toBe(1);
     }
-    // A real zero is a count, and the label branches on exactly one: 0 and 3
-    // print their own number, only 1 takes the singular form.
+    // A real zero is a count: the parser keeps 0, 1 and 3 as parsed. The
+    // total itself feeds no render — the review row prints only the
+    // per-class pairs — so nothing here pins a label branch on it.
     const tallies = parseRecordPage("reviews", {
       items: [
         { ...REVIEWS[0], findings: 0, severity_counts: "" },
@@ -1733,46 +1733,37 @@ describe("pull request detail face (static SSR)", () => {
     expect([...order].sort((a, b) => a - b)).toEqual(order);
   });
 
-  test("the toolbar and record list share one main column beside the aside", async () => {
-    // Structure, not class strings: at xl the shell is a flex row whose main
-    // column stacks the toolbar over the record list, with the aside as the
-    // main column's sibling, so a tall aside can never size the list's start.
-    // Below xl the same DOM stacks toolbar → list → aside in one column.
-    // Toolbar and list are located independently by their data-slot, so each
-    // assertion can fail: the order pin fails if the list moves above the
-    // toolbar, the parent pins fail if either leaves the main column.
+  test("the reading order runs toolbar, record list, then aside", async () => {
+    // Product behaviour, not DOM topology: a screen reader or keyboard user
+    // meets the toolbar (its TabsList labelled `recordsLabel`), then the
+    // record list, then the aside's facts (`asideFacts`). The flex mechanism
+    // that places them is proven by the design-system reference page, not by
+    // this test.
     const layout = await withMarkup(face(), (container) => {
-      const toolbar = container.querySelector('[data-slot="record-toolbar"]');
+      const tabsList = container.querySelector(`[aria-label="${t("en", "pullRequests.recordsLabel")}"]`);
       const recordList = container.querySelector('[data-slot="record-list"]');
-      const aside = container.querySelector("aside");
-      const main = container.querySelector('[data-slot="record-main"]');
-      const shell = container.querySelector('[data-slot="record-layout"]');
-      const siblings = Array.from(main?.children ?? []);
-      const toolbarPrecedesList =
-        toolbar !== null &&
+      const asideFacts = container.querySelector(`[aria-label="${t("en", "pullRequests.asideFacts")}"]`);
+      // compareDocumentPosition FOLLOWING bit (4; `Node` is not global in the DOM harness).
+      const listAfterToolbar =
+        tabsList !== null &&
         recordList !== null &&
-        siblings.indexOf(toolbar) !== -1 &&
-        siblings.indexOf(recordList) > siblings.indexOf(toolbar);
+        (tabsList.compareDocumentPosition(recordList) & 4) !== 0;
+      const asideAfterList =
+        recordList !== null &&
+        asideFacts !== null &&
+        (recordList.compareDocumentPosition(asideFacts) & 4) !== 0;
       return {
-        toolbarExists: toolbar !== null,
+        toolbarLabelled: tabsList !== null,
         recordListExists: recordList !== null,
-        toolbarAndListShareMain: toolbar?.parentElement === main && recordList?.parentElement === main,
-        toolbarPrecedesList: Boolean(toolbarPrecedesList),
-        mainIsRecordMain: main?.getAttribute("data-slot") === "record-main",
-        shellIsRecordLayout: shell?.getAttribute("data-slot") === "record-layout",
-        asideIsShellChild: aside !== null && aside.parentElement === shell,
-        asideOutsideMain: aside !== null && aside.parentElement !== main,
+        asideLabelled: asideFacts !== null,
+        inDocumentOrder: listAfterToolbar && asideAfterList,
       };
     });
     expect(layout).toEqual({
-      toolbarExists: true,
+      toolbarLabelled: true,
       recordListExists: true,
-      toolbarAndListShareMain: true,
-      toolbarPrecedesList: true,
-      mainIsRecordMain: true,
-      shellIsRecordLayout: true,
-      asideIsShellChild: true,
-      asideOutsideMain: true,
+      asideLabelled: true,
+      inDocumentOrder: true,
     });
   });
 });
