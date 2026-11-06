@@ -60,8 +60,17 @@ export function ProviderModelsDialog({
 
   // Opening re-seeds from the stored list: the declaration is the source of
   // truth, and a cancelled earlier edit must not leak into the next open.
+  // Seed exactly once per open transition — background reloads hand us a
+  // fresh storedModelIds identity while open and must not wipe the
+  // in-progress selection.
+  const wasOpenRef = useRef(false);
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (wasOpenRef.current) return;
+    wasOpenRef.current = true;
     setSelected(new Set(storedModelIds));
     setQuery("");
     setNotice(null);

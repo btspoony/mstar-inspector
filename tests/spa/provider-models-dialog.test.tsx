@@ -52,27 +52,29 @@ async function mount(overrides: {
       calls.push(fields);
       return notice("success", "stored");
     });
-  await act(async () =>
-    root.render(
-      createElement(Opener, {
-        factory: (open, onOpenChange) =>
-          createElement(ProviderModelsDialog, {
-            locale,
-            open,
-            onOpenChange,
-            provider: "my-gateway",
-            label: "My Gateway",
-            storedModelIds: overrides.storedModelIds ?? [],
-            catalogModelIds: overrides.catalogModelIds ?? [],
-            onSettings,
-            onOutcome: (outcome) => {
-              outcomes.push(outcome);
-              overrides.onOutcome?.(outcome);
-            },
-          }),
-      }),
-    ),
-  );
+  const renderTree = (storedModelIds: string[]) =>
+    createElement(Opener, {
+      factory: (open, onOpenChange) =>
+        createElement(ProviderModelsDialog, {
+          locale,
+          open,
+          onOpenChange,
+          provider: "my-gateway",
+          label: "My Gateway",
+          storedModelIds,
+          catalogModelIds: overrides.catalogModelIds ?? [],
+          onSettings,
+          onOutcome: (outcome) => {
+            outcomes.push(outcome);
+            overrides.onOutcome?.(outcome);
+          },
+        }),
+    });
+  await act(async () => root.render(renderTree(overrides.storedModelIds ?? [])));
+  // Simulate a background reload: a fresh array identity, equal contents.
+  const reload = async (storedModelIds: string[]) => {
+    await act(async () => root.render(renderTree(storedModelIds)));
+  };
   await act(async () => {});
 
   const dialog = (): HTMLElement | null => win.document.querySelector('[role="dialog"]') as unknown as HTMLElement | null;
@@ -112,6 +114,7 @@ async function mount(overrides: {
     search,
     calls,
     outcomes,
+    reload,
     cleanup: async () => {
       await act(async () => root.unmount());
       cleanupDom();
@@ -253,6 +256,20 @@ describe("ProviderModelsDialog", () => {
       expect(view.dialog()?.textContent).toContain("The provider rejected the rewrite.");
       expect(view.checkboxes()[0]?.checked).toBe(true);
       expect(view.calls).toHaveLength(0); // the rejecting stub records nothing
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a background reload with equal stored ids does not wipe the in-progress selection", async () => {
+    const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"] });
+    try {
+      await view.click(view.checkboxes()[1]); // select m-2
+      expect(view.checkboxes()[1]?.checked).toBe(true);
+      // The settings page reloads in the background: same ids, new array identity.
+      await view.reload(["m-1"]);
+      expect(view.checkboxes()[1]?.checked).toBe(true); // m-2 stays selected
+      expect(view.checkboxes()[0]?.checked).toBe(true);
     } finally {
       await view.cleanup();
     }
