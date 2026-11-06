@@ -213,7 +213,7 @@ import {
   type InflightKey,
   type InflightRefusal,
 } from "../store/inflight-store";
-import { readReviewConcurrency } from "./concurrency-reader";
+import { readReviewConcurrency, type DegradedReason } from "./concurrency-reader";
 import {
   CHECK_TERMINALIZE_DEFAULT,
   CHECK_UPDATE_DEFAULT,
@@ -397,6 +397,13 @@ export type ConsumerLogFields = {
   effective?: number;
   /** The degraded recheck ask-budget read's value (the runner's documented default). */
   max_bytes?: number;
+  /**
+   * Why a degraded settings read answered conservatively — the runtime-config
+   * store's cause (`read-failed` / `malformed` / `untrusted`), relayed by the
+   * concurrency and check-budget readers. Its own key because `reason` here is
+   * the closed admission vocabulary.
+   */
+  degraded_reason?: DegradedReason;
   /**
    * Review admission (§1.3): WHY the in-flight guard held this message —
    * `pr-held` (this PR already has a live review), `system-cap` /

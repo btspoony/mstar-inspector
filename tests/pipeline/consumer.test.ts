@@ -2746,6 +2746,8 @@ describe("createReviewConsumer", () => {
     expect(warnLine).toBeDefined();
     expect(warnLine!.fields.workspace_id).toBe("default");
     expect(warnLine!.fields.effective).toBe(1);
+    // The line names the store's cause, not just that it degraded.
+    expect(warnLine!.fields.degraded_reason).toBe("read-failed");
     // The conservative cap still admits an idle deployment, and the row is
     // released normally.
     expect(reviewCount(db)).toBe(1);
