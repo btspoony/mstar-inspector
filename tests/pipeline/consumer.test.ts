@@ -88,6 +88,7 @@ import {
   setCheckDesired,
 } from "../../src/store/review-checks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
+import { reconcileReviewChecks } from "../../src/worker/check-reconcile";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
@@ -5813,6 +5814,111 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(early).not.toBeNull();
     expect(row.next_attempt_ms).toBeLessThan(row.execution_deadline_ms);
     expect(checkRequests.filter((r) => r.op === "create")).toHaveLength(1);
+  });
+
+  test("check lifecycle: an attempt abandoned by the begin budget concludes from the publication it went on to make", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    // The create outlives the consumer's 2 s begin budget, so the lifecycle
+    // abandons the attempt — row released, NO conclusion, `publication_id`
+    // NULL — while the SAME message goes on to publish its review.
+    const held = Promise.withResolvers<void>();
+    const base = scriptedChecks();
+    const adapter = createChecksAdapter({
+      db,
+      nowMs: () => Date.now(),
+      getOctokit: async () => ({
+        rest: {
+          checks: {
+            ...base.rest.checks,
+            async create(params) {
+              // Recorded at ISSUE, then held past the budget.
+              checkRequests.push({
+                op: "create",
+                params: params as unknown as Record<string, unknown>,
+                sandboxCalls: sandbox.calls.length,
+                commenterCalls: commenterCalls.length,
+              });
+              await held.promise;
+              const id = (checkRunSeq += 1);
+              const run: CheckRunPayload = {
+                id,
+                name: params.name,
+                head_sha: params.head_sha,
+                external_id: params.external_id,
+                status: "in_progress",
+                conclusion: null,
+                app: { id: TEST_GITHUB_APP_ID },
+              };
+              checkRuns.set(id, run);
+              return { data: run };
+            },
+          },
+        },
+      }),
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    setTimeout(() => held.resolve(), CHECK_HOOK_TIMEOUT_MS + 500);
+    await consumer(makeBatch(makePayload()));
+
+    // The message published regardless: the journal row is applied with proof.
+    const publication = publicationRow(db);
+    expect(publication.phase).toBe("applied");
+    expect(publication.proof_json).not.toBeNull();
+
+    // The abandoned begin then attaches its run and hands the attempt over with
+    // no conclusion of its own and no publication link.
+    for (let attempt = 0; attempt < 200 && checkRowFor(db, SHA).next_attempt_ms === null; attempt += 1) {
+      await Bun.sleep(5);
+    }
+    const abandoned = checkRowFor(db, SHA);
+    expect(abandoned.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
+    expect(abandoned.publication_id).toBeNull();
+    expect(abandoned.desired).toBe("in_progress");
+    expect(abandoned.recovery_state).toBe("remote-unconfirmed");
+    expect(abandoned.terminal_ms).toBeNull();
+
+    // ONE reconciler pass at the released row's own due time — inside the
+    // execution deadline — concludes the Check from THAT publication's proof:
+    // the newest journal row for this head was staged by this attempt, so its
+    // exact id is the proof this attempt owes a conclusion to.
+    const dueAt = abandoned.next_attempt_ms!;
+    expect(dueAt).toBeLessThan(abandoned.execution_deadline_ms);
+    // The reconciler's D1 pair gate reads the App/installation mapping the
+    // production route always carries; this suite seeds the App only.
+    db.raw
+      .prepare(
+        `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+         VALUES (?, ?, 123, 'acme', datetime('now'))`,
+      )
+      .run(`inst-${TEST_APP_ID}-123`, TEST_APP_ID);
+    const summary = await reconcileReviewChecks({ DB: db as never } as never, {
+      now: () => dueAt,
+      credentials: async () => ({ kind: "ok" as const, paused: false, adapter: checksAdapterFor(db, () => dueAt) }),
+      log: { warn: () => {}, info: () => {} },
+    });
+
+    expect(summary.examined).toBe(1);
+    expect(summary.completed).toBe(1);
+    expect(summary.deferred).toBe(0);
+    expect(summary.unconfirmed).toBe(0);
+    // Gate-derived: the published review meets the App gate.
+    const update = checkRequests.filter((r) => r.op === "update").at(-1);
+    expect(update).toBeDefined();
+    expect(update!.params.conclusion).toBe("success");
+    expect(String(update!.params.summary)).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
+
+    // The conclusion write links the publication it was decided from, so the
+    // row is no longer unlinked and the frozen Check is the published one.
+    const settled = checkRowFor(db, SHA);
+    expect(settled.publication_id).toBe(publication.id);
+    expect(settled.observed).toBe("success");
+    expect(settled.terminal_ms).not.toBeNull();
   });
 
   test("check lifecycle: a later message cannot un-abandon an earlier detached begin", async () => {
