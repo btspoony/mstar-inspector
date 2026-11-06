@@ -78,7 +78,6 @@ import {
 } from "../store/review-checks";
 import type { CheckIdentity, CheckOwnership, Lease, PublicationProof, PublishedReview } from "../store/review-checks";
 import { findPublicationJournal, PUBLICATION_HANDOFF_PHASES } from "../store/finding-lifecycle";
-import { ADMISSION_DROP_REASONS } from "../store/failure-store";
 import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
@@ -785,8 +784,8 @@ async function reconcileCheckAttempt(
   //
   // A missing journal is NOT the end of the wait: the review may simply not
   // have prepared its publication yet. Without a persisted proof the wait also
-  // holds while the head can still publish — only a persisted terminal failure
-  // writer (or an already-applied review) says nothing more can land.
+  // holds while the head can still publish — only an already-applied review
+  // says a publication for this head has landed.
   if (now() < row.executionDeadlineMs) {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6): a waiting
     // row whose App is disabled/deleted or whose installation mapping vanished
@@ -801,7 +800,7 @@ async function reconcileCheckAttempt(
     const waiting =
       pending.kind !== "none" ||
       ((await readProof(db, row.identity, row.publicationId)) === null &&
-        (await reviewCanStillPublish(db, row)));
+        (await reviewCanStillPublish(db, row.identity)));
     if (waiting) {
       const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now());
       if (waitingLease === null) return;
@@ -1354,71 +1353,26 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
 }
 
 /**
- * The text an admission drop writes before its reason (the consumer's stable
- * prefix, derived from the same exported vocabulary as the dashboard read so
- * the two spellings cannot drift).
- */
-const admissionDropLike = (reason: string): string =>
-  `review dropped after % refused retries: ${reason} (%`;
-
-/**
  * Whether the head on this attempt can still produce a publication. Only a
- * PERSISTED row that proves nothing more can land may end the wait:
+ * PERSISTED row that proves a publication for this head already LANDED may end
+ * the wait: `reviews` is written only at publication, so a row for the head
+ * proves it even when the journal or its proof is missing (same head means the
+ * same diff).
  *
- * - `review_failures`: an admission drop (the row's stable error prefix) — the
- *   drop acks WITHOUT any publication, so nothing can land afterwards. The
- *   lookup is scoped to THIS attempt (`created_at >= created_ms`): the table is
- *   append-only and is never cleaned per attempt, and a re-trigger of the SAME
- *   head is a supported flow, so a PRIOR attempt's drop row for that head must
- *   not claim this attempt can publish nothing.
- *   The parse-fail degrade path records `stage = 'parse'` BEFORE it still
- *   publishes the degraded comment (journal + proof), so that row proves
- *   nothing: its proof, or the execution deadline, decides. The infra stages
- *   (`runner` / `sandbox` / `pipeline` / `usage` / `recheck`) are per-attempt
- *   events written before a queue retry, so a retry can still publish and they
- *   keep waiting.
- * - `reviews`: written only at publication, so a row for the head proves the
- *   publication already landed even when the journal or its proof is missing.
- *
- * The attempt boundary is SECOND granularity on both sides (`datetime('now')`
- * text versus the same form derived from `created_ms`), so a drop an older
- * attempt wrote within this attempt's creation second still compares as
- * "this attempt's" (`>=`) and can end the wait early. Accepted: sub-second
- * ordering is not recoverable from that column, and the row must in any case
- * precede the creation it is compared against — the window can only hold the
- * tail of the attempt this one superseded, never a later publication's drop.
+ * No `review_failures` row can end this wait. The admission-drop row is written
+ * best-effort AFTER the consumer's ack (`handleGuardHeld`), carries no attempt
+ * identity, and nothing orders it against a newer attempt's creation — so a
+ * drop may belong to a prior, superseded attempt for the same head, and
+ * reading it as "this attempt publishes nothing" would freeze this attempt's
+ * Check as `failure` before its own publication could land. A drop therefore
+ * waits like any other no-proof row: the publication proof, or the execution
+ * deadline, decides.
  *
  * An unreadable read is "still possible": the execution deadline, not a failed
  * read, is what ends this wait.
  */
-async function reviewCanStillPublish(db: D1Like, attempt: CheckAttempt): Promise<boolean> {
-  const { installationId, owner, repo, prNumber } = attempt.identity.scope;
-  // The column is written by SQLite's `datetime('now')`: `YYYY-MM-DD HH:MM:SS`
-  // in UTC. The comparison only holds if the bound side is the same form.
-  const createdAfter = new Date(attempt.createdMs).toISOString().slice(0, 19).replace("T", " ");
-  try {
-    const terminal = await db
-      .prepare(
-        `SELECT 1 AS terminal FROM review_failures
-          WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?
-            AND created_at >= ?
-            AND (${ADMISSION_DROP_REASONS.map(() => "error LIKE ?").join(" OR ")})
-          LIMIT 1`,
-      )
-      .bind(
-        installationId,
-        owner,
-        repo,
-        prNumber,
-        attempt.identity.headSha,
-        createdAfter,
-        ...ADMISSION_DROP_REASONS.map(admissionDropLike),
-      )
-      .first();
-    if (terminal !== null) return false;
-  } catch {
-    return true;
-  }
+async function reviewCanStillPublish(db: D1Like, identity: CheckIdentity): Promise<boolean> {
+  const { installationId, owner, repo, prNumber } = identity.scope;
   try {
     const applied = await db
       .prepare(
@@ -1426,7 +1380,7 @@ async function reviewCanStillPublish(db: D1Like, attempt: CheckAttempt): Promise
           WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?
           LIMIT 1`,
       )
-      .bind(installationId, owner, repo, prNumber, attempt.identity.headSha)
+      .bind(installationId, owner, repo, prNumber, identity.headSha)
       .first();
     return applied === null;
   } catch {
@@ -1439,8 +1393,8 @@ async function reviewCanStillPublish(db: D1Like, attempt: CheckAttempt): Promise
  * publication proof decides the conclusion against the App gate — a normal
  * publication only succeeds when the applied review meets it — regardless of
  * how the attempt expired. The no-proof branch runs only once the wait above
- * has ended: the execution deadline passed, or every persisted writer says the
- * head can publish nothing more, which makes the honest unconfirmed `failure`
+ * has ended: the execution deadline passed, or an applied publication for the
+ * head proves one already landed — which makes the honest unconfirmed `failure`
  * the conclusion. An intent the consumer already persisted is preserved
  * verbatim unless a proof-derived correction applies. `gate` is the App's
  * stored gate; `null` means it could not be read, so a proof-derived
