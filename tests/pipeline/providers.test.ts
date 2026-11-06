@@ -229,7 +229,7 @@ describe("provider catalog breadth enumeration (spec § Providers contract 2)", 
     expect(templateIds.size).toBe(195 + OMP_SNAPSHOT.providers.length);
   });
 
-  test("snapshot-derived entries follow the breadth mapping (label/baseUrl/api/models/doc, 20-model prefill cap)", () => {
+  test("snapshot-derived entries follow the breadth mapping (label/baseUrl/api/models/doc, full model vocabulary)", () => {
     const expectedBreadth = Object.keys(snapshot).filter(
       (key) =>
         !builtinSourceKeys.includes(key) &&
@@ -247,7 +247,7 @@ describe("provider catalog breadth enumeration (spec § Providers contract 2)", 
       expect(entry.baseUrl, key).toBe(source.api ?? null);
       // The snapshot carries NO protocol field — the ecosystem-norm default.
       expect(entry.api, key).toBe("openai-completions");
-      expect(entry.models, key).toEqual(source.model_ids.slice(0, 20));
+      expect(entry.models, key).toEqual(source.model_ids);
       expect(entry.doc, key).toBe(source.doc ?? null);
     }
     // The curated workers-ai entry is NOT snapshot-derived — its 8-model
@@ -295,7 +295,6 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
     expect(source).toMatch(/rule \(b\) deduped into a hand-curated template \(1\)/);
     expect(source).toContain("cloudflare-workers-ai → workers-ai");
     expect(source).toMatch(/rule \(c\) skipped, failing CUSTOM_PROVIDER_ID_PATTERN \(0 additional/);
-    expect(source).toContain("first 20 model ids per provider");
   });
 
   test("the pipeline face is the hand-written re-export (contract only), not generated output", () => {
@@ -404,8 +403,8 @@ describe("omp provider union (third generator input)", () => {
       expect(entry!.api, record.id).toBe(record.api);
       expect(entry!.baseUrl, record.id).toBe(record.baseUrl);
       expect(entry!.label.length, record.id).toBeGreaterThan(0);
-      // Prefill is the vendored vocabulary, capped at the 20-model prefill cap.
-      expect(entry!.models, record.id).toEqual(record.models.slice(0, 20));
+      // Prefill is the vendored vocabulary verbatim — no prefix cap.
+      expect(entry!.models, record.id).toEqual(record.models);
     }
   });
 
