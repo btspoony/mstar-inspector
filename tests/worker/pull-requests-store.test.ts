@@ -855,7 +855,7 @@ describe("pull request detail reads", () => {
       "row-3",
       "open",
       3,
-      2,
+      5,
     );
     const store = createAppsStore(db);
     const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });

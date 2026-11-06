@@ -352,8 +352,8 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     // irrelevant to the read, and the last-seen round differs so a
     // first/last column mix-up cannot pass.
     seedFindings(db, [
-      { id: "row-1", findingId: "F-1", mergeClass: "nit", filePath: null, lineStart: null, firstSeenRound: 2, lastSeenRound: 1 },
-      { id: "row-2", findingId: "F-2", mergeClass: "must-fix", filePath: "src/a.ts", lineStart: 3, firstSeenRound: 3, lastSeenRound: 2 },
+      { id: "row-1", findingId: "F-1", mergeClass: "nit", filePath: null, lineStart: null, firstSeenRound: 2, lastSeenRound: 3 },
+      { id: "row-2", findingId: "F-2", mergeClass: "must-fix", filePath: "src/a.ts", lineStart: 3, firstSeenRound: 3, lastSeenRound: 5 },
     ]);
 
     const res = await getFace(sectionPath("findings"), db);

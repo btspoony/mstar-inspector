@@ -563,7 +563,7 @@ describe("createArtifactStore().put — publication round", () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
     await store.put(reviewDoc({ round: 4 }));
-    await store.put(reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "a".repeat(40) }), round: null }));
+    await store.put(reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "a".repeat(40) }) }));
 
     const rows = db.raw
       .query("SELECT head_sha, round FROM reviews ORDER BY round")

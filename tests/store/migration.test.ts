@@ -2387,3 +2387,41 @@ describe("migrations/0049_workspace_check_min_score.sql", () => {
     });
   });
 });
+
+describe("migrations/0050_reviews_round.sql", () => {
+  const ROUND_MIGRATION = "0050_reviews_round.sql";
+
+  /** A DB shaped like production at 0049: every earlier file, applied in order. */
+  function preRoundDb(): TestD1 {
+    const db = createTestD1();
+    for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
+      (migration) => migrationNumber(migration) < migrationNumber(ROUND_MIGRATION),
+    )) {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  test("adds a nullable, default-free column without touching any row", () => {
+    const db = preRoundDb();
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, reviewed_at)
+         VALUES ('r-1', 1, 'acme', 'widgets', 7, 'sha-1', 'comment', '2026-01-01 00:00:00')`,
+      )
+      .run();
+
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, ROUND_MIGRATION), "utf8"));
+
+    // Pre-column rows read NULL, which is exactly the branch the detail read
+    // turns into its positional fallback.
+    expect(db.raw.query("SELECT round FROM reviews WHERE id = 'r-1'").get()).toEqual({ round: null });
+    const column = (
+      db.raw.query("PRAGMA table_info(reviews)").all() as Array<{ name: string; notnull: number; dflt_value: unknown }>
+    ).find((c) => c.name === "round");
+    expect(column).toMatchObject({ notnull: 0, dflt_value: null });
+
+    // ALTER TABLE must preserve the row.
+    expect(db.raw.query("SELECT id FROM reviews").all()).toEqual([{ id: "r-1" }]);
+  });
+});

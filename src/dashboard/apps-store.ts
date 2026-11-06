@@ -2090,7 +2090,11 @@ export type PullRequestReviewDetailRow = {
   provider: string | null;
   reviewed_at: string;
   head_sha: string;
-  /** The round's ordinal in the PR's oldest-first review history (1 = first published round). */
+  /**
+   * The stored publication round (`reviews.round`), which can skip ordinals.
+   * Rows written before migration 0050 fall back to their position in the
+   * PR's oldest-first review history (1 = first).
+   */
   round: number;
   /** Wall clock of the round in ms; NULL for rows written before the measurement. */
   duration_ms: number | null;
