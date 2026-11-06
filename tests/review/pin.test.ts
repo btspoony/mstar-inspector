@@ -25,8 +25,7 @@
  * desyncs from the `REVIEW_SKILL_VERSION` prefix, if a build-assertion script
  * loses its COPY/RUN wiring — or if the fixture plugin
  * root stops mirroring the pinned layout (`commands/amazing-pr-review.md` +
- * `skills/mstar-audit`). Transitive drift between the two lockfiles is a
- * separate, allowlisted check: tests/review/lock-drift.test.ts.
+ * `skills/mstar-audit`).
  */
 
 import { describe, expect, test } from "bun:test";
