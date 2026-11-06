@@ -1765,6 +1765,86 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     // not this attempt's evidence.
     expect(row.publication_id).toBeNull();
   });
+
+  test("a linked publication with no readable proof is UNPROVEN, never a prior generation's verdict", async () => {
+    const db = await seededDb();
+    // One row exists per scope/head/kind, so a same-SHA re-trigger owns the
+    // DEGRADED row: its own publication is still in flight and carries no proof
+    // yet, while the PRIOR generation's `review` row is applied, proven and
+    // gate-meeting. The store reader's head fallback returns that older row, so
+    // without the id-equality guard this attempt's Check is frozen `success`
+    // from a review it never produced.
+    const priorId = crypto.randomUUID();
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms,
+            confirmed_ms, applied_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'applied', ?, ?, 1, 'done', ?, ?, ?, ?)`,
+      )
+      .run(
+        priorId, APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA,
+        JSON.stringify({ version: 1, artifact: { payload: { verdict: "ship it", tally: { scorePct: 90 } } } }),
+        JSON.stringify({
+          publicationId: priorId,
+          scope: SCOPE,
+          headSha: SHA,
+          kind: "review",
+          round: 1,
+          commentId: 9001,
+          bodySha256: "b".repeat(64),
+          confirmedMs: T0 - 10_000,
+        } satisfies PublicationProof),
+        T0 - 20_000, T0 - 10_000, T0 - 10_000, T0 - 5_000,
+      );
+    const ownId = crypto.randomUUID();
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'degraded', 'sending', '{}', NULL, 1, 'pending', ?, ?)`,
+      )
+      .run(ownId, APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA, T0, T0);
+
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    const fake = fakeChecks({
+      update: () => runPayload(attempt.identity, { status: "completed", conclusion: "failure" }),
+    });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    // The attempt's own publication is linked but unreadable, so it has no
+    // proof to decide from: unproven, never the prior row's gate-derived
+    // `success`.
+    await lifecycle.terminalize({
+      handle: {
+        attemptId: attempt.identity.attemptId,
+        scope: SCOPE,
+        githubAppId: GITHUB_APP_ID,
+        headSha: SHA,
+        lease,
+      },
+      publicationId: ownId,
+      outcome: "publication-unknown",
+    });
+
+    expect(fake.updates).toHaveLength(1);
+    expect(fake.updates[0]!.raw.conclusion).toBe("failure");
+    expect(fake.updates[0]!.raw.summary).toBe(
+      "Review attempt could not be confirmed complete; publication status is unknown.",
+    );
+    const row = await rowOf(db, attempt);
+    expect(row.desired).toBe("failure");
+    // The frozen link is THIS attempt's own publication, never the prior row.
+    expect(row.publication_id).toBe(ownId);
+  });
 });
 
 describe("identity helpers", () => {

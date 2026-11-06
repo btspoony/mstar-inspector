@@ -1413,7 +1413,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // EMPTY increment reads the reviewed head's `reviews` row instead — the
       // head whose content this round covers.
       const ownPublicationId = input.publicationId ?? undefined;
-      const proof =
+      const readProof =
         ownPublicationId === undefined && input.inheritedHeadSha === undefined
           ? null
           : await readPublicationProof(deps.db, {
@@ -1421,6 +1421,16 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
               headSha: handle.headSha,
               publicationId: ownPublicationId,
             });
+      // The reader prefers the linked row but still falls back to another row
+      // with a readable proof for the same head — under RL-12 that is a PRIOR
+      // generation's applied publication (one row per scope/head/kind, so a
+      // re-trigger owns the degraded row and can only ever see an older
+      // `review` row). That proof is not this attempt's: a foreign publication
+      // id is UNPROVEN, exactly as the recovery lane's `readProof` treats it.
+      const proof =
+        readProof !== null && ownPublicationId !== undefined && readProof.publicationId !== ownPublicationId
+          ? null
+          : readProof;
       const gateAndReview: readonly [ReviewGate | null, PublishedReview | null] =
         proof !== null
           ? await Promise.all([
