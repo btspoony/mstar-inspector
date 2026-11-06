@@ -975,6 +975,18 @@ export const en = {
       alreadyConnected: "This GitHub App is already connected on this deployment — no changes were made.",
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
+      /**
+       * The workspace's own default floor is unreadable (a failed read, or a
+       * stored value no reader trusts): the connect fails closed before
+       * writing anything, so the operator repairs the setting and retries.
+       */
+      workspaceFloorUnreadable:
+        "The App could not be connected — this workspace's default score floor cannot be read, so nothing was stored. Repair the setting, then resubmit.",
+      /** The repair clause: "Repair it in [workspace settings]<floorRepairEnd>". */
+      floorRepair: "Repair it in",
+      floorRepairLink: "workspace settings",
+      /** Ends the clause after the link, so the next sentence starts cleanly. */
+      floorRepairEnd: ".",
       workspaceRequired:
         "This deployment has more than one workspace, so an App needs to know which it belongs to — open a workspace and create the App from there.",
       workspaceGone:

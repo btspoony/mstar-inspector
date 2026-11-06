@@ -521,8 +521,17 @@ export function manifestOnboardingPage(
   );
 }
 
-/** Manifest failure surface: error notice + what-to-do-next, never secrets. No chrome (current IA). */
-export function manifestErrorPage(message: string, resumable = false, locale: Locale = "en"): string {
+/**
+ * Manifest failure surface: error notice + what-to-do-next, never secrets. No chrome (current IA).
+ * `repair`, when supplied, names the surface that fixes the failure and
+ * renders it as a link inside the same banner, ahead of `next`.
+ */
+export function manifestErrorPage(
+  message: string,
+  resumable = false,
+  locale: Locale = "en",
+  repair: { phrase: string; text: string; href: string } | null = null,
+): string {
   // Resumable failures (retryable commit outcomes: 400/500/502) keep the
   // hold cookie, so the what-to-do-next link goes back to the confirm gate,
   // not a shell with no confirm form.
@@ -533,12 +542,18 @@ export function manifestErrorPage(message: string, resumable = false, locale: Lo
         "/dashboard/manifest/confirm",
       )
     : wrapPhraseAsLink(t(locale, "manifest.error.retry"), "/dashboard", "/dashboard");
+  // The link is not sentence-final: the clause carries its own locale-owned
+  // terminator, so English gets "." and Chinese gets "。" from the dictionary
+  // instead of one locale inheriting the other's punctuation.
+  const repairHtml = repair
+    ? `${escapeHtml(repair.phrase)} <a href="${escapeHtml(repair.href)}">${escapeHtml(repair.text)}</a>${escapeHtml(t(locale, "manifest.error.floorRepairEnd"))} `
+    : "";
   return page(
     t(locale, "manifest.error.title"),
     `<main>
     <div class="banner" role="alert">
       <strong>${escapeHtml(t(locale, "manifest.error.failedHeading"))}</strong> ${escapeHtml(message)}
-      ${escapeHtml(t(locale, "manifest.error.secretsUnchanged"))} ${next}
+      ${escapeHtml(t(locale, "manifest.error.secretsUnchanged"))} ${repairHtml}${next}
     </div>
   </main>`,
     locale,

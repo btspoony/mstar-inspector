@@ -523,17 +523,19 @@ export async function getWorkspaceCheckMinScore(
 }
 
 /**
- * The ledger's `before` is the floor the workspace was actually RUNNING: the
- * same mapping the reader applies (NULL stays the absent state, a trusted
- * integer records itself, anything else records the platform default) — the
- * concurrency audit's invariant. A raw corrupt value would attribute a floor
- * that was never in effect.
+ * The ledger's `before` is the floor the workspace was actually RUNNING: a
+ * trusted integer records itself, while the absent state and every untrusted
+ * value record `null` — the concurrency audit's absent-state convention. The
+ * reader answers an untrusted value with the platform default flagged
+ * `degraded` and never seeds it, so naming that default would attribute a
+ * floor nothing ran with.
+ * `real` needs no branch: the column's INTEGER affinity plus the CAST CHECK
+ * stores an integral REAL as an integer, so that state cannot occur.
  */
 const workspaceCheckMinScoreAuditSql = (value: string) => `CASE
-      WHEN ${value} IS NULL THEN NULL
       WHEN typeof(${value}) = 'integer' AND ${value} BETWEEN ${CHECK_MIN_SCORE_MIN} AND ${CHECK_MIN_SCORE_MAX}
         THEN ${value}
-      ELSE ${DEFAULT_CHECK_MIN_SCORE} END`;
+      ELSE NULL END`;
 
 const WORKSPACE_CHECK_MIN_SCORE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
