@@ -16,13 +16,13 @@ tags:
 applies_when:
   - adding a provider family to the per-key usage action
   - changing where provider keys are stored or resolved
-  - touching the usage dialog or its snapshot parser
+  - touching the usage panel or its snapshot parser
   - deciding whether a catalog provider can carry usage_probe
 related_components:
   - src/dashboard/provider-usage.ts
   - src/dashboard/app-config-store.ts
   - src/dashboard/index.ts
-  - src/spa/pages/usage-dialog.tsx
+  - src/spa/pages/usage-panel.tsx
   - src/spa/pages/data.ts
   - tests/dashboard/provider-usage.test.ts
   - tests/worker/app-config.test.ts
@@ -124,13 +124,13 @@ The plaintext exists only as the outbound `Authorization` header: never in a res
 
 `src/spa/pages/data.ts` validates the 200 body field by field and returns `null` on any off-shape value rather than rendering it: the status must be on `ok | absent | unauthorized | error`, `kind` on `window | balance`, `unit` on the five-value set, every optional number must pass `Number.isFinite` (`typeof NaN === "number"` would otherwise render "NaN%"), and `shared` must be a boolean.
 
-`src/spa/pages/usage-dialog.tsx` probes on open and on Refresh — the refresh **is** the cache; there is deliberately no polling and no server-side cache, so a key that just died never shows a stale bar. A `generation` counter discards responses that resolve after close or after a switch to another key. Transport failure, a non-200 status, a non-JSON body and a `null` parse all collapse into the same danger notice as the wire's `error` face.
+`src/spa/pages/usage-panel.tsx` probes when the row's usage action is clicked and again on every re-click — the re-click **is** the cache; there is deliberately no polling and no server-side cache, so a key that just died never shows a stale bar. The panel renders directly under the key's row: session/week/month windows become a three-cell bar row in that fixed order, any other window falls back to one line each, and a balance renders as the muted bottom line. A `generation` counter discards responses that resolve after close or after a switch to another key. Transport failure, a non-200 status, a non-JSON body and a `null` parse all collapse into the same danger notice as the wire's `error` face.
 
 The row label is the segment after the **last** `:` of the normalized limit id (`cline-pass:session` → `session`), looked up as `settings.providers.usage.window.<segment>`; an unknown segment renders verbatim. The id is this app's own vocabulary, never vendor payload text, so a new family must pick ids whose last segment is either an existing dictionary key or acceptable raw English.
 
 ### `shared: true` means one account-wide pool, not a per-key allowance
 
-Set only where the vendor reports a single account-level number every stored key would repeat: Charm Hyper's prepaid balance, Synthetic's five-hour and weekly pools, and Command Code's credit balance (the org pool when `whoami` names one). The dialog appends the "account-wide" wording so three key rows drawing on one pool do not read as three independent quotas. A per-key allowance must never carry the flag — it would understate what a rotated key still has.
+Set only where the vendor reports a single account-level number every stored key would repeat: Charm Hyper's prepaid balance, Synthetic's five-hour and weekly pools, and Command Code's credit balance (the org pool when `whoami` names one). The panel appends the "account-wide" wording so three key rows drawing on one pool do not read as three independent quotas. A per-key allowance must never carry the flag — it would understate what a rotated key still has.
 
 ### Scope boundary: API key, not OAuth, not a composite credential
 
@@ -153,7 +153,7 @@ The endpoint constants exist because the alternative (deriving from `baseUrl`) f
 - Adding a provider family to the usage action, or a catalog id to an existing family.
 - Deciding whether a newly catalogued provider may carry `usage_probe`.
 - Changing where provider keys are written, read, or decrypted.
-- Touching the usage dialog, its snapshot parser, or the i18n keys under `settings.providers.usage.*`.
+- Touching the usage panel, its snapshot parser, or the i18n keys under `settings.providers.usage.*`.
 - Reviewing a diff that adds an outbound request to `src/dashboard/provider-usage.ts`.
 
 ## Examples

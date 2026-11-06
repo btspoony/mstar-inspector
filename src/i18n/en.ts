@@ -62,7 +62,7 @@ export const en = {
       hoursAgo: "{count} hours ago",
       dayAgo: "{count} day ago",
       daysAgo: "{count} days ago",
-      /** Future tense (formatUntil) — the usage dialog's reset stamps. */
+      /** Future tense (formatUntil) — the usage panel's reset stamps. */
       inMinute: "in {count} minute",
       inMinutes: "in {count} minutes",
       inHour: "in {count} hour",
@@ -778,9 +778,10 @@ export const en = {
       customIdRequired: "{provider} is taken — enter a new id for this declaration.",
       submitFailed: "That request failed before it reached the server — nothing was stored.",
       /**
-       * The per-key usage probe: the key-row action, the dialog it opens,
-       * and the four faces — ok (window bar / balance), unauthorized,
-       * absent, error. The wire's diagnostic `reason` never renders verbatim.
+       * The per-key usage probe: the key-row action, the inline panel it
+       * reveals under the row, and the four faces — ok (window bar /
+       * balance), unauthorized, absent, error. The wire's diagnostic
+       * `reason` never renders verbatim.
        */
       usage: {
         action: "Usage",
