@@ -270,6 +270,7 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
     expect(attempt.identity.headSha).toBe(SHA);
     expect(lease).toEqual({ holder: "run-a", epoch: 1, untilMs: DEADLINE });
     expect(attempt.executionDeadlineMs).toBe(DEADLINE);
+    expect(attempt.createdMs).toBe(T0);
     // Born in_progress/unknown/not-sent, and never unowned.
     expect(attempt.desired).toBe("in_progress");
     expect(attempt.observed).toBe("unknown");
