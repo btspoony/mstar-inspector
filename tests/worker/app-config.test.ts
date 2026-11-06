@@ -3894,7 +3894,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     expect(await res.json()).toMatchObject({
       ok: true,
       status: "ok",
-      limits: [{ id: "commandcode:balance", kind: "balance", remaining: 10, unit: "credits", shared: true }],
+      limits: [{ id: "commandcode:month", kind: "balance", remaining: 10, unit: "credits", shared: true }],
     });
     // The credential went to the vendor's own two routes, carrying this key.
     expect(fetchSpy).toHaveBeenCalledTimes(2);

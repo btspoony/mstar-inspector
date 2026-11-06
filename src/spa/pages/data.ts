@@ -1656,6 +1656,8 @@ export type UsageLimit = {
   usedFraction?: number;
   /** Balance amount; a window states it only when the vendor does. */
   remaining?: number;
+  /** On-demand amount shown beside `remaining` in the same cell. */
+  extraRemaining?: number;
   limit?: number;
   unit: "percent" | "requests" | "credits" | "usd" | "tokens";
   /** Epoch ms, always a future stamp. */
@@ -1710,6 +1712,10 @@ function parseUsageLimit(raw: unknown): UsageLimit | null {
   if (raw.remaining !== undefined) {
     if (typeof raw.remaining !== "number" || !Number.isFinite(raw.remaining)) return null;
     limit.remaining = raw.remaining;
+  }
+  if (raw.extraRemaining !== undefined) {
+    if (typeof raw.extraRemaining !== "number" || !Number.isFinite(raw.extraRemaining)) return null;
+    limit.extraRemaining = raw.extraRemaining;
   }
   if (raw.limit !== undefined) {
     if (typeof raw.limit !== "number" || !Number.isFinite(raw.limit)) return null;
