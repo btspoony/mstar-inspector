@@ -1672,9 +1672,12 @@ describe("/dashboard manifest routes", () => {
     // A pre-apps DB: users + the workspace plane, but no github_apps table.
     // The creation gate resolves the caller as the workspace owner, and the
     // inline commit then fails on the missing table: retryable, hold parked
-    // for the resume path.
+    // for the resume path. The workspace floor column must exist (0049; it
+    // only alters `workspaces`) so the floor read SUCCEEDS and the failure
+    // under test stays the missing-table write, not an unreadable setting.
     const db = seededDashboardD1(3);
     applyMigrationFile(db.raw, "0026_workspaces.sql");
+    applyMigrationFile(db.raw, "0049_workspace_check_min_score.sql");
     db.raw
       .prepare(
         `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
@@ -1692,6 +1695,11 @@ describe("/dashboard manifest routes", () => {
       env,
     );
     expect(res.status).toBe(500);
+    // A genuine storage failure keeps the database copy: it is not the
+    // unreadable-workspace-setting failure.
+    const failedBody = await res.text();
+    expect(failedBody).toContain("the dashboard database rejected the write");
+    expect(failedBody).not.toContain("default score floor cannot be read");
     const holdCookie = res.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
     expect(holdCookie).toBeTruthy();
     const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
@@ -2153,6 +2161,12 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const refused = await doCommit({ env, holdValue });
     expect(refused.status).toBe(500);
     expect(appRowCount(env)).toBe(0);
+    // The page must name the workspace setting the operator can repair — not
+    // the database — and hand them the settings page to repair it.
+    const refusedBody = await refused.text();
+    expect(refusedBody).toContain("default score floor cannot be read");
+    expect(refusedBody).not.toContain("The App could not be stored");
+    expect(refusedBody).toContain('href="/dashboard/default/settings"');
     // Retryable: the hold is kept (not burned), so the operator can resume.
     const holdCookie =
       refused.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";

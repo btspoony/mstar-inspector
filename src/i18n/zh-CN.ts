@@ -833,6 +833,10 @@ export const zhCN: Dictionary = {
       alreadyConnected: "此 GitHub App 已在此部署上连接 — 未做任何更改。",
       dbRejected: "无法存储该 App — 控制台数据库拒绝了写入。你可以重新提交。",
       dbUnbound: "控制台存储未配置 — 无法存储该 App。",
+      workspaceFloorUnreadable:
+        "无法连接该 App — 无法读取此工作区的默认评分下限，因此没有存储任何内容。修复该设置后再重新提交即可。",
+      floorRepair: "前往",
+      floorRepairLink: "工作区设置",
       workspaceRequired:
         "此部署有多个工作区，App 需要归属其中一个 — 请先进入某个工作区，再从那里创建 App。",
       workspaceGone:
