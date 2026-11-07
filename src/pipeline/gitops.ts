@@ -125,8 +125,15 @@ export function boundedFileReadCommand(path: string, maxBytes: number): ShellCom
 export const BOUNDED_READ_ABSENT_FLAG = "2";
 
 /** A commit sha interpolated into a command path segment — hex only. */
+const SHA_RE = /^[0-9a-f]{7,64}$/;
+
+/** The sha shape `assertSha` enforces, for a caller that must tell an unusable API answer from a hostile value. */
+export function isSha(value: string): boolean {
+  return SHA_RE.test(value);
+}
+
 function assertSha(value: string, label: string): void {
-  assertShellSafe(value, /^[0-9a-f]{7,64}$/, label)
+  assertShellSafe(value, SHA_RE, label);
 }
 
 /**

@@ -155,6 +155,7 @@ import {
   gitTransportEnv,
   incrementDiffCommand,
   isDiffTooLarge,
+  isSha,
   issueViewCommand,
   localDiffCommand,
   mergeBaseCommand,
@@ -341,14 +342,16 @@ export type ReportContextFailure = "pr-view" | "pr-view-json" | "issue-view" | "
 /**
  * Why the oversized-diff fallback produced no capture
  * (`ConsumerLogFields.diff_fallback`). Each name is a distinct operational
- * fact: an admission decline is not a step failure, and a hostile ref refused
- * by a builder guard is not a sandbox transport fault.
+ * fact: an admission decline is not a step failure, an exit-0 answer that is
+ * not a sha is not an exec failure, and a hostile ref refused by a builder
+ * guard is not a sandbox transport fault.
  */
 export type DiffCaptureDeclineReason =
   | "budget"
   | "step-timeout"
   | "base-ref-empty"
   | "merge-base-empty"
+  | "merge-base-unreadable"
   | "fetch-exit"
   | "local-diff-exit"
   | "guard-rejected"
@@ -357,7 +360,11 @@ export type DiffCaptureDeclineReason =
 /** Where the fallback stopped, and the exec result the step ended with. */
 type DiffCaptureDecline = {
   reason: DiffCaptureDeclineReason;
-  /** The step that ended the attempt — `admission` when nothing ran. */
+  /**
+   * The step the attempt stopped at; `admission` only for the round-budget
+   * refusal, which has no step. A guard refusal names the step whose command
+   * was never built.
+   */
   step: string;
   /** The step's exec result; absent when no exec ran (budget / timeout / guard). */
   run?: { stdout: string; stderr: string; exitCode: number };
@@ -569,10 +576,12 @@ export type ConsumerLogFields = {
    * Set on the fallback's ONE decline warn: why the oversized-diff capture
    * produced nothing, and the step it stopped at. `budget` / `step-timeout`
    * declined before that step's exec ran, `guard-rejected` is a hostile
-   * ref/sha refused before it reached a shell string, `transport` is a
-   * sandbox fault, and the rest name the step that exited non-zero or
-   * answered empty. The message carries that step's exit code and redacted
-   * stderr tail; the round's durable failure keeps the ORIGINAL 406.
+   * ref/sha refused before it reached a shell string, `merge-base-unreadable`
+   * is an exit-0 answer that is not a sha (`--jq` prints `null` for an absent
+   * field), `transport` is a sandbox fault, and the rest name the step that
+   * exited non-zero or answered empty. The message carries that step's exit
+   * code and redacted stderr tail; the round's durable failure keeps the
+   * ORIGINAL 406.
    */
   diff_fallback?: DiffCaptureDeclineReason;
   diff_fallback_step?: string;
@@ -3279,9 +3288,10 @@ function gitStageFailureDetail(
  * Every decline names itself and the step it stopped at. The caller turns that
  * into ONE structured warn (reason, step, that step's exit code and redacted
  * stderr tail) plus a suffix on the rethrown ORIGINAL 406 — so "not attempted
- * (budget)", "failed at fetch" and "hostile ref rejected" never collapse into
- * the same silent nothing. A capture is still never partial, and the fallback's
- * own fault still never replaces the cause that was diagnosed.
+ * (budget)", "failed at fetch", "the API's answer was unusable" and "hostile
+ * ref rejected" never collapse into the same silent nothing. A capture is still
+ * never partial, and the fallback's own fault still never replaces the cause
+ * that was diagnosed.
  */
 async function oversizedDiffCapture(
   sandbox: ReviewSandbox,
@@ -3325,6 +3335,10 @@ async function oversizedDiffCapture(
     const merge = await sandbox.runCommand(mergeCmd, { env: { GH_TOKEN: token }, timeout: left });
     const mergeBaseSha = merge.stdout.trim();
     if (merge.exitCode !== 0 || mergeBaseSha === "") return { reason: "merge-base-empty", step, run: merge };
+    // An exit-0 answer that is not a sha is an UNUSABLE answer, never a hostile
+    // ref: `gh api --jq` prints `null` for an absent field, and a truncated or
+    // proxied reply prints anything. No guard ran and nothing is built from it.
+    if (!isSha(mergeBaseSha)) return { reason: "merge-base-unreadable", step, run: merge };
 
     step = "fetch";
     left = stepTimeout();

@@ -1571,9 +1571,10 @@ describe("createReviewConsumer", () => {
       await consumer(makeBatch(makePayload()));
     });
 
-    // The gate asks for the derived runner deadline (900s − 114s post-runner
-    // reserve = 786s), never the level's whole 600s table: at 200s elapsed the
-    // fallback runs and the round still completes.
+    // The gate asks for the derived runner deadline — `ROUND_BUDGET_MS` −
+    // `postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT)` = 900s − 234s = 666s —
+    // never the level's whole 600s table: at 200s elapsed the fallback runs and
+    // the round still completes.
     expect(sandbox.calls.map((c) => c.cmd).slice(3, 7)).toEqual([
       pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
       mergeBaseCommand(TEST_OWNER, TEST_REPO, sandbox.diffBaseRef, SHA),
