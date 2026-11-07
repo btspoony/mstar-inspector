@@ -2729,7 +2729,6 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     // The whole point of the released-row eligibility: a row whose intent is
     // still `in_progress` is SELECTED long before its execution deadline.
     expect(await listCheckReconcileBatch(db, T0 + 120_000)).toHaveLength(1);
-    const dueBefore = (await rawRow(db, id)).next_attempt_ms;
     const stub = stubFetch();
     let factoryCalls = 0;
     const events: Array<Record<string, unknown>> = [];
@@ -2766,9 +2765,10 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.observed).toBe("unknown");
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
-    // Untouched: no claim and no defer write, so the row keeps the due time it
-    // already had and a journal row that lands later is seen on the next tick.
-    expect(row.next_attempt_ms).toBe(dueBefore);
+    // Moved onto the active ladder rung by ONE unclaimed write: no claim, no
+    // defer, no attempt spent — the row stops holding the head of the due batch
+    // and is still due (and seen) at that time.
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
 
     // No wait line: the per-minute log churn is part of what the short-circuit
     // removes.
@@ -2892,12 +2892,13 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     const proof = proofFor(attempt.identity);
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
     linkPublication(db, id, proof.publicationId);
+    const dueAt = Number((await rawRow(db, id)).next_attempt_ms);
     const sent: { desired?: string; summary?: string } = {};
     const secondStub = stubFetch();
     let secondDeferred = -1;
     try {
       const summary = await run(db, {
-        now: () => T0 + 180_000,
+        now: () => dueAt,
         credentials: scriptedCredentials(db, publishingScript(sent)),
       });
       secondDeferred = summary.deferred;
@@ -2956,12 +2957,13 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     const proof = proofFor(attempt.identity);
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
     linkPublication(db, id, proof.publicationId);
+    const dueAt = Number((await rawRow(db, id)).next_attempt_ms);
     const sent: { desired?: string; summary?: string } = {};
     const secondStub = stubFetch();
     let secondDeferred = -1;
     try {
       const summary = await run(db, {
-        now: () => T0 + 180_000,
+        now: () => dueAt,
         credentials: scriptedCredentials(db, publishingScript(sent)),
       });
       secondDeferred = summary.deferred;
@@ -3246,12 +3248,13 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     seedPublication(db, SCOPE, SHA, degraded, "applied");
     linkPublication(db, id, degraded.publicationId);
 
+    const dueAt = Number((await rawRow(db, id)).next_attempt_ms);
     const sent: { desired?: string; summary?: string } = {};
     const secondStub = stubFetch();
     let secondDeferred = -1;
     try {
       const summary = await run(db, {
-        now: () => T0 + 180_000,
+        now: () => dueAt,
         credentials: scriptedCredentials(db, publishingScript(sent)),
       });
       secondDeferred = summary.deferred;

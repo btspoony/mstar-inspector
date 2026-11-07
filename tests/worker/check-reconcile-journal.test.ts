@@ -14,7 +14,9 @@ import { describe, expect, test } from "bun:test";
 import {
   CHECK_BACKOFF_MS,
   CHECK_NAME,
+  CHECK_RECONCILE_LIMIT,
   deferCheckRecovery,
+  listCheckReconcileBatch,
   setCheckDesired,
   type CheckConclusion,
   type CheckIdentity,
@@ -555,7 +557,6 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     // adopted.
     const prior = { ...proofFor(attempt.identity), publicationId: "pub-only-previous-generation" };
     seedPublication(db, SCOPE, SHA, prior, "applied", reviewPayload(SCOPE, SHA, "ship it", 90));
-    const dueBefore = (await rawRow(db, id)).next_attempt_ms;
 
     const stub = stubFetch();
     let factoryCalls = 0;
@@ -583,7 +584,10 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(row.terminal_ms).toBeNull();
     expect(row.observed).toBe("unknown");
     expect(row.attempts).toBe(1);
-    expect(row.next_attempt_ms).toBe(dueBefore); // untouched: no claim, no defer
+    // One unclaimed write moved the due time onto the ladder rung — no claim, no
+    // defer, no attempt spent. The row is not concludable, but it also does not
+    // hold the head of the bounded due batch.
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
   });
@@ -593,21 +597,24 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     const { attempt, id } = await abandonedRow(db);
     const stub = stubFetch();
     try {
-      // First pass: no journal row yet — terminal for the wait, nothing written.
+      // First pass: no journal row yet — terminal for the wait. Only its own
+      // due time moves (one unclaimed write), so the row no longer holds the
+      // head of the due batch.
       const first = await run(db, { now: () => T0 + 120_000 });
       expect(first.deferred).toBe(0);
       expect(first.completed).toBe(0);
 
-      // The publication is staged and proves itself while the row is still due.
+      // The publication is staged and proves itself before that pushed due time.
       const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 130_000);
       const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
       db.raw
         .prepare(`UPDATE review_publications SET proof_json = ?, payload_json = ? WHERE id = ?`)
         .run(JSON.stringify(proof), JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 85)), journalId);
 
+      const dueAt = Number((await rawRow(db, id)).next_attempt_ms);
       const sent: { desired: string | null } = { desired: null };
       const second = await run(db, {
-        now: () => T0 + 180_000,
+        now: () => dueAt,
         credentials: scriptedCredentials(db, {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
@@ -836,14 +843,14 @@ describe("the journal-less short-circuit (spec §7.9/§7.11.2)", () => {
     const before = dead.statements();
     const summary = await run(dead.db, { now: () => T0 + 120_000 });
 
-    // TWO statements for the dead attempt — the shared determination's journal
-    // probe plus the D1 pair gate that LEADS the wait (spec §7.11.2 step 2), so
-    // a disabled/deleted App still suspends instead of looping to the deadline.
-    // The proof read, the claim and the defer are all gone: nothing in the wait
-    // can progress and nothing is written.
+    // THREE statements for the dead attempt — the shared determination's journal
+    // probe, the D1 pair gate that LEADS the wait (spec §7.11.2 step 2), and the
+    // one unclaimed due-time write that keeps the row off the head of the due
+    // batch. The proof read, the claim and the re-leasing defer are all gone;
+    // the row stays live and still owes its deadline conclusion.
     expect(summary.examined).toBe(1);
     expect(summary.deferred).toBe(0);
-    expect(dead.statements() - before - selectorOnly).toBe(2);
+    expect(dead.statements() - before - selectorOnly).toBe(3);
   });
 
   test("a journal row staggers the wait onto the widening ladder instead of every minute", async () => {
@@ -862,5 +869,103 @@ describe("the journal-less short-circuit (spec §7.9/§7.11.2)", () => {
     expect((await rawRow(db, id)).next_attempt_ms).toBe(
       T0 + 120_000 + CHECK_BACKOFF_MS[1]! + CHECK_BACKOFF_MS[2]!,
     );
+  });
+
+  test("more wait-terminal rows than the batch bound cannot starve a publishable attempt", async () => {
+    const db = seededDb();
+    // CHECK_RECONCILE_LIMIT + 1 rows that can never progress, every one due
+    // BEFORE the one attempt that can publish. The selector orders by
+    // `COALESCE(next_attempt_ms, created_ms), id LIMIT 25`, so a wait-terminal
+    // row left at its early due time occupies a slot on EVERY pass: the same 25
+    // are re-read each time and the publishable attempt behind them is never
+    // examined until its deadline.
+    const deadIds: string[] = [];
+    for (let index = 0; index < CHECK_RECONCILE_LIMIT + 1; index += 1) {
+      const { attempt, lease } = await claim(db, {
+        headSha: `${index.toString(16).padStart(2, "0")}${"0".repeat(38)}`,
+        nowMs: T0,
+        executionDeadlineMs: DEADLINE,
+      });
+      const id = attempt.identity.attemptId;
+      expect(
+        await deferCheckRecovery(
+          db,
+          id,
+          lease,
+          { state: "remote-unconfirmed", nextAttemptMs: T0 + 60_000, reason: "the creating invocation was abandoned" },
+          T0,
+        ),
+      ).toBe(true);
+      deadIds.push(id);
+    }
+
+    // The one attempt that CAN publish: its journal row has already proved
+    // itself, and its due time sits behind every dead row's.
+    const publishableSha = "f".repeat(40);
+    const { attempt: publishable, lease: publishableLease } = await claim(db, {
+      headSha: publishableSha,
+      nowMs: T0,
+      executionDeadlineMs: DEADLINE,
+    });
+    const publishableId = publishable.identity.attemptId;
+    expect(
+      await deferCheckRecovery(
+        db,
+        publishableId,
+        publishableLease,
+        { state: "remote-unconfirmed", nextAttemptMs: T0 + 90_000, reason: "publication journal handoff" },
+        T0,
+      ),
+    ).toBe(true);
+    const journalId = seedJournal(db, SCOPE, publishableSha, "confirmed", T0 + 10_000);
+    const proof = { ...proofFor(publishable.identity, "review"), publicationId: journalId };
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ?, payload_json = ? WHERE id = ?`)
+      .run(JSON.stringify(proof), JSON.stringify(reviewPayload(SCOPE, publishableSha, "ship it", 85)), journalId);
+
+    const stub = stubFetch();
+    try {
+      const first = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: scriptedCredentials(db, countingScript({ adopt: 0, begin: 0, complete: 0 })),
+      });
+      // The bound still applies: one pass reads exactly `CHECK_RECONCILE_LIMIT`
+      // rows and the publishable attempt is the 27th…
+      expect(first.examined).toBe(CHECK_RECONCILE_LIMIT);
+      expect(first.completed).toBe(0);
+
+      // …but the dead rows it read no longer hold the head — the very next
+      // selection is the one straggler plus the publishable attempt.
+      const nextIds = (await listCheckReconcileBatch(db, T0 + 120_000)).map((row) => row.identity.attemptId);
+      expect(nextIds).toHaveLength(2);
+      expect(nextIds).toContain(publishableId);
+
+      // The reorder spent nothing: the dead row keeps its attempt count, holds
+      // no lease, and is due again on the ladder rung.
+      const reorderedId = deadIds.find((id) => !nextIds.includes(id))!;
+      const reordered = await rawRow(db, reorderedId);
+      expect(reordered.attempts).toBe(1);
+      expect(reordered.holder).toBeNull();
+      expect(reordered.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
+
+      const second = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: scriptedCredentials(db, {
+          ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
+          complete: async (identity, _runId, conclusion) => ({
+            kind: "completed" as const,
+            remote: remoteFor(identity, { conclusion: conclusion.desired }),
+          }),
+        }),
+      });
+      expect(second.examined).toBe(2);
+      expect(second.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    const settled = await rawRow(db, publishableId);
+    expect(settled.observed).toBe("success");
+    expect(settled.terminal_ms).not.toBeNull();
   });
 });

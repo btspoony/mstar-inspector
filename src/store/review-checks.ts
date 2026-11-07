@@ -789,6 +789,40 @@ export async function deferCheckForPendingPublication(
 }
 
 /**
+ * Push a due time forward WITHOUT taking ownership, for the row a wait can no
+ * longer make progress on (spec §7.11.2 step 2): the due batch is ordered by
+ * `COALESCE(next_attempt_ms, created_ms)`, so a row left at an early due time
+ * re-occupies the head of every bounded pass and starves the rows behind it.
+ *
+ * Nothing is claimed and nothing is spent: `lease_epoch`, `holder`, `attempts`,
+ * `recovery_state` and the identity are all untouched, so this is bookkeeping —
+ * not a recovery action and not a deferral. The row stays a live due row, so
+ * the selector finds it again once the pushed time arrives and a publication
+ * that lands later is still seen.
+ *
+ * The selectors' own eligibility is repeated in the statement, so a row another
+ * invocation claimed or suspended in between is left exactly as it is.
+ */
+export async function deferUnclaimedCheckRecovery(
+  db: D1Like,
+  id: string,
+  nextAttemptMs: number,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_checks
+          SET next_attempt_ms = ?, updated_ms = ?
+        WHERE id = ? AND holder IS NULL
+          AND recovery_state IN ('pending','remote-unconfirmed')
+          AND ${NONTERMINAL_WHERE}`,
+    )
+    .bind(nextAttemptMs, nowMs, id)
+    .run();
+  return result.meta.changes === 1;
+}
+
+/**
  * Persist the publication an attempt was handed off to, without concluding
  * anything: a `runFenced` write of `publication_id` ALONE. A hand-off attempt
  * publishes nothing itself, so the journal row it found is the only proof its

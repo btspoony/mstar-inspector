@@ -61,6 +61,7 @@ import {
   type CheckRemote,
   deferCheckForPendingPublication,
   deferCheckRecovery,
+  deferUnclaimedCheckRecovery,
   getCheckAttempt,
   getCheckOwnership,
   listCheckReconcileBatch,
@@ -847,11 +848,19 @@ async function reconcileCheckAttempt(
     }
     // Terminal for the WAIT: nothing was staged for this attempt and it links
     // no publication of its own, so no later read in this lane can change that
-    // answer. It is NOT a conclusion — the deadline concludes it, naming the
-    // missing evidence `unstaged` — and it is not a defer either: the row stays
-    // due, so the pass costs the probe and the pair gate, and a journal row
-    // that DOES appear is still seen on the next tick.
-    if (waitIsTerminal(pending, proofPublicationId)) return;
+    // answer. It is NOT a conclusion — only the execution deadline concludes it,
+    // naming the missing evidence `unstaged` — and it is not a defer either: no
+    // attempt is spent and no claim is taken. But it must not KEEP the head of
+    // the bounded due batch: the selector orders by `COALESCE(next_attempt_ms,
+    // created_ms)`, so a row whose due time never moves occupies a slot on every
+    // pass and starves the rows behind it. One unclaimed write moves its own due
+    // time onto the active rung; the row stays live, so a journal row that lands
+    // later is still seen on the pass it falls due.
+    if (waitIsTerminal(pending, proofPublicationId)) {
+      const at = now();
+      await deferUnclaimedCheckRecovery(db, attemptId, at + waitRungMs(row, at), at);
+      return;
+    }
     const waiting =
       pending.kind === "pending" ||
       pending.kind === "unknown" ||
