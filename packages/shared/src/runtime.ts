@@ -148,6 +148,16 @@ export type AgentRuntimeRunInput = {
    */
   recheck?: RecheckInput;
   /**
+   * The OUTER wall-clock budget this run is actually given, in ms — the
+   * caller's exec timeout for the runner process, which can be shorter than
+   * the level's tier cap once the round's earlier steps have spent part of it.
+   * The runner anchors the shared review deadline at `start + outerBudgetMs`,
+   * so the seats and every recheck read stop before the exec kills the
+   * process. ABSENT = the level's tier cap (`OUTER_RUNNER_CAP_MS`), so a
+   * legacy runner input keeps its behaviour exactly.
+   */
+  outerBudgetMs?: number;
+  /**
    * The seat's ask budget in UTF-8 bytes, read once from the operator's
    * `review.recheck.assignment_max_bytes` system row. ABSENT = the runner's
    * documented default (`RECHECK_ASSIGNMENT_MAX_BYTES`), so a legacy input

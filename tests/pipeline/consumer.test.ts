@@ -534,6 +534,9 @@ describe("createReviewConsumer", () => {
       worktreePath: "/workspace/repo",
       reconFacts: ["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"],
       capabilityHosts: getSandboxImage("omp")!.hosts,
+      // The runner anchors its own deadline at this budget, so the input must
+      // carry the exec window it is started with (here the whole 600s tier).
+      outerBudgetMs: 600_000,
     });
     // Clone: git transport auth via scoped extraheader env (bugbot A1) — the
     // token lives in GIT_CONFIG_VALUE_0, never in the command string. Form is
@@ -1558,6 +1561,11 @@ describe("createReviewConsumer", () => {
     const inputWrite = sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'")!;
     expect(execTimeout(inputWrite)).toBe(66_000);
     expect(runnerExecTimeout()).toBe(66_000);
+    // The runner input carries that SAME derived window: the runner anchors its
+    // own deadline at it, so a shortened exec no longer lets the round plan
+    // synthesis at the end of a tier budget it will never be given.
+    const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { outerBudgetMs?: number };
+    expect(writtenInput.outerBudgetMs).toBe(66_000);
     // 66s cannot fund the narrative (120s) plus the post-runner reads (90s).
     expect(logLines.some((l) => l.fields.report_context === "budget")).toBe(true);
     expect(reviewCount(db)).toBe(1);

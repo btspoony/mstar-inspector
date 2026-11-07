@@ -4807,10 +4807,21 @@ async function processMessage(
       runnerDeadlineMs,
     );
 
+    // Derived from the SAME deadline the diff stage and every post-diff step
+    // use (never the bare level constant): the runner only gets what the
+    // post-runner tail does not already need, and a spent deadline declines the
+    // paid exec instead of starting it with a manufactured 1ms timeout. Read
+    // BEFORE the input write because the document must carry it; the write's
+    // own bounded window is the measure-then-start gap every step already pays.
+    const runnerTimeout = boundedStepTimeout(runnerDeadlineMs, runnerTimeoutMs(level), "runner");
     const runnerInput = {
       worktreePath: CLONE_DIR,
       reconFacts,
       capabilityHosts: sandboxImage.hosts,
+      // The window the exec below is really given: the runner anchors its own
+      // review deadline at it, so a shortened round plans synthesis inside the
+      // exec it runs under instead of the level's whole tier cap.
+      outerBudgetMs: runnerTimeout,
       ...(modelOverrides !== undefined ? { modelOverrides } : {}),
       ...(customProviders !== undefined
         ? { customProviders: customProviders.map(toRunnerCustomProvider) }
@@ -4868,11 +4879,8 @@ async function processMessage(
       recheckInput !== undefined ? RECHECK_OUTPUT_PATH : undefined,
       prContext !== undefined ? REPORT_OUTPUT_PATH : undefined,
     );
-    // Derived from the SAME deadline the diff stage and every post-diff step
-    // use (never the bare level constant): the runner only gets what the
-    // post-runner tail does not already need, and a spent deadline declines the
-    // paid exec instead of starting it with a manufactured 1ms timeout.
-    const runnerTimeout = boundedStepTimeout(runnerDeadlineMs, runnerTimeoutMs(level), "runner");
+    // The exec is started with exactly the window its input declares, so the
+    // runner's own anchored deadline and this timeout cannot disagree.
     const run = await sandbox.runCommand(runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,

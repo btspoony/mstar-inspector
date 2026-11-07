@@ -460,6 +460,24 @@ describe("remainingOuterMs (the outer exec guard, as opposed to the soft clock)"
     // this one the outer exec guard a hard cap derives from.
     expect(remainingSoftMinutes(start, "quick") * 60_000).not.toBe(remainingOuterMs(start, "quick"));
   });
+
+  test("a supplied outer budget replaces the tier cap — the exec the runner really has", () => {
+    const start = 6_000_000;
+    // deep's tier cap is 840,000, but this round's exec only grants 240,000.
+    // Everything derived from the anchor must plan against the exec the runner
+    // actually runs under, not the table entry it would have got alone.
+    const budget = 240_000;
+    anchorRecheckDeadline(start, "deep", budget);
+
+    expect(remainingOuterMs(start)).toBe(budget);
+    expect(remainingOuterMs(start + 100_000)).toBe(budget - 100_000);
+    // The seat's hard cap (runtime-omp: `remainingOuterMs - PUBLICATION_TAIL_MS`)
+    // therefore leaves the tail before the EXEC deadline, not before the tier's
+    // wider one. Proved through the recheck budget, which derives from the same
+    // deadline: what it allows plus the tail is exactly what the exec leaves.
+    expect(currentRecheckBudget(start)).toBe(budget - PUBLICATION_TAIL_MS);
+    expect(currentRecheckBudget(start) + PUBLICATION_TAIL_MS).toBe(remainingOuterMs(start));
+  });
 });
 
 describe("recheckRoundStatus (a round that delivered nothing is failed, never clean)", () => {

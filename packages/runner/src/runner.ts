@@ -115,7 +115,7 @@ const USAGE =
   "(input JSON: { capabilityHosts: [{ id, catalogProviderId, apiKeyEnv, baseUrl, api, auth, models }], " +
   "worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string>, " +
   "customProviders?: [{ provider_id, base_url, api, model_ids }], recheck?: mstar.recheck-input/v1 document, " +
-  "recheckAssignmentMaxBytes?: integer > 0, " +
+  "recheckAssignmentMaxBytes?: integer > 0, outerBudgetMs?: integer > 0, " +
   "prContext?: { prBody: string, issues: [{ number, title, body }] } })";
 
 /** Validated shape of the --input JSON file. */
@@ -129,6 +129,8 @@ type RunnerInputJson = {
   recheck?: RecheckInput;
   /** The operator's recheck ask budget in bytes — absent = the runner default. */
   recheckAssignmentMaxBytes?: number;
+  /** The caller's outer exec budget in ms — absent = the level's tier cap. */
+  outerBudgetMs?: number;
   /** Optional PR context for the report seat — passed through to the runtime. */
   prContext?: PrContext;
 };
@@ -350,6 +352,15 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
       throw new Error("input JSON field `recheckAssignmentMaxBytes` must be a positive integer when present");
     }
     input.recheckAssignmentMaxBytes = maxBytes;
+  }
+  if (record.outerBudgetMs !== undefined) {
+    // The caller's own exec timeout: the anchor follows it, so a shortened run
+    // plans against the exec that will kill it instead of the tier cap.
+    const outerBudgetMs = record.outerBudgetMs;
+    if (typeof outerBudgetMs !== "number" || !Number.isInteger(outerBudgetMs) || outerBudgetMs <= 0) {
+      throw new Error("input JSON field `outerBudgetMs` must be a positive integer when present");
+    }
+    input.outerBudgetMs = outerBudgetMs;
   }
   if (record.prContext !== undefined) {
     // Shape validation ONLY, mirroring the recheck guard: the consumer builds
@@ -634,11 +645,6 @@ export async function main(
       return 1;
     }
   }
-  // spec §7.8: anchor the ABSOLUTE outer review deadline once
-  // per process — the recheck seat's budget derives from it, so the seat can
-  // never outlive (or restart past) the review's own wall-clock cap.
-  anchorRecheckDeadline(Date.now(), level);
-
   // The per-run directory carries only the synthesized models.yml — the
   // credential rows live in an in-memory store (below), so no key material is
   // ever written to disk. The directory still exists only for this run, so it
@@ -663,6 +669,14 @@ export async function main(
     try {
       const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
       const json = parseRunnerInput(parsed);
+      // spec §7.8: anchor the ABSOLUTE outer review deadline once per process
+      // — the recheck seat's budget derives from it, so the seat can never
+      // outlive (or restart past) the review's own wall-clock cap. The anchor
+      // follows the caller's own exec budget when it supplies one (a shortened
+      // round): every derived cap then stops before the exec that kills us. It
+      // runs after the input is parsed because only the input carries that
+      // budget, and still before the runtime starts.
+      anchorRecheckDeadline(Date.now(), level, json.outerBudgetMs);
       // (AL-23-1): EVERY run synthesizes the
       // COMPLETE per-review models.yml (/tmp/omp-agent-<uuid>/) — the App's
       // selected image's capability hosts are the base, the custom-provider
@@ -714,6 +728,9 @@ export async function main(
         ...(json.recheckAssignmentMaxBytes !== undefined
           ? { recheckAssignmentMaxBytes: json.recheckAssignmentMaxBytes }
           : {}),
+        // The caller's own exec window: absent for a direct legacy invocation,
+        // so the runtime input keeps its tier-cap behaviour.
+        ...(json.outerBudgetMs !== undefined ? { outerBudgetMs: json.outerBudgetMs } : {}),
         // Optional PR context: the report seat's untrusted input. Absent =
         // no report seat runs, so the runtime input stays byte-identical.
         ...(json.prContext !== undefined ? { prContext: json.prContext } : {}),

@@ -19,7 +19,9 @@
  * `recheckBudget(outerDeadline, now, cap)` then clamps to that cap and to
  * `outerDeadline - now - 5000`, 0 = skip (below 30,000ms remaining). The
  * runner anchors the ABSOLUTE outer deadline once per process
- * (`anchorRecheckDeadline(startMs, level)`); the seat evaluates
+ * (`anchorRecheckDeadline(startMs, level, outerBudgetMs?)` — a supplied exec
+ * budget replaces the tier cap, so a shortened round plans against the exec it
+ * really runs under); the seat evaluates
  * `currentRecheckBudget(Date.now())` at start so a late start shrinks toward
  * the shared deadline — a fresh cap after the normal review is structurally
  * impossible (the seat only ever starts concurrently, and the caller awaits
@@ -164,11 +166,14 @@ let anchoredSoftLevel: ReviewLevel | undefined;
  * the runner calls this ONCE per process at start (`startMs` = process
  * start, `level` = review tier). The recheck seat's budget is derived from
  * this deadline, so the seat can never outlive — or restart past — the
- * review's own wall-clock cap. Re-anchoring overrides (assignment, not
- * error).
+ * review's own wall-clock cap. `outerBudgetMs` is the caller's own exec
+ * timeout when it supplies one (a shortened round budget): the deadline then
+ * follows the exec the process really runs under, never the tier cap it would
+ * have had alone. ABSENT = `OUTER_RUNNER_CAP_MS[level]`. Re-anchoring
+ * overrides (assignment, not error).
  */
-export function anchorRecheckDeadline(startMs: number, level: ReviewLevel): void {
-  anchoredDeadlineMs = startMs + OUTER_RUNNER_CAP_MS[level];
+export function anchorRecheckDeadline(startMs: number, level: ReviewLevel, outerBudgetMs?: number): void {
+  anchoredDeadlineMs = startMs + (outerBudgetMs ?? OUTER_RUNNER_CAP_MS[level]);
   // Same instant, same call: the soft clock shares the outer deadline's origin
   // — one anchor per review, never a second one.
   anchoredSoftStartMs = startMs;
