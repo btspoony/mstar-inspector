@@ -98,6 +98,14 @@ import { encodeCredentialPayload } from "../../packages/shared/src/credential-pa
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import {
+  CLONE_DIR,
+  DIFF_PATH,
+  fetchDepthOneCommand,
+  gitTransportEnv,
+  localDiffCommand,
+  mergeBaseCommand,
+  numstatCommand,
+  pullRequestBaseRefCommand,
   readRecheckCommand,
   readRecheckStatusCommand,
   readReportCommand,
@@ -115,6 +123,9 @@ import {
   seedReviewingApp,
   setAppReviewLevel,
   TEST_APP_PEM,
+  TEST_OWNER,
+  TEST_PR_NUMBER,
+  TEST_REPO,
   PRIOR_PUB_ID,
   PRIOR_SHA,
   TARGET_ROW_ID,
@@ -1175,6 +1186,88 @@ describe("createReviewConsumer", () => {
     expect(sandbox.destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+  });
+
+  test("oversized diff (GitHub 406) → captured from the local merge-base diff and the round continues", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr =
+      "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000) (https://api.github.com/repos/acme/widgets/pulls/42)";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // Base ref → merge base → depth-1 fetch of that merge base → local diff,
+    // in that order, right after the refused gh capture.
+    const cmds = sandbox.calls.map((c) => c.cmd);
+    expect(cmds.slice(3, 7)).toEqual([
+      pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
+      mergeBaseCommand(TEST_OWNER, TEST_REPO, sandbox.diffBaseRef, SHA),
+      fetchDepthOneCommand(CLONE_DIR, sandbox.mergeBaseSha),
+      localDiffCommand(CLONE_DIR, sandbox.mergeBaseSha, SHA, DIFF_PATH),
+    ]);
+    // The round continues on the SAME downstream path: numstat, then the
+    // runner-input write. The local capture is one bounded read, not two.
+    expect(cmds).toContain(numstatCommand(DIFF_PATH));
+    expect(cmds.some((c) => c.includes("--input"))).toBe(true);
+    // Credentials stay exec-env only: the fetch carries the shared transport
+    // header, the local diff needs none.
+    expect(sandbox.calls[5]!.opts).toEqual({
+      env: gitTransportEnv(gh("s", "installation_token")),
+      timeout: EXEC_TIMEOUT_GIT_MS,
+    });
+    expect(sandbox.calls[6]!.opts).toEqual({ timeout: EXEC_TIMEOUT_GIT_MS });
+    expect(logLines.some((l) => l.fields.diff_source === "oversized-local")).toBe(true);
+    expect(reviewCount(db)).toBe(1);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+  });
+
+  test("a non-oversized diff failure rethrows the original message and runs no fallback command", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    // An auth failure is NOT the API ceiling: the fallback would mask the cause.
+    sandbox.diffStderr = "HTTP 401: Bad credentials (https://api.github.com/repos/acme/widgets/pulls/42)";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 401: Bad credentials/,
+    );
+
+    // Exactly clone → rev-parse → diff: no base-ref, merge-base, fetch or
+    // local-diff step follows a failure that is not the API ceiling.
+    expect(sandbox.calls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+      expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
+    ]);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("diff failed");
+  });
+
+  test("an oversized diff whose base ref resolves empty rethrows the ORIGINAL failure and fetches nothing", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    sandbox.diffBaseRef = "";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
+    );
+
+    // The lookup ran; the chain stopped before any merge-base/fetch/local diff.
+    expect(sandbox.calls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+      expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
+      pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
+    ]);
+    expect(failureRows(db)).toHaveLength(1);
   });
 
   test("runner input write failure → no runner, no post, no insert, rethrow, destroy", async () => {

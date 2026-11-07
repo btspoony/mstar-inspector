@@ -24,9 +24,13 @@ import {
   compareStatusCommand,
   DIFF_PATH,
   DIFF_PREFETCH_MAX_BYTES,
+  fetchDepthOneCommand,
   incrementDiffCommand,
   issueViewCommand,
+  localDiffCommand,
+  mergeBaseCommand,
   prBodyCommand,
+  pullRequestBaseRefCommand,
   readRecheckCommand,
   readRecheckStatusCommand,
   readReportCommand,
@@ -340,6 +344,11 @@ export type FakeSandboxState = {
   /** The diff FILE the production command writes; the double streams it back bounded. */
   diffStdout: string;
   diffExitCode: number;
+  /** stderr a failing `gh pr diff` answers with (the oversized-diff wording lives here). */
+  diffStderr: string;
+  /** The PR's base ref and the merge base the oversized-diff fallback resolves. */
+  diffBaseRef: string;
+  mergeBaseSha: string;
   /**
    * Raw stdout a BROKEN transport answers the bounded read with, replacing the
    * command's own `<content>\n<flag>\n` reply (an empty one has no flag line).
@@ -401,6 +410,9 @@ export function initialFakeSandboxState(): FakeSandboxState {
     // context-incomplete path. Cases that need a lost capture opt in explicitly.
     diffStdout: VALID_DIFF,
     diffExitCode: 0,
+    diffStderr: "gh failed",
+    diffBaseRef: "main",
+    mergeBaseSha: "c".repeat(40),
     diffReadStdout: null,
     numstatStdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n",
     numstatExitCode: 0,
@@ -464,7 +476,7 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
       if (state.diffExitCode !== 0) {
         // `gh` fails the chain BEFORE the read half runs: no bounded payload
         // can accompany a failed exit.
-        return { stdout: "", stderr: "gh failed", exitCode: state.diffExitCode };
+        return { stdout: "", stderr: state.diffStderr, exitCode: state.diffExitCode };
       }
       if (!cmd.endsWith(DIFF_READ)) {
         throw new Error(`fake sandbox: diff command without its bounded read: ${cmd}`);
@@ -539,6 +551,25 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
     const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
     return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: state.incrementDiffExitCode };
+  }
+  // Oversized-diff fallback (production shape): base ref → merge base →
+  // depth-1 fetch → local merge-base..head diff, whose read half is the SAME
+  // bounded transport as the gh capture. Commands are built from the live
+  // state, so a product-shape change edits the builders, never this double.
+  if (cmd === pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER)) {
+    return { stdout: `${state.diffBaseRef}\n`, stderr: "", exitCode: 0 };
+  }
+  if (cmd === mergeBaseCommand(TEST_OWNER, TEST_REPO, state.diffBaseRef, state.resolvedSha)) {
+    return { stdout: `${state.mergeBaseSha}\n`, stderr: "", exitCode: 0 };
+  }
+  if (cmd === fetchDepthOneCommand(CLONE_DIR, state.mergeBaseSha)) {
+    return { stdout: "", stderr: "", exitCode: 0 };
+  }
+  if (cmd === localDiffCommand(CLONE_DIR, state.mergeBaseSha, state.resolvedSha, DIFF_PATH)) {
+    const bytes = Buffer.from(state.diffStdout);
+    const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
+    const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
+    return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: 0 };
   }
   if (cmd === REPORT_READ) {
     if (state.reportFileExitCode !== 0) {

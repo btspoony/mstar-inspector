@@ -151,9 +151,15 @@ import {
   CLONE_DIR,
   compareStatusCommand,
   DIFF_PATH,
+  fetchDepthOneCommand,
+  gitTransportEnv,
   incrementDiffCommand,
+  isDiffTooLarge,
   issueViewCommand,
+  localDiffCommand,
+  mergeBaseCommand,
   prBodyCommand,
+  pullRequestBaseRefCommand,
   readRecheckCommand,
   readRecheckStatusCommand,
   readReportCommand,
@@ -527,6 +533,13 @@ export type ConsumerLogFields = {
    * context unavailable; none is published as `no-evidence`.
    */
   diff_capture?: "empty" | "overflow" | "unreadable";
+  /**
+   * Set on the oversized-diff line: `gh pr diff` refused the PR (GitHub's
+   * 20,000-line API ceiling) and the captured diff came from the clone's
+   * merge-base..head diff instead. The capture then takes the ordinary
+   * bounded-read path, so `diff_capture` keeps its failure-only meaning.
+   */
+  diff_source?: "oversized-local";
   /**
    * Increment-round diagnostics: the compare verdict (`ahead` is the only one
    * that starts an increment round) when the round reviewed the full diff, and
@@ -3126,6 +3139,56 @@ function gitStageFailureDetail(
 }
 
 /**
+ * Capture a PR diff GitHub refuses to serve: `gh pr diff` 406s once the PR
+ * passes its 20,000-line API ceiling, so the same unified diff comes from the
+ * clone instead — base ref → merge base → depth-1 fetch of that merge base →
+ * `git diff <merge-base> <head>` into DIFF_PATH, read back through the SAME
+ * bounded transport `diffCommand` uses (2 MiB overflow semantics unchanged).
+ * The head commit is already in the clone (`cloneCommand` fetched
+ * `pull/<n>/head`), so only the merge base has to be fetched.
+ *
+ * null means the fallback produced no capture — an empty/unparseable ref or
+ * sha, a non-zero exit, or a rejected exec. The caller rethrows the ORIGINAL
+ * diff failure: a fault here must never replace the cause that was diagnosed.
+ */
+async function oversizedDiffCapture(
+  sandbox: ReviewSandbox,
+  token: string,
+  target: { owner: string; repo: string; prNumber: number },
+  headSha: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number } | null> {
+  const gh = { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS };
+  try {
+    const base = await sandbox.runCommand(
+      pullRequestBaseRefCommand(target.owner, target.repo, target.prNumber),
+      gh,
+    );
+    const baseRef = base.stdout.trim();
+    if (base.exitCode !== 0 || baseRef === "") return null;
+    const merge = await sandbox.runCommand(
+      mergeBaseCommand(target.owner, target.repo, baseRef, headSha),
+      gh,
+    );
+    const mergeBaseSha = merge.stdout.trim();
+    if (merge.exitCode !== 0 || mergeBaseSha === "") return null;
+    const fetched = await sandbox.runCommand(fetchDepthOneCommand(CLONE_DIR, mergeBaseSha), {
+      env: gitTransportEnv(token),
+      timeout: EXEC_TIMEOUT_GIT_MS,
+    });
+    if (fetched.exitCode !== 0) return null;
+    const local = await sandbox.runCommand(
+      localDiffCommand(CLONE_DIR, mergeBaseSha, headSha, DIFF_PATH),
+      { timeout: EXEC_TIMEOUT_GIT_MS },
+    );
+    return local.exitCode === 0 ? local : null;
+  } catch {
+    // A builder's guard rejecting a hostile ref/sha, or a sandbox transport
+    // fault, leaves the original diff failure as the round's cause.
+    return null;
+  }
+}
+
+/**
  * KV done-state read (B3): `done` means a review was already POSTED for this
  * sha (the consumer writes it right after posting, before the D1 insert).
  * The worker's enqueue marker uses the SAME key format with value "1", so
@@ -3963,19 +4026,12 @@ async function processMessage(
 
     // 2. Clone the PR head branch. Git transport auth via scoped extraheader
     // env (bugbot A1 — git ignores GH_TOKEN, so private-repo clones failed
-    // without this; same pattern as the smoke-entry git fallback). The header
-    // is the GitHub-app token form `AUTHORIZATION: basic base64(x-access-token:<token>)`
-    // (basic auth with username `x-access-token`) — NOT `Bearer <token>`,
-    // which GitHub's git server rejects even on public repos (post-remediation
-    // deploy finding; verified live). GH_TOKEN stays for the gh steps below.
-    // Credentials are exec env only — never in the command string, never in
-    // the image, never in logs.
+    // without this; same pattern as the smoke-entry git fallback), built by
+    // the ONE `gitTransportEnv` the oversized-diff fetch also uses. GH_TOKEN
+    // stays for the gh steps below. Credentials are exec env only — never in
+    // the command string, never in the image, never in logs.
     const clone = await sandbox.runCommand(cmds.clone, {
-      env: {
-        GIT_CONFIG_COUNT: "1",
-        GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
-        GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${btoa(`x-access-token:${token}`)}`,
-      },
+      env: gitTransportEnv(token),
       timeout: EXEC_TIMEOUT_GIT_MS,
     });
     if (clone.exitCode !== 0) {
@@ -4309,10 +4365,28 @@ async function processMessage(
     // catalog can only be proven against the whole PR diff. The increment
     // capture below feeds the numstat partition ONLY.
     const diff = await sandbox.runCommand(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
+    let diffStdout = diff.stdout;
     if (diff.exitCode !== 0) {
-      throw new Error(gitStageFailureDetail("diff", diff));
+      // Only GitHub's oversized-diff refusal has a local substitute; an auth or
+      // network failure keeps today's rethrow (a fallback would mask the cause).
+      const local = isDiffTooLarge(diff.stderr)
+        ? await oversizedDiffCapture(
+            sandbox,
+            token,
+            { owner: payload.owner, repo: payload.repo, prNumber: payload.pr_number },
+            headSha,
+          )
+        : null;
+      if (local === null) {
+        throw new Error(gitStageFailureDetail("diff", diff));
+      }
+      diffStdout = local.stdout;
+      deps.log.info(
+        { ...fields, diff_source: "oversized-local" },
+        "oversized PR diff (github 406) — captured the merge-base..head diff from the clone",
+      );
     }
-    const diffRead = parseBoundedRead(diff.stdout);
+    const diffRead = parseBoundedRead(diffStdout);
     const diffText = diffRead.text ?? "";
 
     // Increment capture (numstat partition only): base...head replaces the
