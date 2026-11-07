@@ -64,7 +64,7 @@ import {
   type CheckReconcileSummary,
   type CheckTransport,
 } from "../../src/worker/check-reconcile";
-import { CheckRequestNotDispatched, isRequestNotDispatched, createCheckBeginLatch, createCheckLifecycle, type ChecksAdapter } from "../../src/pipeline/checks";
+import { CHECK_SUMMARIES, CheckRequestNotDispatched, isRequestNotDispatched, createCheckBeginLatch, createCheckLifecycle, type ChecksAdapter } from "../../src/pipeline/checks";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { defaultReconcileLog } from "../../src/worker/lifecycle-reconcile";
 import { defaultSweepLog } from "../../src/worker/sweep";
@@ -353,7 +353,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.observed).toBe("failure");
   });
 
-  test("an expired attempt with NO proof concludes an honest unconfirmed failure", async () => {
+  test("an expired attempt with NO journal row names an unstaged publication", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     const fetchStub = stubFetch();
@@ -366,9 +366,9 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("failure");
-            expect(conclusion.summary).toBe(
-              "Review attempt could not be confirmed complete; publication status is unknown.",
-            );
+            // No publication row was ever staged for this attempt: the frozen
+            // text names that cause instead of asserting a generic unknown.
+            expect(conclusion.summary).toBe(CHECK_SUMMARIES.unconfirmedUnstaged);
             return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
           },
         }),
@@ -3087,10 +3087,11 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     }
 
     // No attribution: the unwritten row ended no wait, so the deadline path
-    // writes its honest unconfirmed failure and never adopts that proof.
+    // names the missing evidence (nothing was staged for this attempt) and
+    // never adopts that proof.
     expect(deferred).toBe(0);
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(UNCONFIRMED);
+    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnstaged);
     const row = await rawRow(db, id);
     expect(row.publication_id).toBeNull();
     expect(row.observed).toBe("failure");
@@ -3154,7 +3155,9 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
 
     expect(deadlineDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(UNCONFIRMED);
+    // A staged row exists (it was claimed after admission) but no proof ever
+    // landed on it: the deadline names that cause, never a proof-less success.
+    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnproven);
     const row = await rawRow(db, id);
     expect(row.publication_id).toBeNull();
     expect(row.observed).toBe("failure");
@@ -3290,5 +3293,60 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     const row = await rawRow(db, id);
     expect(row.observed).toBe("failure");
     expect(row.terminal_ms).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The deadline conclusion names the proof it could not read (spec §7.9)
+// ---------------------------------------------------------------------------
+
+describe("the deadline conclusion names the missing proof", () => {
+  test("(b) a staged journal row without proof names the proof that never landed", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    // The hand-off shape: this attempt linked the row it was handed off to,
+    // and the deadline arrived before that row recorded its proof.
+    const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 1_000);
+    linkPublication(db, attempt.identity.attemptId, journalId);
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnproven);
+  });
+
+  test("(c) a staged journal row whose proof read fails names the unreadable proof", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 1_000);
+    linkPublication(db, attempt.identity.attemptId, journalId);
+    // The row exists, but every proof read on the journal fails: the deadline
+    // must say the proof could not be read, never that nothing was staged.
+    const unreadable = withFailingReads(db, /SELECT proof_json FROM review_publications/);
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    try {
+      const summary = await run(unreadable, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
   });
 });

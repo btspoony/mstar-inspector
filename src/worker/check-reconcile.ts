@@ -85,6 +85,7 @@ import {
   isRequestNotDispatched,
   type ChecksAdapter,
   type ReviewGate,
+  type UnconfirmedCause,
 } from "../pipeline/checks";
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
@@ -797,7 +798,11 @@ async function reconcileCheckAttempt(
   // or, failing it, by the deadline. Neither `reviews` nor `review_failures`
   // carries attempt identity either, so their rows cannot end it early.
   let proofPublicationId: string | null = row.publicationId;
-  if (now() < row.executionDeadlineMs) {
+  // The attempt's own deadline is the wait's hard stop: past it the row must
+  // conclude. The SAME journal probe still runs — not to wait, but to name the
+  // proof the deadline could not read and to end on a proof that did land.
+  const beforeDeadline = now() < row.executionDeadlineMs;
+  if (beforeDeadline) {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6): a waiting
     // row whose App is disabled/deleted or whose installation mapping vanished
     // must take the durable suspension path, never loop through the defer with
@@ -807,16 +812,18 @@ async function reconcileCheckAttempt(
       await suspendUnusablePair(db, scope, unusable, undefined, now, log, summary);
       return;
     }
-    const pending = await probePendingPublication(db, row);
-    // `pending` (a readable journal row still without proof) and `unknown` (an
-    // unreadable journal read) both defer. `proven` supplies the id to conclude
-    // from; `none` leaves the decision to this attempt's own link, and a null
-    // link keeps waiting — the publication may simply not be prepared yet.
-    if (pending.kind === "proven") proofPublicationId = pending.publicationId;
+  }
+  const pending = await probePendingPublication(db, row);
+  // `pending` (a readable journal row still without proof) and `unknown` (an
+  // unreadable journal read) both defer. `proven` supplies the id to conclude
+  // from; `none` leaves the decision to this attempt's own link, and a null
+  // link keeps waiting — the publication may simply not be prepared yet.
+  if (pending.kind === "proven") proofPublicationId = pending.publicationId;
+  if (beforeDeadline) {
     const waiting =
       pending.kind === "pending" ||
       pending.kind === "unknown" ||
-      (await readProof(db, row.identity, proofPublicationId)) === null;
+      (await readProof(db, row.identity, proofPublicationId)).kind !== "read";
     if (waiting) {
       const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now());
       if (waitingLease === null) return;
@@ -871,7 +878,8 @@ async function reconcileCheckAttempt(
   //    lane only ever READS what that lane persisted — never a send, replay
   //    or paid re-review. The id is the wait's attributed one (the newest
   //    journal row's own publication), falling back to the link the claim read.
-  const proof = await readProof(db, owned.identity, proofPublicationId ?? owned.publicationId);
+  const proofRead = await readProof(db, owned.identity, proofPublicationId ?? owned.publicationId);
+  const proof = proofRead.kind === "read" ? proofRead.proof : null;
   // The gate decision needs the App's stored gate and the review THIS proof
   // published. A missing or corrupt gate row, or a tallies-free review, is
   // unreadable, so it can never be corrected into a success (spec §7.9).
@@ -882,7 +890,13 @@ async function reconcileCheckAttempt(
     readRecoveryGate(db, scope.appId),
     readRecoveryReview(db, owned, proof?.publicationId ?? null),
   ]);
-  const conclusion = terminalConclusion(owned, proof, gate, review);
+  const conclusion = terminalConclusion(
+    owned,
+    proof,
+    gate,
+    review,
+    beforeDeadline ? undefined : deadlineCause(pending, proofRead),
+  );
 
   // Intent BEFORE any remote update: the persisted row is the only source the
   // send reads, so the frozen text cannot be swapped after this point.
@@ -1270,9 +1284,10 @@ async function pairUnusableReason(db: D1Like, scope: Scope): Promise<CheckCreden
 
 /**
  * The proof of the publication THIS attempt owns — the one its own intent write
- * linked into `publication_id` (spec §7.9). Unlinked (`publicationId` absent) is
- * UNPROVEN, exactly like a linked row whose proof is not readable yet or a
- * failed read; `null` never means "not published".
+ * linked into `publication_id` (spec §7.9). The outcome distinguishes WHY it is
+ * not a proof, because the deadline conclusion names the missing evidence:
+ * `unlinked` (no publication row was staged for this attempt), `unproven` (the
+ * linked row carries no proof), `unreadable` (the read itself failed).
  *
  * There is deliberately no head-keyed fallback. Under RL-12 a re-trigger reuses
  * the head, so another generation's publication for the SAME scope/SHA is
@@ -1280,12 +1295,18 @@ async function pairUnusableReason(db: D1Like, scope: Scope): Promise<CheckCreden
  * proof would freeze this attempt's Check from an envelope it never published,
  * and the frozen row could never be corrected.
  */
+type ProofRead =
+  | { kind: "read"; proof: PublicationProof }
+  | { kind: "unlinked" }
+  | { kind: "unproven" }
+  | { kind: "unreadable" };
+
 async function readProof(
   db: D1Like,
   identity: CheckIdentity,
   publicationId?: string | null,
-): Promise<PublicationProof | null> {
-  if (publicationId === null || publicationId === undefined) return null;
+): Promise<ProofRead> {
+  if (publicationId === null || publicationId === undefined) return { kind: "unlinked" };
   try {
     const proof = await readPublicationProof(db, {
       scope: identity.scope,
@@ -1294,9 +1315,11 @@ async function readProof(
     });
     // The store reader prefers the linked row but still falls back to another
     // row of the same head; only the linked row's own proof is this attempt's.
-    return proof !== null && proof.publicationId === publicationId ? proof : null;
+    return proof !== null && proof.publicationId === publicationId
+      ? { kind: "read", proof }
+      : { kind: "unproven" };
   } catch {
-    return null;
+    return { kind: "unreadable" };
   }
 }
 
@@ -1400,24 +1423,47 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
 }
 
 /**
+ * Which evidence the deadline was missing, from the wait probe's answer and
+ * this attempt's own proof read. Three causes — an attribution, not a
+ * taxonomy: nothing was staged for this attempt (`none` plus no link), a staged
+ * row whose proof never landed, or a read that failed (the journal's or the
+ * proof's). A readable proof never reaches here: it decides.
+ */
+function deadlineCause(pending: PendingPublication, read: ProofRead): UnconfirmedCause {
+  if (pending.kind === "unknown" || read.kind === "unreadable") return "unreadable";
+  if (pending.kind === "none" && read.kind === "unlinked") return "unstaged";
+  return "unproven";
+}
+
+/**
  * The terminal conclusion for a due attempt (spec §7.9 matrix): a persisted
  * publication proof decides the conclusion against the App gate — a normal
  * publication only succeeds when the applied review meets it — regardless of
  * how the attempt expired. The no-proof branch runs only once the wait above
  * has ended: the execution deadline passed, which makes the honest unconfirmed
- * `failure` the conclusion. An intent the consumer already persisted is
- * preserved verbatim unless a proof-derived correction applies. `gate` is the
- * App's stored gate; `null` means it could not be read, so a proof-derived
- * conclusion fails closed instead of assuming a default.
+ * `failure` the conclusion, and `unconfirmedCause` names the evidence that was
+ * missing. An intent the consumer already persisted is preserved verbatim
+ * unless a proof-derived correction applies. `gate` is the App's stored gate;
+ * `null` means it could not be read, so a proof-derived conclusion fails closed
+ * instead of assuming a default.
  */
 function terminalConclusion(
   owned: CheckOwnership,
   proof: PublicationProof | null,
   gate: ReviewGate | null,
   review: PublishedReview | null,
+  unconfirmedCause?: UnconfirmedCause,
 ): CheckConclusion {
   if (proof !== null) return decideConclusion({ proof, outcome: "expired", gate, review });
-  if (owned.desired === "in_progress") return decideConclusion({ proof: null, outcome: "expired", gate, review });
+  if (owned.desired === "in_progress") {
+    return decideConclusion({
+      proof: null,
+      outcome: "expired",
+      gate,
+      review,
+      ...(unconfirmedCause === undefined ? {} : { unconfirmedCause }),
+    });
+  }
   return {
     desired: owned.desired,
     title: owned.desiredTitle ?? CHECK_NAME,
