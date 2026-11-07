@@ -528,19 +528,21 @@ function creationDeniedResponse(c: DashboardContext, message: string): Response 
 /**
  * The repair affordance for an unreadable workspace floor: the settings route
  * of the workspace the flow addresses, so the copy and its href cannot drift
- * between the callback and commit switches. A target that is not `ok` has no
- * workspace page to repair from — the message then carries the instruction
- * alone.
+ * between the callback and commit switches. The returned clause carries its own
+ * locale-owned terminator, so the sentence's shape lives here rather than in
+ * the view. A target that is not `ok` has no workspace page to repair from —
+ * the message then carries the instruction alone.
  */
 function floorRepairLink(
   locale: Locale,
   target: CreationTarget,
-): { phrase: string; text: string; href: string } | null {
+): { phrase: string; text: string; href: string; end: string } | null {
   return target.kind === "ok"
     ? {
         phrase: t(locale, "manifest.error.floorRepair"),
         text: t(locale, "manifest.error.floorRepairLink"),
         href: `/dashboard/${target.workspaceRef}/settings`,
+        end: t(locale, "manifest.error.floorRepairEnd"),
       }
     : null;
 }

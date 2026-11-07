@@ -530,7 +530,7 @@ export function manifestErrorPage(
   message: string,
   resumable = false,
   locale: Locale = "en",
-  repair: { phrase: string; text: string; href: string } | null = null,
+  repair: { phrase: string; text: string; href: string; end: string } | null = null,
 ): string {
   // Resumable failures (retryable commit outcomes: 400/500/502) keep the
   // hold cookie, so the what-to-do-next link goes back to the confirm gate,
@@ -542,11 +542,11 @@ export function manifestErrorPage(
         "/dashboard/manifest/confirm",
       )
     : wrapPhraseAsLink(t(locale, "manifest.error.retry"), "/dashboard", "/dashboard");
-  // The link is not sentence-final: the clause carries its own locale-owned
-  // terminator, so English gets "." and Chinese gets "。" from the dictionary
-  // instead of one locale inheriting the other's punctuation.
+  // The caller owns the whole clause, terminator included, so the locale-owned
+  // punctuation rides with the phrase and link it closes instead of being
+  // rederived here.
   const repairHtml = repair
-    ? `${escapeHtml(repair.phrase)} <a href="${escapeHtml(repair.href)}">${escapeHtml(repair.text)}</a>${escapeHtml(t(locale, "manifest.error.floorRepairEnd"))} `
+    ? `${escapeHtml(repair.phrase)} <a href="${escapeHtml(repair.href)}">${escapeHtml(repair.text)}</a>${escapeHtml(repair.end)} `
     : "";
   return page(
     t(locale, "manifest.error.title"),

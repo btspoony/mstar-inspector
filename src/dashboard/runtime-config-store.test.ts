@@ -1004,6 +1004,12 @@ describe("workspace check_min_score default", () => {
     db.raw.exec("PRAGMA ignore_check_constraints = ON");
     db.raw.prepare("UPDATE workspaces SET check_min_score = 150 WHERE id = ?").run(WS);
     db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+    // Prove the corruption landed: a silently refused write would leave the
+    // seeded 60 in place and make the audit assertion below pass for free.
+    const stored = db.raw
+      .prepare("SELECT check_min_score AS value FROM workspaces WHERE id = ?")
+      .get(WS) as { value: number | null };
+    expect(stored.value).toBe(150);
 
     await setWorkspaceCheckMinScore(db, WS, 75, ACTOR);
     expect(auditDetails(db, ACTION)).toEqual([{ before: null, after: 75 }]);
