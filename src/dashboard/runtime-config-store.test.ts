@@ -988,12 +988,27 @@ describe("workspace check_min_score default", () => {
     db.raw.exec("PRAGMA ignore_check_constraints = ON");
     db.raw.prepare("UPDATE workspaces SET check_min_score = 'maybe' WHERE id = ?").run(WS);
     db.raw.exec("PRAGMA ignore_check_constraints = OFF");
-    expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({ minScore: 60, degraded: true });
+    expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({
+      minScore: 60,
+      degraded: true,
+      reason: "untrusted",
+    });
 
     // An untrusted stored value was never in effect, so the ledger records the
     // absent state, not the platform default it degraded to.
     await setWorkspaceCheckMinScore(db, WS, 75, ACTOR);
     expect(auditDetails(db, ACTION)).toEqual([{ before: null, after: 75 }]);
+  });
+
+  test("a present row without the selected field degrades as malformed, not as absent", async () => {
+    // `first() === null` is the absent state; a row that exists but does not
+    // carry the selected column is a malformed result, so its default is
+    // untrusted and the cause is named as such.
+    expect(await getWorkspaceCheckMinScore(dbWithRow({}), WS)).toEqual({
+      minScore: 60,
+      degraded: true,
+      reason: "malformed",
+    });
   });
 
   test("an out-of-range integer stored by a foreign writer also records the absent state", async () => {
@@ -1021,6 +1036,10 @@ describe("workspace check_min_score default", () => {
       .prepare("UPDATE workspaces SET check_min_score = 70, deleted_at = '2026-01-01T00:00:00.000Z' WHERE id = ?")
       .run(WS);
     expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({ minScore: 60, degraded: false });
-    expect(await getWorkspaceCheckMinScore(failingDb, WS)).toEqual({ minScore: 60, degraded: true });
+    expect(await getWorkspaceCheckMinScore(failingDb, WS)).toEqual({
+      minScore: 60,
+      degraded: true,
+      reason: "read-failed",
+    });
   });
 });

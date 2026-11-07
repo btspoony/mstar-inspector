@@ -976,12 +976,18 @@ export const en = {
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
       /**
-       * The workspace's own default floor is unreadable (a failed read, or a
-       * stored value no reader trusts): the connect fails closed before
-       * writing anything, so the operator repairs the setting and retries.
+       * The workspace's stored default floor is untrusted or its result row
+       * malformed: the connect fails closed before writing anything, so the
+       * operator repairs the setting and retries.
        */
       workspaceFloorUnreadable:
         "The App could not be connected — this workspace's default score floor cannot be read, so nothing was stored. Repair the setting, then resubmit.",
+      /**
+       * A transient read failure of the default floor: nothing was stored, and
+       * resubmitting retries the read — there is no setting to repair.
+       */
+      workspaceFloorReadFailed:
+        "The App could not be connected — this workspace's default score floor could not be read just now, so nothing was stored. Resubmit to retry.",
       /** The repair clause: "Repair it in [workspace settings]<floorRepairEnd>". */
       floorRepair: "Repair it in",
       floorRepairLink: "workspace settings",

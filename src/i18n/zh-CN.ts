@@ -834,6 +834,8 @@ export const zhCN: Dictionary = {
       dbUnbound: "控制台存储未配置 — 无法存储该 App。",
       workspaceFloorUnreadable:
         "无法连接该 App — 无法读取此工作区的默认评分下限，因此没有存储任何内容。修复该设置后再重新提交即可。",
+      workspaceFloorReadFailed:
+        "无法连接该 App — 暂时无法读取此工作区的默认评分下限，因此没有存储任何内容。重新提交即可重试。",
       floorRepair: "前往",
       floorRepairLink: "工作区设置",
       floorRepairEnd: "。",

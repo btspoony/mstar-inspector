@@ -200,6 +200,7 @@ import {
   readDefaultReviewLevel,
   setWorkspaceCheckMinScore,
   setWorkspaceConcurrency,
+  type DegradedReason,
 } from "./runtime-config-store";
 import {
   CHECK_MIN_SCORE_MAX,
@@ -545,6 +546,27 @@ function floorRepairLink(
         end: t(locale, "manifest.error.floorRepairEnd"),
       }
     : null;
+}
+
+/**
+ * The fail-closed floor read's page, branched on the read's cause. A transient
+ * read failure is fixed by resubmitting, so it names no setting and carries no
+ * repair link; an untrusted or malformed stored value IS what needs repair, so
+ * it keeps the settings link. Both render sites share this one decision.
+ */
+function workspaceFloorUnreadablePage(
+  locale: Locale,
+  reason: DegradedReason | undefined,
+  target: CreationTarget,
+): string {
+  return reason === "read-failed"
+    ? manifestErrorPage(t(locale, "manifest.error.workspaceFloorReadFailed"), true, locale)
+    : manifestErrorPage(
+        t(locale, "manifest.error.workspaceFloorUnreadable"),
+        true,
+        locale,
+        floorRepairLink(locale, target),
+      );
 }
 
 /**
@@ -1473,15 +1495,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
       return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
     case "workspace_gate_unreadable":
       parkHold();
-      return c.html(
-        manifestErrorPage(
-          t(locale, "manifest.error.workspaceFloorUnreadable"),
-          true,
-          locale,
-          floorRepairLink(locale, target),
-        ),
-        500,
-      );
+      return c.html(workspaceFloorUnreadablePage(locale, outcome.reason, target), 500);
     case "db_rejected":
       parkHold();
       return c.html(manifestErrorPage(t(locale, "manifest.error.dbRejected"), true, locale), 500);
@@ -1560,15 +1574,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
     // Nothing to park: the submitted hold cookie IS this route's hold, so it
     // stays for the repair-then-resubmit retry — same as `db_rejected` below.
     case "workspace_gate_unreadable":
-      return c.html(
-        manifestErrorPage(
-          t(locale, "manifest.error.workspaceFloorUnreadable"),
-          true,
-          locale,
-          floorRepairLink(locale, target),
-        ),
-        500,
-      );
+      return c.html(workspaceFloorUnreadablePage(locale, outcome.reason, target), 500);
     case "db_rejected":
       return c.html(manifestErrorPage(t(locale, "manifest.error.dbRejected"), true, locale), 500);
   }
@@ -1583,7 +1589,7 @@ type ManifestCommitOutcome =
   | { kind: "db_unbound" }
   | { kind: "encrypt_failed" }
   | { kind: "already_connected" }
-  | { kind: "workspace_gate_unreadable" }
+  | { kind: "workspace_gate_unreadable"; reason?: DegradedReason }
   | { kind: "db_rejected" };
 
 /**
@@ -1658,9 +1664,9 @@ async function commitManifestApp(args: {
     // silently WIDEN a floor the tenant may have set higher, so the commit
     // fails closed before anything is written. This is not a database
     // rejection: the hold is kept and the operator retries once the stored
-    // workspace setting is repaired.
+    // workspace setting is repaired. The cause decides which page they get.
     logManifestFailure("commit", "db_error", { error_type: "workspace_gate_unreadable" });
-    return { kind: "workspace_gate_unreadable" };
+    return { kind: "workspace_gate_unreadable", reason: workspaceFloor.reason };
   }
   try {
     const row = await apps.createApp({
