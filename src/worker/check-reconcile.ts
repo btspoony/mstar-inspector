@@ -802,17 +802,6 @@ async function reconcileCheckAttempt(
   // conclude. The SAME journal probe still runs — not to wait, but to name the
   // proof the deadline could not read and to end on a proof that did land.
   const beforeDeadline = now() < row.executionDeadlineMs;
-  if (beforeDeadline) {
-    // The D1 half of the pair gate runs BEFORE the wait (spec §7.6): a waiting
-    // row whose App is disabled/deleted or whose installation mapping vanished
-    // must take the durable suspension path, never loop through the defer with
-    // its Check never converging.
-    const unusable = await pairUnusableReason(db, scope);
-    if (unusable !== null) {
-      await suspendUnusablePair(db, scope, unusable, undefined, now, log, summary);
-      return;
-    }
-  }
   const pending = await probePendingPublication(db, row);
   // `pending` (a readable journal row still without proof) and `unknown` (an
   // unreadable journal read) both defer. `proven` supplies the id to conclude
@@ -829,13 +818,34 @@ async function reconcileCheckAttempt(
     proofPublicationId = pending.publicationId;
   }
   if (beforeDeadline) {
+    // The D1 half of the pair gate runs BEFORE the wait (spec §7.6, §7.11.2
+    // step 2): a row whose App is disabled/deleted or whose installation
+    // mapping vanished must take the durable suspension path, never loop with
+    // its Check never converging. The gate leads the wait for EVERY row,
+    // including the wait-terminal one below.
+    const unusable = await pairUnusableReason(db, scope);
+    if (unusable !== null) {
+      await suspendUnusablePair(db, scope, unusable, undefined, now, log, summary);
+      return;
+    }
+    // The wait is one shape: this attempt owes a conclusion to a publication it
+    // has NO readable proof of. The terminal shape — nothing staged since
+    // admission and no link of its own — is part of it, so it takes the SAME
+    // claim-and-give-back path below (spec §7.11.2 step 2). `waitIsTerminal`
+    // stays a predicate: it names the deadline cause (`unstaged`) and must never
+    // skip the claim, which is what moves the row's due time off the head of
+    // the bounded due batch.
     const waiting =
+      waitIsTerminal(pending, proofPublicationId) ||
       pending.kind === "pending" ||
       pending.kind === "unknown" ||
       (await readProof(db, row.identity, proofPublicationId)).kind !== "read";
     if (waiting) {
       const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now());
       if (waitingLease === null) return;
+      // Spec §7.11.2 step 2 pins the claim's given-back due time to the FIRST
+      // rung: the publication may prove itself at any moment, so a widened rung
+      // would only delay a proof that already exists.
       const nextAttemptMs = now() + CHECK_BACKOFF_MS[0]!;
       if (!(await deferCheckForPendingPublication(db, attemptId, waitingLease, nextAttemptMs, now()))) return;
       summary.deferred += 1;
@@ -887,7 +897,8 @@ async function reconcileCheckAttempt(
   //    lane only ever READS what that lane persisted — never a send, replay
   //    or paid re-review. The id is the wait's attributed one (the newest
   //    journal row's own publication), falling back to the link the claim read.
-  const proofRead = await readProof(db, owned.identity, proofPublicationId ?? owned.publicationId);
+  const proofSourceId = proofPublicationId ?? owned.publicationId;
+  const proofRead = await readProof(db, owned.identity, proofSourceId);
   const proof = proofRead.kind === "read" ? proofRead.proof : null;
   // The gate decision needs the App's stored gate and the review THIS proof
   // published. A missing or corrupt gate row, or a tallies-free review, is
@@ -904,7 +915,7 @@ async function reconcileCheckAttempt(
     proof,
     gate,
     review,
-    beforeDeadline ? undefined : deadlineCause(pending, proofRead),
+    beforeDeadline ? undefined : deadlineCause(pending, proofSourceId, proofRead),
   );
 
   // Intent BEFORE any remote update: the persisted row is the only source the
@@ -1394,6 +1405,23 @@ type PendingPublication =
   | { kind: "none" }
   | { kind: "unknown" };
 
+/**
+ * The wait's terminal shape, derived once and read by both ends of the lane:
+ * no journal row has been staged since this attempt was admitted, and it links
+ * no publication of its own. Nothing THIS pass can read answers such an
+ * attempt, so it is not concludable — only the execution deadline concludes it,
+ * and `deadlineCause` reports exactly this shape as `unstaged`.
+ *
+ * A predicate, never a gate: the shape is not proof the wait can never
+ * progress, because a journal row that lands later lifts it. The row therefore
+ * takes the same claim-and-give-back wait as any unproven row (spec §7.11.2
+ * step 2) and is re-probed on the first rung — the claim is also what keeps a
+ * dead row off the head of the bounded due batch.
+ */
+function waitIsTerminal(pending: PendingPublication, publicationId: string | null): boolean {
+  return pending.kind === "none" && publicationId === null;
+}
+
 async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promise<PendingPublication> {
   // The wait is bound to ONE journal row — the NEWEST row for this exact
   // scope/head whose last write is at least as new as this attempt — because
@@ -1442,9 +1470,13 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
  * row whose proof never landed, or a read that failed (the journal's or the
  * proof's). A readable proof never reaches here: it decides.
  */
-function deadlineCause(pending: PendingPublication, read: ProofRead): UnconfirmedCause {
+function deadlineCause(
+  pending: PendingPublication,
+  publicationId: string | null,
+  read: ProofRead,
+): UnconfirmedCause {
   if (pending.kind === "unknown" || read.kind === "unreadable") return "unreadable";
-  if (pending.kind === "none" && read.kind === "unlinked") return "unstaged";
+  if (waitIsTerminal(pending, publicationId)) return "unstaged";
   return "unproven";
 }
 

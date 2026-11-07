@@ -164,17 +164,22 @@ describe("createFailureStore", () => {
     await store.record({ ...BASE, stage: "pipeline", error: `${GITHUB_RATE_LIMIT_PREFIX}secondary limit on comment update` });
     await store.record({ ...BASE, stage: "pipeline", error: `${GITHUB_RATE_LIMIT_PREFIX}secondary limit on check update` });
     await store.record({ ...BASE, stage: "rate-limit", error: `${GITHUB_RATE_LIMIT_PREFIX}secondary limit on delete sweep` });
+    const matchesOnly = await store.countGithubRateLimited24h();
+    expect(matchesOnly).toBe(3);
+
     // Not counted: the primary-limit prefix is its own words, and an ordinary
     // failure carries neither prefix.
     await store.record({ ...BASE, stage: "pipeline", error: `${GITHUB_PRIMARY_RATE_LIMIT_PREFIX}primary limit on comment update` });
     await store.record({ ...BASE, stage: "pipeline", error: "comment post failed" });
-    // A matching row outside the 24h window stays invisible.
-    db.raw
-      .prepare(
-        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-25 hours'))`,
-      )
-      .run(
+    // Matching rows outside the 24h window stay invisible. The count is a
+    // window-and-prefix predicate over the same index, so these decoys must
+    // leave its result exactly where the in-window matches put it.
+    const oldRow = db.raw.prepare(
+      `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?))`,
+    );
+    for (const age of ["-25 hours", "-48 hours"]) {
+      oldRow.run(
         crypto.randomUUID(),
         BASE.installation_id,
         BASE.owner,
@@ -183,9 +188,11 @@ describe("createFailureStore", () => {
         BASE.head_sha,
         "pipeline",
         `${GITHUB_RATE_LIMIT_PREFIX}secondary limit on comment update`,
+        age,
       );
+    }
 
-    expect(await store.countGithubRateLimited24h()).toBe(3);
+    expect(await store.countGithubRateLimited24h()).toBe(matchesOnly);
   });
 
   test("the trailing-24h pipeline read is served by its partial window index (0048)", () => {

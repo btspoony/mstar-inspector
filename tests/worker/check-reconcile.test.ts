@@ -2723,7 +2723,7 @@ function recordFailure(db: TestD1, stage: string, error: string, createdAtMs: nu
 }
 
 describe("the publication-proof wait decides when abandonment may conclude (spec §7.9)", () => {
-  test("no proof and a future deadline: the pass defers and spends no attempt", async () => {
+  test("no proof and a future deadline: the pass claims, gives the claim back and spends no attempt", async () => {
     const db = seededDb();
     const { id } = await abandonedAttempt(db);
     // The whole point of the released-row eligibility: a row whose intent is
@@ -2742,6 +2742,8 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
         },
       });
       expect(summary.examined).toBe(1);
+      // No journal row and no link: the wait is terminal for this pass, and it
+      // still takes the claim-and-give-back defer (spec §7.11.2 step 2).
       expect(summary.deferred).toBe(1);
       expect(summary.completed).toBe(0);
       expect(summary.unconfirmed).toBe(0);
@@ -2763,10 +2765,14 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.observed).toBe("unknown");
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
-    expect(row.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+    // The claim was taken and given straight back on the FIRST rung: no attempt
+    // spent, and the row stops holding the head of the due batch — it is
+    // re-probed about a minute later, so a publication that lands is seen on the
+    // next pass rather than minutes from now (spec §7.11.2 step 2).
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
 
-    // The journal probe found nothing to report AND no readable proof exists:
-    // the missing proof is what held the wait, and the line says so.
+    // The wait line names the probe's answer: nothing was staged for this
+    // attempt.
     const deferred = events.filter((fields) => fields.event === "check_recovery_deferred_pending_publication");
     expect(deferred).toHaveLength(1);
     expect(deferred[0]!.probe_state).toBe("none");
@@ -2805,6 +2811,45 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.terminal_ms).not.toBeNull();
   });
 
+  test("an applied payload that fails the gate decides, not a passing live score", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    // The live projection for this head: a PASSING review. It is not what this
+    // attempt published — `reviews` is a first-write-wins projection that can
+    // belong to an earlier attempt for the same SHA, so it must never decide.
+    seedReview(db, SCOPE, SHA, "ship it", 95);
+    // The projection is read per App; the helper leaves `app_id` unset, so
+    // stamp it the way the apply write does.
+    db.raw.prepare(`UPDATE reviews SET app_id = ? WHERE head_sha = ?`).run(SCOPE.appId, SHA);
+    // THIS attempt's own applied publication: its payload's envelope fails the
+    // gate, and that verdict is immutable. The link is what attributes it.
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "applied", reviewPayload(SCOPE, SHA, "needs fixes", 40));
+    linkPublication(db, id, proof.publicationId);
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    // The published payload decides: a gate miss, never the passing row the
+    // scope/SHA projection happens to hold.
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toContain("Review gate missed");
+    expect(sent.summary).toContain("needs fixes");
+    expect(sent.summary).toContain("score 40");
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
   test("an admission-drop row never ends the wait: the publication still decides", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
@@ -2835,8 +2880,9 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // Still waiting: the drop proved nothing, so no conclusion was frozen, no
-    // attempt was spent and no credential was minted.
+    // Deferred on the first rung and not concluded: the drop proved nothing, so
+    // no conclusion was frozen, no attempt was spent and no credential was
+    // minted.
     expect(factoryCalls).toBe(0);
     const waitingRow = await rawRow(db, id);
     expect(waitingRow.terminal_ms).toBeNull();
@@ -2849,12 +2895,13 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     const proof = proofFor(attempt.identity);
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
     linkPublication(db, id, proof.publicationId);
+    const dueAt = Number((await rawRow(db, id)).next_attempt_ms);
     const sent: { desired?: string; summary?: string } = {};
     const secondStub = stubFetch();
     let secondDeferred = -1;
     try {
       const summary = await run(db, {
-        now: () => T0 + 180_000,
+        now: () => dueAt,
         credentials: scriptedCredentials(db, publishingScript(sent)),
       });
       secondDeferred = summary.deferred;
@@ -2897,8 +2944,9 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // Deferred, not concluded: the earlier row proved nothing about THIS
-    // attempt, so no conclusion was frozen and nothing was minted.
+    // Deferred on the first rung and not concluded: the earlier row proved
+    // nothing about THIS attempt, so no conclusion was frozen and nothing was
+    // minted.
     expect(factoryCalls).toBe(0);
     const waitingRow = await rawRow(db, id);
     expect(waitingRow.terminal_ms).toBeNull();
@@ -2913,12 +2961,13 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     const proof = proofFor(attempt.identity);
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
     linkPublication(db, id, proof.publicationId);
+    const dueAt = Number((await rawRow(db, id)).next_attempt_ms);
     const sent: { desired?: string; summary?: string } = {};
     const secondStub = stubFetch();
     let secondDeferred = -1;
     try {
       const summary = await run(db, {
-        now: () => T0 + 180_000,
+        now: () => dueAt,
         credentials: scriptedCredentials(db, publishingScript(sent)),
       });
       secondDeferred = summary.deferred;
@@ -2962,8 +3011,9 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // Deferred with nothing frozen: the prior proof ended no wait, spent no
-    // attempt and minted no credential.
+    // Nothing frozen and nothing minted: the prior proof ended no wait — the row
+    // took the claim-and-give-back defer — spent no attempt and never became
+    // this attempt's evidence.
     expect(factoryCalls).toBe(0);
     const waitingRow = await rawRow(db, id);
     expect(waitingRow.publication_id).toBeNull();
@@ -2972,7 +3022,8 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(waitingRow.desired).toBe("in_progress");
     expect(waitingRow.observed).toBe("unknown");
 
-    // Offering the same prior proof at the next rung changes nothing.
+    // Offering the same prior proof at the next rung changes nothing: the row
+    // is waiting again, one rung later.
     const secondStub = stubFetch();
     try {
       const summary = await run(db, {
@@ -3164,7 +3215,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.terminal_ms).not.toBeNull();
   });
 
-  test("a parse-stage failure row is NOT terminal: the degraded publication still decides", async () => {
+  test("a parse-stage failure row stays open: the degraded publication still decides", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
     // The parse branch records this row FIRST and only then publishes the
@@ -3187,7 +3238,8 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // Deferred, not concluded: no conclusion was frozen and no attempt spent.
+    // Deferred and not concluded: no conclusion was frozen, no attempt spent,
+    // and the row is due again on the first rung.
     expect(factoryCalls).toBe(0);
     const deferredRow = await rawRow(db, id);
     expect(deferredRow.terminal_ms).toBeNull();
@@ -3202,12 +3254,13 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     seedPublication(db, SCOPE, SHA, degraded, "applied");
     linkPublication(db, id, degraded.publicationId);
 
+    const dueAt = Number((await rawRow(db, id)).next_attempt_ms);
     const sent: { desired?: string; summary?: string } = {};
     const secondStub = stubFetch();
     let secondDeferred = -1;
     try {
       const summary = await run(db, {
-        now: () => T0 + 180_000,
+        now: () => dueAt,
         credentials: scriptedCredentials(db, publishingScript(sent)),
       });
       secondDeferred = summary.deferred;
@@ -3248,6 +3301,9 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.terminal_ms).toBeNull();
     expect(row.attempts).toBe(1);
     expect(row.observed).toBe("unknown");
+    // Still open for a retry: with no journal row the wait is terminal for this
+    // pass, so the claim is given straight back on the first rung and the wait
+    // line says nothing was staged for this attempt.
     expect(
       events.some((fields) => fields.event === "check_recovery_deferred_pending_publication"),
     ).toBe(true);
