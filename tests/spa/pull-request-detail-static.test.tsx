@@ -1092,11 +1092,17 @@ describe("pull request detail face (static SSR)", () => {
       }),
       rounds: [...container.querySelectorAll('[data-slot="review-round"]')].map((chip) => chip.textContent ?? ""),
       // Only the measured round prints a time; the historical rows omit it.
-      // The span's own text — label, separator, value — is its accessible
-      // name, so that is what the assertion reads.
-      durations: [...container.querySelectorAll('[data-slot="review-duration"]')].map(
-        (duration) => duration.textContent ?? "",
-      ),
+      // The span's own text — one label, separator, value — is its accessible
+      // name. `title` and the label count are pinned too: a `title` echoing
+      // the hidden label, or a second carrier, leaves the text unchanged.
+      durations: [...container.querySelectorAll('[data-slot="review-duration"]')].map((span) => {
+        const text = span.textContent ?? "";
+        return {
+          text,
+          title: span.getAttribute("title"),
+          labels: text.split(t("en", "pullRequests.reviewDurationLabel")).length - 1,
+        };
+      }),
       // The summary body and its expand/collapse control are gone: a review
       // row is its two lines alone.
       foldControls: container.querySelectorAll('[role="tabpanel"] button[aria-expanded][aria-controls]').length,
@@ -1148,19 +1154,24 @@ describe("pull request detail face (static SSR)", () => {
       },
     ]);
     // The span's own text is the accessible name: one label, one separator,
-    // one value. Read per locale, so a join without the separator, or a
-    // second label carrier, cannot pass.
+    // one value, and no `title` repeating the label. Read per locale, so a
+    // join without the separator, a second label carrier, or a restored
+    // `title={durationLabel}` cannot pass.
     const durationText = (locale: Locale) =>
       `${t(locale, "pullRequests.reviewDurationLabel")} ${t(locale, "pullRequests.reviewDurationMinutes", {
         minutes: 1,
         seconds: 5,
       })}`;
-    expect(read.durations).toEqual([durationText("en")]);
+    expect(read.durations).toEqual([{ text: durationText("en"), title: null, labels: 1 }]);
     expect(
-      await withMarkup(zhMarkup, (container) =>
-        [...container.querySelectorAll('[data-slot="review-duration"]')].map((span) => span.textContent ?? ""),
-      ),
-    ).toEqual([durationText("zh_CN")]);
+      await withMarkup(zhMarkup, (container) => {
+        const label = t("zh_CN", "pullRequests.reviewDurationLabel");
+        return [...container.querySelectorAll('[data-slot="review-duration"]')].map((span) => {
+          const text = span.textContent ?? "";
+          return { text, title: span.getAttribute("title"), labels: text.split(label).length - 1 };
+        });
+      }),
+    ).toEqual([{ text: durationText("zh_CN"), title: null, labels: 1 }]);
     expect(read.foldControls).toBe(0);
     expect(read.bodies).toEqual([]);
     expect(read.latestHead).toContain(
