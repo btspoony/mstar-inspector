@@ -30,10 +30,10 @@ category: Added
   materialize the defaults, so no backfill or settings visit is needed.
 - **The floor a new App starts at is a workspace setting.** The workspace
   settings page gains a *Review gate default* card (`workspaces.check_min_score`,
-  migration `0049`); connecting an App seeds its floor from that value, and the
-  platform default is 60. Existing Apps keep their own stored floor — the
-  workspace value is a default, not a backfill — and the per-App *Review gate*
-  section remains their writer.
+  migration `0049_workspace_check_min_score.sql`); connecting an App seeds its
+  floor from that value, and the platform default is 60. Existing Apps keep
+  their own stored floor — the workspace value is a default, not a backfill —
+  and the per-App *Review gate* section remains their writer.
 - **Owner allowlist on the Installed tab — off by default.** With the switch
   off nothing is filtered: every owner is reviewed as before. With it on, the
   App reviews only deliveries whose `repository.owner.login` it lists, on the
@@ -94,7 +94,7 @@ category: Added
   给出警告。改动在下一次 Check 生效，无需部署。迁移 `0045` 是追加式的：已有行会
   自动获得默认值，无需回填或访问设置页。
 - **新 App 的分数下限是工作区设置。** 工作区设置页新增「审查门禁默认值」卡片
-  （`workspaces.check_min_score`，迁移 `0049`）；接入 App 时用该值作为其分数下限，
+  （`workspaces.check_min_score`，迁移 `0049_workspace_check_min_score.sql`）；接入 App 时用该值作为其分数下限，
   平台默认值为 60。已有 App 保留各自已存储的下限——工作区值只是默认值，不做回填——
   逐 App 的「审查门禁」区块仍是它们的写入入口。
 - **Installed Tab 上的所有者允许列表——默认关闭。** 开关关闭时不作任何过滤：

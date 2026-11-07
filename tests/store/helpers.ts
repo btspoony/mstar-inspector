@@ -55,12 +55,17 @@ export function migrationNumber(name: string): number {
  * lockstep edit. A filename without a numeric prefix throws BY NAME
  * (`migrationNumber`): its apply order is undefined, and a silent drop would
  * apply a partial schema and hide the cause.
+ *
+ * The order is total: equal numeric prefixes — the four pre-existing duplicate
+ * pairs (`0043`, `0047`, `0048`, `0049`) — break on the filename in byte order,
+ * never on `readdir` order. With the repo's fixed-width 4-digit prefixes that
+ * equals full-filename lexicographic order, the same order wrangler applies.
  */
 export function migrationsAfter(anchor: number | string): string[] {
   const from = typeof anchor === "number" ? anchor : migrationNumber(anchor);
   return readdirSync(MIGRATIONS_DIR)
     .filter((name) => name.endsWith(".sql"))
-    .sort((a, b) => migrationNumber(a) - migrationNumber(b))
+    .sort((a, b) => migrationNumber(a) - migrationNumber(b) || (a < b ? -1 : a > b ? 1 : 0))
     .filter((name) => migrationNumber(name) > from);
 }
 
