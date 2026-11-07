@@ -22,7 +22,9 @@ import {
   WORKSPACE_CONCURRENCY_MAX,
   getEffectiveConcurrency,
 } from "../../src/dashboard/runtime-config-store";
+import { GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
 import { selectAssessmentTargets } from "../../src/store/finding-lifecycle";
+import { createFailureStore } from "../../src/store/failure-store";
 import { COMMENT_CLAIM_OUTBOX_SQL } from "../../src/worker/sweep";
 import type { TestD1 } from "./helpers";
 import type { D1Like } from "../../src/store/types";
@@ -2423,5 +2425,52 @@ describe("migrations/0050_reviews_round.sql", () => {
 
     // ALTER TABLE must preserve the row.
     expect(db.raw.query("SELECT id FROM reviews").all()).toEqual([{ id: "r-1" }]);
+  });
+});
+
+/**
+ * migration 0051 — the trailing-24h secondary-rate-limit count's index.
+ *
+ * The read (`countGithubRateLimited24h`) states a `created_at` window and an
+ * `error` prefix test, and no stage predicate — so 0048's partial index cannot
+ * serve it, and the 0010 `created_at` index still forces a table read per row
+ * of the window to evaluate the LIKE. The index must seek the window and carry
+ * `error`, and the statement the store prepares must seek it.
+ */
+describe("migrations/0051_review_failures_rate_limit_window.sql", () => {
+  test("seeks the window on created_at with error covered; the count's own statement uses it", async () => {
+    const db = createMigratedTestD1();
+    const indexColumns = (
+      db.raw.query("PRAGMA index_info(idx_review_failures_rate_limited_created)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    expect(indexColumns).toEqual(["created_at", "error"]);
+    const indexSql = (
+      db.raw
+        .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_failures_rate_limited_created'")
+        .get() as { sql: string } | null
+    )?.sql;
+    // Not partial: the read states no stage, and its LIKE prefix arrives as a
+    // bound value, which no index predicate could be matched against.
+    expect(indexSql).not.toContain("WHERE");
+
+    // The statement the REAL store prepares — never a hand-written twin.
+    const prepared: string[] = [];
+    const recording: D1Like = {
+      prepare(sql: string) {
+        prepared.push(sql);
+        return db.prepare(sql);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    await createFailureStore(recording).countGithubRateLimited24h();
+
+    const countSql = prepared.find((sql) => sql.includes("COUNT(*)"))!;
+    const plan = (
+      db.raw.query(`EXPLAIN QUERY PLAN ${countSql}`).all(`${GITHUB_RATE_LIMIT_PREFIX}%`) as Array<{ detail: string }>
+    ).map((row) => row.detail);
+    console.log("EXPLAIN QUERY PLAN (24h secondary-limit count):", plan.join("\n"));
+    expect(plan.join("\n")).toContain(
+      "SEARCH review_failures USING COVERING INDEX idx_review_failures_rate_limited_created (created_at>?)",
+    );
   });
 });
