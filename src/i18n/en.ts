@@ -668,6 +668,9 @@ export const en = {
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
       concurrencyInvalid: "Concurrency must be a whole number from {min} to {max}. Nothing was stored.",
+      /** Usage probe's off-vendor refusal: the declaration's host is not one the probe calls. */
+      usageProbeOffVendorHost:
+        "The usage probe for {provider} only calls the vendor's own quota host; this declaration points at {host}.",
     },
     ops: "Operations",
     opsCopy: "These actions change how this App answers incoming deliveries.",

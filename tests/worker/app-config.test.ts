@@ -3858,7 +3858,11 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     expect(await res.json()).toEqual({
       ok: false,
       reason: "unsupported_provider",
-      message: expect.stringContaining("proxy.example"),
+      key: "settings.error.usageProbeOffVendorHost",
+      message: t("en", "settings.error.usageProbeOffVendorHost", {
+        provider: "commandcode",
+        host: "proxy.example",
+      }),
       params: { provider: "commandcode", host: "proxy.example" },
     });
     // The credential never left the Worker.

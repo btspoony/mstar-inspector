@@ -569,6 +569,8 @@ export const zhCN: Dictionary = {
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
       concurrencyInvalid: "并发数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
+      usageProbeOffVendorHost:
+        "{provider} 的用量探测只会访问提供方自己的配额主机；此声明指向 {host}。",
     },
     ops: "运维",
     opsCopy: "以下操作改变此 App 如何应答传入的投递。",

@@ -3006,6 +3006,8 @@ const SETTINGS_400_KEYS = {
   githubMetadataRefreshFailed: "settings.error.githubMetadataRefreshFailed",
   /** Workspace review-concurrency cap (iteration spec §2.3). */
   concurrencyInvalid: "settings.error.concurrencyInvalid",
+  /** Per-key usage probe: the declaration points away from the vendor's quota host. */
+  usageProbeOffVendorHost: "settings.error.usageProbeOffVendorHost",
 } as const satisfies Record<string, DictionaryKey>;
 
 /**
@@ -3687,12 +3689,15 @@ const appKeyUsageRoute = async (c: DashboardContext) => {
       const declaredHost = declaredBaseUrl === null ? null : endpointHost(declaredBaseUrl);
       if (declaredHost === null || !probeHosts.includes(declaredHost)) {
         const host = declaredHost ?? declaredBaseUrl ?? "an unreadable endpoint";
+        const params = { provider, host };
+        const key = SETTINGS_400_KEYS.usageProbeOffVendorHost;
         return c.json(
           {
             ok: false,
             reason: "unsupported_provider" as const,
-            message: `The probe targets the vendor's own quota host; this declaration points at ${host}.`,
-            params: { provider, host },
+            key,
+            message: t("en", key, params),
+            params,
           },
           400,
         );
