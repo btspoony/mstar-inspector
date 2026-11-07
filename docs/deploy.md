@@ -2501,6 +2501,13 @@ Observation checklist after a concurrency change:
       means retries are outrunning the lock, not that the ceiling is low.
 - [ ] Container count stays under the account's container limit; the ceiling
       is a hard upper bound on simultaneously live sandboxes.
+- [ ] The queue gauge and the 24 h secondary-rate-limit count were observed on
+      a deployed environment — `GET /_internal_admin/api/runtime` answered a
+      readable `queue` (not `null`) under a real backlog, and the runtime page
+      rendered both numbers. NOT yet run: no deployment has exercised
+      `REVIEW_QUEUE.metrics()` at this `compatibility_date`, so local evidence
+      is the route test with a stubbed `metrics()` only. A `queue: null` here
+      is the gauge being unreadable, not an empty queue.
 
 Where the counts are read: a dropped admission has already written one
 `review_failures` row (`stage: "pipeline"`, reason in the error prefix), and
@@ -2509,9 +2516,28 @@ the `/_internal_admin` runtime page groups the last 24 hours' rows by reason —
 fault) — on the same `GET /_internal_admin/api/runtime` read that reports the
 caps, field `admissionDrops24h`. That page is the surface for this signal
 because the 15 min cron sweep (§ Cron failure sweep) pages only above
-`SWEEP_FAILURE_THRESHOLD`. Queue backlog depth and GitHub secondary-rate-limit
-(`429` / `retry-after`) responses have no surface at all: no metric, API field
-or console card reports either, so this count is not a proxy for them.
+`SWEEP_FAILURE_THRESHOLD`.
+
+Two more fields ride that same runtime read, and the same page renders both:
+
+- `queue` — the live gauge, asked as `REVIEW_QUEUE.metrics()` inside the
+  runtime handler: `{ backlogCount, backlogBytes, oldestMessageTimestamp }`,
+  the oldest stamp ISO-8601 (`null` when nothing is waiting). The page shows
+  the backlog depth and how long the oldest message has waited. A missing
+  binding, a binding without `metrics()` and a rejected call all answer
+  `null`, which the page renders as "not readable": `null` never means an
+  empty queue, and a failed gauge read never turns the endpoint into a `500`.
+- `githubRateLimited24h` — a count over the same 24 h window of
+  `review_failures` rows whose error starts with `GITHUB_RATE_LIMIT_PREFIX`
+  (`github-secondary-rate-limit: `). Two writers share it: the consumer tags a
+  review rejected by a GitHub secondary limit once at its single catch, before
+  redaction, and the degraded comment-delete sweep records one `rate-limit`
+  row per non-zero kind. A primary limit (`429`) carries its own
+  `github-primary-rate-limit: ` prefix and never counts here. The page renders
+  the number, so a secondary rejection is told apart from any other delivery
+  failure. The sweep rows are an attribution stage (`rate-limit`), which every
+  failure count excludes (§ Cron failure sweep) in exactly the way it excludes
+  `recheck` and `usage` rows — a throttled cleanup is not a failed review.
 
 ### Review concurrency caps (runtime configuration)
 
@@ -2605,11 +2631,13 @@ behave.
   signal). The attribution stages (`PAGING_EXCLUDED_STAGES` in
   `src/contracts/failure-stages.ts`) are rows written for a
   review that kept going — a recheck round that budget-skipped, lost its seat
-  or produced an invalid document, and a `usage_events` insert that failed
-  while the review continued — so the count excludes them. They stay in the
+  or produced an invalid document (`recheck`), a `usage_events` insert that
+  failed while the review continued (`usage`), and a degraded comment-delete
+  sweep GitHub throttled while the review itself stood (`rate-limit`) — so the
+  count excludes them. They stay in the
   table as attribution and never page ops. The same contract supplies the
   dashboard's own predicates: the per-PR failure COUNT and the per-PR failure
-  HISTORY exclude the same two stages, so the tab's number and the pager under
+  HISTORY exclude the same three stages, so the tab's number and the pager under
   it always agree. The stage lists are written once.
 - Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
   leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).

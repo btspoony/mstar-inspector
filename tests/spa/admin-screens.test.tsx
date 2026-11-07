@@ -718,6 +718,54 @@ describe("Runtime screen", () => {
     }
     await surface.close();
   });
+
+  /** The queue card's read cells, keyed by their `data-queue` field. */
+  function queueCells(surface: Surface): Record<string, string | null> {
+    return Object.fromEntries(
+      [...surface.container.querySelectorAll("[data-queue]")].map((node) => [
+        node.getAttribute("data-queue"),
+        node.textContent,
+      ]),
+    );
+  }
+
+  test("the queue card renders the backlog depth and how long the oldest message has waited", async () => {
+    const oldest = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    const surface = await runtimeScreen(() =>
+      json({
+        ...RUNTIME,
+        queue: { backlogCount: 12, backlogBytes: 4096, oldestMessageTimestamp: oldest },
+      }),
+    );
+    expect(surface.text()).toContain("Queue backlog and GitHub rate limits");
+    expect(queueCells(surface)).toEqual({ backlog: "12", oldest: "2 hours ago", "rate-limited": "0" });
+    await surface.close();
+  });
+
+  test("an unreadable queue gauge reads as not readable and never hides the rate-limit count", async () => {
+    const surface = await runtimeScreen(() => json({ ...RUNTIME, queue: null, githubRateLimited24h: 4 }));
+    expect(queueCells(surface)).toEqual({
+      backlog: "Not readable",
+      oldest: "Not readable",
+      "rate-limited": "4",
+    });
+    await surface.close();
+  });
+
+  test("a non-zero 24 h GitHub secondary-rate-limit count renders in the queue card", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...RUNTIME,
+        queue: { backlogCount: 0, backlogBytes: 0, oldestMessageTimestamp: null },
+        githubRateLimited24h: 7,
+      }),
+    );
+    expect(surface.text()).toContain("GitHub secondary limits (24 h)");
+    expect(queueCells(surface)["rate-limited"]).toBe("7");
+    // An empty queue names its own state instead of rendering an absence.
+    expect(queueCells(surface).oldest).toBe("Empty");
+    await surface.close();
+  });
 });
 
 describe("Workspaces screen", () => {

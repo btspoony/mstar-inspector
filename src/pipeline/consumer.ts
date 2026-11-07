@@ -77,6 +77,11 @@
 import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
+  classifyGithubRateLimit,
+  GITHUB_PRIMARY_RATE_LIMIT_PREFIX,
+  GITHUB_RATE_LIMIT_PREFIX,
+} from "../contracts/failure-stages";
+import {
   idemKey,
   IDEMPOTENCY_SECONDS,
   IDEM_DEGRADED,
@@ -5357,6 +5362,34 @@ async function processMessage(
             }`,
           );
         }
+        // A throttled sweep is a CONTINUATION event, not a failure of this
+        // review: ONE row per non-zero kind under the non-failure `rate-limit`
+        // stage (excluded from every failure count) so the throttle is not
+        // silently dropped. Each row carries its own kind's prefix, so a
+        // primary 429 never inflates the secondary-limit count. Its own
+        // try/catch — the insert must never mask the review that stands, and
+        // the round is never retried for it.
+        const rateLimitKinds = [
+          { kind: "primary", prefix: GITHUB_PRIMARY_RATE_LIMIT_PREFIX, count: deleteOutcome.rateLimited.primary },
+          { kind: "secondary", prefix: GITHUB_RATE_LIMIT_PREFIX, count: deleteOutcome.rateLimited.secondary },
+        ] as const;
+        for (const { kind, prefix, count } of rateLimitKinds) {
+          if (count === 0) continue;
+          try {
+            await deps.failureStore.record({
+              installation_id: payload.installation_id,
+              owner: payload.owner,
+              repo: payload.repo,
+              pr_number: payload.pr_number,
+              head_sha: headSha,
+              stage: "rate-limit",
+              error: `${prefix}${count} stale degraded comment deletion(s) rejected by the GitHub ${kind} rate limit — the review stands`,
+            });
+          } catch (recordErr) {
+            const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
+            deps.log.warn(fields, `review_failures insert failed (degraded cleanup continues): ${recordDetail}`);
+          }
+        }
       }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -5413,6 +5446,11 @@ async function processMessage(
     // SEC-03: the error detail is redacted (shape + exact-value passes)
     // before the durable row — an infra error can interpolate a
     // secret-shaped value (defense-in-depth; clean strings pass through).
+    // The GitHub secondary-rate-limit cause is tagged HERE — once, before
+    // redaction — so the row's text and the store's prefix count share one
+    // source of truth (a second detection site would drift).
+    const persistedDetail =
+      classifyGithubRateLimit(err) === "secondary" ? `${GITHUB_RATE_LIMIT_PREFIX}${detail}` : detail;
     try {
       await deps.failureStore.record({
         installation_id: payload.installation_id,
@@ -5423,7 +5461,7 @@ async function processMessage(
         // the payload sha, else "" (= never resolved).
         head_sha: fields?.head_sha ?? payload.head_sha ?? "",
         stage: failureStage,
-        error: redactExactSecrets(redactSecrets(detail), secretValues),
+        error: redactExactSecrets(redactSecrets(persistedDetail), secretValues),
       });
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);

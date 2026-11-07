@@ -101,6 +101,7 @@ import {
   REVIEW_MARKER_PREFIX,
   REVIEW_MARKER_RE,
 } from "./review-markers";
+import { classifyGithubRateLimit } from "../contracts/failure-stages";
 
 export type { ListDiscussionInput };
 export type { DiscoveryResult, ResolveOutcome };
@@ -1523,6 +1524,10 @@ export async function postPreparedReviewWithOctokit(octokit: PostOctokit, input:
       });
       return { commentId: target.id };
     } catch (err) {
+      // A rate-limited PATCH is a throttle, not a dead target: a CREATE here
+      // would publish the round twice. Rethrow unchanged so the consumer's
+      // catch persists the tagged row; a plain 403 keeps the fallback below.
+      if (classifyGithubRateLimit(err) !== null) throw err;
       // qc2 F-002 parity with a STAGED body: 404 (deleted mid-flight) or 403
       // (foreign App's bot marker — we can never edit it) makes the target
       // dead; the prepared publication is NOT recomputed (a retry never
@@ -1617,6 +1622,9 @@ export async function postPreparedDegradedWithOctokit(
       });
       return { posted: true, commentId: target.id };
     } catch (err) {
+      // Same throttle guard as the review chain: a rate-limited PATCH must
+      // reach the consumer's catch instead of creating a second publication.
+      if (classifyGithubRateLimit(err) !== null) throw err;
       // Same dead-target parity as the review chain: 403/404 → create
       // fallback with the exact prepared body; other errors rethrow.
       const status = typeof err === "object" && err !== null ? (err as { status?: unknown }).status : undefined;
@@ -1665,12 +1673,17 @@ export type PostDegradedInput = {
  * this instead of catching — the delete step is best-effort and never
  * throws. `skipped` counts 403/404 (foreign App's marker or already gone)
  * and any other per-match error; `errors` carries the non-403/404
- * messages so the warn line stays actionable.
+ * messages so the warn line stays actionable; `rateLimited` counts the
+ * matches a GitHub rate limit rejected, split by kind — the sweep was
+ * throttled, not the marker dead, so the consumer persists that as a
+ * continuation event instead of a review failure, and a primary `429` never
+ * reaches the secondary-limit metric.
  */
 export type DegradedDeleteOutcome = {
   deleted: number;
   skipped: number;
   errors: string[];
+  rateLimited: { primary: number; secondary: number };
 };
 
 /**
@@ -1704,11 +1717,17 @@ export async function deleteDegradedCommentWithOctokit(
       errors: [
         "octokit is missing rest.issues.listComments/deleteComment / paginate — cannot delete the degraded comment; check the injected auth surface",
       ],
+      rateLimited: { primary: 0, secondary: 0 },
     };
   }
   const comments = await scanCommentsWithOctokit(octokit, input, "degraded");
   const matches = findDegradedComments(comments);
-  const outcome: DegradedDeleteOutcome = { deleted: 0, skipped: 0, errors: [] };
+  const outcome: DegradedDeleteOutcome = {
+    deleted: 0,
+    skipped: 0,
+    errors: [],
+    rateLimited: { primary: 0, secondary: 0 },
+  };
   for (const match of matches) {
     try {
       await issues.deleteComment({
@@ -1718,6 +1737,15 @@ export async function deleteDegradedCommentWithOctokit(
       });
       outcome.deleted += 1;
     } catch (err) {
+      // A throttled delete says nothing about the marker: count it as the
+      // continuation event the consumer persists, never as a skip. The kind
+      // decides which prefix that row carries, so a 429 stays out of the
+      // secondary-limit metric.
+      const limited = classifyGithubRateLimit(err);
+      if (limited !== null) {
+        outcome.rateLimited[limited] += 1;
+        continue;
+      }
       // A RequestError from octokit carries `.status` (duck-typed so the
       // mock-octokit tests can reject with a plain { status: N }).
       const status = typeof err === "object" && err !== null ? (err as { status?: unknown }).status : undefined;

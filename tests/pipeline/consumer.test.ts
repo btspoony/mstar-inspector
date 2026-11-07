@@ -93,6 +93,7 @@ import { reconcileReviewChecks } from "../../src/worker/check-reconcile";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
+import { GITHUB_PRIMARY_RATE_LIMIT_PREFIX, GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
@@ -839,6 +840,31 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", error: "container unavailable" });
+    expect(sandbox.destroyCalls).toBe(1);
+  });
+
+  test("propagated GitHub secondary rate limit → the persisted error starts with the stable prefix, after redaction", async () => {
+    reset();
+    // The octokit request-error shape a rejected GitHub call throws: a 403
+    // that carries `retry-after` is GitHub's secondary limit, not a
+    // permission problem. The tag is written once at the consumer's single
+    // catch, BEFORE redaction, so the durable row (and the store count that
+    // derives from this prefix) can tell it apart from any other failure.
+    sandbox.error = Object.assign(new Error("Forbidden"), {
+      status: 403,
+      response: { headers: { "retry-after": "60" } },
+    });
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("Forbidden");
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    const error = String(rows[0]!.error);
+    expect(error.startsWith(GITHUB_RATE_LIMIT_PREFIX)).toBe(true);
+    // The original message survives beside the tag — the prefix classifies,
+    // it never replaces the evidence.
+    expect(error).toBe(`${GITHUB_RATE_LIMIT_PREFIX}Forbidden`);
     expect(sandbox.destroyCalls).toBe(1);
   });
 
@@ -3178,7 +3204,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
   test("success flow with a pre-existing degraded comment → the delete scan runs after the upsert", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    commenterState.deleteDegradedOutcome = { deleted: 1, skipped: 1, errors: ["rate limited"] };
+    commenterState.deleteDegradedOutcome = { deleted: 1, skipped: 1, errors: ["rate limited"], rateLimited: { primary: 0, secondary: 0 } };
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -3202,6 +3228,9 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     expect(warn!.msg).toContain("rate limited");
     expect(warn!.fields.degraded_delete_deleted).toBe(1);
     expect(warn!.fields.degraded_delete_skipped).toBe(1);
+    // A plain 403/404 skip or a per-match error is NOT a rate limit: no
+    // continuation row is written.
+    expect(failureRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
     // The ok path resolves silently (queue auto-ack) — nothing retried.
@@ -3227,6 +3256,96 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     expect(kvPuts).toHaveLength(1);
     expect(messageRetryCalls).toHaveLength(0);
     expect(sandbox.destroyCalls).toBe(1);
+  });
+
+  test("a secondary-rate-limit delete outcome persists ONE tagged rate-limit row — the review stands", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    commenterState.deleteDegradedOutcome = { deleted: 0, skipped: 0, errors: [], rateLimited: { primary: 0, secondary: 1 } };
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The throttled sweep is a CONTINUATION event, not a review failure: one
+    // row under the non-failure stage, prefixed so the store and the operator
+    // can count it — and the successful review is untouched.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.stage).toBe("rate-limit");
+    expect(String(rows[0]!.error)).toStartWith(GITHUB_RATE_LIMIT_PREFIX);
+    expect(reviewCount(db)).toBe(1);
+    expect(kvPuts).toHaveLength(1);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(sandbox.destroyCalls).toBe(1);
+  });
+
+  test("a 429 delete persists the primary prefix and never counts toward the secondary-limit query", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    commenterState.deleteDegradedOutcome = { deleted: 0, skipped: 0, errors: [], rateLimited: { primary: 1, secondary: 0 } };
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // A primary-limit sweep is the same continuation event as a secondary
+    // one, but its row carries the primary prefix so the 24 h
+    // secondary-limit count (keyed on GITHUB_RATE_LIMIT_PREFIX) stays 0.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.stage).toBe("rate-limit");
+    expect(String(rows[0]!.error)).toStartWith(GITHUB_PRIMARY_RATE_LIMIT_PREFIX);
+    const counted = db.raw
+      .query("SELECT COUNT(*) AS n FROM review_failures WHERE error LIKE ?")
+      .get(`${GITHUB_RATE_LIMIT_PREFIX}%`) as { n: number };
+    expect(counted.n).toBe(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(kvPuts).toHaveLength(1);
+    expect(messageRetryCalls).toHaveLength(0);
+  });
+
+  test("a mixed delete outcome persists one row per kind with its own prefix", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    commenterState.deleteDegradedOutcome = { deleted: 0, skipped: 0, errors: [], rateLimited: { primary: 2, secondary: 1 } };
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.stage)).toEqual(["rate-limit", "rate-limit"]);
+    expect(String(rows[0]!.error)).toStartWith(`${GITHUB_PRIMARY_RATE_LIMIT_PREFIX}2 `);
+    expect(String(rows[1]!.error)).toStartWith(`${GITHUB_RATE_LIMIT_PREFIX}1 `);
+    expect(reviewCount(db)).toBe(1);
+    expect(kvPuts).toHaveLength(1);
+    expect(messageRetryCalls).toHaveLength(0);
+  });
+
+  test("a failing rate-limit row insert never masks the review (best-effort record)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    commenterState.deleteDegradedOutcome = { deleted: 0, skipped: 0, errors: [], rateLimited: { primary: 0, secondary: 1 } };
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      failureStore: {
+        record: async () => {
+          throw new Error("d1 down");
+        },
+        listRecent: async () => [],
+        countAdmissionDrops24h: async () => ({ "pr-held": 0, "system-cap": 0, "workspace-cap": 0, error: 0 }),
+      },
+    });
+
+    await consumer(makeBatch(makePayload())); // resolves — the insert must not mask the review
+
+    expect(reviewCount(db)).toBe(1);
+    expect(kvPuts).toHaveLength(1);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(logLines.some((l) => l.level === "warn" && l.msg.includes("review_failures insert failed"))).toBe(true);
   });
 });
 
