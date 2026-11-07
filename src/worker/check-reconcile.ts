@@ -819,6 +819,15 @@ async function reconcileCheckAttempt(
   // from; `none` leaves the decision to this attempt's own link, and a null
   // link keeps waiting — the publication may simply not be prepared yet.
   if (pending.kind === "proven") proofPublicationId = pending.publicationId;
+  // A `pending` row carries its own id too, but only an attempt with NO link of
+  // its own reads it: past the deadline the proof read then answers `unproven`
+  // (proof bytes absent) or `unreadable` (present but malformed) from THAT row,
+  // instead of the link-less `unlinked` that would report "the proof never
+  // landed" over proof bytes that exist. A link already names this attempt's
+  // publication, so a proof-less row must never displace it.
+  else if (pending.kind === "pending" && proofPublicationId === null) {
+    proofPublicationId = pending.publicationId;
+  }
   if (beforeDeadline) {
     const waiting =
       pending.kind === "pending" ||
@@ -1372,11 +1381,15 @@ async function readRecoveryReview(
  * The wait is bounded by the execution deadline, so treating "unknown" as
  * "keep waiting" can never loop forever.
  *
- * Every end-of-wait answer carries the journal row's own publication id, so the
- * caller decides from that exact publication and never from a head match.
+ * Every end-of-wait answer that names a journal row carries that row's own
+ * publication id, so the caller decides from that exact publication and never
+ * from a head match: `proven` concludes from it, and `pending` carries it so
+ * the DEADLINE can read those proof bytes itself (absent -> `unproven`,
+ * present-but-corrupt -> `unreadable`) instead of reporting `unlinked` and
+ * claiming the proof never landed.
  */
 type PendingPublication =
-  | { kind: "pending"; phase: string }
+  | { kind: "pending"; phase: string; publicationId: string }
   | { kind: "proven"; publicationId: string }
   | { kind: "none" }
   | { kind: "unknown" };
@@ -1416,7 +1429,7 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
     // id returned here, exactly as it always did (never a head fallback).
     return journal.hasProof
       ? { kind: "proven", publicationId: journal.id }
-      : { kind: "pending", phase: journal.phase };
+      : { kind: "pending", phase: journal.phase, publicationId: journal.id };
   } catch {
     return { kind: "unknown" };
   }

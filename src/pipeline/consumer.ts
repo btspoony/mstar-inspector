@@ -365,9 +365,12 @@ export type ConsumerLogFields = {
    * `check_abandon_not_owned` = it changed nothing because the attempt is no
    * longer ours (recovery claimed it, the lease expired, or it already ended) —
    * a legitimate no-op, not a fault; `check_abandon_failed` = the hand-off
-   * itself faulted (a store error). The publication hand-off reports its two
-   * fenced writes (link, release) on these same three values, with the message
-   * naming which write refused.
+   * itself faulted (a store error). The publication hand-off (§7.7 step 2)
+   * emits only the two REFUSAL values: `check_abandon_not_owned` when either
+   * fenced write (link, release) changed nothing, and `check_abandon_failed`
+   * when a write threw — the message names which write refused. A COMPLETED
+   * hand-off has no event of its own; its only line is the info above it
+   * ("publication journal hit"), printed before the link.
    */
   event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed";
   action: string;

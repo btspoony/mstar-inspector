@@ -3349,4 +3349,67 @@ describe("the deadline conclusion names the missing proof", () => {
     expect(sent.desired).toBe("failure");
     expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
   });
+
+  test("(d) an unlinked attempt's staged row with malformed proof bytes defers, then names it unreadable", async () => {
+    const db = seededDb();
+    const { id } = await abandonedAttempt(db);
+    // The attributed shape the probe admits — the row's last write lands after
+    // admission — with proof bytes that are NOT JSON: present, but undecodable.
+    // The attempt has no `publication_id` link of its own.
+    const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 1_000);
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run('{"publicationId":', journalId);
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      // Before the deadline a corrupt envelope is still "not readable yet":
+      // the wait continues and nothing is frozen.
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    expect(factoryCalls).toBe(0);
+    const waitingRow = await rawRow(db, id);
+    expect(waitingRow.publication_id).toBeNull();
+    expect(waitingRow.terminal_ms).toBeNull();
+    expect(waitingRow.attempts).toBe(1);
+    expect(waitingRow.desired).toBe("in_progress");
+    expect(waitingRow.observed).toBe("unknown");
+
+    // Past the attempt's own deadline the proof bytes exist but cannot be
+    // read: the deadline names THAT cause, never "the proof never landed" and
+    // never a proof-less success.
+    const sent: { desired?: string; summary?: string } = {};
+    const deadlineStub = stubFetch();
+    let deadlineDeferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => FUTURE_DEADLINE + 60_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deadlineDeferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      deadlineStub.restore();
+    }
+
+    expect(deadlineDeferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
+    const row = await rawRow(db, id);
+    expect(row.publication_id).toBeNull();
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
 });
