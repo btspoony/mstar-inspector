@@ -39,6 +39,7 @@ import {
   DETAIL,
   FAILURES,
   FINDINGS,
+  MUST_FIX,
   RECORDS,
   REVIEWS,
   ROW_HEAD,
@@ -203,6 +204,18 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(defaultFamily({ findings: 0, reviews: 2, failures: 1, must_fix: 0 })).toBe("failures");
     expect(defaultFamily({ findings: 0, reviews: 0, failures: 0, must_fix: 0 })).toBe("reviews");
     expect(defaultFamily({ findings: 0, reviews: 2, failures: 0, must_fix: 0 })).toBe("reviews");
+  });
+
+  test("a scene reads its findings count and tally from one page, and a windowed page must state the tally", () => {
+    // The whole family: both the count and the default tally read the same
+    // page, so a page with no must-fix row claims none.
+    const mayFixOnly = scene({ findings: page(FINDINGS.filter((finding) => finding.severity !== "must-fix")) });
+    expect(mayFixOnly.detail.counts).toMatchObject({ findings: 2, must_fix: 0 });
+    // A window is not the family: its total is the family's size while its rows
+    // are one page's, so there is no tally to default and the scene throws.
+    expect(() => scene({ findings: page(FINDINGS.slice(0, 2), 25) })).toThrow(/mustFix/);
+    const stated = scene({ findings: page(FINDINGS.slice(0, 2), 25) }, {}, DETAIL.latest_review, MUST_FIX);
+    expect(stated.detail.counts).toMatchObject({ findings: 25, must_fix: MUST_FIX });
   });
 
   test("a review with provider null parses without a null leak, and the retired numeric total no longer gates the row", async () => {
@@ -1510,7 +1523,7 @@ describe("pull request detail face (static SSR)", () => {
         label: button.textContent ?? "",
         disabled: button.disabled,
       }));
-    const built = scene(pages);
+    const built = scene(pages, {}, DETAIL.latest_review, MUST_FIX);
     const first = await withMarkup(render(built.detail, recordsOf(built.pages)), (container) => ({
       range: range(container),
       controls: controls(container),
@@ -1536,7 +1549,7 @@ describe("pull request detail face (static SSR)", () => {
   test("a page that dropped rows says so beside the range; a clean page says nothing", async () => {
     // Two of the head's three findings could be rendered: the third still sits
     // inside `total`, so the range alone would promise a row no window can show.
-    const built = scene({ ...RECORDS, findings: page(FINDINGS.slice(0, 2), 3) });
+    const built = scene({ ...RECORDS, findings: page(FINDINGS.slice(0, 2), 3) }, {}, DETAIL.latest_review, MUST_FIX);
     const note = (pages: RecordPages) =>
       withMarkup(render(built.detail, recordsOf(pages)), (container) => ({
         note: container.querySelector('[data-slot="pager-dropped"]')?.textContent ?? null,
@@ -1551,7 +1564,7 @@ describe("pull request detail face (static SSR)", () => {
   test("a page that shrank under a stale offset renders a clamped range, and the range is a live region", async () => {
     // The server's total fell to 20 between reads while the reader still holds
     // offset 20: the honest page is empty, and the label must never invert.
-    const built = scene({ ...RECORDS, findings: page([], 20) });
+    const built = scene({ ...RECORDS, findings: page([], 20) }, {}, DETAIL.latest_review, MUST_FIX);
     const read = (offset: number) =>
       withMarkup(render(built.detail, recordsOf(built.pages, offset)), (container) => {
         const label = container.querySelector('[data-slot="pager-range"]');
@@ -1646,7 +1659,7 @@ describe("pull request detail face (static SSR)", () => {
   test("a filtered findings window with no match names the filter, not the PR", async () => {
     // The head counts three findings while the nit filter matches none: the
     // empty copy must describe the FILTER, or it contradicts the tab count.
-    const built = scene({ findings: page([], 3) });
+    const built = scene({ findings: page([], 3) }, {}, DETAIL.latest_review, MUST_FIX);
     const copy = (severity: string) =>
       withMarkup(render(built.detail, recordsOf({ ...built.pages, findings: page([]) }, 0, severity)), (container) =>
         container.querySelector('[role="tabpanel"] p')?.textContent ?? "",
