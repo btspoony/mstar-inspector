@@ -467,8 +467,8 @@ export const en = {
     concurrencySave: "Save concurrency",
     concurrencySaved: "Review concurrency updated.",
     concurrencyFailed: "Could not change the review concurrency — try again.",
-    /** {max} = this workspace's own maximum. */
-    concurrencyRange: "Accepts 1–{max}.",
+    /** {min}/{max} = this workspace's own range. */
+    concurrencyRange: "Accepts {min}–{max}.",
     /** The owner/admin review-gate default card for Apps connected later. */
     checkMinScoreHeading: "Review gate default",
     checkMinScoreDescription:
@@ -477,14 +477,14 @@ export const en = {
     checkMinScoreSave: "Save default",
     checkMinScoreSaved: "Review gate default updated.",
     checkMinScoreFailed: "Could not change the review gate default — try again.",
-    /** {max} = the accepted maximum. */
-    checkMinScoreRange: "Accepts 0–{max}.",
-    /** {max} = the accepted maximum; the shown number is the fallback. */
+    /** {min}/{max} = the accepted range. */
+    checkMinScoreRange: "Accepts {min}–{max}.",
+    /** {min}/{max} = the accepted range; the shown number is the fallback. */
     checkMinScoreUnreadable:
-      "The stored default could not be read, so new Apps use the platform default. Saving a value from 0 to {max} sets this workspace's default, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
-    /** {max} = this workspace's own maximum; the shown numbers are the fallback. */
+      "The stored default could not be read, so new Apps use the platform default. Saving a value from {min} to {max} sets this workspace's default, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
+    /** {min}/{max} = this workspace's own range; the shown numbers are the fallback. */
     concurrencyUnreadable:
-      "The stored review concurrency could not be read, so reviews may be running one at a time. The numbers shown are a fallback. Saving a value from 1 to {max} sets this workspace's value, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
+      "The stored review concurrency could not be read, so reviews may be running one at a time. The numbers shown are a fallback. Saving a value from {min} to {max} sets this workspace's value, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
   },
   /**
    * Platform-operator support (2026-10): the operator's read-only face and the
@@ -668,6 +668,12 @@ export const en = {
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
       concurrencyInvalid: "Concurrency must be a whole number from {min} to {max}. Nothing was stored.",
+      /** Usage probe's off-vendor refusal: the declaration's host is not one the probe calls. */
+      usageProbeOffVendorHost:
+        "The usage probe for {provider} only calls the vendor's own quota host; this declaration points at {host}.",
+      /** Same refusal when the declaration yields no readable host at all. */
+      usageProbeUnreadableEndpoint:
+        "The usage probe for {provider} only calls the vendor's own quota host; this declaration points at an endpoint that cannot be read.",
     },
     ops: "Operations",
     opsCopy: "These actions change how this App answers incoming deliveries.",
@@ -738,7 +744,7 @@ export const en = {
       modelCountOne: "{count} model",
       /**
        * The model picker: the meta-line trigger, the dialog faces, and the
-       * 32-id cap stated in the counter. `common` has no save key — the
+       * model-id cap stated in the counter. `common` has no save key — the
        * picker's save label lives here.
        */
       models: {
@@ -976,12 +982,25 @@ export const en = {
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
       /**
-       * The workspace's own default floor is unreadable (a failed read, or a
-       * stored value no reader trusts): the connect fails closed before
-       * writing anything, so the operator repairs the setting and retries.
+       * The workspace's stored default floor is untrusted: the connect fails
+       * closed before writing anything, so the operator repairs the setting
+       * and retries.
        */
       workspaceFloorUnreadable:
         "The App could not be connected — this workspace's default score floor cannot be read, so nothing was stored. Repair the setting, then resubmit.",
+      /**
+       * The workspace row came back without the floor field: the database
+       * predates the column, so a settings visit cannot repair it. The copy
+       * names the migration that adds it (`0049`).
+       */
+      workspaceFloorMalformed:
+        "The App could not be connected — this workspace's row carries no default score floor, so nothing was stored. Apply migration 0049_workspace_check_min_score.sql, then resubmit.",
+      /**
+       * A transient read failure of the default floor: nothing was stored, and
+       * resubmitting retries the read — there is no setting to repair.
+       */
+      workspaceFloorReadFailed:
+        "The App could not be connected — this workspace's default score floor could not be read just now, so nothing was stored. Resubmit to retry.",
       /** The repair clause: "Repair it in [workspace settings]<floorRepairEnd>". */
       floorRepair: "Repair it in",
       floorRepairLink: "workspace settings",

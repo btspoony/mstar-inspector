@@ -45,7 +45,6 @@ import {
   InvalidModelChainNameError,
   InvalidModelSelectorError,
   MAX_KEYS_PER_PROVIDER,
-  MAX_CUSTOM_PROVIDER_MODEL_IDS,
   MAX_MODEL_SELECTOR_LENGTH,
   MAX_PROVIDER_KEY_LENGTH,
   MODEL_ROLE_IDS,
@@ -65,6 +64,7 @@ import {
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../../src/contracts/sandbox-images";
 import { composeModelOptions, findFailingSelector } from "../../src/dashboard/model-membership";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
+import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../src/contracts/provider-models";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { t } from "../../src/i18n";
 import { CHECK_MIN_SCORE_MAX, CHECK_MIN_SCORE_MIN } from "../../src/contracts/review-gate";
@@ -3858,7 +3858,11 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     expect(await res.json()).toEqual({
       ok: false,
       reason: "unsupported_provider",
-      message: expect.stringContaining("proxy.example"),
+      key: "settings.error.usageProbeOffVendorHost",
+      message: t("en", "settings.error.usageProbeOffVendorHost", {
+        provider: "commandcode",
+        host: "proxy.example",
+      }),
       params: { provider: "commandcode", host: "proxy.example" },
     });
     // The credential never left the Worker.
@@ -4418,7 +4422,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     );
   });
 
-  test("add-template-provider clips a wider-than-store catalog vocabulary to the 32-entry bound", async () => {
+  test("add-template-provider clips a wider-than-store catalog vocabulary to the store's model-id bound", async () => {
     const { db, app } = await seededWorld();
     // nano-gpt carries the snapshot's widest vocabulary — well past the store
     // bound the declaration gate enforces.

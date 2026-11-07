@@ -129,15 +129,20 @@ function auditDetails(db: TestD1, action: string): Array<{ before: unknown; afte
   return rows.map((row) => JSON.parse(row.detail_json) as { before: unknown; after: unknown });
 }
 
-/** A D1 face whose every statement fails — the degraded read path. */
-const failingDb: DashboardD1 = {
-  prepare() {
-    throw new Error("D1 unavailable");
-  },
-  batch() {
-    throw new Error("D1 unavailable");
-  },
-};
+/** A D1 face whose every statement fails with this error — the degraded read path. */
+function failingDbWith(error: unknown): DashboardD1 {
+  return {
+    prepare() {
+      throw error;
+    },
+    batch() {
+      throw error;
+    },
+  };
+}
+
+/** The generic D1 failure: no schema signature, so it must stay `read-failed`. */
+const failingDb: DashboardD1 = failingDbWith(new Error("D1 unavailable"));
 
 /** A D1 face whose every `first()` yields this row verbatim — the row-shape path. */
 function dbWithRow(row: Record<string, unknown>): DashboardD1 {
@@ -988,13 +993,56 @@ describe("workspace check_min_score default", () => {
     db.raw.exec("PRAGMA ignore_check_constraints = ON");
     db.raw.prepare("UPDATE workspaces SET check_min_score = 'maybe' WHERE id = ?").run(WS);
     db.raw.exec("PRAGMA ignore_check_constraints = OFF");
-    expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({ minScore: 60, degraded: true });
+    expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({
+      minScore: 60,
+      degraded: true,
+      reason: "untrusted",
+    });
 
     // An untrusted stored value was never in effect, so the ledger records the
     // absent state, not the platform default it degraded to.
     await setWorkspaceCheckMinScore(db, WS, 75, ACTOR);
     expect(auditDetails(db, ACTION)).toEqual([{ before: null, after: 75 }]);
   });
+
+  test("a present row without the selected field degrades as malformed, not as absent", async () => {
+    // `first() === null` is the absent state; a row that exists but does not
+    // carry the selected column is a malformed result, so its default is
+    // untrusted and the cause is named as such.
+    expect(await getWorkspaceCheckMinScore(dbWithRow({}), WS)).toEqual({
+      minScore: 60,
+      degraded: true,
+      reason: "malformed",
+    });
+  });
+
+  test("a read failing on a missing column degrades as malformed, not read-failed", async () => {
+    // Before 0049 applies, the SELECT itself throws. That is the pre-migration
+    // state the malformed copy names; answering `read-failed` there would make
+    // the copy unreachable in its only scenario.
+    const db = failingDbWith(new Error("D1_ERROR: no such column: check_min_score"));
+    expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({
+      minScore: 60,
+      degraded: true,
+      reason: "malformed",
+    });
+  });
+
+  test("a read failing on a missing table degrades as malformed too", async () => {
+    const db = failingDbWith(new Error("no such table: workspaces"));
+    expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({
+      minScore: 60,
+      degraded: true,
+      reason: "malformed",
+    });
+  });
+
+  test("a generic read failure stays read-failed", async () =>
+    expect(await getWorkspaceCheckMinScore(failingDbWith(new Error("network unreachable")), WS)).toEqual({
+      minScore: 60,
+      degraded: true,
+      reason: "read-failed",
+    }));
 
   test("an out-of-range integer stored by a foreign writer also records the absent state", async () => {
     const db = fixture();
@@ -1021,6 +1069,10 @@ describe("workspace check_min_score default", () => {
       .prepare("UPDATE workspaces SET check_min_score = 70, deleted_at = '2026-01-01T00:00:00.000Z' WHERE id = ?")
       .run(WS);
     expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({ minScore: 60, degraded: false });
-    expect(await getWorkspaceCheckMinScore(failingDb, WS)).toEqual({ minScore: 60, degraded: true });
+    expect(await getWorkspaceCheckMinScore(failingDb, WS)).toEqual({
+      minScore: 60,
+      degraded: true,
+      reason: "read-failed",
+    });
   });
 });

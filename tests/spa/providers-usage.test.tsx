@@ -16,7 +16,8 @@
  * - a reported balance renders as the muted bottom line; a snapshot with
  *   no balance renders no such line;
  * - `unauthorized` / `absent` / `error` render a danger or muted line and
- *   never a fabricated bar;
+ *   never a fabricated bar; a keyed 400 renders its localized refusal
+ *   (key + params) instead of the generic error face;
  * - no dialog role exists anywhere in the tree — the numbers live under
  *   the row, not over the page.
  *
@@ -132,13 +133,13 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-async function mount(payload: SettingsManagePayload) {
+async function mount(payload: SettingsManagePayload, loc: SpaBoot["locale"] = locale) {
   const { win, cleanup: cleanupDom } = installDom("http://localhost/dashboard/acme/apps");
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);
   const root = createRoot(container as unknown as Element);
   const element: ReactElement = createElement(ProvidersSection, {
-    locale,
+    locale: loc,
     payload,
     onVerify: async (): Promise<OpNotice> => ({ kind: "success", message: "added" }),
     onSettings: async (): Promise<OpNotice> => ({ kind: "success", message: "added" }),
@@ -172,7 +173,7 @@ async function mount(payload: SettingsManagePayload) {
   };
   const usageButton = (): HTMLButtonElement | null =>
     [...(win.document.querySelectorAll("button") as unknown as HTMLButtonElement[])].find(
-      (button) => button.textContent === t(locale, "settings.providers.usage.action"),
+      (button) => button.textContent === t(loc, "settings.providers.usage.action"),
     ) ?? null;
   /** The usage button of the key row whose identity names `last4`. */
   const rowUsageButton = (last4: string): HTMLButtonElement | null => {
@@ -564,6 +565,72 @@ describe("UsagePanel — inline probe under the owning row", () => {
       expect(text).toContain(t(locale, "settings.providers.usage.error"));
       expect(text).not.toContain("upstream exploded");
       expect(view.panel()?.querySelector('[data-slot="usage-bar"]')).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a keyed 400 renders its refusal naming the provider and host", async () => {
+    const params = { provider: probedProvider, host: "proxy.example" };
+    queue.push(() => new Response(JSON.stringify({
+      ok: false,
+      reason: "unsupported_provider",
+      key: "settings.error.usageProbeOffVendorHost",
+      message: t("en", "settings.error.usageProbeOffVendorHost", params),
+      params,
+    }), { status: 400 }));
+    const view = await mount(probedPayload());
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const text = view.panel()?.textContent ?? "";
+      expect(text).toBe(t("en", "settings.error.usageProbeOffVendorHost", params));
+      expect(text).toContain("proxy.example");
+      expect(text).toContain(probedProvider);
+      expect(view.panel()?.querySelector('[data-slot="usage-bar"]')).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("the keyed refusal resolves in the operator's locale, not the server's English face", async () => {
+    const params = { provider: probedProvider, host: "proxy.example" };
+    queue.push(() => new Response(JSON.stringify({
+      ok: false,
+      reason: "unsupported_provider",
+      key: "settings.error.usageProbeOffVendorHost",
+      message: t("en", "settings.error.usageProbeOffVendorHost", params),
+      params,
+    }), { status: 400 }));
+    const view = await mount(probedPayload(), "zh_CN");
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const text = view.panel()?.textContent ?? "";
+      expect(text).toBe(t("zh_CN", "settings.error.usageProbeOffVendorHost", params));
+      expect(text).toContain("proxy.example");
+      expect(text).not.toContain("vendor's own quota host");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a keyed 400 with malformed params falls back to the generic error face", async () => {
+    queue.push(() => new Response(JSON.stringify({
+      ok: false,
+      reason: "unsupported_provider",
+      key: "settings.error.usageProbeOffVendorHost",
+      message: "server face is never rendered",
+      params: { provider: { name: "nested" }, host: "proxy.example" },
+    }), { status: 400 }));
+    const view = await mount(probedPayload());
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const text = view.panel()?.textContent ?? "";
+      expect(text).toBe(t(locale, "settings.providers.usage.error"));
+      expect(text).not.toContain("[object Object]");
+      expect(text).not.toContain("{provider}");
     } finally {
       await view.cleanup();
     }

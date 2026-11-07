@@ -1918,6 +1918,41 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     return makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, ...overrides });
   }
 
+  /**
+   * A commit env whose workspace floor read answers `cause` instead of the
+   * stored column — the two degradations a real row cannot produce here
+   * (`read-failed` throws; `malformed` returns a row without the field).
+   */
+  function degradedFloorEnv(cause: "read-failed" | "malformed"): Env {
+    const env = commitEnv();
+    const db = dbOf(env);
+    return {
+      ...env,
+      DB: {
+        ...db,
+        prepare(query: string): DashboardD1Statement {
+          if (!query.includes("check_min_score AS value")) return db.prepare(query);
+          if (cause === "read-failed") throw new Error("D1 unavailable");
+          const malformed: DashboardD1Statement = {
+            bind: () => malformed,
+            first: async <T = Record<string, unknown>>() => ({}) as T,
+            all: <T = Record<string, unknown>>() => db.prepare(query).all<T>(),
+            run: <T = Record<string, unknown>>() => db.prepare(query).run<T>(),
+          };
+          return malformed;
+        },
+      },
+    } as unknown as Env;
+  }
+
+  /** Manifest banner copy as it lands in HTML (escapeHtml owns the apostrophe entity). */
+  const bannerCopy = (
+    key:
+      | "manifest.error.workspaceFloorUnreadable"
+      | "manifest.error.workspaceFloorMalformed"
+      | "manifest.error.workspaceFloorReadFailed",
+  ) => t("en", key).replaceAll("'", "&#39;");
+
   /** POST /dashboard/manifest/commit; holdValue=null omits the hold cookie. */
   async function doCommit(args: {
     env?: Env;
@@ -2162,9 +2197,11 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(refused.status).toBe(500);
     expect(appRowCount(env)).toBe(0);
     // The page must name the workspace setting the operator can repair — not
-    // the database — and hand them the settings page to repair it.
+    // the database — and hand them the settings page to repair it. A stored
+    // value is the repair case, never the transient-read retry copy.
     const refusedBody = await refused.text();
-    expect(refusedBody).toContain("default score floor cannot be read");
+    expect(refusedBody).toContain(bannerCopy("manifest.error.workspaceFloorUnreadable"));
+    expect(refusedBody).not.toContain(bannerCopy("manifest.error.workspaceFloorReadFailed"));
     expect(refusedBody).not.toContain("The App could not be stored");
     expect(refusedBody).toContain('href="/dashboard/default/settings"');
     // Retryable: the hold is kept (not burned), so the operator can resume.
@@ -2209,7 +2246,8 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     // One wording for both routes: the copy names the workspace setting the
     // operator can repair — not the database — and links that page.
     const refusedBody = await refused.text();
-    expect(refusedBody).toContain("default score floor cannot be read");
+    expect(refusedBody).toContain(bannerCopy("manifest.error.workspaceFloorUnreadable"));
+    expect(refusedBody).not.toContain(bannerCopy("manifest.error.workspaceFloorReadFailed"));
     expect(refusedBody).not.toContain("The App could not be stored");
     expect(refusedBody).toContain('href="/dashboard/default/settings"');
     // The clause's terminator rides directly after the link, so a dropped or
@@ -2220,6 +2258,56 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       refused.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
     expect(holdCookie).toBeTruthy();
     expect(holdCookie).not.toContain("Max-Age=0");
+  });
+
+  test("a transient floor read failure is retryable and names no workspace setting to repair", async () => {
+    stubGitHubConversionOnly();
+    const env = degradedFloorEnv("read-failed");
+    const holdValue = await freshHold();
+
+    const refused = await doCommit({ env, holdValue });
+    expect(refused.status).toBe(500);
+    expect(appRowCount(env)).toBe(0);
+    const refusedBody = await refused.text();
+    expect(refusedBody).toContain(bannerCopy("manifest.error.workspaceFloorReadFailed"));
+    expect(refusedBody).not.toContain(bannerCopy("manifest.error.workspaceFloorUnreadable"));
+    // A failed read is fixed by resubmitting — a settings link would misdirect.
+    expect(refusedBody).not.toContain('href="/dashboard/default/settings"');
+    expectHoldKept(refused);
+
+    // The callback auto-commit answers the same cause with the same copy.
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const state = await createManifestStateValue(SESSION_SECRET, START_APP_ID, "default");
+    const callback = await worker.fetch(
+      dashboardRequest(
+        `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_STATE_COOKIE}=${state}`,
+      ),
+      env,
+    );
+    expect(callback.status).toBe(500);
+    expect(appRowCount(env)).toBe(0);
+    const callbackBody = await callback.text();
+    expect(callbackBody).toContain(bannerCopy("manifest.error.workspaceFloorReadFailed"));
+    expect(callbackBody).not.toContain('href="/dashboard/default/settings"');
+  });
+
+  test("a malformed floor result row names the migration and links no setting to repair", async () => {
+    const env = degradedFloorEnv("malformed");
+    const holdValue = await freshHold();
+    const refused = await doCommit({ env, holdValue });
+    expect(refused.status).toBe(500);
+    expect(appRowCount(env)).toBe(0);
+    const refusedBody = await refused.text();
+    // The row came back without the column: the fix is the migration, not a
+    // settings visit — a repair link would send the operator to a page that
+    // cannot add it.
+    expect(refusedBody).toContain(bannerCopy("manifest.error.workspaceFloorMalformed"));
+    expect(refusedBody).toContain("0049_workspace_check_min_score.sql");
+    expect(refusedBody).not.toContain(bannerCopy("manifest.error.workspaceFloorUnreadable"));
+    expect(refusedBody).not.toContain(bannerCopy("manifest.error.workspaceFloorReadFailed"));
+    expect(refusedBody).not.toContain('href="/dashboard/default/settings"');
+    expectHoldKept(refused);
   });
 
   test("POST /manifest/commit stays an idempotent-recovery path: after a retryable callback 500, the SAME hold resubmits → 302 onboarding + one row", async () => {

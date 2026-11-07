@@ -1,7 +1,7 @@
 /**
  * The model picker dialog: one checkbox per catalog model (stored ids
  * checked), stored ids the catalog no longer lists stay listed and checked,
- * case-insensitive filtering keeps checked state, the selected / 32 counter
+ * case-insensitive filtering keeps checked state, the selected / max counter
  * states the cap and an unchecked box is unavailable at the cap, select-none
  * empties the selection and disables save, select-all checks everything, and
  * save posts the `update-provider-models` op and reports its success.
@@ -16,7 +16,8 @@ import { createRoot } from "react-dom/client";
 import { t, type DictionaryKey } from "../../src/i18n";
 import type { SpaBoot } from "../../src/spa/boot";
 import type { OpNotice } from "../../src/spa/pages/PageNotice";
-import { MAX_PROVIDER_MODEL_IDS, ProviderModelsDialog } from "../../src/spa/pages/provider-models-dialog";
+import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../src/contracts/provider-models";
+import { ProviderModelsDialog } from "../../src/spa/pages/provider-models-dialog";
 import { installDom } from "./dom";
 
 const locale: SpaBoot["locale"] = "en";
@@ -186,16 +187,16 @@ describe("ProviderModelsDialog", () => {
     }
   });
 
-  test("the counter states the cap; at 32 an unchecked box is disabled", async () => {
-    const catalog = Array.from({ length: MAX_PROVIDER_MODEL_IDS + 1 }, (_, index) => `m-${index + 1}`);
-    const stored = catalog.slice(0, MAX_PROVIDER_MODEL_IDS);
+  test("the counter states the cap; at the cap an unchecked box is disabled", async () => {
+    const catalog = Array.from({ length: MAX_CUSTOM_PROVIDER_MODEL_IDS + 1 }, (_, index) => `m-${index + 1}`);
+    const stored = catalog.slice(0, MAX_CUSTOM_PROVIDER_MODEL_IDS);
     const view = await mount({ catalogModelIds: catalog, storedModelIds: stored });
     try {
       expect(view.dialog()?.textContent).toContain(
-        t(locale, "settings.providers.models.counter", { selected: MAX_PROVIDER_MODEL_IDS, max: MAX_PROVIDER_MODEL_IDS }),
+        t(locale, "settings.providers.models.counter", { selected: MAX_CUSTOM_PROVIDER_MODEL_IDS, max: MAX_CUSTOM_PROVIDER_MODEL_IDS }),
       );
       expect(view.dialog()?.textContent).toContain(
-        t(locale, "settings.providers.models.capReached", { max: MAX_PROVIDER_MODEL_IDS }),
+        t(locale, "settings.providers.models.capReached", { max: MAX_CUSTOM_PROVIDER_MODEL_IDS }),
       );
       const unchecked = view.checkboxes().filter((box) => !box.checked);
       expect(unchecked).toHaveLength(1);
@@ -207,15 +208,15 @@ describe("ProviderModelsDialog", () => {
       await view.click(selectAll);
       expect(view.dialog()?.textContent).toContain(
         t(locale, "settings.providers.models.counter", {
-          selected: MAX_PROVIDER_MODEL_IDS,
-          max: MAX_PROVIDER_MODEL_IDS,
+          selected: MAX_CUSTOM_PROVIDER_MODEL_IDS,
+          max: MAX_CUSTOM_PROVIDER_MODEL_IDS,
         }),
       );
       // Unchecking one re-enables the unchecked box and drops the cap note.
       await view.click(view.checkboxes()[0]);
       expect(view.checkboxes().at(-1)?.disabled).toBe(false);
       expect(view.dialog()?.textContent).not.toContain(
-        t(locale, "settings.providers.models.capReached", { max: MAX_PROVIDER_MODEL_IDS }),
+        t(locale, "settings.providers.models.capReached", { max: MAX_CUSTOM_PROVIDER_MODEL_IDS }),
       );
     } finally {
       await view.cleanup();
@@ -229,7 +230,7 @@ describe("ProviderModelsDialog", () => {
       expect(view.checkboxes().every((box) => !box.checked)).toBe(true);
       expect(view.saveButton()?.disabled).toBe(true);
       expect(view.dialog()?.textContent).toContain(
-        t(locale, "settings.providers.models.counter", { selected: 0, max: MAX_PROVIDER_MODEL_IDS }),
+        t(locale, "settings.providers.models.counter", { selected: 0, max: MAX_CUSTOM_PROVIDER_MODEL_IDS }),
       );
       await view.click(view.buttonByLabel("settings.providers.models.selectAll"));
       expect(view.checkboxes().every((box) => box.checked)).toBe(true);
@@ -252,7 +253,7 @@ describe("ProviderModelsDialog", () => {
       expect(view.checkboxes().every((box) => box.checked)).toBe(true);
       // What the operator saw is what got selected: the hidden id stays out.
       expect(view.dialog()?.textContent).toContain(
-        t(locale, "settings.providers.models.counter", { selected: 2, max: MAX_PROVIDER_MODEL_IDS }),
+        t(locale, "settings.providers.models.counter", { selected: 2, max: MAX_CUSTOM_PROVIDER_MODEL_IDS }),
       );
       await view.type(view.search(), "");
       expect(view.checkboxes().map((box) => box.checked)).toEqual([true, false, true]);
@@ -272,7 +273,7 @@ describe("ProviderModelsDialog", () => {
         "legacy-model",
       ]);
       expect(view.dialog()?.textContent).toContain(
-        t(locale, "settings.providers.models.counter", { selected: 1, max: MAX_PROVIDER_MODEL_IDS }),
+        t(locale, "settings.providers.models.counter", { selected: 1, max: MAX_CUSTOM_PROVIDER_MODEL_IDS }),
       );
     } finally {
       await view.cleanup();

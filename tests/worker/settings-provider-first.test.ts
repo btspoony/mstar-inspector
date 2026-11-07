@@ -14,6 +14,7 @@ import {
 import { composeModelOptions, findFailingSelector, selectorBase } from "../../src/dashboard/model-membership";
 import { PROVIDER_IDS } from "../../src/dashboard/app-config-store";
 import { PROVIDER_CATALOG, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
+import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../src/contracts/provider-models";
 import { hasUsageProbe } from "../../src/dashboard/provider-usage";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
@@ -813,7 +814,7 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
     expect(declared[0]!.api).toBe("openai-completions");
     // The prefill vocabulary is the breadth entry's snapshot model list.
     expect(declared[0]!.model_ids).toEqual(
-      [...PROVIDER_CATALOG["subconscious"]!.models].slice(0, 32),
+      [...PROVIDER_CATALOG["subconscious"]!.models].slice(0, MAX_CUSTOM_PROVIDER_MODEL_IDS),
     );
   });
 

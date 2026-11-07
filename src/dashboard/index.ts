@@ -131,7 +131,6 @@ import {
   MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
   MAX_CUSTOM_PROVIDER_COUNT,
   MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
-  MAX_CUSTOM_PROVIDER_MODEL_IDS,
   MAX_MODEL_CHAIN_NAME_LENGTH,
   MAX_MODEL_SELECTOR_LENGTH,
   MAX_KEYS_PER_PROVIDER,
@@ -151,6 +150,7 @@ import {
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
 import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { isFindingSeverity } from "../contracts/finding-severity";
+import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../contracts/provider-models";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../contracts/sandbox-images";
 import { isCommandConfigKey } from "../../packages/shared/src/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
@@ -200,6 +200,7 @@ import {
   readDefaultReviewLevel,
   setWorkspaceCheckMinScore,
   setWorkspaceConcurrency,
+  type DegradedReason,
 } from "./runtime-config-store";
 import {
   CHECK_MIN_SCORE_MAX,
@@ -545,6 +546,34 @@ function floorRepairLink(
         end: t(locale, "manifest.error.floorRepairEnd"),
       }
     : null;
+}
+
+/**
+ * The fail-closed floor read's page, branched on the read's cause. A transient
+ * read failure is fixed by resubmitting, so it names no setting and carries no
+ * repair link. A malformed result has no floor field at all — the database
+ * predates the column — so a settings visit repairs nothing and the copy
+ * names the migration that adds it. An untrusted stored value IS what needs
+ * repair, so it keeps the settings link. Both render sites share this
+ * decision.
+ */
+function workspaceFloorUnreadablePage(
+  locale: Locale,
+  reason: DegradedReason | undefined,
+  target: CreationTarget,
+): string {
+  if (reason === "read-failed") {
+    return manifestErrorPage(t(locale, "manifest.error.workspaceFloorReadFailed"), true, locale);
+  }
+  if (reason === "malformed") {
+    return manifestErrorPage(t(locale, "manifest.error.workspaceFloorMalformed"), true, locale);
+  }
+  return manifestErrorPage(
+    t(locale, "manifest.error.workspaceFloorUnreadable"),
+    true,
+    locale,
+    floorRepairLink(locale, target),
+  );
 }
 
 /**
@@ -1473,15 +1502,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
       return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
     case "workspace_gate_unreadable":
       parkHold();
-      return c.html(
-        manifestErrorPage(
-          t(locale, "manifest.error.workspaceFloorUnreadable"),
-          true,
-          locale,
-          floorRepairLink(locale, target),
-        ),
-        500,
-      );
+      return c.html(workspaceFloorUnreadablePage(locale, outcome.reason, target), 500);
     case "db_rejected":
       parkHold();
       return c.html(manifestErrorPage(t(locale, "manifest.error.dbRejected"), true, locale), 500);
@@ -1560,15 +1581,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
     // Nothing to park: the submitted hold cookie IS this route's hold, so it
     // stays for the repair-then-resubmit retry — same as `db_rejected` below.
     case "workspace_gate_unreadable":
-      return c.html(
-        manifestErrorPage(
-          t(locale, "manifest.error.workspaceFloorUnreadable"),
-          true,
-          locale,
-          floorRepairLink(locale, target),
-        ),
-        500,
-      );
+      return c.html(workspaceFloorUnreadablePage(locale, outcome.reason, target), 500);
     case "db_rejected":
       return c.html(manifestErrorPage(t(locale, "manifest.error.dbRejected"), true, locale), 500);
   }
@@ -1583,7 +1596,7 @@ type ManifestCommitOutcome =
   | { kind: "db_unbound" }
   | { kind: "encrypt_failed" }
   | { kind: "already_connected" }
-  | { kind: "workspace_gate_unreadable" }
+  | { kind: "workspace_gate_unreadable"; reason?: DegradedReason }
   | { kind: "db_rejected" };
 
 /**
@@ -1658,9 +1671,9 @@ async function commitManifestApp(args: {
     // silently WIDEN a floor the tenant may have set higher, so the commit
     // fails closed before anything is written. This is not a database
     // rejection: the hold is kept and the operator retries once the stored
-    // workspace setting is repaired.
+    // workspace setting is repaired. The cause decides which page they get.
     logManifestFailure("commit", "db_error", { error_type: "workspace_gate_unreadable" });
-    return { kind: "workspace_gate_unreadable" };
+    return { kind: "workspace_gate_unreadable", reason: workspaceFloor.reason };
   }
   try {
     const row = await apps.createApp({
@@ -3000,6 +3013,10 @@ const SETTINGS_400_KEYS = {
   githubMetadataRefreshFailed: "settings.error.githubMetadataRefreshFailed",
   /** Workspace review-concurrency cap (iteration spec §2.3). */
   concurrencyInvalid: "settings.error.concurrencyInvalid",
+  /** Per-key usage probe: the declaration points away from the vendor's quota host. */
+  usageProbeOffVendorHost: "settings.error.usageProbeOffVendorHost",
+  /** Per-key usage probe: the declaration yields no readable host. */
+  usageProbeUnreadableEndpoint: "settings.error.usageProbeUnreadableEndpoint",
 } as const satisfies Record<string, DictionaryKey>;
 
 /**
@@ -3680,13 +3697,21 @@ const appKeyUsageRoute = async (c: DashboardContext) => {
       const declaredBaseUrl = await store.getCustomProviderBaseUrl(gate.app.id, provider);
       const declaredHost = declaredBaseUrl === null ? null : endpointHost(declaredBaseUrl);
       if (declaredHost === null || !probeHosts.includes(declaredHost)) {
-        const host = declaredHost ?? declaredBaseUrl ?? "an unreadable endpoint";
+        // No readable host gets its own face: there is no host to name, and the
+        // sentence must not smuggle an English fallback into the zh-CN copy.
+        const key =
+          declaredHost === null
+            ? SETTINGS_400_KEYS.usageProbeUnreadableEndpoint
+            : SETTINGS_400_KEYS.usageProbeOffVendorHost;
+        const params: Record<string, string | number> =
+          declaredHost === null ? { provider } : { provider, host: declaredHost };
         return c.json(
           {
             ok: false,
             reason: "unsupported_provider" as const,
-            message: `The probe targets the vendor's own quota host; this declaration points at ${host}.`,
-            params: { provider, host },
+            key,
+            message: t("en", key, params),
+            params,
           },
           400,
         );

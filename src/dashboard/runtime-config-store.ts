@@ -499,7 +499,26 @@ export async function setWorkspaceConcurrency(
  * 0..100 is untrusted, so the read answers the default with `degraded: true`
  * rather than inventing a floor nobody stored.
  */
-export type CheckMinScoreRead = { minScore: number; degraded: boolean };
+export type CheckMinScoreRead = {
+  minScore: number;
+  degraded: boolean;
+  /** The degradation's cause; absent from a trustworthy read. */
+  reason?: DegradedReason;
+};
+
+/** The untrusted/failed-read answer: the platform default, flagged with its cause. */
+function degradedCheckMinScore(reason: DegradedReason): CheckMinScoreRead {
+  return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: true, reason };
+}
+
+/**
+ * A read that names a missing column or table hit a database whose schema
+ * predates this build (the deploy window before the migration applies), not a
+ * transient failure — the one case the caller's malformed copy exists for.
+ */
+export function isMissingSchemaError(error: unknown): boolean {
+  return /no such (column|table)/i.test(String(error instanceof Error ? error.message : error));
+}
 
 /** The tenant face's read of the workspace's default floor. */
 export async function getWorkspaceCheckMinScore(
@@ -512,13 +531,13 @@ export async function getWorkspaceCheckMinScore(
       .bind(workspaceId)
       .first<RuntimeSettingRow>();
     if (row === null) return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: false };
-    if (row.value === undefined) return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: true };
+    if (row.value === undefined) return degradedCheckMinScore("malformed");
     if (row.value === null) return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: false };
     return isCheckMinScoreValue(row.value)
       ? { minScore: row.value, degraded: false }
-      : { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: true };
-  } catch {
-    return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: true };
+      : degradedCheckMinScore("untrusted");
+  } catch (error) {
+    return degradedCheckMinScore(isMissingSchemaError(error) ? "malformed" : "read-failed");
   }
 }
 
