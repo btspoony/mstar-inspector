@@ -357,6 +357,47 @@ function handoffFaultStore(db: TestD1, failAt: 1 | 2) {
   };
 }
 
+/**
+ * The REAL store with ONE journal hand-off write replaced — a refusal
+ * (`changes: 0`, nothing written) or a fault — chosen by CALL ORDINAL after
+ * arming: the publication link is call 1, the claim release call 2. Arming is
+ * driven by the consumer's own "publication journal hit" line (`arm` below),
+ * the documented last moment before the link, so no read can consume an
+ * ordinal and no SQL text is matched.
+ */
+function journalHandoffFault(db: TestD1, at: 1 | 2, kind: "refused" | "throw") {
+  const state = { armed: false, calls: 0 };
+  const faulty = {
+    prepare: (sql: string) => {
+      if (!state.armed) return db.prepare(sql);
+      state.calls += 1;
+      if (state.calls !== at) return db.prepare(sql);
+      if (kind === "throw") throw new Error(`journal hand-off store call ${at} unavailable`);
+      return { bind: () => ({ run: async () => ({ meta: { changes: 0 } }) }) };
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+  } as unknown as TestD1;
+  return {
+    db: faulty,
+    /** Arm the fault for the next hand-off. */
+    arm: () => {
+      state.armed = true;
+      state.calls = 0;
+    },
+  };
+}
+
+/** The consumer log, with `arm` run at the journal hand-off seam it documents. */
+function logArmingOnJournalHandoff(arm: () => void) {
+  return {
+    ...testLog,
+    info: (...args: Parameters<typeof testLog.info>) => {
+      if (String(args[1] ?? "").includes("publication journal hit")) arm();
+      return testLog.info(...args);
+    },
+  };
+}
+
 /** Seed a publication-journal row for the delivered head (the hand-off probe). */
 function seedJournalRow(db: TestD1, headSha: string, phase = "prepared", payloadJson = "{}"): void {
   db.raw
@@ -3317,8 +3358,14 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     const rows = failureRows(db);
     expect(rows).toHaveLength(2);
     expect(rows.map((row) => row.stage)).toEqual(["rate-limit", "rate-limit"]);
-    expect(String(rows[0]!.error)).toStartWith(`${GITHUB_PRIMARY_RATE_LIMIT_PREFIX}2 `);
-    expect(String(rows[1]!.error)).toStartWith(`${GITHUB_RATE_LIMIT_PREFIX}1 `);
+    // Two independent rows, one per kind: looked up by prefix rather than by
+    // list position, which the insert order does not promise.
+    const primary = rows.filter((row) => String(row.error).startsWith(GITHUB_PRIMARY_RATE_LIMIT_PREFIX));
+    const secondary = rows.filter((row) => String(row.error).startsWith(GITHUB_RATE_LIMIT_PREFIX));
+    expect(primary).toHaveLength(1);
+    expect(secondary).toHaveLength(1);
+    expect(String(primary[0]!.error)).toStartWith(`${GITHUB_PRIMARY_RATE_LIMIT_PREFIX}2 `);
+    expect(String(secondary[0]!.error)).toStartWith(`${GITHUB_RATE_LIMIT_PREFIX}1 `);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
     expect(messageRetryCalls).toHaveLength(0);
@@ -6806,6 +6853,137 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(closed.desired).toBe("failure");
     expect(closed.terminal_ms).not.toBeNull();
     expect(closed.publication_id).toBe("journal-prepared");
+  });
+
+  // §7.7 step 2's journal hand-off is TWO independent fenced writes (link,
+  // release) inside one try. Each can refuse on its own: the claim runs 900 s
+  // while the steps before the hand-off are network calls with no enforced
+  // clock. A refusal writes nothing, so the row keeps the owner it had and the
+  // deadline path concludes it; a store fault is a warn too, because a Check
+  // fault never blocks the review's ack.
+  test("check lifecycle: a journal hand-off whose lease is no longer ours refuses both writes and keeps the row's owner", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    seedJournalRow(db, SHA, "prepared");
+    const real = lifecycleFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        // The row is claimed for real, but the handle carries a bumped epoch:
+        // the stored fence no longer recognises it, which is exactly the stale
+        // lease both writes answer with `false`.
+        begin: async (input) => {
+          const handle = await real.begin(input);
+          return handle === null ? null : { ...handle, lease: { ...handle.lease, epoch: handle.lease.epoch + 1 } };
+        },
+        terminalize: (input) => real.terminalize(input),
+        abandonTerminalize: (input) => real.abandonTerminalize(input),
+      },
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    const notOwned = logLines.filter((line) => line.fields.event === "check_abandon_not_owned");
+    // Two refusals, two messages: each write names itself, and neither is a
+    // fault. This exit (a lost lease) refuses BOTH writes by construction.
+    expect(notOwned).toHaveLength(2);
+    expect(notOwned.some((line) => line.msg.includes("publication link refused"))).toBe(true);
+    expect(notOwned.some((line) => line.msg.includes("claim release refused"))).toBe(true);
+    expect(logLines.filter((line) => line.fields.event === "check_abandon_failed")).toHaveLength(0);
+
+    // Nothing was written: the row keeps its owner, its publication link stays
+    // empty, and the deadline path still owns the conclusion.
+    const row = checkRowFor(db, SHA);
+    expect(row.holder).not.toBeNull();
+    expect(row.lease_until_ms).not.toBeNull();
+    expect(row.publication_id).toBeNull();
+    expect(row.desired).toBe("in_progress");
+    expect(row.terminal_ms).toBeNull();
+
+    // The review ACK is unchanged by the Check refusal.
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+  });
+
+  test("check lifecycle: a refused claim release after a linked publication keeps the row's owner and the link", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    seedJournalRow(db, SHA, "prepared");
+    const real = lifecycleFor(db);
+    // Write 2 (the release) answers `false` without touching the store; the
+    // link is the real write.
+    const fault = journalHandoffFault(db, 2, "refused");
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: fault.db as never }),
+      logArmingOnJournalHandoff(fault.arm),
+      {
+        ...testOverrides,
+        checks: {
+          begin: (input) => real.begin(input),
+          terminalize: (input) => real.terminalize(input),
+          abandonTerminalize: (input) => real.abandonTerminalize(input),
+        },
+      },
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    // Exactly one benign no-op, named after the RELEASE — not the link, and not
+    // a fault.
+    const notOwned = logLines.filter((line) => line.fields.event === "check_abandon_not_owned");
+    expect(notOwned).toHaveLength(1);
+    expect(notOwned[0]!.msg).toContain("claim release refused");
+    expect(logLines.filter((line) => line.fields.event === "check_abandon_failed")).toHaveLength(0);
+
+    const row = checkRowFor(db, SHA);
+    expect(row.publication_id).toBe("journal-prepared");
+    expect(row.holder).not.toBeNull();
+    expect(row.lease_until_ms).not.toBeNull();
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+  });
+
+  test("check lifecycle: a store fault during the journal hand-off is classified as a hand-off failure", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    seedJournalRow(db, SHA, "prepared");
+    const real = lifecycleFor(db);
+    const fault = journalHandoffFault(db, 1, "throw");
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: fault.db as never }),
+      logArmingOnJournalHandoff(fault.arm),
+      {
+        ...testOverrides,
+        checks: {
+          begin: (input) => real.begin(input),
+          terminalize: (input) => real.terminalize(input),
+          abandonTerminalize: (input) => real.abandonTerminalize(input),
+        },
+      },
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    // A THROW is a fault, not a refusal: one `_failed` line carrying the store
+    // detail, and nothing written.
+    const failed = logLines.filter((line) => line.fields.event === "check_abandon_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.msg).toContain("journal hand-off store call 1 unavailable");
+    expect(logLines.filter((line) => line.fields.event === "check_abandon_not_owned")).toHaveLength(0);
+
+    const row = checkRowFor(db, SHA);
+    expect(row.holder).not.toBeNull();
+    expect(row.lease_until_ms).not.toBeNull();
+    expect(row.publication_id).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    // The review ACK is unchanged: a Check fault never schedules a retry.
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
   });
 
   test("check lifecycle: abandonTerminalize releases once, and writes nothing after recovery claims the attempt", async () => {

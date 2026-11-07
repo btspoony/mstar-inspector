@@ -13,7 +13,26 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { classifyGithubRateLimit } from "../../src/contracts/failure-stages";
+import {
+  GITHUB_PRIMARY_RATE_LIMIT_PREFIX,
+  GITHUB_RATE_LIMIT_PREFIX,
+  classifyGithubRateLimit,
+} from "../../src/contracts/failure-stages";
+
+describe("rate-limit error prefixes", () => {
+  // The two prefixes are the durable `review_failures.error` vocabulary the
+  // store counts by; a rename is a data-compat break, so the literals are
+  // pinned here (the dashboard and the 24 h counts read them, not the source).
+  test("each prefix equals its documented literal", () => {
+    expect(GITHUB_RATE_LIMIT_PREFIX).toBe("github-secondary-rate-limit: ");
+    expect(GITHUB_PRIMARY_RATE_LIMIT_PREFIX).toBe("github-primary-rate-limit: ");
+  });
+
+  test("neither prefix is a prefix of the other", () => {
+    expect(GITHUB_PRIMARY_RATE_LIMIT_PREFIX.startsWith(GITHUB_RATE_LIMIT_PREFIX)).toBe(false);
+    expect(GITHUB_RATE_LIMIT_PREFIX.startsWith(GITHUB_PRIMARY_RATE_LIMIT_PREFIX)).toBe(false);
+  });
+});
 
 describe("classifyGithubRateLimit", () => {
   test("429 is a primary limit", () => {
@@ -38,14 +57,30 @@ describe("classifyGithubRateLimit", () => {
     ).toBe("secondary");
   });
 
-  test("403 with x-ratelimit-remaining: 0 is a secondary limit", () => {
+  test("403 with x-ratelimit-remaining: 0 is a PRIMARY limit", () => {
+    // GitHub answers 403 for primary exhaustion too; the exhausted budget is
+    // the primary signal, while retry-after / the message name the secondary.
     expect(
       classifyGithubRateLimit({
         status: 403,
-        message: "Forbidden",
+        message: "API rate limit exceeded for installation",
         response: { headers: { "x-ratelimit-remaining": "0" } },
       }),
+    ).toBe("primary");
+  });
+
+  test("the secondary signals win over an exhausted budget on the same 403", () => {
+    expect(
+      classifyGithubRateLimit({
+        status: 403,
+        message: "You have exceeded a SECONDARY rate limit.",
+        response: { headers: { "retry-after": "60", "x-ratelimit-remaining": "0" } },
+      }),
     ).toBe("secondary");
+  });
+
+  test("a plain 403 with no limit header is unclassified", () => {
+    expect(classifyGithubRateLimit({ status: 403, message: "Forbidden" })).toBeNull();
   });
 
   test("403 whose message names a secondary rate limit is a secondary limit", () => {

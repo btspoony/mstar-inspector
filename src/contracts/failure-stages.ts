@@ -73,10 +73,12 @@ function headerValue(headers: unknown, name: string): string | null {
  * plain object, a `Headers` instance and any non-request value all answer
  * without throwing.
  *
- * `429` is the primary limit. A `403` is the secondary limit only when GitHub
- * says so — a `retry-after` header, `x-ratelimit-remaining: 0`, or a message
- * naming the secondary limit; a bare `403` is an ordinary permission/not-found
- * rejection and stays unclassified (`null`).
+ * `429` is the primary limit. GitHub answers `403` for BOTH limits, so a
+ * `403` is secondary only when GitHub's secondary signals are present — a
+ * `retry-after` header, or a message naming the secondary limit. A `403`
+ * whose `x-ratelimit-remaining` is `0` is primary exhaustion (the budget is
+ * gone, and none of the secondary signals appeared); a bare `403` is an
+ * ordinary permission/not-found rejection and stays unclassified (`null`).
  */
 export function classifyGithubRateLimit(err: unknown): "primary" | "secondary" | null {
   if (typeof err !== "object" || err === null) return null;
@@ -86,12 +88,10 @@ export function classifyGithubRateLimit(err: unknown): "primary" | "secondary" |
   const response = "response" in err ? err.response : undefined;
   const headers = typeof response === "object" && response !== null && "headers" in response ? response.headers : undefined;
   const message = "message" in err ? err.message : undefined;
-  if (
-    headerValue(headers, "retry-after") !== null ||
-    headerValue(headers, "x-ratelimit-remaining") === "0" ||
-    (typeof message === "string" && /secondary rate limit/i.test(message))
-  ) {
-    return "secondary";
-  }
+  // The secondary signals are checked FIRST: they win over an exhausted
+  // budget, which GitHub also reports on a throttled secondary 403.
+  if (headerValue(headers, "retry-after") !== null) return "secondary";
+  if (typeof message === "string" && /secondary rate limit/i.test(message)) return "secondary";
+  if (headerValue(headers, "x-ratelimit-remaining") === "0") return "primary";
   return null;
 }
