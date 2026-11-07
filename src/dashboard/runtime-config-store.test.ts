@@ -1016,7 +1016,7 @@ describe("workspace check_min_score default", () => {
     });
   });
 
-  test("a read failing on a missing column degrades as malformed, not read-failed", async () => {
+  test("a read failing on the floor column degrades as malformed, not read-failed", async () => {
     // Before 0049 applies, the SELECT itself throws. That is the pre-migration
     // state the malformed copy names; answering `read-failed` there would make
     // the copy unreachable in its only scenario.
@@ -1028,13 +1028,16 @@ describe("workspace check_min_score default", () => {
     });
   });
 
-  test("a read failing on a missing table degrades as malformed too", async () => {
-    const db = failingDbWith(new Error("no such table: workspaces"));
-    expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({
-      minScore: 60,
-      degraded: true,
-      reason: "malformed",
-    });
+  test("a read failing on any other missing column or table stays read-failed", async () => {
+    // Neither gap is the 0049 window, so the migration copy would send the
+    // operator to a repair that does not apply.
+    for (const message of ["D1_ERROR: no such column: deleted_at", "no such table: workspaces"]) {
+      expect(await getWorkspaceCheckMinScore(failingDbWith(new Error(message)), WS)).toEqual({
+        minScore: 60,
+        degraded: true,
+        reason: "read-failed",
+      });
+    }
   });
 
   test("a generic read failure stays read-failed", async () =>
