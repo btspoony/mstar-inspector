@@ -571,6 +571,8 @@ export const zhCN: Dictionary = {
       concurrencyInvalid: "并发数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
       usageProbeOffVendorHost:
         "{provider} 的用量探测只会访问提供方自己的配额主机；此声明指向 {host}。",
+      usageProbeUnreadableEndpoint:
+        "{provider} 的用量探测只会访问提供方自己的配额主机；此声明指向的端点无法识别。",
     },
     ops: "运维",
     opsCopy: "以下操作改变此 App 如何应答传入的投递。",

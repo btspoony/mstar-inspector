@@ -671,6 +671,9 @@ export const en = {
       /** Usage probe's off-vendor refusal: the declaration's host is not one the probe calls. */
       usageProbeOffVendorHost:
         "The usage probe for {provider} only calls the vendor's own quota host; this declaration points at {host}.",
+      /** Same refusal when the declaration yields no readable host at all. */
+      usageProbeUnreadableEndpoint:
+        "The usage probe for {provider} only calls the vendor's own quota host; this declaration points at an endpoint that cannot be read.",
     },
     ops: "Operations",
     opsCopy: "These actions change how this App answers incoming deliveries.",

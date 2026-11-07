@@ -3008,6 +3008,8 @@ const SETTINGS_400_KEYS = {
   concurrencyInvalid: "settings.error.concurrencyInvalid",
   /** Per-key usage probe: the declaration points away from the vendor's quota host. */
   usageProbeOffVendorHost: "settings.error.usageProbeOffVendorHost",
+  /** Per-key usage probe: the declaration yields no readable host. */
+  usageProbeUnreadableEndpoint: "settings.error.usageProbeUnreadableEndpoint",
 } as const satisfies Record<string, DictionaryKey>;
 
 /**
@@ -3688,9 +3690,14 @@ const appKeyUsageRoute = async (c: DashboardContext) => {
       const declaredBaseUrl = await store.getCustomProviderBaseUrl(gate.app.id, provider);
       const declaredHost = declaredBaseUrl === null ? null : endpointHost(declaredBaseUrl);
       if (declaredHost === null || !probeHosts.includes(declaredHost)) {
-        const host = declaredHost ?? declaredBaseUrl ?? "an unreadable endpoint";
-        const params = { provider, host };
-        const key = SETTINGS_400_KEYS.usageProbeOffVendorHost;
+        // No readable host gets its own face: there is no host to name, and the
+        // sentence must not smuggle an English fallback into the zh-CN copy.
+        const key =
+          declaredHost === null
+            ? SETTINGS_400_KEYS.usageProbeUnreadableEndpoint
+            : SETTINGS_400_KEYS.usageProbeOffVendorHost;
+        const params: Record<string, string | number> =
+          declaredHost === null ? { provider } : { provider, host: declaredHost };
         return c.json(
           {
             ok: false,

@@ -37,16 +37,29 @@ type UsagePhase = "loading" | "ready" | "failed";
 /** A 400's keyed face: the dictionary key plus the server's interpolation params. */
 type Refusal = { key: DictionaryKey; params?: Record<string, string | number> };
 
-/** Resolve a 400 body's keyed face; an unkeyed or non-JSON body keeps the generic notice. */
+/** A value `t()` can interpolate; anything else would render `[object Object]` or leave `{name}` bare. */
+function isParamValue(value: unknown): value is string | number {
+  return typeof value === "string" || typeof value === "number";
+}
+
+/**
+ * Resolve a 400 body's keyed face; an unkeyed, non-JSON, or malformed-params
+ * body keeps the generic notice rather than a half-filled refusal.
+ */
 function refusalOf(body: string): Refusal | null {
   try {
     const parsed = JSON.parse(body) as { key?: unknown; params?: unknown };
     if (typeof parsed.key !== "string" || !isDictionaryKey(parsed.key)) return null;
-    const params =
-      typeof parsed.params === "object" && parsed.params !== null
-        ? (parsed.params as Record<string, string | number>)
-        : undefined;
-    return { key: parsed.key, params };
+    if (parsed.params === undefined) return { key: parsed.key };
+    if (
+      typeof parsed.params !== "object" ||
+      parsed.params === null ||
+      Array.isArray(parsed.params) ||
+      !Object.values(parsed.params).every(isParamValue)
+    ) {
+      return null;
+    }
+    return { key: parsed.key, params: parsed.params as Record<string, string | number> };
   } catch {
     return null;
   }

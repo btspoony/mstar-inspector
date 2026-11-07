@@ -615,6 +615,27 @@ describe("UsagePanel — inline probe under the owning row", () => {
     }
   });
 
+  test("a keyed 400 with malformed params falls back to the generic error face", async () => {
+    queue.push(() => new Response(JSON.stringify({
+      ok: false,
+      reason: "unsupported_provider",
+      key: "settings.error.usageProbeOffVendorHost",
+      message: "server face is never rendered",
+      params: { provider: { name: "nested" }, host: "proxy.example" },
+    }), { status: 400 }));
+    const view = await mount(probedPayload());
+    try {
+      await view.click(view.usageButton());
+      await view.flush();
+      const text = view.panel()?.textContent ?? "";
+      expect(text).toBe(t(locale, "settings.providers.usage.error"));
+      expect(text).not.toContain("[object Object]");
+      expect(text).not.toContain("{provider}");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   test("a snapshot reporting only session fills the row instead of a third of it", async () => {
     queue.push(() => new Response(snapshotBody({
       limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" }],
