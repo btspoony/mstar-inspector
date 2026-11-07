@@ -3,9 +3,9 @@
  * exposes (the `update-provider-models` settings op). The stored declaration
  * is the seed — a stored id the catalog no longer lists stays listed and
  * checked, never silently dropped. At least one id must stay selected, and
- * the 32-id cap (MAX_CUSTOM_PROVIDER_MODEL_IDS) is enforced client-side: an
- * unchecked box is unavailable at the cap, and the server still refuses an
- * over-limit write.
+ * the model-id cap (MAX_CUSTOM_PROVIDER_MODEL_IDS, src/contracts/provider-models.ts)
+ * is enforced client-side: an unchecked box is unavailable at the cap, and the
+ * server still refuses an over-limit write.
  *
  * Busy state, the disabled save and the failure contract are this dialog's —
  * `StepDialog` owns only the shell. Like the add-key flow, a failed submit
@@ -14,13 +14,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Button, Input } from "@design-system";
 import { t } from "../../i18n";
+import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../contracts/provider-models";
 import type { SpaBoot } from "../boot";
 import { StepDialog } from "../components/StepDialog";
 import { NoticeRegion, type OpNotice } from "./PageNotice";
-
-/** The store's per-declaration ceiling (MAX_CUSTOM_PROVIDER_MODEL_IDS in
- *  src/dashboard/app-config-store.ts); the server refuses anything above it. */
-export const MAX_PROVIDER_MODEL_IDS = 128;
 
 export function ProviderModelsDialog({
   locale,
@@ -77,7 +74,7 @@ export function ProviderModelsDialog({
 
   const needle = query.trim().toLowerCase();
   const filtered = needle === "" ? allIds : allIds.filter((id) => id.toLowerCase().includes(needle));
-  const atCap = selected.size >= MAX_PROVIDER_MODEL_IDS;
+  const atCap = selected.size >= MAX_CUSTOM_PROVIDER_MODEL_IDS;
   // Select-all acts on the rendered list, so it has nothing to do once every
   // visible id is checked — the cap alone never disables it.
   const allFilteredSelected = filtered.every((id) => selected.has(id));
@@ -87,7 +84,7 @@ export function ProviderModelsDialog({
       const next = new Set(current);
       if (next.has(id)) {
         next.delete(id);
-      } else if (next.size < MAX_PROVIDER_MODEL_IDS) {
+      } else if (next.size < MAX_CUSTOM_PROVIDER_MODEL_IDS) {
         next.add(id);
       }
       return next;
@@ -98,7 +95,7 @@ export function ProviderModelsDialog({
     setSelected((current) => {
       const next = new Set(current);
       for (const id of filtered) {
-        if (next.size >= MAX_PROVIDER_MODEL_IDS) break;
+        if (next.size >= MAX_CUSTOM_PROVIDER_MODEL_IDS) break;
         next.add(id);
       }
       return next;
@@ -140,7 +137,7 @@ export function ProviderModelsDialog({
       title={t(locale, "settings.providers.models.title", { label })}
       description={t(locale, "settings.providers.models.counter", {
         selected: selected.size,
-        max: MAX_PROVIDER_MODEL_IDS,
+        max: MAX_CUSTOM_PROVIDER_MODEL_IDS,
       })}
       footer={
         <>
@@ -170,7 +167,7 @@ export function ProviderModelsDialog({
         <NoticeRegion notice={notice} />
         {atCap ? (
           <p className="text-sm text-muted-foreground">
-            {t(locale, "settings.providers.models.capReached", { max: MAX_PROVIDER_MODEL_IDS })}
+            {t(locale, "settings.providers.models.capReached", { max: MAX_CUSTOM_PROVIDER_MODEL_IDS })}
           </p>
         ) : null}
         <Input

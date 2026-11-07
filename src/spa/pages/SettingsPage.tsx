@@ -1668,7 +1668,10 @@ function NumberSettingCard({
             // number is a fallback the tenant never chose. The field starts
             // empty and never shows that fallback; a typed value OR the re-read
             // repairs the state.
-            <PageNotice kind="warn" message={t(locale, copy.unreadable, { max: loaded.max })} />
+            <PageNotice
+              kind="warn"
+              message={t(locale, copy.unreadable, { min: loaded.min, max: loaded.max })}
+            />
           ) : null}
           {/* The range line sits outside the row: inside the stack, `items-end`
               would align the button to the hint instead of the input. */}
@@ -1700,7 +1703,7 @@ function NumberSettingCard({
               ) : null}
             </form>
             <span className="text-xs text-muted-foreground">
-              {t(locale, copy.range, { max: loaded.max })}
+              {t(locale, copy.range, { min: loaded.min, max: loaded.max })}
             </span>
           </div>
         </div>

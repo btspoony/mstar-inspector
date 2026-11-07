@@ -22,7 +22,9 @@ import {
   WORKSPACE_CONCURRENCY_MAX,
   getEffectiveConcurrency,
 } from "../../src/dashboard/runtime-config-store";
+import { GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
 import { selectAssessmentTargets } from "../../src/store/finding-lifecycle";
+import { createFailureStore } from "../../src/store/failure-store";
 import { COMMENT_CLAIM_OUTBOX_SQL } from "../../src/worker/sweep";
 import type { TestD1 } from "./helpers";
 import type { D1Like } from "../../src/store/types";
@@ -2423,5 +2425,128 @@ describe("migrations/0050_reviews_round.sql", () => {
 
     // ALTER TABLE must preserve the row.
     expect(db.raw.query("SELECT id FROM reviews").all()).toEqual([{ id: "r-1" }]);
+  });
+});
+
+/**
+
+ * Ordinal hygiene. This table IS the keep-and-order decision — not a
+ * convenience list: applied state is not determinable from the repo, so the
+ * four pairs were kept, nothing was renamed, and their apply order is the
+ * filename byte order the total comparator in `./helpers` produces.
+ *
+ * | Ordinal | Files, in apply order                                                      |
+ * |---------|-----------------------------------------------------------------------------|
+ * | `0043`  | `0043_webhook_delivery_repository.sql` → `0043_workspace_concurrency_bound.sql` |
+ * | `0047`  | `0047_review_level_per_app.sql` → `0047_thread_pr_scope.sql`                |
+ * | `0048`  | `0048_comment_trigger_claims.sql` → `0048_review_failures_pipeline_window.sql` |
+ * | `0049`  | `0049_reviews_duration_ms.sql` → `0049_workspace_check_min_score.sql`       |
+ *
+ * When a pair stops colliding, delete its entry — the tests below fail until
+ * you do.
+ */
+const KEPT_DUPLICATE_ORDINALS: ReadonlyMap<number, readonly string[]> = new Map([
+  [43, ["0043_webhook_delivery_repository.sql", "0043_workspace_concurrency_bound.sql"]],
+  [47, ["0047_review_level_per_app.sql", "0047_thread_pr_scope.sql"]],
+  [48, ["0048_comment_trigger_claims.sql", "0048_review_failures_pipeline_window.sql"]],
+  [49, ["0049_reviews_duration_ms.sql", "0049_workspace_check_min_score.sql"]],
+]);
+
+/** Group migration filenames by numeric prefix; a group of 2+ is a repeated ordinal. */
+function groupByOrdinal(names: readonly string[]): Map<number, string[]> {
+  const groups = new Map<number, string[]>();
+  for (const name of names) {
+    const ordinal = migrationNumber(name);
+    groups.set(ordinal, [...(groups.get(ordinal) ?? []), name]);
+  }
+  return groups;
+}
+
+/**
+ * Throw for any repeated ordinal the table does not record, or whose file set
+ * differs from the recorded pair (a third file for `0043` is undocumented too).
+ */
+function assertOnlyRecordedDuplicates(names: readonly string[]): void {
+  for (const [ordinal, files] of groupByOrdinal(names)) {
+    if (files.length < 2) continue;
+    const recorded = KEPT_DUPLICATE_ORDINALS.get(ordinal);
+    if (recorded === undefined || files.length !== recorded.length || files.some((f, i) => f !== recorded[i])) {
+      throw new Error(
+        `migrations/ ordinal ${String(ordinal).padStart(4, "0")} repeats as [${files.join(", ")}], ` +
+          `which is not the recorded pair [${recorded?.join(", ") ?? "none"}]`,
+      );
+    }
+  }
+}
+
+describe("migrations/ ordinals", () => {
+  /** Readdir order is a filesystem detail; byte order is what the decision states. */
+  const names = readdirSync(MIGRATIONS_DIR)
+    .filter((name) => name.endsWith(".sql"))
+    .sort();
+
+  test("only the four recorded ordinals repeat, each as its recorded pair", () => {
+    assertOnlyRecordedDuplicates(names);
+  });
+
+  test("each recorded pair is present exactly and applies in the recorded filename order", () => {
+    for (const [ordinal, recorded] of KEPT_DUPLICATE_ORDINALS) {
+      expect(names.filter((name) => migrationNumber(name) === ordinal)).toEqual([...recorded]);
+      expect(migrationsAfter(ordinal - 1).filter((name) => migrationNumber(name) === ordinal)).toEqual([...recorded]);
+    }
+  });
+
+  test("a second file for an unrecorded ordinal — a hypothetical fifth duplicate — fails the guard", () => {
+    expect(() => assertOnlyRecordedDuplicates([...names, "0050_reviews_round_second.sql"])).toThrow(
+      /ordinal 0050 repeats as \[0050_reviews_round\.sql, 0050_reviews_round_second\.sql\]/,
+    );
+    expect(() => assertOnlyRecordedDuplicates([...names, "0043_third_claim.sql"])).toThrow(/ordinal 0043/);
+  });
+});
+
+/**
+ * migration 0051 — the trailing-24h secondary-rate-limit count's index.
+ *
+ * The read (`countGithubRateLimited24h`) states a `created_at` window and an
+ * `error` prefix test, and no stage predicate — so 0048's partial index cannot
+ * serve it, and the 0010 `created_at` index still forces a table read per row
+ * of the window to evaluate the LIKE. The index must seek the window and carry
+ * `error`, and the statement the store prepares must seek it.
+ */
+describe("migrations/0051_review_failures_rate_limit_window.sql", () => {
+  test("seeks the window on created_at with error covered; the count's own statement uses it", async () => {
+    const db = createMigratedTestD1();
+    const indexColumns = (
+      db.raw.query("PRAGMA index_info(idx_review_failures_rate_limited_created)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    expect(indexColumns).toEqual(["created_at", "error"]);
+    const indexSql = (
+      db.raw
+        .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_failures_rate_limited_created'")
+        .get() as { sql: string } | null
+    )?.sql;
+    // Not partial: the read states no stage, and its LIKE prefix arrives as a
+    // bound value, which no index predicate could be matched against.
+    expect(indexSql).not.toContain("WHERE");
+
+    // The statement the REAL store prepares — never a hand-written twin.
+    const prepared: string[] = [];
+    const recording: D1Like = {
+      prepare(sql: string) {
+        prepared.push(sql);
+        return db.prepare(sql);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    await createFailureStore(recording).countGithubRateLimited24h();
+
+    const countSql = prepared.find((sql) => sql.includes("COUNT(*)"))!;
+    const plan = (
+      db.raw.query(`EXPLAIN QUERY PLAN ${countSql}`).all(`${GITHUB_RATE_LIMIT_PREFIX}%`) as Array<{ detail: string }>
+    ).map((row) => row.detail);
+    console.log("EXPLAIN QUERY PLAN (24h secondary-limit count):", plan.join("\n"));
+    expect(plan.join("\n")).toContain(
+      "SEARCH review_failures USING COVERING INDEX idx_review_failures_rate_limited_created (created_at>?)",
+    );
   });
 });

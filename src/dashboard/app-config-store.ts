@@ -164,6 +164,7 @@ import { createAppsStore } from "./apps-store";
 import { sandboxImageHostIds } from "../contracts/sandbox-images";
 import { builtinProbeCanRejectKey, customProbeCanRejectKey } from "./provider-verify";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-catalog.generated";
+import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../contracts/provider-models";
 
 /**
  * The store-enforced `verified_status` vocabulary (migration 0015; no CHECK
@@ -509,14 +510,13 @@ const keyIdEncoder = new TextEncoder();
  * Custom-provider declaration bounds (AL-23-2 verdict): provider id
  * `[a-z0-9][a-z0-9-]{0,63}` (the credential-payload pool key the consumer
  * emits),
- * baseUrl https-only ≤2048, model_ids 1..128 entries × ≤128 characters
- * (AL-23-1).
+ * baseUrl https-only ≤2048, model_ids 1..MAX_CUSTOM_PROVIDER_MODEL_IDS
+ * entries × ≤128 characters (AL-23-1).
  * The route answers 400 first; the store re-validates as the backstop for
  * direct callers (the ProviderKeyTooLongError pattern).
  */
 export const CUSTOM_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH = 2048;
-export const MAX_CUSTOM_PROVIDER_MODEL_IDS = 128;
 export const MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH = 128;
 /**
  * Declarations per App bound (QC wave-1 W-2): the last AL-23-2 input

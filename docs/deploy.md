@@ -2341,7 +2341,7 @@ Contract:
 ### Review depth (per App, with an operator default)
 
 Each App chooses how thoroughly its reviews run — `github_apps.review_level`
-(migration `0047`), set on the App's dashboard Settings page:
+(migration `0047_review_level_per_app.sql`), set on the App's dashboard Settings page:
 
 | Stored | Tenant label | What the consumer runs |
 |---|---|---|
@@ -2380,9 +2380,10 @@ tab (the owners arrive through that App's installations, so the control sits
 next to them). `0045` is additive: four `ADD COLUMN`s whose NOT NULL columns
 carry defaults — an existing row materializes the allowlist off, the gate at
 80 points on the verdict `ship it` — plus the new table, so the apply needs no
-backfill and no settings visit. Migration `0049` adds a nullable workspace
-default floor (`workspaces.check_min_score`); Apps connected afterwards start
-at it (platform default 60) and existing Apps keep their stored floor.
+backfill and no settings visit. Migration `0049_workspace_check_min_score.sql`
+adds a nullable workspace default floor (`workspaces.check_min_score`); Apps
+connected afterwards start at it (platform default 60) and existing Apps keep
+their stored floor.
 
 - **Off by default: no owner is filtered.** Every owner is reviewed as before.
   What the switch does not govern is the read itself: admission reads the
@@ -2583,15 +2584,16 @@ behave.
   the current system quota. Lowering the quota below an existing workspace
   value needs no workspace write — `min` applies the system value from the next
   message on, and the tenant's card keeps showing its own stored value.
-- Migration `0043` rewrites every stored workspace value above `32` (legal
-  under the previous `1..64` range) down to `32` when it applies. This is a
-  one-time, customer-visible lowering of an existing setting, performed at
-  deploy time; the tenant's card shows the clamped value afterwards. The
-  migration records each previous value in `workspace_concurrency_clamp_0043`
-  (one row per affected workspace) — that table is the per-row answer. For the
-  pre-apply evidence, run this BEFORE the deploy and keep the output with the
-  deploy evidence; restoring the whole database follows § Rollback
-  (production), which is an accepted limitation on its own:
+- Migration `0043_workspace_concurrency_bound.sql` rewrites every stored
+  workspace value above `32` (legal under the previous `1..64` range) down to
+  `32` when it applies. This is a one-time, customer-visible lowering of an
+  existing setting, performed at deploy time; the tenant's card shows the
+  clamped value afterwards. The migration records each previous value in
+  `workspace_concurrency_clamp_0043` (one row per affected workspace) — that
+  table is the per-row answer. For the pre-apply evidence, run this BEFORE
+  the deploy and keep the output with the deploy evidence; restoring the
+  whole database follows § Rollback (production), which is an accepted
+  limitation on its own:
 
   ```sql
   SELECT id, max_concurrent_reviews FROM workspaces
@@ -2600,11 +2602,11 @@ behave.
 
   Deploy-window caveat: migrations apply BEFORE the Worker cutover, so the
   previously deployed API can still accept one more `33..64` value in that
-  window. Such a row is NOT in the record table, and 0043 never runs again;
-  the reader clamps it to `32` (so the workspace keeps a real cap) and the
-  stored column matches the card again after the owner's next save. Seeing a
-  `>32` row after the deploy is therefore expected self-healing state, not a
-  failed migration.
+  window. Such a row is NOT in the record table, and
+  `0043_workspace_concurrency_bound.sql` never runs again; the reader clamps it
+  to `32` (so the workspace keeps a real cap) and the stored column matches the
+  card again after the owner's next save. Seeing a `>32` row after the deploy is
+  therefore expected self-healing state, not a failed migration.
 - Every accepted write lands with its `platform_audit_events` row (actor
   included) in one D1 batch; a refused write changes no row and audits
   nothing.

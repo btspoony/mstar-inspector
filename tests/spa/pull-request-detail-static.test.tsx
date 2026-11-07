@@ -13,7 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { t, type DictionaryKey } from "../../src/i18n";
+import { t, type DictionaryKey, type Locale } from "../../src/i18n";
 import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   appPullRequestDetailUrl,
@@ -39,6 +39,7 @@ import {
   DETAIL,
   FAILURES,
   FINDINGS,
+  MUST_FIX,
   RECORDS,
   REVIEWS,
   ROW_HEAD,
@@ -48,10 +49,10 @@ import {
   type RecordPages,
 } from "./pull-request-fixtures";
 
-const render = (detail: PullRequestDetail, records = recordsOf()) =>
+const render = (detail: PullRequestDetail, records = recordsOf(), locale: Locale = "en") =>
   renderToStaticMarkup(
     createElement(PullRequestDetailView, {
-      locale: "en",
+      locale,
       detail,
       records,
       onEnsureSection: () => {},
@@ -203,6 +204,18 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(defaultFamily({ findings: 0, reviews: 2, failures: 1, must_fix: 0 })).toBe("failures");
     expect(defaultFamily({ findings: 0, reviews: 0, failures: 0, must_fix: 0 })).toBe("reviews");
     expect(defaultFamily({ findings: 0, reviews: 2, failures: 0, must_fix: 0 })).toBe("reviews");
+  });
+
+  test("a scene reads its findings count and tally from one page, and a windowed page must state the tally", () => {
+    // The whole family: both the count and the default tally read the same
+    // page, so a page with no must-fix row claims none.
+    const mayFixOnly = scene({ findings: page(FINDINGS.filter((finding) => finding.severity !== "must-fix")) });
+    expect(mayFixOnly.detail.counts).toMatchObject({ findings: 2, must_fix: 0 });
+    // A window is not the family: its total is the family's size while its rows
+    // are one page's, so there is no tally to default and the scene throws.
+    expect(() => scene({ findings: page(FINDINGS.slice(0, 2), 25) })).toThrow(/mustFix/);
+    const stated = scene({ findings: page(FINDINGS.slice(0, 2), 25) }, {}, DETAIL.latest_review, MUST_FIX);
+    expect(stated.detail.counts).toMatchObject({ findings: 25, must_fix: MUST_FIX });
   });
 
   test("a review with provider null parses without a null leak, and the retired numeric total no longer gates the row", async () => {
@@ -1045,11 +1058,13 @@ describe("pull request detail face (static SSR)", () => {
         severity_counts: {},
       },
     ]);
-    const markup = face(
+    const built = scene(
       { findings: page([]), failures: page([]), reviews },
       {},
       { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
     );
+    const markup = render(built.detail, recordsOf(built.pages));
+    const zhMarkup = render(built.detail, recordsOf(built.pages), "zh_CN");
     const read = await withMarkup(markup, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
       rows: [...container.querySelectorAll('[data-slot="review-head"]')].map((head) => {
@@ -1077,15 +1092,17 @@ describe("pull request detail face (static SSR)", () => {
       }),
       rounds: [...container.querySelectorAll('[data-slot="review-round"]')].map((chip) => chip.textContent ?? ""),
       // Only the measured round prints a time; the historical rows omit it.
-      // The label must be real TEXT inside the span (its accessible name) —
-      // a null here fails the assertion below, so removing it cannot pass.
-      durations: [...container.querySelectorAll('[data-slot="review-duration"]')].map((duration) => ({
-        label: duration.querySelector(".sr-only")?.textContent ?? null,
-        value: duration.lastChild?.textContent ?? "",
-      })),
-      durationTitles: [...container.querySelectorAll('[data-slot="review-duration"]')].map((duration) =>
-        duration.getAttribute("title"),
-      ),
+      // The span's own text — one label, separator, value — is its accessible
+      // name. `title` and the label count are pinned too: a `title` echoing
+      // the hidden label, or a second carrier, leaves the text unchanged.
+      durations: [...container.querySelectorAll('[data-slot="review-duration"]')].map((span) => {
+        const text = span.textContent ?? "";
+        return {
+          text,
+          title: span.getAttribute("title"),
+          labels: text.split(t("en", "pullRequests.reviewDurationLabel")).length - 1,
+        };
+      }),
       // The summary body and its expand/collapse control are gone: a review
       // row is its two lines alone.
       foldControls: container.querySelectorAll('[role="tabpanel"] button[aria-expanded][aria-controls]').length,
@@ -1136,15 +1153,25 @@ describe("pull request detail face (static SSR)", () => {
         text: "ccc333d",
       },
     ]);
-    const durationLabel = t("en", "pullRequests.reviewDurationLabel");
-    expect(read.durations).toEqual([
-      {
-        label: durationLabel,
-        value: t("en", "pullRequests.reviewDurationMinutes", { minutes: 1, seconds: 5 }),
-      },
-    ]);
-    // The same words ride the tooltip, still the hover affordance.
-    expect(read.durationTitles).toEqual([durationLabel]);
+    // The span's own text is the accessible name: one label, one separator,
+    // one value, and no `title` repeating the label. Read per locale, so a
+    // join without the separator, a second label carrier, or a restored
+    // `title={durationLabel}` cannot pass.
+    const durationText = (locale: Locale) =>
+      `${t(locale, "pullRequests.reviewDurationLabel")} ${t(locale, "pullRequests.reviewDurationMinutes", {
+        minutes: 1,
+        seconds: 5,
+      })}`;
+    expect(read.durations).toEqual([{ text: durationText("en"), title: null, labels: 1 }]);
+    expect(
+      await withMarkup(zhMarkup, (container) => {
+        const label = t("zh_CN", "pullRequests.reviewDurationLabel");
+        return [...container.querySelectorAll('[data-slot="review-duration"]')].map((span) => {
+          const text = span.textContent ?? "";
+          return { text, title: span.getAttribute("title"), labels: text.split(label).length - 1 };
+        });
+      }),
+    ).toEqual([{ text: durationText("zh_CN"), title: null, labels: 1 }]);
     expect(read.foldControls).toBe(0);
     expect(read.bodies).toEqual([]);
     expect(read.latestHead).toContain(
@@ -1507,7 +1534,7 @@ describe("pull request detail face (static SSR)", () => {
         label: button.textContent ?? "",
         disabled: button.disabled,
       }));
-    const built = scene(pages);
+    const built = scene(pages, {}, DETAIL.latest_review, MUST_FIX);
     const first = await withMarkup(render(built.detail, recordsOf(built.pages)), (container) => ({
       range: range(container),
       controls: controls(container),
@@ -1533,7 +1560,7 @@ describe("pull request detail face (static SSR)", () => {
   test("a page that dropped rows says so beside the range; a clean page says nothing", async () => {
     // Two of the head's three findings could be rendered: the third still sits
     // inside `total`, so the range alone would promise a row no window can show.
-    const built = scene({ ...RECORDS, findings: page(FINDINGS.slice(0, 2), 3) });
+    const built = scene({ ...RECORDS, findings: page(FINDINGS.slice(0, 2), 3) }, {}, DETAIL.latest_review, MUST_FIX);
     const note = (pages: RecordPages) =>
       withMarkup(render(built.detail, recordsOf(pages)), (container) => ({
         note: container.querySelector('[data-slot="pager-dropped"]')?.textContent ?? null,
@@ -1548,7 +1575,7 @@ describe("pull request detail face (static SSR)", () => {
   test("a page that shrank under a stale offset renders a clamped range, and the range is a live region", async () => {
     // The server's total fell to 20 between reads while the reader still holds
     // offset 20: the honest page is empty, and the label must never invert.
-    const built = scene({ ...RECORDS, findings: page([], 20) });
+    const built = scene({ ...RECORDS, findings: page([], 20) }, {}, DETAIL.latest_review, MUST_FIX);
     const read = (offset: number) =>
       withMarkup(render(built.detail, recordsOf(built.pages, offset)), (container) => {
         const label = container.querySelector('[data-slot="pager-range"]');
@@ -1643,7 +1670,7 @@ describe("pull request detail face (static SSR)", () => {
   test("a filtered findings window with no match names the filter, not the PR", async () => {
     // The head counts three findings while the nit filter matches none: the
     // empty copy must describe the FILTER, or it contradicts the tab count.
-    const built = scene({ findings: page([], 3) });
+    const built = scene({ findings: page([], 3) }, {}, DETAIL.latest_review, MUST_FIX);
     const copy = (severity: string) =>
       withMarkup(render(built.detail, recordsOf({ ...built.pages, findings: page([]) }, 0, severity)), (container) =>
         container.querySelector('[role="tabpanel"] p')?.textContent ?? "",

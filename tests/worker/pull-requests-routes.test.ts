@@ -345,7 +345,18 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
       [2, 42_000],
       [1, null],
     ]);
-    expect(body.items[0]).not.toHaveProperty("findings");
+    // The wire shape is frozen: exactly these keys, so the retired numeric
+    // `findings` total cannot reappear and no new column leaks by accident.
+    expect(Object.keys(body.items[0]!).sort()).toEqual([
+      "duration_ms",
+      "head_sha",
+      "model",
+      "provider",
+      "reviewed_at",
+      "round",
+      "severity_counts",
+      "verdict",
+    ]);
     expect(JSON.parse(String(body.items[0]!.severity_counts))).toEqual({ "must-fix": 1 });
   });
 

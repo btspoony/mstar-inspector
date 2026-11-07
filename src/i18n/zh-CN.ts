@@ -407,22 +407,22 @@ export const zhCN: Dictionary = {
     checkMinScoreSave: "保存默认值",
     checkMinScoreSaved: "审查门禁默认值已更新。",
     checkMinScoreFailed: "无法修改审查门禁默认值——请重试。",
-    /** {max} = 可接受的最大值。 */
-    checkMinScoreRange: "接受 0–{max}。",
-    /** {max} = 可接受的最大值；显示的数字是兜底值。 */
+    /** {min}/{max} = 可接受的范围。 */
+    checkMinScoreRange: "接受 {min}–{max}。",
+    /** {min}/{max} = 可接受的范围；显示的数字是兜底值。 */
     checkMinScoreUnreadable:
-      "无法读取已存储的默认值，因此新 App 将使用平台默认值。保存 0–{max} 之间的值会设置本工作区的默认值，重新读取可刷新；若刷新后仍提示，请联系平台运维。",
+      "无法读取已存储的默认值，因此新 App 将使用平台默认值。保存 {min}–{max} 之间的值会设置本工作区的默认值，重新读取可刷新；若刷新后仍提示，请联系平台运维。",
     concurrencyHeading: "审查并发",
     concurrencyDescription: "此工作区最多同时运行的审查数量。平台可能进一步限制。",
     concurrencyLabel: "并发审查数",
     concurrencySave: "保存并发数",
     concurrencySaved: "审查并发数已更新。",
     concurrencyFailed: "修改审查并发数失败，请重试。",
-    /** {max} = 此工作区自己的上限。 */
-    concurrencyRange: "可设置 1–{max}。",
-    /** {max} = 此工作区自身上限；显示的数字只是兜底值。 */
+    /** {min}/{max} = 此工作区自己的范围。 */
+    concurrencyRange: "可设置 {min}–{max}。",
+    /** {min}/{max} = 此工作区自身范围；显示的数字只是兜底值。 */
     concurrencyUnreadable:
-      "无法读取已存储的审查并发数，因此审查可能仍逐个运行。显示的数字只是兜底值。保存 1–{max} 之间的值会设置本工作区的值，重新读取可刷新；若刷新后仍提示，请联系平台运维。",
+      "无法读取已存储的审查并发数，因此审查可能仍逐个运行。显示的数字只是兜底值。保存 {min}–{max} 之间的值会设置本工作区的值，重新读取可刷新；若刷新后仍提示，请联系平台运维。",
   },
   /**
    * 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
@@ -569,6 +569,10 @@ export const zhCN: Dictionary = {
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
       concurrencyInvalid: "并发数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
+      usageProbeOffVendorHost:
+        "{provider} 的用量探测只会访问提供方自己的配额主机；此声明指向 {host}。",
+      usageProbeUnreadableEndpoint:
+        "{provider} 的用量探测只会访问提供方自己的配额主机；此声明指向的端点无法识别。",
     },
     ops: "运维",
     opsCopy: "以下操作改变此 App 如何应答传入的投递。",
@@ -834,6 +838,10 @@ export const zhCN: Dictionary = {
       dbUnbound: "控制台存储未配置 — 无法存储该 App。",
       workspaceFloorUnreadable:
         "无法连接该 App — 无法读取此工作区的默认评分下限，因此没有存储任何内容。修复该设置后再重新提交即可。",
+      workspaceFloorMalformed:
+        "无法连接该 App — 此工作区的记录中没有默认评分下限，因此没有存储任何内容。请先应用迁移 0049_workspace_check_min_score.sql，然后重新提交。",
+      workspaceFloorReadFailed:
+        "无法连接该 App — 暂时无法读取此工作区的默认评分下限，因此没有存储任何内容。重新提交即可重试。",
       floorRepair: "前往",
       floorRepairLink: "工作区设置",
       floorRepairEnd: "。",

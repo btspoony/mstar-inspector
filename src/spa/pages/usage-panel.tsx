@@ -20,10 +20,11 @@
  * those dimensions renders as the muted bottom line. `unauthorized` and
  * `error` are danger notices; `absent` is a muted line. The wire's diagnostic
  * `reason` is never rendered verbatim. A transport/HTTP/parse failure renders
- * the same danger notice as the wire's `error` face.
+ * the same danger notice as the wire's `error` face, unless the 400 carries a
+ * dictionary key — then that key's localized sentence renders instead.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { t, isDictionaryKey } from "../../i18n";
+import { t, isDictionaryKey, type DictionaryKey } from "../../i18n";
 import type { SpaBoot } from "../boot";
 import { postForm } from "../api";
 import { apiBase } from "../workspace-base";
@@ -32,6 +33,37 @@ import { LoadingNotice, PageNotice } from "./PageNotice";
 import { parseUsageSnapshot, type UsageLimit, type UsageSnapshot } from "./data";
 
 type UsagePhase = "loading" | "ready" | "failed";
+
+/** A 400's keyed face: the dictionary key plus the server's interpolation params. */
+type Refusal = { key: DictionaryKey; params?: Record<string, string | number> };
+
+/** A value `t()` can interpolate; anything else would render `[object Object]` or leave `{name}` bare. */
+function isParamValue(value: unknown): value is string | number {
+  return typeof value === "string" || typeof value === "number";
+}
+
+/**
+ * Resolve a 400 body's keyed face; an unkeyed, non-JSON, or malformed-params
+ * body keeps the generic notice rather than a half-filled refusal.
+ */
+function refusalOf(body: string): Refusal | null {
+  try {
+    const parsed = JSON.parse(body) as { key?: unknown; params?: unknown };
+    if (typeof parsed.key !== "string" || !isDictionaryKey(parsed.key)) return null;
+    if (parsed.params === undefined) return { key: parsed.key };
+    if (
+      typeof parsed.params !== "object" ||
+      parsed.params === null ||
+      Array.isArray(parsed.params) ||
+      !Object.values(parsed.params).every(isParamValue)
+    ) {
+      return null;
+    }
+    return { key: parsed.key, params: parsed.params as Record<string, string | number> };
+  } catch {
+    return null;
+  }
+}
 
 /** The window dimensions that earn a bar cell, in their fixed display order. */
 const CELL_SEGMENTS = ["session", "week", "month"] as const;
@@ -61,6 +93,7 @@ export function UsagePanel({
 }) {
   const [phase, setPhase] = useState<UsagePhase>("loading");
   const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null);
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
   // Generation guard: the parent keeps the panel mounted across re-probes of
   // the same key (a fresh mount per key), so a probe that resolves late must
   // not set state under another key's row or after close.
@@ -69,7 +102,9 @@ export function UsagePanel({
   const probe = useCallback(async () => {
     const mine = ++generation.current;
     setPhase("loading");
+    setRefusal(null);
     let ready: UsageSnapshot | null = null;
+    let keyed: Refusal | null = null;
     try {
       const { status, body } = await postForm(
         `${apiBase()}/api/apps/${encodeURIComponent(String(appId))}/keys/usage`,
@@ -81,12 +116,15 @@ export function UsagePanel({
         } catch {
           /* body is not JSON */
         }
+      } else {
+        keyed = refusalOf(body);
       }
     } catch {
       /* transport failure — the failure face below covers it */
     }
     if (mine !== generation.current) return;
     if (ready === null) {
+      setRefusal(keyed);
       setPhase("failed");
       return;
     }
@@ -128,7 +166,14 @@ export function UsagePanel({
     <div data-slot="usage-panel" className="border-t border-(--border-subtle) bg-(--surface-inset) px-3 py-3">
       {phase === "loading" ? <LoadingNotice locale={locale} /> : null}
       {phase === "failed" ? (
-        <PageNotice kind="error" message={t(locale, "settings.providers.usage.error")} />
+        <PageNotice
+          kind="error"
+          message={
+            refusal === null
+              ? t(locale, "settings.providers.usage.error")
+              : t(locale, refusal.key, refusal.params)
+          }
+        />
       ) : null}
       {phase === "ready" && snapshot !== null ? (
         <UsageFace locale={locale} snapshot={snapshot} />
