@@ -4,7 +4,8 @@
  * `INSERT … SELECT … RETURNING` matched, `0` when it did not — with `results`
  * unchanged and a plain read changing nothing.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
+import * as fs from "node:fs";
 import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter } from "./helpers";
 
 const AT = "2026-10-27T00:00:00.000Z";
@@ -47,5 +48,39 @@ describe("test D1 double", () => {
     // A fixture declares either anchor; they must not diverge.
     expect(migrationsAfter("0036_app_identity.sql")).toEqual(migrationsAfter(36));
     expect(() => migrationsAfter("add_index.sql")).toThrow(/no numeric prefix/);
+  });
+});
+
+/**
+ * The REAL `node:fs` exports, captured before any mock. Bun's `mock.module`
+ * registry is process-global (see `tests/review/runtime-omp.test.ts`), and
+ * `mock.restore()` does not undo a builtin mock, so the synthetic-directory
+ * case below restores `node:fs` by re-registering this snapshot.
+ */
+const REAL_FS = { ...fs };
+
+describe("migration order", () => {
+  test("a synthetic duplicate pair orders by filename, never by readdir order", async () => {
+    // `zzz` before `aaa` is the order a non-lexical directory listing hands
+    // back. `number(a) - number(b)` alone keeps it; the byte-order tie-break
+    // is what the duplicates in `migrations/` depend on, so reverting that
+    // tie-break fails exactly here.
+    mock.module("node:fs", () => ({
+      ...REAL_FS,
+      readdirSync: () => ["0043_zzz_synthetic.sql", "0043_aaa_synthetic.sql"],
+    }));
+    // Dynamic import with a query: the mock must be registered before
+    // `./helpers` loads, and the query keeps this file's registry key apart
+    // from the statically imported real module above.
+    const SPEC = "./helpers.ts?synthetic-ordinals";
+    const synthetic = (await import(SPEC)) as { migrationsAfter: typeof migrationsAfter };
+    try {
+      expect(synthetic.migrationsAfter(0)).toEqual([
+        "0043_aaa_synthetic.sql",
+        "0043_zzz_synthetic.sql",
+      ]);
+    } finally {
+      mock.module("node:fs", () => REAL_FS);
+    }
   });
 });

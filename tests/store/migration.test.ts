@@ -2425,3 +2425,79 @@ describe("migrations/0050_reviews_round.sql", () => {
     expect(db.raw.query("SELECT id FROM reviews").all()).toEqual([{ id: "r-1" }]);
   });
 });
+
+/**
+ * Ordinal hygiene. This table IS the keep-and-order decision recorded in plan
+ * 320 `## Review notes` (Task 1 inventory) — not a convenience list: applied
+ * state is not determinable from the repo (`## Clarify`), so the four pairs
+ * were kept, nothing was renamed, and their apply order is the filename byte
+ * order the total comparator in `./helpers` produces.
+ *
+ * | Ordinal | Files, in apply order                                                      |
+ * |---------|-----------------------------------------------------------------------------|
+ * | `0043`  | `0043_webhook_delivery_repository.sql` → `0043_workspace_concurrency_bound.sql` |
+ * | `0047`  | `0047_review_level_per_app.sql` → `0047_thread_pr_scope.sql`                |
+ * | `0048`  | `0048_comment_trigger_claims.sql` → `0048_review_failures_pipeline_window.sql` |
+ * | `0049`  | `0049_reviews_duration_ms.sql` → `0049_workspace_check_min_score.sql`       |
+ *
+ * The tracker-driven renumber follow-up (`## Clarify`) shrinks this list: when a
+ * pair stops colliding, delete its entry — the tests below fail until you do.
+ */
+const KEPT_DUPLICATE_ORDINALS: ReadonlyMap<number, readonly string[]> = new Map([
+  [43, ["0043_webhook_delivery_repository.sql", "0043_workspace_concurrency_bound.sql"]],
+  [47, ["0047_review_level_per_app.sql", "0047_thread_pr_scope.sql"]],
+  [48, ["0048_comment_trigger_claims.sql", "0048_review_failures_pipeline_window.sql"]],
+  [49, ["0049_reviews_duration_ms.sql", "0049_workspace_check_min_score.sql"]],
+]);
+
+/** Group migration filenames by numeric prefix; a group of 2+ is a repeated ordinal. */
+function groupByOrdinal(names: readonly string[]): Map<number, string[]> {
+  const groups = new Map<number, string[]>();
+  for (const name of names) {
+    const ordinal = migrationNumber(name);
+    groups.set(ordinal, [...(groups.get(ordinal) ?? []), name]);
+  }
+  return groups;
+}
+
+/**
+ * Throw for any repeated ordinal the table does not record, or whose file set
+ * differs from the recorded pair (a third file for `0043` is undocumented too).
+ */
+function assertOnlyRecordedDuplicates(names: readonly string[]): void {
+  for (const [ordinal, files] of groupByOrdinal(names)) {
+    if (files.length < 2) continue;
+    const recorded = KEPT_DUPLICATE_ORDINALS.get(ordinal);
+    if (recorded === undefined || files.length !== recorded.length || files.some((f, i) => f !== recorded[i])) {
+      throw new Error(
+        `migrations/ ordinal ${String(ordinal).padStart(4, "0")} repeats as [${files.join(", ")}], ` +
+          `which is not the recorded pair [${recorded?.join(", ") ?? "none"}]`,
+      );
+    }
+  }
+}
+
+describe("migrations/ ordinals", () => {
+  /** Readdir order is a filesystem detail; byte order is what the decision states. */
+  const names = readdirSync(MIGRATIONS_DIR)
+    .filter((name) => name.endsWith(".sql"))
+    .sort();
+
+  test("only the four recorded ordinals repeat, each as its recorded pair", () => {
+    assertOnlyRecordedDuplicates(names);
+  });
+
+  test("each recorded pair is present exactly and applies in the recorded filename order", () => {
+    for (const [ordinal, recorded] of KEPT_DUPLICATE_ORDINALS) {
+      expect(names.filter((name) => migrationNumber(name) === ordinal)).toEqual([...recorded]);
+      expect(migrationsAfter(ordinal - 1).filter((name) => migrationNumber(name) === ordinal)).toEqual([...recorded]);
+    }
+  });
+
+  test("a second file for an unrecorded ordinal — a hypothetical fifth duplicate — fails the guard", () => {
+    expect(() => assertOnlyRecordedDuplicates([...names, "0050_reviews_round_second.sql"])).toThrow(
+      /ordinal 0050 repeats as \[0050_reviews_round\.sql, 0050_reviews_round_second\.sql\]/,
+    );
+    expect(() => assertOnlyRecordedDuplicates([...names, "0043_third_claim.sql"])).toThrow(/ordinal 0043/);
+  });
+});
