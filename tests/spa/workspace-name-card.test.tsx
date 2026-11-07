@@ -230,7 +230,7 @@ describe("workspace name card", () => {
       // The read lands the stored value, not the documented default.
       const input = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
       expect(input.value).toBe("8");
-      expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { max: 32 }));
+      expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { min: 1, max: 32 }));
 
       const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
       await act(async () => {
@@ -482,7 +482,7 @@ describe("workspace name card", () => {
       await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
 
       expect(container.textContent).toContain(
-        t("en", "workspace.concurrencyUnreadable", { max: 32 }),
+        t("en", "workspace.concurrencyUnreadable", { min: 1, max: 32 }),
       );
       const field = win.document.querySelector(
         "#workspace-concurrency",
@@ -490,7 +490,7 @@ describe("workspace name card", () => {
       expect(field).not.toBeNull();
       expect(field.value).toBe("");
       expect(field.required).toBe(true);
-      expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { max: 32 }));
+      expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { min: 1, max: 32 }));
       const save = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "workspace.concurrencySave"),
       ) as unknown as HTMLButtonElement;
@@ -522,7 +522,7 @@ describe("workspace name card", () => {
       ]);
       // The accepted write triggers a re-read, so the repaired state converges:
       // warning gone, the stored number back in the field.
-      expect(container.textContent).not.toContain(t("en", "workspace.concurrencyUnreadable", { max: 32 }));
+      expect(container.textContent).not.toContain(t("en", "workspace.concurrencyUnreadable", { min: 1, max: 32 }));
       expect(
         (win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement).value,
       ).toBe("6");

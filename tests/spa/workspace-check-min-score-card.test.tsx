@@ -38,8 +38,11 @@ describe("workspace default review-gate floor card", () => {
     const realFetch = globalThis.fetch;
     // The PUT answers a normalized 40 for a typed 45, so the field can only
     // settle on 40 by reading the server's body — echoing the draft cannot.
+    // A non-zero payload floor: a copy string carrying its own lower bound
+    // cannot match the rendered sentence.
+    const bounds = { min: 3, max: 100 };
     const calls = stubFetch((call) =>
-      call.method === "PUT" ? json(200, { min_score: 40 }) : json(200, { min_score: 60, min: 0, max: 100, degraded: false }),
+      call.method === "PUT" ? json(200, { min_score: 40 }) : json(200, { min_score: 60, ...bounds, degraded: false }),
     );
     try {
       const container = win.document.createElement("div");
@@ -49,7 +52,7 @@ describe("workspace default review-gate floor card", () => {
 
       const input = win.document.querySelector("#workspace-check-min-score") as unknown as HTMLInputElement;
       expect(input.value).toBe("60");
-      expect(container.textContent).toContain(t("en", "workspace.checkMinScoreRange", { max: 100 }));
+      expect(container.textContent).toContain(t("en", "workspace.checkMinScoreRange", bounds));
 
       const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
       await act(async () => {
@@ -78,7 +81,7 @@ describe("workspace default review-gate floor card", () => {
   test("a degraded read warns and never submits the fallback as a stored value", async () => {
     const { win, cleanup } = installDom("http://localhost/dashboard/ws_acme/settings");
     const realFetch = globalThis.fetch;
-    const calls = stubFetch(() => json(200, { min_score: 60, min: 0, max: 100, degraded: true }));
+    const calls = stubFetch(() => json(200, { min_score: 60, min: 5, max: 100, degraded: true }));
     try {
       const container = win.document.createElement("div");
       win.document.body.appendChild(container);
@@ -87,7 +90,7 @@ describe("workspace default review-gate floor card", () => {
 
       const input = win.document.querySelector("#workspace-check-min-score") as unknown as HTMLInputElement;
       expect(input.value).toBe("");
-      expect(container.textContent).toContain(t("en", "workspace.checkMinScoreUnreadable", { max: 100 }));
+      expect(container.textContent).toContain(t("en", "workspace.checkMinScoreUnreadable", { min: 5, max: 100 }));
 
       await act(async () => {
         input.closest("form")?.dispatchEvent(

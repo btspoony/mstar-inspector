@@ -467,8 +467,8 @@ export const en = {
     concurrencySave: "Save concurrency",
     concurrencySaved: "Review concurrency updated.",
     concurrencyFailed: "Could not change the review concurrency — try again.",
-    /** {max} = this workspace's own maximum. */
-    concurrencyRange: "Accepts 1–{max}.",
+    /** {min}/{max} = this workspace's own range. */
+    concurrencyRange: "Accepts {min}–{max}.",
     /** The owner/admin review-gate default card for Apps connected later. */
     checkMinScoreHeading: "Review gate default",
     checkMinScoreDescription:
@@ -477,14 +477,14 @@ export const en = {
     checkMinScoreSave: "Save default",
     checkMinScoreSaved: "Review gate default updated.",
     checkMinScoreFailed: "Could not change the review gate default — try again.",
-    /** {max} = the accepted maximum. */
-    checkMinScoreRange: "Accepts 0–{max}.",
-    /** {max} = the accepted maximum; the shown number is the fallback. */
+    /** {min}/{max} = the accepted range. */
+    checkMinScoreRange: "Accepts {min}–{max}.",
+    /** {min}/{max} = the accepted range; the shown number is the fallback. */
     checkMinScoreUnreadable:
-      "The stored default could not be read, so new Apps use the platform default. Saving a value from 0 to {max} sets this workspace's default, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
-    /** {max} = this workspace's own maximum; the shown numbers are the fallback. */
+      "The stored default could not be read, so new Apps use the platform default. Saving a value from {min} to {max} sets this workspace's default, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
+    /** {min}/{max} = this workspace's own range; the shown numbers are the fallback. */
     concurrencyUnreadable:
-      "The stored review concurrency could not be read, so reviews may be running one at a time. The numbers shown are a fallback. Saving a value from 1 to {max} sets this workspace's value, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
+      "The stored review concurrency could not be read, so reviews may be running one at a time. The numbers shown are a fallback. Saving a value from {min} to {max} sets this workspace's value, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
   },
   /**
    * Platform-operator support (2026-10): the operator's read-only face and the
