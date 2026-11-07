@@ -131,7 +131,6 @@ import {
   MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
   MAX_CUSTOM_PROVIDER_COUNT,
   MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
-  MAX_CUSTOM_PROVIDER_MODEL_IDS,
   MAX_MODEL_CHAIN_NAME_LENGTH,
   MAX_MODEL_SELECTOR_LENGTH,
   MAX_KEYS_PER_PROVIDER,
@@ -151,6 +150,7 @@ import {
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
 import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { isFindingSeverity } from "../contracts/finding-severity";
+import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../contracts/provider-models";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../contracts/sandbox-images";
 import { isCommandConfigKey } from "../../packages/shared/src/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";

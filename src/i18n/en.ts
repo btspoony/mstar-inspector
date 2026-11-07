@@ -738,7 +738,7 @@ export const en = {
       modelCountOne: "{count} model",
       /**
        * The model picker: the meta-line trigger, the dialog faces, and the
-       * 32-id cap stated in the counter. `common` has no save key — the
+       * model-id cap stated in the counter. `common` has no save key — the
        * picker's save label lives here.
        */
       models: {
