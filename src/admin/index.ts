@@ -135,6 +135,41 @@ async function setFlag(c: AdminContext): Promise<Response> {
 }
 
 /**
+ * The live queue gauge `GET /api/runtime` reports; `null` says "not readable",
+ * never "empty".
+ */
+type RuntimeQueue = {
+  backlogCount: number;
+  backlogBytes: number;
+  oldestMessageTimestamp: string | null;
+};
+
+/** The one read the gauge needs — optional, because a face may bind no queue. */
+type QueueGaugeSource = {
+  metrics?: () => Promise<{ backlogCount: number; backlogBytes: number; oldestMessageTimestamp?: Date }>;
+};
+
+/**
+ * Read the review queue's backlog. A missing binding, a binding without
+ * `metrics()` and a rejected call all answer `null`: this face degrades rather
+ * than becoming a 500. The oldest message is serialized as ISO-8601 (the wire
+ * form) and is `null` for an empty queue.
+ */
+async function readQueueBacklog(queue: QueueGaugeSource | undefined): Promise<RuntimeQueue | null> {
+  try {
+    const metrics = await queue?.metrics?.();
+    if (!metrics) return null;
+    return {
+      backlogCount: metrics.backlogCount,
+      backlogBytes: metrics.backlogBytes,
+      oldestMessageTimestamp: metrics.oldestMessageTimestamp?.toISOString() ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The system review-concurrency cap — the operator half of the runtime
  * configuration (iteration spec §1.1). One row in `review_runtime_settings`,
  * absent = the documented default; the leaf store owns the parse, the
@@ -147,13 +182,16 @@ async function readRuntime(c: AdminContext): Promise<Response> {
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
-  const [system, budgets, claim, level, recheck, admissionDrops24h] = await Promise.all([
+  const failures = createFailureStore(db);
+  const [system, budgets, claim, level, recheck, admissionDrops24h, githubRateLimited24h, queue] = await Promise.all([
     getSystemConcurrency(db),
     getCheckBudgets(db),
     getCommentClaimSettings(db),
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
-    createFailureStore(db).countAdmissionDrops24h(),
+    failures.countAdmissionDrops24h(),
+    failures.countGithubRateLimited24h(),
+    readQueueBacklog(c.env.REVIEW_QUEUE),
   ]);
   return c.json({
     concurrency: system.concurrency,
@@ -197,6 +235,12 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     // grouped by the reason token of the drop prefix over the last 24h — the
     // sub-threshold signal the failure sweep cannot page on.
     admissionDrops24h,
+    // GitHub secondary rate limits over the same 24h window: a separate
+    // rejection cause from any other delivery failure.
+    githubRateLimited24h,
+    // Live queue depth for the same page; `null` means the gauge is not
+    // readable, never that the queue is empty.
+    queue,
   });
 }
 

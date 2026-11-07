@@ -33,7 +33,7 @@
  * artifact-store.ts).
  */
 
-import { PAGING_EXCLUDED_STAGES } from "../contracts/failure-stages";
+import { GITHUB_RATE_LIMIT_PREFIX, PAGING_EXCLUDED_STAGES } from "../contracts/failure-stages";
 import type { D1Like } from "./types";
 
 /**
@@ -139,6 +139,21 @@ export type FailureStore = {
   countAdmissionDrops24h(): Promise<AdmissionDropCounts>;
 };
 
+/**
+ * The operator read's counted gauges on top of the append/read contract. Split
+ * from {@link FailureStore} so the consumer's test doubles stay complete
+ * without a verb they never call.
+ */
+export type FailureStoreWithCounts = FailureStore & {
+  /**
+   * GitHub secondary-rate-limit rejections in the trailing 24h, counted by the
+   * `error` prefix every such row starts with. No stage predicate: the
+   * `rate-limit` stage's rows ARE causes of this metric, and the primary-limit
+   * prefix is different text, so a primary limit never inflates this number.
+   */
+  countGithubRateLimited24h(): Promise<number>;
+};
+
 /** Default page size for listRecent when the caller does not bound it. */
 const LIST_RECENT_DEFAULT_LIMIT = 50;
 
@@ -164,8 +179,18 @@ WHERE stage = 'pipeline'
   AND (${ADMISSION_DROP_REASONS.map((reason) => `error LIKE ${admissionDropLike(reason)}`).join("\n    OR ")})
 GROUP BY reason`;
 
+/**
+ * The secondary-rate-limit count over the same trailing 24h window as the
+ * admission drops. The prefix is a bound value (it is a compile-time literal
+ * with no wildcard of its own), so the query text stays constant.
+ */
+const GITHUB_RATE_LIMITED_SQL = `SELECT COUNT(*) AS count
+FROM review_failures
+WHERE created_at > datetime('now', '-24 hours')
+  AND error LIKE ?`;
+
 /** Create the failure store over one D1 handle. */
-export function createFailureStore(db: D1Like): FailureStore {
+export function createFailureStore(db: D1Like): FailureStoreWithCounts {
   return {
     async record(input: ReviewFailureInput): Promise<void> {
       if (!FAILURE_STAGES.includes(input.stage)) {
@@ -208,6 +233,14 @@ export function createFailureStore(db: D1Like): FailureStore {
       ) as AdmissionDropCounts;
       for (const row of results) counts[row.reason] = row.drops;
       return counts;
+    },
+
+    async countGithubRateLimited24h(): Promise<number> {
+      const row = await db
+        .prepare(GITHUB_RATE_LIMITED_SQL)
+        .bind(`${GITHUB_RATE_LIMIT_PREFIX}%`)
+        .first<{ count: number }>();
+      return row?.count ?? 0;
     },
   };
 }

@@ -12,6 +12,10 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  GITHUB_PRIMARY_RATE_LIMIT_PREFIX,
+  GITHUB_RATE_LIMIT_PREFIX,
+} from "../../src/contracts/failure-stages";
+import {
   ADMISSION_DROP_REASONS,
   createFailureStore,
   type AdmissionDropReason,
@@ -149,6 +153,39 @@ describe("createFailureStore", () => {
     });
     // The reason vocabulary is closed: the operator's four buckets.
     expect(ADMISSION_DROP_REASONS).toEqual(["pr-held", "system-cap", "workspace-cap", "error"]);
+  });
+
+  test("countGithubRateLimited24h counts only the secondary prefix inside the trailing 24h", async () => {
+    const db = createMigratedTestD1();
+    const store = createFailureStore(db);
+    // The metric's three in-window rows: the single catch's delivery failure
+    // and the degraded delete sweep's own `rate-limit` attribution — this count
+    // IS the metric, so no stage is excluded.
+    await store.record({ ...BASE, stage: "pipeline", error: `${GITHUB_RATE_LIMIT_PREFIX}secondary limit on comment update` });
+    await store.record({ ...BASE, stage: "pipeline", error: `${GITHUB_RATE_LIMIT_PREFIX}secondary limit on check update` });
+    await store.record({ ...BASE, stage: "rate-limit", error: `${GITHUB_RATE_LIMIT_PREFIX}secondary limit on delete sweep` });
+    // Not counted: the primary-limit prefix is its own words, and an ordinary
+    // failure carries neither prefix.
+    await store.record({ ...BASE, stage: "pipeline", error: `${GITHUB_PRIMARY_RATE_LIMIT_PREFIX}primary limit on comment update` });
+    await store.record({ ...BASE, stage: "pipeline", error: "comment post failed" });
+    // A matching row outside the 24h window stays invisible.
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-25 hours'))`,
+      )
+      .run(
+        crypto.randomUUID(),
+        BASE.installation_id,
+        BASE.owner,
+        BASE.repo,
+        BASE.pr_number,
+        BASE.head_sha,
+        "pipeline",
+        `${GITHUB_RATE_LIMIT_PREFIX}secondary limit on comment update`,
+      );
+
+    expect(await store.countGithubRateLimited24h()).toBe(3);
   });
 
   test("the trailing-24h pipeline read is served by its partial window index (0048)", () => {
