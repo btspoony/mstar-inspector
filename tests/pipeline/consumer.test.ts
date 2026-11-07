@@ -1162,7 +1162,9 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/diff failed: exit 1, stdout 0B/);
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /diff failed: exit 1, stdout 0B, stderr tail: gh failed/,
+    );
 
     expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);

@@ -3088,8 +3088,8 @@ function sessionSecretValues(runnerEnv: Record<string, string>, keyValues: reado
   return values;
 }
 
-/** Characters of the runner's stderr tail carried by the failure message. */
-const RUNNER_STDERR_TAIL_MAX = 600;
+/** Characters of an exec's stderr tail carried by its failure message. */
+const STDERR_TAIL_MAX = 600;
 
 /**
  * The runner stage's failure detail. stderr is the ONLY diagnosis a non-zero
@@ -3105,7 +3105,23 @@ function runnerFailureDetail(
   // review_failures.error is unbounded TEXT (migration 0010), so the bounded
   // tail below cannot overflow the column.
   const base = `runner failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`;
-  const tail = redactExactSecrets(redactSecrets(run.stderr), secretValues).trim().slice(-RUNNER_STDERR_TAIL_MAX);
+  const tail = redactExactSecrets(redactSecrets(run.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
+  return tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
+}
+
+/**
+ * A git stage's failure detail (diff / increment diff / numstat). stderr is the
+ * ONLY diagnosis a non-zero exit carries — an oversized diff fails `gh pr diff`
+ * with HTTP 406 on stderr and 0B of stdout — so a redacted tail rides the
+ * message that reaches the durable review_failures row. Redaction runs BEFORE
+ * the tail cut, so a secret straddling the cap cannot survive as a fragment.
+ */
+function gitStageFailureDetail(
+  stage: string,
+  run: { stdout: string; stderr: string; exitCode: number },
+): string {
+  const base = `${stage} failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`;
+  const tail = redactSecrets(run.stderr).trim().slice(-STDERR_TAIL_MAX);
   return tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
 }
 
@@ -4294,7 +4310,7 @@ async function processMessage(
     // capture below feeds the numstat partition ONLY.
     const diff = await sandbox.runCommand(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
     if (diff.exitCode !== 0) {
-      throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
+      throw new Error(gitStageFailureDetail("diff", diff));
     }
     const diffRead = parseBoundedRead(diff.stdout);
     const diffText = diffRead.text ?? "";
@@ -4317,7 +4333,7 @@ async function processMessage(
         { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS },
       );
       if (increment.exitCode !== 0) {
-        throw new Error(`increment diff failed: exit ${increment.exitCode}, stdout ${increment.stdout.length}B`);
+        throw new Error(gitStageFailureDetail("increment diff", increment));
       }
       const incrementRead = parseBoundedRead(increment.stdout);
       if (incrementRead.failure === "unreadable") {
@@ -4487,7 +4503,7 @@ async function processMessage(
     // work done since the last review instead of the whole PR.
     const numstat = await sandbox.runCommand(cmds.numstat, { timeout: EXEC_TIMEOUT_GIT_MS });
     if (numstat.exitCode !== 0) {
-      throw new Error(`numstat failed: exit ${numstat.exitCode}, stdout ${numstat.stdout.length}B`);
+      throw new Error(gitStageFailureDetail("numstat", numstat));
     }
     const numstatLines = numstat.stdout
       .split("\n")
