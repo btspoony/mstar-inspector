@@ -32,17 +32,18 @@ import {
   makeBatch,
   makeEnv,
   makePayload,
+  postRunnerReserveMs,
   PR_CONTEXT_EXEC_TIMEOUT_MS,
   PR_CONTEXT_WORST_CASE_MS,
   POST_RUNNER_READ_TIMEOUT_MS,
   POST_RUNNER_READ_BUDGET_MS,
   reset,
   ROUND_BUDGET_MS,
-  runnerTimeoutMs,
   sandbox,
   testLog,
   testOverrides,
 } from "../helpers/consumer-harness";
+import { CHECK_TERMINALIZE_DEFAULT } from "../../src/dashboard/runtime-config-store";
 import {
   PR_CONTEXT_MAX_CHARS,
   PR_CONTEXT_MAX_ISSUES,
@@ -71,7 +72,7 @@ function preparedBody(): string {
 }
 
 describe("PR-context capture", () => {
-  test("near the reserve boundary (capture + runner + post-runner reads) the capture is skipped", async () => {
+  test("near the derived-deadline boundary (capture + post-runner reads) the capture is skipped", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     sandbox.diffStdout = VALID_DIFF;
@@ -79,14 +80,18 @@ describe("PR-context capture", () => {
     sandbox.prBodyExitCode = 0;
     sandbox.prBodyContent = "Closes #7";
     const db = await createSeededTestD1();
-    const runnerBudgetMs = runnerTimeoutMs("default");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
-      // Above the capture's own worst case (120s), 60s BELOW the 810s reserve
-      // the gate needs (capture + runner + the three post-runner reads): the
-      // capture would fit and would eat the paid run's or the reads' window.
+      // The gate bills the DERIVED deadline (round − the post-runner reserve)
+      // and needs the capture plus the post-runner reads: 234s + 120s + 90s.
+      // 60s BELOW that boundary leaves 150s before the derived deadline — above
+      // the capture's own 120s worst case, so the capture alone would fit and
+      // the post-runner reads are what the round refuses.
       roundBudgetMs:
-        PR_CONTEXT_WORST_CASE_MS + runnerBudgetMs + POST_RUNNER_READ_BUDGET_MS - 60_000,
+        postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT) +
+        PR_CONTEXT_WORST_CASE_MS +
+        POST_RUNNER_READ_BUDGET_MS -
+        60_000,
     });
 
     await consumer(makeBatch(makePayload()));
@@ -97,8 +102,9 @@ describe("PR-context capture", () => {
     const warns = logLines.filter((l) => l.level === "warn" && l.fields.report_context !== undefined);
     expect(warns).toHaveLength(1);
     expect(warns[0]!.fields.report_context).toBe("budget");
+    // The line names the DERIVED deadline it refused on, not the level's tier.
+    expect(warns[0]!.msg).toMatch(/\d+ms left before the derived runner deadline/);
     expect(warns[0]!.msg).toContain(`${PR_CONTEXT_WORST_CASE_MS}ms`);
-    expect(warns[0]!.msg).toContain(`${runnerBudgetMs}ms`);
     expect(warns[0]!.msg).toContain(`${POST_RUNNER_READ_BUDGET_MS}ms`);
     // Never a failed review: the report degrades to `none` and the body lands.
     expect(preparedBody()).toContain("### Linked-issue AC\n\nnone");
@@ -116,16 +122,14 @@ describe("PR-context capture", () => {
       sandbox.issueBodies.set(number, { title: `issue ${number}`, body: "none" });
     }
     const db = await createSeededTestD1();
-    // The production round (900s) minus the default reserve (120s capture +
-    // 600s runner + 90s post-runner reads) leaves 90s: the gate must admit the
-    // capture, not skip it. quick shares the default runner budget, so both
-    // tiers must fit — this assertion is what keeps the feature usable.
-    expect(
-      PR_CONTEXT_WORST_CASE_MS + runnerTimeoutMs("default") + POST_RUNNER_READ_BUDGET_MS,
-    ).toBeLessThanOrEqual(ROUND_BUDGET_MS);
-    expect(
-      PR_CONTEXT_WORST_CASE_MS + runnerTimeoutMs("quick") + POST_RUNNER_READ_BUDGET_MS,
-    ).toBeLessThanOrEqual(ROUND_BUDGET_MS);
+    // The production round (900s) is billed through the DERIVED deadline: the
+    // post-runner reserve (234s) is set aside first, leaving 666s, and the gate
+    // needs the capture (120s) plus the post-runner reads (90s) — 210s fits.
+    // The level never enters the bound (the exec is capped at
+    // min(deadline, tier)), so quick and default both admit the capture.
+    expect(PR_CONTEXT_WORST_CASE_MS + POST_RUNNER_READ_BUDGET_MS).toBeLessThanOrEqual(
+      ROUND_BUDGET_MS - postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT),
+    );
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));

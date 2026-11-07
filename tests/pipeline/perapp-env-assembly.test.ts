@@ -29,8 +29,9 @@
  * Runner-input threading: the consumer resolves the App's
  * per-role selector map (decrypt-free `getAppModelRoles`) into the runner
  * input JSON's OPTIONAL `modelOverrides` field; empty maps omit the field
- * entirely (byte-identical payload). The runner-side guard/type extension
- * is pinned in the runtime-input tests.
+ * entirely (the rest of the shape is the no-map run's). The declared exec
+ * deadline (`outerDeadlineEpochMs`) is a run fact and rides every input. The
+ * runner-side guard/type extension is pinned in the runtime-input tests.
  *
  * Same technique as tests/pipeline/consumer.test.ts: sandbox + commenters
  * injected via createReviewConsumer overrides (no process-wide relative-path
@@ -164,10 +165,13 @@ async function seedTamperedKey(
 const sandboxCalls: Array<{ cmd: string; opts?: unknown }> = [];
 /** Numstat stdout for the next run (the reconFacts carrier; set per test). */
 let numstatStdout = "";
+/** Wall clock at the runner exec's start (frozen by `withFrozenClock` below). */
+let runnerExecStartedAt = 0;
 
 const fakeSandbox = {
   runCommand: mock(async (cmd: string, opts?: unknown) => {
     sandboxCalls.push({ cmd, opts });
+    if (cmd.includes("--input")) runnerExecStartedAt = Date.now();
     if (cmd.includes("rev-parse")) {
       return { stdout: `${SHA}\n`, stderr: "", exitCode: 0 };
     }
@@ -319,6 +323,35 @@ function reset(): void {
   kvGuardPuts.length = 0;
   logLines.length = 0;
   numstatStdout = "";
+  runnerExecStartedAt = 0;
+}
+
+/** Run one round against a frozen wall clock so the declared deadline is exact. */
+async function withFrozenClock<T>(fn: (clock: { now: number }) => Promise<T>): Promise<T> {
+  const realNow = Date.now;
+  const clock = { now: realNow() };
+  Date.now = () => clock.now;
+  try {
+    return await fn(clock);
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+/**
+ * The runner input's declared instant is a RUN FACT, not configuration: the
+ * instant the exec is killed at = its own start + the timeout it runs under.
+ * Every message carries it, so a run's key list is the pre-existing shape plus
+ * exactly this one field.
+ */
+function expectOuterDeadline(input: Record<string, unknown>): void {
+  const runner = sandboxCalls.find((c) => c.cmd.includes("--input"));
+  if (runner === undefined) throw new Error("no runner exec was issued");
+  const opts = runner.opts;
+  const execTimeout =
+    opts !== null && typeof opts === "object" && "timeout" in opts ? opts.timeout : undefined;
+  if (typeof execTimeout !== "number") throw new Error("runner exec carried no numeric timeout");
+  expect(input.outerDeadlineEpochMs).toBe(runnerExecStartedAt + execTimeout);
 }
 
 /** The runner exec call's env, in message order (one entry per runner step). */
@@ -868,16 +901,23 @@ describe("runner input modelOverrides threading", () => {
     await mapRole(db, appX.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await withFrozenClock(() => consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))));
 
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({
       "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
       "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
     });
-    // The field rides AFTER the pre- shape (additive optional field),
-    // next to the capability hosts (present on every run).
-    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "capabilityHosts", "modelOverrides"]);
+    // The declared deadline is a RUN FACT (every message carries it); the role
+    // field still rides AFTER the pre- shape, next to the capability hosts.
+    expectOuterDeadline(input);
+    expect(Object.keys(input)).toEqual([
+      "worktreePath",
+      "reconFacts",
+      "capabilityHosts",
+      "outerDeadlineEpochMs",
+      "modelOverrides",
+    ]);
   });
 
   test("app message with NO role map: input JSON omits the field entirely (no-map run)", async () => {
@@ -888,11 +928,19 @@ describe("runner input modelOverrides threading", () => {
     const appDb = createMigratedTestD1();
     const appX = await seedApp(appDb, "app-x"); // github_apps row, NO role rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
-    await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
+    await withFrozenClock(() =>
+      appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } }))),
+    );
     const [appInput] = runnerInputs();
-    // No role map → the runner input JSON omits the field entirely
-    // (byte-identical to a no-map run); capability hosts ride always.
-    expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
+    // No role map → the role field is omitted entirely, so the shape is the
+    // pre-overrides one PLUS the deadline every run declares.
+    expectOuterDeadline(appInput!);
+    expect(Object.keys(appInput!)).toEqual([
+      "worktreePath",
+      "reconFacts",
+      "capabilityHosts",
+      "outerDeadlineEpochMs",
+    ]);
     expect(appInput!.reconFacts).toContain("1\t1\tdocs/中文.md");
   });
 
@@ -905,10 +953,16 @@ describe("runner input modelOverrides threading", () => {
     await store.clearModelChainSeat(appX.id, "mstar-review-seat"); // cleared → empty map
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await withFrozenClock(() => consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))));
 
     const input = runnerInputs()[0]!;
-    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
+    expectOuterDeadline(input);
+    expect(Object.keys(input)).toEqual([
+      "worktreePath",
+      "reconFacts",
+      "capabilityHosts",
+      "outerDeadlineEpochMs",
+    ]);
     expect(input.modelOverrides).toBeUndefined();
   });
 
@@ -1092,7 +1146,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await withFrozenClock(() => consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))));
 
     // Credential transport: decrypted keys into their provider's pool.
     const env = runnerEnvs()[0]!;
@@ -1118,9 +1172,16 @@ describe("custom provider credential transport + runner input threading (AL-23-1
         model_ids: ["b-model"],
       },
     ]);
-    // Additive optional field after the pre- shape — plus the
-    // capability hosts the consumer resolves and rides ALWAYS.
-    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "capabilityHosts", "customProviders"]);
+    // Additive optional field after the pre- shape — plus the capability hosts
+    // and the declared deadline the consumer rides ALWAYS.
+    expectOuterDeadline(input);
+    expect(Object.keys(input)).toEqual([
+      "worktreePath",
+      "reconFacts",
+      "capabilityHosts",
+      "outerDeadlineEpochMs",
+      "customProviders",
+    ]);
     const serialized = JSON.stringify(input);
     expect(serialized).not.toContain(sk("custom-fixture"));
   });
@@ -1197,13 +1258,21 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     const appDb = createMigratedTestD1();
     const appX = await seedApp(appDb, "app-x"); // github_apps row, NO custom rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
-    await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
+    await withFrozenClock(() =>
+      appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } }))),
+    );
     const [appInput] = runnerInputs();
     const [appEnv] = runnerEnvs();
-    // No declarations → the runner input JSON omits the field entirely and no
+    // No declarations → the custom-provider field is omitted entirely and no
     // custom-provider pool is transported (byte-compat pin). The capability
-    // hosts ride ALWAYS (keyless registry data).
-    expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
+    // hosts and the declared deadline ride ALWAYS.
+    expectOuterDeadline(appInput!);
+    expect(Object.keys(appInput!)).toEqual([
+      "worktreePath",
+      "reconFacts",
+      "capabilityHosts",
+      "outerDeadlineEpochMs",
+    ]);
     // The seeded App's own ark key still pools; nothing else does — and the
     // exec env carries no pool name at all (the retired channel).
     expect(runnerPools()[0]).toEqual({ ark: [ARK_KEY] });
