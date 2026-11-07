@@ -2533,8 +2533,11 @@ Two more fields ride that same runtime read, and the same page renders both:
   review rejected by a GitHub secondary limit once at its single catch, before
   redaction, and the degraded comment-delete sweep records one `rate-limit`
   row per non-zero kind. A primary limit (`429`, or a `403` whose
-  `x-ratelimit-remaining` is `0` with no secondary signal) carries its own
-  `github-primary-rate-limit: ` prefix and never counts here. The page renders
+  `x-ratelimit-remaining` is `0` with no secondary signal) is not tagged on the
+  review-failure row: the review catch writes the secondary prefix only, so a
+  primary rejection stays an ordinary `pipeline` row. The
+  `github-primary-rate-limit: ` prefix belongs to the degraded comment-delete
+  sweep's `rate-limit` row alone and never counts here. The page renders
   the number, so a secondary rejection is told apart from any other delivery
   failure. The sweep rows are an attribution stage (`rate-limit`), which every
   failure count excludes (§ Cron failure sweep) in exactly the way it excludes
