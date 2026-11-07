@@ -217,6 +217,31 @@ function reviewCount(db: TestD1): number {
   return row.n;
 }
 
+/** A sandbox call's exec timeout (the fake stores `opts` as unknown). */
+function execTimeout(call: { opts?: unknown }): number | undefined {
+  const opts = call.opts as { timeout?: number } | undefined;
+  return opts?.timeout;
+}
+
+/**
+ * Sandbox overrides for the diff-window cases: the refused `gh pr diff`
+ * consumes `spentMs` of the round (and of the ONE capture window it shares
+ * with the fallback), so the deadline arithmetic is observable without
+ * waiting. Everything else is the shared fake, and every command still lands
+ * in `sandbox.calls`.
+ */
+function diffSpendingSandbox(spentMs: number, clock: { now: number }) {
+  return {
+    getSandbox: async () => ({
+      runCommand: async (cmd: string, opts?: unknown) => {
+        if (cmd.includes("gh pr diff")) clock.now += spentMs;
+        return fakeSandbox.runCommand(cmd, opts);
+      },
+      destroy: fakeSandbox.destroy,
+    }),
+  };
+}
+
 /**
  * The shared reset, plus this file's own scripted Checks surface (declared
  * further down): harness state and Check state are cleared by one call, so no
@@ -1354,6 +1379,113 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
     ]);
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("the fallback's steps shrink to what the refused capture left of the ONE diff window", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr =
+      "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000) (https://api.github.com/repos/acme/widgets/pulls/42)";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const realNow = Date.now;
+    const clock = { now: realNow() };
+    try {
+      Date.now = () => clock.now;
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+        ...testOverrides,
+        // A round long enough for the budget gate: this case pins the DIFF
+        // window, which the refused capture has already spent 100s of.
+        roundBudgetMs: 1_200_000,
+        ...diffSpendingSandbox(100_000, clock),
+      });
+      await consumer(makeBatch(makePayload()));
+    } finally {
+      Date.now = realNow;
+    }
+
+    // The `gh pr diff` exec keeps the whole window it opens; the four fallback
+    // steps then share what is LEFT of that same deadline (20s each), never
+    // four fresh 30s buckets — the stage bills at most one 120s `full-diff`
+    // window across both captures.
+    expect(execTimeout(sandbox.calls[2]!)).toBe(EXEC_TIMEOUT_GIT_MS);
+    for (const call of sandbox.calls.slice(3, 7)) {
+      expect(execTimeout(call)).toBe(20_000);
+    }
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("a diff window the refused capture already spent declines the fallback", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    const db = await createSeededTestD1();
+    const realNow = Date.now;
+    const clock = { now: realNow() };
+    try {
+      Date.now = () => clock.now;
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+        ...testOverrides,
+        // The round still has 18 of its 20 minutes, so the budget gate passes:
+        // what is gone is the shared diff window, at exactly 120s.
+        roundBudgetMs: 1_200_000,
+        ...diffSpendingSandbox(EXEC_TIMEOUT_GIT_MS, clock),
+      });
+      await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+        /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
+      );
+    } finally {
+      Date.now = realNow;
+    }
+
+    expect(sandbox.calls).toHaveLength(3);
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("the fallback declines when the round cannot fund the runner and the tail after it", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    const db = await createSeededTestD1();
+    const realNow = Date.now;
+    const clock = { now: realNow() };
+    try {
+      Date.now = () => clock.now;
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+        ...testOverrides,
+        ...diffSpendingSandbox(60_000, clock),
+      });
+      // 60s of the 900s round are gone: 840s left, less than the
+      // runner(600s) + inline(12s) + slack(120s) + allowance(130s) reserve.
+      // The old gate compared against the 130s allowance alone and would have
+      // run the fallback into the runner's window.
+      await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+        /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
+      );
+    } finally {
+      Date.now = realNow;
+    }
+
+    expect(sandbox.calls).toHaveLength(3);
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("deep always declines the oversized fallback — its runner leaves no round budget", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    const db = await createSeededTestD1();
+    setAppReviewLevel(db, TEST_APP_ID, "deep");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    // Fail closed by construction: deep's 840s runner plus the tail exceeds
+    // the whole 900s round, so no oversized capture can ever fit.
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
+    );
+
+    expect(sandbox.calls).toHaveLength(3);
     expect(failureRows(db)).toHaveLength(1);
   });
 

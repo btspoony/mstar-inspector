@@ -615,9 +615,11 @@ export const defaultConsumerLog: ConsumerLog = {
  * over-count, so the TTL stays conservative: the four PR-context reads run
  * under `PR_CONTEXT_EXEC_TIMEOUT_MS` (30s), the post-runner
  * document/status/report reads under `POST_RUNNER_READ_TIMEOUT_MS` (also 30s).
- * `full-diff` bills ONE complete capture attempt: the `gh pr diff` exec alone,
- * OR the oversized fallback's four 30s steps (4 × 30s = the same 120s window),
- * so the fallback adds no window and the TTL/backoff pins stay put. An
+ * `full-diff` bills ONE complete diff stage: the `gh pr diff` exec and the
+ * oversized fallback draw their timeouts from the SAME `EXEC_TIMEOUT_GIT_MS`
+ * deadline (`diffCaptureDeadlineMs`), so the stage spends at most one 120s
+ * window however it splits between the refused capture and the fallback — the
+ * fallback adds no window and the TTL/backoff pins stay put. An
  * uncounted step lets the row expire while a legal review is still posting, so
  * a new one must fail that test until it is added here.
  */
@@ -3158,16 +3160,22 @@ const OVERSIZED_DIFF_ALLOWANCE_MS = 4 * PR_CONTEXT_EXEC_TIMEOUT_MS + 10_000;
  * The head commit is already in the clone (`cloneCommand` fetched
  * `pull/<n>/head`), so only the merge base has to be fetched.
  *
- * Bounded twice over: every exec runs under `PR_CONTEXT_EXEC_TIMEOUT_MS`, so
- * the fallback costs at most the one `full-diff` ledger window of the capture
- * it replaces; and the whole fallback is declined when the round's remaining
- * clock cannot fund `OVERSIZED_DIFF_ALLOWANCE_MS`, so an oversized round keeps
- * the fast 406 failure row instead of being killed mid-fallback.
+ * Bounded twice over: every exec draws its timeout from `diffCaptureDeadlineMs`
+ * — the ONE window the refused `gh pr diff` already started — capped at
+ * `PR_CONTEXT_EXEC_TIMEOUT_MS`, so the whole diff stage can never spend more
+ * than one `full-diff` ledger window however it splits between the two
+ * captures. And the fallback is declined unless the round's remaining clock
+ * covers the fallback AND everything after it in the round — the level's
+ * runner, the inline-resolution tail and the untimed slack — so an oversized
+ * round keeps the fast 406 failure row instead of being killed mid-fallback.
+ * `deep` therefore declines by construction: its 840s runner leaves no room
+ * for any capture in a 900s round.
  *
- * null means the fallback produced no capture — no round budget, an
- * empty/unparseable ref or sha, a non-zero exit, or a rejected exec. The caller
- * rethrows the ORIGINAL diff failure: a fault here must never replace the cause
- * that was diagnosed, and a partial capture is never published.
+ * null means the fallback produced no capture — no round budget, a spent diff
+ * window, an empty/unparseable ref or sha, a non-zero exit, or a rejected
+ * exec. The caller rethrows the ORIGINAL diff failure: a fault here must never
+ * replace the cause that was diagnosed, and a partial capture is never
+ * published.
  */
 async function oversizedDiffCapture(
   sandbox: ReviewSandbox,
@@ -3175,30 +3183,46 @@ async function oversizedDiffCapture(
   target: { owner: string; repo: string; prNumber: number },
   headSha: string,
   roundDeadlineMs: number,
+  diffCaptureDeadlineMs: number,
+  level: ReviewLevel,
 ): Promise<{ stdout: string; stderr: string; exitCode: number } | null> {
-  if (roundDeadlineMs - Date.now() < OVERSIZED_DIFF_ALLOWANCE_MS) return null;
-  const gh = { env: { GH_TOKEN: token }, timeout: PR_CONTEXT_EXEC_TIMEOUT_MS };
+  const reserveMs =
+    OVERSIZED_DIFF_ALLOWANCE_MS + runnerTimeoutMs(level) + INLINE_RESOLVE_BUDGET_MS + GUARD_SLACK_MS;
+  if (roundDeadlineMs - Date.now() < reserveMs) return null;
+  // What is left of the shared diff window, capped per step; null once spent.
+  const stepTimeout = (): number | null => {
+    const left = Math.min(PR_CONTEXT_EXEC_TIMEOUT_MS, diffCaptureDeadlineMs - Date.now());
+    return left > 0 ? left : null;
+  };
   try {
+    const baseTimeout = stepTimeout();
+    if (baseTimeout === null) return null;
     const base = await sandbox.runCommand(
       pullRequestBaseRefCommand(target.owner, target.repo, target.prNumber),
-      gh,
+      { env: { GH_TOKEN: token }, timeout: baseTimeout },
     );
     const baseRef = base.stdout.trim();
     if (base.exitCode !== 0 || baseRef === "") return null;
+    const mergeTimeout = stepTimeout();
+    if (mergeTimeout === null) return null;
     const merge = await sandbox.runCommand(
       mergeBaseCommand(target.owner, target.repo, baseRef, headSha),
-      gh,
+      { env: { GH_TOKEN: token }, timeout: mergeTimeout },
     );
     const mergeBaseSha = merge.stdout.trim();
     if (merge.exitCode !== 0 || mergeBaseSha === "") return null;
+    const fetchTimeout = stepTimeout();
+    if (fetchTimeout === null) return null;
     const fetched = await sandbox.runCommand(fetchDepthOneCommand(CLONE_DIR, mergeBaseSha), {
       env: gitTransportEnv(token),
-      timeout: PR_CONTEXT_EXEC_TIMEOUT_MS,
+      timeout: fetchTimeout,
     });
     if (fetched.exitCode !== 0) return null;
+    const diffTimeout = stepTimeout();
+    if (diffTimeout === null) return null;
     const local = await sandbox.runCommand(
       localDiffCommand(CLONE_DIR, mergeBaseSha, headSha, DIFF_PATH),
-      { timeout: PR_CONTEXT_EXEC_TIMEOUT_MS },
+      { timeout: diffTimeout },
     );
     return local.exitCode === 0 ? local : null;
   } catch {
@@ -4384,12 +4408,20 @@ async function processMessage(
     // findings live in files the increment may not touch, so their evidence
     // catalog can only be proven against the whole PR diff. The increment
     // capture below feeds the numstat partition ONLY.
-    const diff = await sandbox.runCommand(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
+    // ONE window for the whole diff stage: the refused `gh pr diff` and the
+    // oversized fallback draw their timeouts from this same deadline, so the
+    // stage can never spend more than the `full-diff` ledger window it bills.
+    const diffCaptureDeadlineMs = Date.now() + EXEC_TIMEOUT_GIT_MS;
+    const diff = await sandbox.runCommand(cmds.diff, {
+      env: { GH_TOKEN: token },
+      timeout: Math.max(1, diffCaptureDeadlineMs - Date.now()),
+    });
     let diffStdout = diff.stdout;
     if (diff.exitCode !== 0) {
       // Only GitHub's oversized-diff refusal has a local substitute; an auth or
       // network failure keeps today's rethrow (a fallback would mask the cause).
-      // The fallback shares this round's clock and declines it when spent.
+      // The fallback shares this round's clock and the diff stage's window, and
+      // declines when either of them is spent.
       const local = isDiffTooLarge(diff.stderr)
         ? await oversizedDiffCapture(
             sandbox,
@@ -4397,6 +4429,8 @@ async function processMessage(
             { owner: payload.owner, repo: payload.repo, prNumber: payload.pr_number },
             headSha,
             roundStartedAt + deps.roundBudgetMs,
+            diffCaptureDeadlineMs,
+            level,
           )
         : null;
       if (local === null) {
