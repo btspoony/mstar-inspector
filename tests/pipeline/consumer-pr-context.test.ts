@@ -42,6 +42,7 @@ import {
   testLog,
   testOverrides,
 } from "../helpers/consumer-harness";
+import { withFrozenClock } from "../helpers/clock";
 import { CHECK_TERMINALIZE_DEFAULT } from "../../src/dashboard/runtime-config-store";
 import {
   PR_CONTEXT_MAX_CHARS,
@@ -79,21 +80,23 @@ describe("PR-context capture", () => {
     sandbox.prBodyExitCode = 0;
     sandbox.prBodyContent = "Closes #7";
     const db = await createSeededTestD1();
+    const reserveMs = postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT);
+    // The gate bills the DERIVED deadline (round − the post-runner reserve)
+    // and needs the capture plus the post-runner reads: 234s + 120s + 90s.
+    // 60s BELOW that boundary leaves 150s before the derived deadline — above
+    // the capture's own 120s worst case, so the capture alone would fit and
+    // the post-runner reads are what the round refuses.
+    const roundBudgetMs = reserveMs + PR_CONTEXT_WORST_CASE_MS + POST_RUNNER_READ_BUDGET_MS - 60_000;
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
-      // The gate bills the DERIVED deadline (round − the post-runner reserve)
-      // and needs the capture plus the post-runner reads: 234s + 120s + 90s.
-      // 60s BELOW that boundary leaves 150s before the derived deadline — above
-      // the capture's own 120s worst case, so the capture alone would fit and
-      // the post-runner reads are what the round refuses.
-      roundBudgetMs:
-        postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT) +
-        PR_CONTEXT_WORST_CASE_MS +
-        POST_RUNNER_READ_BUDGET_MS -
-        60_000,
+      roundBudgetMs,
     });
 
-    await consumer(makeBatch(makePayload()));
+    // Frozen clock: the round spends no wall time, so the remainder the gate
+    // reports is an exact quantity rather than `round remainder − real elapsed`.
+    await withFrozenClock(async () => {
+      await consumer(makeBatch(makePayload()));
+    });
 
     // Not one gh read started: the skip precedes the first exec, so a slow
     // sandbox cannot spend the window the paid run and its post need.
@@ -101,12 +104,16 @@ describe("PR-context capture", () => {
     const warns = logLines.filter((l) => l.level === "warn" && l.fields.report_context !== undefined);
     expect(warns).toHaveLength(1);
     expect(warns[0]!.fields.report_context).toBe("budget");
-    // The line names the DERIVED deadline it refused on, not the level's tier:
-    // the remainder it reports is a real quantity — positive, and short of the
-    // capture-plus-post-reads cost the gate bills.
+    // The line names the DERIVED deadline it refused on, not the level's tier
+    // nor the round's own remainder: it sits exactly one post-runner reserve
+    // below the round budget, which is what puts it under the capture-plus-
+    // post-reads cost the gate bills.
     const leftMs = Number(/(\d+)ms left before the derived runner deadline/.exec(warns[0]!.msg)?.[1]);
-    expect(leftMs).toBeGreaterThan(0);
     expect(leftMs).toBeLessThan(PR_CONTEXT_WORST_CASE_MS + POST_RUNNER_READ_BUDGET_MS);
+    expect(roundBudgetMs - leftMs).toBe(reserveMs);
+    // And it names both costs the gate compared, not just its verdict.
+    expect(warns[0]!.msg).toContain(`the capture costs up to ${PR_CONTEXT_WORST_CASE_MS}ms`);
+    expect(warns[0]!.msg).toContain(`the post-runner reads ${POST_RUNNER_READ_BUDGET_MS}ms`);
     // Never a failed review: the report degrades to `none` and the body lands.
     expect(preparedBody()).toContain("### Linked-issue AC\n\nnone");
     expect(sandbox.calls.some((c) => c.cmd.includes("--report-out"))).toBe(false);

@@ -46,7 +46,6 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
 import { createMigratedTestD1, mapAppToDefaultWorkspace } from "../store/helpers";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
-import { CHECK_TERMINALIZE_DEFAULT } from "../../src/dashboard/runtime-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { sk, fakePem } from "../helpers/fake-secrets";
@@ -254,7 +253,7 @@ const testOverrides = {
 
 // --- consumer under test (dynamic import: mocks must be registered first) ---
 
-const { createReviewConsumer, postRunnerReserveMs, ROUND_BUDGET_MS, runnerTimeoutMs } = await import(
+const { createReviewConsumer, runnerTimeoutMs } = await import(
   "../../src/pipeline/consumer"
 );
 
@@ -342,17 +341,18 @@ function expectOuterDeadline(input: Record<string, unknown>): void {
   expect(input.outerDeadlineEpochMs).toBe(runner.startedAt + execTimeout);
 }
 
+/** The fields every runner input declares, whatever the run adds. */
+const RUNNER_INPUT_BASE_FIELDS = ["capabilityHosts", "outerDeadlineEpochMs", "reconFacts", "worktreePath"];
+
 /**
- * The runner input's carried fields, in NO particular order (serialization
- * order is not a contract): the fields every run declares, plus the optional
- * ones this run added. No credential-shaped field name may exist — the keyless
- * declarations are the only credential-facing surface in this document.
+ * The runner input's exact key set — serialization order is not a contract, the
+ * SET is: the base fields every run declares, plus the optional ones this run
+ * added. The document is deliberately keyless, so any field nobody declared
+ * here is the regression — a credential spread lands as an unexpected key,
+ * whatever it is named.
  */
 function expectRunnerInputFields(input: Record<string, unknown>, extra: string[] = []): void {
-  for (const field of ["worktreePath", "reconFacts", "capabilityHosts", "outerDeadlineEpochMs", ...extra]) {
-    expect(input[field]).toBeDefined();
-  }
-  expect(Object.keys(input).filter((name) => /key|token|secret/i.test(name))).toEqual([]);
+  expect(Object.keys(input).sort()).toEqual([...RUNNER_INPUT_BASE_FIELDS, ...extra].sort());
 }
 
 /** The runner exec call's env, in message order (one entry per runner step). */
@@ -912,16 +912,13 @@ describe("runner input modelOverrides threading", () => {
       "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
       "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
     });
-    // Absolute pin: the declared instant is the round clock plus the tighter of
-    // the derived budget (round − post-runner reserve) and the level's tier.
-    expect(input.outerDeadlineEpochMs).toBe(
-      startedAt +
-        Math.min(
-          ROUND_BUDGET_MS - postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT),
-          runnerTimeoutMs("default"),
-        ),
-    );
+    // The declared instant is a RUN FACT, not a re-derivation: it is the
+    // instant this very exec is killed at (the mock's recorded start plus the
+    // timeout that exec ran under). The frozen round clock adds the one claim
+    // the deleted formula pin made — the declared instant cannot outrun the
+    // level's tier table from the round start.
     expectOuterDeadline(input);
+    expect(input.outerDeadlineEpochMs as number).toBeLessThanOrEqual(startedAt + runnerTimeoutMs("default"));
     expectRunnerInputFields(input, ["modelOverrides"]);
   });
 
