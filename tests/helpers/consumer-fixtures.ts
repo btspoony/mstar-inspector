@@ -327,6 +327,15 @@ const INCREMENT_DIFF = aroundSha(
   incrementDiffCommand(TEST_OWNER, TEST_REPO, SHA_PROBE, SHA_PROBE, DIFF_PATH),
 );
 /**
+ * The oversized-diff fallback's fetch and local diff carry the merge-base
+ * ANSWER, which a decline case may set to any value (a truncated reply, a
+ * proxied one, `--jq`'s `null`). Match them by the fixed text the production
+ * builders emit around it, so the double never builds a matcher from the very
+ * value under test.
+ */
+const FETCH_DEPTH_ONE = aroundSha(fetchDepthOneCommand(CLONE_DIR, SHA_PROBE));
+const LOCAL_DIFF = aroundSha(localDiffCommand(CLONE_DIR, SHA_PROBE, SHA_PROBE, DIFF_PATH));
+/**
  * The input write carries no per-round payload in its command any more: the
  * document travels the exec STDIN pipe, so the command is fixed and comes
  * from the production builder.
@@ -582,10 +591,10 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     }
     return { stdout: `${state.mergeBaseSha}\n`, stderr: "", exitCode: 0 };
   }
-  if (cmd === fetchDepthOneCommand(CLONE_DIR, state.mergeBaseSha)) {
+  if (cmd.startsWith(FETCH_DEPTH_ONE.head) && cmd.endsWith(FETCH_DEPTH_ONE.tail)) {
     return { stdout: "", stderr: state.fetchExitCode === 0 ? "" : "fatal: fetch failed", exitCode: state.fetchExitCode };
   }
-  if (cmd === localDiffCommand(CLONE_DIR, state.mergeBaseSha, state.resolvedSha, DIFF_PATH)) {
+  if (cmd.startsWith(LOCAL_DIFF.head) && cmd.endsWith(LOCAL_DIFF.tail)) {
     if (state.localDiffExitCode !== 0) {
       return { stdout: "", stderr: "diff failed", exitCode: state.localDiffExitCode };
     }

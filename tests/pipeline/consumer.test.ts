@@ -1378,6 +1378,44 @@ describe("createReviewConsumer", () => {
     expect(String(failureRows(db)[0]!.error)).toContain("oversized fallback: merge-base-empty at merge base");
   });
 
+  // The answer is the API's, not the shell's: a 7-char truncated reply and
+  // `--jq`'s `null` both exit 0 and are unusable — the shell allowlist would
+  // accept the truncated one, so this check must be stricter than it.
+  for (const answer of ["c".repeat(7), "null"]) {
+    test(`an exit-0 merge-base answer that is not a complete object id is unreadable (${answer})`, async () => {
+      reset();
+      sandbox.diffExitCode = 1;
+      sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+      sandbox.mergeBaseSha = answer;
+      const db = await createSeededTestD1();
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+        /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: merge-base-unreadable at merge base$/,
+      );
+
+      // Nothing was built from the answer: no fetch, no local diff.
+      expect(sandbox.calls.map((c) => c.cmd)).toEqual([
+        expect.stringContaining("git init '/workspace/repo'"),
+        expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+        expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
+        pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
+        mergeBaseCommand(TEST_OWNER, TEST_REPO, sandbox.diffBaseRef, SHA),
+      ]);
+      const fallbackWarns = logLines.filter((l) => l.fields.diff_fallback !== undefined);
+      expect(fallbackWarns).toHaveLength(1);
+      expect(fallbackWarns[0]!.fields).toMatchObject({
+        diff_fallback: "merge-base-unreadable",
+        diff_fallback_step: "merge base",
+      });
+      // The exec itself SUCCEEDED: the warn names exit 0, never an exec failure.
+      expect(fallbackWarns[0]!.msg).toContain("exit 0");
+      expect(reviewCount(db)).toBe(0);
+      expect(failureRows(db)).toHaveLength(1);
+      expect(String(failureRows(db)[0]!.error)).toContain("oversized fallback: merge-base-unreadable at merge base");
+    });
+  }
+
   test("a hostile base ref is rejected by the guard and named — never built into a shell string", async () => {
     reset();
     sandbox.diffExitCode = 1;

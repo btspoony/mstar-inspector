@@ -124,12 +124,19 @@ export function boundedFileReadCommand(path: string, maxBytes: number): ShellCom
  */
 export const BOUNDED_READ_ABSENT_FLAG = "2";
 
-/** A commit sha interpolated into a command path segment — hex only. */
+/** A commit sha interpolated into a command path segment — hex only. A shell allowlist, never an answer check. */
 const SHA_RE = /^[0-9a-f]{7,64}$/;
 
-/** The sha shape `assertSha` enforces, for a caller that must tell an unusable API answer from a hostile value. */
-export function isSha(value: string): boolean {
-  return SHA_RE.test(value);
+/**
+ * A COMPLETE git object id: SHA-1's 40 or SHA-256's 64 lowercase hex. The
+ * interpolation allowlist above accepts a truncated reply, so it cannot tell
+ * an unusable API answer from a real one.
+ */
+const COMPLETE_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** For a caller that must tell an unusable API answer (`--jq`'s `null`, a truncated reply) from a real object id. */
+export function isApiSha(value: string): boolean {
+  return COMPLETE_SHA_RE.test(value);
 }
 
 function assertSha(value: string, label: string): void {

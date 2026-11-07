@@ -154,8 +154,8 @@ import {
   fetchDepthOneCommand,
   gitTransportEnv,
   incrementDiffCommand,
+  isApiSha,
   isDiffTooLarge,
-  isSha,
   issueViewCommand,
   localDiffCommand,
   mergeBaseCommand,
@@ -577,11 +577,11 @@ export type ConsumerLogFields = {
    * produced nothing, and the step it stopped at. `budget` / `step-timeout`
    * declined before that step's exec ran, `guard-rejected` is a hostile
    * ref/sha refused before it reached a shell string, `merge-base-unreadable`
-   * is an exit-0 answer that is not a sha (`--jq` prints `null` for an absent
-   * field), `transport` is a sandbox fault, and the rest name the step that
-   * exited non-zero or answered empty. The message carries that step's exit
-   * code and redacted stderr tail; the round's durable failure keeps the
-   * ORIGINAL 406.
+   * is an exit-0 answer that is not a COMPLETE object id (a truncated reply, or
+   * `--jq`'s `null` for an absent field), `transport` is a sandbox fault, and
+   * the rest name the step that exited non-zero or answered empty. The message
+   * carries that step's exit code and redacted stderr tail; the round's durable
+   * failure keeps the ORIGINAL 406.
    */
   diff_fallback?: DiffCaptureDeclineReason;
   diff_fallback_step?: string;
@@ -3335,10 +3335,11 @@ async function oversizedDiffCapture(
     const merge = await sandbox.runCommand(mergeCmd, { env: { GH_TOKEN: token }, timeout: left });
     const mergeBaseSha = merge.stdout.trim();
     if (merge.exitCode !== 0 || mergeBaseSha === "") return { reason: "merge-base-empty", step, run: merge };
-    // An exit-0 answer that is not a sha is an UNUSABLE answer, never a hostile
-    // ref: `gh api --jq` prints `null` for an absent field, and a truncated or
-    // proxied reply prints anything. No guard ran and nothing is built from it.
-    if (!isSha(mergeBaseSha)) return { reason: "merge-base-unreadable", step, run: merge };
+    // An exit-0 answer that is not a COMPLETE object id is an UNUSABLE answer,
+    // never a hostile ref: `gh api --jq` prints `null` for an absent field, and
+    // a truncated or proxied reply prints anything. The shell allowlist would
+    // accept a truncated 7-char reply, so it cannot make this call.
+    if (!isApiSha(mergeBaseSha)) return { reason: "merge-base-unreadable", step, run: merge };
 
     step = "fetch";
     left = stepTimeout();
