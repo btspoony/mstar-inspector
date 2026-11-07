@@ -669,12 +669,14 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
  * clock a best-effort step must fit inside.
  *
  * The paid runner is DERIVED from this deadline, never reserved in full: its
- * exec timeout is `min(runnerTimeoutMs(level), runnerDeadlineMs - now)` read
- * immediately before the exec, where
+ * exec ends at `min(runnerDeadlineMs, now + runnerTimeoutMs(level))` fixed
+ * before the input write, where
  * `runnerDeadlineMs = ROUND_BUDGET_MS - postRunnerReserveMs(terminalizeMs)`.
- * The input hands that same instant to the runner (`outerDeadlineEpochMs`), so
- * the input write's own window and the runner's start/parse time spend that
- * deadline instead of each being added back onto it.
+ * The input hands that exact end instant to the runner
+ * (`outerDeadlineEpochMs`) and the exec timeout is what remains of it
+ * immediately before the exec, so the input write's own window and the
+ * runner's start/parse time spend that deadline instead of each being added
+ * back onto it.
  * That reserve is the whole post-runner tail plus the guard's slack — 234_000ms
  * at today's defaults:
  *   post-runner bounded reads  POST_RUNNER_READ_BUDGET_MS    90_000
@@ -4811,10 +4813,16 @@ async function processMessage(
       runnerDeadlineMs,
     );
 
+    // The instant the exec is actually killed at: the derived deadline, capped
+    // by the level's table — a quick/default round with more than 600s of
+    // derived deadline left still cannot run longer than its tier. Fixed HERE
+    // and handed to the runner verbatim, so the instant it anchors at is
+    // exactly where the exec ends instead of up to one tier gap later.
+    const runnerExecDeadlineMs = Math.min(runnerDeadlineMs, Date.now() + runnerTimeoutMs(level));
     // The input carries the SAME absolute deadline every post-diff step bills —
-    // the derived instant, never a duration. The runner anchors its own review
-    // deadline AT it, so the write's own window and the runner's parse time
-    // both spend that deadline instead of each being added back onto it.
+    // the exec's own end instant, never a duration. The runner anchors its own
+    // review deadline AT it, so the write's own window and the runner's parse
+    // time both spend that deadline instead of each being added back onto it.
     const runnerInput = {
       worktreePath: CLONE_DIR,
       reconFacts,
@@ -4822,7 +4830,7 @@ async function processMessage(
       // The absolute instant the exec below is killed at: the runner anchors
       // its own review deadline there, so a shortened round plans synthesis
       // inside the exec it runs under instead of the level's whole tier cap.
-      outerDeadlineEpochMs: runnerDeadlineMs,
+      outerDeadlineEpochMs: runnerExecDeadlineMs,
       ...(modelOverrides !== undefined ? { modelOverrides } : {}),
       ...(customProviders !== undefined
         ? { customProviders: customProviders.map(toRunnerCustomProvider) }
@@ -4880,12 +4888,12 @@ async function processMessage(
       recheckInput !== undefined ? RECHECK_OUTPUT_PATH : undefined,
       prContext !== undefined ? REPORT_OUTPUT_PATH : undefined,
     );
-    // Recomputed HERE, after the input write has consumed its window: the exec
-    // gets exactly what the absolute deadline still owes, so this timeout and
-    // the `outerDeadlineEpochMs` the input declares name the same instant. A
-    // deadline the write finished is declined explicitly, never started as a
-    // 1ms exec that would fail for the wrong cause.
-    const runnerTimeout = boundedStepTimeout(runnerDeadlineMs, runnerTimeoutMs(level), "runner");
+    // What the declared instant still owes, read HERE after the input write
+    // consumed its window: `runnerExecDeadlineMs` sits at most one tier cap
+    // after the write, so this is always below that cap and ends exactly at
+    // the instant the input named. A deadline the write finished is declined
+    // explicitly, never started as a 1ms exec that fails for the wrong cause.
+    const runnerTimeout = boundedStepTimeout(runnerExecDeadlineMs, runnerTimeoutMs(level), "runner");
     const run = await sandbox.runCommand(runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,

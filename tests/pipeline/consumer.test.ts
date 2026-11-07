@@ -1609,6 +1609,41 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(1);
   });
 
+  test("the declared instant is exactly where the exec ends when the tier cap binds", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    let roundStart = 0;
+    let execStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+        ...testOverrides,
+        // Nothing is spent before the runner: 666s of derived deadline remain,
+        // but a quick/default exec is capped at 600s — the CAP, not the derived
+        // deadline, decides where this exec is killed.
+        getSandbox: async () => ({
+          runCommand: async (cmd: string, opts?: unknown) => {
+            if (cmd.includes("bun run")) execStart = clock.now;
+            return fakeSandbox.runCommand(cmd, opts);
+          },
+          destroy: fakeSandbox.destroy,
+        }),
+      });
+      await consumer(makeBatch(makePayload()));
+    });
+
+    const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    expect(runnerExecTimeout()).toBe(600_000);
+    // The input declares the exec's OWN end, never the later derived deadline a
+    // cap-bound exec cannot reach: a seat planned against it is never killed
+    // inside the exec window it runs under.
+    expect(writtenInput.outerDeadlineEpochMs).toBe(execStart + runnerExecTimeout()!);
+    expect(writtenInput.outerDeadlineEpochMs).toBe(roundStart + 600_000);
+    expect(reviewCount(db)).toBe(1);
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
   test("an input write that spends the derived deadline declines the runner with the explicit budget failure", async () => {
     reset();
     const db = await createSeededTestD1();
