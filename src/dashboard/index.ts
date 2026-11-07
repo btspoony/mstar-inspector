@@ -551,22 +551,29 @@ function floorRepairLink(
 /**
  * The fail-closed floor read's page, branched on the read's cause. A transient
  * read failure is fixed by resubmitting, so it names no setting and carries no
- * repair link; an untrusted or malformed stored value IS what needs repair, so
- * it keeps the settings link. Both render sites share this one decision.
+ * repair link. A malformed result has no floor field at all — the database
+ * predates the column — so a settings visit repairs nothing and the copy
+ * names the migration that adds it. An untrusted stored value IS what needs
+ * repair, so it keeps the settings link. Both render sites share this
+ * decision.
  */
 function workspaceFloorUnreadablePage(
   locale: Locale,
   reason: DegradedReason | undefined,
   target: CreationTarget,
 ): string {
-  return reason === "read-failed"
-    ? manifestErrorPage(t(locale, "manifest.error.workspaceFloorReadFailed"), true, locale)
-    : manifestErrorPage(
-        t(locale, "manifest.error.workspaceFloorUnreadable"),
-        true,
-        locale,
-        floorRepairLink(locale, target),
-      );
+  if (reason === "read-failed") {
+    return manifestErrorPage(t(locale, "manifest.error.workspaceFloorReadFailed"), true, locale);
+  }
+  if (reason === "malformed") {
+    return manifestErrorPage(t(locale, "manifest.error.workspaceFloorMalformed"), true, locale);
+  }
+  return manifestErrorPage(
+    t(locale, "manifest.error.workspaceFloorUnreadable"),
+    true,
+    locale,
+    floorRepairLink(locale, target),
+  );
 }
 
 /**

@@ -1947,7 +1947,10 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
 
   /** Manifest banner copy as it lands in HTML (escapeHtml owns the apostrophe entity). */
   const bannerCopy = (
-    key: "manifest.error.workspaceFloorUnreadable" | "manifest.error.workspaceFloorReadFailed",
+    key:
+      | "manifest.error.workspaceFloorUnreadable"
+      | "manifest.error.workspaceFloorMalformed"
+      | "manifest.error.workspaceFloorReadFailed",
   ) => t("en", key).replaceAll("'", "&#39;");
 
   /** POST /dashboard/manifest/commit; holdValue=null omits the hold cookie. */
@@ -2289,16 +2292,22 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(callbackBody).not.toContain('href="/dashboard/default/settings"');
   });
 
-  test("a malformed floor result row is a stored-setting repair, not a retry", async () => {
+  test("a malformed floor result row names the migration and links no setting to repair", async () => {
     const env = degradedFloorEnv("malformed");
     const holdValue = await freshHold();
     const refused = await doCommit({ env, holdValue });
     expect(refused.status).toBe(500);
     expect(appRowCount(env)).toBe(0);
     const refusedBody = await refused.text();
-    expect(refusedBody).toContain(bannerCopy("manifest.error.workspaceFloorUnreadable"));
+    // The row came back without the column: the fix is the migration, not a
+    // settings visit — a repair link would send the operator to a page that
+    // cannot add it.
+    expect(refusedBody).toContain(bannerCopy("manifest.error.workspaceFloorMalformed"));
+    expect(refusedBody).toContain("0049_workspace_check_min_score.sql");
+    expect(refusedBody).not.toContain(bannerCopy("manifest.error.workspaceFloorUnreadable"));
     expect(refusedBody).not.toContain(bannerCopy("manifest.error.workspaceFloorReadFailed"));
-    expect(refusedBody).toContain('href="/dashboard/default/settings"');
+    expect(refusedBody).not.toContain('href="/dashboard/default/settings"');
+    expectHoldKept(refused);
   });
 
   test("POST /manifest/commit stays an idempotent-recovery path: after a retryable callback 500, the SAME hold resubmits → 302 onboarding + one row", async () => {

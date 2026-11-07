@@ -982,12 +982,19 @@ export const en = {
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
       /**
-       * The workspace's stored default floor is untrusted or its result row
-       * malformed: the connect fails closed before writing anything, so the
-       * operator repairs the setting and retries.
+       * The workspace's stored default floor is untrusted: the connect fails
+       * closed before writing anything, so the operator repairs the setting
+       * and retries.
        */
       workspaceFloorUnreadable:
         "The App could not be connected — this workspace's default score floor cannot be read, so nothing was stored. Repair the setting, then resubmit.",
+      /**
+       * The workspace row came back without the floor field: the database
+       * predates the column, so a settings visit cannot repair it. The copy
+       * names the migration that adds it (`0049`).
+       */
+      workspaceFloorMalformed:
+        "The App could not be connected — this workspace's row carries no default score floor, so nothing was stored. Apply migration 0049_workspace_check_min_score.sql, then resubmit.",
       /**
        * A transient read failure of the default floor: nothing was stored, and
        * resubmitting retries the read — there is no setting to repair.

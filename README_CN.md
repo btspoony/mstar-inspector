@@ -134,8 +134,8 @@ Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.revie
   （名为 `mstar-inspector review`），随后终态化为 `success` 或 `failure`。`success` 的含义是审查
   **已发布且满足该 App 的审查门禁**——其 verdict 属于 App 的通过 verdict 集合，且 tally 分数不低于
   App 的分数下限。门禁是该 App 在 Settings 页上的逐 App 配置；从此以后接入的 App 以所属工作区的默认分数下限
-  起始（平台默认 60），而在此变更之前就已存在的 App 保留自己已存储的下限（早于该默认值的
-  App 带的是 80）。只有 verdict 属于该 App 的通过集合（默认 `ship it`）且分数达到该 App 下限的
+  起始（平台默认 60），而在此变更之前就已存在的 App 保留自己已存储的下限；只有下限此后从未被改写的
+  App 仍带着 80（迁移 `0045` 物化的取值）。只有 verdict 属于该 App 的通过集合（默认 `ship it`）且分数达到该 App 下限的
   审查，才能通过门禁。确认的降级发布、发布未确认、
   执行失败，或已发布但未达门禁的审查，均为 `failure`。结论**绝不是**批准、merge 门禁或
   `REQUEST_CHANGES` 等价物，App 也从不请求这些。结论由持久化的发布证据加上已应用的 review 决定，
