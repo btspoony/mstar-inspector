@@ -51,6 +51,7 @@ import {
   type CheckAttempt,
   type CheckConclusion,
 } from "../../src/store/review-checks";
+import { claimPublication } from "../../src/store/finding-lifecycle";
 import {
   CHECK_RECONCILE_MAX_REQUESTS,
   CHECK_RECONCILE_PER_REQUEST_MS,
@@ -3088,6 +3089,70 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     // No attribution: the unwritten row ended no wait, so the deadline path
     // writes its honest unconfirmed failure and never adopts that proof.
     expect(deferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(UNCONFIRMED);
+    const row = await rawRow(db, id);
+    expect(row.publication_id).toBeNull();
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("a re-trigger whose pre-existing journal row is claimed mid-wait never concludes from it", async () => {
+    const db = seededDb();
+    const { id } = await abandonedAttempt(db);
+    // Counterexample (b): this head's journal row was INSERTED before the
+    // attempt was admitted, and an earlier generation CLAIMED it afterwards —
+    // the claim stamps `updated_ms` and moves `prepared` to `sending`
+    // (`claimPublication`). No proof is ever recorded. The post-admission write
+    // admits the row to the probe, but a proofless row can only answer
+    // `pending`: it must defer, never conclude.
+    const journalId = seedJournal(db, SCOPE, SHA, "prepared", T0 - 5_000);
+    expect(await claimPublication(db, journalId, "earlier-generation", T0 + 5_000)).not.toBeNull();
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      // Inside the deadline nothing is concludable: deferred, not completed.
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    // No attempt spent and no credential minted: the earlier generation's
+    // claim-only write attributed no conclusion to this attempt.
+    expect(factoryCalls).toBe(0);
+    const waitingRow = await rawRow(db, id);
+    expect(waitingRow.publication_id).toBeNull();
+    expect(waitingRow.terminal_ms).toBeNull();
+    expect(waitingRow.attempts).toBe(1);
+    expect(waitingRow.desired).toBe("in_progress");
+    expect(waitingRow.observed).toBe("unknown");
+
+    // At the attempt's own deadline the wait ends unconfirmed: a `sending` row
+    // with no proof never becomes a success, and the row is never adopted.
+    const sent: { desired?: string; summary?: string } = {};
+    const deadlineStub = stubFetch();
+    let deadlineDeferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => FUTURE_DEADLINE + 60_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deadlineDeferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      deadlineStub.restore();
+    }
+
+    expect(deadlineDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
     expect(sent.summary).toBe(UNCONFIRMED);
     const row = await rawRow(db, id);
