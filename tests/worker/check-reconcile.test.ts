@@ -2809,6 +2809,45 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.terminal_ms).not.toBeNull();
   });
 
+  test("an applied payload that fails the gate decides, not a passing live score", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    // The live projection for this head: a PASSING review. It is not what this
+    // attempt published — `reviews` is a first-write-wins projection that can
+    // belong to an earlier attempt for the same SHA, so it must never decide.
+    seedReview(db, SCOPE, SHA, "ship it", 95);
+    // The projection is read per App; the helper leaves `app_id` unset, so
+    // stamp it the way the apply write does.
+    db.raw.prepare(`UPDATE reviews SET app_id = ? WHERE head_sha = ?`).run(SCOPE.appId, SHA);
+    // THIS attempt's own applied publication: its payload's envelope fails the
+    // gate, and that verdict is immutable. The link is what attributes it.
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "applied", reviewPayload(SCOPE, SHA, "needs fixes", 40));
+    linkPublication(db, id, proof.publicationId);
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    // The published payload decides: a gate miss, never the passing row the
+    // scope/SHA projection happens to hold.
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toContain("Review gate missed");
+    expect(sent.summary).toContain("needs fixes");
+    expect(sent.summary).toContain("score 40");
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
   test("an admission-drop row never ends the wait: the publication still decides", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
