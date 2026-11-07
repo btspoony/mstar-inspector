@@ -133,11 +133,8 @@ export const RECORDS: RecordPages = {
   failures: page(FAILURES),
 };
 
-/**
- * The fixture PR's own must-fix tally, as its head counts it: read off the
- * untouched full first page (`FINDINGS`), never off a page a test overrode.
- */
-const MUST_FIX = FINDINGS.filter((finding) => finding.severity === "must-fix").length;
+/** The fixture PR's own must-fix tally, as its head counts it. */
+export const MUST_FIX = FINDINGS.filter((finding) => finding.severity === "must-fix").length;
 
 /**
  * The head's authoritative newest review — the same round as `REVIEWS[0]`, in
@@ -179,15 +176,18 @@ export type DetailScene = { detail: PullRequestDetailPayload; pages: RecordPages
  * stub will serve. `latest` overrides the head's newest review (the headline's
  * only source), leaving the section pages untouched.
  *
- * `mustFix` is the head's own must-fix tally and is NEVER derived from a
- * window the page under test does not describe: by default it is the
- * must-fix count of the scene's findings page, so a scene whose page holds
- * only may-fix/nit rows claims none. A caller with a genuinely filtered or
- * paged window whose PR really has other must-fix rows states its own; an
- * explicit `0` stays `0`. Callers keep it within the scene's findings
- * total — a PR with no finding cannot claim a must-fix one — and the
- * fixture does not enforce that: a clamp here would silently rewrite the
- * stated fact and make the head agree with whichever page the test loaded.
+ * The findings count and the must-fix tally are both facts about the WHOLE
+ * family, so both come from the scene's findings page: the count is the page's
+ * authoritative `total`, and the tally defaults to that same page's must-fix
+ * rows only while the page IS the family (`items.length === total`), so a
+ * scene whose page holds only may-fix/nit rows claims none. A windowed page —
+ * a later page, a filtered window, a shrunken page — states no family tally,
+ * and `mustFix` is then REQUIRED: the default would pair a family total with a
+ * window's row count. A windowed scene without one throws; an explicit `0`
+ * stays `0`. Callers keep it within the scene's findings total — a PR with no
+ * finding cannot claim a must-fix one — and the fixture does not enforce that:
+ * a clamp here would silently rewrite the stated fact and make the head agree
+ * with whichever page the test loaded.
  */
 export function scene(
   over: Partial<RecordPages> = {},
@@ -196,16 +196,22 @@ export function scene(
   mustFix?: number,
 ): DetailScene {
   const pages: RecordPages = { ...RECORDS, ...over };
+  const findings = pages.findings;
+  if (mustFix === undefined && findings.items.length !== findings.total) {
+    throw new Error(
+      "scene(): the findings page is a window, not the whole family — state its mustFix tally explicitly",
+    );
+  }
   const base = DETAIL.latest_review;
   return {
     detail: {
       pull_request: { ...DETAIL.pull_request, ...row },
       counts: {
-        findings: pages.findings.total,
+        findings: findings.total,
         reviews: pages.reviews.total,
         failures: pages.failures.total,
         must_fix:
-          mustFix ?? pages.findings.items.filter((finding) => finding.severity === MUST_FIX_SEVERITY).length,
+          mustFix ?? findings.items.filter((finding) => finding.severity === MUST_FIX_SEVERITY).length,
       },
       latest_review: latest === null || base === null ? null : { ...base, ...latest },
     },
@@ -309,7 +315,9 @@ export async function mountView(
  * rows and `severity` filters findings, so a mounted test sees a real page
  * swap. `sceneFor` receives the App the URL names, so one stub can serve
  * different Apps. Every request is recorded for the "one read per switch"
- * assertions.
+ * assertions. A read outside those families (the head and the three record
+ * sections) is refused, naming the URL: no head payload stands in for a read
+ * the API never answered.
  *
  * The `severity` semantics are the route's own (`isFindingSeverity` in
  * `src/contracts/finding-severity.ts`, which `src/dashboard/index.ts` guards
@@ -372,7 +380,13 @@ export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: 
         limit: applied,
       });
     }
-    return jsonResponse(sceneValue.detail);
+    // The head read is the only other read this stub describes; anything else
+    // is a test asking for a read the stub cannot answer, and answering it with
+    // a head payload would let that test pass on a response the API never gave.
+    if (/\/api\/apps\/[^/]+\/pull-requests\/[^/]+\/[^/]+\/\d+$/.test(url.pathname)) {
+      return jsonResponse(sceneValue.detail);
+    }
+    throw new Error(`detailFetch: unhandled URL ${url.pathname}${url.search}`);
   }) as unknown as typeof fetch;
   return { fetch: impl, fetches };
 }

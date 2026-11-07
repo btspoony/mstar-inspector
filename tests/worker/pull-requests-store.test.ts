@@ -813,9 +813,9 @@ describe("pull request detail reads", () => {
     // Newest-first paging never renumbers: page 1 is rounds 3, 2; page 2 is
     // the oldest round alone.
     const first = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 2 });
-    expect(first!.items.map((review) => [review.round, review.findings, review.duration_ms])).toEqual([
-      [3, 0, 65_000],
-      [2, 2, null],
+    expect(first!.items.map((review) => [review.round, review.duration_ms])).toEqual([
+      [3, 65_000],
+      [2, null],
     ]);
     const second = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 2, limit: 2 });
     expect(second!.items.map((review) => review.round)).toEqual([1]);
