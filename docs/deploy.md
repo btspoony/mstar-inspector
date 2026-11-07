@@ -2532,7 +2532,8 @@ Two more fields ride that same runtime read, and the same page renders both:
   (`github-secondary-rate-limit: `). Two writers share it: the consumer tags a
   review rejected by a GitHub secondary limit once at its single catch, before
   redaction, and the degraded comment-delete sweep records one `rate-limit`
-  row per non-zero kind. A primary limit (`429`) carries its own
+  row per non-zero kind. A primary limit (`429`, or a `403` whose
+  `x-ratelimit-remaining` is `0` with no secondary signal) carries its own
   `github-primary-rate-limit: ` prefix and never counts here. The page renders
   the number, so a secondary rejection is told apart from any other delivery
   failure. The sweep rows are an attribution stage (`rate-limit`), which every
