@@ -99,6 +99,9 @@ import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-sto
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
 import { hasUsageEventForExecutionToken, recordUsageEvent } from "../store/usage-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
+// The hand-off's two fenced writes live in the Check registry (§7.9/§7.11.2):
+// linking the publication the probe found, and releasing the claim to recovery.
+import { CHECK_BACKOFF_MS, deferCheckRecovery, linkCheckPublication } from "../store/review-checks";
 import {
   applyPublishedLifecycle,
   claimPublication,
@@ -362,7 +365,9 @@ export type ConsumerLogFields = {
    * `check_abandon_not_owned` = it changed nothing because the attempt is no
    * longer ours (recovery claimed it, the lease expired, or it already ended) —
    * a legitimate no-op, not a fault; `check_abandon_failed` = the hand-off
-   * itself faulted (a store error).
+   * itself faulted (a store error). The publication hand-off reports its two
+   * fenced writes (link, release) on these same three values, with the message
+   * naming which write refused.
    */
   event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed";
   action: string;
@@ -4051,15 +4056,69 @@ async function processMessage(
         `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
       );
       // Deliberately NOT terminalized: this attempt published nothing, and the
-      // publication on this head belongs to an earlier generation — a proof
-      // this attempt never linked, so it can never decide this attempt's Check
-      // (spec §7.9/§7.11.2). A premature `neutral` here would outlive the run
-      // that still owns the lease. The admitted claim is RELEASED instead
-      // (remote-unconfirmed + the first backoff rung), so the recoverer waits
-      // out THIS attempt's execution deadline and closes it with the honest
-      // unconfirmed failure rather than freezing a conclusion under a live
-      // lease.
-      if (checkHandle !== null) await abandonCheck(checkHandle, "publication journal handoff");
+      // publication on this head belongs to an earlier generation. LINKING that
+      // row is what makes it this attempt's proof, so the conclusion stays with
+      // the publication: an applied proof decides `success`, and only the
+      // execution deadline decides the honest failure. Freezing an intent here
+      // would instead close the run for good — the correction seam needs a
+      // non-null `publication_id` (which is exactly what this link supplies).
+      //
+      // Both writes are fenced on the claim lease, and either can refuse: the
+      // claim runs 900s while the intervening sandbox/token/inflight/journal
+      // steps are network calls with no enforced clock. A refusal writes
+      // nothing, which is the honest outcome — the row keeps its current owner
+      // and stays `in_progress`; once `lease_until_ms` passes, the reconcile
+      // selector picks it up and the deadline path concludes it. A store fault
+      // is a warn too: a Check fault never blocks the review's ack.
+      if (checkHandle !== null) {
+        const nowMs = Date.now();
+        const handoffFields = {
+          ...fields,
+          sandbox_id: sandboxId,
+          attempt_id: checkHandle.attemptId,
+          check_reason: "publication journal handoff",
+        };
+        try {
+          if (
+            !(await linkCheckPublication(
+              deps.env.DB,
+              checkHandle.attemptId,
+              checkHandle.lease,
+              journalRow.id,
+              nowMs,
+            ))
+          ) {
+            deps.log.warn(
+              { ...handoffFields, event: "check_abandon_not_owned" },
+              "publication link refused by the check lease fence — the row keeps its owner and the deadline path concludes it (publication journal handoff)",
+            );
+          }
+          if (
+            !(await deferCheckRecovery(
+              deps.env.DB,
+              checkHandle.attemptId,
+              checkHandle.lease,
+              {
+                state: "remote-unconfirmed",
+                nextAttemptMs: nowMs + CHECK_BACKOFF_MS[0]!,
+                reason: "publication journal handoff",
+              },
+              nowMs,
+            ))
+          ) {
+            deps.log.warn(
+              { ...handoffFields, event: "check_abandon_not_owned" },
+              "claim release refused by the check lease fence — the row keeps its lease and the deadline path concludes it (publication journal handoff)",
+            );
+          }
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(
+            { ...handoffFields, event: "check_abandon_failed" },
+            `publication journal handoff faulted (the Check row is left to the recovery lane): ${detail}`,
+          );
+        }
+      }
       return { kind: "ok" };
     }
 
