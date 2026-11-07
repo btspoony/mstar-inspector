@@ -232,6 +232,50 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     });
   }
 
+  test("a wait-terminal row of a disabled App still takes the durable suspension", async () => {
+    const db = seededDb();
+    // Wait-terminal shape: no journal row since admission and no link of its
+    // own, so the probe alone already ends this lane's wait. The D1 pair gate
+    // still LEADS the wait (spec §7.11.2 step 2), so a disabled App suspends the
+    // pair exactly as the credential path would, instead of leaving the row to
+    // burn its window until the deadline.
+    const { id } = await abandonedRow(db);
+    db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(SCOPE.appId);
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    const warned: Array<Record<string, unknown>> = [];
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        log: { warn: (fields) => void warned.push(fields), info: () => {} },
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      // The lifecycle gate WINS over the dead-attempt short-circuit.
+      expect(summary.suspended).toBe(1);
+      expect(summary.deferred).toBe(0);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    expect(factoryCalls).toBe(0);
+    const row = await rawRow(db, id);
+    expect(row.recovery_state).toBe("suspended");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.observed).toBe("unknown");
+    expect(row.attempts).toBe(1); // no attempt spent
+    expect(row.next_attempt_ms).toBeNull(); // the suspension owns the row now
+    expect(row.holder).toBeNull();
+    expect(warned.some((fields) => fields.event === "ops_check_reconcile_pair_suspended")).toBe(true);
+    expect(
+      warned.some((fields) => fields.event === "check_recovery_deferred_pending_publication"),
+    ).toBe(false);
+  });
+
   test("a confirmed journal whose proof is not applied yet still holds the wait", async () => {
     const db = seededDb();
     const { attempt, id } = await handedOverAttempt(db);
@@ -505,9 +549,10 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     // Nothing this attempt staged exists: the only publication for the head was
     // staged before it was admitted. The abandoned row has no link of its own,
     // so nothing in the wait can ever answer it — the probe is terminal for the
-    // lane on the FIRST pass, and it is not repeated: no claim, no defer, no
-    // re-read of the pair or of the attempt's link. The deadline still owns the
-    // conclusion, so the proof is never adopted.
+    // lane on the FIRST pass, and it is not repeated: no claim, no defer, and
+    // no proof re-read of the attempt's link (the D1 pair gate still leads the
+    // wait). The deadline still owns the conclusion, so the proof is never
+    // adopted.
     const prior = { ...proofFor(attempt.identity), publicationId: "pub-only-previous-generation" };
     seedPublication(db, SCOPE, SHA, prior, "applied", reviewPayload(SCOPE, SHA, "ship it", 90));
     const dueBefore = (await rawRow(db, id)).next_attempt_ms;
@@ -781,7 +826,7 @@ function countingDb(db: TestD1): { db: TestD1; statements: () => number } {
 }
 
 describe("the journal-less short-circuit (spec §7.9/§7.11.2)", () => {
-  test("an attempt with no journal row costs the probe alone and is not deferred", async () => {
+  test("an attempt with no journal row costs the probe and the pair gate, and is not deferred", async () => {
     const baseline = countingDb(seededDb());
     await run(baseline.db, { now: () => T0 + 120_000 });
     const selectorOnly = baseline.statements();
@@ -791,12 +836,14 @@ describe("the journal-less short-circuit (spec §7.9/§7.11.2)", () => {
     const before = dead.statements();
     const summary = await run(dead.db, { now: () => T0 + 120_000 });
 
-    // ONE statement for the dead attempt — the shared determination's journal
-    // probe. The pair gate, the proof read, the claim and the defer are all
-    // gone: nothing in the wait can progress and nothing is written.
+    // TWO statements for the dead attempt — the shared determination's journal
+    // probe plus the D1 pair gate that LEADS the wait (spec §7.11.2 step 2), so
+    // a disabled/deleted App still suspends instead of looping to the deadline.
+    // The proof read, the claim and the defer are all gone: nothing in the wait
+    // can progress and nothing is written.
     expect(summary.examined).toBe(1);
     expect(summary.deferred).toBe(0);
-    expect(dead.statements() - before - selectorOnly).toBe(1);
+    expect(dead.statements() - before - selectorOnly).toBe(2);
   });
 
   test("a journal row staggers the wait onto the widening ladder instead of every minute", async () => {

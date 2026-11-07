@@ -833,27 +833,25 @@ async function reconcileCheckAttempt(
   else if (pending.kind === "pending" && proofPublicationId === null) {
     proofPublicationId = pending.publicationId;
   }
-  // Terminal for the WAIT: nothing was staged for this attempt and it links no
-  // publication of its own, so no later read in this lane can change that
-  // answer. It is NOT a conclusion — the deadline concludes it, naming the
-  // missing evidence `unstaged` — and it is not a defer either: the row stays
-  // due, so the pass costs this one probe and a journal row that DOES appear is
-  // still seen on the next tick.
-  if (beforeDeadline && waitIsTerminal(pending, proofPublicationId)) return;
   if (beforeDeadline) {
-    // The D1 half of the pair gate runs BEFORE the wait (spec §7.6): a waiting
-    // row whose App is disabled/deleted or whose installation mapping vanished
-    // must take the durable suspension path, never loop through the defer with
-    // its Check never converging. A wait-terminal row never reaches it: it
-    // neither defers nor concludes here, and every other row of its pair still
-    // reads the pair's state.
+    // The D1 half of the pair gate runs BEFORE the wait (spec §7.6, §7.11.2
+    // step 2): a row whose App is disabled/deleted or whose installation
+    // mapping vanished must take the durable suspension path, never loop with
+    // its Check never converging. That holds for a wait-terminal row too — the
+    // gate leads the wait, so the dead-attempt short-circuit below must not
+    // skip it.
     const unusable = await pairUnusableReason(db, scope);
     if (unusable !== null) {
       await suspendUnusablePair(db, scope, unusable, undefined, now, log, summary);
       return;
     }
-  }
-  if (beforeDeadline) {
+    // Terminal for the WAIT: nothing was staged for this attempt and it links
+    // no publication of its own, so no later read in this lane can change that
+    // answer. It is NOT a conclusion — the deadline concludes it, naming the
+    // missing evidence `unstaged` — and it is not a defer either: the row stays
+    // due, so the pass costs the probe and the pair gate, and a journal row
+    // that DOES appear is still seen on the next tick.
+    if (waitIsTerminal(pending, proofPublicationId)) return;
     const waiting =
       pending.kind === "pending" ||
       pending.kind === "unknown" ||
