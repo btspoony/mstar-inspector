@@ -141,7 +141,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       expect(waiting.desired).toBe("failure");
       expect(waiting.desired_summary).toBe(UNCONFIRMED);
       expect(waiting.attempts).toBe(1); // the wait spends NO attempt
-      expect(waiting.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
+      expect(waiting.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
       expect(waiting.holder).toBeNull();
       expect(waiting.lease_until_ms).toBeNull();
 
@@ -154,7 +154,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       expect(deferredLine.attempt_id).toBe(id);
       expect(deferredLine.probe_state).toBe("pending");
       expect(deferredLine.phase).toBe(phase);
-      expect(deferredLine.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
+      expect(deferredLine.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
 
       // The publication now proves itself: the SAME attempt concludes from it.
       const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
@@ -506,7 +506,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(row.terminal_ms).toBeNull();
     expect(row.desired).toBe("in_progress");
     expect(row.observed).toBe("unknown");
-    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
   });
 
   test("a previous generation's proof never ends an abandoned attempt's wait", async () => {
@@ -743,7 +743,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     const row = await rawRow(db, id);
     expect(row.terminal_ms).toBeNull();
     expect(row.observed).toBe("unknown");
-    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
   });
 
   test("an unreadable journal probe at the deadline still fails closed", async () => {
@@ -854,22 +854,43 @@ describe("the journal-less short-circuit (spec §7.9/§7.11.2)", () => {
     expect(dead.statements() - before - selectorOnly).toBe(3);
   });
 
-  test("a journal row staggers the wait onto the widening ladder instead of every minute", async () => {
+  test("a journal row re-probes the wait on the first rung instead of widening", async () => {
     const db = seededDb();
     const { id } = await handedOverAttempt(db);
     seedJournal(db, SCOPE, SHA, "prepared");
 
     const first = await run(db, { now: () => T0 + 120_000 });
     expect(first.deferred).toBe(1);
-    // 120 s of wait already outlived the 60 s rung, so the next rung is due.
-    expect((await rawRow(db, id)).next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
+    // Spec §7.11.2 step 2: the claim is taken and given straight back on the
+    // FIRST rung, so a proof that already exists is never delayed by minutes.
+    expect((await rawRow(db, id)).next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
 
-    const second = await run(db, { now: () => T0 + 120_000 + CHECK_BACKOFF_MS[1]! });
+    const second = await run(db, { now: () => T0 + 120_000 + CHECK_BACKOFF_MS[0]! });
     expect(second.deferred).toBe(1);
-    // Widened again: three probes inside the 900 s window, not fifteen.
+    // No widening: a wait that already outlived the first rung still lands on
+    // it, so the row is re-probed about once a minute for the whole window.
     expect((await rawRow(db, id)).next_attempt_ms).toBe(
-      T0 + 120_000 + CHECK_BACKOFF_MS[1]! + CHECK_BACKOFF_MS[2]!,
+      T0 + 120_000 + CHECK_BACKOFF_MS[0]! + CHECK_BACKOFF_MS[0]!,
     );
+  });
+
+  test("a journal-present wait costs the probe, the pair gate, the claim and the defer", async () => {
+    const baseline = countingDb(seededDb());
+    await run(baseline.db, { now: () => T0 + 120_000 });
+    const selectorOnly = baseline.statements();
+
+    const counted = countingDb(seededDb());
+    const { id } = await handedOverAttempt(counted.db);
+    seedJournal(counted.db, SCOPE, SHA, "prepared");
+    const before = counted.statements();
+    const summary = await run(counted.db, { now: () => T0 + 120_000 });
+
+    // FIVE statements for the claim-taking wait — the journal probe, the D1
+    // pair gate that leads it, the claim UPDATE, the claim read and the
+    // re-leasing defer that gives the claim straight back on the first rung.
+    expect(summary.deferred).toBe(1);
+    expect(counted.statements() - before - selectorOnly).toBe(5);
+    expect((await rawRow(counted.db, id)).holder).toBeNull();
   });
 
   test("more wait-terminal rows than the batch bound cannot starve a publishable attempt", async () => {

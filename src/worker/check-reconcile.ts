@@ -424,25 +424,6 @@ function backoffFor(attemptsAfter: number): number {
   return CHECK_BACKOFF_MS[index]!;
 }
 
-/**
- * The rung for the next CLAIM-TAKING proof-wait defer, from the SAME ladder the
- * attempt path backs off on. The wait spends no attempt, so `backoffFor` cannot
- * place it; its own elapsed time does. Every rung the wait has already outlived
- * widens the next one, so a publication that never proves itself is re-probed
- * a handful of times inside the window instead of every minute.
- *
- * The wait-terminal row is NOT placed by this: spec §7.11.2 step 2 pins its
- * due time to `now + the first backoff rung`, because that row is one probe.
- */
-function waitRungMs(attempt: CheckAttempt, nowMs: number): number {
-  let outlivedMs = 0;
-  for (let index = 0; index < CHECK_BACKOFF_MS.length; index += 1) {
-    outlivedMs += CHECK_BACKOFF_MS[index]!;
-    if (nowMs - attempt.createdAtMs < outlivedMs) return CHECK_BACKOFF_MS[index]!;
-  }
-  return CHECK_BACKOFF_MS[CHECK_BACKOFF_MS.length - 1]!;
-}
-
 /** Structured give-up line — App/scope/work ID + reason, no payload/secret. */
 function giveUpLine(scope: Scope, workId: string, attempts: number, reason: string): string {
   return `gave up after ${attempts} attempts (app=${scope.appId}, installation=${scope.installationId}, owner=${scope.owner}, repo=${scope.repo}, pr=${scope.prNumber}, work=${workId}): ${reason}`;
@@ -873,7 +854,11 @@ async function reconcileCheckAttempt(
     if (waiting) {
       const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now());
       if (waitingLease === null) return;
-      const nextAttemptMs = now() + waitRungMs(row, now());
+      // Spec §7.11.2 step 2 pins the claim's given-back due time to the FIRST
+      // rung, exactly like the wait-terminal push above: the publication may
+      // prove itself at any moment, so a widened rung would only delay a proof
+      // that already exists.
+      const nextAttemptMs = now() + CHECK_BACKOFF_MS[0]!;
       if (!(await deferCheckForPendingPublication(db, attemptId, waitingLease, nextAttemptMs, now()))) return;
       summary.deferred += 1;
       log.info(
