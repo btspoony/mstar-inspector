@@ -666,8 +666,10 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
  * Cloudflare caps a Queue consumer invocation at 15 minutes
  * (knowledge: best-practices/cf-queue-consumer-wall-clock), and that cap — not
  * the admission TTL, which only bounds how long the row may be held — is the
- * clock a best-effort step must fit inside. The paid runner owns its own
- * `runnerTimeoutMs(level)` out of the same window.
+ * clock a best-effort step must fit inside. The paid runner owns
+ * `min(runnerTimeoutMs(level), runnerDeadline - now)` out of the same window —
+ * it is DERIVED from this deadline (`deriveRunnerDeadline`), never reserved in
+ * full, so an oversized-diff fallback can still fit.
  *
  * Deepest tier (`deep`), worst case at the documented budgets:
  *   runnerTimeoutMs("deep")      840_000
@@ -1001,6 +1003,41 @@ export const CHECK_EXECUTION_WINDOW_MS = 900_000;
  * documented on `ROUND_BUDGET_MS`.
  */
 export const CHECK_HOOK_TIMEOUT_MS = 2_000;
+
+/**
+ * What every round still owes AFTER the paid runner (ms): the post-runner
+ * bounded reads, the inline-resolution tail and the two Check hooks. Composed
+ * ONLY from values that already exist — every term is an operator-tunable
+ * `review_runtime_settings` value (or the begin hook's platform bound), so the
+ * sum adds no operator knob of its own. 114_000ms at today's defaults.
+ */
+export const POST_RUNNER_RESERVE_MS =
+  POST_RUNNER_READ_BUDGET_MS +
+  INLINE_RESOLVE_BUDGET_MS +
+  CHECK_HOOK_TIMEOUT_MS +
+  CHECK_TERMINALIZE_DEFAULT;
+
+/**
+ * The paid runner's deadline and exec timeout, DERIVED from the round's own
+ * deadline instead of the level's fixed budget:
+ *   runnerDeadlineMs = roundDeadline - POST_RUNNER_RESERVE_MS
+ *   exec timeout     = min(runnerTimeoutMs(level), runnerDeadline - now)
+ * A round that spent its clock on the clone and the refused diff therefore
+ * keeps a real runner window instead of failing the level's whole table
+ * budget. The runner timeout is now derived from the round deadline; no
+ * operator-tunable budget was added (each term already has its own source).
+ */
+function deriveRunnerDeadline(
+  roundDeadlineMs: number,
+  now: number,
+  level: ReviewLevel,
+): { runnerDeadlineMs: number; runnerTimeoutMs: number } {
+  const runnerDeadlineMs = roundDeadlineMs - POST_RUNNER_RESERVE_MS;
+  return {
+    runnerDeadlineMs,
+    runnerTimeoutMs: Math.max(1, Math.min(runnerTimeoutMs(level), runnerDeadlineMs - now)),
+  };
+}
 
 /**
  * §7.3 catalog budget: "Diff capture plus catalog is bounded to 256 KiB; at
@@ -3144,14 +3181,6 @@ function gitStageFailureDetail(
 }
 
 /**
- * Worst case of the whole fallback: four bounded execs, each able to consume
- * its whole `PR_CONTEXT_EXEC_TIMEOUT_MS` window (4 × 30s = the ONE `full-diff`
- * ledger window a `gh pr diff` capture already bills), plus the margin the
- * caller still owes after the last exec (bounded-read parse, log line).
- */
-const OVERSIZED_DIFF_ALLOWANCE_MS = 4 * PR_CONTEXT_EXEC_TIMEOUT_MS + 10_000;
-
-/**
  * Capture a PR diff GitHub refuses to serve: `gh pr diff` 406s once the PR
  * passes its 20,000-line API ceiling, so the same unified diff comes from the
  * clone instead — base ref → merge base → depth-1 fetch of that merge base →
@@ -3164,15 +3193,14 @@ const OVERSIZED_DIFF_ALLOWANCE_MS = 4 * PR_CONTEXT_EXEC_TIMEOUT_MS + 10_000;
  * — the ONE window the refused `gh pr diff` already started — capped at
  * `PR_CONTEXT_EXEC_TIMEOUT_MS`, so the whole diff stage can never spend more
  * than one `full-diff` ledger window however it splits between the two
- * captures. And the fallback is declined unless the round's remaining clock
- * covers the fallback AND everything after it in the round — the level's
- * runner, the inline-resolution tail and the untimed slack — so an oversized
- * round keeps the fast 406 failure row instead of being killed mid-fallback.
- * `deep` therefore declines by construction: its 840s runner leaves no room
- * for any capture in a 900s round.
+ * captures. And the fallback is declined unless the DERIVED runner deadline
+ * still leaves the runner more than one `EXEC_TIMEOUT_GIT_MS` step — that step
+ * is the capture's own allowance — so an oversized round keeps the fast 406
+ * failure row instead of being killed mid-fallback. `deep` fits: its 840s table
+ * budget is capped by the derived deadline, not reserved in full.
  *
- * null means the fallback produced no capture — no round budget, a spent diff
- * window, an empty/unparseable ref or sha, a non-zero exit, or a rejected
+ * null means the fallback produced no capture — no runner budget left, a spent
+ * diff window, an empty/unparseable ref or sha, a non-zero exit, or a rejected
  * exec. The caller rethrows the ORIGINAL diff failure: a fault here must never
  * replace the cause that was diagnosed, and a partial capture is never
  * published.
@@ -3182,13 +3210,10 @@ async function oversizedDiffCapture(
   token: string,
   target: { owner: string; repo: string; prNumber: number },
   headSha: string,
-  roundDeadlineMs: number,
+  runnerDeadlineMs: number,
   diffCaptureDeadlineMs: number,
-  level: ReviewLevel,
 ): Promise<{ stdout: string; stderr: string; exitCode: number } | null> {
-  const reserveMs =
-    OVERSIZED_DIFF_ALLOWANCE_MS + runnerTimeoutMs(level) + INLINE_RESOLVE_BUDGET_MS + GUARD_SLACK_MS;
-  if (roundDeadlineMs - Date.now() < reserveMs) return null;
+  if (runnerDeadlineMs - Date.now() <= EXEC_TIMEOUT_GIT_MS) return null;
   // What is left of the shared diff window, capped per step; null once spent.
   const stepTimeout = (): number | null => {
     const left = Math.min(PR_CONTEXT_EXEC_TIMEOUT_MS, diffCaptureDeadlineMs - Date.now());
@@ -3429,6 +3454,9 @@ async function processMessage(
   // `deps.roundBudgetMs`, so it can never eat the window the paid run and its
   // publication need.
   const roundStartedAt = Date.now();
+  // The round's hard stop: the diff stage, the derived runner deadline and the
+  // PR-context capture are all measured against THIS instant.
+  const roundDeadlineMs = roundStartedAt + deps.roundBudgetMs;
   // Unique per attempt: a destroyed sandbox's id is never
   // reused — attach-after-destroy behavior is unknown, uniqueness wins.
   const sandboxId = `review-${crypto.randomUUID()}`;
@@ -4410,8 +4438,12 @@ async function processMessage(
     // capture below feeds the numstat partition ONLY.
     // ONE window for the whole diff stage: the refused `gh pr diff` and the
     // oversized fallback draw their timeouts from this same deadline, so the
-    // stage can never spend more than the `full-diff` ledger window it bills.
-    const diffCaptureDeadlineMs = Date.now() + EXEC_TIMEOUT_GIT_MS;
+    // stage can never spend more than the `full-diff` ledger window it bills —
+    // and never more than what the derived runner deadline still leaves.
+    const diffStageNow = Date.now();
+    const { runnerDeadlineMs } = deriveRunnerDeadline(roundDeadlineMs, diffStageNow, level);
+    const diffCaptureDeadlineMs =
+      diffStageNow + Math.min(EXEC_TIMEOUT_GIT_MS, runnerDeadlineMs - diffStageNow);
     const diff = await sandbox.runCommand(cmds.diff, {
       env: { GH_TOKEN: token },
       timeout: Math.max(1, diffCaptureDeadlineMs - Date.now()),
@@ -4421,16 +4453,15 @@ async function processMessage(
       // Only GitHub's oversized-diff refusal has a local substitute; an auth or
       // network failure keeps today's rethrow (a fallback would mask the cause).
       // The fallback shares this round's clock and the diff stage's window, and
-      // declines when either of them is spent.
+      // declines when either the derived runner deadline or that window is spent.
       const local = isDiffTooLarge(diff.stderr)
         ? await oversizedDiffCapture(
             sandbox,
             token,
             { owner: payload.owner, repo: payload.repo, prNumber: payload.pr_number },
             headSha,
-            roundStartedAt + deps.roundBudgetMs,
+            runnerDeadlineMs,
             diffCaptureDeadlineMs,
-            level,
           )
         : null;
       if (local === null) {
@@ -4730,7 +4761,7 @@ async function processMessage(
       deps.log,
       fields,
       level,
-      roundStartedAt + deps.roundBudgetMs,
+      roundDeadlineMs,
     );
 
     const runnerInput = {
@@ -4794,13 +4825,16 @@ async function processMessage(
       recheckInput !== undefined ? RECHECK_OUTPUT_PATH : undefined,
       prContext !== undefined ? REPORT_OUTPUT_PATH : undefined,
     );
+    const derivedRunner = deriveRunnerDeadline(roundDeadlineMs, Date.now(), level);
     const run = await sandbox.runCommand(runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,
       // The credential payload rides the exec STDIN pipe — present only when
       // the App actually transported a key (keyless run shape = no stdin).
       ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
-      timeout: runnerTimeoutMs(level),
+      // Derived from the round deadline (never the bare level constant): the
+      // runner only gets what the post-runner tail does not already need.
+      timeout: derivedRunner.runnerTimeoutMs,
     });
     const runnerElapsedMs = Date.now() - runnerStartedAt;
     if (run.exitCode !== 0) {
@@ -4812,7 +4846,7 @@ async function processMessage(
     // the only wall-clock failure (spec 不 abort).
     deps.log.info(
       { ...fields, elapsed_ms: runnerElapsedMs },
-      `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeoutMs(level)}ms)`,
+      `runner finished in ${runnerElapsedMs}ms (budget ${derivedRunner.runnerTimeoutMs}ms)`,
     );
 
     // AL-6 stage window: post-runner steps (parse has its own branch; the

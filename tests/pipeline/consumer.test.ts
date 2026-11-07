@@ -169,6 +169,7 @@ import {
   messageRetryCalls,
   PR_CONTEXT_EXEC_TIMEOUT_MS,
   POST_RUNNER_READ_TIMEOUT_MS,
+  POST_RUNNER_RESERVE_MS,
   queueState,
   reset as resetHarness,
   reviewGuardTtlSeconds,
@@ -224,22 +225,33 @@ function execTimeout(call: { opts?: unknown }): number | undefined {
 }
 
 /**
- * Sandbox overrides for the diff-window cases: the refused `gh pr diff`
- * consumes `spentMs` of the round (and of the ONE capture window it shares
- * with the fallback), so the deadline arithmetic is observable without
- * waiting. Everything else is the shared fake, and every command still lands
- * in `sandbox.calls`.
+ * Sandbox overrides for the clock cases: `needle`'s command consumes `spentMs`
+ * of the round (and of any window it shares), so the deadline arithmetic is
+ * observable without waiting. Everything else is the shared fake, and every
+ * command still lands in `sandbox.calls`.
  */
-function diffSpendingSandbox(spentMs: number, clock: { now: number }) {
+function clockSpendingSandbox(needle: string, spentMs: number, clock: { now: number }) {
   return {
     getSandbox: async () => ({
       runCommand: async (cmd: string, opts?: unknown) => {
-        if (cmd.includes("gh pr diff")) clock.now += spentMs;
+        if (cmd.includes(needle)) clock.now += spentMs;
         return fakeSandbox.runCommand(cmd, opts);
       },
       destroy: fakeSandbox.destroy,
     }),
   };
+}
+
+/** Run `fn` against a frozen wall clock so a derived deadline is exact. */
+async function withFrozenClock<T>(fn: (clock: { now: number }) => Promise<T>): Promise<T> {
+  const realNow = Date.now;
+  const clock = { now: realNow() };
+  Date.now = () => clock.now;
+  try {
+    return await fn(clock);
+  } finally {
+    Date.now = realNow;
+  }
 }
 
 /**
@@ -1398,7 +1410,7 @@ describe("createReviewConsumer", () => {
         // A round long enough for the budget gate: this case pins the DIFF
         // window, which the refused capture has already spent 100s of.
         roundBudgetMs: 1_200_000,
-        ...diffSpendingSandbox(100_000, clock),
+        ...clockSpendingSandbox("gh pr diff", 100_000, clock),
       });
       await consumer(makeBatch(makePayload()));
     } finally {
@@ -1430,7 +1442,7 @@ describe("createReviewConsumer", () => {
         // The round still has 18 of its 20 minutes, so the budget gate passes:
         // what is gone is the shared diff window, at exactly 120s.
         roundBudgetMs: 1_200_000,
-        ...diffSpendingSandbox(EXEC_TIMEOUT_GIT_MS, clock),
+        ...clockSpendingSandbox("gh pr diff", EXEC_TIMEOUT_GIT_MS, clock),
       });
       await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
         /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
@@ -1443,50 +1455,74 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(1);
   });
 
-  test("the fallback declines when the round cannot fund the runner and the tail after it", async () => {
+  test("a slow quick/default round still reaches the fallback — the runner budget is derived, not reserved", async () => {
     reset();
     sandbox.diffExitCode = 1;
     sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    const realNow = Date.now;
-    const clock = { now: realNow() };
-    try {
-      Date.now = () => clock.now;
+    await withFrozenClock(async (clock) => {
       const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
         ...testOverrides,
-        ...diffSpendingSandbox(60_000, clock),
+        // 200s of the 900s round are gone before the diff stage.
+        ...clockSpendingSandbox("git init", 200_000, clock),
       });
-      // 60s of the 900s round are gone: 840s left, less than the
-      // runner(600s) + inline(12s) + slack(120s) + allowance(130s) reserve.
-      // The old gate compared against the 130s allowance alone and would have
-      // run the fallback into the runner's window.
+      await consumer(makeBatch(makePayload()));
+    });
+
+    // The gate asks for the derived runner deadline (900s − 114s post-runner
+    // reserve = 786s), never the level's whole 600s table: at 200s elapsed the
+    // fallback runs and the round still completes.
+    expect(sandbox.calls.map((c) => c.cmd).slice(3, 7)).toEqual([
+      pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
+      mergeBaseCommand(TEST_OWNER, TEST_REPO, sandbox.diffBaseRef, SHA),
+      fetchDepthOneCommand(CLONE_DIR, sandbox.mergeBaseSha),
+      localDiffCommand(CLONE_DIR, sandbox.mergeBaseSha, SHA, DIFF_PATH),
+    ]);
+    expect(reviewCount(db)).toBe(1);
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("a round past the derived runner deadline declines the fallback and rethrows the 406", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    const db = await createSeededTestD1();
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+        ...testOverrides,
+        // 700s elapsed: of the 786s deadline only 86s are left, below the 120s
+        // capture allowance — a fallback could only starve the runner.
+        ...clockSpendingSandbox("git init", 700_000, clock),
+      });
       await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
         /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
       );
-    } finally {
-      Date.now = realNow;
-    }
+    });
 
     expect(sandbox.calls).toHaveLength(3);
     expect(failureRows(db)).toHaveLength(1);
   });
 
-  test("deep always declines the oversized fallback — its runner leaves no round budget", async () => {
+  test("deep reaches the fallback: its runner budget is capped by the derived deadline, not reserved in full", async () => {
     reset();
     sandbox.diffExitCode = 1;
     sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    await withFrozenClock(async () => {
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+      await consumer(makeBatch(makePayload()));
+    });
 
-    // Fail closed by construction: deep's 840s runner plus the tail exceeds
-    // the whole 900s round, so no oversized capture can ever fit.
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
-      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
-    );
-
-    expect(sandbox.calls).toHaveLength(3);
-    expect(failureRows(db)).toHaveLength(1);
+    // The capture runs and the round completes; the runner exec gets the
+    // derived 786s deadline (below its 840s table) instead of the whole table.
+    expect(execTimeout(sandbox.calls[2]!)).toBe(EXEC_TIMEOUT_GIT_MS);
+    expect(runnerExecTimeout()).toBe(786_000);
+    expect(logLines.some((l) => l.fields.diff_source === "oversized-local")).toBe(true);
+    expect(reviewCount(db)).toBe(1);
+    expect(failureRows(db)).toHaveLength(0);
   });
 
   test("runner input write failure → no runner, no post, no insert, rethrow, destroy", async () => {
@@ -1618,7 +1654,7 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(2);
   });
 
-  test("App row review_level 'deep' → runner exec timeout 840_000 + admission TTL 2532; quick/default stay 600_000 (AC-S10-clock)", async () => {
+  test("App row review_level 'deep' → derived runner exec timeout 786_000 + admission TTL 2532; quick/default stay 600_000 (AC-S10-clock)", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -1630,14 +1666,15 @@ describe("createReviewConsumer", () => {
     };
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
-    await consumer(makeBatch(makePayload()));
+    await withFrozenClock(async () => {
+      await consumer(makeBatch(makePayload()));
+    });
 
-    // Deep runner budget: 14 min — CF Queue consumers cap at 15 min
-    // wall-clock, so grill-me's 30 min could never finish in-consumer
-    // (qc2/qc3 Critical); the old 10 min ceiling would
-    // false-timeout a deep three-phase run into the DLQ (spec d5-budget
-    // Problem Statement).
-    expect(runnerExecTimeout()).toBe(840_000);
+    // Deep's 14-min table budget is the CEILING, not the reservation: the exec
+    // gets what the round deadline still owes (900s − the 114s post-runner
+    // reserve), so an oversized-diff fallback fits inside the same 900s cap.
+    expect(runnerExecTimeout()).toBe(ROUND_BUDGET_MS - POST_RUNNER_RESERVE_MS);
+    expect(runnerExecTimeout()).toBe(786_000);
     // The admission row's TTL follows the same level table (AC-S10-guard):
     // deep is 2532s. Pinned as the table's figure, like the runner budgets
     // below — the arithmetic that produces it is pinned once, by the guard
@@ -3318,6 +3355,20 @@ describe("createReviewConsumer", () => {
     expect(deepestTierMs).toBe(852_000);
     expect(deepestTierMs).toBeLessThan(ROUND_BUDGET_MS);
     expect(ROUND_BUDGET_MS - deepestTierMs).toBe(48_000);
+  });
+
+  test("round budget: the DERIVED runner deadline leaves the oversized fallback room on every level", () => {
+    // The reserve is composed from existing values, never a new knob:
+    // post-runner reads (90s) + inline tail (12s) + begin hook (2s) +
+    // terminalize (10s). Any move in a term must fail this pin.
+    expect(POST_RUNNER_RESERVE_MS).toBe(114_000);
+    // deep: 900s − 114s = a 786s runner deadline (below its 840s table), and
+    // 666s of it remain once the fallback's single 120s capture window is
+    // allowed for — the capture is reachable instead of declined by design.
+    const runnerDeadlineMs = ROUND_BUDGET_MS - POST_RUNNER_RESERVE_MS;
+    expect(runnerDeadlineMs).toBe(786_000);
+    expect(Math.min(runnerTimeoutMs("deep"), runnerDeadlineMs)).toBe(786_000);
+    expect(runnerDeadlineMs - EXEC_TIMEOUT_GIT_MS).toBe(666_000);
   });
 
   test("a maximal round issues exactly the steps the guard TTL bills", async () => {
