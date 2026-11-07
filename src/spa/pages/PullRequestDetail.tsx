@@ -1007,16 +1007,16 @@ export function PullRequestDetailView({
                                 <span className="text-(--text-muted)">{attribution}</span>
                               )}
                               {/* Historical rows carry no measured clock: the
-                                  row simply omits the time. The label is real
-                                  text: the span carries no role, so a tooltip
-                                  alone would leave the value announced bare. */}
+                                  row simply omits the time. The label and the
+                                  value share the span's own text, separated so
+                                  the two never concatenate, and the label is
+                                  carried exactly once. */}
                               {review.duration_ms === null ? null : (
                                 <span
                                   data-slot="review-duration"
                                   className="tabular-nums text-(--text-muted)"
-                                  title={durationLabel}
                                 >
-                                  <span className="sr-only">{durationLabel}</span>
+                                  {durationLabel}{" "}
                                   {formatReviewDuration(locale, review.duration_ms)}
                                 </span>
                               )}

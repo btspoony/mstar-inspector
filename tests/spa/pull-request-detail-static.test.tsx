@@ -13,7 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { t, type DictionaryKey } from "../../src/i18n";
+import { t, type DictionaryKey, type Locale } from "../../src/i18n";
 import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   appPullRequestDetailUrl,
@@ -48,10 +48,10 @@ import {
   type RecordPages,
 } from "./pull-request-fixtures";
 
-const render = (detail: PullRequestDetail, records = recordsOf()) =>
+const render = (detail: PullRequestDetail, records = recordsOf(), locale: Locale = "en") =>
   renderToStaticMarkup(
     createElement(PullRequestDetailView, {
-      locale: "en",
+      locale,
       detail,
       records,
       onEnsureSection: () => {},
@@ -1045,11 +1045,13 @@ describe("pull request detail face (static SSR)", () => {
         severity_counts: {},
       },
     ]);
-    const markup = face(
+    const built = scene(
       { findings: page([]), failures: page([]), reviews },
       {},
       { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
     );
+    const markup = render(built.detail, recordsOf(built.pages));
+    const zhMarkup = render(built.detail, recordsOf(built.pages), "zh_CN");
     const read = await withMarkup(markup, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
       rows: [...container.querySelectorAll('[data-slot="review-head"]')].map((head) => {
@@ -1077,14 +1079,10 @@ describe("pull request detail face (static SSR)", () => {
       }),
       rounds: [...container.querySelectorAll('[data-slot="review-round"]')].map((chip) => chip.textContent ?? ""),
       // Only the measured round prints a time; the historical rows omit it.
-      // The label must be real TEXT inside the span (its accessible name) —
-      // a null here fails the assertion below, so removing it cannot pass.
-      durations: [...container.querySelectorAll('[data-slot="review-duration"]')].map((duration) => ({
-        label: duration.querySelector(".sr-only")?.textContent ?? null,
-        value: duration.lastChild?.textContent ?? "",
-      })),
-      durationTitles: [...container.querySelectorAll('[data-slot="review-duration"]')].map((duration) =>
-        duration.getAttribute("title"),
+      // The span's own text — label, separator, value — is its accessible
+      // name, so that is what the assertion reads.
+      durations: [...container.querySelectorAll('[data-slot="review-duration"]')].map(
+        (duration) => duration.textContent ?? "",
       ),
       // The summary body and its expand/collapse control are gone: a review
       // row is its two lines alone.
@@ -1136,15 +1134,20 @@ describe("pull request detail face (static SSR)", () => {
         text: "ccc333d",
       },
     ]);
-    const durationLabel = t("en", "pullRequests.reviewDurationLabel");
-    expect(read.durations).toEqual([
-      {
-        label: durationLabel,
-        value: t("en", "pullRequests.reviewDurationMinutes", { minutes: 1, seconds: 5 }),
-      },
-    ]);
-    // The same words ride the tooltip, still the hover affordance.
-    expect(read.durationTitles).toEqual([durationLabel]);
+    // The span's own text is the accessible name: one label, one separator,
+    // one value. Read per locale, so a join without the separator, or a
+    // second label carrier, cannot pass.
+    const durationText = (locale: Locale) =>
+      `${t(locale, "pullRequests.reviewDurationLabel")} ${t(locale, "pullRequests.reviewDurationMinutes", {
+        minutes: 1,
+        seconds: 5,
+      })}`;
+    expect(read.durations).toEqual([durationText("en")]);
+    expect(
+      await withMarkup(zhMarkup, (container) =>
+        [...container.querySelectorAll('[data-slot="review-duration"]')].map((span) => span.textContent ?? ""),
+      ),
+    ).toEqual([durationText("zh_CN")]);
     expect(read.foldControls).toBe(0);
     expect(read.bodies).toEqual([]);
     expect(read.latestHead).toContain(
