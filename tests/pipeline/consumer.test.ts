@@ -93,6 +93,7 @@ import { reconcileReviewChecks } from "../../src/worker/check-reconcile";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
+import { GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
@@ -839,6 +840,31 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", error: "container unavailable" });
+    expect(sandbox.destroyCalls).toBe(1);
+  });
+
+  test("propagated GitHub secondary rate limit → the persisted error starts with the stable prefix, after redaction", async () => {
+    reset();
+    // The octokit request-error shape a rejected GitHub call throws: a 403
+    // that carries `retry-after` is GitHub's secondary limit, not a
+    // permission problem. The tag is written once at the consumer's single
+    // catch, BEFORE redaction, so the durable row (and the store count that
+    // derives from this prefix) can tell it apart from any other failure.
+    sandbox.error = Object.assign(new Error("Forbidden"), {
+      status: 403,
+      response: { headers: { "retry-after": "60" } },
+    });
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("Forbidden");
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    const error = String(rows[0]!.error);
+    expect(error.startsWith(GITHUB_RATE_LIMIT_PREFIX)).toBe(true);
+    // The original message survives beside the tag — the prefix classifies,
+    // it never replaces the evidence.
+    expect(error).toBe(`${GITHUB_RATE_LIMIT_PREFIX}Forbidden`);
     expect(sandbox.destroyCalls).toBe(1);
   });
 

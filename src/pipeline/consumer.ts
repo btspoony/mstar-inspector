@@ -76,6 +76,7 @@
 
 import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
+import { classifyGithubRateLimit, GITHUB_RATE_LIMIT_PREFIX } from "../contracts/failure-stages";
 import {
   idemKey,
   IDEMPOTENCY_SECONDS,
@@ -5413,6 +5414,11 @@ async function processMessage(
     // SEC-03: the error detail is redacted (shape + exact-value passes)
     // before the durable row — an infra error can interpolate a
     // secret-shaped value (defense-in-depth; clean strings pass through).
+    // The GitHub secondary-rate-limit cause is tagged HERE — once, before
+    // redaction — so the row's text and the store's prefix count share one
+    // source of truth (a second detection site would drift).
+    const persistedDetail =
+      classifyGithubRateLimit(err) === "secondary" ? `${GITHUB_RATE_LIMIT_PREFIX}${detail}` : detail;
     try {
       await deps.failureStore.record({
         installation_id: payload.installation_id,
@@ -5423,7 +5429,7 @@ async function processMessage(
         // the payload sha, else "" (= never resolved).
         head_sha: fields?.head_sha ?? payload.head_sha ?? "",
         stage: failureStage,
-        error: redactExactSecrets(redactSecrets(detail), secretValues),
+        error: redactExactSecrets(redactSecrets(persistedDetail), secretValues),
       });
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);

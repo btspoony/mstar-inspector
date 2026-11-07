@@ -33,3 +33,55 @@ export const PAGING_EXCLUDED_STAGES = Object.freeze(["recheck", "usage"] as cons
 export function sqlStageList(stages: readonly string[]): string {
   return stages.map((stage) => `'${stage}'`).join(", ");
 }
+
+/**
+ * The stable `review_failures.error` prefix a GitHub secondary rate limit
+ * carries. The consumer writes it once at its single catch and the store
+ * counts rows by it, so the 24 h number and the durable text share one source
+ * of truth. Plain words on purpose: the shape redaction pass the row also
+ * passes through leaves them intact.
+ */
+export const GITHUB_RATE_LIMIT_PREFIX = "github-secondary-rate-limit: ";
+
+/** Case-insensitive header read over either header shape a transport exposes. */
+function headerValue(headers: unknown, name: string): string | null {
+  if (headers === null || typeof headers !== "object") return null;
+  if ("get" in headers && typeof headers.get === "function") {
+    const value: unknown = headers.get(name);
+    return value === null || value === undefined ? null : String(value);
+  }
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === name) return value === null || value === undefined ? null : String(value);
+  }
+  return null;
+}
+
+/**
+ * Which GitHub limit — if any — rejected this call. Duck-typed on the octokit
+ * request-error shape (`{status, message, response: {headers}}`), because the
+ * error crosses the injected adapter boundary and is never re-wrapped: a
+ * plain object, a `Headers` instance and any non-request value all answer
+ * without throwing.
+ *
+ * `429` is the primary limit. A `403` is the secondary limit only when GitHub
+ * says so — a `retry-after` header, `x-ratelimit-remaining: 0`, or a message
+ * naming the secondary limit; a bare `403` is an ordinary permission/not-found
+ * rejection and stays unclassified (`null`).
+ */
+export function classifyGithubRateLimit(err: unknown): "primary" | "secondary" | null {
+  if (typeof err !== "object" || err === null) return null;
+  const status = "status" in err ? err.status : undefined;
+  if (status === 429) return "primary";
+  if (status !== 403) return null;
+  const response = "response" in err ? err.response : undefined;
+  const headers = typeof response === "object" && response !== null && "headers" in response ? response.headers : undefined;
+  const message = "message" in err ? err.message : undefined;
+  if (
+    headerValue(headers, "retry-after") !== null ||
+    headerValue(headers, "x-ratelimit-remaining") === "0" ||
+    (typeof message === "string" && /secondary rate limit/i.test(message))
+  ) {
+    return "secondary";
+  }
+  return null;
+}
