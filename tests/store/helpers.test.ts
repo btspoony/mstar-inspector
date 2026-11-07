@@ -73,8 +73,8 @@ describe("migration order", () => {
     // `./helpers` loads, and the query keeps this file's registry key apart
     // from the statically imported real module above.
     const SPEC = "./helpers.ts?synthetic-ordinals";
-    const synthetic = (await import(SPEC)) as { migrationsAfter: typeof migrationsAfter };
     try {
+      const synthetic = (await import(SPEC)) as { migrationsAfter: typeof migrationsAfter };
       expect(synthetic.migrationsAfter(0)).toEqual([
         "0043_aaa_synthetic.sql",
         "0043_zzz_synthetic.sql",
