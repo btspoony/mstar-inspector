@@ -566,8 +566,14 @@ describe("createReviewConsumer", () => {
         OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash",
       },
       stdin: encodeCredentialPayload({ ark: ["ark-key"] }),
-      timeout: 600_000,
+      timeout: expect.any(Number),
     });
+    // The exec gets what the declared instant still owes, read after the input
+    // write: never above the 600s default cap, and — with a fake write that
+    // spends no time — never a whole second below it. An exact 600_000 would
+    // assert that this write took zero real milliseconds.
+    expect(runnerExecTimeout()).toBeLessThanOrEqual(600_000);
+    expect(runnerExecTimeout()).toBeGreaterThan(590_000);
     // inside VALID_DIFF's right hunk [18,23]). §7.7 order: the
     // intent-prepared line comments run after the apply; the degraded-comment
     // delete runs last, only after the normal publication proof.
