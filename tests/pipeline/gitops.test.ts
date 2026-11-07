@@ -24,10 +24,16 @@ import {
   DIFF_PATH,
   DIFF_PREFETCH_MAX_BYTES,
   diffCommand,
+  fetchDepthOneCommand,
+  gitTransportEnv,
   incrementDiffCommand,
+  isDiffTooLarge,
   issueViewCommand,
+  localDiffCommand,
+  mergeBaseCommand,
   numstatCommand,
   prBodyCommand,
+  pullRequestBaseRefCommand,
   readRecheckCommand,
   readRecheckStatusCommand,
   readReportCommand,
@@ -217,6 +223,79 @@ describe("gitops command builders", () => {
     // The three-dot form is the one `compare` reports `ahead` for, so the two
     // steps agree by construction.
     expect(incrementDiffCommand("acme", "widgets", base, head, DIFF_PATH)).toContain(`/${base}...${head}`);
+  });
+
+  test("the oversized-diff fallback resolves the base ref and merge base, then diffs the clone locally", () => {
+    const head = "b".repeat(40);
+    const mergeBase = "c".repeat(40);
+    expect(pullRequestBaseRefCommand("acme", "widgets", 42)).toBe(
+      shellCommand(`gh api 'repos/acme/widgets/pulls/42' --jq '.base.ref'`),
+    );
+    expect(mergeBaseCommand("acme", "widgets", "release/1.9", head)).toBe(
+      shellCommand(`gh api 'repos/acme/widgets/compare/release/1.9...${head}' --jq '.merge_base_commit.sha'`),
+    );
+    expect(fetchDepthOneCommand("/workspace/repo", mergeBase)).toBe(
+      shellCommand(`git -C '/workspace/repo' fetch --depth 1 origin '${mergeBase}'`),
+    );
+    // The local capture is the SAME bounded read `diffCommand` carries — one
+    // transport, so the overflow contract cannot drift between the two.
+    expect(localDiffCommand("/workspace/repo", mergeBase, head, DIFF_PATH)).toBe(
+      shellCommand(
+        `git -C '/workspace/repo' diff '${mergeBase}' '${head}' > '${DIFF_PATH}' && ` +
+          boundedFileReadCommand(DIFF_PATH, DIFF_PREFETCH_MAX_BYTES),
+      ),
+    );
+  });
+
+  test("isDiffTooLarge accepts only GitHub's oversized-diff wording — an auth or transport fault is not it", () => {
+    expect(
+      isDiffTooLarge(
+        "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000) (https://api.github.com/repos/acme/widgets/pulls/42)",
+      ),
+    ).toBe(true);
+    expect(isDiffTooLarge('{"message":"too_large"}')).toBe(true);
+    expect(isDiffTooLarge("GraphQL: too_large")).toBe(true);
+    for (const other of [
+      "",
+      "HTTP 401: Bad credentials (https://api.github.com/repos/acme/widgets/pulls/42)",
+      "HTTP 404: Not Found (https://api.github.com/repos/acme/widgets/pulls/42)",
+      "dial tcp 140.82.112.3:443: connect: connection refused",
+      "error: RPC failed; curl 56 GnuTLS recv error",
+      // The token inside gh's trailing URL is a REPO NAME, not the ceiling:
+      // every failure of `auth_too_large` would otherwise take the fallback.
+      "HTTP 401: Bad credentials (https://api.github.com/repos/acme/auth_too_large/pulls/42)",
+      "HTTP 500: Server Error (https://api.github.com/repos/too_large/widgets/pulls/42)",
+      // A longer word that merely contains it is not the token either.
+      "HTTP 422: too_larger request",
+    ]) {
+      expect(isDiffTooLarge(other)).toBe(false);
+    }
+  });
+
+  test("a base ref must stay a plain branch ref — traversal and option-form refs fail closed", () => {
+    const head = "b".repeat(40);
+    for (const evil of ["", "-main", "main..evil", "../../etc", "main; rm -rf /", "re lease", "main'", "`main`"]) {
+      expect(() => mergeBaseCommand("acme", "widgets", evil, head)).toThrow(/unsafe base ref/);
+    }
+    // A ref GitHub can really report is accepted (slashes and dots are branch syntax).
+    expect(mergeBaseCommand("acme", "widgets", "release/1.9_hotfix", head)).toContain(
+      "/compare/release/1.9_hotfix...",
+    );
+    // Every sha argument keeps the hex guard.
+    for (const evil of ["", "ABC", "../../etc", "b".repeat(40) + ";rm -rf /", "zzzzzzz", "b".repeat(65)]) {
+      expect(() => mergeBaseCommand("acme", "widgets", "main", evil)).toThrow(/unsafe head sha/);
+      expect(() => fetchDepthOneCommand("/workspace/repo", evil)).toThrow(/unsafe fetch sha/);
+      expect(() => localDiffCommand("/workspace/repo", evil, head, DIFF_PATH)).toThrow(/unsafe merge base sha/);
+      expect(() => localDiffCommand("/workspace/repo", "c".repeat(40), evil, DIFF_PATH)).toThrow(/unsafe head sha/);
+    }
+  });
+
+  test("gitTransportEnv is the ONE extraheader definition the clone and the fallback fetch share", () => {
+    expect(gitTransportEnv("ghs_installation_token")).toEqual({
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${btoa("x-access-token:ghs_installation_token")}`,
+    });
   });
 
   test("compareStatusCommand / incrementDiffCommand reject a non-hex sha before any shell string", () => {

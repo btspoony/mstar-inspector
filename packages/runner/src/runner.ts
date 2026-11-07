@@ -115,7 +115,7 @@ const USAGE =
   "(input JSON: { capabilityHosts: [{ id, catalogProviderId, apiKeyEnv, baseUrl, api, auth, models }], " +
   "worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string>, " +
   "customProviders?: [{ provider_id, base_url, api, model_ids }], recheck?: mstar.recheck-input/v1 document, " +
-  "recheckAssignmentMaxBytes?: integer > 0, " +
+  "recheckAssignmentMaxBytes?: integer > 0, outerDeadlineEpochMs?: integer epoch ms, " +
   "prContext?: { prBody: string, issues: [{ number, title, body }] } })";
 
 /** Validated shape of the --input JSON file. */
@@ -129,6 +129,8 @@ type RunnerInputJson = {
   recheck?: RecheckInput;
   /** The operator's recheck ask budget in bytes — absent = the runner default. */
   recheckAssignmentMaxBytes?: number;
+  /** The caller's absolute exec deadline (Date.now() ms) — absent = the level's tier cap from process start. */
+  outerDeadlineEpochMs?: number;
   /** Optional PR context for the report seat — passed through to the runtime. */
   prContext?: PrContext;
 };
@@ -350,6 +352,24 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
       throw new Error("input JSON field `recheckAssignmentMaxBytes` must be a positive integer when present");
     }
     input.recheckAssignmentMaxBytes = maxBytes;
+  }
+  if (record.outerDeadlineEpochMs !== undefined) {
+    // The caller's own exec deadline as an absolute worker-clock instant: the
+    // anchor takes it verbatim, so a shortened run plans against the exec that
+    // will kill it instead of the tier cap. A PAST instant is valid — it anchors
+    // a spent budget that every seat clamps — so only the shape is rejected.
+    const outerDeadlineEpochMs = record.outerDeadlineEpochMs;
+    if (
+      typeof outerDeadlineEpochMs !== "number" ||
+      !Number.isInteger(outerDeadlineEpochMs) ||
+      outerDeadlineEpochMs <= 0 ||
+      outerDeadlineEpochMs > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new Error(
+        "input JSON field `outerDeadlineEpochMs` must be a positive integer epoch in ms when present",
+      );
+    }
+    input.outerDeadlineEpochMs = outerDeadlineEpochMs;
   }
   if (record.prContext !== undefined) {
     // Shape validation ONLY, mirroring the recheck guard: the consumer builds
@@ -634,11 +654,6 @@ export async function main(
       return 1;
     }
   }
-  // spec §7.8: anchor the ABSOLUTE outer review deadline once
-  // per process — the recheck seat's budget derives from it, so the seat can
-  // never outlive (or restart past) the review's own wall-clock cap.
-  anchorRecheckDeadline(Date.now(), level);
-
   // The per-run directory carries only the synthesized models.yml — the
   // credential rows live in an in-memory store (below), so no key material is
   // ever written to disk. The directory still exists only for this run, so it
@@ -663,6 +678,15 @@ export async function main(
     try {
       const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
       const json = parseRunnerInput(parsed);
+      // spec §7.8: anchor the ABSOLUTE outer review deadline once per process
+      // — the recheck seat's budget derives from it, so the seat can never
+      // outlive (or restart past) the review's own wall-clock cap. The anchor
+      // takes the caller's own exec deadline VERBATIM when the input supplies
+      // one (a shortened round): every derived cap then stops before the exec
+      // that kills us, and this process's own start/parse time cannot push the
+      // deadline back. It runs after the input is parsed because only the input
+      // carries that deadline, and still before the runtime starts.
+      anchorRecheckDeadline(Date.now(), level, json.outerDeadlineEpochMs);
       // (AL-23-1): EVERY run synthesizes the
       // COMPLETE per-review models.yml (/tmp/omp-agent-<uuid>/) — the App's
       // selected image's capability hosts are the base, the custom-provider
@@ -713,6 +737,11 @@ export async function main(
         // legacy input, so the runtime keeps its documented default.
         ...(json.recheckAssignmentMaxBytes !== undefined
           ? { recheckAssignmentMaxBytes: json.recheckAssignmentMaxBytes }
+          : {}),
+        // The caller's own exec deadline: absent for a direct legacy
+        // invocation, so the runtime input keeps its tier-cap behaviour.
+        ...(json.outerDeadlineEpochMs !== undefined
+          ? { outerDeadlineEpochMs: json.outerDeadlineEpochMs }
           : {}),
         // Optional PR context: the report seat's untrusted input. Absent =
         // no report seat runs, so the runtime input stays byte-identical.
