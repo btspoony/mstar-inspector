@@ -7,6 +7,13 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: both recheck failure exits now share the existing attribution chain in
+# `packages/runner/src/recheck.ts`: the `single.error` short-circuit no longer
+# pre-empts the child's `abortReason`, stderr tail and exit code, and the catch
+# unwraps the settled result the SDK's rejection carries instead of keeping only
+# the rejection message. A stale image still returns the bare seat-failed text
+# from those two exits, so a dead round loses that cause again (I-000431).
+#
 # rebuild: the recheck seat's budget is the anchored TIER's wall clock (quick
 # 300s / default 600s / deep 900s, bounded by the outer guard's 60s publication
 # tail) instead of a fixed 180s, and a failed round's status now names the

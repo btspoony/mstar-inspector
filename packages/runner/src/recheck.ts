@@ -467,27 +467,67 @@ function redactedStatusError(text: string): string {
   return redactSecretShapes(text).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
 }
 
+/**
+ * The one attribution chain every failed recheck exit shares: the validator's
+ * own text, then the child's cap reason, then its own error, then its stderr
+ * tail, then its exit code. A capped child settles with `exitCode: 1` and no
+ * `error`/stderr and the SDK only says `unavailable` (I-000431), so the first
+ * two sources are what names the seat's wall clock instead of a bare status.
+ * `""` means the child settled with no attributable evidence at all — each
+ * caller then supplies its own last-resort floor, so absence of evidence is
+ * never recorded as if it were the child's answer.
+ */
+function recheckFailureEvidence(single: Partial<StructuredSubagentResult["result"]>): string {
+  // Duck-typed: a foreign settled shape must not throw out of the catch, so
+  // every field read is type-checked rather than trusted — including the exit
+  // code, which no template literal can coerce for a symbol.
+  const structuredError = single.structuredOutput?.error;
+  return (
+    (typeof structuredError === "string" ? structuredError : "") ||
+    (typeof single.abortReason === "string" ? single.abortReason : "") ||
+    (typeof single.error === "string" ? single.error : "") ||
+    (typeof single.stderr === "string" ? single.stderr.slice(-200) : "") ||
+    (typeof single.exitCode === "number" ? `exit ${single.exitCode}` : "")
+  );
+}
+
+/**
+ * The settled child result a rejection carries, when it is usable evidence:
+ * only a non-null, non-array object. A foreign shape (a string, an array, a
+ * null) is absence of evidence, so the catch falls back to the rejection's
+ * own message instead of letting that shape erase it.
+ */
+function settledChildResult(error: unknown): Partial<StructuredSubagentResult["result"]> | undefined {
+  const settled = (error as { result?: unknown } | null | undefined)?.result;
+  return typeof settled === "object" && settled !== null && !Array.isArray(settled)
+    ? (settled as Partial<StructuredSubagentResult["result"]>)
+    : undefined;
+}
+
+/**
+ * The strict-validated payload a settled result carries, when it is usable —
+ * the ONE payload test the resolved and the rejected path share.
+ */
+function usableRecheckData(single: Partial<StructuredSubagentResult["result"]> | undefined): unknown {
+  const structured = single?.structuredOutput;
+  return structured?.status === "valid" && structured.data !== undefined ? structured.data : undefined;
+}
+
 /** Unwrap the strict-validated structured payload of the recheck child. */
-function recheckStructuredData(result: StructuredSubagentResult): unknown {
-  const single = result.result;
+function recheckStructuredData(single: Partial<StructuredSubagentResult["result"]>): unknown {
+  // The payload decides: a child that reports `error` while yielding a usable
+  // document keeps it, so `error` only supplies attribution when the payload
+  // is unusable.
+  const data = usableRecheckData(single);
+  if (data !== undefined) return data;
+  const evidence = recheckFailureEvidence(single) || "exit unknown";
   if (single.error) {
-    throw new Error(`recheck seat failed: ${single.error}`);
+    throw new Error(`recheck seat failed: ${evidence}`);
   }
-  const structured = single.structuredOutput;
-  if (!structured || structured.status !== "valid" || structured.data === undefined) {
-    // Attribution order: the validator's own text, then the child's cap
-    // reason, then its stderr tail, then its exit code. A capped child settles
-    // with `exitCode: 1` and no `error`/stderr and the SDK only says
-    // `unavailable` (I-000431), so the first two sources are what names the
-    // seat's wall clock instead of a bare status.
-    const detail =
-      structured?.error || single.abortReason || single.stderr.slice(-200) || `exit ${single.exitCode ?? "unknown"}`;
-    throw new Error(
-      `recheck seat produced no valid structured output (status ${structured?.status ?? "absent"})` +
-        `${detail ? `: ${detail}` : ""}`,
-    );
-  }
-  return structured.data;
+  throw new Error(
+    `recheck seat produced no valid structured output (status ${single.structuredOutput?.status ?? "absent"}): ` +
+      evidence,
+  );
 }
 
 /** What the seat always resolves: the document (or null) plus the attributable status. */
@@ -619,7 +659,7 @@ export async function runRecheckSeat(input: {
     // Validate against the catalog the seat was ASKED with, not the round's
     // full one: a slice the fit omitted is proof the seat never received, so
     // citing it must drop that row here rather than count it `addressed`.
-    gate = validateRecheckDoc(recheckStructuredData(result), ask.input);
+    gate = validateRecheckDoc(recheckStructuredData(result.result), ask.input);
   } catch (error) {
     // A by-design abort is a CONTRACT exit, not a lost round: the caller
     // cancels this seat on review failure or when the outer deadline leaves
@@ -630,12 +670,27 @@ export async function runRecheckSeat(input: {
       console.error(JSON.stringify({ event: "recheck_seat_aborted", reason: "aborted" }));
       return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "aborted", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: null } };
     }
-    // A non-Error rejection (`throw "x"`, a rejected plain value) has no
-    // `.message`; coercing keeps the REAL failure inside the never-throws
-    // contract instead of throwing out of this catch.
-    const message = redactedStatusError(error instanceof Error ? error.message : String(error));
-    console.error(JSON.stringify({ event: "recheck_seat_failed", error: message }));
-    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "seat-failed", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: message } };
+    // The SDK rejects with `StructuredSubagentError`, whose duck-typed
+    // `{ result }` carries the settled child's yield; read it here so the
+    // never-throws path imports no SDK internals. Only a plain object counts
+    // as evidence — a foreign shape falls back to the rejection's own message
+    // rather than erasing it.
+    const settled = settledChildResult(error);
+    // A valid yield is never discarded: the child finished and attached its
+    // document before a post-settle SDK step failed, so it passes the very
+    // same validation boundary (and gate-derived status) as a resolved round.
+    const yielded = usableRecheckData(settled);
+    if (yielded !== undefined) {
+      gate = validateRecheckDoc(yielded, ask.input);
+    } else {
+      const message = redactedStatusError(
+        (settled === undefined ? "" : recheckFailureEvidence(settled)) ||
+          (error instanceof Error ? error.message : String(error)) ||
+          "exit unknown",
+      );
+      console.error(JSON.stringify({ event: "recheck_seat_failed", error: message }));
+      return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "seat-failed", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: message } };
+    }
   }
   if (!gate.ok) {
     const error = redactedStatusError(gate.error);
