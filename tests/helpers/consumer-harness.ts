@@ -70,7 +70,7 @@ export const {
   PR_CONTEXT_WORST_CASE_MS,
   POST_RUNNER_READ_TIMEOUT_MS,
   POST_RUNNER_READ_BUDGET_MS,
-  POST_RUNNER_RESERVE_MS,
+  postRunnerReserveMs,
 } = await import("../../src/pipeline/consumer");
 
 // The diff bound lives with the command that enforces it (gitops), not on the

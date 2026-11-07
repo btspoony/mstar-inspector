@@ -666,31 +666,32 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
  * Cloudflare caps a Queue consumer invocation at 15 minutes
  * (knowledge: best-practices/cf-queue-consumer-wall-clock), and that cap — not
  * the admission TTL, which only bounds how long the row may be held — is the
- * clock a best-effort step must fit inside. The paid runner owns
- * `min(runnerTimeoutMs(level), runnerDeadline - now)` out of the same window —
- * it is DERIVED from this deadline (`deriveRunnerDeadline`), never reserved in
- * full, so an oversized-diff fallback can still fit.
+ * clock a best-effort step must fit inside.
  *
- * Deepest tier (`deep`), worst case at the documented budgets:
- *   runnerTimeoutMs("deep")      840_000
- *   CHECK_HOOK_TIMEOUT_MS          2_000  (begin hook, before the model work)
- *   CHECK_TERMINALIZE_DEFAULT     10_000  (terminalize hook, every terminal path)
- *                               ---------
- *                                852_000  → 48_000 of the 900_000 window left.
+ * The paid runner is DERIVED from this deadline, never reserved in full: its
+ * exec timeout is `min(runnerTimeoutMs(level), runnerDeadlineMs - now)`, where
+ * `runnerDeadlineMs = ROUND_BUDGET_MS - postRunnerReserveMs(terminalizeMs)`.
+ * That reserve is the whole post-runner tail plus the guard's slack — 234_000ms
+ * at today's defaults:
+ *   post-runner bounded reads  POST_RUNNER_READ_BUDGET_MS    90_000
+ *   inline resolution          INLINE_RESOLVE_BUDGET_MS      12_000
+ *   begin hook                 CHECK_HOOK_TIMEOUT_MS          2_000
+ *   terminalize hook           live checkBudgets.terminalizeMs 10_000 (up to 30_000)
+ *   untimed worker-side tail   GUARD_SLACK_MS                120_000
+ *                           ------------------------------------------
+ *                                                            234_000
  *
- * That sum covers ONLY the paid runner and the two Check hooks. The steps that
- * share the window around them are NOT in it: admission/claim, container
- * create + token mint + clone + rev-parse, the dedup/journal reads, diff
- * capture, recheck reads, PR context capture (always skipped at `deep`), and
- * the runner input write before the run; then the bounded report/recheck
- * reads, inline resolution (`INLINE_RESOLVE_BUDGET_MS`), the comment publish
- * and the D1 puts after it. Those spend the 48_000 margin, so the sum must
- * stay below the cap for every step to fit.
- *
- * The terminalize term is the default: an operator may configure it up to
- * 30_000 (`CHECK_TERMINALIZE_MAX`), which leaves 28_000. Pinned by
- * consumer.test.ts (round-budget case) — any change to a term, the cap or the
- * margin re-derives that pin.
+ * So the derived runner deadline is 666_000ms — 646_000 when an operator
+ * configures terminalize at its 30_000 ceiling — below `deep`'s 840_000 table
+ * on every level. That is what makes an oversized-diff capture fit: the
+ * fallback needs one `EXEC_TIMEOUT_GIT_MS` (120_000) of the deadline and still
+ * leaves 546_000 for the runner. Every post-diff sandbox step (increment
+ * capture, numstat, the runner-input write, the PR-context reads) and the
+ * runner itself draw from the SAME deadline and decline with an explicit
+ * round-budget failure once it is spent, so the timed steps end at the
+ * deadline and the reserve covers everything after it. Pinned by
+ * consumer.test.ts (the round-budget arithmetic case and the derived-exec
+ * cases) — any change to a term re-derives those pins.
  */
 export const ROUND_BUDGET_MS = 900_000;
 
@@ -1006,37 +1007,54 @@ export const CHECK_HOOK_TIMEOUT_MS = 2_000;
 
 /**
  * What every round still owes AFTER the paid runner (ms): the post-runner
- * bounded reads, the inline-resolution tail and the two Check hooks. Composed
- * ONLY from values that already exist — every term is an operator-tunable
- * `review_runtime_settings` value (or the begin hook's platform bound), so the
- * sum adds no operator knob of its own. 114_000ms at today's defaults.
+ * bounded reads, the inline-resolution tail, the two Check hooks and the slack
+ * for the untimed worker-side tail (parse, publication, D1/KV puts, sandbox
+ * destroy). Composed ONLY from values that already exist — every term is an
+ * operator-tunable `review_runtime_settings` value (or the begin hook's
+ * platform bound / the guard's own slack), so the sum adds no operator knob of
+ * its own.
+ *
+ * `terminalizeMs` is the message's LIVE budget — the same value the
+ * terminalize hook runs on (`checkBudgets.terminalizeMs`, read once per
+ * message) — never `CHECK_TERMINALIZE_DEFAULT`: an operator who raises it to
+ * `CHECK_TERMINALIZE_MAX` (30_000) owes 20_000 more of the reserve. 234_000ms
+ * at today's defaults (90_000 + 12_000 + 2_000 + 120_000 + 10_000).
  */
-export const POST_RUNNER_RESERVE_MS =
-  POST_RUNNER_READ_BUDGET_MS +
-  INLINE_RESOLVE_BUDGET_MS +
-  CHECK_HOOK_TIMEOUT_MS +
-  CHECK_TERMINALIZE_DEFAULT;
+export function postRunnerReserveMs(terminalizeMs: number): number {
+  return (
+    POST_RUNNER_READ_BUDGET_MS +
+    INLINE_RESOLVE_BUDGET_MS +
+    CHECK_HOOK_TIMEOUT_MS +
+    GUARD_SLACK_MS +
+    terminalizeMs
+  );
+}
 
 /**
- * The paid runner's deadline and exec timeout, DERIVED from the round's own
- * deadline instead of the level's fixed budget:
- *   runnerDeadlineMs = roundDeadline - POST_RUNNER_RESERVE_MS
- *   exec timeout     = min(runnerTimeoutMs(level), runnerDeadline - now)
- * A round that spent its clock on the clone and the refused diff therefore
- * keeps a real runner window instead of failing the level's whole table
- * budget. The runner timeout is now derived from the round deadline; no
- * operator-tunable budget was added (each term already has its own source).
+ * The instant the paid runner must be finished by: the round's hard stop less
+ * the live post-runner reserve. Never the level's whole table — the runner's
+ * exec timeout, the oversized-diff capture and every post-diff sandbox step
+ * draw from THIS deadline, so a round that spent its clock on the clone still
+ * keeps a real runner window instead of failing the table budget.
  */
-function deriveRunnerDeadline(
-  roundDeadlineMs: number,
-  now: number,
-  level: ReviewLevel,
-): { runnerDeadlineMs: number; runnerTimeoutMs: number } {
-  const runnerDeadlineMs = roundDeadlineMs - POST_RUNNER_RESERVE_MS;
-  return {
-    runnerDeadlineMs,
-    runnerTimeoutMs: Math.max(1, Math.min(runnerTimeoutMs(level), runnerDeadlineMs - now)),
-  };
+function deriveRunnerDeadline(roundDeadlineMs: number, terminalizeMs: number): number {
+  return roundDeadlineMs - postRunnerReserveMs(terminalizeMs);
+}
+
+/**
+ * What that deadline still owes a bounded step, capped at the step's own
+ * budget. THROWS the explicit round-budget failure once spent: a spent
+ * deadline must decline the step, never manufacture a positive (1ms) timeout
+ * that starts a paid exec and then fails it for the wrong cause.
+ */
+function boundedStepTimeout(runnerDeadlineMs: number, capMs: number, step: string): number {
+  const left = Math.min(capMs, runnerDeadlineMs - Date.now());
+  if (left <= 0) {
+    throw new Error(
+      `round budget spent: ${step} declined — the derived runner deadline is spent (${left}ms left for it)`,
+    );
+  }
+  return left;
 }
 
 /**
@@ -1291,17 +1309,16 @@ function clampContextText(text: string, maxChars: number): string {
 
 /**
  * Per-call bound for the capture's own `gh` reads (ms). Far below
- * `EXEC_TIMEOUT_GIT_MS` because the capture is best-effort narrative: its
- * worst case must fit inside the round NEXT TO the level's runner budget.
+ * `EXEC_TIMEOUT_GIT_MS` because the capture is best-effort narrative, and each
+ * read is further capped by what the DERIVED runner deadline still owes.
  *
- * Round arithmetic (`ROUND_BUDGET_MS` = 900_000ms):
- *   capture worst case (1 + PR_CONTEXT_MAX_ISSUES) × 30_000 = 120_000ms
- *   quick/default runner                                     = 600_000ms
- *   post-runner bounded reads (3 × POST_RUNNER_READ_TIMEOUT_MS) =  90_000ms
- *   gate needs 810_000ms → funded at round start with 90_000ms to spare.
- * A deep round needs 840_000 + 120_000 + 90_000 = 1_050_000ms, more than the
- * 900_000ms window, so deep rounds always skip the capture — narrative never
- * trades away a deep run's window. Changing any term re-derives the gate.
+ * Round arithmetic (`ROUND_BUDGET_MS` = 900_000ms, 234_000ms reserve at the
+ * defaults → a 666_000ms runner deadline): the gate needs the capture's
+ * worst case (1 + PR_CONTEXT_MAX_ISSUES) × 30_000 = 120_000ms plus the
+ * post-runner bounded reads (3 × POST_RUNNER_READ_TIMEOUT_MS = 90_000ms) still
+ * ahead of that deadline, so it fits on every level — `deep` included, whose
+ * 840_000 table budget is a ceiling that the derived deadline never grants in
+ * full. Changing any term re-derives the gate.
  */
 export const PR_CONTEXT_EXEC_TIMEOUT_MS = 30_000;
 
@@ -1317,14 +1334,14 @@ export const PR_CONTEXT_WORST_CASE_MS = (1 + PR_CONTEXT_MAX_ISSUES) * PR_CONTEXT
  * to `PR_CONTEXT_MAX_ISSUES` issues it closes/references. Every value is
  * clamped — this is attacker-controlled prose that rides into a prompt.
  *
- * Bounded by the ROUND's clock: the capture runs before the paid run and each
- * gh read can consume its whole `PR_CONTEXT_EXEC_TIMEOUT_MS`, so a slow
- * sandbox could spend the round's window on a narrative. The gate therefore
- * requires the remainder to cover the worst-case capture, the level's runner
- * budget AND the post-runner bounded reads that share this round's clock —
- * the reads must still fit after the capture and the run — and only then
- * does the remaining time bound how many issue reads start, so the review
- * itself never carries the cost.
+ * Bounded by the DERIVED runner deadline: the capture runs before the paid run
+ * and each gh read can consume its whole `PR_CONTEXT_EXEC_TIMEOUT_MS`, so a
+ * slow sandbox could spend the window on a narrative. The gate therefore
+ * requires that deadline to still cover the worst-case capture AND the
+ * post-runner bounded reads, and each read's own timeout is what that deadline
+ * still owes — a read that would start past it is skipped, never issued on a
+ * fresh window. Only then does the remaining time bound how many issue reads
+ * start, so the review itself never carries the cost.
  *
  * Any failure (gh missing, API error, non-JSON output, no budget) resolves
  * `undefined` after ONE warn naming the cause: the report sections then degrade
@@ -1338,33 +1355,42 @@ async function capturePrContext(
   token: string,
   log: ConsumerLog,
   fields: ConsumerLogFields,
-  level: ReviewLevel,
-  roundDeadlineMs: number,
+  runnerDeadlineMs: number,
 ): Promise<PrContext | undefined> {
-  const exec = { env: { GH_TOKEN: token }, timeout: PR_CONTEXT_EXEC_TIMEOUT_MS };
   const warn = (cause: ReportContextFailure, issue?: number): void => {
     log.warn(
       { ...fields, report_context: cause, ...(issue === undefined ? {} : { report_context_issue: issue }) },
       `report context ${cause}${issue === undefined ? "" : ` (issue #${issue})`} — report sections degrade to none`,
     );
   };
-  const remainingMs = roundDeadlineMs - Date.now();
-  // The capture is spent BEFORE the paid run, so its bound must leave the
-  // level's own exec budget intact: a capture that fits but eats the runner's
-  // window turns a review into a timeout. The post-runner bounded reads share
-  // that same clock, so their worst case is reserved too — a capture that
-  // consumed the whole remainder would starve them.
-  const captureBudgetMs =
-    PR_CONTEXT_WORST_CASE_MS + runnerTimeoutMs(level) + POST_RUNNER_READ_BUDGET_MS;
+  // What the DERIVED deadline still owes one read; null once it is spent, so a
+  // read never starts on a fresh window.
+  const readBudget = (): number | null => {
+    const left = Math.min(PR_CONTEXT_EXEC_TIMEOUT_MS, runnerDeadlineMs - Date.now());
+    return left > 0 ? left : null;
+  };
+  // The capture is spent BEFORE the paid run, and the post-runner bounded reads
+  // share the same derived deadline, so both worst cases must still fit ahead
+  // of it — a capture that consumed the whole remainder would starve them.
+  const remainingMs = runnerDeadlineMs - Date.now();
+  const captureBudgetMs = PR_CONTEXT_WORST_CASE_MS + POST_RUNNER_READ_BUDGET_MS;
   if (remainingMs < captureBudgetMs) {
     log.warn(
       { ...fields, report_context: "budget" },
-      `report context budget — ${remainingMs}ms left of the round, the capture costs up to ${PR_CONTEXT_WORST_CASE_MS}ms, the run still needs its ${runnerTimeoutMs(level)}ms and the post-runner reads ${POST_RUNNER_READ_BUDGET_MS}ms — skipped, report sections degrade to none`,
+      `report context budget — ${remainingMs}ms left before the derived runner deadline, the capture costs up to ${PR_CONTEXT_WORST_CASE_MS}ms and the post-runner reads ${POST_RUNNER_READ_BUDGET_MS}ms — skipped, report sections degrade to none`,
     );
     return undefined;
   }
+  const prTimeout = readBudget();
+  if (prTimeout === null) {
+    warn("budget");
+    return undefined;
+  }
   const prRead = await sandbox
-    .runCommand(prBodyCommand(payload.owner, payload.repo, payload.pr_number), exec)
+    .runCommand(prBodyCommand(payload.owner, payload.repo, payload.pr_number), {
+      env: { GH_TOKEN: token },
+      timeout: prTimeout,
+    })
     .catch(() => null);
   if (prRead === null || prRead.exitCode !== 0) {
     warn("pr-view");
@@ -1380,15 +1406,22 @@ async function capturePrContext(
   }
   const issues: PrContext["issues"] = [];
   // One gh read may burn its whole window, so the remaining time also bounds
-  // how many issue reads start: never more than the round can still fund.
-  // The runner's own window is already reserved by the gate above.
+  // how many issue reads start: never more than the deadline can still fund.
   const maxIssueReads = Math.min(
     PR_CONTEXT_MAX_ISSUES,
-    Math.floor((roundDeadlineMs - Date.now()) / PR_CONTEXT_EXEC_TIMEOUT_MS),
+    Math.floor((runnerDeadlineMs - Date.now()) / PR_CONTEXT_EXEC_TIMEOUT_MS),
   );
   for (const issueNumber of extractIssueRefs(prBody).slice(0, Math.max(0, maxIssueReads))) {
+    const issueTimeout = readBudget();
+    if (issueTimeout === null) {
+      warn("budget");
+      break;
+    }
     const issueRead = await sandbox
-      .runCommand(issueViewCommand(payload.owner, payload.repo, issueNumber), exec)
+      .runCommand(issueViewCommand(payload.owner, payload.repo, issueNumber), {
+        env: { GH_TOKEN: token },
+        timeout: issueTimeout,
+      })
       .catch(() => null);
     if (issueRead === null || issueRead.exitCode !== 0) {
       warn("issue-view", issueNumber);
@@ -4440,13 +4473,18 @@ async function processMessage(
     // oversized fallback draw their timeouts from this same deadline, so the
     // stage can never spend more than the `full-diff` ledger window it bills —
     // and never more than what the derived runner deadline still leaves.
+    // EVERY post-diff sandbox step below (the increment capture, numstat, the
+    // runner-input write, the PR-context reads) and the paid runner itself draw
+    // from this ONE derived deadline, and a spent deadline declines explicitly
+    // — no step starts on a fresh 120s window once the fallback was admitted.
+    const terminalizeBudgetMs = checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT;
+    const runnerDeadlineMs = deriveRunnerDeadline(roundDeadlineMs, terminalizeBudgetMs);
     const diffStageNow = Date.now();
-    const { runnerDeadlineMs } = deriveRunnerDeadline(roundDeadlineMs, diffStageNow, level);
-    const diffCaptureDeadlineMs =
-      diffStageNow + Math.min(EXEC_TIMEOUT_GIT_MS, runnerDeadlineMs - diffStageNow);
+    const diffWindowMs = boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "diff capture");
+    const diffCaptureDeadlineMs = diffStageNow + diffWindowMs;
     const diff = await sandbox.runCommand(cmds.diff, {
       env: { GH_TOKEN: token },
-      timeout: Math.max(1, diffCaptureDeadlineMs - Date.now()),
+      timeout: diffWindowMs,
     });
     let diffStdout = diff.stdout;
     if (diff.exitCode !== 0) {
@@ -4491,7 +4529,10 @@ async function processMessage(
     if (sinceSha !== null) {
       const increment = await sandbox.runCommand(
         incrementDiffCommand(payload.owner, payload.repo, sinceSha, headSha, DIFF_PATH),
-        { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS },
+        {
+          env: { GH_TOKEN: token },
+          timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "increment diff"),
+        },
       );
       if (increment.exitCode !== 0) {
         throw new Error(gitStageFailureDetail("increment diff", increment));
@@ -4661,8 +4702,11 @@ async function processMessage(
     // diff without applying it. The lines ("<add>\t<del>\t<path>") are the
     // runner's seat-partition universe (reconFacts convention). On an
     // incremental round the file holds base...head, so the seats partition the
-    // work done since the last review instead of the whole PR.
-    const numstat = await sandbox.runCommand(cmds.numstat, { timeout: EXEC_TIMEOUT_GIT_MS });
+    // work done since the last review instead of the whole PR. Its window is
+    // what the DERIVED runner deadline still owes (declines once spent).
+    const numstat = await sandbox.runCommand(cmds.numstat, {
+      timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "numstat"),
+    });
     if (numstat.exitCode !== 0) {
       throw new Error(gitStageFailureDetail("numstat", numstat));
     }
@@ -4749,9 +4793,9 @@ async function processMessage(
     // packages/shared/src, tests/review/runtime-boundary).
     // PR context for the report seat (best-effort): the description plus the
     // issues it closes/references, read through gh with the same exec env the
-    // diff uses. Bounded by the round's own clock (each read can burn its whole
-    // PR_CONTEXT_EXEC_TIMEOUT_MS window) and gated so the level's runner budget
-    // AND the post-runner bounded reads survive the capture; any failure or a
+    // diff uses. Bounded by the DERIVED runner deadline (each read gets what
+    // that deadline still owes, capped at PR_CONTEXT_EXEC_TIMEOUT_MS) and gated
+    // so the post-runner bounded reads survive the capture; any failure or a
     // budget skip resolves undefined (with one named warn) so the published
     // report sections degrade to `none` — a narrative gap never fails a review.
     const prContext = await capturePrContext(
@@ -4760,8 +4804,7 @@ async function processMessage(
       token,
       deps.log,
       fields,
-      level,
-      roundDeadlineMs,
+      runnerDeadlineMs,
     );
 
     const runnerInput = {
@@ -4787,7 +4830,7 @@ async function processMessage(
     // argument, and a recheck round above ~98 KiB breaches Linux's 128 KiB cap.
     const writeInput = await sandbox.runCommand(writeJsonCommand(RUNNER_INPUT_PATH), {
       stdin: toBase64Utf8(JSON.stringify(runnerInput)),
-      timeout: EXEC_TIMEOUT_GIT_MS,
+      timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "runner input write"),
     });
     if (writeInput.exitCode !== 0) {
       throw new Error(`runner input write failed: exit ${writeInput.exitCode}`);
@@ -4825,16 +4868,18 @@ async function processMessage(
       recheckInput !== undefined ? RECHECK_OUTPUT_PATH : undefined,
       prContext !== undefined ? REPORT_OUTPUT_PATH : undefined,
     );
-    const derivedRunner = deriveRunnerDeadline(roundDeadlineMs, Date.now(), level);
+    // Derived from the SAME deadline the diff stage and every post-diff step
+    // use (never the bare level constant): the runner only gets what the
+    // post-runner tail does not already need, and a spent deadline declines the
+    // paid exec instead of starting it with a manufactured 1ms timeout.
+    const runnerTimeout = boundedStepTimeout(runnerDeadlineMs, runnerTimeoutMs(level), "runner");
     const run = await sandbox.runCommand(runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,
       // The credential payload rides the exec STDIN pipe — present only when
       // the App actually transported a key (keyless run shape = no stdin).
       ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
-      // Derived from the round deadline (never the bare level constant): the
-      // runner only gets what the post-runner tail does not already need.
-      timeout: derivedRunner.runnerTimeoutMs,
+      timeout: runnerTimeout,
     });
     const runnerElapsedMs = Date.now() - runnerStartedAt;
     if (run.exitCode !== 0) {
@@ -4846,7 +4891,7 @@ async function processMessage(
     // the only wall-clock failure (spec 不 abort).
     deps.log.info(
       { ...fields, elapsed_ms: runnerElapsedMs },
-      `runner finished in ${runnerElapsedMs}ms (budget ${derivedRunner.runnerTimeoutMs}ms)`,
+      `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeout}ms)`,
     );
 
     // AL-6 stage window: post-runner steps (parse has its own branch; the
