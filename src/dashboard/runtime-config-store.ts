@@ -511,6 +511,15 @@ function degradedCheckMinScore(reason: DegradedReason): CheckMinScoreRead {
   return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: true, reason };
 }
 
+/**
+ * A read that names a missing column or table hit a database whose schema
+ * predates this build (the deploy window before the migration applies), not a
+ * transient failure — the one case the caller's malformed copy exists for.
+ */
+export function isMissingSchemaError(error: unknown): boolean {
+  return /no such (column|table)/i.test(String(error instanceof Error ? error.message : error));
+}
+
 /** The tenant face's read of the workspace's default floor. */
 export async function getWorkspaceCheckMinScore(
   db: DashboardD1,
@@ -527,8 +536,8 @@ export async function getWorkspaceCheckMinScore(
     return isCheckMinScoreValue(row.value)
       ? { minScore: row.value, degraded: false }
       : degradedCheckMinScore("untrusted");
-  } catch {
-    return degradedCheckMinScore("read-failed");
+  } catch (error) {
+    return degradedCheckMinScore(isMissingSchemaError(error) ? "malformed" : "read-failed");
   }
 }
 
