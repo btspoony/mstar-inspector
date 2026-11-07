@@ -610,13 +610,16 @@ export const defaultConsumerLog: ConsumerLog = {
  *
  * This list is the TTL's single source of truth (`reviewGuardTtlSeconds` bills
  * its length) and it is pinned against a real round: consumer.test.ts runs the
- * maximal round and requires exactly this many bounded commands. The four
- * PR-context reads run under the tighter `PR_CONTEXT_EXEC_TIMEOUT_MS` (30s)
- * and the post-runner document/status/report reads under
- * `POST_RUNNER_READ_TIMEOUT_MS` (also 30s), but all still bill at 120s here —
- * a deliberate over-count, so the TTL stays conservative. An uncounted step
- * lets the row expire while a legal review is still posting, so a new one must
- * fail that test until it is added here.
+ * maximal round and requires exactly this many bounded commands. Steps that
+ * run under a tighter per-command bound still bill at 120s here — a deliberate
+ * over-count, so the TTL stays conservative: the four PR-context reads run
+ * under `PR_CONTEXT_EXEC_TIMEOUT_MS` (30s), the post-runner
+ * document/status/report reads under `POST_RUNNER_READ_TIMEOUT_MS` (also 30s).
+ * `full-diff` bills ONE complete capture attempt: the `gh pr diff` exec alone,
+ * OR the oversized fallback's four 30s steps (4 × 30s = the same 120s window),
+ * so the fallback adds no window and the TTL/backoff pins stay put. An
+ * uncounted step lets the row expire while a legal review is still posting, so
+ * a new one must fail that test until it is added here.
  */
 export const GUARD_TIMED_SANDBOX_STEPS: readonly string[] = [
   "clone",
@@ -3139,6 +3142,14 @@ function gitStageFailureDetail(
 }
 
 /**
+ * Worst case of the whole fallback: four bounded execs, each able to consume
+ * its whole `PR_CONTEXT_EXEC_TIMEOUT_MS` window (4 × 30s = the ONE `full-diff`
+ * ledger window a `gh pr diff` capture already bills), plus the margin the
+ * caller still owes after the last exec (bounded-read parse, log line).
+ */
+const OVERSIZED_DIFF_ALLOWANCE_MS = 4 * PR_CONTEXT_EXEC_TIMEOUT_MS + 10_000;
+
+/**
  * Capture a PR diff GitHub refuses to serve: `gh pr diff` 406s once the PR
  * passes its 20,000-line API ceiling, so the same unified diff comes from the
  * clone instead — base ref → merge base → depth-1 fetch of that merge base →
@@ -3147,17 +3158,26 @@ function gitStageFailureDetail(
  * The head commit is already in the clone (`cloneCommand` fetched
  * `pull/<n>/head`), so only the merge base has to be fetched.
  *
- * null means the fallback produced no capture — an empty/unparseable ref or
- * sha, a non-zero exit, or a rejected exec. The caller rethrows the ORIGINAL
- * diff failure: a fault here must never replace the cause that was diagnosed.
+ * Bounded twice over: every exec runs under `PR_CONTEXT_EXEC_TIMEOUT_MS`, so
+ * the fallback costs at most the one `full-diff` ledger window of the capture
+ * it replaces; and the whole fallback is declined when the round's remaining
+ * clock cannot fund `OVERSIZED_DIFF_ALLOWANCE_MS`, so an oversized round keeps
+ * the fast 406 failure row instead of being killed mid-fallback.
+ *
+ * null means the fallback produced no capture — no round budget, an
+ * empty/unparseable ref or sha, a non-zero exit, or a rejected exec. The caller
+ * rethrows the ORIGINAL diff failure: a fault here must never replace the cause
+ * that was diagnosed, and a partial capture is never published.
  */
 async function oversizedDiffCapture(
   sandbox: ReviewSandbox,
   token: string,
   target: { owner: string; repo: string; prNumber: number },
   headSha: string,
+  roundDeadlineMs: number,
 ): Promise<{ stdout: string; stderr: string; exitCode: number } | null> {
-  const gh = { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS };
+  if (roundDeadlineMs - Date.now() < OVERSIZED_DIFF_ALLOWANCE_MS) return null;
+  const gh = { env: { GH_TOKEN: token }, timeout: PR_CONTEXT_EXEC_TIMEOUT_MS };
   try {
     const base = await sandbox.runCommand(
       pullRequestBaseRefCommand(target.owner, target.repo, target.prNumber),
@@ -3173,12 +3193,12 @@ async function oversizedDiffCapture(
     if (merge.exitCode !== 0 || mergeBaseSha === "") return null;
     const fetched = await sandbox.runCommand(fetchDepthOneCommand(CLONE_DIR, mergeBaseSha), {
       env: gitTransportEnv(token),
-      timeout: EXEC_TIMEOUT_GIT_MS,
+      timeout: PR_CONTEXT_EXEC_TIMEOUT_MS,
     });
     if (fetched.exitCode !== 0) return null;
     const local = await sandbox.runCommand(
       localDiffCommand(CLONE_DIR, mergeBaseSha, headSha, DIFF_PATH),
-      { timeout: EXEC_TIMEOUT_GIT_MS },
+      { timeout: PR_CONTEXT_EXEC_TIMEOUT_MS },
     );
     return local.exitCode === 0 ? local : null;
   } catch {
@@ -4369,12 +4389,14 @@ async function processMessage(
     if (diff.exitCode !== 0) {
       // Only GitHub's oversized-diff refusal has a local substitute; an auth or
       // network failure keeps today's rethrow (a fallback would mask the cause).
+      // The fallback shares this round's clock and declines it when spent.
       const local = isDiffTooLarge(diff.stderr)
         ? await oversizedDiffCapture(
             sandbox,
             token,
             { owner: payload.owner, repo: payload.repo, prNumber: payload.pr_number },
             headSha,
+            roundStartedAt + deps.roundBudgetMs,
           )
         : null;
       if (local === null) {

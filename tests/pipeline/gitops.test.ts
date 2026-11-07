@@ -254,12 +254,19 @@ describe("gitops command builders", () => {
       ),
     ).toBe(true);
     expect(isDiffTooLarge('{"message":"too_large"}')).toBe(true);
+    expect(isDiffTooLarge("GraphQL: too_large")).toBe(true);
     for (const other of [
       "",
       "HTTP 401: Bad credentials (https://api.github.com/repos/acme/widgets/pulls/42)",
       "HTTP 404: Not Found (https://api.github.com/repos/acme/widgets/pulls/42)",
       "dial tcp 140.82.112.3:443: connect: connection refused",
       "error: RPC failed; curl 56 GnuTLS recv error",
+      // The token inside gh's trailing URL is a REPO NAME, not the ceiling:
+      // every failure of `auth_too_large` would otherwise take the fallback.
+      "HTTP 401: Bad credentials (https://api.github.com/repos/acme/auth_too_large/pulls/42)",
+      "HTTP 500: Server Error (https://api.github.com/repos/too_large/widgets/pulls/42)",
+      // A longer word that merely contains it is not the token either.
+      "HTTP 422: too_larger request",
     ]) {
       expect(isDiffTooLarge(other)).toBe(false);
     }

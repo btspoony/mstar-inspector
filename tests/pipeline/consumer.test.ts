@@ -1213,12 +1213,21 @@ describe("createReviewConsumer", () => {
     expect(cmds).toContain(numstatCommand(DIFF_PATH));
     expect(cmds.some((c) => c.includes("--input"))).toBe(true);
     // Credentials stay exec-env only: the fetch carries the shared transport
-    // header, the local diff needs none.
+    // header, the local diff needs none. Both share the 30s window, so the four
+    // fallback steps cost exactly the one 120s `full-diff` ledger window.
+    expect(sandbox.calls[3]!.opts).toEqual({
+      env: { GH_TOKEN: gh("s", "installation_token") },
+      timeout: PR_CONTEXT_EXEC_TIMEOUT_MS,
+    });
+    expect(sandbox.calls[4]!.opts).toEqual({
+      env: { GH_TOKEN: gh("s", "installation_token") },
+      timeout: PR_CONTEXT_EXEC_TIMEOUT_MS,
+    });
     expect(sandbox.calls[5]!.opts).toEqual({
       env: gitTransportEnv(gh("s", "installation_token")),
-      timeout: EXEC_TIMEOUT_GIT_MS,
+      timeout: PR_CONTEXT_EXEC_TIMEOUT_MS,
     });
-    expect(sandbox.calls[6]!.opts).toEqual({ timeout: EXEC_TIMEOUT_GIT_MS });
+    expect(sandbox.calls[6]!.opts).toEqual({ timeout: PR_CONTEXT_EXEC_TIMEOUT_MS });
     expect(logLines.some((l) => l.fields.diff_source === "oversized-local")).toBe(true);
     expect(reviewCount(db)).toBe(1);
     expect(failureRows(db)).toHaveLength(0);
@@ -1266,6 +1275,84 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
       pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
+    ]);
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("a mid-fallback fetch failure rethrows the ORIGINAL diff failure and captures nothing", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    sandbox.fetchExitCode = 128;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
+    );
+
+    // The chain stopped at the failed fetch: no local diff, no numstat, no
+    // runner — the fallback's own fault never becomes the round's cause.
+    expect(sandbox.calls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+      expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
+      pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
+      mergeBaseCommand(TEST_OWNER, TEST_REPO, sandbox.diffBaseRef, SHA),
+      fetchDepthOneCommand(CLONE_DIR, sandbox.mergeBaseSha),
+    ]);
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("diff failed");
+  });
+
+  test("a mid-fallback local-diff failure rethrows the ORIGINAL diff failure with no partial capture", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    sandbox.localDiffExitCode = 1;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
+    );
+
+    // The local diff rewrote DIFF_PATH from 0B, but a failed read is no
+    // capture: nothing downstream reads the half-written file.
+    expect(sandbox.calls.map((c) => c.cmd).slice(3, 7)).toEqual([
+      pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
+      mergeBaseCommand(TEST_OWNER, TEST_REPO, sandbox.diffBaseRef, SHA),
+      fetchDepthOneCommand(CLONE_DIR, sandbox.mergeBaseSha),
+      localDiffCommand(CLONE_DIR, sandbox.mergeBaseSha, SHA, DIFF_PATH),
+    ]);
+    expect(sandbox.calls.some((c) => c.cmd === numstatCommand(DIFF_PATH))).toBe(false);
+    expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("diff failed");
+  });
+
+  test("an insufficient round budget declines the oversized fallback and keeps the 406 failure", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      // The round window is already spent: fail closed BEFORE any fallback exec
+      // rather than risk the invocation being killed with no failure row.
+      roundBudgetMs: 1,
+    });
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
+    );
+
+    expect(sandbox.calls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+      expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
     ]);
     expect(failureRows(db)).toHaveLength(1);
   });

@@ -349,6 +349,9 @@ export type FakeSandboxState = {
   /** The PR's base ref and the merge base the oversized-diff fallback resolves. */
   diffBaseRef: string;
   mergeBaseSha: string;
+  /** Exit codes of the fallback's last two steps (mid-fallback failure cases). */
+  fetchExitCode: number;
+  localDiffExitCode: number;
   /**
    * Raw stdout a BROKEN transport answers the bounded read with, replacing the
    * command's own `<content>\n<flag>\n` reply (an empty one has no flag line).
@@ -413,6 +416,8 @@ export function initialFakeSandboxState(): FakeSandboxState {
     diffStderr: "gh failed",
     diffBaseRef: "main",
     mergeBaseSha: "c".repeat(40),
+    fetchExitCode: 0,
+    localDiffExitCode: 0,
     diffReadStdout: null,
     numstatStdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n",
     numstatExitCode: 0,
@@ -563,9 +568,12 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     return { stdout: `${state.mergeBaseSha}\n`, stderr: "", exitCode: 0 };
   }
   if (cmd === fetchDepthOneCommand(CLONE_DIR, state.mergeBaseSha)) {
-    return { stdout: "", stderr: "", exitCode: 0 };
+    return { stdout: "", stderr: state.fetchExitCode === 0 ? "" : "fatal: fetch failed", exitCode: state.fetchExitCode };
   }
   if (cmd === localDiffCommand(CLONE_DIR, state.mergeBaseSha, state.resolvedSha, DIFF_PATH)) {
+    if (state.localDiffExitCode !== 0) {
+      return { stdout: "", stderr: "diff failed", exitCode: state.localDiffExitCode };
+    }
     const bytes = Buffer.from(state.diffStdout);
     const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
     const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";

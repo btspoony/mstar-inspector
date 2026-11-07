@@ -205,9 +205,14 @@ export function diffCommand(owner: string, repo: string, prNumber: number, diffP
  * ceiling: HTTP 406 on stderr, nothing on stdout. Those two wordings are the
  * ONLY signature of that ceiling — an auth (401/404) or transport failure is
  * a different cause and must keep failing the round, never take the fallback.
+ *
+ * gh appends the request URL in parentheses, and a repo name may contain the
+ * ceiling token itself (`auth_too_large`, `too_larger`), so URLs are cut and
+ * the token must stand alone: a substring of a URL is not GitHub's verdict.
  */
 export function isDiffTooLarge(stderr: string): boolean {
-  return stderr.includes("too_large") || stderr.includes("exceeded the maximum number of lines");
+  const message = stderr.replace(/\s*\(https?:\/\/[^)]*\)/g, "");
+  return /\btoo_large\b/.test(message) || message.includes("exceeded the maximum number of lines");
 }
 
 /** A branch ref as GitHub reports it (`base.ref`) — no traversal, no option form. */
