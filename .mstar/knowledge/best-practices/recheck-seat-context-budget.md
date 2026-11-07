@@ -1,3 +1,19 @@
+---
+module: recheck-seat
+date: 2026-11-07
+last_updated: 2026-11-07
+problem_type: best_practice
+category: best-practices
+severity: high
+topic: recheck seat budget and failure attribution
+tags:
+  - recheck
+  - sandbox
+  - structured-output
+  - budget
+  - attribution
+---
+
 # Recheck seat context budget and catalog alignment
 
 > A structured subagent that is asked more than its context can hold fails by yielding nothing at
@@ -55,3 +71,29 @@ a received-slice citation still publishes. Reverting the one-line gate must make
 
 - `docs/runtime-configuration.md` — where the assignment budget is listed with its layer and default.
 - `cf-queue-consumer-wall-clock.md` — the outer bound that a recheck round shares with the review.
+
+## Every failure exit must name its cause
+
+A lost recheck round is only actionable when the status document names why. The runner's failure
+attribution is one chain — `structured.error`, then the child's `abortReason`, its own `single.error`,
+the stderr tail, and finally `exit <code>` — and every exit that can fail must route through it:
+
+- the **no-yield** branch (`status !== "valid"` or absent data);
+- the **`single.error` short-circuit**, which must not pre-empt a usable `structuredOutput`: a child
+  can report an error and still yield a valid document, and that document wins;
+- the **catch**, which must unwrap the settled `SingleResult` carried by the SDK's rejection
+  (duck-typed `error.result`) and apply the same chain, falling back to `error.message` and only then
+  to a synthetic `exit unknown`.
+
+Two defects hide here, and both were found by reading the writer rather than the reader:
+
+1. **A short-circuit that discards the cause.** Throwing the bare `single.error` before the chain
+   loses the abort reason and exit code that explain a cap.
+2. **A foreign or empty settled shape.** Treating any truthy `result` as chainable returned
+   `exit unknown` and made the rejection's own message unreachable; a non-coercible `exitCode` could
+   even throw from the never-throws path. Guard the shape and the numeric field, then fall back.
+
+A stale sandbox image keeps the old bare text: the runner sources are image inputs, so the rebuild
+marker ships in the same commit as the change. A regression test per exit (no-yield, short-circuit,
+settled result, empty message) is the minimum; a live round proving "a prior finding is assessed" is
+a separate, unverified observation, never a unit-test substitute.

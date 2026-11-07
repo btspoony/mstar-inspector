@@ -6,6 +6,8 @@ Morning Star harness subtree rules. Root `AGENTS.md` keeps repo-level long-term 
 
 Directory layout is declared in root `.mstarc` (`[config]`) — single source of truth; do not duplicate it here. Git split (process local / results shared): tracked = `AGENTS.md`, `knowledge/**`, `specs/**`; everything else under `.mstar/` is gitignored. `workflows/` and `projects/` are created by engine writers on demand — never pre-create.
 
+`knowledge/` holds captured solutions and reusable patterns. Before implement, review or planning work, read the entries whose area matches the task; the catalog (`mstar catalog list --kind document`) is the index, not the README prose.
+
 ## Content Boundaries
 
 - `docs/` — human docs (install, contributing). Never process artifacts.
