@@ -145,6 +145,8 @@ export type CheckAttempt = {
   observed: CheckObserved;
   recoveryState: CheckRecoveryState;
   executionDeadlineMs: number;
+  /** The due time the selector observed; the unclaimed due-time push CASes on it. */
+  nextAttemptMs: number | null;
   attempts: number;
   terminalMs: number | null;
   /**
@@ -326,6 +328,7 @@ function attemptOf(row: ReviewCheckRow): CheckAttempt {
     observed: row.observed as CheckObserved,
     recoveryState: row.recovery_state as CheckRecoveryState,
     executionDeadlineMs: row.execution_deadline_ms,
+    nextAttemptMs: row.next_attempt_ms,
     attempts: row.attempts,
     terminalMs: row.terminal_ms,
     createdAtMs: row.created_ms,
@@ -802,10 +805,20 @@ export async function deferCheckForPendingPublication(
  *
  * The selectors' own eligibility is repeated in the statement, so a row another
  * invocation claimed or suspended in between is left exactly as it is.
+ *
+ * The due time itself is part of that predicate: the write CASes on the value
+ * this pass OBSERVED (`next_attempt_ms IS ?`, the selector's copy, NULL
+ * included), so a concurrent pass that already pushed the due time further —
+ * a defer with a newer rung — makes this UPDATE match nothing and leaves that
+ * newer value standing instead of overwritten by this older one. The `holder`
+ * and `terminal_ms`/state guards above cover a concurrent claim or end; the
+ * CAS covers only the due-time value this pass probed. A proof that lands
+ * without moving the row is still seen when the pushed time arrives.
  */
 export async function deferUnclaimedCheckRecovery(
   db: D1Like,
   id: string,
+  observedNextAttemptMs: number | null,
   nextAttemptMs: number,
   nowMs: CheckClock,
 ): Promise<boolean> {
@@ -815,9 +828,10 @@ export async function deferUnclaimedCheckRecovery(
           SET next_attempt_ms = ?, updated_ms = ?
         WHERE id = ? AND holder IS NULL
           AND recovery_state IN ('pending','remote-unconfirmed')
+          AND next_attempt_ms IS ?
           AND ${NONTERMINAL_WHERE}`,
     )
-    .bind(nextAttemptMs, nowMs, id)
+    .bind(nextAttemptMs, nowMs, id, observedNextAttemptMs)
     .run();
   return result.meta.changes === 1;
 }

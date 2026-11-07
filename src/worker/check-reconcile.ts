@@ -858,7 +858,7 @@ async function reconcileCheckAttempt(
     // later is still seen on the pass it falls due.
     if (waitIsTerminal(pending, proofPublicationId)) {
       const at = now();
-      await deferUnclaimedCheckRecovery(db, attemptId, at + waitRungMs(row, at), at);
+      await deferUnclaimedCheckRecovery(db, attemptId, row.nextAttemptMs, at + waitRungMs(row, at), at);
       return;
     }
     const waiting =

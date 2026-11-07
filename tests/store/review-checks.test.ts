@@ -51,6 +51,7 @@ import {
   claimAttempt,
   claimCheckRecovery,
   deferCheckRecovery,
+  deferUnclaimedCheckRecovery,
   externalIdFor,
   getCheckAttempt,
   getCheckOwnership,
@@ -916,6 +917,61 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0);
     expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE * 2)).toBeNull();
+  });
+});
+
+describe("deferUnclaimedCheckRecovery (due-time push without ownership)", () => {
+  /**
+   * The row shape the reconciler hands this write: a pending row that owns no
+   * lease (nothing was staged for the attempt, so there is nothing to claim),
+   * carrying whatever due time the selector observed — NULL on a fresh row.
+   */
+  async function unclaimedRow(db: TestD1): Promise<{ id: string; observed: number | null }> {
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    db.raw.prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`).run(id);
+    return { id, observed: (await getCheckAttempt(db, id))!.nextAttemptMs };
+  }
+
+  test("moves the observed due time and spends nothing", async () => {
+    const db = seededDb();
+    const { id, observed } = await unclaimedRow(db);
+    expect(observed).toBeNull();
+    expect(await deferUnclaimedCheckRecovery(db, id, observed, T0 + 30_000, T0)).toBe(true);
+    const row = await rawRow(db, id);
+    expect(row.next_attempt_ms).toBe(T0 + 30_000);
+    expect(row.attempts).toBe(0);
+    expect(row.holder).toBeNull();
+    expect(row.lease_epoch).toBe(1);
+    // Still a live due row, so the selector sees it once the pushed time arrives.
+    expect(await listCheckReconcileBatch(db, T0 + 30_000)).toHaveLength(1);
+  });
+
+  test("a due time another pass already pushed survives the stale write", async () => {
+    const db = seededDb();
+    const { id } = await unclaimedRow(db);
+    // This pass probed the row at T0 + 1s; another pass then pushed it further.
+    db.raw.prepare(`UPDATE review_checks SET next_attempt_ms = ? WHERE id = ?`).run(T0 + 1_000, id);
+    const observed = (await getCheckAttempt(db, id))!.nextAttemptMs;
+    db.raw.prepare(`UPDATE review_checks SET next_attempt_ms = ? WHERE id = ?`).run(T0 + 900_000, id);
+    expect(await deferUnclaimedCheckRecovery(db, id, observed, T0 + 30_000, T0)).toBe(false);
+    const row = await rawRow(db, id);
+    expect(row.next_attempt_ms).toBe(T0 + 900_000);
+    expect(row.updated_ms).toBe(T0); // nothing was written at all
+  });
+
+  test("a held or terminal row is left exactly as it is", async () => {
+    const db = seededDb();
+    const { id, observed } = await unclaimedRow(db);
+    db.raw.prepare(`UPDATE review_checks SET holder = 'other', lease_until_ms = ? WHERE id = ?`).run(T0 + 120_000, id);
+    expect(await deferUnclaimedCheckRecovery(db, id, observed, T0 + 30_000, T0)).toBe(false);
+    expect((await rawRow(db, id)).next_attempt_ms).toBeNull();
+
+    db.raw.prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, terminal_ms = ? WHERE id = ?`).run(T0, id);
+    expect(await deferUnclaimedCheckRecovery(db, id, observed, T0 + 30_000, T0)).toBe(false);
+    const row = await rawRow(db, id);
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.updated_ms).toBe(T0);
   });
 });
 
