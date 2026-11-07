@@ -461,22 +461,50 @@ describe("remainingOuterMs (the outer exec guard, as opposed to the soft clock)"
     expect(remainingSoftMinutes(start, "quick") * 60_000).not.toBe(remainingOuterMs(start, "quick"));
   });
 
-  test("a supplied outer budget replaces the tier cap — the exec the runner really has", () => {
+  test("a supplied absolute deadline replaces the tier cap — the exec the runner really has", () => {
     const start = 6_000_000;
-    // deep's tier cap is 840,000, but this round's exec only grants 240,000.
+    // deep's tier cap is 840,000, but this round's exec is killed at start+240,000.
     // Everything derived from the anchor must plan against the exec the runner
     // actually runs under, not the table entry it would have got alone.
-    const budget = 240_000;
-    anchorRecheckDeadline(start, "deep", budget);
+    const deadline = start + 240_000;
+    anchorRecheckDeadline(start, "deep", deadline);
 
-    expect(remainingOuterMs(start)).toBe(budget);
-    expect(remainingOuterMs(start + 100_000)).toBe(budget - 100_000);
+    expect(remainingOuterMs(start)).toBe(240_000);
+    expect(remainingOuterMs(start + 100_000)).toBe(140_000);
     // The seat's hard cap (runtime-omp: `remainingOuterMs - PUBLICATION_TAIL_MS`)
     // therefore leaves the tail before the EXEC deadline, not before the tier's
     // wider one. Proved through the recheck budget, which derives from the same
     // deadline: what it allows plus the tail is exactly what the exec leaves.
-    expect(currentRecheckBudget(start)).toBe(budget - PUBLICATION_TAIL_MS);
+    expect(currentRecheckBudget(start)).toBe(240_000 - PUBLICATION_TAIL_MS);
     expect(currentRecheckBudget(start) + PUBLICATION_TAIL_MS).toBe(remainingOuterMs(start));
+  });
+
+  test("a late start still anchors to the caller's instant — the parse time is never re-added", () => {
+    const start = 7_000_000;
+    const delay = 30_000;
+    const deadline = start + 240_000;
+    // The runner only calls the anchor after it read credentials and parsed the
+    // input: `now` is later, but the deadline it anchors is the caller's
+    // absolute instant — the delay is spent out of it, never added onto it.
+    anchorRecheckDeadline(start + delay, "deep", deadline);
+
+    expect(remainingOuterMs(start + delay)).toBe(240_000 - delay);
+    expect(remainingOuterMs(start + delay + 60_000)).toBe(180_000 - delay);
+    expect(currentRecheckBudget(start + delay)).toBe(240_000 - delay - PUBLICATION_TAIL_MS);
+  });
+
+  test("a spent absolute deadline anchors a spent budget — every seat cap clamps, the tail stays reserved", () => {
+    const start = 8_000_000;
+    anchorRecheckDeadline(start, "default", start - 5_000);
+
+    // Negative, never a fresh tier cap: the caller's exec is already gone.
+    expect(remainingOuterMs(start)).toBe(-5_000);
+    // The recheck seat's cap clamps to 0 (= skip); the 60s tail is still what
+    // the derivation subtracts, so a seat can never start inside it.
+    expect(currentRecheckBudget(start)).toBe(0);
+    // The soft clock keeps its own tier origin: the anchor's start, not the
+    // deadline it was handed.
+    expect(remainingSoftMinutes(start)).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
   });
 });
 

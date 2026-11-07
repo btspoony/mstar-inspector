@@ -7,14 +7,17 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
-# rebuild: the runner's anchored review deadline now follows the OUTER exec it
-# is really given: the Worker writes `outerBudgetMs` (the derived runner-exec
-# timeout) into the runner input, and `anchorRecheckDeadline` adds it in place
-# of the tier cap, so a shortened round plans its seats and its synthesis inside
-# the exec that would otherwise kill it first. Both modules are image inputs
+# rebuild: the runner's anchored review deadline now IS the OUTER exec deadline
+# the Worker derived: the input carries `outerDeadlineEpochMs` (that absolute
+# worker-clock instant, not a duration) and `anchorRecheckDeadline` anchors to
+# it verbatim, so a shortened round plans its seats and its synthesis inside the
+# exec that would otherwise kill it. The exec's own timeout is recomputed from
+# the same instant after the input write, so the write and the runner's parse
+# time spend it instead of extending it. Both modules are image inputs
 # (`packages/runner/src/recheck.ts`, `packages/shared/src/runtime.ts`); a stale
-# image anchors the whole tier cap, waits out the shortened exec, and publishes
-# nothing while still paying the model round.
+# image anchors the whole tier cap (or adds a duration onto its own late start),
+# waits out the shortened exec, and publishes nothing while still paying the
+# model round.
 #
 # rebuild: both recheck failure exits now share the existing attribution chain in
 # `packages/runner/src/recheck.ts`: the `single.error` short-circuit no longer

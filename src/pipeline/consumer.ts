@@ -669,8 +669,12 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
  * clock a best-effort step must fit inside.
  *
  * The paid runner is DERIVED from this deadline, never reserved in full: its
- * exec timeout is `min(runnerTimeoutMs(level), runnerDeadlineMs - now)`, where
+ * exec timeout is `min(runnerTimeoutMs(level), runnerDeadlineMs - now)` read
+ * immediately before the exec, where
  * `runnerDeadlineMs = ROUND_BUDGET_MS - postRunnerReserveMs(terminalizeMs)`.
+ * The input hands that same instant to the runner (`outerDeadlineEpochMs`), so
+ * the input write's own window and the runner's start/parse time spend that
+ * deadline instead of each being added back onto it.
  * That reserve is the whole post-runner tail plus the guard's slack — 234_000ms
  * at today's defaults:
  *   post-runner bounded reads  POST_RUNNER_READ_BUDGET_MS    90_000
@@ -4807,21 +4811,18 @@ async function processMessage(
       runnerDeadlineMs,
     );
 
-    // Derived from the SAME deadline the diff stage and every post-diff step
-    // use (never the bare level constant): the runner only gets what the
-    // post-runner tail does not already need, and a spent deadline declines the
-    // paid exec instead of starting it with a manufactured 1ms timeout. Read
-    // BEFORE the input write because the document must carry it; the write's
-    // own bounded window is the measure-then-start gap every step already pays.
-    const runnerTimeout = boundedStepTimeout(runnerDeadlineMs, runnerTimeoutMs(level), "runner");
+    // The input carries the SAME absolute deadline every post-diff step bills —
+    // the derived instant, never a duration. The runner anchors its own review
+    // deadline AT it, so the write's own window and the runner's parse time
+    // both spend that deadline instead of each being added back onto it.
     const runnerInput = {
       worktreePath: CLONE_DIR,
       reconFacts,
       capabilityHosts: sandboxImage.hosts,
-      // The window the exec below is really given: the runner anchors its own
-      // review deadline at it, so a shortened round plans synthesis inside the
-      // exec it runs under instead of the level's whole tier cap.
-      outerBudgetMs: runnerTimeout,
+      // The absolute instant the exec below is killed at: the runner anchors
+      // its own review deadline there, so a shortened round plans synthesis
+      // inside the exec it runs under instead of the level's whole tier cap.
+      outerDeadlineEpochMs: runnerDeadlineMs,
       ...(modelOverrides !== undefined ? { modelOverrides } : {}),
       ...(customProviders !== undefined
         ? { customProviders: customProviders.map(toRunnerCustomProvider) }
@@ -4879,8 +4880,12 @@ async function processMessage(
       recheckInput !== undefined ? RECHECK_OUTPUT_PATH : undefined,
       prContext !== undefined ? REPORT_OUTPUT_PATH : undefined,
     );
-    // The exec is started with exactly the window its input declares, so the
-    // runner's own anchored deadline and this timeout cannot disagree.
+    // Recomputed HERE, after the input write has consumed its window: the exec
+    // gets exactly what the absolute deadline still owes, so this timeout and
+    // the `outerDeadlineEpochMs` the input declares name the same instant. A
+    // deadline the write finished is declined explicitly, never started as a
+    // 1ms exec that would fail for the wrong cause.
+    const runnerTimeout = boundedStepTimeout(runnerDeadlineMs, runnerTimeoutMs(level), "runner");
     const run = await sandbox.runCommand(runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,

@@ -534,9 +534,10 @@ describe("createReviewConsumer", () => {
       worktreePath: "/workspace/repo",
       reconFacts: ["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"],
       capabilityHosts: getSandboxImage("omp")!.hosts,
-      // The runner anchors its own deadline at this budget, so the input must
-      // carry the exec window it is started with (here the whole 600s tier).
-      outerBudgetMs: 600_000,
+      // The input names the ABSOLUTE instant the exec is killed at, so the
+      // runner anchors its own review deadline there (a duration would be
+      // re-added onto its late start).
+      outerDeadlineEpochMs: expect.any(Number),
     });
     // Clone: git transport auth via scoped extraheader env (bugbot A1) — the
     // token lives in GIT_CONFIG_VALUE_0, never in the command string. Form is
@@ -1532,7 +1533,9 @@ describe("createReviewConsumer", () => {
     sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    let roundStart = 0;
     await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
       const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
         ...testOverrides,
         getSandbox: async () => ({
@@ -1561,15 +1564,73 @@ describe("createReviewConsumer", () => {
     const inputWrite = sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'")!;
     expect(execTimeout(inputWrite)).toBe(66_000);
     expect(runnerExecTimeout()).toBe(66_000);
-    // The runner input carries that SAME derived window: the runner anchors its
-    // own deadline at it, so a shortened exec no longer lets the round plan
+    // The runner input carries that SAME derived deadline as an instant: the
+    // runner anchors at it, so a shortened exec no longer lets the round plan
     // synthesis at the end of a tier budget it will never be given.
-    const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { outerBudgetMs?: number };
-    expect(writtenInput.outerBudgetMs).toBe(66_000);
+    const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    expect(writtenInput.outerDeadlineEpochMs).toBe(roundStart + 666_000);
     // 66s cannot fund the narrative (120s) plus the post-runner reads (90s).
     expect(logLines.some((l) => l.fields.report_context === "budget")).toBe(true);
     expect(reviewCount(db)).toBe(1);
     expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("a slow runner-input write shrinks the exec timeout by exactly the time it spent", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    let roundStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+        ...testOverrides,
+        getSandbox: async () => ({
+          runCommand: async (cmd: string, opts?: unknown) => {
+            // 500s of the 666s derived deadline are gone before the write, and
+            // the write itself then spends 100s of the 166s that remained.
+            if (cmd.includes("git init")) clock.now += 500_000;
+            if (cmd.startsWith("base64 -d >")) clock.now += 100_000;
+            return fakeSandbox.runCommand(cmd, opts);
+          },
+          destroy: fakeSandbox.destroy,
+        }),
+      });
+      await consumer(makeBatch(makePayload()));
+    });
+
+    const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    const deadline = writtenInput.outerDeadlineEpochMs!;
+    expect(deadline).toBe(roundStart + 666_000);
+    // The deadline owed 166s when the write started and 66s when the exec
+    // started: the write's own 100s is spent, never re-added to the exec.
+    expect(deadline - (roundStart + 500_000)).toBe(166_000);
+    expect(deadline - (roundStart + 600_000)).toBe(66_000);
+    expect(runnerExecTimeout()).toBe(66_000);
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("an input write that spends the derived deadline declines the runner with the explicit budget failure", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+        ...testOverrides,
+        getSandbox: async () => ({
+          runCommand: async (cmd: string, opts?: unknown) => {
+            // 546s elapsed leaves exactly the 120s write window; the write
+            // spends all of it, so nothing is left when the exec would start.
+            if (cmd.includes("git init")) clock.now += 546_000;
+            if (cmd.startsWith("base64 -d >")) clock.now += 120_000;
+            return fakeSandbox.runCommand(cmd, opts);
+          },
+          destroy: fakeSandbox.destroy,
+        }),
+      });
+      await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/round budget spent: runner declined/);
+    });
+
+    expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(failureRows(db)).toHaveLength(1);
   });
 
   test("runner input write failure → no runner, no post, no insert, rethrow, destroy", async () => {
