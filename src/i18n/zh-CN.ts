@@ -985,6 +985,16 @@ export const zhCN: Dictionary = {
       admissionDropsSystemCap: "系统上限",
       admissionDropsWorkspaceCap: "工作区上限",
       admissionDropsError: "存储错误",
+      /** 实时队列积压，以及最近 24 小时的 GitHub 次级限流次数。 */
+      queueTitle: "队列积压与 GitHub 限流",
+      queueDescription:
+        "审查队列的实时积压，以及流水线在最近 24 小时记录的 GitHub 次级限流拒绝。“不可读”表示无法取得该计数，并不表示队列为空。",
+      queueBacklogLabel: "积压深度",
+      queueOldestLabel: "最旧消息",
+      queueUnreadable: "不可读",
+      /** 没有消息在排队，因此计数没有最旧时间戳。 */
+      queueEmpty: "空队列",
+      githubRateLimitedLabel: "GitHub 次级限流（24 小时）",
       // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
       // 与 /healthz 字段及 release tag 同形。
       version: "版本 {version}",

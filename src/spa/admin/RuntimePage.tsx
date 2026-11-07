@@ -27,6 +27,7 @@ import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { PageNotice } from "../pages/PageNotice";
 import { concurrencySubmitBlocked } from "../pages/data";
+import { formatRelativeTime } from "../relative-time";
 import {
   AdminWriteError,
   readRuntime,
@@ -39,6 +40,7 @@ import {
   type AdmissionDropCounts,
   type CheckBudgetConfig,
   type CommentClaimConfig,
+  type QueueBacklog,
   type RecheckAssignmentConfig,
   type ReviewLevelConfig,
 } from "./api";
@@ -59,6 +61,16 @@ const ADMISSION_DROP_FIELDS = [
   { reason: "workspace-cap", label: "admin.runtime.admissionDropsWorkspaceCap" },
   { reason: "error", label: "admin.runtime.admissionDropsError" },
 ] as const satisfies ReadonlyArray<{ reason: keyof AdmissionDropCounts; label: DictionaryKey }>;
+
+/**
+ * How long the oldest queued message has waited. An unreadable gauge and an
+ * empty queue are different states, so neither renders as a bare absence.
+ */
+function oldestWait(locale: Locale, queue: QueueBacklog | null): string {
+  if (queue === null) return t(locale, "admin.runtime.queueUnreadable");
+  if (queue.oldestMessageTimestamp === null) return t(locale, "admin.runtime.queueEmpty");
+  return formatRelativeTime(queue.oldestMessageTimestamp, locale);
+}
 
 export function RuntimePage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readRuntime);
@@ -311,6 +323,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const recheck = data.recheckAssignment;
           // And for the admission-drop counts.
           const drops = data.admissionDrops24h;
+          // The live queue gauge; `null` is "not readable", never an empty queue.
+          const queue = data.queue;
           return (
           <div className="flex flex-col gap-4">
             <SectionCard tier="secondary">
@@ -694,6 +708,44 @@ export function RuntimePage({ locale }: { locale: Locale }) {
               </CardContent>
             </SectionCard>
             )}
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.queueTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.queueDescription")}
+                </p>
+                <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
+                  <div className="flex flex-col gap-1">
+                    <dt className="text-muted-foreground">
+                      {t(locale, "admin.runtime.queueBacklogLabel")}
+                    </dt>
+                    <dd className="text-lg font-medium" data-queue="backlog">
+                      {queue === null
+                        ? t(locale, "admin.runtime.queueUnreadable")
+                        : queue.backlogCount}
+                    </dd>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <dt className="text-muted-foreground">
+                      {t(locale, "admin.runtime.queueOldestLabel")}
+                    </dt>
+                    <dd className="text-lg font-medium" data-queue="oldest">
+                      {oldestWait(locale, queue)}
+                    </dd>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <dt className="text-muted-foreground">
+                      {t(locale, "admin.runtime.githubRateLimitedLabel")}
+                    </dt>
+                    <dd className="text-lg font-medium" data-queue="rate-limited">
+                      {data.githubRateLimited24h}
+                    </dd>
+                  </div>
+                </dl>
+              </CardContent>
+            </SectionCard>
           </div>
           );
         }}
