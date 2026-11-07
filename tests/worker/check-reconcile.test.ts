@@ -2723,12 +2723,13 @@ function recordFailure(db: TestD1, stage: string, error: string, createdAtMs: nu
 }
 
 describe("the publication-proof wait decides when abandonment may conclude (spec §7.9)", () => {
-  test("no proof and a future deadline: the pass defers and spends no attempt", async () => {
+  test("no proof and a future deadline: the pass spends the probe alone and no attempt", async () => {
     const db = seededDb();
     const { id } = await abandonedAttempt(db);
     // The whole point of the released-row eligibility: a row whose intent is
     // still `in_progress` is SELECTED long before its execution deadline.
     expect(await listCheckReconcileBatch(db, T0 + 120_000)).toHaveLength(1);
+    const dueBefore = (await rawRow(db, id)).next_attempt_ms;
     const stub = stubFetch();
     let factoryCalls = 0;
     const events: Array<Record<string, unknown>> = [];
@@ -2742,7 +2743,9 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
         },
       });
       expect(summary.examined).toBe(1);
-      expect(summary.deferred).toBe(1);
+      // No journal row and no link: the wait is terminal for this lane, so it
+      // is not deferred — there is no progress a repeat probe could make.
+      expect(summary.deferred).toBe(0);
       expect(summary.completed).toBe(0);
       expect(summary.unconfirmed).toBe(0);
     } finally {
@@ -2763,13 +2766,14 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.observed).toBe("unknown");
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
-    expect(row.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+    // Untouched: no claim and no defer write, so the row keeps the due time it
+    // already had and a journal row that lands later is seen on the next tick.
+    expect(row.next_attempt_ms).toBe(dueBefore);
 
-    // The journal probe found nothing to report AND no readable proof exists:
-    // the missing proof is what held the wait, and the line says so.
+    // No wait line: the per-minute log churn is part of what the short-circuit
+    // removes.
     const deferred = events.filter((fields) => fields.event === "check_recovery_deferred_pending_publication");
-    expect(deferred).toHaveLength(1);
-    expect(deferred[0]!.probe_state).toBe("none");
+    expect(deferred).toHaveLength(0);
   });
 
   test("a proof linked to THIS attempt ends the wait before the deadline and decides", async () => {
@@ -2829,14 +2833,14 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
           return scriptedCredentials(db)(input);
         },
       });
-      expect(summary.deferred).toBe(1);
+      expect(summary.deferred).toBe(0);
       expect(summary.completed).toBe(0);
     } finally {
       stub.restore();
     }
 
-    // Still waiting: the drop proved nothing, so no conclusion was frozen, no
-    // attempt was spent and no credential was minted.
+    // Not deferred and not concluded: the drop proved nothing, so no conclusion
+    // was frozen, no attempt was spent and no credential was minted.
     expect(factoryCalls).toBe(0);
     const waitingRow = await rawRow(db, id);
     expect(waitingRow.terminal_ms).toBeNull();
@@ -2891,13 +2895,13 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
           return scriptedCredentials(db)(input);
         },
       });
-      expect(summary.deferred).toBe(1);
+      expect(summary.deferred).toBe(0);
       expect(summary.completed).toBe(0);
     } finally {
       stub.restore();
     }
 
-    // Deferred, not concluded: the earlier row proved nothing about THIS
+    // Not deferred and not concluded: the earlier row proved nothing about THIS
     // attempt, so no conclusion was frozen and nothing was minted.
     expect(factoryCalls).toBe(0);
     const waitingRow = await rawRow(db, id);
@@ -2956,14 +2960,14 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
           return scriptedCredentials(db)(input);
         },
       });
-      expect(summary.deferred).toBe(1);
+      expect(summary.deferred).toBe(0);
       expect(summary.completed).toBe(0);
     } finally {
       stub.restore();
     }
 
-    // Deferred with nothing frozen: the prior proof ended no wait, spent no
-    // attempt and minted no credential.
+    // Nothing frozen and nothing minted: the prior proof ended no wait, spent
+    // no attempt and never became this attempt's evidence.
     expect(factoryCalls).toBe(0);
     const waitingRow = await rawRow(db, id);
     expect(waitingRow.publication_id).toBeNull();
@@ -2982,7 +2986,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
           return scriptedCredentials(db)(input);
         },
       });
-      expect(summary.deferred).toBe(1);
+      expect(summary.deferred).toBe(0);
       expect(summary.completed).toBe(0);
     } finally {
       secondStub.restore();
@@ -3164,7 +3168,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.terminal_ms).not.toBeNull();
   });
 
-  test("a parse-stage failure row is NOT terminal: the degraded publication still decides", async () => {
+  test("a parse-stage failure row stays open: the degraded publication still decides", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
     // The parse branch records this row FIRST and only then publishes the
@@ -3181,13 +3185,14 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
           return scriptedCredentials(db)(input);
         },
       });
-      expect(summary.deferred).toBe(1);
+      expect(summary.deferred).toBe(0);
       expect(summary.completed).toBe(0);
     } finally {
       stub.restore();
     }
 
-    // Deferred, not concluded: no conclusion was frozen and no attempt spent.
+    // Not deferred and not concluded: no conclusion was frozen, no attempt
+    // spent and no wait line written.
     expect(factoryCalls).toBe(0);
     const deferredRow = await rawRow(db, id);
     expect(deferredRow.terminal_ms).toBeNull();
@@ -3238,7 +3243,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
         log: { warn: () => {}, info: (fields) => void events.push(fields) },
         credentials: scriptedCredentials(db),
       });
-      expect(summary.deferred).toBe(1);
+      expect(summary.deferred).toBe(0);
       expect(summary.completed).toBe(0);
     } finally {
       stub.restore();
@@ -3248,9 +3253,11 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.terminal_ms).toBeNull();
     expect(row.attempts).toBe(1);
     expect(row.observed).toBe("unknown");
+    // Still open for a retry, but not churning: no journal row means no wait to
+    // defer, and no line is logged for it.
     expect(
       events.some((fields) => fields.event === "check_recovery_deferred_pending_publication"),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("an elapsed deadline still concludes failure/unconfirmed (existing semantics)", async () => {

@@ -12,6 +12,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  CHECK_BACKOFF_MS,
   CHECK_NAME,
   deferCheckRecovery,
   setCheckDesired,
@@ -138,7 +139,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       expect(waiting.desired).toBe("failure");
       expect(waiting.desired_summary).toBe(UNCONFIRMED);
       expect(waiting.attempts).toBe(1); // the wait spends NO attempt
-      expect(waiting.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+      expect(waiting.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
       expect(waiting.holder).toBeNull();
       expect(waiting.lease_until_ms).toBeNull();
 
@@ -151,7 +152,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       expect(deferredLine.attempt_id).toBe(id);
       expect(deferredLine.probe_state).toBe("pending");
       expect(deferredLine.phase).toBe(phase);
-      expect(deferredLine.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+      expect(deferredLine.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
 
       // The publication now proves itself: the SAME attempt concludes from it.
       const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
@@ -163,7 +164,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       const sent: { desired: string | null } = { desired: null };
       try {
         const second = await run(db, {
-          now: () => T0 + 200_000,
+          now: () => T0 + 300_000,
           credentials: scriptedCredentials(db, {
             ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
             complete: async (identity, _runId, conclusion) => {
@@ -273,7 +274,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     const sent: { desired: string | null } = { desired: null };
     try {
       const second = await run(db, {
-        now: () => T0 + 200_000,
+        now: () => T0 + 300_000,
         credentials: scriptedCredentials(db, {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
@@ -342,7 +343,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     const settled: { desired: string | null } = { desired: null };
     try {
       const second = await run(db, {
-        now: () => T0 + 200_000,
+        now: () => T0 + 300_000,
         credentials: scriptedCredentials(db, {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
@@ -459,7 +460,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(row.terminal_ms).toBeNull();
     expect(row.desired).toBe("in_progress");
     expect(row.observed).toBe("unknown");
-    expect(row.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
   });
 
   test("a previous generation's proof never ends an abandoned attempt's wait", async () => {
@@ -498,14 +499,18 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(row.observed).toBe("unknown");
   });
 
-  test("a previous generation's proof with no journal row of this attempt's never ends the wait", async () => {
+  test("a previous generation's proof with no journal row of this attempt's ends the WAIT, not the deadline", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedRow(db);
     // Nothing this attempt staged exists: the only publication for the head was
     // staged before it was admitted. The abandoned row has no link of its own,
-    // so the wait continues to the deadline instead of adopting that proof.
+    // so nothing in the wait can ever answer it — the probe is terminal for the
+    // lane on the FIRST pass, and it is not repeated: no claim, no defer, no
+    // re-read of the pair or of the attempt's link. The deadline still owns the
+    // conclusion, so the proof is never adopted.
     const prior = { ...proofFor(attempt.identity), publicationId: "pub-only-previous-generation" };
     seedPublication(db, SCOPE, SHA, prior, "applied", reviewPayload(SCOPE, SHA, "ship it", 90));
+    const dueBefore = (await rawRow(db, id)).next_attempt_ms;
 
     const stub = stubFetch();
     let factoryCalls = 0;
@@ -518,8 +523,11 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           return scripted(input);
         },
       });
-      expect(summary.deferred).toBe(1);
+      // Not deferred: it is not a wait this lane can make progress on. Not
+      // concluded either — `completed`/`unconfirmed` stay 0 until the deadline.
+      expect(summary.deferred).toBe(0);
       expect(summary.completed).toBe(0);
+      expect(summary.unconfirmed).toBe(0);
     } finally {
       stub.restore();
     }
@@ -529,6 +537,50 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(row.publication_id).toBeNull();
     expect(row.terminal_ms).toBeNull();
     expect(row.observed).toBe("unknown");
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toBe(dueBefore); // untouched: no claim, no defer
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+  });
+
+  test("a dead attempt still converges the moment a journal row lands", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedRow(db);
+    const stub = stubFetch();
+    try {
+      // First pass: no journal row yet — terminal for the wait, nothing written.
+      const first = await run(db, { now: () => T0 + 120_000 });
+      expect(first.deferred).toBe(0);
+      expect(first.completed).toBe(0);
+
+      // The publication is staged and proves itself while the row is still due.
+      const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 130_000);
+      const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
+      db.raw
+        .prepare(`UPDATE review_publications SET proof_json = ?, payload_json = ? WHERE id = ?`)
+        .run(JSON.stringify(proof), JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 85)), journalId);
+
+      const sent: { desired: string | null } = { desired: null };
+      const second = await run(db, {
+        now: () => T0 + 180_000,
+        credentials: scriptedCredentials(db, {
+          ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
+          complete: async (identity, _runId, conclusion) => {
+            sent.desired = conclusion.desired;
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+          },
+        }),
+      });
+      expect(second.deferred).toBe(0);
+      expect(second.completed).toBe(1);
+      expect(sent.desired).toBe("success");
+    } finally {
+      stub.restore();
+    }
+
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("success");
+    expect(row.terminal_ms).not.toBeNull();
   });
 
   test("the attempt's OWN linked proof ends the wait even while its phase is prepared", async () => {
@@ -638,7 +690,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     const row = await rawRow(db, id);
     expect(row.terminal_ms).toBeNull();
     expect(row.observed).toBe("unknown");
-    expect(row.next_attempt_ms).toBe(T0 + 120_000 + 60_000);
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
   });
 
   test("an unreadable journal probe at the deadline still fails closed", async () => {
@@ -703,5 +755,65 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     const row = await rawRow(db, id);
     expect(row.observed).toBe("failure");
     expect(row.terminal_ms).not.toBeNull();
+  });
+});
+
+/**
+ * Counts every D1 statement a pass prepares, so the wait's per-pass cost is
+ * MEASURED. A pass with nothing due is the baseline (the selector alone).
+ */
+function countingDb(db: TestD1): { db: TestD1; statements: () => number } {
+  let prepared = 0;
+  return {
+    db: {
+      prepare(sql: string) {
+        prepared += 1;
+        return db.prepare(sql);
+      },
+      batch: (statements) => {
+        prepared += statements.length;
+        return db.batch(statements);
+      },
+      raw: db.raw,
+    } as TestD1,
+    statements: () => prepared,
+  };
+}
+
+describe("the journal-less short-circuit (spec §7.9/§7.11.2)", () => {
+  test("an attempt with no journal row costs the probe alone and is not deferred", async () => {
+    const baseline = countingDb(seededDb());
+    await run(baseline.db, { now: () => T0 + 120_000 });
+    const selectorOnly = baseline.statements();
+
+    const dead = countingDb(seededDb());
+    await handedOverAttempt(dead.db);
+    const before = dead.statements();
+    const summary = await run(dead.db, { now: () => T0 + 120_000 });
+
+    // ONE statement for the dead attempt — the shared determination's journal
+    // probe. The pair gate, the proof read, the claim and the defer are all
+    // gone: nothing in the wait can progress and nothing is written.
+    expect(summary.examined).toBe(1);
+    expect(summary.deferred).toBe(0);
+    expect(dead.statements() - before - selectorOnly).toBe(1);
+  });
+
+  test("a journal row staggers the wait onto the widening ladder instead of every minute", async () => {
+    const db = seededDb();
+    const { id } = await handedOverAttempt(db);
+    seedJournal(db, SCOPE, SHA, "prepared");
+
+    const first = await run(db, { now: () => T0 + 120_000 });
+    expect(first.deferred).toBe(1);
+    // 120 s of wait already outlived the 60 s rung, so the next rung is due.
+    expect((await rawRow(db, id)).next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
+
+    const second = await run(db, { now: () => T0 + 120_000 + CHECK_BACKOFF_MS[1]! });
+    expect(second.deferred).toBe(1);
+    // Widened again: three probes inside the 900 s window, not fifteen.
+    expect((await rawRow(db, id)).next_attempt_ms).toBe(
+      T0 + 120_000 + CHECK_BACKOFF_MS[1]! + CHECK_BACKOFF_MS[2]!,
+    );
   });
 });
