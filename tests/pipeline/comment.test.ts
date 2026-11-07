@@ -1698,6 +1698,22 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
     expect(calls.createParams!.body).toBe(preparedBody);
   });
 
+  test("updateComment 403 with retry-after (secondary rate limit) → rethrows unchanged, never a CREATE fallback", async () => {
+    // A throttled PATCH is not a dead target: a CREATE here would publish the
+    // round twice, so the rejection must reach the consumer's tagging catch.
+    const limited = Object.assign(new Error("You have exceeded a secondary rate limit"), {
+      status: 403,
+      response: { headers: { "retry-after": "60" } },
+    });
+    const { calls, octokit } = mockOctok(
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nReview 2", user: { type: "Bot" } }],
+      limited,
+    );
+    await expect(postPreparedReviewWithOctokit(octokit, sendInput)).rejects.toBe(limited);
+    expect(calls.updateParams).toMatchObject({ comment_id: 7 });
+    expect(calls.createParams).toBeUndefined();
+  });
+
   test("non-403/404 updateComment errors rethrow (no fallback)", async () => {
     const { octokit } = mockOctok(
       [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nReview 2", user: { type: "Bot" } }],
@@ -1976,6 +1992,17 @@ describe("prepared degraded publication wiring (mock octokit, spec §7.7)", () =
     expect(recovery.calls.createParams!.body).toBe(preparedDegradedBody);
   });
 
+  test("403 with retry-after (secondary rate limit) on the degraded target → rethrows unchanged, never a CREATE fallback", async () => {
+    const limited = Object.assign(new Error("You have exceeded a secondary rate limit"), {
+      status: 403,
+      response: { headers: { "retry-after": "60" } },
+    });
+    const throttled = mockOctok([degradedBotMarker(7, 2)], limited);
+    await expect(postPreparedDegradedWithOctokit(throttled.octokit, sendInput)).rejects.toBe(limited);
+    expect(throttled.calls.updateParams).toMatchObject({ comment_id: 7 });
+    expect(throttled.calls.createParams).toBeUndefined();
+  });
+
   test("a changed target (non-degraded body / wrong round) is a definitive rejection", async () => {
     const newer = mockOctok([{ id: 7, body: "<!-- mstar-inspector:review-degraded:v1 round=9 -->\nnewer", user: { type: "Bot" } }]);
     await expect(postPreparedDegradedWithOctokit(newer.octokit, sendInput)).rejects.toThrow(/expected previous version/);
@@ -2035,14 +2062,14 @@ describe("deleteDegradedComment wiring (mock octokit, Bugbot lifecycle)", () => 
     const outcome = await deleteDegradedCommentWithOctokit(octokit, degradeInput);
     expect(calls.listParams).toEqual({ owner: "acme", repo: "widgets", issue_number: 42, per_page: 100 });
     expect(calls.deleteParams).toEqual([{ owner: "acme", repo: "widgets", comment_id: 7 }]);
-    expect(outcome).toEqual({ deleted: 1, skipped: 0, errors: [] });
+    expect(outcome).toEqual({ deleted: 1, skipped: 0, errors: [], rateLimited: 0 });
   });
 
   test("no degraded comment → no delete call, zero outcome", async () => {
     const { calls, octokit } = mockOctok([{ id: 1, body: "a human comment", user: { type: "User" } }]);
     const outcome = await deleteDegradedCommentWithOctokit(octokit, degradeInput);
     expect(calls.deleteParams).toEqual([]);
-    expect(outcome).toEqual({ deleted: 0, skipped: 0, errors: [] });
+    expect(outcome).toEqual({ deleted: 0, skipped: 0, errors: [], rateLimited: 0 });
   });
 
   test("a human-planted degraded marker is never deleted (bot-authorship gate)", async () => {
@@ -2051,7 +2078,7 @@ describe("deleteDegradedComment wiring (mock octokit, Bugbot lifecycle)", () => 
     ]);
     const outcome = await deleteDegradedCommentWithOctokit(octokit, degradeInput);
     expect(calls.deleteParams).toEqual([]);
-    expect(outcome).toEqual({ deleted: 0, skipped: 0, errors: [] });
+    expect(outcome).toEqual({ deleted: 0, skipped: 0, errors: [], rateLimited: 0 });
   });
 
   test("foreign-first ordering: first match 403, second ours → ours deleted, no throw", async () => {
@@ -2065,7 +2092,23 @@ describe("deleteDegradedComment wiring (mock octokit, Bugbot lifecycle)", () => 
       { owner: "acme", repo: "widgets", comment_id: 7 },
       { owner: "acme", repo: "widgets", comment_id: 8 },
     ]);
-    expect(outcome).toEqual({ deleted: 1, skipped: 1, errors: [] });
+    expect(outcome).toEqual({ deleted: 1, skipped: 1, errors: [], rateLimited: 0 });
+  });
+
+  test("a secondary-rate-limit 403 is counted as rateLimited, never as a skip or an error", async () => {
+    const limited = Object.assign(new Error("You have exceeded a secondary rate limit"), {
+      status: 403,
+      response: { headers: { "retry-after": "60" } },
+    });
+    const { calls, octokit } = mockOctok([degradedBotMarker(7, 2), degradedBotMarker(8, 1)], limited);
+    const outcome = await deleteDegradedCommentWithOctokit(octokit, degradeInput);
+    // Both matches are still attempted; the throttled one is neither a skip
+    // nor an error — the consumer persists it as a continuation event.
+    expect(calls.deleteParams).toEqual([
+      { owner: "acme", repo: "widgets", comment_id: 7 },
+      { owner: "acme", repo: "widgets", comment_id: 8 },
+    ]);
+    expect(outcome).toEqual({ deleted: 1, skipped: 0, errors: [], rateLimited: 1 });
   });
 
   test("multiple own markers → all deleted", async () => {
@@ -2075,7 +2118,7 @@ describe("deleteDegradedComment wiring (mock octokit, Bugbot lifecycle)", () => 
       { owner: "acme", repo: "widgets", comment_id: 7 },
       { owner: "acme", repo: "widgets", comment_id: 8 },
     ]);
-    expect(outcome).toEqual({ deleted: 2, skipped: 0, errors: [] });
+    expect(outcome).toEqual({ deleted: 2, skipped: 0, errors: [], rateLimited: 0 });
   });
 
   test("non-403 error on one match → others still attempted, error surfaced in the outcome", async () => {
@@ -2088,13 +2131,13 @@ describe("deleteDegradedComment wiring (mock octokit, Bugbot lifecycle)", () => 
       { owner: "acme", repo: "widgets", comment_id: 7 },
       { owner: "acme", repo: "widgets", comment_id: 8 },
     ]);
-    expect(outcome).toEqual({ deleted: 1, skipped: 1, errors: ["rate limited"] });
+    expect(outcome).toEqual({ deleted: 1, skipped: 1, errors: ["rate limited"], rateLimited: 0 });
   });
 
   test("missing octokit surface → outcome error, never throws", async () => {
     const bare = {} as PostOctokit;
     const outcome = await deleteDegradedCommentWithOctokit(bare, degradeInput);
-    expect(outcome).toEqual({ deleted: 0, skipped: 0, errors: [expect.stringContaining("missing rest.issues")] });
+    expect(outcome).toEqual({ deleted: 0, skipped: 0, errors: [expect.stringContaining("missing rest.issues")], rateLimited: 0 });
   });
 });
 

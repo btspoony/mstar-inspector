@@ -48,7 +48,9 @@ import type { D1Like } from "./types";
  * the only record of the dropped metered attempt (it carries the `reviewId`);
  * `recheck` = the recheck round produced no usable document or its own status
  * said `failed` (the round continues with unverifiable rows; the row is the
- * attribution that survives a lost container stderr).
+ * attribution that survives a lost container stderr); `rate-limit` = the
+ * degraded-comment sweep was throttled by a GitHub secondary rate limit while
+ * the review itself stood (the continuation event, never a review failure).
  */
 export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "parse",
@@ -58,7 +60,7 @@ export const FAILURE_STAGES: readonly string[] = Object.freeze([
   ...PAGING_EXCLUDED_STAGES,
 ]);
 
-export type FailureStage = "parse" | "runner" | "sandbox" | "pipeline" | "usage" | "recheck";
+export type FailureStage = "parse" | "runner" | "sandbox" | "pipeline" | "usage" | "recheck" | "rate-limit";
 
 /**
  * The attribution partition of the vocabulary, re-exported from the

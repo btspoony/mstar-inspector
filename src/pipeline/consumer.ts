@@ -5358,6 +5358,27 @@ async function processMessage(
             }`,
           );
         }
+        // A throttled sweep is a CONTINUATION event, not a failure of this
+        // review: ONE row under the non-failure `rate-limit` stage (excluded
+        // from every failure count) so the throttle is not silently dropped.
+        // Its own try/catch — the insert must never mask the review that
+        // stands, and the round is never retried for it.
+        if (deleteOutcome.rateLimited > 0) {
+          try {
+            await deps.failureStore.record({
+              installation_id: payload.installation_id,
+              owner: payload.owner,
+              repo: payload.repo,
+              pr_number: payload.pr_number,
+              head_sha: headSha,
+              stage: "rate-limit",
+              error: `${GITHUB_RATE_LIMIT_PREFIX}${deleteOutcome.rateLimited} stale degraded comment deletion(s) rejected by the GitHub rate limit — the review stands`,
+            });
+          } catch (recordErr) {
+            const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
+            deps.log.warn(fields, `review_failures insert failed (degraded cleanup continues): ${recordDetail}`);
+          }
+        }
       }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);

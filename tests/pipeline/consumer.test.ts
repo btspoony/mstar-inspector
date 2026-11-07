@@ -3204,7 +3204,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
   test("success flow with a pre-existing degraded comment → the delete scan runs after the upsert", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    commenterState.deleteDegradedOutcome = { deleted: 1, skipped: 1, errors: ["rate limited"] };
+    commenterState.deleteDegradedOutcome = { deleted: 1, skipped: 1, errors: ["rate limited"], rateLimited: 0 };
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -3228,6 +3228,9 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     expect(warn!.msg).toContain("rate limited");
     expect(warn!.fields.degraded_delete_deleted).toBe(1);
     expect(warn!.fields.degraded_delete_skipped).toBe(1);
+    // A plain 403/404 skip or a per-match error is NOT a rate limit: no
+    // continuation row is written.
+    expect(failureRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
     // The ok path resolves silently (queue auto-ack) — nothing retried.
@@ -3253,6 +3256,52 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     expect(kvPuts).toHaveLength(1);
     expect(messageRetryCalls).toHaveLength(0);
     expect(sandbox.destroyCalls).toBe(1);
+  });
+
+  test("a secondary-rate-limit delete outcome persists ONE tagged rate-limit row — the review stands", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    commenterState.deleteDegradedOutcome = { deleted: 0, skipped: 0, errors: [], rateLimited: 1 };
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The throttled sweep is a CONTINUATION event, not a review failure: one
+    // row under the non-failure stage, prefixed so the store and the operator
+    // can count it — and the successful review is untouched.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.stage).toBe("rate-limit");
+    expect(String(rows[0]!.error)).toStartWith(GITHUB_RATE_LIMIT_PREFIX);
+    expect(reviewCount(db)).toBe(1);
+    expect(kvPuts).toHaveLength(1);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(sandbox.destroyCalls).toBe(1);
+  });
+
+  test("a failing rate-limit row insert never masks the review (best-effort record)", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    commenterState.deleteDegradedOutcome = { deleted: 0, skipped: 0, errors: [], rateLimited: 1 };
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      failureStore: {
+        record: async () => {
+          throw new Error("d1 down");
+        },
+        listRecent: async () => [],
+        countAdmissionDrops24h: async () => ({ "pr-held": 0, "system-cap": 0, "workspace-cap": 0, error: 0 }),
+      },
+    });
+
+    await consumer(makeBatch(makePayload())); // resolves — the insert must not mask the review
+
+    expect(reviewCount(db)).toBe(1);
+    expect(kvPuts).toHaveLength(1);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(logLines.some((l) => l.level === "warn" && l.msg.includes("review_failures insert failed"))).toBe(true);
   });
 });
 

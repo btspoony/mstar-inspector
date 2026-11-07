@@ -18,10 +18,12 @@
  * dashboard's failure count (list aggregate, detail `counts.failures`) and the
  * per-PR failure history. One rule on both faces, so a tab number never
  * disagrees with the pager below it. The rows stay in `review_failures` —
- * `usage` is the only record of a dropped metered attempt and `recheck` of a
- * round that produced no usable document — they are just not failures.
+ * `usage` is the only record of a dropped metered attempt, `recheck` of a
+ * round that produced no usable document, and `rate-limit` of a degraded-
+ * comment sweep GitHub throttled while the review itself stood — they are just
+ * not failures.
  */
-export const PAGING_EXCLUDED_STAGES = Object.freeze(["recheck", "usage"] as const);
+export const PAGING_EXCLUDED_STAGES = Object.freeze(["recheck", "usage", "rate-limit"] as const);
 
 /**
  * Render a stage list as the literal body of a SQL `IN (…)` / `NOT IN (…)`
