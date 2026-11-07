@@ -28,7 +28,7 @@ const OPERATOR_KEY = OPERATOR.toLowerCase();
 
 function envFor(db: TestD1, overrides: Partial<Env> = {}): Env {
   return {
-    REVIEW_QUEUE: { send: async () => {} },
+    REVIEW_QUEUE: { send: async () => {}, metrics: async () => ({ backlogCount: 0, backlogBytes: 0 }) },
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
@@ -191,6 +191,9 @@ const DEFAULT_ADMISSION_DROPS = {
   error: 0,
 };
 
+/** The fixture queue's live gauge as `GET /api/runtime` reports it. */
+const DEFAULT_QUEUE = { backlogCount: 0, backlogBytes: 0, oldestMessageTimestamp: null };
+
 /** The stored recheck ask-budget row, raw so a refused write is observable. */
 function storedRecheckBudget(db: TestD1): string | null {
   const row = db.raw
@@ -269,7 +272,14 @@ async function getCheckMinScore(db: TestD1, ref: string, login: string | null): 
 
 async function runtimeApi(
   db: TestD1,
-  init: { method: "GET" | "PATCH"; body?: string; login?: string | null; mode?: "saas" | "self-hosted" },
+  init: {
+    method: "GET" | "PATCH";
+    body?: string;
+    login?: string | null;
+    mode?: "saas" | "self-hosted";
+    /** Replaces the queue binding for the degraded-gauge cases. */
+    queue?: unknown;
+  },
 ): Promise<Response> {
   const login = init.login === undefined ? OPERATOR : init.login;
   const headers: Record<string, string> = {};
@@ -281,7 +291,10 @@ async function runtimeApi(
       headers,
       body: init.body,
     }),
-    envFor(db, { DEPLOYMENT_MODE: init.mode ?? "saas" }),
+    envFor(db, {
+      DEPLOYMENT_MODE: init.mode ?? "saas",
+      ...(init.queue === undefined ? {} : { REVIEW_QUEUE: init.queue as Env["REVIEW_QUEUE"] }),
+    }),
   );
 }
 
@@ -350,6 +363,8 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
+      githubRateLimited24h: 0,
+      queue: DEFAULT_QUEUE,
     });
   });
 
@@ -444,6 +459,8 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
+      githubRateLimited24h: 0,
+      queue: DEFAULT_QUEUE,
     });
     await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ concurrency: 5 }) });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
@@ -456,6 +473,8 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
+      githubRateLimited24h: 0,
+      queue: DEFAULT_QUEUE,
     });
   });
 
@@ -483,6 +502,52 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       "workspace-cap": 1,
       error: 0,
     });
+  });
+
+  test("GET reports the live queue backlog when metrics() resolves", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "GET",
+      queue: {
+        send: async () => {},
+        metrics: async () => ({
+          backlogCount: 12,
+          backlogBytes: 4096,
+          oldestMessageTimestamp: new Date("2026-11-07T09:30:00.000Z"),
+        }),
+      },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.queue).toEqual({
+      backlogCount: 12,
+      backlogBytes: 4096,
+      oldestMessageTimestamp: "2026-11-07T09:30:00.000Z",
+    });
+  });
+
+  test("GET reports queue: null — never a 500 — when metrics() rejects", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "GET",
+      queue: {
+        send: async () => {},
+        metrics: async () => {
+          throw new Error("queue unavailable");
+        },
+      },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.queue).toBeNull();
+  });
+
+  test("GET reports queue: null when the binding has no metrics()", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, { method: "GET", queue: { send: async () => {} } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.queue).toBeNull();
   });
 
   test("a non-operator login, an anonymous caller and a self-hosted deployment all 404", async () => {

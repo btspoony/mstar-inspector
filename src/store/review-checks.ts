@@ -789,6 +789,28 @@ export async function deferCheckForPendingPublication(
 }
 
 /**
+ * Persist the publication an attempt was handed off to, without concluding
+ * anything: a `runFenced` write of `publication_id` ALONE. A hand-off attempt
+ * publishes nothing itself, so the journal row it found is the only proof its
+ * Check can ever be decided from — linking it keeps the proof able to decide
+ * (`readProof` reads exactly this id) instead of freezing a conclusion here.
+ *
+ * Nothing else moves: `desired` stays `in_progress`, no title/summary is
+ * frozen, and the caller releases the lease separately. `false` means the
+ * fence refused — the lease died, another holder took over, or the row already
+ * ended — and the row was left exactly as it was.
+ */
+export async function linkCheckPublication(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  publicationId: string,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  return runFenced(db, id, lease, `publication_id = COALESCE(?, publication_id)`, [publicationId], nowMs);
+}
+
+/**
  * The identity-fenced twin of `releaseCheckClaim`, for the one caller that
  * reports a refusal WITHOUT counting a request: `beginCheck` answering
  * `requests: 0`.

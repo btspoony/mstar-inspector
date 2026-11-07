@@ -1143,6 +1143,16 @@ export const en = {
       admissionDropsSystemCap: "System cap",
       admissionDropsWorkspaceCap: "Workspace cap",
       admissionDropsError: "Storage error",
+      /** The live queue gauge plus the 24 h GitHub secondary-rate-limit count. */
+      queueTitle: "Queue backlog and GitHub rate limits",
+      queueDescription:
+        "The live review-queue gauge and the GitHub secondary-limit rejections the pipeline recorded over the last 24 hours. A reading of “not readable” means the gauge could not be asked — never that the queue is empty.",
+      queueBacklogLabel: "Backlog depth",
+      queueOldestLabel: "Oldest message",
+      queueUnreadable: "Not readable",
+      /** No message is waiting, so the gauge reports no oldest stamp. */
+      queueEmpty: "Empty",
+      githubRateLimitedLabel: "GitHub secondary limits (24 h)",
       /**
        * Deployment version footer. `{version}` carries the
        * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the

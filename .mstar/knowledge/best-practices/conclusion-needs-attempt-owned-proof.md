@@ -1,3 +1,19 @@
+---
+module: review-checks
+date: 2026-11-06
+last_updated: 2026-11-07
+problem_type: best_practice
+category: best-practices
+severity: high
+topic: check conclusion and publication proof
+tags:
+  - check-runs
+  - publication-proof
+  - attribution
+  - queue-consumer
+  - d1
+---
+
 # A terminal conclusion needs attempt-owned proof
 
 ## Pair
@@ -58,3 +74,38 @@ red that later proves wrong is not.
 - Complements `finding-fingerprint-identity.md` (identity of findings vs identity of attempts).
 - Writer-side examples: `src/pipeline/consumer.ts` `handleGuardHeld` (ack-then-record) and the
   parse degrade branch (record-then-publish); `src/store/review-checks.ts` recovery selector.
+
+## The journal handoff: link the publication, release the attempt
+
+A handoff happens when a delivery finds an existing publication row for the same head: this
+attempt claimed a Check but staged nothing itself. Two rules keep the conclusion honest:
+
+- **Link, do not conclude.** Persist this attempt's `publication_id` link to the attributed row and
+  release the attempt (`remote-unconfirmed`). Calling `terminalize` here freezes a conclusion and,
+  when a remote run exists, completes it; the terminal write then blocks any later proof from
+  correcting the row. A link-only write leaves `desired` at `in_progress` and issues no request.
+- **The wait ends on a linked applied proof, or the deadline.** With the link in place the reconciler
+  reads exactly that publication: an applied proof plus the gate decide `success`, and the deadline
+  decides a `failure` naming the missing evidence (no staged row / proof never landed / proof
+  unreadable).
+
+**The attribution floor is not an authorship claim.** The reconciler admits a same-head journal row
+written after the attempt was admitted (`updated_ms >= attempt.created_at`). That is a heuristic
+about *which row can end the wait*, because the writer reuses one row per scope/head/kind. What it
+admits is still only a journal row: without an applied proof the wait defers — an earlier
+generation's bare claim decides nothing — and at the deadline the attempt fails closed. When the
+admitted row does carry an applied proof, concluding from it is the honest result for that commit.
+That rests on the journal's own storage rule, not on the timestamp: `stagePublication` inserts with
+`ON CONFLICT DO NOTHING` and the conflicting path returns the **existing immutable payload**
+(`src/store/finding-lifecycle.ts`), so one scope/head/kind keeps exactly one recorded result and a
+later generation cannot replace it. The row a later attempt reads is therefore the commit's recorded
+outcome, not a race winner. Do not promote the floor into "this attempt wrote it", do not assume a
+later publication overwrites an earlier one, and do not replace the floor with a head-only fallback.
+
+A different-verdict sequence is the case to test: an earlier generation's applied payload decides
+the later, unlinked attempt exactly as it decided its own round — the later attempt cannot publish a
+second payload for the same head. A test that only covers the pass case would hide this.
+
+The cost stays explicit: an attempt whose publication is still unproven waits out its execution
+deadline, then turns red with a named cause. That bounded late red is correct; an early red that a
+later proof contradicts is not.

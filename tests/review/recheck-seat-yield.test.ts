@@ -24,7 +24,13 @@
  *       outer guard or the retired fixed 180s — decides the figure;
  *   (j) a late dispatch still clears the contract floor instead of skipping;
  *   (k) the dispatch/skip boundary sits exactly at the floor plus the
- *       publication tail of outer time (90,001ms dispatches, 89,999ms skips).
+ *       publication tail of outer time (90,001ms dispatches, 89,999ms skips);
+ *   (l) a child that reports `error` beside a cap reason is attributed to the
+ *       cap, not the bare error text;
+ *   (m) a child error alone is carried, never degraded to `exit <code>`;
+ *   (n) a child that reports `error` while yielding a valid document keeps
+ *       the document — `error` only attributes an unusable payload;
+ *   (o) the validator's own text outranks the cap reason and the child error.
  *
  * The budget cases ask the same seat within `RECHECK_ASSIGNMENT_MAX_BYTES`: the
  * documented limits still reach every row, the fit covers rows before it
@@ -83,7 +89,7 @@ let seatResult: FakeSeatResult;
 /** Set when the answer depends on the assignment the seat was actually handed. */
 let seatAnswer: ((asked: RecheckInput) => FakeSeatResult) | null = null;
 /** Set to model a seat the caller's abort signal rejects before it settles. */
-let seatReject: Error | null = null;
+let seatReject: unknown = null;
 const seatCalls: { assignment: string; maxRuntimeMs?: number }[] = [];
 
 /**
@@ -230,6 +236,15 @@ async function run(signal = new AbortController().signal) {
   return runRecheckSeat({ session: {} as never, input: INPUT, model: ["test-model"], signal, runSeat: fakeRunSeat });
 }
 
+/**
+ * The SDK's `StructuredSubagentError`-like rejection: a generic message plus
+ * the settled child result the catch must read. Built as a plain object — the
+ * reader duck-types `result`, so no SDK internals enter this file.
+ */
+function thrownSeatError(message: string, settled?: Record<string, unknown>): Error {
+  return Object.assign(new Error(message), settled === undefined ? {} : { result: settled });
+}
+
 describe("recheck seat yield at the documented input limits", () => {
   test("(a) a valid document over the max-size input survives whole — 25/25 assessed", async () => {
     const results = INPUT.targets.map((target) => row(target.rowId));
@@ -368,6 +383,156 @@ describe("recheck seat yield at the documented input limits", () => {
     const { status } = await run();
     expect(status.reason).toBe("seat-failed");
     expect(status.error).toBe("recheck seat produced no valid structured output (status unavailable): exit unknown");
+  });
+
+  test("(l) a child error beside a cap reason is attributed to the cap, not the error text", async () => {
+    // An aborted child that also carries `error`: throwing the bare error text
+    // dropped the cap reason (and the exit code and stderr) the round ended on.
+    seatResult = {
+      stderr: "",
+      error: "auth failed",
+      abortReason: "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)",
+      structuredOutput: { source: "caller", mode: "strict", status: "unavailable" },
+    };
+    const { status } = await run();
+    expect(status.reason).toBe("seat-failed");
+    expect(status.error).toContain("Subagent runtime limit exceeded (task.maxRuntimeMs=540000)");
+    expect(status.error).not.toContain("auth failed");
+  });
+
+  test("(m) a child error alone is carried, never degraded to a bare exit code", async () => {
+    seatResult = {
+      stderr: "",
+      error: "provider 401: invalid api key",
+      exitCode: 1,
+      structuredOutput: { source: "caller", mode: "strict", status: "unavailable" },
+    };
+    const { status } = await run();
+    expect(status.reason).toBe("seat-failed");
+    expect(status.error).toBe(
+      "recheck seat failed: provider 401: invalid api key",
+    );
+  });
+
+  test("(n) a child that reports error but yields a valid document keeps the document", async () => {
+    // The payload decides: `error` only supplies attribution when the
+    // structured output is unusable, so a usable document is never discarded.
+    const results = INPUT.targets.map((target) => row(target.rowId));
+    seatResult = {
+      stderr: "",
+      error: "trailing warning",
+      structuredOutput: { source: "caller", mode: "strict", status: "valid", data: doc(results) },
+    };
+    const { doc: seatDoc, status } = await run();
+    expect(seatDoc?.results).toHaveLength(RECHECK_MAX_TARGETS);
+    expect(status).toMatchObject({ outcome: "ok", reason: null });
+  });
+
+  test("(o) the validator's own text outranks the cap reason and the child error", async () => {
+    seatResult = {
+      stderr: "",
+      error: "child error text",
+      abortReason: "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)",
+      structuredOutput: { source: "caller", mode: "strict", status: "invalid", data: {}, error: "rowId missing" },
+    };
+    const { status } = await run();
+    expect(status.reason).toBe("seat-failed");
+    expect(status.error).toBe("recheck seat failed: rowId missing");
+  });
+
+  test("(p) a thrown SDK error names its settled child's cap reason", async () => {
+    // The SDK rejects with a generic message while the settled child carries
+    // the cause; keeping only `error.message` loses the whole attribution.
+    seatReject = thrownSeatError("structured subagent failed: unavailable", {
+      abortReason: "runtime-limit",
+      exitCode: 1,
+    });
+    const { doc: seatDoc, status } = await run();
+    expect(seatDoc).toBeNull();
+    expect(status.reason).toBe("seat-failed");
+    expect(status.error).toContain("runtime-limit");
+  });
+
+  test("(q) a thrown SDK error falls back to its settled stderr tail", async () => {
+    seatReject = thrownSeatError("structured subagent failed", { stderr: "OOM", exitCode: 137 });
+    const { status } = await run();
+    expect(status.reason).toBe("seat-failed");
+    expect(status.error).toBe("OOM");
+  });
+
+  test("(r) a plain thrown Error keeps its message", async () => {
+    seatReject = new Error("boom");
+    const { status } = await run();
+    expect(status.reason).toBe("seat-failed");
+    expect(status.error).toBe("boom");
+  });
+
+  test("(s) an empty thrown message still names a cause, never an empty string", async () => {
+    seatReject = new Error("");
+    const { status } = await run();
+    expect(status.reason).toBe("seat-failed");
+    expect(status.error).toBe("exit unknown");
+  });
+
+  test("(t) an empty settled result keeps the rejection's own message", async () => {
+    // F-001: `{}` is truthy, so an unconditional settled read synthesized
+    // `exit unknown` and erased the only cause the rejection carried.
+    seatReject = thrownSeatError("boom", {});
+    const { status } = await run();
+    expect(status.reason).toBe("seat-failed");
+    expect(status.error).toBe("boom");
+  });
+
+  test("(u) a foreign settled result keeps the rejection's own message, never throws", async () => {
+    seatReject = Object.assign(new Error("boom"), { result: "not a settled result" });
+    const { doc: seatDoc, status } = await run();
+    expect(seatDoc).toBeNull();
+    expect(status.reason).toBe("seat-failed");
+    expect(status.error).toBe("boom");
+  });
+
+  test("(v) a non-coercible settled exit code never throws and still names a cause", async () => {
+    // A symbol cannot be interpolated: both exits must type-check `exitCode`
+    // instead of trusting it. The rejected path still names the rejection's
+    // message, and the resolved path falls to the `unknown` floor.
+    seatReject = thrownSeatError("settled failure", { exitCode: Symbol("not an exit code") });
+    const thrown = await run();
+    expect(thrown.doc).toBeNull();
+    expect(thrown.status.reason).toBe("seat-failed");
+    expect(thrown.status.error).toBe("settled failure");
+
+    seatReject = null;
+    seatResult = {
+      stderr: "",
+      exitCode: Symbol("not an exit code") as unknown as number,
+      structuredOutput: { source: "caller", mode: "strict", status: "unavailable" },
+    };
+    const resolved = await run();
+    expect(resolved.status.reason).toBe("seat-failed");
+    expect(resolved.status.error).toBe(
+      "recheck seat produced no valid structured output (status unavailable): exit unknown",
+    );
+  });
+
+  test("(w) a rejection carrying a valid settled document returns it through the validator", async () => {
+    // F-002: a post-settle SDK failure keeps the child's attached payload, so
+    // the document must survive the rejection — and still pass the same
+    // validator, which is what separates it from a lost round.
+    const results = INPUT.targets.map((target) => row(target.rowId));
+    seatReject = thrownSeatError("isolation merge failed", {
+      structuredOutput: { source: "caller", mode: "strict", status: "valid", data: doc(results) },
+    });
+    const yielded = await run();
+    expect(yielded.doc?.results).toHaveLength(RECHECK_MAX_TARGETS);
+    expect(yielded.status).toMatchObject({ outcome: "ok", reason: null });
+
+    seatReject = thrownSeatError("isolation merge failed", {
+      structuredOutput: { source: "caller", mode: "strict", status: "valid", data: doc(results, "f".repeat(40)) },
+    });
+    const stale = await run();
+    expect(stale.doc).toBeNull();
+    expect(stale.status.reason).toBe("invalid-document");
+    expect(stale.status.error).toContain("stale document");
   });
 });
 

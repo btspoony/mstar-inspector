@@ -1516,6 +1516,50 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     }
   });
 
+  // The deadline ended the wait without a proof. Each named cause replaces the
+  // generic unknown, so the frozen Check says which evidence it could not read.
+  test("a deadline with no publication row staged names that cause", () => {
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "expired",
+      gate,
+      review: null,
+      unconfirmedCause: "unstaged",
+    });
+    expect(decided.desired).toBe("failure");
+    expect(decided.title).toBe(CHECK_NAME);
+    expect(decided.summary).toBe(CHECK_SUMMARIES.unconfirmedUnstaged);
+    expect(decided.summary).toContain("no publication row was staged");
+  });
+
+  test("a deadline whose staged publication never landed its proof names that cause", () => {
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "expired",
+      gate,
+      review: null,
+      unconfirmedCause: "unproven",
+    });
+    expect(decided.desired).toBe("failure");
+    expect(decided.title).toBe(CHECK_NAME);
+    expect(decided.summary).toBe(CHECK_SUMMARIES.unconfirmedUnproven);
+    expect(decided.summary).toContain("the proof never landed");
+  });
+
+  test("a deadline whose proof read failed names that cause", () => {
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "expired",
+      gate,
+      review: null,
+      unconfirmedCause: "unreadable",
+    });
+    expect(decided.desired).toBe("failure");
+    expect(decided.title).toBe(CHECK_NAME);
+    expect(decided.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
+    expect(decided.summary).toContain("could not be read");
+  });
+
   test("no proof + local-error is the exhausted finalization wording", () => {
     const decided = decideConclusion({ proof: null, outcome: "local-error", gate, review: null });
     expect(decided.desired).toBe("failure");
@@ -1551,6 +1595,9 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       decideConclusion({ proof: null, outcome: "publication-unknown", gate, review: null }),
       decideConclusion({ proof: null, outcome: "degraded-not-posted", gate, review: null }),
       decideConclusion({ proof: null, outcome: "expired", gate, review: null }),
+      decideConclusion({ proof: null, outcome: "expired", gate, review: null, unconfirmedCause: "unstaged" }),
+      decideConclusion({ proof: null, outcome: "expired", gate, review: null, unconfirmedCause: "unproven" }),
+      decideConclusion({ proof: null, outcome: "expired", gate, review: null, unconfirmedCause: "unreadable" }),
       decideConclusion({ proof: null, outcome: "local-error", gate, review: null }),
     ]) {
       expect(decided.summary.length).toBeLessThanOrEqual(2_000);

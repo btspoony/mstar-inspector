@@ -77,6 +77,11 @@
 import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
+  classifyGithubRateLimit,
+  GITHUB_PRIMARY_RATE_LIMIT_PREFIX,
+  GITHUB_RATE_LIMIT_PREFIX,
+} from "../contracts/failure-stages";
+import {
   idemKey,
   IDEMPOTENCY_SECONDS,
   IDEM_DEGRADED,
@@ -99,6 +104,9 @@ import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-sto
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
 import { hasUsageEventForExecutionToken, recordUsageEvent } from "../store/usage-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
+// The hand-off's two fenced writes live in the Check registry (§7.9/§7.11.2):
+// linking the publication the probe found, and releasing the claim to recovery.
+import { CHECK_BACKOFF_MS, deferCheckRecovery, linkCheckPublication } from "../store/review-checks";
 import {
   applyPublishedLifecycle,
   claimPublication,
@@ -362,7 +370,12 @@ export type ConsumerLogFields = {
    * `check_abandon_not_owned` = it changed nothing because the attempt is no
    * longer ours (recovery claimed it, the lease expired, or it already ended) —
    * a legitimate no-op, not a fault; `check_abandon_failed` = the hand-off
-   * itself faulted (a store error).
+   * itself faulted (a store error). The publication hand-off (§7.7 step 2)
+   * emits only the two REFUSAL values: `check_abandon_not_owned` when either
+   * fenced write (link, release) changed nothing, and `check_abandon_failed`
+   * when a write threw — the message names which write refused. A COMPLETED
+   * hand-off has no event of its own; its only line is the info above it
+   * ("publication journal hit"), printed before the link.
    */
   event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed";
   action: string;
@@ -4051,15 +4064,69 @@ async function processMessage(
         `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
       );
       // Deliberately NOT terminalized: this attempt published nothing, and the
-      // publication on this head belongs to an earlier generation — a proof
-      // this attempt never linked, so it can never decide this attempt's Check
-      // (spec §7.9/§7.11.2). A premature `neutral` here would outlive the run
-      // that still owns the lease. The admitted claim is RELEASED instead
-      // (remote-unconfirmed + the first backoff rung), so the recoverer waits
-      // out THIS attempt's execution deadline and closes it with the honest
-      // unconfirmed failure rather than freezing a conclusion under a live
-      // lease.
-      if (checkHandle !== null) await abandonCheck(checkHandle, "publication journal handoff");
+      // publication on this head belongs to an earlier generation. LINKING that
+      // row is what makes it this attempt's proof, so the conclusion stays with
+      // the publication: an applied proof decides `success`, and only the
+      // execution deadline decides the honest failure. Freezing an intent here
+      // would instead close the run for good — the correction seam needs a
+      // non-null `publication_id` (which is exactly what this link supplies).
+      //
+      // Both writes are fenced on the claim lease, and either can refuse: the
+      // claim runs 900s while the intervening sandbox/token/inflight/journal
+      // steps are network calls with no enforced clock. A refusal writes
+      // nothing, which is the honest outcome — the row keeps its current owner
+      // and stays `in_progress`; once `lease_until_ms` passes, the reconcile
+      // selector picks it up and the deadline path concludes it. A store fault
+      // is a warn too: a Check fault never blocks the review's ack.
+      if (checkHandle !== null) {
+        const nowMs = Date.now();
+        const handoffFields = {
+          ...fields,
+          sandbox_id: sandboxId,
+          attempt_id: checkHandle.attemptId,
+          check_reason: "publication journal handoff",
+        };
+        try {
+          if (
+            !(await linkCheckPublication(
+              deps.env.DB,
+              checkHandle.attemptId,
+              checkHandle.lease,
+              journalRow.id,
+              nowMs,
+            ))
+          ) {
+            deps.log.warn(
+              { ...handoffFields, event: "check_abandon_not_owned" },
+              "publication link refused by the check lease fence — the row keeps its owner and the deadline path concludes it (publication journal handoff)",
+            );
+          }
+          if (
+            !(await deferCheckRecovery(
+              deps.env.DB,
+              checkHandle.attemptId,
+              checkHandle.lease,
+              {
+                state: "remote-unconfirmed",
+                nextAttemptMs: nowMs + CHECK_BACKOFF_MS[0]!,
+                reason: "publication journal handoff",
+              },
+              nowMs,
+            ))
+          ) {
+            deps.log.warn(
+              { ...handoffFields, event: "check_abandon_not_owned" },
+              "claim release refused by the check lease fence — the row keeps its lease and the deadline path concludes it (publication journal handoff)",
+            );
+          }
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(
+            { ...handoffFields, event: "check_abandon_failed" },
+            `publication journal handoff faulted (the Check row is left to the recovery lane): ${detail}`,
+          );
+        }
+      }
       return { kind: "ok" };
     }
 
@@ -5295,6 +5362,34 @@ async function processMessage(
             }`,
           );
         }
+        // A throttled sweep is a CONTINUATION event, not a failure of this
+        // review: ONE row per non-zero kind under the non-failure `rate-limit`
+        // stage (excluded from every failure count) so the throttle is not
+        // silently dropped. Each row carries its own kind's prefix, so a
+        // primary 429 never inflates the secondary-limit count. Its own
+        // try/catch — the insert must never mask the review that stands, and
+        // the round is never retried for it.
+        const rateLimitKinds = [
+          { kind: "primary", prefix: GITHUB_PRIMARY_RATE_LIMIT_PREFIX, count: deleteOutcome.rateLimited.primary },
+          { kind: "secondary", prefix: GITHUB_RATE_LIMIT_PREFIX, count: deleteOutcome.rateLimited.secondary },
+        ] as const;
+        for (const { kind, prefix, count } of rateLimitKinds) {
+          if (count === 0) continue;
+          try {
+            await deps.failureStore.record({
+              installation_id: payload.installation_id,
+              owner: payload.owner,
+              repo: payload.repo,
+              pr_number: payload.pr_number,
+              head_sha: headSha,
+              stage: "rate-limit",
+              error: `${prefix}${count} stale degraded comment deletion(s) rejected by the GitHub ${kind} rate limit — the review stands`,
+            });
+          } catch (recordErr) {
+            const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
+            deps.log.warn(fields, `review_failures insert failed (degraded cleanup continues): ${recordDetail}`);
+          }
+        }
       }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -5351,6 +5446,11 @@ async function processMessage(
     // SEC-03: the error detail is redacted (shape + exact-value passes)
     // before the durable row — an infra error can interpolate a
     // secret-shaped value (defense-in-depth; clean strings pass through).
+    // The GitHub secondary-rate-limit cause is tagged HERE — once, before
+    // redaction — so the row's text and the store's prefix count share one
+    // source of truth (a second detection site would drift).
+    const persistedDetail =
+      classifyGithubRateLimit(err) === "secondary" ? `${GITHUB_RATE_LIMIT_PREFIX}${detail}` : detail;
     try {
       await deps.failureStore.record({
         installation_id: payload.installation_id,
@@ -5361,7 +5461,7 @@ async function processMessage(
         // the payload sha, else "" (= never resolved).
         head_sha: fields?.head_sha ?? payload.head_sha ?? "",
         stage: failureStage,
-        error: redactExactSecrets(redactSecrets(detail), secretValues),
+        error: redactExactSecrets(redactSecrets(persistedDetail), secretValues),
       });
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);

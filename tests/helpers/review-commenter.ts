@@ -72,7 +72,7 @@ export function initialFakeCommenterState(): FakeCommenterState {
     preparedReviewReject: undefined,
     preparedDegradedError: undefined,
     preparedDegradedResult: { posted: true, commentId: 202 },
-    deleteDegradedOutcome: { deleted: 0, skipped: 0, errors: [] },
+    deleteDegradedOutcome: { deleted: 0, skipped: 0, errors: [], rateLimited: { primary: 0, secondary: 0 } },
     deleteDegradedError: undefined,
     lineCommentsError: undefined,
     lineCommentsResult: { posted: [], ambiguous: [], captured: true, reviewId: 55 },

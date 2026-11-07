@@ -166,6 +166,17 @@ export type AdmissionDropCounts = {
   error: number;
 };
 
+/**
+ * The live review-queue gauge. `null` at the config level means the gauge is
+ * not readable — never that the queue is empty.
+ */
+export type QueueBacklog = {
+  /** Messages waiting for a consumer right now. */
+  backlogCount: number;
+  /** ISO-8601 (`REVIEW_QUEUE.metrics()` reports a Date); `null` for an empty queue. */
+  oldestMessageTimestamp: string | null;
+};
+
 /** The runtime parameters (iteration spec §1.1, spec §7.10). */
 export type RuntimeConfig = {
   concurrency: number;
@@ -191,6 +202,13 @@ export type RuntimeConfig = {
   recheckAssignment: RecheckAssignmentConfig | null;
   /** The 24h admission-drop counts; `null` under the same older-Worker rule. */
   admissionDrops24h: AdmissionDropCounts | null;
+  /**
+   * The live queue gauge; `null` when the server does not report it or the
+   * gauge itself is unreadable. `null` is never an empty queue.
+   */
+  queue: QueueBacklog | null;
+  /** The 24h GitHub secondary-rate-limit count; `0` when the server does not report it. */
+  githubRateLimited24h: number;
 };
 
 function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
@@ -263,6 +281,29 @@ function parseAdmissionDrops(row: Json): AdmissionDropCounts | null {
   };
 }
 
+/**
+ * The live queue gauge. A foreign shape answers `null` like the server's own
+ * `null` does — both mean "not readable", so the page degrades instead of
+ * failing the whole read over one optional gauge.
+ */
+function parseQueue(row: Json): QueueBacklog | null {
+  const raw = row.queue;
+  if (typeof raw !== "object" || raw === null) return null;
+  const queue = raw as Json;
+  if (typeof queue.backlogCount !== "number") return null;
+  return {
+    backlogCount: queue.backlogCount,
+    oldestMessageTimestamp:
+      typeof queue.oldestMessageTimestamp === "string" ? queue.oldestMessageTimestamp : null,
+  };
+}
+
+/** The 24h secondary-rate-limit count; an older Worker's silence reads as `0`. */
+function parseGithubRateLimited(row: Json): number {
+  const value = row.githubRateLimited24h;
+  return typeof value === "number" ? value : 0;
+}
+
 export async function readRuntime(): Promise<RuntimeConfig> {
   const body = map(await fetchJson(`${BASE}/runtime`), "runtime response");
   return {
@@ -275,6 +316,8 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     reviewLevel: parseReviewLevel(body),
     recheckAssignment: parseRecheckAssignment(body),
     admissionDrops24h: parseAdmissionDrops(body),
+    queue: parseQueue(body),
+    githubRateLimited24h: parseGithubRateLimited(body),
   };
 }
 

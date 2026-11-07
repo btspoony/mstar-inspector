@@ -493,10 +493,12 @@ describe("runSweep", () => {
   });
 
   // `recheck` marks a budget skip, a dead seat or one invalid document; `usage`
-  // marks a usage_events insert that failed while the review kept going. Both
-  // are attribution, not review failures, and the paging count must ignore
-  // them identically — one parameterized case, one set of assertions.
-  for (const stage of ["recheck", "usage"] as const) {
+  // marks a usage_events insert that failed while the review kept going;
+  // `rate-limit` marks a degraded-comment sweep throttled by GitHub while the
+  // review itself stood. All three are attribution, not review failures, and
+  // the paging count must ignore them identically — one parameterized case,
+  // one set of assertions.
+  for (const stage of ["recheck", "usage", "rate-limit"] as const) {
     test(`${stage} rows never page ops; a runner row still counts`, async () => {
       const db = createMigratedTestD1();
       const store = createFailureStore(db);
