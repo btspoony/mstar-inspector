@@ -76,7 +76,11 @@
 
 import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
-import { classifyGithubRateLimit, GITHUB_RATE_LIMIT_PREFIX } from "../contracts/failure-stages";
+import {
+  classifyGithubRateLimit,
+  GITHUB_PRIMARY_RATE_LIMIT_PREFIX,
+  GITHUB_RATE_LIMIT_PREFIX,
+} from "../contracts/failure-stages";
 import {
   idemKey,
   IDEMPOTENCY_SECONDS,
@@ -5359,11 +5363,18 @@ async function processMessage(
           );
         }
         // A throttled sweep is a CONTINUATION event, not a failure of this
-        // review: ONE row under the non-failure `rate-limit` stage (excluded
-        // from every failure count) so the throttle is not silently dropped.
-        // Its own try/catch — the insert must never mask the review that
-        // stands, and the round is never retried for it.
-        if (deleteOutcome.rateLimited > 0) {
+        // review: ONE row per non-zero kind under the non-failure `rate-limit`
+        // stage (excluded from every failure count) so the throttle is not
+        // silently dropped. Each row carries its own kind's prefix, so a
+        // primary 429 never inflates the secondary-limit count. Its own
+        // try/catch — the insert must never mask the review that stands, and
+        // the round is never retried for it.
+        const rateLimitKinds = [
+          { kind: "primary", prefix: GITHUB_PRIMARY_RATE_LIMIT_PREFIX, count: deleteOutcome.rateLimited.primary },
+          { kind: "secondary", prefix: GITHUB_RATE_LIMIT_PREFIX, count: deleteOutcome.rateLimited.secondary },
+        ] as const;
+        for (const { kind, prefix, count } of rateLimitKinds) {
+          if (count === 0) continue;
           try {
             await deps.failureStore.record({
               installation_id: payload.installation_id,
@@ -5372,7 +5383,7 @@ async function processMessage(
               pr_number: payload.pr_number,
               head_sha: headSha,
               stage: "rate-limit",
-              error: `${GITHUB_RATE_LIMIT_PREFIX}${deleteOutcome.rateLimited} stale degraded comment deletion(s) rejected by the GitHub rate limit — the review stands`,
+              error: `${prefix}${count} stale degraded comment deletion(s) rejected by the GitHub ${kind} rate limit — the review stands`,
             });
           } catch (recordErr) {
             const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);

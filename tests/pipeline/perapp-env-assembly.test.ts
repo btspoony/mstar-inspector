@@ -226,7 +226,7 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
   // Bugbot degraded-comment lifecycle: the success path runs the delete
   // scan (no stale comment → the real implementation finds nothing); the
   // double is a no-op outcome so the flow exercises the real call.
-  deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [], rateLimited: 0 })),
+  deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [], rateLimited: { primary: 0, secondary: 0 } })),
   // line comments: VALID_OUTPUT has no findings → never called.
   postLineComments: mock(async () => {
     throw new Error("unexpected: no qualifying findings → no line comments");

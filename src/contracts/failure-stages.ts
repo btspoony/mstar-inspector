@@ -45,6 +45,14 @@ export function sqlStageList(stages: readonly string[]): string {
  */
 export const GITHUB_RATE_LIMIT_PREFIX = "github-secondary-rate-limit: ";
 
+/**
+ * The stable `review_failures.error` prefix a GitHub PRIMARY rate limit
+ * carries. Its own words on purpose: it must never match a count that reads
+ * {@link GITHUB_RATE_LIMIT_PREFIX}, so a primary-limit row cannot inflate the
+ * secondary-limit number.
+ */
+export const GITHUB_PRIMARY_RATE_LIMIT_PREFIX = "github-primary-rate-limit: ";
+
 /** Case-insensitive header read over either header shape a transport exposes. */
 function headerValue(headers: unknown, name: string): string | null {
   if (headers === null || typeof headers !== "object") return null;
