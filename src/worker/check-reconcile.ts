@@ -425,11 +425,14 @@ function backoffFor(attemptsAfter: number): number {
 }
 
 /**
- * The rung for the next proof-wait defer, from the SAME ladder the attempt
- * path backs off on. The wait spends no attempt, so `backoffFor` cannot place
- * it; its own elapsed time does. Every rung the wait has already outlived
+ * The rung for the next CLAIM-TAKING proof-wait defer, from the SAME ladder the
+ * attempt path backs off on. The wait spends no attempt, so `backoffFor` cannot
+ * place it; its own elapsed time does. Every rung the wait has already outlived
  * widens the next one, so a publication that never proves itself is re-probed
  * a handful of times inside the window instead of every minute.
+ *
+ * The wait-terminal row is NOT placed by this: spec §7.11.2 step 2 pins its
+ * due time to `now + the first backoff rung`, because that row is one probe.
  */
 function waitRungMs(attempt: CheckAttempt, nowMs: number): number {
   let outlivedMs = 0;
@@ -854,11 +857,13 @@ async function reconcileCheckAttempt(
     // the bounded due batch: the selector orders by `COALESCE(next_attempt_ms,
     // created_ms)`, so a row whose due time never moves occupies a slot on every
     // pass and starves the rows behind it. One unclaimed write moves its own due
-    // time onto the active rung; the row stays live, so a journal row that lands
-    // later is still seen on the pass it falls due.
+    // time onto the FIRST rung, exactly as spec §7.11.2 step 2 requires, so the
+    // row is re-probed about once a minute; the row stays live, so a journal row
+    // that lands later is still seen on the pass it falls due. A widened rung
+    // would delay that re-probe by minutes with no gain: this row is cheap.
     if (waitIsTerminal(pending, proofPublicationId)) {
       const at = now();
-      await deferUnclaimedCheckRecovery(db, attemptId, row.nextAttemptMs, at + waitRungMs(row, at), at);
+      await deferUnclaimedCheckRecovery(db, attemptId, row.nextAttemptMs, at + CHECK_BACKOFF_MS[0]!, at);
       return;
     }
     const waiting =

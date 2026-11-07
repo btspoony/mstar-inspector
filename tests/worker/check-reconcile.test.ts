@@ -2765,10 +2765,11 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.observed).toBe("unknown");
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
-    // Moved onto the active ladder rung by ONE unclaimed write: no claim, no
-    // defer, no attempt spent — the row stops holding the head of the due batch
-    // and is still due (and seen) at that time.
-    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
+    // Moved onto the FIRST rung by ONE unclaimed write: no claim, no defer, no
+    // attempt spent — the row stops holding the head of the due batch and is due
+    // (and re-probed) about a minute later, so a publication that lands is seen
+    // on the next pass rather than minutes from now (spec §7.11.2 step 2).
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
 
     // No wait line: the per-minute log churn is part of what the short-circuit
     // removes.

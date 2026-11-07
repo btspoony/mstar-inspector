@@ -584,10 +584,11 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(row.terminal_ms).toBeNull();
     expect(row.observed).toBe("unknown");
     expect(row.attempts).toBe(1);
-    // One unclaimed write moved the due time onto the ladder rung — no claim, no
+    // One unclaimed write moved the due time onto the FIRST rung — no claim, no
     // defer, no attempt spent. The row is not concludable, but it also does not
-    // hold the head of the bounded due batch.
-    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
+    // hold the head of the bounded due batch, and it is re-probed a minute
+    // later, so a journal row that lands is seen about as soon as it exists.
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
   });
@@ -941,12 +942,12 @@ describe("the journal-less short-circuit (spec §7.9/§7.11.2)", () => {
       expect(nextIds).toContain(publishableId);
 
       // The reorder spent nothing: the dead row keeps its attempt count, holds
-      // no lease, and is due again on the ladder rung.
+      // no lease, and is due again one rung later — not at the deadline.
       const reorderedId = deadIds.find((id) => !nextIds.includes(id))!;
       const reordered = await rawRow(db, reorderedId);
       expect(reordered.attempts).toBe(1);
       expect(reordered.holder).toBeNull();
-      expect(reordered.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[1]!);
+      expect(reordered.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
 
       const second = await run(db, {
         now: () => T0 + 120_000,
