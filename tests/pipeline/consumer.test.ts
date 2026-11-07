@@ -179,6 +179,7 @@ import {
   testLog,
   testOverrides,
 } from "../helpers/consumer-harness";
+import { withFrozenClock } from "../helpers/clock";
 import { PR_CONTEXT_MAX_ISSUES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 
 /** Runner exec call's env (the sandbox fake stores opts as unknown). */
@@ -240,18 +241,6 @@ function clockSpendingSandbox(needle: string, spentMs: number, clock: { now: num
       destroy: fakeSandbox.destroy,
     }),
   };
-}
-
-/** Run `fn` against a frozen wall clock so a derived deadline is exact. */
-async function withFrozenClock<T>(fn: (clock: { now: number }) => Promise<T>): Promise<T> {
-  const realNow = Date.now;
-  const clock = { now: realNow() };
-  Date.now = () => clock.now;
-  try {
-    return await fn(clock);
-  } finally {
-    Date.now = realNow;
-  }
 }
 
 /**

@@ -38,7 +38,6 @@ import {
   POST_RUNNER_READ_TIMEOUT_MS,
   POST_RUNNER_READ_BUDGET_MS,
   reset,
-  ROUND_BUDGET_MS,
   sandbox,
   testLog,
   testOverrides,
@@ -102,10 +101,12 @@ describe("PR-context capture", () => {
     const warns = logLines.filter((l) => l.level === "warn" && l.fields.report_context !== undefined);
     expect(warns).toHaveLength(1);
     expect(warns[0]!.fields.report_context).toBe("budget");
-    // The line names the DERIVED deadline it refused on, not the level's tier.
-    expect(warns[0]!.msg).toMatch(/\d+ms left before the derived runner deadline/);
-    expect(warns[0]!.msg).toContain(`${PR_CONTEXT_WORST_CASE_MS}ms`);
-    expect(warns[0]!.msg).toContain(`${POST_RUNNER_READ_BUDGET_MS}ms`);
+    // The line names the DERIVED deadline it refused on, not the level's tier:
+    // the remainder it reports is a real quantity — positive, and short of the
+    // capture-plus-post-reads cost the gate bills.
+    const leftMs = Number(/(\d+)ms left before the derived runner deadline/.exec(warns[0]!.msg)?.[1]);
+    expect(leftMs).toBeGreaterThan(0);
+    expect(leftMs).toBeLessThan(PR_CONTEXT_WORST_CASE_MS + POST_RUNNER_READ_BUDGET_MS);
     // Never a failed review: the report degrades to `none` and the body lands.
     expect(preparedBody()).toContain("### Linked-issue AC\n\nnone");
     expect(sandbox.calls.some((c) => c.cmd.includes("--report-out"))).toBe(false);
@@ -122,14 +123,10 @@ describe("PR-context capture", () => {
       sandbox.issueBodies.set(number, { title: `issue ${number}`, body: "none" });
     }
     const db = await createSeededTestD1();
-    // The production round (900s) is billed through the DERIVED deadline: the
-    // post-runner reserve (234s) is set aside first, leaving 666s, and the gate
-    // needs the capture (120s) plus the post-runner reads (90s) — 210s fits.
-    // The level never enters the bound (the exec is capped at
-    // min(deadline, tier)), so quick and default both admit the capture.
-    expect(PR_CONTEXT_WORST_CASE_MS + POST_RUNNER_READ_BUDGET_MS).toBeLessThanOrEqual(
-      ROUND_BUDGET_MS - postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT),
-    );
+    // The gate bills the DERIVED deadline, and the LEVEL never enters that
+    // bound — each capture exec is capped at min(deadline, tier), so any level
+    // with the capture's 210s left admits it. The per-level table itself is
+    // pinned in consumer.test.ts (runnerTimeoutMs quick/default/deep).
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
