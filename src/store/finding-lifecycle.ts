@@ -473,24 +473,27 @@ export async function findPublicationJournal(
      */
     order?: "oldest" | "newest";
     /**
-     * Only rows staged at or after this instant are reported. The Check wait
-     * passes the attempt's own admission time: one row exists per
-     * scope/head/kind, so a row staged earlier belongs to an earlier generation
-     * of the same head and its proof is never this attempt's.
+     * Only rows whose LAST WRITE is at or after this instant are reported.
+     * The Check wait passes the attempt's own admission time: one row exists
+     * per scope/head/kind, and the writer reuses an existing row for a
+     * re-triggered head, so a row INSERTED earlier still belongs to this
+     * attempt when this attempt's stage/claim/proof write stamped it
+     * afterwards. The conflict-reuse path itself writes nothing, so a reused
+     * row with no post-admission write is never reported.
      */
-    stagedAtOrAfterMs?: number;
+    writtenAtOrAfterMs?: number;
   },
 ): Promise<{ id: string; phase: PublicationRow["phase"]; hasProof: boolean } | null> {
   if (input.phases.length === 0) return null;
   const placeholders = input.phases.map(() => "?").join(", ");
   const order = input.order === "newest" ? "created_ms DESC, id DESC" : "created_ms, id";
-  const stagedFloor =
-    input.stagedAtOrAfterMs === undefined ? "" : "AND created_ms >= ?";
+  const writeFloor =
+    input.writtenAtOrAfterMs === undefined ? "" : "AND updated_ms >= ?";
   const row = await db
     .prepare(
       `SELECT id, phase, (proof_json IS NOT NULL AND json_valid(proof_json)) AS has_proof FROM review_publications
        WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-         AND head_sha = ? AND phase IN (${placeholders}) ${stagedFloor}
+         AND head_sha = ? AND phase IN (${placeholders}) ${writeFloor}
        ORDER BY ${order} LIMIT 1`,
     )
     .bind(
@@ -501,7 +504,7 @@ export async function findPublicationJournal(
       input.scope.prNumber,
       input.headSha,
       ...input.phases,
-      ...(input.stagedAtOrAfterMs === undefined ? [] : [input.stagedAtOrAfterMs]),
+      ...(input.writtenAtOrAfterMs === undefined ? [] : [input.writtenAtOrAfterMs]),
     )
     .first<{ id: string; phase: string; has_proof: number }>();
   return row === null

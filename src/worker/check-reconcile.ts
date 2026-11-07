@@ -783,16 +783,19 @@ async function reconcileCheckAttempt(
   // back, spending no attempt.
   //
   // The publication that answers for this attempt is the NEWEST journal row for
-  // the exact scope/head staged after this attempt was admitted — one row
-  // exists per scope/head/kind, so an older row belongs to an earlier
-  // generation of the same head. Its readable proof ENDS the wait and is read
-  // by that exact id: abandonment is not a conclusion, so an abandoned attempt
-  // keeps its own `publication_id` NULL, and once its review publishes that
-  // row's id is the only proof its Check can conclude from. Otherwise only this
-  // attempt's own `publication_id` link counts — never a head-matched proof, so
-  // the wait is bounded by that link or, failing it, by the deadline. Neither
-  // `reviews` nor `review_failures` carries attempt identity either, so their
-  // rows cannot end it early.
+  // the exact scope/head whose LAST WRITE landed at or after this attempt was
+  // admitted — one row exists per scope/head/kind and the writer REUSES it for
+  // a same-head re-trigger, so creation time cannot separate generations, but
+  // a write this attempt caused (stage/claim/proof) can. Conflict-reuse alone
+  // writes nothing, so a prior generation's row that nobody stamped after
+  // admission stays unattributed. The wait is bound to that row: its readable
+  // proof ENDS the wait and is read by that exact id. Abandonment is not a
+  // conclusion, so an abandoned attempt keeps its own `publication_id` NULL,
+  // and once its review publishes that row's id is the only proof its Check
+  // can conclude from. Otherwise only this attempt's own `publication_id` link
+  // counts — never a head-matched proof, so the wait is bounded by that write
+  // or, failing it, by the deadline. Neither `reviews` nor `review_failures`
+  // carries attempt identity either, so their rows cannot end it early.
   let proofPublicationId: string | null = row.publicationId;
   if (now() < row.executionDeadlineMs) {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6): a waiting
@@ -1356,10 +1359,11 @@ type PendingPublication =
   | { kind: "unknown" };
 
 async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promise<PendingPublication> {
-  // The wait is bound to ONE journal row — the NEWEST row staged since this
-  // attempt was admitted — because that is the publication whose proof is
-  // still owed. A proof on some other row (an older degraded publication, or a
-  // previous generation's row for the same head) proves nothing about this
+  // The wait is bound to ONE journal row — the NEWEST row for this exact
+  // scope/head whose last write is at least as new as this attempt — because
+  // that is the publication whose proof is still owed. A proof on some other
+  // row (an older degraded publication, or a previous generation's row that
+  // nothing stamped after this attempt was admitted) proves nothing about this
   // one: letting it end the wait would freeze a degraded failure while a newer
   // normal publication was still in flight.
   try {
@@ -1374,10 +1378,12 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
       // the proof the attempt owes its conclusion to.
       phases: PUBLICATION_PROOF_WAIT_PHASES,
       order: "newest",
-      // A publication is staged by the message that will publish it, so a row
-      // staged before this attempt was admitted belongs to an earlier
-      // generation — its proof is not this attempt's to conclude from.
-      stagedAtOrAfterMs: attempt.createdAtMs,
+      // Attribution is the row's LAST WRITE, not its creation: the writer
+      // reuses one row per scope/head/kind, so a same-head re-trigger publishes
+      // on a row inserted before this attempt. A write this attempt caused
+      // (stage/claim/proof) stamps `updated_ms` afterwards; reuse alone stamps
+      // nothing, so a prior generation's untouched row never attributes.
+      writtenAtOrAfterMs: attempt.createdAtMs,
     });
     // No journal row: nothing has been handed off for this attempt yet, so THIS
     // probe has nothing to report — the caller's own linked proof read decides
