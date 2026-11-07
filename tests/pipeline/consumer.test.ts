@@ -500,7 +500,10 @@ describe("createReviewConsumer", () => {
     // next to the default run (600s), so the widest flow runs untouched.
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
-    await consumer(makeBatch(makePayload()));
+    // The round runs under a FROZEN clock: the fake spends no wall time, so the
+    // runner gets exactly what the derived deadline still owes. A real clock
+    // would make this a band (a paused CI minute moves it), never a pin.
+    await withFrozenClock(() => consumer(makeBatch(makePayload())));
 
     expect(sandbox.calls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
@@ -569,11 +572,8 @@ describe("createReviewConsumer", () => {
       timeout: expect.any(Number),
     });
     // The exec gets what the declared instant still owes, read after the input
-    // write: never above the 600s default cap, and — with a fake write that
-    // spends no time — never a whole second below it. An exact 600_000 would
-    // assert that this write took zero real milliseconds.
-    expect(runnerExecTimeout()).toBeLessThanOrEqual(600_000);
-    expect(runnerExecTimeout()).toBeGreaterThan(590_000);
+    // write: the frozen clock makes that the full 600s default cap, exactly.
+    expect(runnerExecTimeout()).toBe(600_000);
     // inside VALID_DIFF's right hunk [18,23]). §7.7 order: the
     // intent-prepared line comments run after the apply; the degraded-comment
     // delete runs last, only after the normal publication proof.
@@ -1302,7 +1302,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
-      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: base-ref-empty at base ref$/,
     );
 
     // The lookup ran; the chain stopped before any merge-base/fetch/local diff.
@@ -1312,6 +1312,96 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
       pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
     ]);
+    // An empty answer is diagnosed, never silent: the durable row names the
+    // step and reason, and the attempt leaves its one warn.
+    expect(logLines.filter((l) => l.fields.diff_fallback !== undefined)).toHaveLength(1);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("oversized fallback: base-ref-empty at base ref");
+  });
+
+  test("a FAILING base-ref read names its step and reason, warns once, and fetches nothing", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    sandbox.baseRefExitCode = 1;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: base-ref-empty at base ref$/,
+    );
+
+    // The read ran and failed: merge-base, fetch and the local diff never ran.
+    expect(sandbox.calls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+      expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
+      pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
+    ]);
+    // ONE structured warn per attempt: which step, its exit code, and its
+    // redacted stderr tail — the operator never has to guess the cause.
+    const fallbackWarns = logLines.filter((l) => l.fields.diff_fallback !== undefined);
+    expect(fallbackWarns).toHaveLength(1);
+    expect(fallbackWarns[0]!.fields).toMatchObject({ diff_fallback: "base-ref-empty", diff_fallback_step: "base ref" });
+    expect(fallbackWarns[0]!.msg).toContain("exit 1");
+    expect(fallbackWarns[0]!.msg).toContain("stderr tail: gh: Not Found (HTTP 404)");
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("a FAILING merge-base read names its step and reason and never diffs the clone", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    sandbox.mergeBaseExitCode = 128;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: merge-base-empty at merge base$/,
+    );
+
+    expect(sandbox.calls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+      expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
+      pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
+      mergeBaseCommand(TEST_OWNER, TEST_REPO, sandbox.diffBaseRef, SHA),
+    ]);
+    const fallbackWarns = logLines.filter((l) => l.fields.diff_fallback !== undefined);
+    expect(fallbackWarns).toHaveLength(1);
+    expect(fallbackWarns[0]!.fields).toMatchObject({
+      diff_fallback: "merge-base-empty",
+      diff_fallback_step: "merge base",
+    });
+    expect(fallbackWarns[0]!.msg).toContain("exit 128");
+    expect(fallbackWarns[0]!.msg).toContain("stderr tail: gh: Not Found (HTTP 404)");
+    expect(String(failureRows(db)[0]!.error)).toContain("oversized fallback: merge-base-empty at merge base");
+  });
+
+  test("a hostile base ref is rejected by the guard and named — never built into a shell string", async () => {
+    reset();
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    // A ref GitHub could never return, but a compromised API reply might.
+    sandbox.diffBaseRef = "main; rm -rf /";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: guard-rejected at merge base$/,
+    );
+
+    // The merge-base command was never built (no exec, no shell string).
+    expect(sandbox.calls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+      expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
+      pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
+    ]);
+    // A guard refusal is its own reason — never confused with a failing exec.
+    const fallbackWarn = logLines.find((l) => l.fields.diff_fallback !== undefined);
+    expect(fallbackWarn?.fields).toMatchObject({ diff_fallback: "guard-rejected", diff_fallback_step: "merge base" });
+    expect(fallbackWarn?.msg).toContain("no exec ran");
     expect(failureRows(db)).toHaveLength(1);
   });
 
@@ -1324,11 +1414,12 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
-      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: fetch-exit at fetch$/,
     );
 
     // The chain stopped at the failed fetch: no local diff, no numstat, no
-    // runner — the fallback's own fault never becomes the round's cause.
+    // runner — the fallback's own fault never becomes the round's cause, but
+    // the decline names it instead of vanishing.
     expect(sandbox.calls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
@@ -1337,9 +1428,13 @@ describe("createReviewConsumer", () => {
       mergeBaseCommand(TEST_OWNER, TEST_REPO, sandbox.diffBaseRef, SHA),
       fetchDepthOneCommand(CLONE_DIR, sandbox.mergeBaseSha),
     ]);
+    expect(logLines.find((l) => l.fields.diff_fallback !== undefined)?.fields).toMatchObject({
+      diff_fallback: "fetch-exit",
+      diff_fallback_step: "fetch",
+    });
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
-    expect(String(failureRows(db)[0]!.error)).toContain("diff failed");
+    expect(String(failureRows(db)[0]!.error)).toContain("oversized fallback: fetch-exit at fetch");
   });
 
   test("a mid-fallback local-diff failure rethrows the ORIGINAL diff failure with no partial capture", async () => {
@@ -1351,7 +1446,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
-      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
+      /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: local-diff-exit at local diff$/,
     );
 
     // The local diff rewrote DIFF_PATH from 0B, but a failed read is no
@@ -1364,9 +1459,13 @@ describe("createReviewConsumer", () => {
     ]);
     expect(sandbox.calls.some((c) => c.cmd === numstatCommand(DIFF_PATH))).toBe(false);
     expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(logLines.find((l) => l.fields.diff_fallback !== undefined)?.fields).toMatchObject({
+      diff_fallback: "local-diff-exit",
+      diff_fallback_step: "local diff",
+    });
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
-    expect(String(failureRows(db)[0]!.error)).toContain("diff failed");
+    expect(String(failureRows(db)[0]!.error)).toContain("oversized fallback: local-diff-exit at local diff");
   });
 
   test("a spent round budget declines before any exec with an explicit round-budget failure (qc2 F-002)", async () => {
@@ -1449,6 +1548,11 @@ describe("createReviewConsumer", () => {
     }
 
     expect(sandbox.calls).toHaveLength(3);
+    // The window is spent BEFORE the base-ref exec: `step-timeout` names that,
+    // and the warn says no exec ran.
+    const fallbackWarn = logLines.find((l) => l.fields.diff_fallback !== undefined);
+    expect(fallbackWarn?.fields).toMatchObject({ diff_fallback: "step-timeout", diff_fallback_step: "base ref" });
+    expect(fallbackWarn?.msg).toContain("no exec ran");
     expect(failureRows(db)).toHaveLength(1);
   });
 
@@ -1498,6 +1602,12 @@ describe("createReviewConsumer", () => {
     });
 
     expect(sandbox.calls).toHaveLength(3);
+    // "Not attempted" is a diagnosis of its own, not the same silence as a
+    // failed step: no exec ran, and the reason says so.
+    expect(logLines.find((l) => l.fields.diff_fallback !== undefined)?.fields).toMatchObject({
+      diff_fallback: "budget",
+      diff_fallback_step: "admission",
+    });
     expect(failureRows(db)).toHaveLength(1);
   });
 

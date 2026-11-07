@@ -349,6 +349,13 @@ export type FakeSandboxState = {
   /** The PR's base ref and the merge base the oversized-diff fallback resolves. */
   diffBaseRef: string;
   mergeBaseSha: string;
+  /**
+   * Exit codes of the fallback's ref resolution. A non-zero one is the exec
+   * failing (an empty string is the exec answering nothing); both stop the
+   * chain before the fetch.
+   */
+  baseRefExitCode: number;
+  mergeBaseExitCode: number;
   /** Exit codes of the fallback's last two steps (mid-fallback failure cases). */
   fetchExitCode: number;
   localDiffExitCode: number;
@@ -416,6 +423,8 @@ export function initialFakeSandboxState(): FakeSandboxState {
     diffStderr: "gh failed",
     diffBaseRef: "main",
     mergeBaseSha: "c".repeat(40),
+    baseRefExitCode: 0,
+    mergeBaseExitCode: 0,
     fetchExitCode: 0,
     localDiffExitCode: 0,
     diffReadStdout: null,
@@ -562,9 +571,15 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
   // bounded transport as the gh capture. Commands are built from the live
   // state, so a product-shape change edits the builders, never this double.
   if (cmd === pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER)) {
+    if (state.baseRefExitCode !== 0) {
+      return { stdout: "", stderr: "gh: Not Found (HTTP 404)", exitCode: state.baseRefExitCode };
+    }
     return { stdout: `${state.diffBaseRef}\n`, stderr: "", exitCode: 0 };
   }
   if (cmd === mergeBaseCommand(TEST_OWNER, TEST_REPO, state.diffBaseRef, state.resolvedSha)) {
+    if (state.mergeBaseExitCode !== 0) {
+      return { stdout: "", stderr: "gh: Not Found (HTTP 404)", exitCode: state.mergeBaseExitCode };
+    }
     return { stdout: `${state.mergeBaseSha}\n`, stderr: "", exitCode: 0 };
   }
   if (cmd === fetchDepthOneCommand(CLONE_DIR, state.mergeBaseSha)) {
