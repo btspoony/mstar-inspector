@@ -256,7 +256,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           return scriptedCredentials(db)(input);
         },
       });
-      // The lifecycle gate WINS over the dead-attempt short-circuit.
+      // The lifecycle gate WINS over the wait.
       expect(summary.suspended).toBe(1);
       expect(summary.deferred).toBe(0);
       expect(summary.completed).toBe(0);
@@ -549,12 +549,10 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     const db = seededDb();
     const { attempt, id } = await abandonedRow(db);
     // Nothing this attempt staged exists: the only publication for the head was
-    // staged before it was admitted. The abandoned row has no link of its own,
-    // so nothing in the wait can ever answer it — the probe is terminal for the
-    // lane on the FIRST pass, and it is not repeated: no claim, no defer, and
-    // no proof re-read of the attempt's link (the D1 pair gate still leads the
-    // wait). The deadline still owns the conclusion, so the proof is never
-    // adopted.
+    // staged before it was admitted, so it cannot answer for this attempt. The
+    // abandoned row has no link of its own, so the wait is terminal for this
+    // pass — and it still takes the claim-and-give-back wait (spec §7.11.2 step
+    // 2). The deadline still owns the conclusion, so the proof is never adopted.
     const prior = { ...proofFor(attempt.identity), publicationId: "pub-only-previous-generation" };
     seedPublication(db, SCOPE, SHA, prior, "applied", reviewPayload(SCOPE, SHA, "ship it", 90));
 
@@ -569,9 +567,10 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           return scripted(input);
         },
       });
-      // Not deferred: it is not a wait this lane can make progress on. Not
-      // concluded either — `completed`/`unconfirmed` stay 0 until the deadline.
-      expect(summary.deferred).toBe(0);
+      // Deferred on the first rung: the claim is taken and given straight back.
+      // Nothing is concluded — `completed`/`unconfirmed` stay 0 until the
+      // deadline.
+      expect(summary.deferred).toBe(1);
       expect(summary.completed).toBe(0);
       expect(summary.unconfirmed).toBe(0);
     } finally {
@@ -584,10 +583,10 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(row.terminal_ms).toBeNull();
     expect(row.observed).toBe("unknown");
     expect(row.attempts).toBe(1);
-    // One unclaimed write moved the due time onto the FIRST rung — no claim, no
-    // defer, no attempt spent. The row is not concludable, but it also does not
-    // hold the head of the bounded due batch, and it is re-probed a minute
-    // later, so a journal row that lands is seen about as soon as it exists.
+    // The fenced defer gave the claim back on the FIRST rung: no attempt spent,
+    // no conclusion frozen, and the row no longer holds the head of the bounded
+    // due batch — it is re-probed a minute later, so a journal row that lands is
+    // seen about as soon as it exists.
     expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
@@ -598,11 +597,11 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     const { attempt, id } = await abandonedRow(db);
     const stub = stubFetch();
     try {
-      // First pass: no journal row yet — terminal for the wait. Only its own
-      // due time moves (one unclaimed write), so the row no longer holds the
-      // head of the due batch.
+      // First pass: no journal row yet — the wait is terminal for this pass, so
+      // the claim is taken and given straight back on the first rung. That is
+      // exactly what frees the head of the due batch for the publication below.
       const first = await run(db, { now: () => T0 + 120_000 });
-      expect(first.deferred).toBe(0);
+      expect(first.deferred).toBe(1);
       expect(first.completed).toBe(0);
 
       // The publication is staged and proves itself before that pushed due time.
@@ -833,25 +832,29 @@ function countingDb(db: TestD1): { db: TestD1; statements: () => number } {
   };
 }
 
-describe("the journal-less short-circuit (spec §7.9/§7.11.2)", () => {
-  test("an attempt with no journal row costs the probe and the pair gate, and is not deferred", async () => {
+describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
+  test("an attempt with no journal row pays the same five statements as any wait", async () => {
     const baseline = countingDb(seededDb());
     await run(baseline.db, { now: () => T0 + 120_000 });
     const selectorOnly = baseline.statements();
 
     const dead = countingDb(seededDb());
-    await handedOverAttempt(dead.db);
+    const { id } = await handedOverAttempt(dead.db);
     const before = dead.statements();
     const summary = await run(dead.db, { now: () => T0 + 120_000 });
 
-    // THREE statements for the dead attempt — the shared determination's journal
-    // probe, the D1 pair gate that LEADS the wait (spec §7.11.2 step 2), and the
-    // one unclaimed due-time write that keeps the row off the head of the due
-    // batch. The proof read, the claim and the re-leasing defer are all gone;
-    // the row stays live and still owes its deadline conclusion.
+    // FIVE statements, the SAME cost as a journal-present wait: the D1 pair gate
+    // that LEADS the wait (spec §7.11.2 step 2), the journal probe, the claim
+    // UPDATE, the claim read and the fenced defer that gives the claim straight
+    // back on the first rung. A terminal-for-this-pass shape is NOT exempt from
+    // the claim — that claim is what moves the row's due time off the head of
+    // the due batch.
     expect(summary.examined).toBe(1);
-    expect(summary.deferred).toBe(0);
-    expect(dead.statements() - before - selectorOnly).toBe(3);
+    expect(summary.deferred).toBe(1);
+    expect(dead.statements() - before - selectorOnly).toBe(5);
+    const row = await rawRow(dead.db, id);
+    expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
+    expect(row.holder).toBeNull();
   });
 
   test("a journal row re-probes the wait on the first rung instead of widening", async () => {
@@ -897,10 +900,11 @@ describe("the journal-less short-circuit (spec §7.9/§7.11.2)", () => {
     const db = seededDb();
     // CHECK_RECONCILE_LIMIT + 1 rows that can never progress, every one due
     // BEFORE the one attempt that can publish. The selector orders by
-    // `COALESCE(next_attempt_ms, created_ms), id LIMIT 25`, so a wait-terminal
-    // row left at its early due time occupies a slot on EVERY pass: the same 25
-    // are re-read each time and the publishable attempt behind them is never
-    // examined until its deadline.
+    // `COALESCE(next_attempt_ms, created_ms), id LIMIT 25`, so a row whose due
+    // time never moved would occupy a slot on EVERY pass: the same 25 would be
+    // re-read each time and the publishable attempt behind them never examined
+    // until its deadline. The wait's claim-and-give-back defer is what keeps
+    // their due times moving forward.
     const deadIds: string[] = [];
     for (let index = 0; index < CHECK_RECONCILE_LIMIT + 1; index += 1) {
       const { attempt, lease } = await claim(db, {

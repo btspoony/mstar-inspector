@@ -61,7 +61,6 @@ import {
   type CheckRemote,
   deferCheckForPendingPublication,
   deferCheckRecovery,
-  deferUnclaimedCheckRecovery,
   getCheckAttempt,
   getCheckOwnership,
   listCheckReconcileBatch,
@@ -822,32 +821,22 @@ async function reconcileCheckAttempt(
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6, §7.11.2
     // step 2): a row whose App is disabled/deleted or whose installation
     // mapping vanished must take the durable suspension path, never loop with
-    // its Check never converging. That holds for a wait-terminal row too — the
-    // gate leads the wait, so the dead-attempt short-circuit below must not
-    // skip it.
+    // its Check never converging. The gate leads the wait for EVERY row,
+    // including the wait-terminal one below.
     const unusable = await pairUnusableReason(db, scope);
     if (unusable !== null) {
       await suspendUnusablePair(db, scope, unusable, undefined, now, log, summary);
       return;
     }
-    // Terminal for the WAIT: nothing was staged for this attempt and it links
-    // no publication of its own, so no later read in this lane can change that
-    // answer. It is NOT a conclusion — only the execution deadline concludes it,
-    // naming the missing evidence `unstaged` — and it is not a defer either: no
-    // attempt is spent and no claim is taken. But it must not KEEP the head of
-    // the bounded due batch: the selector orders by `COALESCE(next_attempt_ms,
-    // created_ms)`, so a row whose due time never moves occupies a slot on every
-    // pass and starves the rows behind it. One unclaimed write moves its own due
-    // time onto the FIRST rung, exactly as spec §7.11.2 step 2 requires, so the
-    // row is re-probed about once a minute; the row stays live, so a journal row
-    // that lands later is still seen on the pass it falls due. A widened rung
-    // would delay that re-probe by minutes with no gain: this row is cheap.
-    if (waitIsTerminal(pending, proofPublicationId)) {
-      const at = now();
-      await deferUnclaimedCheckRecovery(db, attemptId, row.nextAttemptMs, at + CHECK_BACKOFF_MS[0]!, at);
-      return;
-    }
+    // The wait is one shape: this attempt owes a conclusion to a publication it
+    // has NO readable proof of. The terminal shape — nothing staged since
+    // admission and no link of its own — is part of it, so it takes the SAME
+    // claim-and-give-back path below (spec §7.11.2 step 2). `waitIsTerminal`
+    // stays a predicate: it names the deadline cause (`unstaged`) and must never
+    // skip the claim, which is what moves the row's due time off the head of
+    // the bounded due batch.
     const waiting =
+      waitIsTerminal(pending, proofPublicationId) ||
       pending.kind === "pending" ||
       pending.kind === "unknown" ||
       (await readProof(db, row.identity, proofPublicationId)).kind !== "read";
@@ -855,9 +844,8 @@ async function reconcileCheckAttempt(
       const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now());
       if (waitingLease === null) return;
       // Spec §7.11.2 step 2 pins the claim's given-back due time to the FIRST
-      // rung, exactly like the wait-terminal push above: the publication may
-      // prove itself at any moment, so a widened rung would only delay a proof
-      // that already exists.
+      // rung: the publication may prove itself at any moment, so a widened rung
+      // would only delay a proof that already exists.
       const nextAttemptMs = now() + CHECK_BACKOFF_MS[0]!;
       if (!(await deferCheckForPendingPublication(db, attemptId, waitingLease, nextAttemptMs, now()))) return;
       summary.deferred += 1;
@@ -1420,10 +1408,15 @@ type PendingPublication =
 /**
  * The wait's terminal shape, derived once and read by both ends of the lane:
  * no journal row has been staged since this attempt was admitted, and it links
- * no publication of its own. Nothing in the wait can ever answer such an
- * attempt, so probing it again cannot change the answer. It is still NOT a
- * conclusion — only the execution deadline concludes it, and
- * `deadlineCause` reports exactly this shape as `unstaged`.
+ * no publication of its own. Nothing THIS pass can read answers such an
+ * attempt, so it is not concludable — only the execution deadline concludes it,
+ * and `deadlineCause` reports exactly this shape as `unstaged`.
+ *
+ * A predicate, never a gate: the shape is not proof the wait can never
+ * progress, because a journal row that lands later lifts it. The row therefore
+ * takes the same claim-and-give-back wait as any unproven row (spec §7.11.2
+ * step 2) and is re-probed on the first rung — the claim is also what keeps a
+ * dead row off the head of the bounded due batch.
  */
 function waitIsTerminal(pending: PendingPublication, publicationId: string | null): boolean {
   return pending.kind === "none" && publicationId === null;
