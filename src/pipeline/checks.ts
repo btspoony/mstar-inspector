@@ -830,6 +830,19 @@ export const CHECK_SUMMARIES = {
     `Review execution failed before publication: ${reason}. No review was published.`,
   degradedNotPosted: "Review output was invalid and the degraded notice was not published.",
   unconfirmed: "Review attempt could not be confirmed complete; publication status is unknown.",
+  /**
+   * The deadline ended the proof wait with no publication row staged for this
+   * attempt at all. Each named cause replaces the generic unknown above with
+   * the evidence that was missing; the conclusion and the title are unchanged.
+   */
+  unconfirmedUnstaged:
+    "Review attempt could not be confirmed complete: no publication row was staged for it.",
+  /** A publication row exists for this attempt but its proof never landed. */
+  unconfirmedUnproven:
+    "Review attempt could not be confirmed complete: its publication was staged but the proof never landed.",
+  /** The proof (or the journal itself) could not be read. */
+  unconfirmedUnreadable:
+    "Review attempt could not be confirmed complete: its publication proof could not be read.",
   exhausted: "Finalization could not be confirmed. Manual inspection may be required.",
   /** Nothing to review: an eligible increment base with an empty `base...head`. */
   skipped: "No new changes since the last reviewed head; nothing to review for this head.",
@@ -872,6 +885,19 @@ export const CHECK_SUMMARIES = {
   superseded: (sha7: string) =>
     `Review attempt was superseded by a newer commit; no review was published for ${sha7}.`,
 } as const;
+
+/**
+ * Why no proof was readable when the deadline ended the proof wait. Only the
+ * Check reconciliation lane's deadline path supplies one; every other
+ * unconfirmed call keeps the generic `unconfirmed` wording.
+ */
+export type UnconfirmedCause = "unstaged" | "unproven" | "unreadable";
+
+const UNCONFIRMED_BY_CAUSE: Record<UnconfirmedCause, string> = {
+  unstaged: CHECK_SUMMARIES.unconfirmedUnstaged,
+  unproven: CHECK_SUMMARIES.unconfirmedUnproven,
+  unreadable: CHECK_SUMMARIES.unconfirmedUnreadable,
+};
 
 /** The allowed-verdict list for a public summary — bounded even if a stored gate were malformed. */
 function verdictsText(gate: ReviewGate): string {
@@ -945,6 +971,13 @@ export function decideConclusion(input: {
    * reviewed: with no proof there is no other honest source for it.
    */
   headSha?: string;
+  /**
+   * Why no proof was readable, supplied only by the reconciler's deadline
+   * path. The deadline fallthrough then names the missing evidence instead of
+   * the generic unknown; absent (the consumer's unknown send) keeps the
+   * generic wording.
+   */
+  unconfirmedCause?: UnconfirmedCause;
   reason?: string;
 }): CheckConclusion {
   const { proof, outcome, gate, review, inherited } = input;
@@ -1060,8 +1093,17 @@ export function decideConclusion(input: {
   if (outcome === "degraded-not-posted") {
     return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degradedNotPosted };
   }
-  // publication-unknown and expired-without-proof are both unconfirmed.
-  return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed };
+  // publication-unknown and expired-without-proof are both unconfirmed. The
+  // deadline path names which proof it could not read; without that
+  // attribution (the consumer's unknown send) the generic wording stays.
+  return {
+    desired: "failure",
+    title: CHECK_NAME,
+    summary:
+      input.unconfirmedCause === undefined
+        ? CHECK_SUMMARIES.unconfirmed
+        : UNCONFIRMED_BY_CAUSE[input.unconfirmedCause],
+  };
 }
 
 /** Bounded, redacted summary fragment (spec §7.9: summary ≤2000 chars). */

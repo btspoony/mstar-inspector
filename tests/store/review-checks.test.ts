@@ -54,6 +54,7 @@ import {
   externalIdFor,
   getCheckAttempt,
   getCheckOwnership,
+  linkCheckPublication,
   listCheckReconcileBatch,
   markCheckLocalError,
   type PublicationProof as _UnusedProof,
@@ -102,6 +103,21 @@ function seededDb(): TestD1 {
   seedApp(db, APP_ID, APP_NUMERIC_ID);
   seedApp(db, OTHER_APP_ID, OTHER_NUMERIC_APP_ID);
   return db;
+}
+
+/**
+ * Seed the journal row a publication link targets: `review_checks.publication_id`
+ * carries an FK to `review_publications`, so a link can only name a real row.
+ */
+function seedPublicationRow(db: TestD1, id: string): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_publications
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+          payload_json, created_ms, updated_ms)
+       VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', ?, ?)`,
+    )
+    .run(id, APP_ID, SHA, T0, T0);
 }
 
 type ClaimInput = Parameters<typeof claimAttempt>[1];
@@ -584,6 +600,43 @@ describe("fenced mutations (spec §7.9)", () => {
     // it was released for may already be persisted — not merely at the deadline.
     expect(await listCheckReconcileBatch(db, T0 + CHECK_BACKOFF_MS[0]!)).toHaveLength(1);
     expect(await listCheckReconcileBatch(db, T0 + CHECK_BACKOFF_MS[0]! - 1)).toEqual([]);
+  });
+
+  test("linkCheckPublication writes ONLY the publication link under the live fence", async () => {
+    const db = seededDb();
+    seedPublicationRow(db, "publication-a");
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const before = await rawRow(db, id);
+
+    expect(await linkCheckPublication(db, id, lease, "publication-a", T0)).toBe(true);
+
+    // Link-only: the intent, the lease and every other durable field stay
+    // exactly as the claim left them, so the attempt is still this
+    // invocation's to release and nothing is concluded.
+    expect(await rawRow(db, id)).toEqual({ ...before, publication_id: "publication-a" });
+  });
+
+  test("linkCheckPublication refuses a foreign, stale or expired lease and a terminal row", async () => {
+    const db = seededDb();
+    seedPublicationRow(db, "publication-a");
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+
+    expect(await linkCheckPublication(db, id, { ...lease, holder: "intruder" }, "publication-a", T0)).toBe(false);
+    expect(await linkCheckPublication(db, id, { ...lease, epoch: lease.epoch + 1 }, "publication-a", T0)).toBe(false);
+    expect(await linkCheckPublication(db, id, { ...lease, untilMs: lease.untilMs + 1 }, "publication-a", T0)).toBe(false);
+    // An expired lease writes nothing even though nobody has reclaimed it.
+    expect(await linkCheckPublication(db, id, lease, "publication-a", lease.untilMs)).toBe(false);
+    expect((await rawRow(db, id)).publication_id).toBeNull();
+
+    // Terminal history is never rewritten (runFenced's NONTERMINAL_WHERE).
+    await attachRun(db, id, lease);
+    await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect((await rawRow(db, id)).terminal_ms).not.toBeNull();
+    expect(await linkCheckPublication(db, id, lease, "publication-a", T0)).toBe(false);
+    expect((await rawRow(db, id)).publication_id).toBeNull();
   });
 
   test("setCheckDesired freezes the intent, keeps the row nonterminal and bounds the summary", async () => {

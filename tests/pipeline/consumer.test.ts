@@ -45,6 +45,7 @@ import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore } from "../../src/store/failure-store";
 import { acquireInflight } from "../../src/store/inflight-store";
+import { claimPublication, recordPublicationProof } from "../../src/store/finding-lifecycle";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
 import { createTestD1, type TestD1 } from "../store/helpers";
@@ -356,15 +357,25 @@ function handoffFaultStore(db: TestD1, failAt: 1 | 2) {
 }
 
 /** Seed a publication-journal row for the delivered head (the hand-off probe). */
-function seedJournalRow(db: TestD1, headSha: string, phase = "prepared"): void {
+function seedJournalRow(db: TestD1, headSha: string, phase = "prepared", payloadJson = "{}"): void {
   db.raw
     .prepare(
       `INSERT INTO review_publications
          (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, created_ms, updated_ms)
-       VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', ?, '{}', 1000, 1000)`,
+       VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', ?, ?, 1000, 1000)`,
     )
-    .run(`journal-${phase}`, TEST_APP_ID, headSha, phase);
+    .run(`journal-${phase}`, TEST_APP_ID, headSha, phase, payloadJson);
+}
+
+/** Seed the App/installation mapping the reconciler's D1 pair gate reads. */
+function seedAppInstallation(db: TestD1): void {
+  db.raw
+    .prepare(
+      `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+       VALUES (?, ?, 123, 'acme', datetime('now'))`,
+    )
+    .run(`inst-${TEST_APP_ID}-123`, TEST_APP_ID);
 }
 
 /** Seed one `review_runtime_settings` row (the operator configuration surface). */
@@ -6527,7 +6538,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
   });
 
-  test("check lifecycle: a publication-journal hit releases the admitted claim without concluding", async () => {
+  test("check lifecycle: a publication journal handoff links its publication and releases the admitted claim without concluding", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -6546,14 +6557,20 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // full execution window and then close red on a reviewed commit.
     expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
     const row = checkRowFor(db, SHA);
+    // The hand-off LINKED the journal row it found: the proof that publication
+    // will carry is this attempt's to conclude from, so nothing is frozen here
+    // (no intent, no title/summary, no remote request).
+    expect(row.publication_id).toBe("journal-prepared");
+    expect(row.desired).toBe("in_progress");
+    expect(row.desired_title).toBeNull();
+    expect(row.desired_summary).toBeNull();
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).not.toBeNull();
     expect(row.next_attempt_ms!).toBeLessThan(row.execution_deadline_ms);
     expect(row.terminal_ms).toBeNull();
-    expect(row.desired).toBe("failure");
-    expect(row.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
 
     // The review ACK is unchanged: no post, no review row, message acked.
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
@@ -6561,6 +6578,115 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // `ok` is the implicit ack: the handler resolves without scheduling a retry.
     expect(messageRetryCalls).toHaveLength(0);
     expect(logLines.some((line) => line.msg.includes("publication journal hit"))).toBe(true);
+  });
+
+  test("check lifecycle: a linked journal handoff concludes from the proof its publication persists", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The journal row the delivery finds already carries the envelope that
+    // applies on it (one row per scope/head/kind, reused across generations).
+    seedJournalRow(db, SHA, "prepared", JSON.stringify({ artifact: { payload: GATED_OUTPUT } }));
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    const linked = checkRowFor(db, SHA);
+    expect(linked.publication_id).toBe("journal-prepared");
+    expect(linked.terminal_ms).toBeNull();
+
+    // The publication this attempt was LINKED to goes on to persist its proof.
+    const journalLease = await claimPublication(db, "journal-prepared", "publisher", linked.next_attempt_ms!);
+    expect(journalLease).not.toBeNull();
+    expect(
+      await recordPublicationProof(db, "journal-prepared", journalLease!, {
+        publicationId: "journal-prepared",
+        scope: CHECK_SCOPE,
+        headSha: SHA,
+        kind: "review",
+        round: 1,
+        commentId: 7,
+        bodySha256: "b".repeat(64),
+        confirmedMs: linked.next_attempt_ms!,
+      }),
+    ).toBe(true);
+
+    // The reconciler's D1 pair gate reads the App/installation mapping the
+    // production route always carries; this suite seeds the App only.
+    seedAppInstallation(db);
+    const dueAt = linked.next_attempt_ms!;
+    const summary = await reconcileReviewChecks({ DB: db as never } as never, {
+      now: () => dueAt,
+      credentials: async () => ({ kind: "ok" as const, paused: false, adapter: checksAdapterFor(db, () => dueAt) }),
+      log: { warn: () => {}, info: () => {} },
+    });
+
+    // The remote run the hand-off never closed is closed by the PROOF, not by
+    // a deadline: gate-derived success on the published verdict.
+    expect(summary.examined).toBe(1);
+    expect(summary.completed).toBe(1);
+    expect(summary.deferred).toBe(0);
+    const update = checkRequests.filter((r) => r.op === "update").at(-1);
+    expect(update).toBeDefined();
+    expect(update!.params.conclusion).toBe("success");
+    expect(String(update!.params.summary)).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
+    const settled = checkRowFor(db, SHA);
+    expect(settled.desired).toBe("success");
+    expect(settled.observed).toBe("success");
+    expect(settled.terminal_ms).not.toBeNull();
+    expect(settled.publication_id).toBe("journal-prepared");
+  });
+
+  test("check lifecycle: an unproven journal handoff defers, and the deadline closes it as failure", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    seedJournalRow(db, SHA, "prepared");
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+    seedAppInstallation(db);
+    const linked = checkRowFor(db, SHA);
+    expect(linked.publication_id).toBe("journal-prepared");
+    const requestsAfterDelivery = checkRequests.length;
+
+    // Due at its released time, inside the execution window: the proof has not
+    // landed, so the claim is given straight back — no attempt, no request.
+    const dueAt = linked.next_attempt_ms!;
+    const first = await reconcileReviewChecks({ DB: db as never } as never, {
+      now: () => dueAt,
+      credentials: async () => ({ kind: "ok" as const, paused: false, adapter: checksAdapterFor(db, () => dueAt) }),
+      log: { warn: () => {}, info: () => {} },
+    });
+    expect(first.deferred).toBe(1);
+    expect(first.completed).toBe(0);
+    const waiting = checkRowFor(db, SHA);
+    expect(waiting.terminal_ms).toBeNull();
+    expect(waiting.attempts).toBe(1);
+    expect(checkRequests).toHaveLength(requestsAfterDelivery);
+
+    // Past the execution deadline the wait ends: the proof never landed, and
+    // the run closes as a failure instead of waiting forever.
+    const late = waiting.execution_deadline_ms + 1;
+    const second = await reconcileReviewChecks({ DB: db as never } as never, {
+      now: () => late,
+      credentials: async () => ({ kind: "ok" as const, paused: false, adapter: checksAdapterFor(db, () => late) }),
+      log: { warn: () => {}, info: () => {} },
+    });
+    expect(second.completed).toBe(1);
+    expect(checkRequests.filter((r) => r.op === "update").at(-1)!.params.conclusion).toBe("failure");
+    const closed = checkRowFor(db, SHA);
+    expect(closed.desired).toBe("failure");
+    expect(closed.terminal_ms).not.toBeNull();
+    expect(closed.publication_id).toBe("journal-prepared");
   });
 
   test("check lifecycle: abandonTerminalize releases once, and writes nothing after recovery claims the attempt", async () => {

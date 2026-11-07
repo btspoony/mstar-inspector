@@ -51,6 +51,7 @@ import {
   type CheckAttempt,
   type CheckConclusion,
 } from "../../src/store/review-checks";
+import { claimPublication } from "../../src/store/finding-lifecycle";
 import {
   CHECK_RECONCILE_MAX_REQUESTS,
   CHECK_RECONCILE_PER_REQUEST_MS,
@@ -63,7 +64,7 @@ import {
   type CheckReconcileSummary,
   type CheckTransport,
 } from "../../src/worker/check-reconcile";
-import { CheckRequestNotDispatched, isRequestNotDispatched, createCheckBeginLatch, createCheckLifecycle, type ChecksAdapter } from "../../src/pipeline/checks";
+import { CHECK_SUMMARIES, CheckRequestNotDispatched, isRequestNotDispatched, createCheckBeginLatch, createCheckLifecycle, type ChecksAdapter } from "../../src/pipeline/checks";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { defaultReconcileLog } from "../../src/worker/lifecycle-reconcile";
 import { defaultSweepLog } from "../../src/worker/sweep";
@@ -352,7 +353,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.observed).toBe("failure");
   });
 
-  test("an expired attempt with NO proof concludes an honest unconfirmed failure", async () => {
+  test("an expired attempt with NO journal row names an unstaged publication", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     const fetchStub = stubFetch();
@@ -365,9 +366,9 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("failure");
-            expect(conclusion.summary).toBe(
-              "Review attempt could not be confirmed complete; publication status is unknown.",
-            );
+            // No publication row was ever staged for this attempt: the frozen
+            // text names that cause instead of asserting a generic unknown.
+            expect(conclusion.summary).toBe(CHECK_SUMMARIES.unconfirmedUnstaged);
             return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
           },
         }),
@@ -3019,6 +3020,150 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.observed).toBe("failure");
   });
 
+  test("a re-trigger publishing on a pre-existing journal row concludes success from its last write", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    // The head's publication row predates this attempt: an earlier generation
+    // inserted it, so its `created_ms` is BEFORE admission. The proof lands
+    // afterwards — the row's LAST WRITE is what attributes it, and only that
+    // write makes its proof the one this Check may conclude from.
+    const proof = proofFor(attempt.identity);
+    seedPublication(
+      db,
+      SCOPE,
+      SHA,
+      proof,
+      "applied",
+      reviewPayload(SCOPE, SHA, "ship it", 85),
+      // Created before admission; the helper's own write stamp lands 10s later.
+      T0 - 5_000,
+    );
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    let deferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    // The wait ENDED on the post-admission write: the applied proof decided a
+    // gate-derived success instead of waiting out the deadline.
+    expect(deferred).toBe(0);
+    expect(sent.desired).toBe("success");
+    expect(sent.summary).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("success");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("a re-trigger whose journal row was never written after admission stays unconfirmed at the deadline", async () => {
+    const db = seededDb();
+    const { attempt, id } = await abandonedAttempt(db);
+    // The same pre-existing applied proof, but EVERY stamp predates admission.
+    // The row was never written after this attempt was admitted, so it proves
+    // nothing about it — attribution is the last write, never a head match.
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "applied", reviewPayload(SCOPE, SHA, "ship it", 85));
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    let deferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => FUTURE_DEADLINE + 60_000, // past the attempt's own deadline
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    // No attribution: the unwritten row ended no wait, so the deadline path
+    // names the missing evidence (nothing was staged for this attempt) and
+    // never adopts that proof.
+    expect(deferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnstaged);
+    const row = await rawRow(db, id);
+    expect(row.publication_id).toBeNull();
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("a re-trigger whose pre-existing journal row is claimed mid-wait never concludes from it", async () => {
+    const db = seededDb();
+    const { id } = await abandonedAttempt(db);
+    // Counterexample (b): this head's journal row was INSERTED before the
+    // attempt was admitted, and an earlier generation CLAIMED it afterwards —
+    // the claim stamps `updated_ms` and moves `prepared` to `sending`
+    // (`claimPublication`). No proof is ever recorded. The post-admission write
+    // admits the row to the probe, but a proofless row can only answer
+    // `pending`: it must defer, never conclude.
+    const journalId = seedJournal(db, SCOPE, SHA, "prepared", T0 - 5_000);
+    expect(await claimPublication(db, journalId, "earlier-generation", T0 + 5_000)).not.toBeNull();
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      // Inside the deadline nothing is concludable: deferred, not completed.
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    // No attempt spent and no credential minted: the earlier generation's
+    // claim-only write attributed no conclusion to this attempt.
+    expect(factoryCalls).toBe(0);
+    const waitingRow = await rawRow(db, id);
+    expect(waitingRow.publication_id).toBeNull();
+    expect(waitingRow.terminal_ms).toBeNull();
+    expect(waitingRow.attempts).toBe(1);
+    expect(waitingRow.desired).toBe("in_progress");
+    expect(waitingRow.observed).toBe("unknown");
+
+    // At the attempt's own deadline the wait ends unconfirmed: a `sending` row
+    // with no proof never becomes a success, and the row is never adopted.
+    const sent: { desired?: string; summary?: string } = {};
+    const deadlineStub = stubFetch();
+    let deadlineDeferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => FUTURE_DEADLINE + 60_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deadlineDeferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      deadlineStub.restore();
+    }
+
+    expect(deadlineDeferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    // A staged row exists (it was claimed after admission) but no proof ever
+    // landed on it: the deadline names that cause, never a proof-less success.
+    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnproven);
+    const row = await rawRow(db, id);
+    expect(row.publication_id).toBeNull();
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
   test("a parse-stage failure row is NOT terminal: the degraded publication still decides", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
@@ -3146,6 +3291,124 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(sent.desired).toBe("failure");
     expect(sent.summary).toBe(UNCONFIRMED);
     const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The deadline conclusion names the proof it could not read (spec §7.9)
+// ---------------------------------------------------------------------------
+
+describe("the deadline conclusion names the missing proof", () => {
+  test("(b) a staged journal row without proof names the proof that never landed", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    // The hand-off shape: this attempt linked the row it was handed off to,
+    // and the deadline arrived before that row recorded its proof.
+    const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 1_000);
+    linkPublication(db, attempt.identity.attemptId, journalId);
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnproven);
+  });
+
+  test("(c) a staged journal row whose proof read fails names the unreadable proof", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 1_000);
+    linkPublication(db, attempt.identity.attemptId, journalId);
+    // The row exists, but every proof read on the journal fails: the deadline
+    // must say the proof could not be read, never that nothing was staged.
+    const unreadable = withFailingReads(db, /SELECT proof_json FROM review_publications/);
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    try {
+      const summary = await run(unreadable, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
+  });
+
+  test("(d) an unlinked attempt's staged row with malformed proof bytes defers, then names it unreadable", async () => {
+    const db = seededDb();
+    const { id } = await abandonedAttempt(db);
+    // The attributed shape the probe admits — the row's last write lands after
+    // admission — with proof bytes that are NOT JSON: present, but undecodable.
+    // The attempt has no `publication_id` link of its own.
+    const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 1_000);
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run('{"publicationId":', journalId);
+
+    const stub = stubFetch();
+    let factoryCalls = 0;
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 120_000,
+        credentials: async (input) => {
+          factoryCalls += 1;
+          return scriptedCredentials(db)(input);
+        },
+      });
+      // Before the deadline a corrupt envelope is still "not readable yet":
+      // the wait continues and nothing is frozen.
+      expect(summary.deferred).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      stub.restore();
+    }
+
+    expect(factoryCalls).toBe(0);
+    const waitingRow = await rawRow(db, id);
+    expect(waitingRow.publication_id).toBeNull();
+    expect(waitingRow.terminal_ms).toBeNull();
+    expect(waitingRow.attempts).toBe(1);
+    expect(waitingRow.desired).toBe("in_progress");
+    expect(waitingRow.observed).toBe("unknown");
+
+    // Past the attempt's own deadline the proof bytes exist but cannot be
+    // read: the deadline names THAT cause, never "the proof never landed" and
+    // never a proof-less success.
+    const sent: { desired?: string; summary?: string } = {};
+    const deadlineStub = stubFetch();
+    let deadlineDeferred = -1;
+    try {
+      const summary = await run(db, {
+        now: () => FUTURE_DEADLINE + 60_000,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      deadlineDeferred = summary.deferred;
+      expect(summary.completed).toBe(1);
+    } finally {
+      deadlineStub.restore();
+    }
+
+    expect(deadlineDeferred).toBe(0);
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
+    const row = await rawRow(db, id);
+    expect(row.publication_id).toBeNull();
     expect(row.observed).toBe("failure");
     expect(row.terminal_ms).not.toBeNull();
   });
