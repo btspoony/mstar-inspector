@@ -338,6 +338,31 @@ export const INLINE_RESOLVE_ENTRY_MS = 6_000;
 /** The named causes of a failed PR-context capture (`ConsumerLogFields.report_context`). */
 export type ReportContextFailure = "pr-view" | "pr-view-json" | "issue-view" | "issue-view-json" | "budget";
 
+/**
+ * Why the oversized-diff fallback produced no capture
+ * (`ConsumerLogFields.diff_fallback`). Each name is a distinct operational
+ * fact: an admission decline is not a step failure, and a hostile ref refused
+ * by a builder guard is not a sandbox transport fault.
+ */
+export type DiffCaptureDeclineReason =
+  | "budget"
+  | "step-timeout"
+  | "base-ref-empty"
+  | "merge-base-empty"
+  | "fetch-exit"
+  | "local-diff-exit"
+  | "guard-rejected"
+  | "transport";
+
+/** Where the fallback stopped, and the exec result the step ended with. */
+type DiffCaptureDecline = {
+  reason: DiffCaptureDeclineReason;
+  /** The step that ended the attempt — `admission` when nothing ran. */
+  step: string;
+  /** The step's exec result; absent when no exec ran (budget / timeout / guard). */
+  run?: { stdout: string; stderr: string; exitCode: number };
+};
+
 /** Structured log fields: seven event fields + sandbox id + idempotency key
  * + the d5-budget visibility quartet (level / runner_timeout_ms /
  * elapsed_ms / orchestration — spec d5-budget L5: they ride THIS channel;
@@ -540,6 +565,17 @@ export type ConsumerLogFields = {
    * bounded-read path, so `diff_capture` keeps its failure-only meaning.
    */
   diff_source?: "oversized-local";
+  /**
+   * Set on the fallback's ONE decline warn: why the oversized-diff capture
+   * produced nothing, and the step it stopped at. `budget` / `step-timeout`
+   * declined before that step's exec ran, `guard-rejected` is a hostile
+   * ref/sha refused before it reached a shell string, `transport` is a
+   * sandbox fault, and the rest name the step that exited non-zero or
+   * answered empty. The message carries that step's exit code and redacted
+   * stderr tail; the round's durable failure keeps the ORIGINAL 406.
+   */
+  diff_fallback?: DiffCaptureDeclineReason;
+  diff_fallback_step?: string;
   /**
    * Increment-round diagnostics: the compare verdict (`ahead` is the only one
    * that starts an increment round) when the round reviewed the full diff, and
@@ -3207,14 +3243,16 @@ function runnerFailureDetail(
  * A git stage's failure detail (diff / increment diff / numstat). stderr is the
  * ONLY diagnosis a non-zero exit carries — an oversized diff fails `gh pr diff`
  * with HTTP 406 on stderr and 0B of stdout — so a redacted tail rides the
- * message that reaches the durable review_failures row. Redaction runs BEFORE
- * the tail cut, so a secret straddling the cap cannot survive as a fragment.
+ * message that reaches the durable review_failures row. `stdout` is measured in
+ * UTF-8 BYTES (a diff carries non-ASCII), and redaction runs BEFORE the tail
+ * cut, so a secret straddling the cap cannot survive as a fragment.
  */
 function gitStageFailureDetail(
   stage: string,
   run: { stdout: string; stderr: string; exitCode: number },
 ): string {
-  const base = `${stage} failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`;
+  const base = `${stage} failed: exit ${run.exitCode}, stdout ${new TextEncoder().encode(run.stdout).length}B`;
+  // Redaction BEFORE the cut: a secret sliced in half would survive it.
   const tail = redactSecrets(run.stderr).trim().slice(-STDERR_TAIL_MAX);
   return tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
 }
@@ -3238,11 +3276,12 @@ function gitStageFailureDetail(
  * failure row instead of being killed mid-fallback. `deep` fits: its 840s table
  * budget is capped by the derived deadline, not reserved in full.
  *
- * null means the fallback produced no capture — no runner budget left, a spent
- * diff window, an empty/unparseable ref or sha, a non-zero exit, or a rejected
- * exec. The caller rethrows the ORIGINAL diff failure: a fault here must never
- * replace the cause that was diagnosed, and a partial capture is never
- * published.
+ * Every decline names itself and the step it stopped at. The caller turns that
+ * into ONE structured warn (reason, step, that step's exit code and redacted
+ * stderr tail) plus a suffix on the rethrown ORIGINAL 406 — so "not attempted
+ * (budget)", "failed at fetch" and "hostile ref rejected" never collapse into
+ * the same silent nothing. A capture is still never partial, and the fallback's
+ * own fault still never replaces the cause that was diagnosed.
  */
 async function oversizedDiffCapture(
   sandbox: ReviewSandbox,
@@ -3251,48 +3290,60 @@ async function oversizedDiffCapture(
   headSha: string,
   runnerDeadlineMs: number,
   diffCaptureDeadlineMs: number,
-): Promise<{ stdout: string; stderr: string; exitCode: number } | null> {
-  if (runnerDeadlineMs - Date.now() <= EXEC_TIMEOUT_GIT_MS) return null;
+): Promise<{ run: { stdout: string; stderr: string; exitCode: number } } | DiffCaptureDecline> {
+  if (runnerDeadlineMs - Date.now() <= EXEC_TIMEOUT_GIT_MS) {
+    return { reason: "budget", step: "admission" };
+  }
   // What is left of the shared diff window, capped per step; null once spent.
   const stepTimeout = (): number | null => {
     const left = Math.min(PR_CONTEXT_EXEC_TIMEOUT_MS, diffCaptureDeadlineMs - Date.now());
     return left > 0 ? left : null;
   };
+  /** A guard refuses a hostile ref/sha BEFORE any exec — no shell string, no transport. */
+  const buildCommand = (step: string, make: () => ShellCommand): ShellCommand | DiffCaptureDecline => {
+    try {
+      return make();
+    } catch {
+      return { reason: "guard-rejected", step };
+    }
+  };
+  let step = "base ref";
   try {
-    const baseTimeout = stepTimeout();
-    if (baseTimeout === null) return null;
-    const base = await sandbox.runCommand(
-      pullRequestBaseRefCommand(target.owner, target.repo, target.prNumber),
-      { env: { GH_TOKEN: token }, timeout: baseTimeout },
-    );
+    let left = stepTimeout();
+    if (left === null) return { reason: "step-timeout", step };
+    const baseCmd = buildCommand(step, () => pullRequestBaseRefCommand(target.owner, target.repo, target.prNumber));
+    if (typeof baseCmd !== "string") return baseCmd;
+    const base = await sandbox.runCommand(baseCmd, { env: { GH_TOKEN: token }, timeout: left });
     const baseRef = base.stdout.trim();
-    if (base.exitCode !== 0 || baseRef === "") return null;
-    const mergeTimeout = stepTimeout();
-    if (mergeTimeout === null) return null;
-    const merge = await sandbox.runCommand(
-      mergeBaseCommand(target.owner, target.repo, baseRef, headSha),
-      { env: { GH_TOKEN: token }, timeout: mergeTimeout },
-    );
+    if (base.exitCode !== 0 || baseRef === "") return { reason: "base-ref-empty", step, run: base };
+
+    step = "merge base";
+    left = stepTimeout();
+    if (left === null) return { reason: "step-timeout", step };
+    const mergeCmd = buildCommand(step, () => mergeBaseCommand(target.owner, target.repo, baseRef, headSha));
+    if (typeof mergeCmd !== "string") return mergeCmd;
+    const merge = await sandbox.runCommand(mergeCmd, { env: { GH_TOKEN: token }, timeout: left });
     const mergeBaseSha = merge.stdout.trim();
-    if (merge.exitCode !== 0 || mergeBaseSha === "") return null;
-    const fetchTimeout = stepTimeout();
-    if (fetchTimeout === null) return null;
-    const fetched = await sandbox.runCommand(fetchDepthOneCommand(CLONE_DIR, mergeBaseSha), {
-      env: gitTransportEnv(token),
-      timeout: fetchTimeout,
-    });
-    if (fetched.exitCode !== 0) return null;
-    const diffTimeout = stepTimeout();
-    if (diffTimeout === null) return null;
-    const local = await sandbox.runCommand(
-      localDiffCommand(CLONE_DIR, mergeBaseSha, headSha, DIFF_PATH),
-      { timeout: diffTimeout },
-    );
-    return local.exitCode === 0 ? local : null;
+    if (merge.exitCode !== 0 || mergeBaseSha === "") return { reason: "merge-base-empty", step, run: merge };
+
+    step = "fetch";
+    left = stepTimeout();
+    if (left === null) return { reason: "step-timeout", step };
+    const fetchCmd = buildCommand(step, () => fetchDepthOneCommand(CLONE_DIR, mergeBaseSha));
+    if (typeof fetchCmd !== "string") return fetchCmd;
+    const fetched = await sandbox.runCommand(fetchCmd, { env: gitTransportEnv(token), timeout: left });
+    if (fetched.exitCode !== 0) return { reason: "fetch-exit", step, run: fetched };
+
+    step = "local diff";
+    left = stepTimeout();
+    if (left === null) return { reason: "step-timeout", step };
+    const diffCmd = buildCommand(step, () => localDiffCommand(CLONE_DIR, mergeBaseSha, headSha, DIFF_PATH));
+    if (typeof diffCmd !== "string") return diffCmd;
+    const local = await sandbox.runCommand(diffCmd, { timeout: left });
+    return local.exitCode === 0 ? { run: local } : { reason: "local-diff-exit", step, run: local };
   } catch {
-    // A builder's guard rejecting a hostile ref/sha, or a sandbox transport
-    // fault, leaves the original diff failure as the round's cause.
-    return null;
+    // A sandbox transport fault leaves the original diff failure as the cause.
+    return { reason: "transport", step };
   }
 }
 
@@ -4498,7 +4549,7 @@ async function processMessage(
       // network failure keeps today's rethrow (a fallback would mask the cause).
       // The fallback shares this round's clock and the diff stage's window, and
       // declines when either the derived runner deadline or that window is spent.
-      const local = isDiffTooLarge(diff.stderr)
+      const captured = isDiffTooLarge(diff.stderr)
         ? await oversizedDiffCapture(
             sandbox,
             token,
@@ -4508,10 +4559,25 @@ async function processMessage(
             diffCaptureDeadlineMs,
           )
         : null;
-      if (local === null) {
+      if (captured === null) {
         throw new Error(gitStageFailureDetail("diff", diff));
       }
-      diffStdout = local.stdout;
+      if ("reason" in captured) {
+        // ONE warn per attempt, and never silence: the step that ended it, that
+        // step's exit code and a redacted stderr tail (redaction BEFORE the tail
+        // cut, exactly as the stage detail does). The durable failure keeps the
+        // ORIGINAL 406 and gains the reason, so "not attempted (budget)",
+        // "failed at fetch" and "hostile ref rejected" stay distinguishable.
+        const tail = captured.run === undefined ? "" : redactSecrets(captured.run.stderr).trim().slice(-STDERR_TAIL_MAX);
+        deps.log.warn(
+          { ...fields, diff_fallback: captured.reason, diff_fallback_step: captured.step },
+          `oversized diff fallback declined: ${captured.step} (${captured.reason})` +
+            (captured.run === undefined ? ", no exec ran" : `, exit ${captured.run.exitCode}`) +
+            (tail === "" ? ", stderr empty" : `, stderr tail: ${tail}`),
+        );
+        throw new Error(`${gitStageFailureDetail("diff", diff)}; oversized fallback: ${captured.reason} at ${captured.step}`);
+      }
+      diffStdout = captured.run.stdout;
       deps.log.info(
         { ...fields, diff_source: "oversized-local" },
         "oversized PR diff (github 406) — captured the merge-base..head diff from the clone",

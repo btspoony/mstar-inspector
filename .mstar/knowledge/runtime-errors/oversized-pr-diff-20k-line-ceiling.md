@@ -48,7 +48,7 @@ A 65,033-addition / 808-deletion PR over 113 files and 155 commits cannot be rev
 
 Two changes: the git stage reports its cause, and an oversized diff is captured from the clone instead of the API.
 
-**Diagnostics** — the `diff`, `increment diff` and `numstat` failures in `src/pipeline/consumer.ts` go through one formatter that appends the redacted 600-char stderr tail: `<stage> failed: exit N, stdout <n>B, stderr tail: <tail>` (`stderr empty` when there is none).
+**Diagnostics** — the `diff`, `increment diff` and `numstat` failures in `src/pipeline/consumer.ts` go through one formatter that appends the redacted 600-char stderr tail: `<stage> failed: exit N, stdout <n>B, stderr tail: <tail>` (`n` is the UTF-8 byte count of stdout; `stderr empty` when there is none).
 
 **Fallback** — `oversizedDiffCapture` in `src/pipeline/consumer.ts`, with builders in `src/pipeline/gitops.ts`:
 
@@ -69,7 +69,7 @@ git -C '<cloneDir>' diff '<mergeBaseSha>' '<headSha>' > '<diffPath>' && <same bo
 - **One clock**: `diffCaptureDeadlineMs` (`EXEC_TIMEOUT_GIT_MS`, 120 s) is created once for the diff stage and every one of the four fallback execs draws its timeout from what remains of it, each step capped at `PR_CONTEXT_EXEC_TIMEOUT_MS` (30 s). A refused `gh pr diff` plus a complete fallback therefore bills one 120 s ledger window, never two.
 - **One derived deadline for everything after the diff**: the runner's exec timeout, `numstat`, the runner-input write, the PR-context reads and the increment capture all draw from `runnerDeadlineMs = roundDeadline − postRunnerReserveMs(live terminalize budget)` — 666 s at the defaults — and a step that would start past it declines with an explicit `round budget spent: <step> declined` failure instead of running on a fresh window, so a legal sequence cannot cross the 900 s cap.
 - **Round gate**: the fallback is declined unless that derived deadline still leaves one `EXEC_TIMEOUT_GIT_MS` (120 s) capture window. `deep` reaches the fallback (666 s > 120 s) because its 840 s runner table is a ceiling, not a reservation; a round that already spent more than ~546 s declines and keeps the fast 406 failure row.
-- **Fail-closed**: any empty ref or sha, non-zero exit, spent window, or rejected builder guard returns `null` and the caller rethrows the ORIGINAL diff failure. A partial capture is never published, and a hostile ref or sha is rejected by `assertBranchRef` / `assertSha` before it reaches a shell string.
+- **Fail-closed, never silent**: every decline returns a reason and the step it stopped at — `budget`, `step-timeout`, `base-ref-empty`, `merge-base-empty`, `fetch-exit`, `local-diff-exit`, `guard-rejected` or `transport`. The caller emits ONE structured warn (`diff_fallback`, `diff_fallback_step`, plus that step's exit code and its redacted 600-char stderr tail) and rethrows the ORIGINAL diff failure with `; oversized fallback: <reason> at <step>` appended, so `review_failures.error` tells "not attempted (budget)" from "failed at fetch" from "a hostile ref rejected". A partial capture is never published, and a hostile ref or sha is rejected by `assertBranchRef` / `assertSha` before it reaches a shell string.
 
 ## Why This Works
 
