@@ -29,4 +29,4 @@ The second one is the dangerous half: with more wait-terminal rows than the batc
 
 ## Evidence trail
 
-The ordering fix shipped together with a reverted unclaimed write and a reverted widening ladder; the batch-starvation regression and the disabled-App suspension regression both live in `tests/worker/check-reconcile-journal.test.ts`, where the wait cost is pinned at five own statements per pass.
+The baseline already ran the pair gate before the journal probe and the wait. What shipped is a regression test that locks that order: a wait-terminal row on a disabled App still suspends the pair. Two proposed shortcuts were reverted — an unclaimed due-time write and an elapsed-indexed widening ladder — and the batch-starvation and disabled-App suspension regressions now live in `tests/worker/check-reconcile-journal.test.ts`, where the wait cost is pinned at five own statements per pass.
