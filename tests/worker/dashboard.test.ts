@@ -1921,7 +1921,9 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
   /**
    * A commit env whose workspace floor read answers `cause` instead of the
    * stored column — the two degradations a real row cannot produce here
-   * (`read-failed` throws; `malformed` returns a row without the field).
+   * (`read-failed` throws a missing non-floor column, as a pre-`0049` database
+   * that also lacks `deleted_at` does; `malformed` returns a row without the
+   * field).
    */
   function degradedFloorEnv(cause: "read-failed" | "malformed"): Env {
     const env = commitEnv();
@@ -1932,7 +1934,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
         ...db,
         prepare(query: string): DashboardD1Statement {
           if (!query.includes("check_min_score AS value")) return db.prepare(query);
-          if (cause === "read-failed") throw new Error("D1 unavailable");
+          if (cause === "read-failed") throw new Error("D1_ERROR: no such column: deleted_at");
           const malformed: DashboardD1Statement = {
             bind: () => malformed,
             first: async <T = Record<string, unknown>>() => ({}) as T,
@@ -2260,7 +2262,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(holdCookie).not.toContain("Max-Age=0");
   });
 
-  test("a transient floor read failure is retryable and names no workspace setting to repair", async () => {
+  test("a missing non-floor column is a read failure: retryable, names no migration and no setting to repair", async () => {
     stubGitHubConversionOnly();
     const env = degradedFloorEnv("read-failed");
     const holdValue = await freshHold();
@@ -2271,6 +2273,9 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const refusedBody = await refused.text();
     expect(refusedBody).toContain(bannerCopy("manifest.error.workspaceFloorReadFailed"));
     expect(refusedBody).not.toContain(bannerCopy("manifest.error.workspaceFloorUnreadable"));
+    // `deleted_at` is not the 0049 column, so naming that migration would send
+    // the operator to a repair that cannot apply.
+    expect(refusedBody).not.toContain("0049_workspace_check_min_score.sql");
     // A failed read is fixed by resubmitting — a settings link would misdirect.
     expect(refusedBody).not.toContain('href="/dashboard/default/settings"');
     expectHoldKept(refused);
@@ -2289,6 +2294,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(appRowCount(env)).toBe(0);
     const callbackBody = await callback.text();
     expect(callbackBody).toContain(bannerCopy("manifest.error.workspaceFloorReadFailed"));
+    expect(callbackBody).not.toContain("0049_workspace_check_min_score.sql");
     expect(callbackBody).not.toContain('href="/dashboard/default/settings"');
   });
 
