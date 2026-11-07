@@ -315,7 +315,9 @@ export async function mountView(
  * rows and `severity` filters findings, so a mounted test sees a real page
  * swap. `sceneFor` receives the App the URL names, so one stub can serve
  * different Apps. Every request is recorded for the "one read per switch"
- * assertions.
+ * assertions. A read outside those families (the head and the three record
+ * sections) is refused, naming the URL: no head payload stands in for a read
+ * the API never answered.
  *
  * The `severity` semantics are the route's own (`isFindingSeverity` in
  * `src/contracts/finding-severity.ts`, which `src/dashboard/index.ts` guards
@@ -378,7 +380,13 @@ export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: 
         limit: applied,
       });
     }
-    return jsonResponse(sceneValue.detail);
+    // The head read is the only other read this stub describes; anything else
+    // is a test asking for a read the stub cannot answer, and answering it with
+    // a head payload would let that test pass on a response the API never gave.
+    if (/\/api\/apps\/[^/]+\/pull-requests\/[^/]+\/[^/]+\/\d+$/.test(url.pathname)) {
+      return jsonResponse(sceneValue.detail);
+    }
+    throw new Error(`detailFetch: unhandled URL ${url.pathname}${url.search}`);
   }) as unknown as typeof fetch;
   return { fetch: impl, fetches };
 }

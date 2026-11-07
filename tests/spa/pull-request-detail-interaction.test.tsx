@@ -16,6 +16,7 @@ import { currentDetailRead, type DetailRead } from "../../src/spa/pages/PullRequ
 import {
   DETAIL,
   FAILURES,
+  detailFetch,
   jsonResponse,
   mountDetailView,
   mountTabAcrossApps,
@@ -42,6 +43,15 @@ describe("pull requests detail read derivation (pure)", () => {
     expect(currentDetailRead(okA, "acme/web/1")).toEqual(okA);
     expect(currentDetailRead(errorA, "acme/web/1")).toEqual(errorA);
     expect(currentDetailRead(null, "acme/web/1")).toBeNull();
+  });
+});
+
+describe("detail fetch stub (pure)", () => {
+  test("an unhandled read fails the caller and names the URL", async () => {
+    const stub = detailFetch(() => scene());
+    await expect(stub.fetch("/dashboard/api/apps/1/pull-requests")).rejects.toThrow(
+      "detailFetch: unhandled URL /dashboard/api/apps/1/pull-requests",
+    );
   });
 });
 
