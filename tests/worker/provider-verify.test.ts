@@ -513,6 +513,43 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
   });
 
+  test("the quota word past the 512-byte body bound is never read — the oversized chunk is not decoded", async () => {
+    // 201 ASCII bytes + 400 multibyte bytes + an oversized tail chunk. The
+    // second chunk alone outruns the remaining budget (311 bytes), so the
+    // decoder must stop inside it and never pull the 10 KB tail — where the
+    // only quota word sits, well past the bound.
+    const chunks = [
+      new TextEncoder().encode("a".repeat(201)),
+      new TextEncoder().encode("é".repeat(200)),
+      new TextEncoder().encode(`insufficient credits ${"é".repeat(5000)}`),
+    ];
+    const pulled: number[] = [];
+    let cancels = 0;
+    let next = 0;
+    const streamed = new ReadableStream<Uint8Array>({
+      // No read-ahead: one pull per reader.read(), so `pulled` is exactly what
+      // the body read consumed from the stream.
+      pull(controller) {
+        const chunk = chunks[next];
+        if (chunk === undefined) return controller.close();
+        pulled.push(chunk.byteLength);
+        controller.enqueue(chunk);
+        next += 1;
+      },
+      cancel() {
+        cancels += 1;
+      },
+    }, { highWaterMark: 0 });
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(new Response(streamed, { status: 500 })) },
+      "openai",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "unexpected_response" });
+    expect(pulled).toEqual([201, 400]);
+    expect(cancels).toBe(1);
+  });
+
   test("probe 500 with an unrelated body carries no quota signal → unexpected_response", async () => {
     const result = await verifyProviderKey(
       { fetch: mockFetch(json(500, { error: { message: "internal server error" } })) },

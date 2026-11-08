@@ -349,9 +349,11 @@ const FAILURE_BODY_LIMIT = 512;
 const QUOTA_BODY_SIGNAL = /\b(credits?|quota|billing|payment required|insufficient funds)\b/i;
 
 /**
- * The first FAILURE_BODY_LIMIT characters of a failure body ("" when the
+ * The first FAILURE_BODY_LIMIT BYTES of a failure body, decoded ("" when the
  * response carries no body). The only body read on the failure path: it takes
  * the stream once and drops the rest, so a caller can never split it twice.
+ * The bound is spent before decoding — a chunk past the budget is cut to what
+ * is left, so an oversized chunk is never decoded in full.
  */
 async function failureBodySample(res: Response): Promise<string> {
   const reader = res.body?.getReader();
@@ -359,12 +361,15 @@ async function failureBodySample(res: Response): Promise<string> {
   try {
     const decoder = new TextDecoder();
     let sample = "";
-    while (sample.length < FAILURE_BODY_LIMIT) {
+    let consumed = 0;
+    while (consumed < FAILURE_BODY_LIMIT) {
       const { done, value } = await reader.read();
       if (done) break;
-      sample += decoder.decode(value, { stream: true });
+      const slice = value.subarray(0, FAILURE_BODY_LIMIT - consumed);
+      consumed += slice.byteLength;
+      sample += decoder.decode(slice, { stream: true });
     }
-    return sample.slice(0, FAILURE_BODY_LIMIT);
+    return sample;
   } catch {
     return "";
   } finally {
