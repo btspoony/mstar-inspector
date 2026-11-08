@@ -3073,6 +3073,7 @@ function settingsKeyLimitResponse(
 type MappedVerifyReason =
   | "invalid_key"
   | "quota_exhausted"
+  | "rate_limited"
   | "unreachable"
   | "unexpected"
   | "unsupported_provider";
@@ -3084,6 +3085,9 @@ function verifyFailCopy(reason: MappedVerifyReason): string {
   if (reason === "invalid_key") return "That API key was rejected by the provider — nothing was stored.";
   if (reason === "quota_exhausted") {
     return "That provider account is out of quota or credit — nothing was stored. The key itself may still be valid.";
+  }
+  if (reason === "rate_limited") {
+    return "The provider throttled the verification request — nothing was stored, and the key was not judged. Retry shortly; if it keeps happening, the account may genuinely be out of quota.";
   }
   if (reason === "unreachable") return "The provider could not be reached — nothing was stored.";
   if (reason === "unsupported_provider") {
@@ -3588,8 +3592,8 @@ const appModelsRoute = async (c: DashboardContext) => {
 /**
  * SPA add-key path: verify the as-typed key, then store. Failure
  * is 400 JSON with a structured reason (invalid_key / quota_exhausted /
- * unreachable / unexpected / unsupported_provider) and ZERO writes. The key is
- * never logged or returned.
+ * rate_limited / unreachable / unexpected / unsupported_provider) and ZERO
+ * writes. The key is never logged or returned.
  * An App whose selected runtime harness is not omp (unknown id
  * included — fail-closed) is refused with unsupported_provider before any
  * probe, mirroring the display face's eligibility gate.

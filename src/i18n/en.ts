@@ -572,6 +572,8 @@ export const en = {
       invalid_key: "That API key was rejected by the provider — nothing was stored.",
       quota_exhausted:
         "That provider account is out of quota or credit — nothing was stored. The key itself may still be valid.",
+      rate_limited:
+        "The provider throttled the verification request — nothing was stored, and the key was not judged. Retry shortly; if it keeps happening, the account may genuinely be out of quota.",
       unreachable: "The provider could not be reached — nothing was stored.",
       unexpected: "The provider returned an unexpected response — nothing was stored.",
       unsupported_provider:
