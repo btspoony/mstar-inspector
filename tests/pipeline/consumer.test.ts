@@ -1201,6 +1201,35 @@ describe("createReviewConsumer", () => {
     expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
   });
 
+  test("numstat failure does not carry an exact secret", async () => {
+    // A credential every shape pattern misses (no token prefix, no 40-char hex
+    // run), assembled at runtime so no contiguous credential literal exists.
+    // Only the exact-value pass can remove it from the stage's message.
+    const secretToken = ["3a7f9c02", "d51e", "4b86", "a97f", "6c04e2b81d35"].join("-");
+    reset();
+    commenterState.token = secretToken;
+    sandbox.numstatExitCode = 1;
+    sandbox.numstatStderr = `fatal: bad object (challenge ${secretToken})`;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    const thrown = await consumer(makeBatch(makePayload())).then(
+      () => {
+        throw new Error("the numstat stage was expected to fail");
+      },
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+
+    // The stderr tail really reached the message (it is not empty) and the
+    // value itself is gone from it.
+    expect(thrown).toContain("numstat failed");
+    expect(thrown).toContain("challenge");
+    expect(thrown).not.toContain(secretToken);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).not.toContain(secretToken);
+  });
+
   test("diff failure → failure row (stage=sandbox) + no runner/post/insert, rethrow, destroy", async () => {
     // `gh pr diff` failing fails the chain BEFORE the bounded read, so the exec
     // carries no stdout at all (the double answers the same shape). The round

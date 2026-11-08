@@ -111,8 +111,11 @@ gh api -H 'Accept: application/vnd.github.v3.diff' 'repos/o/r/compare/a...b' > "
 ## Adjacent Knowledge
 
 - `runtime-errors/oversized-pr-diff-20k-line-ceiling.md` — the fallback whose
-  refusal exposed the truncation; it now captures through this scratch-file
-  discipline.
+  refusal exposed the truncation. The scratch-file discipline is the
+  increment/compare capture's, not the fallback's: `incrementDiffCommand` stages
+  into `${diffPath}.increment` and renames that over `diffPath` only after a
+  delivered capture. The fallback's `localDiffCommand` still writes `DIFF_PATH`
+  directly — harmless only because it is that round's first write to the file.
 - `best-practices/guard-preprocessing-fails-toward-reporting.md` — the same
   principle one layer up: a guard that mutates its input before deciding fails
   open.

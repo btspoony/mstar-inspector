@@ -353,9 +353,11 @@ const QUOTA_BODY_SIGNAL = /\b(credits?|quota|billing|payment required|insufficie
  * response carries no body). The only body read on the failure path: it takes
  * the stream once and drops the rest, so a caller can never split it twice.
  * The bound is spent before decoding — a chunk past the budget is cut to what
- * is left, so an oversized chunk is never decoded in full.
+ * is left, so an oversized chunk is never decoded in full. The streaming
+ * decode is flushed before returning: a code point cut by the bound surfaces
+ * as U+FFFD instead of vanishing from the sample.
  */
-async function failureBodySample(res: Response): Promise<string> {
+export async function failureBodySample(res: Response): Promise<string> {
   const reader = res.body?.getReader();
   if (reader === undefined) return "";
   try {
@@ -369,7 +371,7 @@ async function failureBodySample(res: Response): Promise<string> {
       consumed += slice.byteLength;
       sample += decoder.decode(slice, { stream: true });
     }
-    return sample;
+    return sample + decoder.decode();
   } catch {
     return "";
   } finally {

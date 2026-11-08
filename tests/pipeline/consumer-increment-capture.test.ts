@@ -23,6 +23,7 @@ import {
 import { compareStatusCommand } from "../../src/pipeline/gitops";
 import {
   commenterCalls,
+  commenterState,
   createReviewConsumer,
   DIFF_PREFETCH_MAX_BYTES,
   failureRows,
@@ -153,6 +154,39 @@ describe("incremental review rounds: the increment capture", () => {
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/increment diff failed/);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(sandbox.writtenInputJson).toBeUndefined();
+  });
+
+  test("an increment capture failure does not carry an exact secret", async () => {
+    // A credential every shape pattern misses (no token prefix, no 40-char hex
+    // run), assembled at runtime so no contiguous credential literal exists.
+    // Only the exact-value pass can remove it from the increment stage's
+    // message and its failure row.
+    const secretToken = ["6b2d90f4", "a83c", "4e17", "8d05", "1f7a3c6be942"].join("-");
+    reset();
+    commenterState.token = secretToken;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.compareStatus = "ahead";
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.incrementDiffExitCode = 128;
+    sandbox.incrementDiffStderr = `fatal: could not read Username (challenge ${secretToken})`;
+    const db = await createSeededTestD1();
+    seedReview(db, PREVIOUS_SHA);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    const thrown = await consumer(makeBatch(makePayload())).then(
+      () => {
+        throw new Error("the increment capture was expected to fail");
+      },
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+
+    // The stderr tail really reached the message (it is not empty) and the
+    // value itself is gone from it.
+    expect(thrown).toContain("increment diff failed");
+    expect(thrown).toContain("challenge");
+    expect(thrown).not.toContain(secretToken);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).not.toContain(secretToken);
   });
 
   test("an oversized increment falls back or degrades with a reason", async () => {

@@ -378,12 +378,16 @@ export type FakeSandboxState = {
   diffReadStdout: string | null;
   numstatStdout: string;
   numstatExitCode: number;
+  /** stderr a failing numstat exec answers with (the redaction cases live here). */
+  numstatStderr: string;
   /** The `gh api .../compare/base...head` verdict (`ahead` starts an increment round). */
   compareStatus: string;
   compareExitCode: number;
   /** The increment round's base...head diff FILE content + its command's exit. */
   incrementDiffStdout: string;
   incrementDiffExitCode: number;
+  /** stderr a failing base...head capture answers with. */
+  incrementDiffStderr: string;
   writeInputExitCode: number;
   /** Decoded runner --input JSON written via the base64 write step. */
   writtenInputJson: string | undefined;
@@ -442,12 +446,14 @@ export function initialFakeSandboxState(): FakeSandboxState {
     diffReadStdout: null,
     numstatStdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n",
     numstatExitCode: 0,
+    numstatStderr: "",
     // NON-increment by default: a case that seeds a prior review stays a
     // full-diff round unless it opts in with `ahead`.
     compareStatus: "identical",
     compareExitCode: 0,
     incrementDiffStdout: "",
     incrementDiffExitCode: 0,
+    incrementDiffStderr: "",
     writeInputExitCode: 0,
     writtenInputJson: undefined,
     // Default: gh cannot answer, so no prContext is captured and the runner
@@ -520,7 +526,7 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
       return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: 0 };
     }
     case "numstat":
-      return { stdout: state.numstatStdout, stderr: "", exitCode: state.numstatExitCode };
+      return { stdout: state.numstatStdout, stderr: state.numstatStderr, exitCode: state.numstatExitCode };
     default:
       break;
   }
@@ -576,7 +582,7 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     const bytes = Buffer.from(state.incrementDiffStdout);
     const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
     const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
-    return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: state.incrementDiffExitCode };
+    return { stdout: `${head}\n${overflow}\n`, stderr: state.incrementDiffStderr, exitCode: state.incrementDiffExitCode };
   }
   // Oversized-diff fallback (production shape): base ref → merge base →
   // depth-1 fetch → local merge-base..head diff, whose read half is the SAME
