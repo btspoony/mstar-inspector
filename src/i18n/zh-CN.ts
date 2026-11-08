@@ -498,6 +498,8 @@ export const zhCN: Dictionary = {
     keyVerified: "密钥已验证 — 模型已缓存。",
     verify: {
       invalid_key: "该 API 密钥被 provider 拒绝 — 未存储任何内容。",
+      quota_exhausted: "该 provider 账户的额度或余额已耗尽 — 未存储任何内容。密钥本身可能仍然有效。",
+      rate_limited: "provider 对本次验证请求做了限流 — 未存储任何内容，也未对密钥作出判断。请稍后重试；若持续如此，账户的额度可能确实已耗尽。",
       unreachable: "无法连接 provider — 未存储任何内容。",
       unexpected: "provider 返回了意外响应 — 未存储任何内容。",
       unsupported_provider: "此 provider 无法在此验证 — 请在对应控制台管理密钥。未存储任何内容。",

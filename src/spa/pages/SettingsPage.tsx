@@ -93,6 +93,8 @@ export type PendingAction =
  */
 function verifyReasonMessage(locale: SpaBoot["locale"], reason: string): string {
   if (reason === "invalid_key") return t(locale, "settings.verify.invalid_key");
+  if (reason === "quota_exhausted") return t(locale, "settings.verify.quota_exhausted");
+  if (reason === "rate_limited") return t(locale, "settings.verify.rate_limited");
   if (reason === "unreachable") return t(locale, "settings.verify.unreachable");
   if (reason === "unsupported_provider") return t(locale, "settings.verify.unsupported_provider");
   return t(locale, "settings.verify.unexpected");

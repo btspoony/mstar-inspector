@@ -400,6 +400,9 @@ export type ConsumerLogFields = {
    * `review_no_increment` (union widened ADDITIVELY): an incremental round whose
    * `base...head` is genuinely empty — the prior round already covers this head,
    * so the delivery is acked without a new review body.
+   * `review_no_diff` (union widened ADDITIVELY): a first round whose diff FILE
+   * holds no patch — the head adds no changes at all, so the delivery is acked
+   * without a new review body rather than failing the sandbox stage.
    * `check_terminalize_budget_exceeded` / `check_terminalize_failed` /
    * `check_abandon_released` / `check_abandon_not_owned` /
    * `check_abandon_failed` (spec §7.10/§7.11, union widened ADDITIVELY): the
@@ -415,7 +418,7 @@ export type ConsumerLogFields = {
    * hand-off has no event of its own; its only line is the info above it
    * ("publication journal hit"), printed before the link.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -599,10 +602,13 @@ export type ConsumerLogFields = {
   increment_base?: "lookup-failed";
   /**
    * Why the increment capture could not be trusted — `empty` (exit 0, nothing
-   * delivered) or `unreadable` (no flag line). Its own field, so a full-diff
-   * capture failure and an increment capture failure never read alike.
+   * delivered), `unreadable` (no flag line) or `too_large` (the compare API
+   * refused the base...head diff, GitHub's 20,000-line ceiling). Its own field,
+   * so a full-diff capture failure and an increment capture failure never read
+   * alike. `too_large` is the degrade: the message names the step, its exit
+   * code and its redacted stderr tail, and the round reviews the full diff.
    */
-  increment_capture?: "empty" | "unreadable";
+  increment_capture?: "empty" | "unreadable" | "too_large";
   /**
    * Why the report seat's PR-context capture yielded nothing: `pr-view` (the
    * `gh pr view` exec failed), `pr-view-json` (its reply was not the JSON shape
@@ -3254,15 +3260,17 @@ function runnerFailureDetail(
  * with HTTP 406 on stderr and 0B of stdout — so a redacted tail rides the
  * message that reaches the durable review_failures row. `stdout` is measured in
  * UTF-8 BYTES (a diff carries non-ASCII), and redaction runs BEFORE the tail
- * cut, so a secret straddling the cap cannot survive as a fragment.
+ * cut, so a secret straddling the cap cannot survive as a fragment. Both passes
+ * run: the shape one, then the session's exact values.
  */
 function gitStageFailureDetail(
   stage: string,
   run: { stdout: string; stderr: string; exitCode: number },
+  secretValues: readonly string[],
 ): string {
   const base = `${stage} failed: exit ${run.exitCode}, stdout ${new TextEncoder().encode(run.stdout).length}B`;
   // Redaction BEFORE the cut: a secret sliced in half would survive it.
-  const tail = redactSecrets(run.stderr).trim().slice(-STDERR_TAIL_MAX);
+  const tail = redactExactSecrets(redactSecrets(run.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
   return tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
 }
 
@@ -4575,7 +4583,7 @@ async function processMessage(
           )
         : null;
       if (captured === null) {
-        throw new Error(gitStageFailureDetail("diff", diff));
+        throw new Error(gitStageFailureDetail("diff", diff, secretValues));
       }
       if ("reason" in captured) {
         // ONE warn per attempt, and never silence: the step that ended it, that
@@ -4583,14 +4591,17 @@ async function processMessage(
         // cut, exactly as the stage detail does). The durable failure keeps the
         // ORIGINAL 406 and gains the reason, so "not attempted (budget)",
         // "failed at fetch" and "hostile ref rejected" stay distinguishable.
-        const tail = captured.run === undefined ? "" : redactSecrets(captured.run.stderr).trim().slice(-STDERR_TAIL_MAX);
+        const tail =
+          captured.run === undefined
+            ? ""
+            : redactExactSecrets(redactSecrets(captured.run.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
         deps.log.warn(
           { ...fields, diff_fallback: captured.reason, diff_fallback_step: captured.step },
           `oversized diff fallback declined: ${captured.step} (${captured.reason})` +
             (captured.run === undefined ? ", no exec ran" : `, exit ${captured.run.exitCode}`) +
             (tail === "" ? ", stderr empty" : `, stderr tail: ${tail}`),
         );
-        throw new Error(`${gitStageFailureDetail("diff", diff)}; oversized fallback: ${captured.reason} at ${captured.step}`);
+        throw new Error(`${gitStageFailureDetail("diff", diff, secretValues)}; oversized fallback: ${captured.reason} at ${captured.step}`);
       }
       diffStdout = captured.run.stdout;
       deps.log.info(
@@ -4600,19 +4611,28 @@ async function processMessage(
     }
     const diffRead = parseBoundedRead(diffStdout);
     const diffText = diffRead.text ?? "";
+    // The diff FILE's state, from the SAME round's bounded read of that file —
+    // the one evidence that separates an EMPTY file (nothing to review) from a
+    // capture that never delivered one. `git apply --numstat` rejects an empty
+    // file as unusable input, so the numstat exit below is classified against
+    // this state, never against the exit code alone.
+    let diffFileState: "empty" | "captured" | "overflow" | "unreadable" =
+      diffRead.failure ?? (diffRead.text === "" ? "empty" : "captured");
 
     // Increment capture (numstat partition only): base...head replaces the
     // file AFTER the full diff text is already in memory, so the evidence
     // catalog above keeps proving prior findings against the whole PR.
-    // Failure discipline is the diff text's own — a non-zero exit throws, an
-    // unreadable/empty capture marks the round context-incomplete. Never a
-    // silent fall back to the full diff: the `since` fact would then be a lie.
+    // A non-zero exit has two documented outcomes: a too-large refusal (the
+    // compare API's own 20,000-line ceiling) downgrades the round to the full
+    // diff it already captured — logged, with the `since` fact dropped — while
+    // any other failure throws with its own cause. An unreadable/empty capture
+    // marks the round context-incomplete. Nothing here falls back silently: the
+    // `since` fact would then be a lie.
     // An empty bounded read is NOT decided here: as with the full diff, only
     // the same round's numstat tells a genuinely unchanged increment (empty
     // file) from a capture that delivered nothing. Until that read, an empty
     // capture counts as a failure — the conservative side, which also keeps the
     // recheck input unbuilt exactly as before.
-    let incrementEmpty = false;
     if (sinceSha !== null) {
       const increment = await sandbox.runCommand(
         incrementDiffCommand(payload.owner, payload.repo, sinceSha, headSha, DIFF_PATH),
@@ -4622,18 +4642,36 @@ async function processMessage(
         },
       );
       if (increment.exitCode !== 0) {
-        throw new Error(gitStageFailureDetail("increment diff", increment));
-      }
-      const incrementRead = parseBoundedRead(increment.stdout);
-      if (incrementRead.failure === "unreadable") {
-        captureFailed = true;
+        // The compare API refuses an oversized base...head diff with the same
+        // 20,000-line ceiling `gh pr diff` answers, and that refusal has a
+        // documented outcome: the round reviews the full diff it already
+        // captured (the refused capture never replaced that file). The `since`
+        // fact is DROPPED for the rest of the round — keeping it would describe
+        // the file as an increment it no longer is — and this one warn is its
+        // whole trace, so the degrade is never silent. A genuine capture
+        // failure keeps its own cause and stays a round failure.
+        if (!isDiffTooLarge(increment.stderr)) {
+          throw new Error(gitStageFailureDetail("increment diff", increment, secretValues));
+        }
+        const tail = redactExactSecrets(redactSecrets(increment.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
         deps.log.warn(
-          { ...fields, increment_capture: "unreadable", increment_since: sinceSha },
-          `increment diff capture unreadable — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+          { ...fields, increment_capture: "too_large", increment_since: sinceSha },
+          `increment diff capture too large (github 406) — reviewing the full diff instead, exit ${increment.exitCode}` +
+            (tail === "" ? ", stderr empty" : `, stderr tail: ${tail}`),
         );
-      } else if (incrementRead.failure === null && incrementRead.text === "") {
-        incrementEmpty = true;
-        captureFailed = true;
+        sinceSha = null;
+      } else {
+        const incrementRead = parseBoundedRead(increment.stdout);
+        diffFileState = incrementRead.failure ?? (incrementRead.text === "" ? "empty" : "captured");
+        if (incrementRead.failure === "unreadable") {
+          captureFailed = true;
+          deps.log.warn(
+            { ...fields, increment_capture: "unreadable", increment_since: sinceSha },
+            `increment diff capture unreadable — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+          );
+        } else if (diffFileState === "empty") {
+          captureFailed = true;
+        }
       }
     }
 
@@ -4794,33 +4832,50 @@ async function processMessage(
     const numstat = await sandbox.runCommand(cmds.numstat, {
       timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "numstat"),
     });
-    if (numstat.exitCode !== 0) {
-      throw new Error(gitStageFailureDetail("numstat", numstat));
+    // A non-zero exit is the FILE's answer about itself: an empty file is what
+    // `git apply` rejects as unusable input (exit 128, "unrecognized input"),
+    // so the same round's read of that file classifies the exit. Any other
+    // failure keeps its own detail — git stderr plus the diff-path state — so
+    // "the file is empty" and "the file could not be read" never collapse into
+    // one message.
+    if (numstat.exitCode !== 0 && diffFileState !== "empty") {
+      throw new Error(`${gitStageFailureDetail("numstat", numstat, secretValues)}; diff file: ${diffFileState}`);
     }
     const numstatLines = numstat.stdout
       .split("\n")
       .map((line) => line.trimEnd())
       .filter((line) => line !== "");
 
-    // An ELIGIBLE base plus two empty reads of the SAME increment file means
-    // `base...head` has no changes: the prior round already covers this head's
-    // content, so there is nothing to review. A verdict over an empty file
-    // universe would be an assertion about nothing — and a `context-incomplete`
-    // flag would wrongly exclude this head as a future increment base — so the
-    // round acks instead: no publication, no review row. The Check carries the
-    // REVIEWED head's result against the current gate (an empty commit must
-    // never launder a failing baseline into a neutral required check). Empty
-    // stdout with a NON-empty numstat is the capture failure right below, which
-    // keeps its context-incomplete accounting.
-    if (sinceSha !== null && incrementEmpty && numstatLines.length === 0) {
-      deps.log.info(
-        { ...fields, event: "review_no_increment", increment_since: sinceSha },
-        `no increment to review — ${sinceSha.slice(0, 7)}..${headSha.slice(0, 7)} is empty and the last reviewed head already covers this content; acking without a new review`,
-      );
-      await terminalizeCheck(null, "skipped", sinceSha);
+    // An empty diff FILE is nothing to review — `git apply --numstat` exits
+    // non-zero on it precisely because it holds no patch — so the round acks
+    // instead of failing the sandbox stage: no publication, no review row.
+    // The numstat's own stdout must be empty too: lines there would prove the
+    // read lost a real diff, which is the capture failure below, never an ack.
+    // Both rounds land here: an empty increment (the prior round already covers
+    // this head's content, and the Check inherits that head's result so an
+    // empty commit never launders a failing baseline into a neutral required
+    // check) and a first round whose head adds no diff (nothing to inherit, so
+    // the Check concludes skipped). A first round also needs the failing exit:
+    // an exit-0 numstat keeps the historical normal-round path.
+    const emptyDiffFile =
+      diffFileState === "empty" && numstatLines.length === 0 && (sinceSha !== null || numstat.exitCode !== 0);
+    if (emptyDiffFile) {
+      if (sinceSha !== null) {
+        deps.log.info(
+          { ...fields, event: "review_no_increment", increment_since: sinceSha },
+          `no increment to review — ${sinceSha.slice(0, 7)}..${headSha.slice(0, 7)} is empty and the last reviewed head already covers this content; acking without a new review`,
+        );
+        await terminalizeCheck(null, "skipped", sinceSha);
+      } else {
+        deps.log.info(
+          { ...fields, event: "review_no_diff" },
+          `no diff to review — ${headSha.slice(0, 7)} adds no changes; acking without a new review`,
+        );
+        await terminalizeCheck(null, "skipped");
+      }
       return { kind: "ok" };
     }
-    if (sinceSha !== null && incrementEmpty) {
+    if (sinceSha !== null && diffFileState === "empty") {
       deps.log.warn(
         { ...fields, increment_capture: "empty", increment_since: sinceSha },
         `increment diff capture empty — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
@@ -4832,7 +4887,8 @@ async function processMessage(
     // resolve the EMPTY case. Non-empty numstat means the redirect wrote a diff
     // the read did not deliver: a CAPTURE FAILURE, so the round is
     // context-incomplete, never every row published as a confident
-    // `no-evidence`. Both empty is a genuinely empty PR: a normal round.
+    // `no-evidence`. Both empty with an exit-0 numstat keeps the normal-round
+    // path; a genuinely empty FILE answers the failing exit and acks above.
     // `overflow` and `unreadable` are capture failures by construction — the
     // diff exists but is over the bound, or the transport broke — so they take
     // the same accounting with their own `diff_capture` cause: an over-bound

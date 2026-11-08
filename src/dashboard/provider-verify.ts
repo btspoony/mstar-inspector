@@ -27,7 +27,16 @@
  * alias map; ids omp does not validate keep a hand-documented entry.
  *
  * Failure reasons are structured and documented per case:
- *   - `invalid_key`        401/403 from the provider (key rejected)
+ *   - `invalid_key`        401/403 — the provider refused the key (a 403 billing
+ *                          refusal is still "this key cannot do this")
+ *   - `quota_exhausted`    402, or any other non-2xx whose body names
+ *                          credits/quota/billing — the provider's ACCOUNT is
+ *                          spent; the key itself may still be valid
+ *   - `rate_limited`       429 — the provider throttled the request; the key was
+ *                          NOT judged. A 429 body cannot separate a spend fault
+ *                          from a plain throttle (`RESOURCE_EXHAUSTED` and
+ *                          "Quota exceeded" are both), so the status alone
+ *                          decides and the copy names both causes
  *   - `unreachable`        network failure / timeout (10s AbortSignal.timeout)
  *   - `unexpected_response` the provider answered but not with a successful,
  *                           parseable verification response
@@ -51,6 +60,8 @@ export const VERIFY_USER_AGENT = "mstar-inspector-provider-verify";
 /** The structured failure reasons (never a raw provider error string). */
 export type VerifyFailureReason =
   | "invalid_key"
+  | "quota_exhausted"
+  | "rate_limited"
   | "unreachable"
   | "unexpected_response"
   | "unsupported_provider";
@@ -333,10 +344,79 @@ function responseLeftOrigin(res: Response, requestUrl: string): boolean {
 }
 
 /**
+ * How much of a failure body the quota check may read: provider error JSON is
+ * a few hundred bytes, and the cap keeps a huge (or hostile) error page from
+ * being buffered just to look for one word.
+ */
+const FAILURE_BODY_LIMIT = 512;
+
+/** The account-spent vocabulary of a rejection body on the generic arm — the
+ *  signal that the provider's ACCOUNT is out of credit rather than the key
+ *  being bad. Kept narrow on purpose: an unrelated 400/500 body stays
+ *  `unexpected_response`. Never applied to a 403/429 (see `failureReason`). */
+const QUOTA_BODY_SIGNAL = /\b(credits?|quota|billing|payment required|insufficient funds)\b/i;
+
+/**
+ * The first FAILURE_BODY_LIMIT BYTES of a failure body, decoded ("" when the
+ * response carries no body). The only body read on the failure path: it takes
+ * the stream once and drops the rest, so a caller can never split it twice.
+ * The bound is spent before decoding — a chunk past the budget is cut to what
+ * is left, so an oversized chunk is never decoded in full. The streaming
+ * decode is flushed before returning: a code point cut by the bound surfaces
+ * as U+FFFD instead of vanishing from the sample. A stream that errors mid-body
+ * still yields the bytes it delivered before the error.
+ */
+export async function failureBodySample(res: Response): Promise<string> {
+  const reader = res.body?.getReader();
+  if (reader === undefined) return "";
+  const decoder = new TextDecoder();
+  let sample = "";
+  let consumed = 0;
+  try {
+    while (consumed < FAILURE_BODY_LIMIT) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const slice = value.subarray(0, FAILURE_BODY_LIMIT - consumed);
+      consumed += slice.byteLength;
+      sample += decoder.decode(slice, { stream: true });
+    }
+  } catch {
+    // A stream that breaks mid-body keeps what it already delivered: the
+    // provider's error text rides in the first chunk, before the connection
+    // dies, so an empty sample would discard the only evidence there is.
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return sample + decoder.decode();
+}
+
+/**
+ * The ONE classifier every non-2xx verification response goes through, so the
+ * three entry points can never disagree. The status decides for every status
+ * that carries its own meaning, and only the statuses with none reach the body:
+ *   401/403 → invalid_key (the provider refused the key; a 403 billing refusal
+ *             is still "this key cannot do this");
+ *   402 → quota_exhausted (payment required: the account is spent);
+ *   429 → rate_limited (throttled — the key was not judged). The body is never
+ *         read here: Gemini answers both a plain throttle and a genuinely
+ *         exhausted quota with `RESOURCE_EXHAUSTED` / "Quota exceeded", so no
+ *         prose predicate on a 429 can be correct;
+ *   any other non-2xx whose bounded body names credits/quota/billing →
+ *         quota_exhausted;
+ *   anything else → unexpected_response.
+ */
+async function failureReason(res: Response): Promise<VerifyFailureReason> {
+  if (res.status === 401 || res.status === 403) return "invalid_key";
+  if (res.status === 402) return "quota_exhausted";
+  if (res.status === 429) return "rate_limited";
+  return QUOTA_BODY_SIGNAL.test(await failureBodySample(res)) ? "quota_exhausted" : "unexpected_response";
+}
+
+/**
  * Verify one BUILT-IN provider key against its list-models endpoint.
- * 401/403 → invalid_key; any other non-2xx → unexpected_response; 2xx with an
- * unparseable body → unexpected_response; 2xx with a parseable list (possibly
- * empty) → ok + models. Transport failures/timeouts → unreachable.
+ * Non-2xx → the shared `failureReason` classifier; 2xx with an unparseable
+ * body → unexpected_response; 2xx with a parseable list (possibly empty) → ok
+ * + models. Transport failures/timeouts → unreachable.
  */
 async function verifyModelsEndpoint(
   deps: VerifyDeps,
@@ -359,11 +439,8 @@ async function verifyModelsEndpoint(
   if (responseLeftOrigin(res, spec.url)) {
     return { ok: false, reason: "unexpected_response" };
   }
-  if (res.status === 401 || res.status === 403) {
-    return { ok: false, reason: "invalid_key" };
-  }
   if (!res.ok) {
-    return { ok: false, reason: "unexpected_response" };
+    return { ok: false, reason: await failureReason(res) };
   }
   let body: unknown;
   try {
@@ -381,8 +458,8 @@ async function verifyModelsEndpoint(
 /**
  * Verify one BUILT-IN provider key by auth probe: a GET on the provider's
  * identity/usage endpoint, where any 2xx proves the key (models stay [] — the
- * probe-only signal). 401/403 → invalid_key; every other non-2xx →
- * unexpected_response; transport failures → unreachable.
+ * probe-only signal). Non-2xx → the shared `failureReason` classifier;
+ * transport failures → unreachable.
  */
 async function verifyProbe(
   deps: VerifyDeps,
@@ -403,11 +480,8 @@ async function verifyProbe(
   if (responseLeftOrigin(res, spec.url)) {
     return { ok: false, reason: "unexpected_response" };
   }
-  if (res.status === 401 || res.status === 403) {
-    return { ok: false, reason: "invalid_key" };
-  }
   if (!res.ok) {
-    return { ok: false, reason: "unexpected_response" };
+    return { ok: false, reason: await failureReason(res) };
   }
   return { ok: true, models: [] };
 }
@@ -502,12 +576,14 @@ export function builtinProbeCanRejectKey(providerId: string): boolean {
  * URL's models endpoint with the protocol-appropriate auth for the declared
  * `api` form (anthropic-messages → x-api-key + anthropic-version; both
  * openai-* forms and `typesafe` → Bearer — the "declared api protocol
- * equivalent" of the assignment's probe rule). 401/403 → invalid_key; ANY 2xx
- * → ok with models = the declared modelIds, verbatim (the plan's §6.1 echo
- * contract: 成功时 models = 声明 modelIds 回显，无抓取 — the vocabulary IS the
- * declaration; the response body is never scraped); every other non-2xx →
- * unexpected_response; transport failures AND an unparseable base URL →
- * unreachable. Custom providers never write app_provider_models rows — their
+ * equivalent" of the assignment's probe rule). ANY 2xx → ok with models = the
+ * declared modelIds, verbatim (the plan's §6.1 echo contract: 成功时 models =
+ * 声明 modelIds 回显，无抓取 — the vocabulary IS the declaration; the response
+ * body is never scraped); every other non-2xx → the shared `failureReason`
+ * classifier (so a spent account is quota_exhausted, a throttled request
+ * rate_limited — never unexpected_response);
+ * transport failures AND an unparseable base URL → unreachable. Custom
+ * providers never write app_provider_models rows — their
  * dropdown source is the declared model_ids, returned here for callers to
  * display.
  *
@@ -538,11 +614,8 @@ async function verifyCustomProvider(
   if (responseLeftOrigin(res, probe.toString())) {
     return { ok: false, reason: "unexpected_response" };
   }
-  if (res.status === 401 || res.status === 403) {
-    return { ok: false, reason: "invalid_key" };
-  }
   if (!res.ok) {
-    return { ok: false, reason: "unexpected_response" };
+    return { ok: false, reason: await failureReason(res) };
   }
   return { ok: true, models: custom.modelIds };
 }

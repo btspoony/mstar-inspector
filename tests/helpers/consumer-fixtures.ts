@@ -367,6 +367,8 @@ export type FakeSandboxState = {
   mergeBaseExitCode: number;
   /** Exit codes of the fallback's last two steps (mid-fallback failure cases). */
   fetchExitCode: number;
+  /** stderr a failing depth-1 fetch answers with. */
+  fetchStderr: string;
   localDiffExitCode: number;
   /**
    * Raw stdout a BROKEN transport answers the bounded read with, replacing the
@@ -376,12 +378,16 @@ export type FakeSandboxState = {
   diffReadStdout: string | null;
   numstatStdout: string;
   numstatExitCode: number;
+  /** stderr a failing numstat exec answers with (the redaction cases live here). */
+  numstatStderr: string;
   /** The `gh api .../compare/base...head` verdict (`ahead` starts an increment round). */
   compareStatus: string;
   compareExitCode: number;
   /** The increment round's base...head diff FILE content + its command's exit. */
   incrementDiffStdout: string;
   incrementDiffExitCode: number;
+  /** stderr a failing base...head capture answers with. */
+  incrementDiffStderr: string;
   writeInputExitCode: number;
   /** Decoded runner --input JSON written via the base64 write step. */
   writtenInputJson: string | undefined;
@@ -435,16 +441,19 @@ export function initialFakeSandboxState(): FakeSandboxState {
     baseRefExitCode: 0,
     mergeBaseExitCode: 0,
     fetchExitCode: 0,
+    fetchStderr: "fatal: fetch failed",
     localDiffExitCode: 0,
     diffReadStdout: null,
     numstatStdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n",
     numstatExitCode: 0,
+    numstatStderr: "",
     // NON-increment by default: a case that seeds a prior review stays a
     // full-diff round unless it opts in with `ahead`.
     compareStatus: "identical",
     compareExitCode: 0,
     incrementDiffStdout: "",
     incrementDiffExitCode: 0,
+    incrementDiffStderr: "",
     writeInputExitCode: 0,
     writtenInputJson: undefined,
     // Default: gh cannot answer, so no prContext is captured and the runner
@@ -517,7 +526,7 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
       return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: 0 };
     }
     case "numstat":
-      return { stdout: state.numstatStdout, stderr: "", exitCode: state.numstatExitCode };
+      return { stdout: state.numstatStdout, stderr: state.numstatStderr, exitCode: state.numstatExitCode };
     default:
       break;
   }
@@ -570,10 +579,16 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     return { stdout: `${state.compareStatus}\n`, stderr: "", exitCode: state.compareExitCode };
   }
   if (cmd.startsWith(INCREMENT_DIFF.head) && cmd.endsWith(INCREMENT_DIFF.tail)) {
+    // The compare read is the same `&&` chain as the diff capture: a non-zero
+    // exit stops it BEFORE the bounded read half, so no payload accompanies the
+    // failure.
+    if (state.incrementDiffExitCode !== 0) {
+      return { stdout: "", stderr: state.incrementDiffStderr, exitCode: state.incrementDiffExitCode };
+    }
     const bytes = Buffer.from(state.incrementDiffStdout);
     const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
     const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
-    return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: state.incrementDiffExitCode };
+    return { stdout: `${head}\n${overflow}\n`, stderr: state.incrementDiffStderr, exitCode: state.incrementDiffExitCode };
   }
   // Oversized-diff fallback (production shape): base ref → merge base →
   // depth-1 fetch → local merge-base..head diff, whose read half is the SAME
@@ -592,7 +607,7 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     return { stdout: `${state.mergeBaseSha}\n`, stderr: "", exitCode: 0 };
   }
   if (cmd.startsWith(FETCH_DEPTH_ONE.head) && cmd.endsWith(FETCH_DEPTH_ONE.tail)) {
-    return { stdout: "", stderr: state.fetchExitCode === 0 ? "" : "fatal: fetch failed", exitCode: state.fetchExitCode };
+    return { stdout: "", stderr: state.fetchExitCode === 0 ? "" : state.fetchStderr, exitCode: state.fetchExitCode };
   }
   if (cmd.startsWith(LOCAL_DIFF.head) && cmd.endsWith(LOCAL_DIFF.tail)) {
     if (state.localDiffExitCode !== 0) {

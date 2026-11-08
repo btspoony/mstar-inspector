@@ -13,7 +13,9 @@
  * `wrangler d1 migrations apply`.
  *
  * Verify-service tests use a mocked fetch: success+models / 401 / timeout /
- * non-JSON / custom-provider happy+401, plus the endpoint-map parity lock
+ * non-JSON / quota-class refusals (402, a generic quota body) / a 429 kept
+ * apart as its own throttled reason /
+ * custom-provider happy+401, plus the endpoint-map parity lock
  * (PROVIDER_VERIFY_ENDPOINTS ≡ PROVIDER_IDS — a future provider id must
  * get an explicit verify entry).
  */
@@ -38,6 +40,7 @@ import {
   VERIFY_USER_AGENT,
   builtinProbeCanRejectKey,
   customProbeCanRejectKey,
+  failureBodySample,
   ompProviderIdFor,
   verifyFetch,
   verifyProviderKey,
@@ -494,6 +497,175 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: false, reason: "unexpected_response" });
   });
 
+  test("probe 402 → quota_exhausted: a spent account is never an unexpected response", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(402, { error: { message: "payment required" } })) },
+      "copilot",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
+  test("probe 400 whose body names insufficient credits → quota_exhausted (bounded body read on the failure path)", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(400, { error: { message: "insufficient credits" } })) },
+      "copilot",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
+  test("the quota word past the 512-byte body bound is never read — the chunk over the bound is decoded only up to it", async () => {
+    // 201 ASCII bytes + 400 multibyte bytes + an oversized tail chunk. The
+    // second chunk alone outruns the remaining budget (311 bytes), so the read
+    // stops inside it and never pulls the 10 KB tail — where the only quota
+    // word sits, well past the bound.
+    const chunks = [
+      new TextEncoder().encode("a".repeat(201)),
+      new TextEncoder().encode("é".repeat(200)),
+      new TextEncoder().encode(`insufficient credits ${"é".repeat(5000)}`),
+    ];
+    const pulled: number[] = [];
+    let cancels = 0;
+    let next = 0;
+    const streamed = (): ReadableStream<Uint8Array> => {
+      next = 0;
+      return new ReadableStream<Uint8Array>({
+        // No read-ahead: one pull per reader.read(), so `pulled` is exactly what
+        // the body read consumed from the stream.
+        pull(controller) {
+          const chunk = chunks[next];
+          if (chunk === undefined) return controller.close();
+          pulled.push(chunk.byteLength);
+          controller.enqueue(chunk);
+          next += 1;
+        },
+        cancel() {
+          cancels += 1;
+        },
+      }, { highWaterMark: 0 });
+    };
+    // The retained SAMPLE is what the bound really spends: 201 ASCII bytes plus
+    // 311 of the 400 multibyte bytes — 155 whole é, and the 512th byte alone
+    // (the first half of the 156th é) flushed as U+FFFD.
+    expect(await failureBodySample(new Response(streamed(), { status: 500 }))).toBe(
+      "a".repeat(201) + "é".repeat(155) + "\uFFFD",
+    );
+    // Two chunks pulled, and the tail one never: the sample read closed the
+    // stream at the bound.
+    expect(pulled).toEqual([201, 400]);
+    expect(cancels).toBe(1);
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(new Response(streamed(), { status: 500 })) },
+      "openai",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "unexpected_response" });
+  });
+
+  test("a code point cut by the byte bound is flushed, and the signal beside it still classifies", async () => {
+    // 504 ASCII bytes + " quota " + the first byte of a 2-byte code point at
+    // the 512-byte cut. The signal is complete inside the budget; the cut
+    // lands mid-code-point, which a streaming decode would otherwise drop.
+    const body = (): Response =>
+      new Response(new TextEncoder().encode(`x`.repeat(504) + " quota " + "é".repeat(300)), { status: 500 });
+    const sample = await failureBodySample(body());
+    expect(sample).toBe(`${"x".repeat(504)} quota \uFFFD`);
+    const result = await verifyProviderKey({ fetch: mockFetch(body()) }, "openai", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
+  test("probe 500 with an unrelated body carries no quota signal → unexpected_response", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(500, { error: { message: "internal server error" } })) },
+      "copilot",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "unexpected_response" });
+  });
+
+  test("probe 429 → rate_limited, even when the body names quota and billing (the status alone decides, the body is never read)", async () => {
+    // Gemini answers both a plain throttle and a genuinely out-of-quota key
+    // with this exact body, so no prose predicate can tell them apart: the
+    // status is the only evidence there is, and the reason says so instead of
+    // guessing a spent account.
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulls += 1;
+          controller.enqueue(
+            new TextEncoder().encode(
+              JSON.stringify({
+                error: {
+                  code: 429,
+                  status: "RESOURCE_EXHAUSTED",
+                  message: "Quota exceeded. Please check your plan and billing details.",
+                },
+              }),
+            ),
+          );
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const result = await verifyProviderKey({ fetch: mockFetch(new Response(body, { status: 429 })) }, "gemini", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "rate_limited" });
+    expect(pulls).toBe(0);
+  });
+
+  test("403 whose body names a billing disablement → invalid_key: only 402 asserts a spent account", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(403, { error: { message: "billing is disabled for this project" } })) },
+      "openai",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "invalid_key" });
+  });
+
+  test("probe 403 whose body reports a zero balance without spend wording → invalid_key", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(403, { error: { message: "your account balance is $0.00" } })) },
+      "openai",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "invalid_key" });
+  });
+
+  test("a stream that errors mid-body keeps the bytes already delivered", async () => {
+    // The provider's own words arrive in the first chunk and the connection
+    // breaks after it: the delivered prefix is the only evidence there is, and
+    // the quota signal inside it still has to classify on the generic arm.
+    const partialErrorBody = (): Response => {
+      const chunk = new TextEncoder().encode(`{"error":{"message":"insufficient funds`);
+      let pulls = 0;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls += 1;
+            if (pulls === 1) controller.enqueue(chunk);
+            else controller.error(new Error("connection reset"));
+          },
+        }, { highWaterMark: 0 }),
+        { status: 500 },
+      );
+    };
+    expect(await failureBodySample(partialErrorBody())).toBe(`{"error":{"message":"insufficient funds`);
+    const result = await verifyProviderKey({ fetch: mockFetch(partialErrorBody()) }, "openai", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
+  test("a 4xx with no body at all has no quota signal to find → unexpected_response", async () => {
+    const result = await verifyProviderKey({ fetch: mockFetch(new Response(null, { status: 404 })) }, "openai", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "unexpected_response" });
+  });
+
+  test("models endpoint 402 → quota_exhausted (the same classifier as the probe path)", async () => {
+    const result = await verifyProviderKey({ fetch: mockFetch(json(402, {})) }, "openai", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
   test("2xx but non-JSON body → unexpected_response", async () => {
     const html = new Response("<html>gateway</html>", { status: 200, headers: { "content-type": "text/html" } });
     const result = await verifyProviderKey({ fetch: mockFetch(html) }, "openai", PLAIN_KEY);
@@ -796,6 +968,16 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
       CUSTOM,
     );
     expect(result).toEqual({ ok: false, reason: "invalid_key" });
+  });
+
+  test("custom provider 402 → quota_exhausted (the third call site shares the classifier)", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(402, { error: { message: "insufficient quota" } })) },
+      "custom",
+      PLAIN_KEY,
+      CUSTOM,
+    );
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
   });
 
   test("anthropic-messages custom provider probes with x-api-key + anthropic-version and echoes the DECLARED model_ids", async () => {

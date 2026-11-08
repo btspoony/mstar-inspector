@@ -226,6 +226,8 @@ describe("settings copy is dictionary-backed", () => {
     expect(t("zh_CN", "settings.verify.unexpected")).toContain("意外");
     expect(t("en", "settings.verify.unsupported_provider")).toContain("can't be verified");
     expect(t("zh_CN", "settings.verify.unsupported_provider")).toContain("无法");
+    expect(t("en", "settings.verify.rate_limited")).toContain("throttled");
+    expect(t("zh_CN", "settings.verify.rate_limited")).toContain("限流");
     expect(t("en", "settings.consoleOnly")).toContain("can't be verified");
     expect(t("zh_CN", "settings.consoleOnly")).toContain("无法");
     expect(t("en", "settings.ops")).toBe("Operations");
@@ -258,6 +260,8 @@ describe("settings copy is dictionary-backed", () => {
     expect(source).toContain("settings.consoleOnly");
     expect(source).toContain("unsupported_provider");
   });
+
+  // The private verify-reason routing has no direct test seam; copy alone does not cover it.
 });
 
 describe("configured providers + catalog add flow", () => {

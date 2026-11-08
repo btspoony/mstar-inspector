@@ -155,6 +155,7 @@ import {
   commenterCalls,
   commenterState,
   createReviewConsumer,
+  expectFailureRedacted,
   failureRows,
   fakeCommenter,
   fakeSandbox,
@@ -1192,9 +1193,30 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", head_sha: SHA });
     expect(String(failureRows(db)[0]!.error)).toContain("numstat failed");
+    // A genuine failure names BOTH its causes: git's own stderr (in the stage
+    // detail) and the diff-path state the same round read — so an unusable
+    // empty file and an unreadable captured one never read as one failure.
+    expect(String(failureRows(db)[0]!.error)).toContain("diff file: captured");
     expect(sandbox.destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+  });
+
+  test("numstat failure does not carry an exact secret", async () => {
+    // A credential every shape pattern misses (no token prefix, no 40-char hex
+    // run), assembled at runtime so no contiguous credential literal exists.
+    // Only the exact-value pass can remove it from the stage's message.
+    const secretToken = ["3a7f9c02", "d51e", "4b86", "a97f", "6c04e2b81d35"].join("-");
+    reset();
+    commenterState.token = secretToken;
+    sandbox.numstatExitCode = 1;
+    sandbox.numstatStderr = `fatal: bad object (challenge ${secretToken})`;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    const message = await expectFailureRedacted(consumer, db, { secret: secretToken, tail: "challenge" });
+    expect(message).toContain("numstat failed");
   });
 
   test("diff failure → failure row (stage=sandbox) + no runner/post/insert, rethrow, destroy", async () => {
@@ -1222,6 +1244,25 @@ describe("createReviewConsumer", () => {
     expect(sandbox.destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+  });
+
+  test("git-stage failure does not carry an exact secret", async () => {
+    // A credential every shape pattern misses (no token prefix, no 40-char hex
+    // run), assembled at runtime so no contiguous credential literal exists.
+    // Only the exact-value pass can remove it from the stage's message.
+    const secretToken = ["9f1c4a77", "2b6d", "4e05", "8c31", "7d5be0a2f684"].join("-");
+    reset();
+    commenterState.token = secretToken;
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = `HTTP 401: Bad credentials (challenge ${secretToken})`;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    const message = await expectFailureRedacted(consumer, db, { secret: secretToken, tail: "challenge" });
+    expect(message).toContain("diff failed");
+    const failureLine = logLines.find((l) => l.level === "error" && l.msg.startsWith("review failed:"));
+    expect(failureLine).toBeDefined();
+    expect(failureLine!.msg).not.toContain(secretToken);
   });
 
   test("oversized diff (GitHub 406) → captured from the local merge-base diff and the round continues", async () => {
@@ -1473,6 +1514,36 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(String(failureRows(db)[0]!.error)).toContain("oversized fallback: fetch-exit at fetch");
+  });
+
+  test("an oversized-diff fallback decline does not carry an exact secret from the failed step", async () => {
+    // The decline warn tails the FAILED STEP's stderr, not the refused gh
+    // capture's. A credential every shape pattern misses (assembled at
+    // runtime, so no contiguous literal exists) survives shape redaction and
+    // only the exact-value pass can remove it before the tail cut.
+    const secretToken = ["5d2b8e41", "c7a3", "4f16", "9b0d", "3e6c1f8a2d57"].join("-");
+    reset();
+    commenterState.token = secretToken;
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    sandbox.fetchExitCode = 128;
+    sandbox.fetchStderr = `fatal: could not read Username (challenge ${secretToken})`;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expectFailureRedacted(consumer, db, {
+      secret: secretToken,
+      tail: "oversized fallback: fetch-exit at fetch",
+    });
+
+    const declineWarn = logLines.find(
+      (l) => l.level === "warn" && l.msg.startsWith("oversized diff fallback declined:"),
+    );
+    expect(declineWarn).toBeDefined();
+    // The failed step's tail really reached the sink (it is not empty), and
+    // the value itself is gone from it.
+    expect(declineWarn!.msg).toContain("challenge");
+    expect(declineWarn!.msg).not.toContain(secretToken);
   });
 
   test("a mid-fallback local-diff failure rethrows the ORIGINAL diff failure with no partial capture", async () => {

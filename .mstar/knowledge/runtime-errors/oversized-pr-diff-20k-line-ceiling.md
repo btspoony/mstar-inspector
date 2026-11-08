@@ -1,6 +1,7 @@
 ---
 module: review-pipeline
 date: 2026-11-07
+last_updated: 2026-11-08
 problem_type: runtime_error
 category: runtime-errors
 severity: high
@@ -91,7 +92,15 @@ Measured on the prototype recorded in `{PLAN_DIR}/100-diff-too-large-fallback.md
 
 ## Known Limits
 
-- `shortcut:` incremental recheck capture still uses the compare-API diff and shares the 20,000-line ceiling, so a recheck round on an oversized PR still fails at the increment stage; upgrade when rechecking oversized PRs matters (issue I-000503).
+- The incremental recheck capture now composes with this fallback: `incrementDiffCommand`
+  delivers through `<diffPath>.increment` and only renames it onto the diff on
+  success, so a refused `compare` answer can no longer truncate the full diff;
+  the round then degrades to a full-diff round with one structured warn
+  (`increment_capture: "too_large"`, the step named) and drops `since` so no claim
+  outlives its diff. `isDiffTooLarge` also accepts the `HTTP 406` status token
+  before the prose, so a wording change cannot silently reopen the repeat-failure.
+  See `best-practices/empty-artifact-is-not-a-failed-capture.md` for the delivery
+  discipline that makes the truncation impossible.
 - `shortcut:` the base-ref guard admits only `[A-Za-z0-9._/-]`, so a legal GitHub ref outside that set (for example one containing `+`) declines the fallback and the round rethrows the 406; upgrade on the first such PR (issue I-000505).
 - `shortcut:` `isDiffTooLarge` can still match a repository literally named `too_large` in non-URL error text; every sub-step then fails and the original error is rethrown, so the cost is a spent 120 s window, not a wrong capture (issue I-000506).
 - `shortcut:` a round that has already spent more than ~546 s of its 900 s window (the derived runner deadline less one 120 s capture) declines the fallback and keeps the fast 406 failure row; upgrade if blocked-by-budget oversized rounds become common.

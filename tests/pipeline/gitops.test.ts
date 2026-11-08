@@ -210,19 +210,72 @@ describe("gitops command builders", () => {
     );
   });
 
-  test("incrementDiffCommand captures base...head with the SAME bounded read as the PR diff", () => {
-    const base = "a".repeat(40);
-    const head = "b".repeat(40);
-    expect(incrementDiffCommand("acme", "widgets", base, head, DIFF_PATH)).toBe(
-      shellCommand(
-        `gh api -H 'Accept: application/vnd.github.v3.diff' 'repos/acme/widgets/compare/${base}...${head}' > '${DIFF_PATH}' && ` +
-          `head -c '${DIFF_PREFETCH_MAX_BYTES}' '${DIFF_PATH}' && printf '\\n' && ` +
-          `tail -c '+${DIFF_PREFETCH_MAX_BYTES + 1}' '${DIFF_PATH}' | head -c '1' | wc -c`,
-      ),
-    );
-    // The three-dot form is the one `compare` reports `ahead` for, so the two
-    // steps agree by construction.
-    expect(incrementDiffCommand("acme", "widgets", base, head, DIFF_PATH)).toContain(`/${base}...${head}`);
+  test("incrementDiffCommand replaces the diff file only after a delivered capture, and flags an increment over the prefetch bound", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mstar-increment-"));
+    try {
+      // A stub compare API: it records the request it was asked for, answers
+      // with the file named by GH_ANSWER_FILE, and otherwise refuses with
+      // nothing on stdout — the way the real 406 does.
+      const answer = join(dir, "answer.diff");
+      const argv = join(dir, "gh-argv");
+      await Bun.write(
+        join(dir, "gh"),
+        `#!/bin/sh\nprintf '%s\\n' "$@" > '${argv}'\n[ -n "$GH_ANSWER_FILE" ] && cat "$GH_ANSWER_FILE"\nexit "\${GH_EXIT:-0}"\n`,
+      );
+      Bun.spawnSync(["chmod", "+x", join(dir, "gh")]);
+
+      const diffPath = join(dir, "pr.diff");
+      const previous = "diff --git a/full b/full\n@@ -1 +1 @@\n-full\n+full\n";
+      const increment = "diff --git a/delta b/delta\n@@ -1 +1 @@\n-a\n+b\n";
+      const base = "a".repeat(40);
+      const head = "b".repeat(40);
+      const command = incrementDiffCommand("acme", "widgets", base, head, diffPath);
+      const run = async (env: Record<string, string>) => {
+        const proc = Bun.spawn(["sh", "-c", command], {
+          env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, ...env },
+        });
+        return { exitCode: await proc.exited, stdout: await new Response(proc.stdout).text() };
+      };
+
+      // REFUSED capture: the full diff this round already wrote stays intact,
+      // so a refused increment degrades to a full-diff round instead of an
+      // empty one. The delivery ORDER is what this pins: redirecting straight
+      // into `diffPath` would truncate it before the refusal lands.
+      await Bun.write(diffPath, previous);
+      const refused = await run({ GH_EXIT: "1" });
+      expect(refused.exitCode).not.toBe(0);
+      expect(await Bun.file(diffPath).text()).toBe(previous);
+
+      // DELIVERED capture: the increment replaces the file completely — no
+      // byte of the full diff survives — and the bounded read after it
+      // answers fit (flag 0) over the same file.
+      await Bun.write(answer, increment);
+      const delivered = await run({ GH_EXIT: "0", GH_ANSWER_FILE: answer });
+      expect(delivered.exitCode).toBe(0);
+      expect(await Bun.file(diffPath).text()).toBe(increment);
+      const lines = delivered.stdout.trimEnd().split("\n");
+      expect(lines.at(-1)!.trim()).toBe("0");
+      expect(lines.slice(0, -1).join("\n")).toBe(increment);
+
+      // OVER-BOUND delivered capture: the SAME command answers the overflow
+      // flag "1" over an increment past the prefetch window, streaming only
+      // its first DIFF_PREFETCH_MAX_BYTES — the half of the builder that only
+      // a synthesised fixture answer covered before.
+      const overBound = `${increment}${"x".repeat(DIFF_PREFETCH_MAX_BYTES)}\n`;
+      await Bun.write(answer, overBound);
+      const overDelivered = await run({ GH_EXIT: "0", GH_ANSWER_FILE: answer });
+      expect(overDelivered.exitCode).toBe(0);
+      expect(await Bun.file(diffPath).text()).toBe(overBound);
+      const overLines = overDelivered.stdout.trimEnd().split("\n");
+      expect(overLines.at(-1)!.trim()).toBe("1");
+      expect(overLines.slice(0, -1).join("\n")).toBe(overBound.slice(0, DIFF_PREFETCH_MAX_BYTES));
+
+      // The three-dot form is the one `compare` reports `ahead` for, so the two
+      // steps agree by construction.
+      expect(await Bun.file(argv).text()).toContain(`repos/acme/widgets/compare/${base}...${head}`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("the oversized-diff fallback resolves the base ref and merge base, then diffs the clone locally", () => {
@@ -247,7 +300,7 @@ describe("gitops command builders", () => {
     );
   });
 
-  test("isDiffTooLarge accepts only GitHub's oversized-diff wording — an auth or transport fault is not it", () => {
+  test("isDiffTooLarge accepts the 406 ceiling token or GitHub's wording — an auth or transport fault is not it", () => {
     expect(
       isDiffTooLarge(
         "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000) (https://api.github.com/repos/acme/widgets/pulls/42)",
@@ -255,6 +308,9 @@ describe("gitops command builders", () => {
     ).toBe(true);
     expect(isDiffTooLarge('{"message":"too_large"}')).toBe(true);
     expect(isDiffTooLarge("GraphQL: too_large")).toBe(true);
+    // The status TOKEN alone is enough: GitHub rewriting the prose must not
+    // silently reopen the repeat-failure it took the fallback out of.
+    expect(isDiffTooLarge("HTTP 406: Not Acceptable")).toBe(true);
     for (const other of [
       "",
       "HTTP 401: Bad credentials (https://api.github.com/repos/acme/widgets/pulls/42)",
@@ -265,8 +321,11 @@ describe("gitops command builders", () => {
       // every failure of `auth_too_large` would otherwise take the fallback.
       "HTTP 401: Bad credentials (https://api.github.com/repos/acme/auth_too_large/pulls/42)",
       "HTTP 500: Server Error (https://api.github.com/repos/too_large/widgets/pulls/42)",
+      // …and a 406 that only appears in the URL is not the status either.
+      "HTTP 404: Not Found (https://api.github.com/repos/acme/widgets/pulls/406)",
       // A longer word that merely contains it is not the token either.
       "HTTP 422: too_larger request",
+      "HTTP 4060: not a status",
     ]) {
       expect(isDiffTooLarge(other)).toBe(false);
     }

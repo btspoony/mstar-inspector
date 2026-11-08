@@ -23,12 +23,17 @@ import {
 import { compareStatusCommand } from "../../src/pipeline/gitops";
 import {
   commenterCalls,
+  commenterState,
   createReviewConsumer,
   DIFF_PREFETCH_MAX_BYTES,
+  expectFailureRedacted,
+  failureRows,
+  fakeSandbox,
   logLines,
   makeBatch,
   makeEnv,
   makePayload,
+  messageRetryCalls,
   reset,
   sandbox,
   testLog,
@@ -112,6 +117,27 @@ function runnerInput(): Record<string, unknown> {
   return JSON.parse(sandbox.writtenInputJson!) as Record<string, unknown>;
 }
 
+/** GitHub's answer when it refuses a diff over its 20,000-line API ceiling. */
+const INCREMENT_TOO_LARGE =
+  "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000) " +
+  "(https://api.github.com/repos/acme/widgets/compare/bbbbbbb...aaaaaaa)";
+
+/**
+ * The double answers the increment exec with an exit code but no stderr, so
+ * this case injects the stderr the compare API really writes when it refuses
+ * an oversized increment — the token the consumer classifies by. Everything
+ * else (call recording, the other commands) stays the shared double's.
+ */
+const oversizedIncrementSandbox = {
+  ...fakeSandbox,
+  runCommand: mock(async (cmd: string, opts?: unknown) => {
+    const answer = await fakeSandbox.runCommand(cmd, opts);
+    return cmd.includes("application/vnd.github.v3.diff")
+      ? { ...answer, stderr: INCREMENT_TOO_LARGE, exitCode: 1 }
+      : answer;
+  }),
+};
+
 describe("incremental review rounds: the increment capture", () => {
   test("an increment capture failure is a round failure, never a silent full-diff fallback", async () => {
     reset();
@@ -129,6 +155,65 @@ describe("incremental review rounds: the increment capture", () => {
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/increment diff failed/);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(sandbox.writtenInputJson).toBeUndefined();
+  });
+
+  test("an increment capture failure does not carry an exact secret", async () => {
+    // A credential every shape pattern misses (no token prefix, no 40-char hex
+    // run), assembled at runtime so no contiguous credential literal exists.
+    // Only the exact-value pass can remove it from the increment stage's
+    // message and its failure row.
+    const secretToken = ["6b2d90f4", "a83c", "4e17", "8d05", "1f7a3c6be942"].join("-");
+    reset();
+    commenterState.token = secretToken;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.compareStatus = "ahead";
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.incrementDiffExitCode = 128;
+    sandbox.incrementDiffStderr = `fatal: could not read Username (challenge ${secretToken})`;
+    const db = await createSeededTestD1();
+    seedReview(db, PREVIOUS_SHA);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    const message = await expectFailureRedacted(consumer, db, { secret: secretToken, tail: "challenge" });
+    expect(message).toContain("increment diff failed");
+  });
+
+  test("an oversized increment falls back or degrades with a reason", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    // `ahead` starts an increment round, then the compare API refuses the
+    // base...head diff exactly as `gh pr diff` refuses an oversized PR.
+    sandbox.compareStatus = "ahead";
+    const db = await createSeededTestD1();
+    seedReview(db, PREVIOUS_SHA);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      getSandbox: async () => oversizedIncrementSandbox,
+    });
+
+    // A refusal is not a round failure: nothing is retried and no failure row
+    // is left, so the delivery never repeats the four-attempt exhaustion.
+    await consumer(makeBatch(makePayload()));
+
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(0);
+    // ONE structured warn names the reason and the step it stopped at.
+    const degrade = logLines.filter((l) => l.fields.increment_capture !== undefined);
+    expect(degrade).toHaveLength(1);
+    expect(degrade[0]!.level).toBe("warn");
+    expect(degrade[0]!.fields).toMatchObject({ increment_capture: "too_large", increment_since: PREVIOUS_SHA });
+    expect(degrade[0]!.msg).toContain("increment diff capture too large");
+    expect(degrade[0]!.msg).toContain("406");
+    // …and the `since` fact is dropped rather than faked: the round reviews the
+    // full diff its own capture already holds.
+    expect(runnerInput().reconFacts).toEqual([
+      "acme/widgets#42",
+      `head ${SHA}`,
+      "10\t2\tsrc/auth.ts",
+      "5\t0\tdocs/readme.md",
+    ]);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
   });
 
   test("a capture-failed round still publishes, and its row is never an incremental base", async () => {
@@ -234,11 +319,15 @@ describe("incremental review rounds: the increment capture", () => {
     sandbox.diffStdout = VALID_DIFF;
     // The eligible base is an ancestor and `base...head` truly has no changes:
     // both reads of the increment — the bounded stdout copy and the numstat of
-    // the file it wrote — are empty. The prior round already covers this head's
-    // content, so a verdict here would be computed from nothing.
+    // the file it wrote — are empty. `git apply --numstat` rejects an EMPTY
+    // file with the exit git really answers (128), so the ack must survive
+    // that exit rather than only an empty stdout. The prior round already
+    // covers this head's content, so a verdict here would be computed from
+    // nothing.
     sandbox.compareStatus = "ahead";
     sandbox.incrementDiffStdout = "";
     sandbox.numstatStdout = "";
+    sandbox.numstatExitCode = 128;
     const db = await createSeededTestD1();
     seedReview(db, PREVIOUS_SHA);
     const terminalized: Array<{ publicationId: string | null; outcome: string; inheritedHeadSha?: string }> = [];
@@ -286,6 +375,64 @@ describe("incremental review rounds: the increment capture", () => {
     // The Check is told WHICH reviewed head it inherits — the conclusion then
     // comes from that head's row, never from a free-standing skip.
     expect(terminalized).toEqual([{ publicationId: null, outcome: "skipped", inheritedHeadSha: PREVIOUS_SHA }]);
+  });
+
+  test("an empty diff file acks instead of failing the sandbox stage", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // A first round whose PR adds no diff: `gh pr diff` writes an EMPTY file,
+    // and `git apply --numstat` rejects it with the exit git really answers
+    // for unusable input (128). Nothing to review, so the delivery acks — no
+    // publication, no review row — instead of failing the sandbox stage.
+    sandbox.diffStdout = "";
+    sandbox.numstatStdout = "";
+    sandbox.numstatExitCode = 128;
+    const db = await createSeededTestD1();
+    const terminalized: Array<{ publicationId: string | null; outcome: string; inheritedHeadSha?: string }> = [];
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: mock(async () => ({
+          attemptId: "attempt-1",
+          scope: {
+            appId: TEST_APP_ID,
+            installationId: TEST_INSTALLATION_ID,
+            owner: TEST_OWNER,
+            repo: TEST_REPO,
+            prNumber: TEST_PR_NUMBER,
+          },
+          githubAppId: 424242,
+          headSha: SHA,
+          lease: { holder: "h", epoch: 1, untilMs: 1 },
+        })),
+        terminalize: mock(async (input: { publicationId: string | null; outcome: string; inheritedHeadSha?: string }) => {
+          terminalized.push({
+            publicationId: input.publicationId,
+            outcome: input.outcome,
+            inheritedHeadSha: input.inheritedHeadSha,
+          });
+        }),
+      },
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // Acked with no review: no body, no paid run, no review row, and no
+    // failure row — the round did not fail, there was just nothing to review.
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    expect(sandbox.writtenInputJson).toBeUndefined();
+    expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    const rows = db.raw.query("SELECT count(*) AS c FROM reviews WHERE head_sha = ?").get(SHA) as { c: number };
+    expect(rows.c).toBe(0);
+    expect(db.raw.query("SELECT * FROM review_failures").all()).toHaveLength(0);
+    // …and it is NOT the capture-failure path.
+    expect(logLines.some((l) => l.fields.diff_capture !== undefined)).toBe(false);
+    expect(logLines.some((l) => l.fields.increment_capture !== undefined)).toBe(false);
+    // ONE structured line names the outcome; there is no reviewed head to
+    // inherit, so the Check keeps the skipped outcome's neutral conclusion.
+    const ack = logLines.filter((l) => l.fields.event === "review_no_diff");
+    expect(ack).toHaveLength(1);
+    expect(terminalized).toEqual([{ publicationId: null, outcome: "skipped", inheritedHeadSha: undefined }]);
   });
 
   test("an over-size increment stdout copy is not a capture failure — numstat still reads the file", async () => {
