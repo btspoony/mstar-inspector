@@ -216,17 +216,22 @@ export function diffCommand(owner: string, repo: string, prNumber: number, diffP
 
 /**
  * GitHub refuses `gh pr diff` on a PR whose diff exceeds its 20,000-line API
- * ceiling: HTTP 406 on stderr, nothing on stdout. Those two wordings are the
- * ONLY signature of that ceiling — an auth (401/404) or transport failure is
- * a different cause and must keep failing the round, never take the fallback.
+ * ceiling: HTTP 406 on stderr, nothing on stdout. The status TOKEN is the
+ * stable half of that signature — GitHub's prose is corroboration, so a
+ * reworded 406 still takes the fallback. An auth (401/404) or transport
+ * failure is a different cause and must keep failing the round.
  *
  * gh appends the request URL in parentheses, and a repo name may contain the
  * ceiling token itself (`auth_too_large`, `too_larger`), so URLs are cut and
- * the token must stand alone: a substring of a URL is not GitHub's verdict.
+ * each token must stand alone: a substring of a URL is not GitHub's verdict.
  */
 export function isDiffTooLarge(stderr: string): boolean {
   const message = stderr.replace(/\s*\(https?:\/\/[^)]*\)/g, "");
-  return /\btoo_large\b/.test(message) || message.includes("exceeded the maximum number of lines");
+  return (
+    /\bHTTP 406\b/.test(message) ||
+    /\btoo_large\b/.test(message) ||
+    message.includes("exceeded the maximum number of lines")
+  );
 }
 
 /** A branch ref as GitHub reports it (`base.ref`) — no traversal, no option form. */
@@ -332,6 +337,12 @@ export function compareStatusCommand(owner: string, repo: string, baseSha: strin
  * `base...head` is GitHub's three-dot form (compared against the merge base),
  * which is what `compare` reports as `ahead` — the two steps agree by
  * construction.
+ *
+ * The reply lands in a scratch file and replaces `diffPath` only once the
+ * capture was DELIVERED: a refused capture must never truncate the full diff
+ * this round already wrote there, because numstat reads that file — an
+ * untouched full diff lets a refused increment degrade to a full-diff round
+ * instead of reading as "an empty diff, nothing to review".
  */
 export function incrementDiffCommand(
   owner: string,
@@ -343,8 +354,10 @@ export function incrementDiffCommand(
   assertOwnerRepo(owner, repo);
   assertSha(baseSha, "base sha");
   assertSha(headSha, "head sha");
+  const scratch = `${diffPath}.increment`;
   return shellCommand(
-    `gh api -H 'Accept: application/vnd.github.v3.diff' 'repos/${owner}/${repo}/compare/${baseSha}...${headSha}' > '${diffPath}' && ` +
+    `gh api -H 'Accept: application/vnd.github.v3.diff' 'repos/${owner}/${repo}/compare/${baseSha}...${headSha}' > '${scratch}' && ` +
+      `mv -f '${scratch}' '${diffPath}' && ` +
       `head -c '${DIFF_PREFETCH_MAX_BYTES}' '${diffPath}' && printf '\\n' && ` +
       `tail -c '+${DIFF_PREFETCH_MAX_BYTES + 1}' '${diffPath}' | head -c '1' | wc -c`,
   );
