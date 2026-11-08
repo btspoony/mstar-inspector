@@ -7,6 +7,10 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the two GitHub release downloads (Bun, gh CLI) now retry a transient
+# CDN 504 instead of failing the whole image build at that layer. Pinned versions
+# are unchanged; only the fetch step gained `--retry 8 --retry-delay 5
+# --retry-all-errors`.
 # rebuild: the runner's OMP SDK pin moves to 18.18.1; its package and lockfile are image inputs, so the image must rebuild.
 # rebuild: the runner's anchored review deadline now IS the OUTER exec deadline
 # the Worker derived: the input carries `outerDeadlineEpochMs` (that absolute
@@ -243,14 +247,19 @@ RUN apt-get update \
 COPY --from=docker.io/cloudflare/sandbox:1.0.0@sha256:5bc187515bad0d9d486a4f1476f7d8ad39fe97c57965f044e4b0a0dcc93eac06 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 
 # Bun 1.4.0 pinned (base ships no Bun; omp requires >=1.3.14).
-RUN curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64.zip -o /tmp/bun.zip \
+# `--retry` covers GitHub's release CDN answering a transient 504: the whole
+# build reds at this layer otherwise, and it did on 2026-11-08 while every other
+# GitHub path (codeload, git) stayed healthy. `--retry-all-errors` is needed
+# because `-f` turns a 5xx into a failure curl would otherwise not retry.
+RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64.zip -o /tmp/bun.zip \
     && unzip -o /tmp/bun.zip -d /tmp/bun \
     && mv /tmp/bun/bun-linux-x64/bun /usr/local/bin/bun \
     && chmod +x /usr/local/bin/bun \
     && rm -rf /tmp/bun /tmp/bun.zip
 
 # gh CLI 2.98.0 pinned (not present in the base image — ASSUMPTION confirmed).
-RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_linux_amd64.tar.gz -o /tmp/gh.tar.gz \
+# Same release CDN as the Bun layer above, so the same transient-504 retry.
+RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_linux_amd64.tar.gz -o /tmp/gh.tar.gz \
     && tar -xzf /tmp/gh.tar.gz -C /tmp \
     && mv /tmp/gh_2.98.0_linux_amd64/bin/gh /usr/local/bin/gh \
     && chmod +x /usr/local/bin/gh \
