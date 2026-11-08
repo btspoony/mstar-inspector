@@ -216,17 +216,22 @@ export function diffCommand(owner: string, repo: string, prNumber: number, diffP
 
 /**
  * GitHub refuses `gh pr diff` on a PR whose diff exceeds its 20,000-line API
- * ceiling: HTTP 406 on stderr, nothing on stdout. Those two wordings are the
- * ONLY signature of that ceiling — an auth (401/404) or transport failure is
- * a different cause and must keep failing the round, never take the fallback.
+ * ceiling: HTTP 406 on stderr, nothing on stdout. The status TOKEN is the
+ * stable half of that signature — GitHub's prose is corroboration, so a
+ * reworded 406 still takes the fallback. An auth (401/404) or transport
+ * failure is a different cause and must keep failing the round.
  *
  * gh appends the request URL in parentheses, and a repo name may contain the
  * ceiling token itself (`auth_too_large`, `too_larger`), so URLs are cut and
- * the token must stand alone: a substring of a URL is not GitHub's verdict.
+ * each token must stand alone: a substring of a URL is not GitHub's verdict.
  */
 export function isDiffTooLarge(stderr: string): boolean {
   const message = stderr.replace(/\s*\(https?:\/\/[^)]*\)/g, "");
-  return /\btoo_large\b/.test(message) || message.includes("exceeded the maximum number of lines");
+  return (
+    /\bHTTP 406\b/.test(message) ||
+    /\btoo_large\b/.test(message) ||
+    message.includes("exceeded the maximum number of lines")
+  );
 }
 
 /** A branch ref as GitHub reports it (`base.ref`) — no traversal, no option form. */
