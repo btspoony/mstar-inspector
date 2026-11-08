@@ -210,7 +210,7 @@ describe("gitops command builders", () => {
     );
   });
 
-  test("incrementDiffCommand replaces the diff file only after a delivered capture", async () => {
+  test("incrementDiffCommand replaces the diff file only after a delivered capture, and flags an increment over the prefetch bound", async () => {
     const dir = await mkdtemp(join(tmpdir(), "mstar-increment-"));
     try {
       // A stub compare API: it records the request it was asked for, answers
@@ -256,6 +256,19 @@ describe("gitops command builders", () => {
       const lines = delivered.stdout.trimEnd().split("\n");
       expect(lines.at(-1)!.trim()).toBe("0");
       expect(lines.slice(0, -1).join("\n")).toBe(increment);
+
+      // OVER-BOUND delivered capture: the SAME command answers the overflow
+      // flag "1" over an increment past the prefetch window, streaming only
+      // its first DIFF_PREFETCH_MAX_BYTES — the half of the builder that only
+      // a synthesised fixture answer covered before.
+      const overBound = `${increment}${"x".repeat(DIFF_PREFETCH_MAX_BYTES)}\n`;
+      await Bun.write(answer, overBound);
+      const overDelivered = await run({ GH_EXIT: "0", GH_ANSWER_FILE: answer });
+      expect(overDelivered.exitCode).toBe(0);
+      expect(await Bun.file(diffPath).text()).toBe(overBound);
+      const overLines = overDelivered.stdout.trimEnd().split("\n");
+      expect(overLines.at(-1)!.trim()).toBe("1");
+      expect(overLines.slice(0, -1).join("\n")).toBe(overBound.slice(0, DIFF_PREFETCH_MAX_BYTES));
 
       // The three-dot form is the one `compare` reports `ahead` for, so the two
       // steps agree by construction.

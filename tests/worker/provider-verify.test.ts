@@ -39,6 +39,7 @@ import {
   VERIFY_USER_AGENT,
   builtinProbeCanRejectKey,
   customProbeCanRejectKey,
+  failureBodySample,
   ompProviderIdFor,
   verifyFetch,
   verifyProviderKey,
@@ -513,11 +514,11 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
   });
 
-  test("the quota word past the 512-byte body bound is never read — the oversized chunk is not decoded", async () => {
+  test("the quota word past the 512-byte body bound is never read — the chunk over the bound is decoded only up to it", async () => {
     // 201 ASCII bytes + 400 multibyte bytes + an oversized tail chunk. The
-    // second chunk alone outruns the remaining budget (311 bytes), so the
-    // decoder must stop inside it and never pull the 10 KB tail — where the
-    // only quota word sits, well past the bound.
+    // second chunk alone outruns the remaining budget (311 bytes), so the read
+    // stops inside it and never pulls the 10 KB tail — where the only quota
+    // word sits, well past the bound.
     const chunks = [
       new TextEncoder().encode("a".repeat(201)),
       new TextEncoder().encode("é".repeat(200)),
@@ -526,28 +527,51 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     const pulled: number[] = [];
     let cancels = 0;
     let next = 0;
-    const streamed = new ReadableStream<Uint8Array>({
-      // No read-ahead: one pull per reader.read(), so `pulled` is exactly what
-      // the body read consumed from the stream.
-      pull(controller) {
-        const chunk = chunks[next];
-        if (chunk === undefined) return controller.close();
-        pulled.push(chunk.byteLength);
-        controller.enqueue(chunk);
-        next += 1;
-      },
-      cancel() {
-        cancels += 1;
-      },
-    }, { highWaterMark: 0 });
+    const streamed = (): ReadableStream<Uint8Array> => {
+      next = 0;
+      return new ReadableStream<Uint8Array>({
+        // No read-ahead: one pull per reader.read(), so `pulled` is exactly what
+        // the body read consumed from the stream.
+        pull(controller) {
+          const chunk = chunks[next];
+          if (chunk === undefined) return controller.close();
+          pulled.push(chunk.byteLength);
+          controller.enqueue(chunk);
+          next += 1;
+        },
+        cancel() {
+          cancels += 1;
+        },
+      }, { highWaterMark: 0 });
+    };
+    // The retained SAMPLE is what the bound really spends: 201 ASCII bytes plus
+    // 311 of the 400 multibyte bytes — 155 whole é, and the 512th byte alone
+    // (the first half of the 156th é) flushed as U+FFFD.
+    expect(await failureBodySample(new Response(streamed(), { status: 500 }))).toBe(
+      "a".repeat(201) + "é".repeat(155) + "\uFFFD",
+    );
+    // Two chunks pulled, and the tail one never: the sample read closed the
+    // stream at the bound.
+    expect(pulled).toEqual([201, 400]);
+    expect(cancels).toBe(1);
     const result = await verifyProviderKey(
-      { fetch: mockFetch(new Response(streamed, { status: 500 })) },
+      { fetch: mockFetch(new Response(streamed(), { status: 500 })) },
       "openai",
       PLAIN_KEY,
     );
     expect(result).toEqual({ ok: false, reason: "unexpected_response" });
-    expect(pulled).toEqual([201, 400]);
-    expect(cancels).toBe(1);
+  });
+
+  test("a code point cut by the byte bound is flushed, and the signal beside it still classifies", async () => {
+    // 504 ASCII bytes + " quota " + the first byte of a 2-byte code point at
+    // the 512-byte cut. The signal is complete inside the budget; the cut
+    // lands mid-code-point, which a streaming decode would otherwise drop.
+    const body = (): Response =>
+      new Response(new TextEncoder().encode(`x`.repeat(504) + " quota " + "é".repeat(300)), { status: 500 });
+    const sample = await failureBodySample(body());
+    expect(sample).toBe(`${"x".repeat(504)} quota \uFFFD`);
+    const result = await verifyProviderKey({ fetch: mockFetch(body()) }, "openai", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
   });
 
   test("probe 500 with an unrelated body carries no quota signal → unexpected_response", async () => {
