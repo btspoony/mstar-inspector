@@ -234,11 +234,15 @@ describe("incremental review rounds: the increment capture", () => {
     sandbox.diffStdout = VALID_DIFF;
     // The eligible base is an ancestor and `base...head` truly has no changes:
     // both reads of the increment — the bounded stdout copy and the numstat of
-    // the file it wrote — are empty. The prior round already covers this head's
-    // content, so a verdict here would be computed from nothing.
+    // the file it wrote — are empty. `git apply --numstat` rejects an EMPTY
+    // file with the exit git really answers (128), so the ack must survive
+    // that exit rather than only an empty stdout. The prior round already
+    // covers this head's content, so a verdict here would be computed from
+    // nothing.
     sandbox.compareStatus = "ahead";
     sandbox.incrementDiffStdout = "";
     sandbox.numstatStdout = "";
+    sandbox.numstatExitCode = 128;
     const db = await createSeededTestD1();
     seedReview(db, PREVIOUS_SHA);
     const terminalized: Array<{ publicationId: string | null; outcome: string; inheritedHeadSha?: string }> = [];
@@ -286,6 +290,64 @@ describe("incremental review rounds: the increment capture", () => {
     // The Check is told WHICH reviewed head it inherits — the conclusion then
     // comes from that head's row, never from a free-standing skip.
     expect(terminalized).toEqual([{ publicationId: null, outcome: "skipped", inheritedHeadSha: PREVIOUS_SHA }]);
+  });
+
+  test("an empty diff file acks instead of failing the sandbox stage", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // A first round whose PR adds no diff: `gh pr diff` writes an EMPTY file,
+    // and `git apply --numstat` rejects it with the exit git really answers
+    // for unusable input (128). Nothing to review, so the delivery acks — no
+    // publication, no review row — instead of failing the sandbox stage.
+    sandbox.diffStdout = "";
+    sandbox.numstatStdout = "";
+    sandbox.numstatExitCode = 128;
+    const db = await createSeededTestD1();
+    const terminalized: Array<{ publicationId: string | null; outcome: string; inheritedHeadSha?: string }> = [];
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: mock(async () => ({
+          attemptId: "attempt-1",
+          scope: {
+            appId: TEST_APP_ID,
+            installationId: TEST_INSTALLATION_ID,
+            owner: TEST_OWNER,
+            repo: TEST_REPO,
+            prNumber: TEST_PR_NUMBER,
+          },
+          githubAppId: 424242,
+          headSha: SHA,
+          lease: { holder: "h", epoch: 1, untilMs: 1 },
+        })),
+        terminalize: mock(async (input: { publicationId: string | null; outcome: string; inheritedHeadSha?: string }) => {
+          terminalized.push({
+            publicationId: input.publicationId,
+            outcome: input.outcome,
+            inheritedHeadSha: input.inheritedHeadSha,
+          });
+        }),
+      },
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // Acked with no review: no body, no paid run, no review row, and no
+    // failure row — the round did not fail, there was just nothing to review.
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    expect(sandbox.writtenInputJson).toBeUndefined();
+    expect(sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    const rows = db.raw.query("SELECT count(*) AS c FROM reviews WHERE head_sha = ?").get(SHA) as { c: number };
+    expect(rows.c).toBe(0);
+    expect(db.raw.query("SELECT * FROM review_failures").all()).toHaveLength(0);
+    // …and it is NOT the capture-failure path.
+    expect(logLines.some((l) => l.fields.diff_capture !== undefined)).toBe(false);
+    expect(logLines.some((l) => l.fields.increment_capture !== undefined)).toBe(false);
+    // ONE structured line names the outcome; there is no reviewed head to
+    // inherit, so the Check keeps the skipped outcome's neutral conclusion.
+    const ack = logLines.filter((l) => l.fields.event === "review_no_diff");
+    expect(ack).toHaveLength(1);
+    expect(terminalized).toEqual([{ publicationId: null, outcome: "skipped", inheritedHeadSha: undefined }]);
   });
 
   test("an over-size increment stdout copy is not a capture failure — numstat still reads the file", async () => {

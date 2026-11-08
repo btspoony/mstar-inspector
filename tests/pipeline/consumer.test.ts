@@ -1192,6 +1192,10 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", head_sha: SHA });
     expect(String(failureRows(db)[0]!.error)).toContain("numstat failed");
+    // A genuine failure names BOTH its causes: git's own stderr (in the stage
+    // detail) and the diff-path state the same round read — so an unusable
+    // empty file and an unreadable captured one never read as one failure.
+    expect(String(failureRows(db)[0]!.error)).toContain("diff file: captured");
     expect(sandbox.destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
