@@ -28,7 +28,7 @@
  *     on the shared cron, `reconcileReviewChecks` on its own every-minute cron,
  *     each stage caught independently
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import {
   CHECK_BACKOFF_MS,
@@ -106,10 +106,26 @@ import {
   seedPublication,
   seedReview,
   seededDb,
+  OFFLINE_FETCH,
   stubFetch,
   withFailingReads,
 } from "./helpers/check-reconcile";
 import type { AdapterScript, AdoptOutcome, BeginOutcome, CompleteOutcome, FetchOutcome } from "./helpers/check-reconcile";
+
+// The run's transport bounds every request with a REAL 5 s timeout, so a pass
+// that reaches the network makes the suite's runtime depend on GitHub's latency:
+// the same file redded on CI with 8-10 unrelated assertions timing out at 5002ms
+// and passed on a rerun. Nothing here inspects a real response — the adapter
+// doubles only meter that a request reached the transport — so the file-level
+// fetch answers immediately. `stubFetch()` still wins inside its own tests
+// because `run()` resolves `globalThis.fetch` at call time.
+const REAL_FETCH = globalThis.fetch;
+beforeAll(() => {
+  globalThis.fetch = OFFLINE_FETCH;
+});
+afterAll(() => {
+  globalThis.fetch = REAL_FETCH;
+});
 
 // ---------------------------------------------------------------------------
 // Constants

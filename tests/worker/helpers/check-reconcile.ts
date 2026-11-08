@@ -466,10 +466,28 @@ export function agreeingScript(
   };
 }
 
+/**
+ * Stands in for the global fetch on every reconciler pass in these tests.
+ *
+ * `buildTransport` bounds each request with a real 5 s `AbortSignal.timeout`, so
+ * a live request makes the suite's runtime depend on GitHub's latency — the
+ * adapters below only need the call to reach the transport (they meter it and
+ * ignore the payload), and one slow response reds an unrelated test on bun's own
+ * 5 s default. Answering immediately keeps every budget assertion genuine while
+ * proving nothing left the process.
+ */
+export const OFFLINE_FETCH = (async () => new Response("{}", { status: 401 })) as unknown as typeof fetch;
+
 export function run(db: TestD1, deps: CheckReconcileDeps = {}) {
   // The caller's log wins when supplied (tests that assert on warn events);
-  // silence is only the default.
-  return reconcileReviewChecks(asEnv(db), { log: SILENT_LOG, ...deps });
+  // silence is only the default. The transport's fetch is resolved at CALL time
+  // from `globalThis.fetch`, so `stubFetch()` keeps metering a run while the
+  // file-level offline stand-in covers every case that does not stub it.
+  return reconcileReviewChecks(asEnv(db), {
+    log: SILENT_LOG,
+    ...deps,
+    fetchImpl: deps.fetchImpl ?? globalThis.fetch,
+  });
 }
 
 /**
