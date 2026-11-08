@@ -7,10 +7,11 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
-# rebuild: the two GitHub release downloads (Bun, gh CLI) now retry a transient
-# CDN 504 instead of failing the whole image build at that layer. Pinned versions
-# are unchanged; only the fetch step gained `--retry 8 --retry-delay 5
-# --retry-all-errors`.
+# rebuild: the two GitHub release-asset fetches (Bun, gh CLI) moved off that CDN
+# after it answered 504 to every retry from the build network — Bun now comes
+# from the official Docker Hub image copied at a pinned digest, gh from GitHub's
+# own apt pool as a checksum-verified .deb pinned at 2.103.3 (the pool carries
+# only the current release). Bun stays 1.4.0.
 # rebuild: the runner's OMP SDK pin moves to 18.18.1; its package and lockfile are image inputs, so the image must rebuild.
 # rebuild: the runner's anchored review deadline now IS the OUTER exec deadline
 # the Worker derived: the input carries `outerDeadlineEpochMs` (that absolute
@@ -247,23 +248,25 @@ RUN apt-get update \
 COPY --from=docker.io/cloudflare/sandbox:1.0.0@sha256:5bc187515bad0d9d486a4f1476f7d8ad39fe97c57965f044e4b0a0dcc93eac06 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 
 # Bun 1.4.0 pinned (base ships no Bun; omp requires >=1.3.14).
-# `--retry` covers GitHub's release CDN answering a transient 504: the whole
-# build reds at this layer otherwise, and it did on 2026-11-08 while every other
-# GitHub path (codeload, git) stayed healthy. `--retry-all-errors` is needed
-# because `-f` turns a 5xx into a failure curl would otherwise not retry.
-RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64.zip -o /tmp/bun.zip \
-    && unzip -o /tmp/bun.zip -d /tmp/bun \
-    && mv /tmp/bun/bun-linux-x64/bun /usr/local/bin/bun \
-    && chmod +x /usr/local/bin/bun \
-    && rm -rf /tmp/bun /tmp/bun.zip
+# Sourced from the official Docker Hub image, NOT from a GitHub release asset:
+# on 2026-11-08 `github.com/oven-sh/bun/releases/download/...` answered 504 for
+# every one of eight retries from inside this build network while github.com,
+# codeload and git stayed healthy, so a retry cannot recover it — the fetch had
+# to leave that CDN. Docker Hub is already a hard dependency of this file (the
+# base image and the sandbox shim are copied from it), and the digest pins the
+# same Bun 1.4.0 the tag names.
+COPY --from=docker.io/oven/bun:1.4.0-debian@sha256:5bb0f9be3a1a36a03e27c9a9dd894a3b1ad26657155c7df4dda771e17bf872ef /usr/local/bin/bun /usr/local/bin/bun
+RUN chmod +x /usr/local/bin/bun && /usr/local/bin/bun --version
 
-# gh CLI 2.98.0 pinned (not present in the base image — ASSUMPTION confirmed).
-# Same release CDN as the Bun layer above, so the same transient-504 retry.
-RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_linux_amd64.tar.gz -o /tmp/gh.tar.gz \
-    && tar -xzf /tmp/gh.tar.gz -C /tmp \
-    && mv /tmp/gh_2.98.0_linux_amd64/bin/gh /usr/local/bin/gh \
-    && chmod +x /usr/local/bin/gh \
-    && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
+# gh CLI 2.103.3 pinned (not present in the base image — ASSUMPTION confirmed).
+# Same CDN problem as the Bun layer, so this comes from GitHub's own apt pool
+# (cli.github.com), which is not the release-asset host. The exact version is
+# pinned in the filename and the payload is checksum-verified, because that pool
+# carries only the current release.
+RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.com/packages/pool/main/g/gh/gh_2.103.3_amd64.deb -o /tmp/gh.deb \
+    && echo "e3bafef96328d1a67de3a968bdfe1cc2ffd58cf6aba8b5e201356897ed06bb3d  /tmp/gh.deb" | sha256sum -c - \
+    && dpkg -i /tmp/gh.deb \
+    && rm -f /tmp/gh.deb
 
 # mstar-harness plugin, pinned ref abf3167d3ee7db0d0593d034fbc99330663a4669 (tag v4.2.3, bumped 2026-11-06).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):

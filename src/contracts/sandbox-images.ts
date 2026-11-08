@@ -112,7 +112,7 @@ export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
   sandboxShimTag: "1.0.0",
   sandboxShimDigest: "sha256:5bc187515bad0d9d486a4f1476f7d8ad39fe97c57965f044e4b0a0dcc93eac06",
   bunVersion: "1.4.0",
-  ghVersion: "2.98.0",
+  ghVersion: "2.103.3",
   harnessVersion: HARNESS_VERSION,
   harnessRef: "abf3167d3ee7db0d0593d034fbc99330663a4669",
   harnessCliVersion: HARNESS_VERSION,
