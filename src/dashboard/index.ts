@@ -3068,14 +3068,23 @@ function settingsKeyLimitResponse(
   });
 }
 
-function mapVerifyReason(
-  reason: VerifyFailureReason,
-): "invalid_key" | "unreachable" | "unexpected" | "unsupported_provider" {
-  if (reason === "invalid_key" || reason === "unreachable" || reason === "unsupported_provider") return reason;
-  return "unexpected";
+/** The SPA-facing reason subset: `unexpected` folds the parse misses, every
+ *  other reason reaches the client under its own name. */
+type MappedVerifyReason =
+  | "invalid_key"
+  | "quota_exhausted"
+  | "unreachable"
+  | "unexpected"
+  | "unsupported_provider";
+
+function mapVerifyReason(reason: VerifyFailureReason): MappedVerifyReason {
+  return reason === "unexpected_response" ? "unexpected" : reason;
 }
-function verifyFailCopy(reason: ReturnType<typeof mapVerifyReason>): string {
+function verifyFailCopy(reason: MappedVerifyReason): string {
   if (reason === "invalid_key") return "That API key was rejected by the provider — nothing was stored.";
+  if (reason === "quota_exhausted") {
+    return "That provider account is out of quota or credit — nothing was stored. The key itself may still be valid.";
+  }
   if (reason === "unreachable") return "The provider could not be reached — nothing was stored.";
   if (reason === "unsupported_provider") {
     return "This provider can't be verified here — manage the key in the provider console. Nothing was stored.";
@@ -3578,8 +3587,9 @@ const appModelsRoute = async (c: DashboardContext) => {
 
 /**
  * SPA add-key path: verify the as-typed key, then store. Failure
- * is 400 JSON with a structured reason (invalid_key / unreachable / unexpected /
- * unsupported_provider) and ZERO writes. The key is never logged or returned.
+ * is 400 JSON with a structured reason (invalid_key / quota_exhausted /
+ * unreachable / unexpected / unsupported_provider) and ZERO writes. The key is
+ * never logged or returned.
  * An App whose selected runtime harness is not omp (unknown id
  * included — fail-closed) is refused with unsupported_provider before any
  * probe, mirroring the display face's eligibility gate.

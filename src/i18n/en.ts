@@ -570,6 +570,8 @@ export const en = {
     keyVerified: "Key verified — models cached.",
     verify: {
       invalid_key: "That API key was rejected by the provider — nothing was stored.",
+      quota_exhausted:
+        "That provider account is out of quota or credit — nothing was stored. The key itself may still be valid.",
       unreachable: "The provider could not be reached — nothing was stored.",
       unexpected: "The provider returned an unexpected response — nothing was stored.",
       unsupported_provider:

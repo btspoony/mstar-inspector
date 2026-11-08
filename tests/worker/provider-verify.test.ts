@@ -13,7 +13,8 @@
  * `wrangler d1 migrations apply`.
  *
  * Verify-service tests use a mocked fetch: success+models / 401 / timeout /
- * non-JSON / custom-provider happy+401, plus the endpoint-map parity lock
+ * non-JSON / quota-class refusals (402, a billing body, 429 kept apart) /
+ * custom-provider happy+401, plus the endpoint-map parity lock
  * (PROVIDER_VERIFY_ENDPOINTS ≡ PROVIDER_IDS — a future provider id must
  * get an explicit verify entry).
  */
@@ -494,6 +495,52 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: false, reason: "unexpected_response" });
   });
 
+  test("probe 402 → quota_exhausted: a spent account is never an unexpected response", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(402, { error: { message: "payment required" } })) },
+      "copilot",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
+  test("probe 400 whose body names insufficient credits → quota_exhausted (bounded body read on the failure path)", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(400, { error: { message: "insufficient credits" } })) },
+      "copilot",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
+  test("probe 500 with an unrelated body carries no quota signal → unexpected_response", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(500, { error: { message: "internal server error" } })) },
+      "copilot",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "unexpected_response" });
+  });
+
+  test("probe 429 is a throttled check, not a spent account — never the quota reason", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(429, { error: { message: "rate limit exceeded; quota window resets in 60s" } })) },
+      "copilot",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "unexpected_response" });
+  });
+
+  test("a 4xx with no body at all has no quota signal to find → unexpected_response", async () => {
+    const result = await verifyProviderKey({ fetch: mockFetch(new Response(null, { status: 404 })) }, "openai", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "unexpected_response" });
+  });
+
+  test("models endpoint 402 → quota_exhausted (the same classifier as the probe path)", async () => {
+    const result = await verifyProviderKey({ fetch: mockFetch(json(402, {})) }, "openai", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
   test("2xx but non-JSON body → unexpected_response", async () => {
     const html = new Response("<html>gateway</html>", { status: 200, headers: { "content-type": "text/html" } });
     const result = await verifyProviderKey({ fetch: mockFetch(html) }, "openai", PLAIN_KEY);
@@ -796,6 +843,16 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
       CUSTOM,
     );
     expect(result).toEqual({ ok: false, reason: "invalid_key" });
+  });
+
+  test("custom provider 402 → quota_exhausted (the third call site shares the classifier)", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(402, { error: { message: "insufficient quota" } })) },
+      "custom",
+      PLAIN_KEY,
+      CUSTOM,
+    );
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
   });
 
   test("anthropic-messages custom provider probes with x-api-key + anthropic-version and echoes the DECLARED model_ids", async () => {

@@ -355,6 +355,24 @@ describe("CARRY-2: verify-route eligibility rejection gains the keyed face", () 
   });
 });
 
+describe("verify route: a spent provider account keeps its own reason", () => {
+  test("a provider quota refusal reaches the SPA as quota_exhausted, zero writes", async () => {
+    const { db } = await seededWorld();
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(JSON.stringify({ error: { message: "insufficient credits" } }), { status: 402 })) as unknown as typeof fetch,
+    );
+    try {
+      const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: sk("ant-123") });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ ok: false, reason: "quota_exhausted" });
+      expect(rawCount(db, "app_provider_keys")).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
 describe("review depth op (per-App review level)", () => {
   const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
 
