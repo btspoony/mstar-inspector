@@ -215,6 +215,13 @@ export type CheckReconcileDeps = {
   credentials?: CheckCredentialFactory;
   /** Injectable log; defaults to structured JSON lines. */
   log?: CheckReconcileLog;
+  /**
+   * Injectable fetch for the run's bounded transport; defaults to the global
+   * one. Tests inject this so a reconciler pass cannot reach the network — the
+   * per-request bound is a real 5 s timeout, so a live request makes a test's
+   * runtime depend on GitHub's latency.
+   */
+  fetchImpl?: typeof fetch;
 };
 
 // ---------------------------------------------------------------------------
@@ -396,7 +403,7 @@ function reserve(budget: RunBudget, cost: number): void {
  * `deferCheckRecovery` is deliberately not used here, because it increments
  * `attempts` and the spec forbids charging an attempt for work that never ran.
  */
-function buildTransport(budget: RunBudget, now: () => number): CheckTransport {
+function buildTransport(budget: RunBudget, now: () => number, fetchImpl: typeof fetch = fetch): CheckTransport {
   const boundMs = (): number => Math.max(1, Math.min(CHECK_RECONCILE_PER_REQUEST_MS, budget.deadline - now()));
   return {
     boundMs,
@@ -412,7 +419,7 @@ function buildTransport(budget: RunBudget, now: () => number): CheckTransport {
       reserve(budget, 1);
       const timeout = AbortSignal.timeout(boundMs());
       const signal = init?.signal == null ? timeout : AbortSignal.any([init.signal, timeout]);
-      return fetch(input, { ...init, signal });
+      return fetchImpl(input, { ...init, signal });
     },
   };
 }
@@ -476,7 +483,7 @@ export async function reconcileReviewChecks(
       rowActive: false,
       refused: false,
     };
-    const transport = buildTransport(budget, now);
+    const transport = buildTransport(budget, now, deps.fetchImpl);
     const credentials = deps.credentials ?? productionCheckCredentials;
     // One credential resolution per App pair per run: exactly one identity
     // probe and one purpose-scoped client, reused by every row of that pair.
