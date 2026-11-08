@@ -79,12 +79,12 @@ export type SandboxImageHost = {
  * automatically — a bump edits this declaration and the matching Dockerfile
  * line together.
  *
- * `gh` is the ONE build input deliberately absent: the release-asset CDN answered
- * 504 to every retry (2026-11-08), and GitHub's own apt pool keeps only the
- * current release and its predecessor, so any version-pinned URL is a build
- * break within two gh releases. The Dockerfile installs `gh` from that pool
- * unpinned and prints the resolved version into the build log; reproducibility
- * for gh is traded for a build that cannot break on a schedule.
+ * `gh` is deliberately absent. The release-asset CDN answered 504 to every retry
+ * (2026-11-08), and GitHub's own apt pool did not serve the two older releases
+ * probed the same day, so a version-pinned URL is not durably reachable. The
+ * Dockerfile installs `gh` from that pool unpinned and writes the resolved
+ * version into the image (`/etc/mstar-image-versions`); the accepted cost is that
+ * two builds of this same Dockerfile can carry different gh binaries.
  */
 export type SandboxImagePins = {
   /** Debian base image manifest digest (linux/amd64). */

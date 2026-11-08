@@ -165,9 +165,13 @@
 # pin suite. No build input changes; the marker exists because wrangler hashes
 # this file, so any textual change still rebuilds the image.
 #
-# Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
-# the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and
-# its committed bun.lock) are all pinned to exact versions.
+# Version pinning (compass contracts E): base digest, Bun (image tag + digest),
+# mstar-harness ref, the mstar-harness CLI, and the omp SDK (via
+# packages/runner/package.json and its committed bun.lock) are pinned to exact
+# versions. `gh` is the documented exception — it installs from GitHub's apt pool
+# unpinned, because that pool does not guarantee an old release stays reachable;
+# its resolved version is recorded inside the image (see the version file the gh
+# layer writes) rather than in the contract.
 #
 # NO SECRETS (HARD): this image is built with no build args, no env values, no
 # credentials. Tokens/keys enter only at runtime — the sandbox-read token via
@@ -258,21 +262,26 @@ COPY --from=docker.io/cloudflare/sandbox:1.0.0@sha256:5bc187515bad0d9d486a4f1476
 # same Bun 1.4.0 the tag names — it is declared as `bunImageDigest` /
 # `bunVersion` in src/contracts/sandbox-images.ts.
 COPY --from=docker.io/oven/bun:1.4.0-debian@sha256:5bb0f9be3a1a36a03e27c9a9dd894a3b1ad26657155c7df4dda771e17bf872ef /usr/local/bin/bun /usr/local/bin/bun
-RUN chmod +x /usr/local/bin/bun && /usr/local/bin/bun --version
+# The tag and the digest are two independent literals and nothing else compares
+# them, so the build asserts the binary is the declared version instead of only
+# printing it — a tag bump without a digest re-resolution fails here.
+RUN chmod +x /usr/local/bin/bun && test "$(/usr/local/bin/bun --version)" = "1.4.0"
 
-# gh CLI from GitHub's own apt pool — deliberately NOT version-pinned. The pool
-# keeps only the current release and its predecessor (verified 2026-11-08:
-# 2.98.0 and 2.103.3 resolve; 2.90.0 and 2.80.0 are 404), so a filename-pinned
-# URL is a build break within two gh releases, and the release-asset CDN this
-# layer used before answered 504 to every retry. The resolved version is printed
-# into the build log so an image can still be told apart from another.
+# gh CLI from GitHub's own apt pool — deliberately NOT version-pinned. A
+# filename-pinned URL is not durable: on 2026-11-08 four probes of that pool
+# resolved 2.98.0 and 2.103.3 but returned 404 for 2.90.0 and 2.80.0, so an old
+# release is not guaranteed to stay reachable and a pinned filename would turn a
+# future cold build into a 404. The release-asset CDN this layer used before
+# answered 504 to every retry. The resolved version is written into the image,
+# not only the log, so a running executor can be asked what it actually ships.
 RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/* \
-    && gh --version
+    && { echo "bun $(/usr/local/bin/bun --version)"; gh --version | head -1; } > /etc/mstar-image-versions \
+    && cat /etc/mstar-image-versions
 
 # mstar-harness plugin, pinned ref abf3167d3ee7db0d0593d034fbc99330663a4669 (tag v4.2.3, bumped 2026-11-06).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
