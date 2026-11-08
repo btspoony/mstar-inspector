@@ -638,6 +638,24 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
   });
 
+  test("probe 429 whose body only links a billing dashboard → unexpected_response (no spent-account statement)", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(429, { error: { message: "rate limit: check your billing dashboard" } })) },
+      "openai",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "unexpected_response" });
+  });
+
+  test("probe 403 whose body reports a zero balance without spend wording → invalid_key", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(403, { error: { message: "your account balance is $0.00" } })) },
+      "openai",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "invalid_key" });
+  });
+
   test("a stream that errors mid-body keeps the bytes already delivered", async () => {
     // The provider's own words arrive in the first chunk and the connection
     // breaks after it: the delivered prefix is the only evidence there is, and

@@ -350,14 +350,17 @@ const FAILURE_BODY_LIMIT = 512;
  *  narrow on purpose: an unrelated 400/500 body stays `unexpected_response`. */
 const QUOTA_BODY_SIGNAL = /\b(credits?|quota|billing|payment required|insufficient funds)\b/i;
 
-/** The same signal for a 403/429 body, where the bare words `quota` and
- *  `credits` prove nothing: a throttled check routinely names its quota window,
- *  and classifying that as a spent account would send an operator to top up a
- *  healthy account instead of retrying. Providers that report a spent account
- *  under a throttling status use these phrases — OpenAI's `insufficient_quota`
- *  and Gemini's "check your plan and billing details" on a 429, a billing
- *  disablement on a 403. */
-const ACCOUNT_SPENT_SIGNAL = /\b(insufficient[ _]quota|billing|balance|payment required|insufficient funds)\b/i;
+/** The same signal for a 403/429 body, where a bare word proves nothing: a
+ *  throttled check routinely names its quota window, and a permission error may
+ *  mention billing or a balance in passing (a help link, a dashboard URL, a
+ *  balance field). Either would send an operator to top up a healthy account
+ *  instead of retrying or fixing the key, so every alternative states a spend
+ *  proposition. Providers that report a spent account under a throttling status
+ *  use these shapes — OpenAI's `insufficient_quota` and "exceeded your current
+ *  quota" on a 429, Gemini's `RESOURCE_EXHAUSTED` and "check your plan and
+ *  billing details", a billing disablement on a 403. */
+const ACCOUNT_SPENT_SIGNAL =
+  /\b(?:insufficient[ _](?:quota|credits?|funds|balance)|exceeded (?:your|the) (?:\w+ )?quota|resource[ _]exhausted|out of (?:\w+ ){0,2}credits?|payment required|(?:billing|balance) (?:is )?(?:disabled|not enabled|issue|exhausted|depleted)|check your plan and billing)\b/i;
 
 /**
  * The first FAILURE_BODY_LIMIT BYTES of a failure body, decoded ("" when the
