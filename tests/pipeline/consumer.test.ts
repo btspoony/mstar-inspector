@@ -1503,6 +1503,33 @@ describe("createReviewConsumer", () => {
     expect(String(failureRows(db)[0]!.error)).toContain("oversized fallback: fetch-exit at fetch");
   });
 
+  test("an oversized-diff fallback decline does not carry an exact secret from the failed step", async () => {
+    // The decline warn tails the FAILED STEP's stderr, not the refused gh
+    // capture's. A credential every shape pattern misses (assembled at
+    // runtime, so no contiguous literal exists) survives shape redaction and
+    // only the exact-value pass can remove it before the tail cut.
+    const secretToken = ["5d2b8e41", "c7a3", "4f16", "9b0d", "3e6c1f8a2d57"].join("-");
+    reset();
+    commenterState.token = secretToken;
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    sandbox.fetchExitCode = 128;
+    sandbox.fetchStderr = `fatal: could not read Username (challenge ${secretToken})`;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/oversized fallback: fetch-exit at fetch/);
+
+    const declineWarn = logLines.find(
+      (l) => l.level === "warn" && l.msg.startsWith("oversized diff fallback declined:"),
+    );
+    expect(declineWarn).toBeDefined();
+    // The failed step's tail really reached the sink (it is not empty), and
+    // the value itself is gone from it.
+    expect(declineWarn!.msg).toContain("challenge");
+    expect(declineWarn!.msg).not.toContain(secretToken);
+  });
+
   test("a mid-fallback local-diff failure rethrows the ORIGINAL diff failure with no partial capture", async () => {
     reset();
     sandbox.diffExitCode = 1;

@@ -367,6 +367,8 @@ export type FakeSandboxState = {
   mergeBaseExitCode: number;
   /** Exit codes of the fallback's last two steps (mid-fallback failure cases). */
   fetchExitCode: number;
+  /** stderr a failing depth-1 fetch answers with. */
+  fetchStderr: string;
   localDiffExitCode: number;
   /**
    * Raw stdout a BROKEN transport answers the bounded read with, replacing the
@@ -435,6 +437,7 @@ export function initialFakeSandboxState(): FakeSandboxState {
     baseRefExitCode: 0,
     mergeBaseExitCode: 0,
     fetchExitCode: 0,
+    fetchStderr: "fatal: fetch failed",
     localDiffExitCode: 0,
     diffReadStdout: null,
     numstatStdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n",
@@ -592,7 +595,7 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     return { stdout: `${state.mergeBaseSha}\n`, stderr: "", exitCode: 0 };
   }
   if (cmd.startsWith(FETCH_DEPTH_ONE.head) && cmd.endsWith(FETCH_DEPTH_ONE.tail)) {
-    return { stdout: "", stderr: state.fetchExitCode === 0 ? "" : "fatal: fetch failed", exitCode: state.fetchExitCode };
+    return { stdout: "", stderr: state.fetchExitCode === 0 ? "" : state.fetchStderr, exitCode: state.fetchExitCode };
   }
   if (cmd.startsWith(LOCAL_DIFF.head) && cmd.endsWith(LOCAL_DIFF.tail)) {
     if (state.localDiffExitCode !== 0) {

@@ -4585,7 +4585,10 @@ async function processMessage(
         // cut, exactly as the stage detail does). The durable failure keeps the
         // ORIGINAL 406 and gains the reason, so "not attempted (budget)",
         // "failed at fetch" and "hostile ref rejected" stay distinguishable.
-        const tail = captured.run === undefined ? "" : redactSecrets(captured.run.stderr).trim().slice(-STDERR_TAIL_MAX);
+        const tail =
+          captured.run === undefined
+            ? ""
+            : redactExactSecrets(redactSecrets(captured.run.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
         deps.log.warn(
           { ...fields, diff_fallback: captured.reason, diff_fallback_step: captured.step },
           `oversized diff fallback declined: ${captured.step} (${captured.reason})` +
