@@ -9,9 +9,10 @@
 #
 # rebuild: the two GitHub release-asset fetches (Bun, gh CLI) moved off that CDN
 # after it answered 504 to every retry from the build network — Bun now comes
-# from the official Docker Hub image copied at a pinned digest, gh from GitHub's
-# own apt pool as a checksum-verified .deb pinned at 2.103.3 (the pool carries
-# only the current release). Bun stays 1.4.0.
+# from the official Docker Hub image copied at a pinned digest (declared as
+# `bunImageDigest`), gh installs from GitHub's own apt pool unpinned because that
+# pool keeps only two releases. `unzip` is gone with the Bun zip, and the
+# build-context inventory now names verify-seat-supervision.sh.
 # rebuild: the runner's OMP SDK pin moves to 18.18.1; its package and lockfile are image inputs, so the image must rebuild.
 # rebuild: the runner's anchored review deadline now IS the OUTER exec deadline
 # the Worker derived: the input carries `outerDeadlineEpochMs` (that absolute
@@ -207,7 +208,7 @@
 #   packages/runner/{package.json,bun.lock}
 #   packages/{shared,runner}/src
 #   packages/runner/verify-synthesis.sh
-#   sandbox-image/{verify-cli-shim.sh,verify-cli-lock.sh,cli-global/{package.json,bun.lock}}
+#   sandbox-image/{verify-cli-shim.sh,verify-cli-lock.sh,verify-seat-supervision.sh,cli-global/{package.json,bun.lock}}
 # A repo-root .dockerignore keeps the context lean (node_modules and tests excluded).
 
 # Sandbox SDK 1.0: the 0.12 `FROM docker.io/cloudflare/sandbox:<ver>` base is
@@ -233,11 +234,11 @@
 FROM docker.io/library/debian:trixie-slim@sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483
 
 # Tools the pinned steps below need (coreutils incl. `timeout`, tar and the
-# POSIX shell are Essential in the Debian base): curl + ca-certificates for
-# the Bun/gh downloads, unzip for the Bun zip, git for the harness clone and
-# the PR-head fetch at review time.
+# POSIX shell are Essential in the Debian base): curl + ca-certificates for the
+# build-time fetches, git for the harness clone and the PR-head fetch at review
+# time.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git unzip \
+    && apt-get install -y --no-install-recommends ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
 
 # The shim is digest-pinned for the same reason as the base: the tag alone is
@@ -254,19 +255,24 @@ COPY --from=docker.io/cloudflare/sandbox:1.0.0@sha256:5bc187515bad0d9d486a4f1476
 # codeload and git stayed healthy, so a retry cannot recover it — the fetch had
 # to leave that CDN. Docker Hub is already a hard dependency of this file (the
 # base image and the sandbox shim are copied from it), and the digest pins the
-# same Bun 1.4.0 the tag names.
+# same Bun 1.4.0 the tag names — it is declared as `bunImageDigest` /
+# `bunVersion` in src/contracts/sandbox-images.ts.
 COPY --from=docker.io/oven/bun:1.4.0-debian@sha256:5bb0f9be3a1a36a03e27c9a9dd894a3b1ad26657155c7df4dda771e17bf872ef /usr/local/bin/bun /usr/local/bin/bun
 RUN chmod +x /usr/local/bin/bun && /usr/local/bin/bun --version
 
-# gh CLI 2.103.3 pinned (not present in the base image — ASSUMPTION confirmed).
-# Same CDN problem as the Bun layer, so this comes from GitHub's own apt pool
-# (cli.github.com), which is not the release-asset host. The exact version is
-# pinned in the filename and the payload is checksum-verified, because that pool
-# carries only the current release.
-RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.com/packages/pool/main/g/gh/gh_2.103.3_amd64.deb -o /tmp/gh.deb \
-    && echo "e3bafef96328d1a67de3a968bdfe1cc2ffd58cf6aba8b5e201356897ed06bb3d  /tmp/gh.deb" | sha256sum -c - \
-    && dpkg -i /tmp/gh.deb \
-    && rm -f /tmp/gh.deb
+# gh CLI from GitHub's own apt pool — deliberately NOT version-pinned. The pool
+# keeps only the current release and its predecessor (verified 2026-11-08:
+# 2.98.0 and 2.103.3 resolve; 2.90.0 and 2.80.0 are 404), so a filename-pinned
+# URL is a build break within two gh releases, and the release-asset CDN this
+# layer used before answered 504 to every retry. The resolved version is printed
+# into the build log so an image can still be told apart from another.
+RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/* \
+    && gh --version
 
 # mstar-harness plugin, pinned ref abf3167d3ee7db0d0593d034fbc99330663a4669 (tag v4.2.3, bumped 2026-11-06).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
