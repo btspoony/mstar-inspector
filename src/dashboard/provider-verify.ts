@@ -27,12 +27,16 @@
  * alias map; ids omp does not validate keep a hand-documented entry.
  *
  * Failure reasons are structured and documented per case:
- *   - `invalid_key`        401, or a 403 whose body names no spent account (the
- *                          provider rejected the key)
- *   - `quota_exhausted`    the provider's ACCOUNT is spent (402, a 403/429 whose
- *                          body reports insufficient quota or a billing fault,
- *                          or any rejection body naming credits/quota/billing) —
- *                          the key itself may still be valid
+ *   - `invalid_key`        401/403 — the provider refused the key (a 403 billing
+ *                          refusal is still "this key cannot do this")
+ *   - `quota_exhausted`    402, or any other non-2xx whose body names
+ *                          credits/quota/billing — the provider's ACCOUNT is
+ *                          spent; the key itself may still be valid
+ *   - `rate_limited`       429 — the provider throttled the request; the key was
+ *                          NOT judged. A 429 body cannot separate a spend fault
+ *                          from a plain throttle (`RESOURCE_EXHAUSTED` and
+ *                          "Quota exceeded" are both), so the status alone
+ *                          decides and the copy names both causes
  *   - `unreachable`        network failure / timeout (10s AbortSignal.timeout)
  *   - `unexpected_response` the provider answered but not with a successful,
  *                           parseable verification response
@@ -57,6 +61,7 @@ export const VERIFY_USER_AGENT = "mstar-inspector-provider-verify";
 export type VerifyFailureReason =
   | "invalid_key"
   | "quota_exhausted"
+  | "rate_limited"
   | "unreachable"
   | "unexpected_response"
   | "unsupported_provider";
@@ -345,22 +350,11 @@ function responseLeftOrigin(res: Response, requestUrl: string): boolean {
  */
 const FAILURE_BODY_LIMIT = 512;
 
-/** The account-spent vocabulary of a rejection body — the signal that the
- *  provider's ACCOUNT is out of credit rather than the key being bad. Kept
- *  narrow on purpose: an unrelated 400/500 body stays `unexpected_response`. */
+/** The account-spent vocabulary of a rejection body on the generic arm — the
+ *  signal that the provider's ACCOUNT is out of credit rather than the key
+ *  being bad. Kept narrow on purpose: an unrelated 400/500 body stays
+ *  `unexpected_response`. Never applied to a 403/429 (see `failureReason`). */
 const QUOTA_BODY_SIGNAL = /\b(credits?|quota|billing|payment required|insufficient funds)\b/i;
-
-/** The same signal for a 403/429 body, where a bare word proves nothing: a
- *  throttled check routinely names its quota window, and a permission error may
- *  mention billing or a balance in passing (a help link, a dashboard URL, a
- *  balance field). Either would send an operator to top up a healthy account
- *  instead of retrying or fixing the key, so every alternative states a spend
- *  proposition. Providers that report a spent account under a throttling status
- *  use these shapes — OpenAI's `insufficient_quota` and "exceeded your current
- *  quota" on a 429, Gemini's `RESOURCE_EXHAUSTED` and "check your plan and
- *  billing details", a billing disablement on a 403. */
-const ACCOUNT_SPENT_SIGNAL =
-  /\b(?:insufficient[ _](?:quota|credits?|funds|balance)|exceeded (?:your|the) (?:\w+ )?quota|resource[ _]exhausted|out of (?:\w+ ){0,2}credits?|payment required|(?:billing|balance) (?:is )?(?:disabled|not enabled|issue|exhausted|depleted)|check your plan and billing)\b/i;
 
 /**
  * The first FAILURE_BODY_LIMIT BYTES of a failure body, decoded ("" when the
@@ -398,25 +392,23 @@ export async function failureBodySample(res: Response): Promise<string> {
 
 /**
  * The ONE classifier every non-2xx verification response goes through, so the
- * three entry points can never disagree:
- *   401 → invalid_key;
+ * three entry points can never disagree. The status decides for every status
+ * that carries its own meaning, and only the statuses with none reach the body:
+ *   401/403 → invalid_key (the provider refused the key; a 403 billing refusal
+ *             is still "this key cannot do this");
  *   402 → quota_exhausted (payment required: the account is spent);
- *   403 → quota_exhausted when the bounded body names a spent account (a
- *         billing-disabled account), else invalid_key — a rejected key;
- *   429 → quota_exhausted on the same spent-account signal (OpenAI reports a
- *         spent account as 429 `insufficient_quota`), else unexpected_response:
- *         a throttled check says nothing about the key or the balance;
+ *   429 → rate_limited (throttled — the key was not judged). The body is never
+ *         read here: Gemini answers both a plain throttle and a genuinely
+ *         exhausted quota with `RESOURCE_EXHAUSTED` / "Quota exceeded", so no
+ *         prose predicate on a 429 can be correct;
  *   any other non-2xx whose bounded body names credits/quota/billing →
  *         quota_exhausted;
  *   anything else → unexpected_response.
  */
 async function failureReason(res: Response): Promise<VerifyFailureReason> {
-  if (res.status === 401) return "invalid_key";
+  if (res.status === 401 || res.status === 403) return "invalid_key";
   if (res.status === 402) return "quota_exhausted";
-  if (res.status === 403 || res.status === 429) {
-    if (ACCOUNT_SPENT_SIGNAL.test(await failureBodySample(res))) return "quota_exhausted";
-    return res.status === 403 ? "invalid_key" : "unexpected_response";
-  }
+  if (res.status === 429) return "rate_limited";
   return QUOTA_BODY_SIGNAL.test(await failureBodySample(res)) ? "quota_exhausted" : "unexpected_response";
 }
 
@@ -588,7 +580,8 @@ export function builtinProbeCanRejectKey(providerId: string): boolean {
  * declared modelIds, verbatim (the plan's §6.1 echo contract: 成功时 models =
  * 声明 modelIds 回显，无抓取 — the vocabulary IS the declaration; the response
  * body is never scraped); every other non-2xx → the shared `failureReason`
- * classifier (so a spent account is quota_exhausted, not unexpected_response);
+ * classifier (so a spent account is quota_exhausted, a throttled request
+ * rate_limited — never unexpected_response);
  * transport failures AND an unparseable base URL → unreachable. Custom
  * providers never write app_provider_models rows — their
  * dropdown source is the declared model_ids, returned here for callers to

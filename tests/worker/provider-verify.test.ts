@@ -13,7 +13,8 @@
  * `wrangler d1 migrations apply`.
  *
  * Verify-service tests use a mocked fetch: success+models / 401 / timeout /
- * non-JSON / quota-class refusals (402, a billing body, 429 kept apart) /
+ * non-JSON / quota-class refusals (402, a generic quota body) / a 429 kept
+ * apart as its own throttled reason /
  * custom-provider happy+401, plus the endpoint-map parity lock
  * (PROVIDER_VERIFY_ENDPOINTS ≡ PROVIDER_IDS — a future provider id must
  * get an explicit verify entry).
@@ -583,68 +584,44 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: false, reason: "unexpected_response" });
   });
 
-  test("probe 429 is a throttled check, not a spent account — never the quota reason", async () => {
-    const result = await verifyProviderKey(
-      { fetch: mockFetch(json(429, { error: { message: "rate limit exceeded; quota window resets in 60s" } })) },
-      "copilot",
-      PLAIN_KEY,
-    );
-    expect(result).toEqual({ ok: false, reason: "unexpected_response" });
-  });
-
-  test("probe 429 whose body names insufficient_quota → quota_exhausted (OpenAI reports a spent account as 429)", async () => {
-    const result = await verifyProviderKey(
+  test("probe 429 → rate_limited, even when the body names quota and billing (the status alone decides, the body is never read)", async () => {
+    // Gemini answers both a plain throttle and a genuinely out-of-quota key
+    // with this exact body, so no prose predicate can tell them apart: the
+    // status is the only evidence there is, and the reason says so instead of
+    // guessing a spent account.
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>(
       {
-        fetch: mockFetch(
-          json(429, {
-            error: {
-              message: "You exceeded your current quota, please check your plan and billing details.",
-              type: "insufficient_quota",
-            },
-          }),
-        ),
+        pull(controller) {
+          pulls += 1;
+          controller.enqueue(
+            new TextEncoder().encode(
+              JSON.stringify({
+                error: {
+                  code: 429,
+                  status: "RESOURCE_EXHAUSTED",
+                  message: "Quota exceeded. Please check your plan and billing details.",
+                },
+              }),
+            ),
+          );
+          controller.close();
+        },
       },
-      "openai",
-      PLAIN_KEY,
+      { highWaterMark: 0 },
     );
-    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+    const result = await verifyProviderKey({ fetch: mockFetch(new Response(body, { status: 429 })) }, "gemini", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "rate_limited" });
+    expect(pulls).toBe(0);
   });
 
-  test("probe 429 RESOURCE_EXHAUSTED that names billing → quota_exhausted (Gemini's spent-account wording)", async () => {
-    const result = await verifyProviderKey(
-      {
-        fetch: mockFetch(
-          json(429, {
-            error: {
-              code: 429,
-              status: "RESOURCE_EXHAUSTED",
-              message: "Quota exceeded. Please check your plan and billing details.",
-            },
-          }),
-        ),
-      },
-      "gemini",
-      PLAIN_KEY,
-    );
-    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
-  });
-
-  test("403 whose body names a billing disablement → quota_exhausted, not a rejected key", async () => {
+  test("403 whose body names a billing disablement → invalid_key: only 402 asserts a spent account", async () => {
     const result = await verifyProviderKey(
       { fetch: mockFetch(json(403, { error: { message: "billing is disabled for this project" } })) },
       "openai",
       PLAIN_KEY,
     );
-    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
-  });
-
-  test("probe 429 whose body only links a billing dashboard → unexpected_response (no spent-account statement)", async () => {
-    const result = await verifyProviderKey(
-      { fetch: mockFetch(json(429, { error: { message: "rate limit: check your billing dashboard" } })) },
-      "openai",
-      PLAIN_KEY,
-    );
-    expect(result).toEqual({ ok: false, reason: "unexpected_response" });
+    expect(result).toEqual({ ok: false, reason: "invalid_key" });
   });
 
   test("probe 403 whose body reports a zero balance without spend wording → invalid_key", async () => {
@@ -659,9 +636,9 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
   test("a stream that errors mid-body keeps the bytes already delivered", async () => {
     // The provider's own words arrive in the first chunk and the connection
     // breaks after it: the delivered prefix is the only evidence there is, and
-    // the spent-account signal inside it still has to classify.
+    // the quota signal inside it still has to classify on the generic arm.
     const partialErrorBody = (): Response => {
-      const chunk = new TextEncoder().encode(`{"error":{"type":"insufficient_quota"}`);
+      const chunk = new TextEncoder().encode(`{"error":{"message":"insufficient funds`);
       let pulls = 0;
       return new Response(
         new ReadableStream<Uint8Array>({
@@ -671,10 +648,10 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
             else controller.error(new Error("connection reset"));
           },
         }, { highWaterMark: 0 }),
-        { status: 429 },
+        { status: 500 },
       );
     };
-    expect(await failureBodySample(partialErrorBody())).toBe(`{"error":{"type":"insufficient_quota"}`);
+    expect(await failureBodySample(partialErrorBody())).toBe(`{"error":{"message":"insufficient funds`);
     const result = await verifyProviderKey({ fetch: mockFetch(partialErrorBody()) }, "openai", PLAIN_KEY);
     expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
   });
