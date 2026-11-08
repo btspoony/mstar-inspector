@@ -97,8 +97,12 @@ const state = read.failure ?? (read.text === "" ? "empty" : "captured");
 if (exitCode !== 0 && state !== "empty") {
   throw new Error(`${failureDetail(stage, run)}; diff file: ${state}`);
 }
-// Only a delivered-empty artifact with nothing parsed from it is the ack.
-const empty = state === "empty" && parsedLines.length === 0;
+// Only a delivered-empty artifact with nothing parsed from it is the ack — and
+// on a FIRST round (no `sinceSha` to inherit from) the parser must also have
+// failed: an exit-0 read with no lines there keeps the normal round, so a
+// capture fault can never ride in as "nothing to review".
+const empty =
+  state === "empty" && parsedLines.length === 0 && (sinceSha !== null || exitCode !== 0);
 ```
 
 ```sh

@@ -579,6 +579,12 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     return { stdout: `${state.compareStatus}\n`, stderr: "", exitCode: state.compareExitCode };
   }
   if (cmd.startsWith(INCREMENT_DIFF.head) && cmd.endsWith(INCREMENT_DIFF.tail)) {
+    // The compare read is the same `&&` chain as the diff capture: a non-zero
+    // exit stops it BEFORE the bounded read half, so no payload accompanies the
+    // failure.
+    if (state.incrementDiffExitCode !== 0) {
+      return { stdout: "", stderr: state.incrementDiffStderr, exitCode: state.incrementDiffExitCode };
+    }
     const bytes = Buffer.from(state.incrementDiffStdout);
     const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
     const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";

@@ -155,6 +155,7 @@ import {
   commenterCalls,
   commenterState,
   createReviewConsumer,
+  expectFailureRedacted,
   failureRows,
   fakeCommenter,
   fakeSandbox,
@@ -1214,20 +1215,8 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    const thrown = await consumer(makeBatch(makePayload())).then(
-      () => {
-        throw new Error("the numstat stage was expected to fail");
-      },
-      (err: unknown) => (err instanceof Error ? err.message : String(err)),
-    );
-
-    // The stderr tail really reached the message (it is not empty) and the
-    // value itself is gone from it.
-    expect(thrown).toContain("numstat failed");
-    expect(thrown).toContain("challenge");
-    expect(thrown).not.toContain(secretToken);
-    expect(failureRows(db)).toHaveLength(1);
-    expect(String(failureRows(db)[0]!.error)).not.toContain(secretToken);
+    const message = await expectFailureRedacted(consumer, db, { secret: secretToken, tail: "challenge" });
+    expect(message).toContain("numstat failed");
   });
 
   test("diff failure → failure row (stage=sandbox) + no runner/post/insert, rethrow, destroy", async () => {
@@ -1269,17 +1258,8 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    const thrown = await consumer(makeBatch(makePayload())).then(
-      () => {
-        throw new Error("the diff stage was expected to fail");
-      },
-      (err: unknown) => (err instanceof Error ? err.message : String(err)),
-    );
-
-    expect(thrown).toContain("diff failed");
-    expect(thrown).not.toContain(secretToken);
-    expect(failureRows(db)).toHaveLength(1);
-    expect(String(failureRows(db)[0]!.error)).not.toContain(secretToken);
+    const message = await expectFailureRedacted(consumer, db, { secret: secretToken, tail: "challenge" });
+    expect(message).toContain("diff failed");
     const failureLine = logLines.find((l) => l.level === "error" && l.msg.startsWith("review failed:"));
     expect(failureLine).toBeDefined();
     expect(failureLine!.msg).not.toContain(secretToken);
@@ -1551,7 +1531,10 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/oversized fallback: fetch-exit at fetch/);
+    await expectFailureRedacted(consumer, db, {
+      secret: secretToken,
+      tail: "oversized fallback: fetch-exit at fetch",
+    });
 
     const declineWarn = logLines.find(
       (l) => l.level === "warn" && l.msg.startsWith("oversized diff fallback declined:"),
