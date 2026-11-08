@@ -7,6 +7,7 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the runner's OMP SDK pin moves to 18.18.1; its package and lockfile are image inputs, so the image must rebuild.
 # rebuild: the runner's anchored review deadline now IS the OUTER exec deadline
 # the Worker derived: the input carries `outerDeadlineEpochMs` (that absolute
 # worker-clock instant, not a duration) and `anchorRecheckDeadline` anchors to
