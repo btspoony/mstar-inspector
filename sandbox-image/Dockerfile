@@ -343,7 +343,7 @@ RUN sh /opt/verify-cli-shim.sh
 RUN mkdir -p /opt/omp-agent
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
 
-# lockfile (omp SDK 18.17.0 = packages/runner/package.json). `--omit=optional` is NOT used:
+# lockfile (omp SDK 18.18.1 = packages/runner/package.json). `--omit=optional` is NOT used:
 # pi-natives ships its platform binary as an optional dep, so omitting optionals
 # breaks the runner at load (T4 live smoke). Size control instead prunes the
 # transformers tree (local-embedding models only — the runner uses the remote
