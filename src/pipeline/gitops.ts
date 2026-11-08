@@ -124,9 +124,23 @@ export function boundedFileReadCommand(path: string, maxBytes: number): ShellCom
  */
 export const BOUNDED_READ_ABSENT_FLAG = "2";
 
-/** A commit sha interpolated into a command path segment — hex only. */
+/** A commit sha interpolated into a command path segment — hex only. A shell allowlist, never an answer check. */
+const SHA_RE = /^[0-9a-f]{7,64}$/;
+
+/**
+ * A COMPLETE git object id: SHA-1's 40 or SHA-256's 64 lowercase hex. The
+ * interpolation allowlist above accepts a truncated reply, so it cannot tell
+ * an unusable API answer from a real one.
+ */
+const COMPLETE_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** For a caller that must tell an unusable API answer (`--jq`'s `null`, a truncated reply) from a real object id. */
+export function isApiSha(value: string): boolean {
+  return COMPLETE_SHA_RE.test(value);
+}
+
 function assertSha(value: string, label: string): void {
-  assertShellSafe(value, /^[0-9a-f]{7,64}$/, label)
+  assertShellSafe(value, SHA_RE, label);
 }
 
 /**
@@ -151,6 +165,21 @@ export function cloneCommand(owner: string, repo: string, prNumber: number, clon
       `git checkout FETCH_HEAD`,
     ].join(" && "),
   );
+}
+
+/**
+ * The ONE git transport-auth env: a scoped `http.extraheader` (git ignores
+ * GH_TOKEN, so a private-repo clone/fetch fails without it). The header is the
+ * GitHub-app token form `basic base64(x-access-token:<token>)` — NOT `Bearer`,
+ * which GitHub's git server rejects even on public repos. The token travels in
+ * exec env only: never in a command string, never in the image, never in logs.
+ */
+export function gitTransportEnv(token: string): Record<string, string> {
+  return {
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${btoa(`x-access-token:${token}`)}`,
+  };
 }
 
 /**
@@ -181,6 +210,92 @@ export function diffCommand(owner: string, repo: string, prNumber: number, diffP
   assertPrNumber(prNumber);
   return shellCommand(
     `gh pr diff '${prNumber}' --repo '${owner}/${repo}' > '${diffPath}' && ` +
+      boundedFileReadCommand(diffPath, DIFF_PREFETCH_MAX_BYTES),
+  );
+}
+
+/**
+ * GitHub refuses `gh pr diff` on a PR whose diff exceeds its 20,000-line API
+ * ceiling: HTTP 406 on stderr, nothing on stdout. Those two wordings are the
+ * ONLY signature of that ceiling — an auth (401/404) or transport failure is
+ * a different cause and must keep failing the round, never take the fallback.
+ *
+ * gh appends the request URL in parentheses, and a repo name may contain the
+ * ceiling token itself (`auth_too_large`, `too_larger`), so URLs are cut and
+ * the token must stand alone: a substring of a URL is not GitHub's verdict.
+ */
+export function isDiffTooLarge(stderr: string): boolean {
+  const message = stderr.replace(/\s*\(https?:\/\/[^)]*\)/g, "");
+  return /\btoo_large\b/.test(message) || message.includes("exceeded the maximum number of lines");
+}
+
+/** A branch ref as GitHub reports it (`base.ref`) — no traversal, no option form. */
+const BRANCH_REF_RE = /^[A-Za-z0-9._/-]+$/;
+
+function assertBranchRef(baseRef: string): void {
+  assertShellSafe(baseRef, BRANCH_REF_RE, "base ref");
+  // The charset admits `.` and `-`; `..` escapes a path segment and a leading
+  // `-` reads as an option wherever the ref lands as an argument.
+  if (baseRef.startsWith("-") || baseRef.includes("..")) {
+    throw new Error(`unsafe base ref for shell interpolation: ${JSON.stringify(baseRef)}`);
+  }
+}
+
+/**
+ * The PR's base branch name (`base.ref`) — the first half of the local merge
+ * base. Reads through gh's `--jq` surface so the name never needs JSON parsing.
+ */
+export function pullRequestBaseRefCommand(owner: string, repo: string, prNumber: number): ShellCommand {
+  assertOwnerRepo(owner, repo);
+  assertPrNumber(prNumber);
+  return shellCommand(`gh api 'repos/${owner}/${repo}/pulls/${prNumber}' --jq '.base.ref'`);
+}
+
+/**
+ * The commit `baseRef...headSha` forks from, resolved by GitHub's compare API.
+ * A depth-1 fetch of that sha plus the already-checked-out head is enough for
+ * a two-dot `git diff`, so no history has to come down with it.
+ */
+export function mergeBaseCommand(
+  owner: string,
+  repo: string,
+  baseRef: string,
+  headSha: string,
+): ShellCommand {
+  assertOwnerRepo(owner, repo);
+  assertBranchRef(baseRef);
+  assertSha(headSha, "head sha");
+  return shellCommand(
+    `gh api 'repos/${owner}/${repo}/compare/${baseRef}...${headSha}' --jq '.merge_base_commit.sha'`,
+  );
+}
+
+/**
+ * Depth-1 fetch of one commit into the existing clone (the merge base). The
+ * head commit is already there — `cloneCommand` fetched `pull/<n>/head` — so
+ * this is the only object the local diff still needs.
+ */
+export function fetchDepthOneCommand(cloneDir: string, sha: string): ShellCommand {
+  assertSha(sha, "fetch sha");
+  return shellCommand(`git -C '${cloneDir}' fetch --depth 1 origin '${sha}'`);
+}
+
+/**
+ * Capture the PR diff from the clone when `gh pr diff` refuses it (oversized):
+ * the same two-dot merge-base..head diff, written to `diffPath`, read back
+ * through the SAME bounded transport as `diffCommand` — one overflow contract,
+ * never a second read.
+ */
+export function localDiffCommand(
+  cloneDir: string,
+  mergeBaseSha: string,
+  headSha: string,
+  diffPath: string,
+): ShellCommand {
+  assertSha(mergeBaseSha, "merge base sha");
+  assertSha(headSha, "head sha");
+  return shellCommand(
+    `git -C '${cloneDir}' diff '${mergeBaseSha}' '${headSha}' > '${diffPath}' && ` +
       boundedFileReadCommand(diffPath, DIFF_PREFETCH_MAX_BYTES),
   );
 }

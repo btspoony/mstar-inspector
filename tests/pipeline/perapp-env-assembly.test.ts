@@ -29,8 +29,9 @@
  * Runner-input threading: the consumer resolves the App's
  * per-role selector map (decrypt-free `getAppModelRoles`) into the runner
  * input JSON's OPTIONAL `modelOverrides` field; empty maps omit the field
- * entirely (byte-identical payload). The runner-side guard/type extension
- * is pinned in the runtime-input tests.
+ * entirely (the rest of the shape is the no-map run's). The declared exec
+ * deadline (`outerDeadlineEpochMs`) is a run fact and rides every input. The
+ * runner-side guard/type extension is pinned in the runtime-input tests.
  *
  * Same technique as tests/pipeline/consumer.test.ts: sandbox + commenters
  * injected via createReviewConsumer overrides (no process-wide relative-path
@@ -48,6 +49,7 @@ import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { sk, fakePem } from "../helpers/fake-secrets";
+import { withFrozenClock } from "../helpers/clock";
 import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
@@ -161,13 +163,13 @@ async function seedTamperedKey(
 
 // --- sandbox fake (injected via createReviewConsumer overrides) -------------
 
-const sandboxCalls: Array<{ cmd: string; opts?: unknown }> = [];
+const sandboxCalls: Array<{ cmd: string; opts?: unknown; startedAt: number }> = [];
 /** Numstat stdout for the next run (the reconFacts carrier; set per test). */
 let numstatStdout = "";
 
 const fakeSandbox = {
   runCommand: mock(async (cmd: string, opts?: unknown) => {
-    sandboxCalls.push({ cmd, opts });
+    sandboxCalls.push({ cmd, opts, startedAt: Date.now() });
     if (cmd.includes("rev-parse")) {
       return { stdout: `${SHA}\n`, stderr: "", exitCode: 0 };
     }
@@ -251,7 +253,9 @@ const testOverrides = {
 
 // --- consumer under test (dynamic import: mocks must be registered first) ---
 
-const { createReviewConsumer } = await import("../../src/pipeline/consumer");
+const { createReviewConsumer, runnerTimeoutMs } = await import(
+  "../../src/pipeline/consumer"
+);
 
 // --- test log sink ----------------------------------------------------------
 
@@ -319,6 +323,36 @@ function reset(): void {
   kvGuardPuts.length = 0;
   logLines.length = 0;
   numstatStdout = "";
+}
+
+/**
+ * The runner input's declared instant is a RUN FACT, not configuration: the
+ * instant the exec is killed at = its own start + the timeout it runs under.
+ * The start is read off the SAME call record, never a last-written scalar, so
+ * round N's input can never borrow another round's start.
+ */
+function expectOuterDeadline(input: Record<string, unknown>): void {
+  const runner = sandboxCalls.find((c) => c.cmd.includes("--input"));
+  if (runner === undefined) throw new Error("no runner exec was issued");
+  const opts = runner.opts;
+  const execTimeout =
+    opts !== null && typeof opts === "object" && "timeout" in opts ? opts.timeout : undefined;
+  if (typeof execTimeout !== "number") throw new Error("runner exec carried no numeric timeout");
+  expect(input.outerDeadlineEpochMs).toBe(runner.startedAt + execTimeout);
+}
+
+/** The fields every runner input declares, whatever the run adds. */
+const RUNNER_INPUT_BASE_FIELDS = ["capabilityHosts", "outerDeadlineEpochMs", "reconFacts", "worktreePath"];
+
+/**
+ * The runner input's exact key set — serialization order is not a contract, the
+ * SET is: the base fields every run declares, plus the optional ones this run
+ * added. The document is deliberately keyless, so any field nobody declared
+ * here is the regression — a credential spread lands as an unexpected key,
+ * whatever it is named.
+ */
+function expectRunnerInputFields(input: Record<string, unknown>, extra: string[] = []): void {
+  expect(Object.keys(input).sort()).toEqual([...RUNNER_INPUT_BASE_FIELDS, ...extra].sort());
 }
 
 /** The runner exec call's env, in message order (one entry per runner step). */
@@ -868,16 +902,24 @@ describe("runner input modelOverrides threading", () => {
     await mapRole(db, appX.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    const startedAt = await withFrozenClock(async (clock) => {
+      await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+      return clock.now;
+    });
 
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({
       "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
       "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
     });
-    // The field rides AFTER the pre- shape (additive optional field),
-    // next to the capability hosts (present on every run).
-    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "capabilityHosts", "modelOverrides"]);
+    // The declared instant is a RUN FACT, not a re-derivation: it is the
+    // instant this very exec is killed at (the mock's recorded start plus the
+    // timeout that exec ran under). The frozen round clock adds the one claim
+    // the deleted formula pin made — the declared instant cannot outrun the
+    // level's tier table from the round start.
+    expectOuterDeadline(input);
+    expect(input.outerDeadlineEpochMs as number).toBeLessThanOrEqual(startedAt + runnerTimeoutMs("default"));
+    expectRunnerInputFields(input, ["modelOverrides"]);
   });
 
   test("app message with NO role map: input JSON omits the field entirely (no-map run)", async () => {
@@ -888,11 +930,15 @@ describe("runner input modelOverrides threading", () => {
     const appDb = createMigratedTestD1();
     const appX = await seedApp(appDb, "app-x"); // github_apps row, NO role rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
-    await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
+    await withFrozenClock(() =>
+      appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } }))),
+    );
     const [appInput] = runnerInputs();
-    // No role map → the runner input JSON omits the field entirely
-    // (byte-identical to a no-map run); capability hosts ride always.
-    expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
+    // No role map → the role field is omitted entirely; the rest is the shape
+    // every run declares.
+    expectOuterDeadline(appInput!);
+    expect(appInput!.modelOverrides).toBeUndefined();
+    expectRunnerInputFields(appInput!);
     expect(appInput!.reconFacts).toContain("1\t1\tdocs/中文.md");
   });
 
@@ -905,10 +951,11 @@ describe("runner input modelOverrides threading", () => {
     await store.clearModelChainSeat(appX.id, "mstar-review-seat"); // cleared → empty map
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await withFrozenClock(() => consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))));
 
     const input = runnerInputs()[0]!;
-    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
+    expectOuterDeadline(input);
+    expectRunnerInputFields(input);
     expect(input.modelOverrides).toBeUndefined();
   });
 
@@ -1092,7 +1139,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await withFrozenClock(() => consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))));
 
     // Credential transport: decrypted keys into their provider's pool.
     const env = runnerEnvs()[0]!;
@@ -1118,9 +1165,10 @@ describe("custom provider credential transport + runner input threading (AL-23-1
         model_ids: ["b-model"],
       },
     ]);
-    // Additive optional field after the pre- shape — plus the
-    // capability hosts the consumer resolves and rides ALWAYS.
-    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "capabilityHosts", "customProviders"]);
+    // The declarations ride as the one optional field beyond the shape every
+    // run carries (plus the always-declared deadline).
+    expectOuterDeadline(input);
+    expectRunnerInputFields(input, ["customProviders"]);
     const serialized = JSON.stringify(input);
     expect(serialized).not.toContain(sk("custom-fixture"));
   });
@@ -1197,13 +1245,17 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     const appDb = createMigratedTestD1();
     const appX = await seedApp(appDb, "app-x"); // github_apps row, NO custom rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
-    await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
+    await withFrozenClock(() =>
+      appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } }))),
+    );
     const [appInput] = runnerInputs();
     const [appEnv] = runnerEnvs();
-    // No declarations → the runner input JSON omits the field entirely and no
+    // No declarations → the custom-provider field is omitted entirely and no
     // custom-provider pool is transported (byte-compat pin). The capability
-    // hosts ride ALWAYS (keyless registry data).
-    expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
+    // hosts and the declared deadline ride ALWAYS.
+    expectOuterDeadline(appInput!);
+    expect(appInput!.customProviders).toBeUndefined();
+    expectRunnerInputFields(appInput!);
     // The seeded App's own ark key still pools; nothing else does — and the
     // exec env carries no pool name at all (the retired channel).
     expect(runnerPools()[0]).toEqual({ ark: [ARK_KEY] });

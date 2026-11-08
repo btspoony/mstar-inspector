@@ -148,6 +148,19 @@ export type AgentRuntimeRunInput = {
    */
   recheck?: RecheckInput;
   /**
+   * The ABSOLUTE instant this run's exec is killed at — `Date.now()` epoch ms
+   * on the WORKER's clock, the deadline the caller already derived from its
+   * round budget, never a duration. The runner anchors the shared review
+   * deadline AT this instant, so the runner-input write and the runner's own
+   * start/parse time spend one deadline instead of each being added to it, and
+   * the seats stop before the exec kills the process. Worker and container
+   * both read `Date.now()` on the same NTP-synced platform; the publication
+   * tail absorbs the residual skew. ABSENT = the level's tier cap
+   * (`OUTER_RUNNER_CAP_MS`) counted from process start, so a legacy runner
+   * input keeps its behaviour exactly.
+   */
+  outerDeadlineEpochMs?: number;
+  /**
    * The seat's ask budget in UTF-8 bytes, read once from the operator's
    * `review.recheck.assignment_max_bytes` system row. ABSENT = the runner's
    * documented default (`RECHECK_ASSIGNMENT_MAX_BYTES`), so a legacy input
