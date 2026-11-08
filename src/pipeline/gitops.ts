@@ -332,6 +332,12 @@ export function compareStatusCommand(owner: string, repo: string, baseSha: strin
  * `base...head` is GitHub's three-dot form (compared against the merge base),
  * which is what `compare` reports as `ahead` — the two steps agree by
  * construction.
+ *
+ * The reply lands in a scratch file and replaces `diffPath` only once the
+ * capture was DELIVERED: a refused capture must never truncate the full diff
+ * this round already wrote there, because numstat reads that file — an
+ * untouched full diff lets a refused increment degrade to a full-diff round
+ * instead of reading as "an empty diff, nothing to review".
  */
 export function incrementDiffCommand(
   owner: string,
@@ -343,8 +349,10 @@ export function incrementDiffCommand(
   assertOwnerRepo(owner, repo);
   assertSha(baseSha, "base sha");
   assertSha(headSha, "head sha");
+  const scratch = `${diffPath}.increment`;
   return shellCommand(
-    `gh api -H 'Accept: application/vnd.github.v3.diff' 'repos/${owner}/${repo}/compare/${baseSha}...${headSha}' > '${diffPath}' && ` +
+    `gh api -H 'Accept: application/vnd.github.v3.diff' 'repos/${owner}/${repo}/compare/${baseSha}...${headSha}' > '${scratch}' && ` +
+      `mv -f '${scratch}' '${diffPath}' && ` +
       `head -c '${DIFF_PREFETCH_MAX_BYTES}' '${diffPath}' && printf '\\n' && ` +
       `tail -c '+${DIFF_PREFETCH_MAX_BYTES + 1}' '${diffPath}' | head -c '1' | wc -c`,
   );

@@ -602,10 +602,13 @@ export type ConsumerLogFields = {
   increment_base?: "lookup-failed";
   /**
    * Why the increment capture could not be trusted — `empty` (exit 0, nothing
-   * delivered) or `unreadable` (no flag line). Its own field, so a full-diff
-   * capture failure and an increment capture failure never read alike.
+   * delivered), `unreadable` (no flag line) or `too_large` (the compare API
+   * refused the base...head diff, GitHub's 20,000-line ceiling). Its own field,
+   * so a full-diff capture failure and an increment capture failure never read
+   * alike. `too_large` is the degrade: the message names the step, its exit
+   * code and its redacted stderr tail, and the round reviews the full diff.
    */
-  increment_capture?: "empty" | "unreadable";
+  increment_capture?: "empty" | "unreadable" | "too_large";
   /**
    * Why the report seat's PR-context capture yielded nothing: `pr-view` (the
    * `gh pr view` exec failed), `pr-view-json` (its reply was not the JSON shape
@@ -4619,9 +4622,12 @@ async function processMessage(
     // Increment capture (numstat partition only): base...head replaces the
     // file AFTER the full diff text is already in memory, so the evidence
     // catalog above keeps proving prior findings against the whole PR.
-    // Failure discipline is the diff text's own — a non-zero exit throws, an
-    // unreadable/empty capture marks the round context-incomplete. Never a
-    // silent fall back to the full diff: the `since` fact would then be a lie.
+    // A non-zero exit has two documented outcomes: a too-large refusal (the
+    // compare API's own 20,000-line ceiling) downgrades the round to the full
+    // diff it already captured — logged, with the `since` fact dropped — while
+    // any other failure throws with its own cause. An unreadable/empty capture
+    // marks the round context-incomplete. Nothing here falls back silently: the
+    // `since` fact would then be a lie.
     // An empty bounded read is NOT decided here: as with the full diff, only
     // the same round's numstat tells a genuinely unchanged increment (empty
     // file) from a capture that delivered nothing. Until that read, an empty
@@ -4636,18 +4642,36 @@ async function processMessage(
         },
       );
       if (increment.exitCode !== 0) {
-        throw new Error(gitStageFailureDetail("increment diff", increment, secretValues));
-      }
-      const incrementRead = parseBoundedRead(increment.stdout);
-      diffFileState = incrementRead.failure ?? (incrementRead.text === "" ? "empty" : "captured");
-      if (incrementRead.failure === "unreadable") {
-        captureFailed = true;
+        // The compare API refuses an oversized base...head diff with the same
+        // 20,000-line ceiling `gh pr diff` answers, and that refusal has a
+        // documented outcome: the round reviews the full diff it already
+        // captured (the refused capture never replaced that file). The `since`
+        // fact is DROPPED for the rest of the round — keeping it would describe
+        // the file as an increment it no longer is — and this one warn is its
+        // whole trace, so the degrade is never silent. A genuine capture
+        // failure keeps its own cause and stays a round failure.
+        if (!isDiffTooLarge(increment.stderr)) {
+          throw new Error(gitStageFailureDetail("increment diff", increment, secretValues));
+        }
+        const tail = redactExactSecrets(redactSecrets(increment.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
         deps.log.warn(
-          { ...fields, increment_capture: "unreadable", increment_since: sinceSha },
-          `increment diff capture unreadable — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+          { ...fields, increment_capture: "too_large", increment_since: sinceSha },
+          `increment diff capture too large (github 406) — reviewing the full diff instead, exit ${increment.exitCode}` +
+            (tail === "" ? ", stderr empty" : `, stderr tail: ${tail}`),
         );
-      } else if (diffFileState === "empty") {
-        captureFailed = true;
+        sinceSha = null;
+      } else {
+        const incrementRead = parseBoundedRead(increment.stdout);
+        diffFileState = incrementRead.failure ?? (incrementRead.text === "" ? "empty" : "captured");
+        if (incrementRead.failure === "unreadable") {
+          captureFailed = true;
+          deps.log.warn(
+            { ...fields, increment_capture: "unreadable", increment_since: sinceSha },
+            `increment diff capture unreadable — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+          );
+        } else if (diffFileState === "empty") {
+          captureFailed = true;
+        }
       }
     }
 

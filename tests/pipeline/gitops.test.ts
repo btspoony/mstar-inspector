@@ -213,9 +213,13 @@ describe("gitops command builders", () => {
   test("incrementDiffCommand captures base...head with the SAME bounded read as the PR diff", () => {
     const base = "a".repeat(40);
     const head = "b".repeat(40);
+    // A refused capture must not truncate the full diff already in `diffPath`
+    // (numstat reads that file): the reply lands in a scratch file that
+    // replaces it only once it was delivered.
     expect(incrementDiffCommand("acme", "widgets", base, head, DIFF_PATH)).toBe(
       shellCommand(
-        `gh api -H 'Accept: application/vnd.github.v3.diff' 'repos/acme/widgets/compare/${base}...${head}' > '${DIFF_PATH}' && ` +
+        `gh api -H 'Accept: application/vnd.github.v3.diff' 'repos/acme/widgets/compare/${base}...${head}' > '${DIFF_PATH}.increment' && ` +
+          `mv -f '${DIFF_PATH}.increment' '${DIFF_PATH}' && ` +
           `head -c '${DIFF_PREFETCH_MAX_BYTES}' '${DIFF_PATH}' && printf '\\n' && ` +
           `tail -c '+${DIFF_PREFETCH_MAX_BYTES + 1}' '${DIFF_PATH}' | head -c '1' | wc -c`,
       ),

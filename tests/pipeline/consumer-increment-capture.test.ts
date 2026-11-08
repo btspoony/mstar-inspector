@@ -25,10 +25,13 @@ import {
   commenterCalls,
   createReviewConsumer,
   DIFF_PREFETCH_MAX_BYTES,
+  failureRows,
+  fakeSandbox,
   logLines,
   makeBatch,
   makeEnv,
   makePayload,
+  messageRetryCalls,
   reset,
   sandbox,
   testLog,
@@ -112,6 +115,27 @@ function runnerInput(): Record<string, unknown> {
   return JSON.parse(sandbox.writtenInputJson!) as Record<string, unknown>;
 }
 
+/** GitHub's answer when it refuses a diff over its 20,000-line API ceiling. */
+const INCREMENT_TOO_LARGE =
+  "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000) " +
+  "(https://api.github.com/repos/acme/widgets/compare/bbbbbbb...aaaaaaa)";
+
+/**
+ * The double answers the increment exec with an exit code but no stderr, so
+ * this case injects the stderr the compare API really writes when it refuses
+ * an oversized increment — the token the consumer classifies by. Everything
+ * else (call recording, the other commands) stays the shared double's.
+ */
+const oversizedIncrementSandbox = {
+  ...fakeSandbox,
+  runCommand: mock(async (cmd: string, opts?: unknown) => {
+    const answer = await fakeSandbox.runCommand(cmd, opts);
+    return cmd.includes("application/vnd.github.v3.diff")
+      ? { ...answer, stderr: INCREMENT_TOO_LARGE, exitCode: 1 }
+      : answer;
+  }),
+};
+
 describe("incremental review rounds: the increment capture", () => {
   test("an increment capture failure is a round failure, never a silent full-diff fallback", async () => {
     reset();
@@ -129,6 +153,44 @@ describe("incremental review rounds: the increment capture", () => {
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/increment diff failed/);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(sandbox.writtenInputJson).toBeUndefined();
+  });
+
+  test("an oversized increment falls back or degrades with a reason", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    // `ahead` starts an increment round, then the compare API refuses the
+    // base...head diff exactly as `gh pr diff` refuses an oversized PR.
+    sandbox.compareStatus = "ahead";
+    const db = await createSeededTestD1();
+    seedReview(db, PREVIOUS_SHA);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      getSandbox: async () => oversizedIncrementSandbox,
+    });
+
+    // A refusal is not a round failure: nothing is retried and no failure row
+    // is left, so the delivery never repeats the four-attempt exhaustion.
+    await consumer(makeBatch(makePayload()));
+
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(0);
+    // ONE structured warn names the reason and the step it stopped at.
+    const degrade = logLines.filter((l) => l.fields.increment_capture !== undefined);
+    expect(degrade).toHaveLength(1);
+    expect(degrade[0]!.level).toBe("warn");
+    expect(degrade[0]!.fields).toMatchObject({ increment_capture: "too_large", increment_since: PREVIOUS_SHA });
+    expect(degrade[0]!.msg).toContain("increment diff capture too large");
+    expect(degrade[0]!.msg).toContain("406");
+    // …and the `since` fact is dropped rather than faked: the round reviews the
+    // full diff its own capture already holds.
+    expect(runnerInput().reconFacts).toEqual([
+      "acme/widgets#42",
+      `head ${SHA}`,
+      "10\t2\tsrc/auth.ts",
+      "5\t0\tdocs/readme.md",
+    ]);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
   });
 
   test("a capture-failed round still publishes, and its row is never an incremental base", async () => {
