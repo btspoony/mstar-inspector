@@ -9,7 +9,7 @@
  * test file must never import consumer.ts before the workerd builtin is
  * stubbed, and keeping both in one module makes that ordering structural.
  */
-import { mock } from "bun:test";
+import { expect, mock } from "bun:test";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { PipelineEnv } from "../../src/pipeline/consumer";
@@ -185,6 +185,32 @@ export function reset(): void {
 /** All rows of the review_failures table in the real D1 double. */
 export function failureRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_failures ORDER BY rowid").all() as Array<Record<string, unknown>>;
+}
+
+/**
+ * Run the consumer over a scripted failing stage and prove the exact credential
+ * is gone from every surface the round publishes: the thrown message — whose
+ * non-secret `tail` really arrived, so a redaction that blanked the message
+ * cannot pass — and the failure row it wrote. Returns the message for the
+ * case's own per-stage pin; a stage whose credential rides another surface
+ * asserts it in the case itself.
+ */
+export async function expectFailureRedacted(
+  consumer: (batch: MessageBatch<ReviewJobPayload>) => Promise<void>,
+  db: TestD1,
+  { secret, tail }: { secret: string; tail: string },
+): Promise<string> {
+  const message = await consumer(makeBatch(makePayload())).then(
+    () => {
+      throw new Error("the scripted stage was expected to fail");
+    },
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  );
+  expect(message).toContain(tail);
+  expect(message).not.toContain(secret);
+  expect(failureRows(db)).toHaveLength(1);
+  expect(String(failureRows(db)[0]!.error)).not.toContain(secret);
+  return message;
 }
 
 /** The §7.10 coverage line's four numbers. */

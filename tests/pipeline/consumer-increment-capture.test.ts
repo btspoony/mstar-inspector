@@ -26,6 +26,7 @@ import {
   commenterState,
   createReviewConsumer,
   DIFF_PREFETCH_MAX_BYTES,
+  expectFailureRedacted,
   failureRows,
   fakeSandbox,
   logLines,
@@ -173,20 +174,8 @@ describe("incremental review rounds: the increment capture", () => {
     seedReview(db, PREVIOUS_SHA);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    const thrown = await consumer(makeBatch(makePayload())).then(
-      () => {
-        throw new Error("the increment capture was expected to fail");
-      },
-      (err: unknown) => (err instanceof Error ? err.message : String(err)),
-    );
-
-    // The stderr tail really reached the message (it is not empty) and the
-    // value itself is gone from it.
-    expect(thrown).toContain("increment diff failed");
-    expect(thrown).toContain("challenge");
-    expect(thrown).not.toContain(secretToken);
-    expect(failureRows(db)).toHaveLength(1);
-    expect(String(failureRows(db)[0]!.error)).not.toContain(secretToken);
+    const message = await expectFailureRedacted(consumer, db, { secret: secretToken, tail: "challenge" });
+    expect(message).toContain("increment diff failed");
   });
 
   test("an oversized increment falls back or degrades with a reason", async () => {

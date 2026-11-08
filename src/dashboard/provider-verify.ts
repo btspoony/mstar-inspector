@@ -27,10 +27,12 @@
  * alias map; ids omp does not validate keep a hand-documented entry.
  *
  * Failure reasons are structured and documented per case:
- *   - `invalid_key`        401/403 from the provider (key rejected)
- *   - `quota_exhausted`    the provider's ACCOUNT is spent (402, or a rejection
- *                          body naming credits/quota/billing) — the key itself
- *                          may still be valid
+ *   - `invalid_key`        401, or a 403 whose body names no spent account (the
+ *                          provider rejected the key)
+ *   - `quota_exhausted`    the provider's ACCOUNT is spent (402, a 403/429 whose
+ *                          body reports insufficient quota or a billing fault,
+ *                          or any rejection body naming credits/quota/billing) —
+ *                          the key itself may still be valid
  *   - `unreachable`        network failure / timeout (10s AbortSignal.timeout)
  *   - `unexpected_response` the provider answered but not with a successful,
  *                           parseable verification response
@@ -348,6 +350,15 @@ const FAILURE_BODY_LIMIT = 512;
  *  narrow on purpose: an unrelated 400/500 body stays `unexpected_response`. */
 const QUOTA_BODY_SIGNAL = /\b(credits?|quota|billing|payment required|insufficient funds)\b/i;
 
+/** The same signal for a 403/429 body, where the bare words `quota` and
+ *  `credits` prove nothing: a throttled check routinely names its quota window,
+ *  and classifying that as a spent account would send an operator to top up a
+ *  healthy account instead of retrying. Providers that report a spent account
+ *  under a throttling status use these phrases — OpenAI's `insufficient_quota`
+ *  and Gemini's "check your plan and billing details" on a 429, a billing
+ *  disablement on a 403. */
+const ACCOUNT_SPENT_SIGNAL = /\b(insufficient[ _]quota|billing|balance|payment required|insufficient funds)\b/i;
+
 /**
  * The first FAILURE_BODY_LIMIT BYTES of a failure body, decoded ("" when the
  * response carries no body). The only body read on the failure path: it takes
@@ -355,15 +366,16 @@ const QUOTA_BODY_SIGNAL = /\b(credits?|quota|billing|payment required|insufficie
  * The bound is spent before decoding — a chunk past the budget is cut to what
  * is left, so an oversized chunk is never decoded in full. The streaming
  * decode is flushed before returning: a code point cut by the bound surfaces
- * as U+FFFD instead of vanishing from the sample.
+ * as U+FFFD instead of vanishing from the sample. A stream that errors mid-body
+ * still yields the bytes it delivered before the error.
  */
 export async function failureBodySample(res: Response): Promise<string> {
   const reader = res.body?.getReader();
   if (reader === undefined) return "";
+  const decoder = new TextDecoder();
+  let sample = "";
+  let consumed = 0;
   try {
-    const decoder = new TextDecoder();
-    let sample = "";
-    let consumed = 0;
     while (consumed < FAILURE_BODY_LIMIT) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -371,29 +383,37 @@ export async function failureBodySample(res: Response): Promise<string> {
       consumed += slice.byteLength;
       sample += decoder.decode(slice, { stream: true });
     }
-    return sample + decoder.decode();
   } catch {
-    return "";
+    // A stream that breaks mid-body keeps what it already delivered: the
+    // provider's error text rides in the first chunk, before the connection
+    // dies, so an empty sample would discard the only evidence there is.
   } finally {
     await reader.cancel().catch(() => {});
   }
+  return sample + decoder.decode();
 }
 
 /**
  * The ONE classifier every non-2xx verification response goes through, so the
  * three entry points can never disagree:
- *   401/403 → invalid_key;
+ *   401 → invalid_key;
  *   402 → quota_exhausted (payment required: the account is spent);
- *   429 → unexpected_response — the check was throttled, which says nothing
- *         about the key or the account's balance;
+ *   403 → quota_exhausted when the bounded body names a spent account (a
+ *         billing-disabled account), else invalid_key — a rejected key;
+ *   429 → quota_exhausted on the same spent-account signal (OpenAI reports a
+ *         spent account as 429 `insufficient_quota`), else unexpected_response:
+ *         a throttled check says nothing about the key or the balance;
  *   any other non-2xx whose bounded body names credits/quota/billing →
  *         quota_exhausted;
  *   anything else → unexpected_response.
  */
 async function failureReason(res: Response): Promise<VerifyFailureReason> {
-  if (res.status === 401 || res.status === 403) return "invalid_key";
+  if (res.status === 401) return "invalid_key";
   if (res.status === 402) return "quota_exhausted";
-  if (res.status === 429) return "unexpected_response";
+  if (res.status === 403 || res.status === 429) {
+    if (ACCOUNT_SPENT_SIGNAL.test(await failureBodySample(res))) return "quota_exhausted";
+    return res.status === 403 ? "invalid_key" : "unexpected_response";
+  }
   return QUOTA_BODY_SIGNAL.test(await failureBodySample(res)) ? "quota_exhausted" : "unexpected_response";
 }
 

@@ -592,6 +592,75 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: false, reason: "unexpected_response" });
   });
 
+  test("probe 429 whose body names insufficient_quota → quota_exhausted (OpenAI reports a spent account as 429)", async () => {
+    const result = await verifyProviderKey(
+      {
+        fetch: mockFetch(
+          json(429, {
+            error: {
+              message: "You exceeded your current quota, please check your plan and billing details.",
+              type: "insufficient_quota",
+            },
+          }),
+        ),
+      },
+      "openai",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
+  test("probe 429 RESOURCE_EXHAUSTED that names billing → quota_exhausted (Gemini's spent-account wording)", async () => {
+    const result = await verifyProviderKey(
+      {
+        fetch: mockFetch(
+          json(429, {
+            error: {
+              code: 429,
+              status: "RESOURCE_EXHAUSTED",
+              message: "Quota exceeded. Please check your plan and billing details.",
+            },
+          }),
+        ),
+      },
+      "gemini",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
+  test("403 whose body names a billing disablement → quota_exhausted, not a rejected key", async () => {
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(403, { error: { message: "billing is disabled for this project" } })) },
+      "openai",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
+  test("a stream that errors mid-body keeps the bytes already delivered", async () => {
+    // The provider's own words arrive in the first chunk and the connection
+    // breaks after it: the delivered prefix is the only evidence there is, and
+    // the spent-account signal inside it still has to classify.
+    const partialErrorBody = (): Response => {
+      const chunk = new TextEncoder().encode(`{"error":{"type":"insufficient_quota"}`);
+      let pulls = 0;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls += 1;
+            if (pulls === 1) controller.enqueue(chunk);
+            else controller.error(new Error("connection reset"));
+          },
+        }, { highWaterMark: 0 }),
+        { status: 429 },
+      );
+    };
+    expect(await failureBodySample(partialErrorBody())).toBe(`{"error":{"type":"insufficient_quota"}`);
+    const result = await verifyProviderKey({ fetch: mockFetch(partialErrorBody()) }, "openai", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "quota_exhausted" });
+  });
+
   test("a 4xx with no body at all has no quota signal to find → unexpected_response", async () => {
     const result = await verifyProviderKey({ fetch: mockFetch(new Response(null, { status: 404 })) }, "openai", PLAIN_KEY);
     expect(result).toEqual({ ok: false, reason: "unexpected_response" });
