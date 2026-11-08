@@ -78,6 +78,13 @@ export type SandboxImageHost = {
  * its literals are a second, unavoidable copy. Nothing compares the two
  * automatically — a bump edits this declaration and the matching Dockerfile
  * line together.
+ *
+ * `gh` is deliberately absent. The release-asset CDN answered 504 to every retry
+ * (2026-11-08), and GitHub's own apt pool did not serve the two older releases
+ * probed the same day, so a version-pinned URL is not durably reachable. The
+ * Dockerfile installs `gh` from that pool unpinned and writes the resolved
+ * version into the image (`/etc/mstar-image-versions`); the accepted cost is that
+ * two builds of this same Dockerfile can carry different gh binaries.
  */
 export type SandboxImagePins = {
   /** Debian base image manifest digest (linux/amd64). */
@@ -86,10 +93,10 @@ export type SandboxImagePins = {
   readonly sandboxShimTag: string;
   /** The shim image's manifest digest — moves only together with `sandboxShimTag`. */
   readonly sandboxShimDigest: string;
-  /** Bun release tag (base ships none; omp needs a floor). */
+  /** Bun version, carried by the `oven/bun:<v>-debian` image tag. */
   readonly bunVersion: string;
-  /** gh CLI release version. */
-  readonly ghVersion: string;
+  /** The `oven/bun:<bunVersion>-debian` manifest digest — moves only together with `bunVersion`. */
+  readonly bunImageDigest: string;
   /** mstar-harness tag the image clones (recorded in the Dockerfile comment). */
   readonly harnessVersion: string;
   /** mstar-harness deref commit fetched into the image. */
@@ -112,7 +119,7 @@ export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
   sandboxShimTag: "1.0.0",
   sandboxShimDigest: "sha256:5bc187515bad0d9d486a4f1476f7d8ad39fe97c57965f044e4b0a0dcc93eac06",
   bunVersion: "1.4.0",
-  ghVersion: "2.98.0",
+  bunImageDigest: "sha256:5bb0f9be3a1a36a03e27c9a9dd894a3b1ad26657155c7df4dda771e17bf872ef",
   harnessVersion: HARNESS_VERSION,
   harnessRef: "abf3167d3ee7db0d0593d034fbc99330663a4669",
   harnessCliVersion: HARNESS_VERSION,

@@ -2205,11 +2205,18 @@ bun scripts/check-image-inputs.ts --base origin/main
 ## Image pins and digest record
 
 The image's versioned build inputs — base digest, sandbox-shim tag plus digest,
-Bun, gh, mstar-harness tag/ref, and the CLI pin — are declared once in
-`OMP_SANDBOX_IMAGE_PINS` (`src/contracts/sandbox-images.ts`). That declaration
-is the single live copy; the Dockerfile's unavoidable literals are hand-synced
-to it (the image builds with no build args and no env, so the Dockerfile cannot
-read the module), and `REVIEW_SKILL_VERSION` derives from the same source.
+Bun (image tag plus digest), mstar-harness tag/ref, and the CLI pin — are declared
+once in `OMP_SANDBOX_IMAGE_PINS` (`src/contracts/sandbox-images.ts`). That
+declaration is the single live copy; the Dockerfile's unavoidable literals are
+hand-synced to it (the image builds with no build args and no env, so the
+Dockerfile cannot read the module), and `REVIEW_SKILL_VERSION` derives from the
+same source.
+
+`gh` is the one exception and is NOT declared there: it installs from GitHub's apt
+pool unpinned, because an old release is not guaranteed to stay reachable. The
+resolved version is written into the image at `/etc/mstar-image-versions`, so a
+running executor can be asked what it ships even though the Dockerfile hash
+cannot distinguish two builds.
 
 Historical bumps, superseding chain, and digest provenance (records, not live
 values): mstar-harness **4.2.2** (2026-11-05, ref
