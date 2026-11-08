@@ -1,8 +1,8 @@
 {
   "source": {
     "package": "@oh-my-pi/pi-catalog",
-    "version": "18.17.0",
-    "extracted": "2026-11-06",
+    "version": "18.18.1",
+    "extracted": "2026-11-08",
     "upstream": [
       "src/compat/rules/auth/*.kdl — every `login \"api-key\"` block carrying a `validate \"models-endpoint\"` entry",
       "src/compat/rules.json — the compiled auth rules (login kind + validate entry)"
