@@ -3254,15 +3254,17 @@ function runnerFailureDetail(
  * with HTTP 406 on stderr and 0B of stdout — so a redacted tail rides the
  * message that reaches the durable review_failures row. `stdout` is measured in
  * UTF-8 BYTES (a diff carries non-ASCII), and redaction runs BEFORE the tail
- * cut, so a secret straddling the cap cannot survive as a fragment.
+ * cut, so a secret straddling the cap cannot survive as a fragment. Both passes
+ * run: the shape one, then the session's exact values.
  */
 function gitStageFailureDetail(
   stage: string,
   run: { stdout: string; stderr: string; exitCode: number },
+  secretValues: readonly string[],
 ): string {
   const base = `${stage} failed: exit ${run.exitCode}, stdout ${new TextEncoder().encode(run.stdout).length}B`;
   // Redaction BEFORE the cut: a secret sliced in half would survive it.
-  const tail = redactSecrets(run.stderr).trim().slice(-STDERR_TAIL_MAX);
+  const tail = redactExactSecrets(redactSecrets(run.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
   return tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
 }
 
@@ -4575,7 +4577,7 @@ async function processMessage(
           )
         : null;
       if (captured === null) {
-        throw new Error(gitStageFailureDetail("diff", diff));
+        throw new Error(gitStageFailureDetail("diff", diff, secretValues));
       }
       if ("reason" in captured) {
         // ONE warn per attempt, and never silence: the step that ended it, that
@@ -4590,7 +4592,7 @@ async function processMessage(
             (captured.run === undefined ? ", no exec ran" : `, exit ${captured.run.exitCode}`) +
             (tail === "" ? ", stderr empty" : `, stderr tail: ${tail}`),
         );
-        throw new Error(`${gitStageFailureDetail("diff", diff)}; oversized fallback: ${captured.reason} at ${captured.step}`);
+        throw new Error(`${gitStageFailureDetail("diff", diff, secretValues)}; oversized fallback: ${captured.reason} at ${captured.step}`);
       }
       diffStdout = captured.run.stdout;
       deps.log.info(
@@ -4622,7 +4624,7 @@ async function processMessage(
         },
       );
       if (increment.exitCode !== 0) {
-        throw new Error(gitStageFailureDetail("increment diff", increment));
+        throw new Error(gitStageFailureDetail("increment diff", increment, secretValues));
       }
       const incrementRead = parseBoundedRead(increment.stdout);
       if (incrementRead.failure === "unreadable") {
@@ -4795,7 +4797,7 @@ async function processMessage(
       timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "numstat"),
     });
     if (numstat.exitCode !== 0) {
-      throw new Error(gitStageFailureDetail("numstat", numstat));
+      throw new Error(gitStageFailureDetail("numstat", numstat, secretValues));
     }
     const numstatLines = numstat.stdout
       .split("\n")

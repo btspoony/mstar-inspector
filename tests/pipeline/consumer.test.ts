@@ -1224,6 +1224,34 @@ describe("createReviewConsumer", () => {
     expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
   });
 
+  test("git-stage failure does not carry an exact secret", async () => {
+    // A credential every shape pattern misses (no token prefix, no 40-char hex
+    // run), assembled at runtime so no contiguous credential literal exists.
+    // Only the exact-value pass can remove it from the stage's message.
+    const secretToken = ["9f1c4a77", "2b6d", "4e05", "8c31", "7d5be0a2f684"].join("-");
+    reset();
+    commenterState.token = secretToken;
+    sandbox.diffExitCode = 1;
+    sandbox.diffStderr = `HTTP 401: Bad credentials (challenge ${secretToken})`;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    const thrown = await consumer(makeBatch(makePayload())).then(
+      () => {
+        throw new Error("the diff stage was expected to fail");
+      },
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+
+    expect(thrown).toContain("diff failed");
+    expect(thrown).not.toContain(secretToken);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).not.toContain(secretToken);
+    const failureLine = logLines.find((l) => l.level === "error" && l.msg.startsWith("review failed:"));
+    expect(failureLine).toBeDefined();
+    expect(failureLine!.msg).not.toContain(secretToken);
+  });
+
   test("oversized diff (GitHub 406) → captured from the local merge-base diff and the round continues", async () => {
     reset();
     sandbox.diffExitCode = 1;
