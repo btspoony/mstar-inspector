@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { enabledSandboxImages, getSandboxImage } from "../../src/contracts/sandbox-images";
+import { OMP_SANDBOX_IMAGE_PINS, enabledSandboxImages, getSandboxImage } from "../../src/contracts/sandbox-images";
 import type { SandboxImageHost, SandboxImageHostModel } from "../../src/contracts/sandbox-images";
 import type { CapabilityHost, CapabilityHostModel } from "../../packages/shared/src/runtime";
 
@@ -87,6 +87,29 @@ describe("in-image verify-synthesis.sh ARK_PLAN_HOST literal mirrors the registr
       expect(block).toContain(`contextWindow: ${model.contextWindow}`);
       expect(block).toContain(`maxTokens: ${model.maxTokens}`);
     }
+  });
+});
+
+describe("Dockerfile harness clone ref mirrors the registry pin", () => {
+  // `harnessRef` is a literal commit the Dockerfile cannot import (it clones at
+  // build time), so the pair is hand-synced — and it drifted once: 4.2.3 shipped
+  // with the v4.2.2 commit, making REVIEW_SKILL_VERSION name a tree no image
+  // checkout contained. Both the anchor comment and the fetch line are locked
+  // here so a missing anchor fails instead of passing vacuously.
+  const dockerfile = readFileSync(join(REPO_ROOT, OMP_IMAGE.dockerfilePath), "utf8");
+  const ANCHOR = /#\s*mstar-harness plugin, pinned ref ([0-9a-f]{40})/;
+  const FETCH = /git -C \/opt\/mstar-harness fetch --depth 1 origin ([0-9a-f]{40})/;
+
+  test("the anchor comment names the pinned ref", () => {
+    const match = ANCHOR.exec(dockerfile);
+    expect(match).not.toBeNull();
+    expect(match![1]).toBe(OMP_SANDBOX_IMAGE_PINS.harnessRef);
+  });
+
+  test("the shallow fetch requests the same commit", () => {
+    const match = FETCH.exec(dockerfile);
+    expect(match).not.toBeNull();
+    expect(match![1]).toBe(OMP_SANDBOX_IMAGE_PINS.harnessRef);
   });
 });
 

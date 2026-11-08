@@ -114,7 +114,7 @@ export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
   bunVersion: "1.4.0",
   ghVersion: "2.98.0",
   harnessVersion: HARNESS_VERSION,
-  harnessRef: "98504a71dcf09cfb551847b85e81d33e682e0bd9",
+  harnessRef: "abf3167d3ee7db0d0593d034fbc99330663a4669",
   harnessCliVersion: HARNESS_VERSION,
 });
 

@@ -7,6 +7,7 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the runner's OMP SDK pin moves to 18.18.1; its package and lockfile are image inputs, so the image must rebuild.
 # rebuild: the runner's anchored review deadline now IS the OUTER exec deadline
 # the Worker derived: the input carries `outerDeadlineEpochMs` (that absolute
 # worker-clock instant, not a duration) and `anchorRecheckDeadline` anchors to
@@ -342,11 +343,16 @@ RUN sh /opt/verify-cli-shim.sh
 RUN mkdir -p /opt/omp-agent
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
 
-# lockfile (omp SDK 18.17.0 = packages/runner/package.json). `--omit=optional` is NOT used:
+# lockfile (omp SDK 18.18.1 = packages/runner/package.json). `--omit=optional` is NOT used:
 # pi-natives ships its platform binary as an optional dep, so omitting optionals
-# breaks the runner at load (T4 live smoke). Size control instead prunes the
-# transformers tree (local-embedding models only — the runner uses the remote
-# ark provider; SDK guards the optional-dep imports, verified live in-image).
+# breaks the runner at load (T4 live smoke). The `rm -rf` below is a DEFENSIVE
+# guard, not something this lock currently materialises: the 18.18.1 frozen lock
+# pulls none of those trees (@oh-my-pi/pi-mnemopi lists fastembed/onnxruntime as
+# optional peers only). It stays so a future SDK resolving them non-optionally
+# cannot silently bloat the image, and it would need revisiting then — the
+# local-embedding models are unused here because the runner reaches the remote
+# ark provider, and the SDK guards the optional-dep imports (verified live
+# in-image).
 WORKDIR /opt/runner
 LABEL io.mstar.runner-package-version=0.1.0
 COPY packages/runner/package.json packages/runner/bun.lock ./

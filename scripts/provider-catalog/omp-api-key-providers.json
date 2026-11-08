@@ -1,8 +1,8 @@
 {
   "source": {
     "package": "@oh-my-pi/pi-catalog",
-    "version": "18.17.0",
-    "extracted": "2026-11-06",
+    "version": "18.18.1",
+    "extracted": "2026-11-08",
     "upstream": [
       "src/compat/rules.json — `providers.<id>` seed rows (model ids, api, baseUrl) and `auth.providers` (login kind, display name, env keys)",
       "src/compat/rules/providers/<id>.kdl — authored provider contract (discovery label, seed api/base-url, default model)",
