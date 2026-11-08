@@ -2356,7 +2356,11 @@ describe("createReviewConsumer", () => {
     });
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
-    await consumer(makeBatch(makePayload()));
+    // The round runs under a FROZEN clock: the fake spends no wall time, so the
+    // runner exec gets exactly what the derived deadline still owes — the full
+    // 600s default cap. On the real clock it is 600_000 minus the milliseconds
+    // the input write and the round itself spent.
+    await withFrozenClock(() => consumer(makeBatch(makePayload())));
 
     const runnerCall = sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
     const { stdin, ...runnerOpts } = runnerCall.opts as { stdin?: string; [key: string]: unknown };
