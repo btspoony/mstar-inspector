@@ -484,7 +484,6 @@ function seatPayload(overrides: Record<string, unknown> = {}): unknown {
         line_end: 20,
       },
     ],
-    unverified: ["flag A"],
     ...overrides,
   };
 }
@@ -1197,7 +1196,6 @@ describe("ompAgentRuntime.runReview — a stopped wave yields an incomplete enve
             line_end: 20,
           },
         ],
-        unverifiedCount: 1,
         target: { owner: "acme", repo: "widgets", pr: 7, head_sha: "abc1234567890abcdef1234567890abcdef12" },
       }),
     );
@@ -2042,7 +2040,7 @@ describe("ompAgentRuntime.runReview — strict parent yield schema (engine 4.0.4
         verdict: "incomplete",
         scorePct: 82,
         band: "good",
-        tally: { mustFix: 0, shouldFix: 1, nit: 0, unverified: 0 },
+        tally: { mustFix: 0, shouldFix: 1, nit: 0 },
         chatHeader: "should-fix: 1 | 82%",
         incomplete: INCOMPLETE_FACT,
       },
@@ -2077,7 +2075,7 @@ describe("ompAgentRuntime.runReview — strict parent yield schema (engine 4.0.4
           verdict: "needs fixes",
           scorePct: 82,
           band: "great",
-          tally: { mustFix: 0, shouldFix: 1, nit: 0, unverified: 0 },
+          tally: { mustFix: 0, shouldFix: 1, nit: 0 },
           chatHeader: "h",
         },
       }).success,
@@ -2089,9 +2087,7 @@ describe("ompAgentRuntime.runReview — envelope", () => {
   test("merges, dedupes, synthesizes and validates the mstar.review/v1 envelope", async () => {
     seatResults = [
       {
-        data: seatPayload({
-          unverified: ["flag A", "flag B"],
-        }),
+        data: seatPayload(),
       },
       {
         data: {
@@ -2113,7 +2109,6 @@ describe("ompAgentRuntime.runReview — envelope", () => {
               line_start: 10,
             },
           ],
-          unverified: ["flag A"],
         },
       },
     ];
@@ -2128,7 +2123,7 @@ describe("ompAgentRuntime.runReview — envelope", () => {
       "Missing null check",
       "Unbounded loop",
     ]);
-    expect(envelope.tally?.tally.unverified).toBe(2);
+    expect(envelope.tally?.tally).toEqual({ mustFix: 1, shouldFix: 1, mayFix: 0, nit: 0 });
     // recon facts fold into the envelope target.
     expect(envelope.target).toEqual({
       owner: "acme",

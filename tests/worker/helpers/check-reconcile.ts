@@ -233,7 +233,7 @@ export function reviewEnvelope(verdict: string, scorePct: number | null): Record
     findings: [],
     ...(scorePct === null
       ? {}
-      : { tally: { verdict, scorePct, tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 0 }, chatHeader: "h" } }),
+      : { tally: { verdict, scorePct, tally: { mustFix: 0, shouldFix: 0, nit: 0 }, chatHeader: "h" } }),
   };
 }
 

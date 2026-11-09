@@ -201,7 +201,7 @@ describe("buildReviewBody", () => {
       tally: {
         verdict: "needs fixes",
         scorePct: 45,
-        tally: { mustFix: 1, shouldFix: 0, nit: 1, unverified: 0 },
+        tally: { mustFix: 1, shouldFix: 0, nit: 1 },
         chatHeader: "unused here",
       },
     });
@@ -227,14 +227,14 @@ describe("buildReviewBody", () => {
       tally: {
         verdict: "needs fixes",
         scorePct: 45,
-        tally: { mustFix: 0, shouldFix: 2, nit: 1, unverified: 1 },
+        tally: { mustFix: 0, shouldFix: 2, nit: 1 },
         chatHeader: "unused here",
       },
     });
     expect(withTally).toContain("## ⚠️ Verdict: `needs fixes` · Score 45% (fail)");
     expect(withTally).toContain("| Findings | Count |");
     expect(withTally).toContain("| 🟠 should-fix | 2 |");
-    expect(withTally).toContain("| ❓ unverified | 1 |");
+    expect(withTally).toContain("| 🔵 nit | 1 |");
     expect(buildReviewBody(output)).not.toContain("| Findings | Count |");
   });
 
@@ -375,7 +375,7 @@ describe("buildReviewBody", () => {
         verdict: "incomplete",
         scorePct: 50,
         band: "fail",
-        tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 1 },
+        tally: { mustFix: 0, shouldFix: 0, nit: 0 },
         chatHeader: "incomplete · 50% (fail)",
         incomplete: { reason: raw, unscanned: ["a.ts"] },
       },
