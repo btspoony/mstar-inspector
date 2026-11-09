@@ -5576,7 +5576,7 @@ const GATED_OUTPUT = {
   tally: {
     verdict: "ship it" as const,
     scorePct: 85,
-    tally: { mustFix: 0, shouldFix: 1, nit: 0, unverified: 0 },
+    tally: { mustFix: 0, shouldFix: 1, nit: 0 },
     chatHeader: "should-fix: 1 | 85%",
   },
 };

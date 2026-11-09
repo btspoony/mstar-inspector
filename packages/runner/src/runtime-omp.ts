@@ -347,7 +347,6 @@ const SEAT_OUTPUT_SCHEMA = {
   required: ["findings"],
   properties: {
     findings: { type: "array", items: REVIEW_FINDING_SCHEMA },
-    unverified: { type: "array", items: { type: "string" } },
   },
 } as const;
 
@@ -381,12 +380,11 @@ const PARENT_OUTPUT_SCHEMA = {
         tally: {
           type: "object",
           additionalProperties: false,
-          required: ["mustFix", "shouldFix", "nit", "unverified"],
+          required: ["mustFix", "shouldFix", "nit"],
           properties: {
             mustFix: { type: "integer" },
             shouldFix: { type: "integer" },
             nit: { type: "integer" },
-            unverified: { type: "integer" },
           },
         },
         chatHeader: { type: "string" },
@@ -409,7 +407,6 @@ const PARENT_OUTPUT_SCHEMA = {
 
 type SeatOutput = {
   findings: MstarReviewFinding[];
-  unverified?: string[];
 };
 
 /** One deterministic seat: prompt labels + the changed-file scope it reviews. */
@@ -900,15 +897,10 @@ function findingFingerprint(finding: MstarReviewFinding): string {
 }
 
 /**
- * Merge seat outputs: exact-dedupe findings by fingerprint (first seat wins),
- * union-dedupe unverified strings (spec § 合并与合成).
+ * Merge seat outputs: exact-dedupe findings by fingerprint (first seat wins).
  */
-export function mergeSeatOutputs(outputs: readonly SeatOutput[]): {
-  findings: MstarReviewFinding[];
-  unverifiedCount: number;
-} {
+export function mergeSeatOutputs(outputs: readonly SeatOutput[]): MstarReviewFinding[] {
   const findings = new Map<string, MstarReviewFinding>();
-  const unverified = new Set<string>();
   for (const output of outputs) {
     for (const finding of output.findings ?? []) {
       const fingerprint = findingFingerprint(finding);
@@ -916,11 +908,8 @@ export function mergeSeatOutputs(outputs: readonly SeatOutput[]): {
         findings.set(fingerprint, finding);
       }
     }
-    for (const item of output.unverified ?? []) {
-      unverified.add(item);
-    }
   }
-  return { findings: [...findings.values()], unverifiedCount: unverified.size };
+  return [...findings.values()];
 }
 
 /** Filename of the shipped seat definition (`./seat-agent.md`) inside the clone's `.omp/agents/`. */
@@ -1448,7 +1437,6 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             .trim();
           const stoppedEnvelope = synthesizeReview({
             findings: [],
-            unverifiedCount: 0,
             target: parseTarget(input.reconFacts),
             incomplete: { reason: cause, unscanned: [DEEP_STOP_UNSCANNED] },
             ...(gathered.summary === undefined ? {} : { summary_md: gathered.summary }),
@@ -1833,7 +1821,7 @@ export const ompAgentRuntime: AgentRuntime = {
       // only alongside an unusable wave — see the failure rule above, where it
       // is exactly then that every dispatched seat was lost).
       const everyStopWasCap = gaps.length === stoppedSeats;
-      const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
+      const findings = mergeSeatOutputs(outputs);
       // Why the wave produced nothing. The failure message is the ONLY
       // diagnosis a lost seat carries (its payload never arrived, so there is
       // no per-seat document to read), and the unusable-wave branch below is
@@ -1876,7 +1864,6 @@ export const ompAgentRuntime: AgentRuntime = {
       // verdict over a wave that reviewed nothing is the dishonest outcome.
       const envelope = synthesizeReview({
         findings,
-        unverifiedCount,
         target: parseTarget(input.reconFacts),
         ...(stoppedSeats === 0
           ? {}

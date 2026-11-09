@@ -306,8 +306,8 @@ describe("parseReviewOutput", () => {
       scorePct: 45,
       // Required since engine 4.0.0; scoreBand(45) === "fail" (< 60 floor).
       band: "fail",
-      tally: { mustFix: 0, shouldFix: 2, mayFix: 0, nit: 1, unverified: 1 },
-      chatHeader: "**needs fixes** · 45%\n🔴 0 🟠 2 🔵 1 ❓ 1",
+      tally: { mustFix: 0, shouldFix: 2, mayFix: 0, nit: 1 },
+      chatHeader: "**needs fixes** · 45%\n🔴 0 🟠 2 🔵 1",
     };
 
     test("accepts an envelope with a well-formed tally", () => {
@@ -369,8 +369,8 @@ describe("parseReviewOutput", () => {
       verdict: "incomplete",
       scorePct: 45,
       band: "fail",
-      tally: { mustFix: 0, shouldFix: 2, nit: 1, unverified: 1 },
-      chatHeader: "**incomplete** · 45%\n🔴 0 🟠 2 🔵 1 ❓ 1",
+      tally: { mustFix: 0, shouldFix: 2, nit: 1 },
+      chatHeader: "**incomplete** · 45%\n🔴 0 🟠 2 🔵 1",
       incomplete: FACT,
     };
 

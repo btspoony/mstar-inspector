@@ -164,6 +164,10 @@
 # rebuild: a comment-only edit — the CLI pin note no longer cites the deleted
 # pin suite. No build input changes; the marker exists because wrangler hashes
 # this file, so any textual change still rebuilds the image.
+# rebuild: the runner's engine pin and the harness clone ref move to 4.4.0
+# (`packages/runner/package.json` and its lockfile are image inputs, and the
+# pinned ref is the tree the skills are cloned from; a stale image would run
+# the previous engine against this Worker).
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via
@@ -283,7 +287,7 @@ RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.c
     && { echo "bun $(/usr/local/bin/bun --version)"; gh --version | head -1; } > /etc/mstar-image-versions \
     && cat /etc/mstar-image-versions
 
-# mstar-harness plugin, pinned ref abf3167d3ee7db0d0593d034fbc99330663a4669 (tag v4.2.3, bumped 2026-11-06).
+# mstar-harness plugin, pinned ref a6721f5231e74ade74e80af5b1596edc6898f4be (tag v4.4.0, bumped 2026-11-09).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -294,7 +298,7 @@ RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.c
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin abf3167d3ee7db0d0593d034fbc99330663a4669 \
+    && git -C /opt/mstar-harness fetch --depth 1 origin a6721f5231e74ade74e80af5b1596edc6898f4be \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && git -C /opt/mstar-harness rev-parse HEAD > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git

@@ -111,7 +111,7 @@ describe("redactReviewOutput", () => {
     tally: {
       verdict: "blocked",
       scorePct: 0,
-      tally: { mustFix: 1, shouldFix: 0, nit: 0, unverified: 0 },
+      tally: { mustFix: 1, shouldFix: 0, nit: 0 },
       chatHeader: "chat: " + gh("p", "abcdef1234567890"),
     },
     findings: [
@@ -165,7 +165,7 @@ describe("redactReviewOutput", () => {
       tally: {
         verdict: "incomplete",
         scorePct: 0,
-        tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 1 },
+        tally: { mustFix: 0, shouldFix: 0, nit: 0 },
         chatHeader: "chat",
         incomplete: fact,
       },
@@ -252,7 +252,7 @@ describe("redactReviewOutputExact", () => {
       tally: {
         verdict: "incomplete",
         scorePct: 0,
-        tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 1 },
+        tally: { mustFix: 0, shouldFix: 0, nit: 0 },
         chatHeader: "chat",
         incomplete: fact,
       },

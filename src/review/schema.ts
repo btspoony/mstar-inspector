@@ -107,7 +107,6 @@ const tallySchema = z.object({
     /** Absent on envelopes written before engine 4.2; readers treat it as 0. */
     mayFix: z.number().int().min(0).optional(),
     nit: z.number().int().min(0),
-    unverified: z.number().int().min(0),
   }),
   chatHeader: z.string(),
   /** Echo of the envelope's incomplete fact (engine `PrTallyResult.incomplete`). */

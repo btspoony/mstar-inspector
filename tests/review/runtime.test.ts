@@ -3,7 +3,7 @@
  *   - port constants (REVIEW_SEATS) and the level guard;
  *   - partitionSeats: quick full-diff seat, default cluster balance,
  *     degenerate half-split, single-file overlap, empty universe;
- *   - mergeSeatOutputs: fingerprint dedupe + unverified union;
+ *   - mergeSeatOutputs: fingerprint dedupe;
  *   - parseTarget: recon-fact folding into the envelope target.
  */
 
@@ -157,19 +157,17 @@ describe("mergeSeatOutputs", () => {
           { mergeClass: "nit", title: "SQL injection", body: "duplicate", fingerprint_hint: "fp-1" },
           { mergeClass: "nit", title: "Typo", body: "duplicate-composite" },
         ],
-        unverified: ["flag A", "flag B"],
       },
-      { findings: [], unverified: ["flag A"] }, // duplicate unverified
+      { findings: [] },
     ]);
 
-    expect(merged.findings).toHaveLength(2);
-    expect(merged.findings[0]!.body).toBe("b1");
-    expect(merged.findings[1]).toEqual({
+    expect(merged).toHaveLength(2);
+    expect(merged[0]!.body).toBe("b1");
+    expect(merged[1]).toEqual({
       mergeClass: "nit",
       title: "Typo",
       body: "b2",
     });
-    expect(merged.unverifiedCount).toBe(2);
   });
 
   test("composite fingerprint distinguishes line numbers and titles", () => {
@@ -178,7 +176,7 @@ describe("mergeSeatOutputs", () => {
       { findings: [{ mergeClass: "nit", title: "Same title", body: "b", file_path: "f.ts", line_start: 2 }] },
     ]);
 
-    expect(merged.findings).toHaveLength(2);
+    expect(merged).toHaveLength(2);
   });
 });
 
