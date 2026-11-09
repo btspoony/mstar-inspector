@@ -36,6 +36,7 @@ import {
   CHECK_NAME,
   CHECK_RECONCILE_LIMIT,
   CHECK_RECOVERY_LEASE_MS,
+  CHECK_STALE_HOLDER_MS,
   claimCheckRecovery,
   rollbackCheckCreateDispatch,
   deferCheckRecovery,
@@ -194,6 +195,58 @@ describe("due selection (spec §7.11.2 predicate)", () => {
       .run(attempt.identity.attemptId);
     expect(await listCheckReconcileBatch(db, T0 + 60_000)).toHaveLength(0);
     expect(await listCheckReconcileBatch(db, T0 + 900_000)).toHaveLength(1);
+  });
+
+  test("a frozen intent stops waiting on a dead holder after CHECK_STALE_HOLDER_MS", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      nowMs: T0,
+      holder: "consumer:x",
+      executionDeadlineMs: T0 + 900_000,
+    });
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, lease, { desired: "success", title: CHECK_NAME, summary: "done" }, null, T0);
+    // The dead consumer's lease is still LIVE to the execution deadline: the
+    // claim writes the whole 900s window, and nothing releases a dead holder.
+    expect((await rawRow(db, id)).lease_until_ms).toBe(T0 + 900_000);
+
+    // Silent for less than the stale window: still the row's owner.
+    expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS - 1)).toHaveLength(0);
+    // Silent for the window: the frozen conclusion no longer waits for it.
+    expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS)).toHaveLength(1);
+    const taken = await claimCheckRecovery(db, id, "reconciler", T0 + CHECK_STALE_HOLDER_MS);
+    expect(taken).not.toBeNull();
+    // The epoch bump is what fences the old holder out.
+    expect(taken!.epoch).toBe(lease.epoch + 1);
+    expect((await rawRow(db, id)).holder).toBe("reconciler");
+  });
+
+  test("an in_progress row with the same silent holder keeps its lease authority", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db, {
+      nowMs: T0,
+      holder: "consumer:x",
+      executionDeadlineMs: T0 + 900_000,
+    });
+    const id = attempt.identity.attemptId;
+    // The model may still be running, so only the execution deadline governs.
+    expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS + 1)).toHaveLength(0);
+    expect(await claimCheckRecovery(db, id, "reconciler", T0 + CHECK_STALE_HOLDER_MS + 1)).toBeNull();
+    expect((await rawRow(db, id)).holder).toBe("consumer:x");
+  });
+
+  test("a frozen intent written inside the stale window is not raced", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      nowMs: T0,
+      holder: "consumer:x",
+      executionDeadlineMs: T0 + 900_000,
+    });
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, lease, { desired: "failure", title: CHECK_NAME, summary: "gate" }, null, T0);
+    // A holder mid-`completeCheck` has frozen the intent seconds ago: taking the
+    // row now would race a send that is still in flight.
+    expect(await listCheckReconcileBatch(db, T0 + 30_000)).toHaveLength(0);
   });
 
   test("a not-yet-due row and a row at the attempt cap are both left alone", async () => {
