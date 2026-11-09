@@ -206,6 +206,15 @@ export const CHECK_EXTERNAL_ID_PREFIX = "mstar-check:v1:";
 export const CHECK_LEASE_MS = 900_000;
 /** Recovery lease (spec §7.9: "Recovery lease is 120,000ms"). */
 export const CHECK_RECOVERY_LEASE_MS = 120_000;
+/**
+ * How long a FROZEN intent keeps waiting on the holder that froze it: 120,000ms
+ * is the terminalize hook's whole budget — its 10 s inline wait plus one 5 s
+ * `checks.update` send (spec §7.10) — with margin, so a holder that is merely
+ * slow still owns its row and only a holder that stopped writing is taken over.
+ * Authority over a row that still wants `in_progress` is unaffected: the
+ * execution deadline alone governs those, because the model may still be running.
+ */
+export const CHECK_STALE_HOLDER_MS = 120_000;
 /** Recovery attempt cap (spec §7.11.2: maxAttempts = 5). */
 export const CHECK_MAX_ATTEMPTS = 5;
 /** Reconcile batch size (spec §7.11.2: limit = 25). */
@@ -693,9 +702,11 @@ function isUniqueViolation(error: unknown): boolean {
  * Recovery reacquire: ONE conditional UPDATE that repeats the FULL candidate
  * eligibility predicate of `listCheckReconcileBatch` and increments the epoch.
  * A live lease — another holder's or this holder's unexpired one — is never
- * taken. `execution_deadline_ms` is untouched and the recovery lease runs
- * `CHECK_RECOVERY_LEASE_MS` from `nowMs`, so expiry always still means the
- * execution deadline (spec §7.9/§7.11.2).
+ * taken, UNLESS the row's intent is already frozen and its holder has been
+ * silent for `CHECK_STALE_HOLDER_MS` (see the selector's note): then the lease
+ * belongs to a holder that is not coming back. `execution_deadline_ms` is
+ * untouched and the recovery lease runs `CHECK_RECOVERY_LEASE_MS` from `nowMs`,
+ * so expiry always still means the execution deadline (spec §7.9/§7.11.2).
  *
  * Repeating the selector is not redundancy: selection alone grants no
  * ownership (§7.11.2 step 1), and a row selected as due can stop being due
@@ -733,11 +744,12 @@ export async function claimCheckRecovery(
           AND recovery_state IN ('pending','remote-unconfirmed')
           AND attempts < ?
           AND (next_attempt_ms IS NULL OR next_attempt_ms <= ?)
-          AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+          AND (lease_until_ms IS NULL OR lease_until_ms <= ?
+               OR (desired <> 'in_progress' AND holder IS NOT NULL AND updated_ms <= ?))
           AND (desired <> 'in_progress' OR execution_deadline_ms <= ?
                OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?))`,
     )
-    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, maxAttempts, nowMs, nowMs, nowMs, nowMs)
+    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs)
     .run();
   if (claim.meta.changes !== 1) return null;
   const row = await db
@@ -1384,6 +1396,17 @@ export async function listReenableableCheckPairs(
  * persisted, and waiting out the deadline would freeze the released state for
  * up to fifteen minutes. The deadline stays in the predicate for the rows
  * nobody released.
+ *
+ * A lease is authority over a row that still wants `in_progress`; it stops
+ * being authority once the intent is frozen. `claimAttempt` writes the lease as
+ * the whole 900 s execution window, and every lease-clearing writer is fenced
+ * on a LIVE lease — so an invocation that froze `desired` (`setCheckDesired`)
+ * and then died leaves a live lease behind that nothing releases. That row's
+ * conclusion is already decided, so it no longer waits: a nonzero `holder`
+ * whose `updated_ms` is at least `CHECK_STALE_HOLDER_MS` old is taken over.
+ * Taking over is safe because the taker bumps `lease_epoch`, which fences the
+ * old holder's late writes. A row that still wants `in_progress` never matches
+ * this disjunct and keeps waiting out its deadline.
  */
 export async function listCheckReconcileBatch(
   db: D1Like,
@@ -1398,13 +1421,14 @@ export async function listCheckReconcileBatch(
           AND recovery_state IN ('pending','remote-unconfirmed')
           AND attempts < ?
           AND (next_attempt_ms IS NULL OR next_attempt_ms <= ?)
-          AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+          AND (lease_until_ms IS NULL OR lease_until_ms <= ?
+               OR (desired <> 'in_progress' AND holder IS NOT NULL AND updated_ms <= ?))
           AND (desired <> 'in_progress' OR execution_deadline_ms <= ?
                OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?))
         ORDER BY COALESCE(next_attempt_ms,created_ms),id
         LIMIT ?`,
     )
-    .bind(maxAttempts, nowMs, nowMs, nowMs, nowMs, limit)
+    .bind(maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, limit)
     .all<ReviewCheckRow>();
   return results.map(attemptOf);
 }
