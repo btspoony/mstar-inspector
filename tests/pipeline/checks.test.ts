@@ -1201,6 +1201,75 @@ describe("per-call update budget (spec §7.10)", () => {
 });
 
 describe("abandonment is not a conclusion (spec §7.10 / §7.9)", () => {
+test("a begin budget that expires DURING the attach still releases the attempt", async () => {
+    // The measured shape behind "a Check that only closes at the 900 s
+    // deadline": the consumer's 2 s bound expires while the attach write is in
+    // flight, so the handle below is returned into a promise nobody awaits.
+    // Left on a live lease the row can only be taken over when the execution
+    // deadline expires; released, recovery adopts the run within a minute.
+    const db = await seededDb();
+    CLOCK = T0;
+    const latch = createCheckBeginLatch();
+    const fake = fakeChecks({
+      create: (params) => ({
+        id: 4242,
+        name: params.name,
+        head_sha: params.head_sha,
+        external_id: params.external_id,
+        status: "in_progress",
+        conclusion: null,
+        app: { id: GITHUB_APP_ID },
+      }),
+    });
+    const base = adapterFor(db, fake.octokit);
+    // The lifecycle's OWN attach write is where the budget expires: the adapter
+    // has already created and attached the run, so the pre-attach latch check
+    // has passed and only the post-attach one can see the abandonment.
+    const dbAtAttach = Object.create(db, {
+      prepare: {
+        value: (sql: string) => {
+          if (sql.includes("check_run_id = COALESCE")) latch.abandon();
+          return db.prepare(sql);
+        },
+      },
+    }) as typeof db;
+    const lifecycle = createCheckLifecycle({
+      db: dbAtAttach,
+      nowMs: () => CLOCK,
+      getAdapter: () => base,
+      getCheckGate: async () => GATE,
+    });
+
+    const handle = await lifecycle.begin({
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+      latch,
+    });
+    expect(handle).toBeNull();
+    expect(fake.creates).toHaveLength(1);
+
+    const row = (await db.prepare(`SELECT * FROM review_checks WHERE head_sha = ?`).bind(SHA).first()) as Record<
+      string,
+      string | number | null
+    >;
+    // The run is retained for adoption, and the row is RELEASED rather than
+    // left holding a lease nothing will terminalize.
+    expect(row.check_run_id).toBe(4242);
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.next_attempt_ms).toBe(T0 + 60_000);
+    // No conclusion of its own: the reconciler owes it.
+    expect(row.desired).toBe("in_progress");
+    expect(row.terminal_ms).toBeNull();
+    // The row names the branch, which is what the diagnostic column is for.
+    expect(row.terminalize_outcome).toBe("no-handle");
+  });
+
   test("an abandoned begin leaves no terminal intent, only the honest recovery state", async () => {
     const db = await seededDb();
     CLOCK = T0;
