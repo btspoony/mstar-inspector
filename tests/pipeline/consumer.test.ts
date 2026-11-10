@@ -5775,11 +5775,11 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(create.external_id).toMatch(/^mstar-check:v1:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:1$/);
     expect(update.status).toBe("completed");
     expect(update.conclusion).toBe("success");
-    expect(update.title).toBe(CHECK_NAME);
-    expect(update.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
-    expect(update.summary).toContain('verdict "ship it"');
-    expect(update.summary).toContain("score 85");
-    expect(update.summary).toContain(`floor ${GATE.minScore}`);
+    expect(update.output.title).toBe(CHECK_NAME);
+    expect(update.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(update.output.summary).toContain('verdict "ship it"');
+    expect(update.output.summary).toContain("score 85");
+    expect(update.output.summary).toContain(`floor ${GATE.minScore}`);
 
     // Order (spec §7.9): the claim lands at ADMISSION — before the container
     // runs a single command and long before the authoritative SHA — while the
@@ -5957,7 +5957,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
-    expect(update.summary).toBe(CHECK_SUMMARIES.prePublicationFailure("unknown pipeline failure"));
+    expect(update.output.summary).toBe(CHECK_SUMMARIES.prePublicationFailure("unknown pipeline failure"));
     expect(checkRows(db)).toHaveLength(1);
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("failure");
@@ -5982,7 +5982,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
-    expect(update.summary).toBe(CHECK_SUMMARIES.degraded);
+    expect(update.output.summary).toBe(CHECK_SUMMARIES.degraded);
     const pub = publicationRow(db);
     expect(pub.kind).toBe("degraded");
     expect(pub.phase).toBe("applied");
@@ -6010,7 +6010,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
-    expect(update.summary).toBe(CHECK_SUMMARIES.degradedNotPosted);
+    expect(update.output.summary).toBe(CHECK_SUMMARIES.degradedNotPosted);
     // ONE attempt: the rejection closes the same row, it never mints a second.
     expect(checkRows(db)).toHaveLength(1);
     const row = checkRowFor(db, SHA);
@@ -6084,7 +6084,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("success");
-    expect(update.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(update.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("success");
     expect(row.observed).toBe("success");
@@ -6127,7 +6127,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
-    expect(update.summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    expect(update.output.summary).toBe(CHECK_SUMMARIES.unconfirmed);
     const row = checkRowFor(db, SHA);
     expect(checkRows(db)).toHaveLength(1);
     expect(row.desired).toBe("failure");
@@ -6831,7 +6831,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const update = checkRequests.filter((r) => r.op === "update").at(-1);
     expect(update).toBeDefined();
     expect(update!.params.conclusion).toBe("success");
-    expect(String(update!.params.summary)).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
+    expect(String((update!.params.output as { summary: string }).summary)).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
 
     // The conclusion write links the publication it was decided from, so the
     // row is no longer unlinked and the frozen Check is the published one.
@@ -7437,7 +7437,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(update.conclusion).toBe("success");
     // The SAME head is the subject and the baseline, so the summary names it
     // once — `since <head>` would be nonsense.
-    expect(update.summary).toBe(
+    expect(update.output.summary).toBe(
       `No new changes since the reviewed head ${SHA.slice(0, 7)}; its own gate result is inherited: verdict "ship it", score 85 (floor ${GATE.minScore}; allowed: ship it).`,
     );
     const row = checkRowFor(db, SHA);
@@ -7542,7 +7542,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const update = checkRequests.filter((r) => r.op === "update").at(-1);
     expect(update).toBeDefined();
     expect(update!.params.conclusion).toBe("success");
-    expect(String(update!.params.summary)).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
+    expect(String((update!.params.output as { summary: string }).summary)).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
     const settled = checkRowFor(db, SHA);
     expect(settled.desired).toBe("success");
     expect(settled.observed).toBe("success");

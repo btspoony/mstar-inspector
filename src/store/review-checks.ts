@@ -1072,6 +1072,36 @@ export async function setCheckFallbackDesired(
 }
 
 /**
+ * Record WHY an attempt reached (or never reached) its conclusion, on the
+ * attempt itself (migration 0052).
+ *
+ * Diagnostic only: every exit of the terminalize hook used to report through
+ * `log.warn`, which is not queryable after the fact, so a Check that only
+ * closed at the 900 s execution deadline left no evidence of whether the
+ * consumer ran the hook, timed it out, or never held a handle at all.
+ *
+ * Deliberately unfenced and WITHOUT touching `updated_ms`: the caller records
+ * after a lease release or a fence refusal, exactly when a fenced write would
+ * be refused, and `updated_ms` is the silence clock the stale-holder takeover
+ * reads (spec §7.9) — a diagnostic write must not buy a dead holder another
+ * two minutes. A store fault here never changes the Check or the review.
+ */
+export async function recordTerminalizeOutcome(
+  db: D1Like,
+  id: string,
+  outcome: "completed" | "budget-exceeded" | "hook-failed" | "no-handle" | "recovery",
+  elapsedMs: number | null,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE review_checks SET terminalize_outcome = ?, terminalize_ms = ?
+        WHERE id = ? AND terminalize_outcome IS NULL`,
+    )
+    .bind(outcome, elapsedMs, id)
+    .run();
+}
+
+/**
  * Advance `observed` from a remote payload whose identity ALREADY matches the
  * persisted row (spec §7.9: "Mark observed only when the response (or a
  * subsequent GET) has matching identity, status=completed and the intended
