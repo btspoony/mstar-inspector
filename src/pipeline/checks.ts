@@ -1439,14 +1439,23 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         );
         return null;
       }
-      // Observation only, no behaviour change: the consumer's 2 s budget may
-      // have expired while this attach ran, in which case the handle below is
-      // returned into a promise nobody awaits and the attempt holds a live
-      // lease nothing will terminalize — it then waits out the 900 s execution
-      // deadline. Recording it here (migration 0052) is what tells that case
-      // apart from a hook that ran and failed.
+      // The same abandonment can land DURING this attach: the consumer's 2 s
+      // budget expires while the D1 write is in flight, so the handle below is
+      // returned into a promise nobody awaits. Left alone that row holds a live
+      // lease nothing will terminalize and the Check only closes when the 900 s
+      // execution deadline expires — measured at 40% of attempts before this
+      // branch existed (terminal - created = 904-965 s). Hand it to recovery
+      // exactly like the pre-attach case: the run id is already persisted, so
+      // the reconciler ADOPTS this run instead of creating a second one.
       if (input.latch?.isAbandoned() === true) {
         await recordTerminalizeOutcome(deps.db, identity.attemptId, "no-handle", null).catch(() => {});
+        await abandonUnterminalized(
+          identity.attemptId,
+          claim.lease,
+          "the creating invocation was abandoned by the consumer budget after the run was attached",
+          true,
+        );
+        return null;
       }
       return {
         attemptId: identity.attemptId,
