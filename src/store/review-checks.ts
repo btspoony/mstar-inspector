@@ -1089,12 +1089,12 @@ export async function setCheckFallbackDesired(
 export async function recordTerminalizeOutcome(
   db: D1Like,
   id: string,
-  outcome: "completed" | "budget-exceeded" | "hook-failed" | "no-handle" | "recovery",
+  outcome: "completed" | "budget-exceeded" | "hook-failed" | "no-handle",
   elapsedMs: number | null,
 ): Promise<void> {
   await db
     .prepare(
-      `UPDATE review_checks SET terminalize_outcome = ?, terminalize_ms = ?
+      `UPDATE review_checks SET terminalize_outcome = ?, terminalize_elapsed_ms = ?
         WHERE id = ? AND terminalize_outcome IS NULL`,
     )
     .bind(outcome, elapsedMs, id)

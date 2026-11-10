@@ -7,11 +7,15 @@
 -- terminalize" case all reported through `log.warn` only, and Workers Logs is
 -- not queryable after the fact. Recovery then closed the row and overwrote the
 -- only evidence. These columns are written by the invocation that owns the
--- attempt (consumer lane) or by the reconciler that took it over, so one query
--- separates "the consumer never ran the hook" from "the hook ran and timed
--- out".
+-- attempt, so one query separates "the consumer never ran the hook" from "the
+-- hook ran and timed out".
 --
--- Values: 'completed' | 'budget-exceeded' | 'hook-failed' | 'no-handle' |
--- 'recovery'. NULL on rows written before this column.
-ALTER TABLE review_checks ADD COLUMN terminalize_outcome TEXT;
-ALTER TABLE review_checks ADD COLUMN terminalize_ms INTEGER;
+-- The reconciler lane writes nothing here: `terminalize_outcome IS NULL` on a
+-- terminal row IS the record that recovery closed it, and `holder` already
+-- names `check-reconcile`. `terminalize_elapsed_ms` is how long the consumer
+-- waited on its hook — distinct from `terminal_ms`, the row's own terminal
+-- timestamp, and from the `review.check.terminalize_timeout_ms` budget.
+ALTER TABLE review_checks ADD COLUMN terminalize_outcome TEXT
+  CHECK (terminalize_outcome IS NULL
+         OR terminalize_outcome IN ('completed', 'budget-exceeded', 'hook-failed', 'no-handle'));
+ALTER TABLE review_checks ADD COLUMN terminalize_elapsed_ms INTEGER;
