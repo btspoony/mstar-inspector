@@ -1,6 +1,6 @@
 # Knowledge Guide
 
-Engineering experience and reusable designs — what the work taught. The current-state contracts live in `docs/specs/` and decision history in `.agents/adr/`; a page here may still be the reference for a durable contract `docs/specs/` does not own yet, and it stays that reference until a spec takes it over. Each document lives at `<category>/<slug>.md`; the catalog (`mstar catalog list --kind document`) is the registry — this README is a prose guide. Maintained via `mstar-compound` / `mstar-compound-refresh`.
+Engineering experience and reusable designs — what the work taught. Current-state contracts live in `docs/specs/` and decision history in `.agents/adr/`; knowledge never describes current state, so a page here that still reads like a contract is legacy capture awaiting promotion into `docs/specs/` or demotion to experience, never the authority for current behaviour. Each document lives at `<category>/<slug>.md`; the catalog (`mstar catalog list --kind document`) is the registry — this README is a prose guide. Maintained via `mstar-compound` / `mstar-compound-refresh`.
 
 | Document | Source | Description | Status |
 |-----------|-------------|-------------|--------|
