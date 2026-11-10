@@ -1092,12 +1092,21 @@ export async function recordTerminalizeOutcome(
   outcome: "completed" | "budget-exceeded" | "hook-failed" | "no-handle",
   elapsedMs: number | null,
 ): Promise<void> {
+  // `completed` is decided HERE, from the row, not from "the hook's promise
+  // resolved": a hook that froze nothing (fence refused) or handed the attempt
+  // to recovery resolves just as normally, and only `observed = desired` proves
+  // a terminal send landed. Those rows record `handed-off`.
   await db
     .prepare(
-      `UPDATE review_checks SET terminalize_outcome = ?, terminalize_elapsed_ms = ?
+      `UPDATE review_checks
+          SET terminalize_outcome = CASE
+                WHEN ? = 'completed'
+                 AND NOT (observed = desired AND desired <> 'in_progress')
+                THEN 'handed-off' ELSE ? END,
+              terminalize_elapsed_ms = ?
         WHERE id = ? AND terminalize_outcome IS NULL`,
     )
-    .bind(outcome, elapsedMs, id)
+    .bind(outcome, outcome, elapsedMs, id)
     .run();
 }
 
