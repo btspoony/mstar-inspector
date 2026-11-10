@@ -4,7 +4,7 @@
 
 ## The contract
 
-`.mstar/specs/review-lifecycle.md` §7.11.2 states it in two steps, and both matter:
+`docs/specs/feature/review-lifecycle.md` §7.11.2 states it in two steps, and both matter:
 
 1. **Reacquire before doing anything.** Selection alone grants nothing; a due attempt is claimed with a conditional `UPDATE` that repeats the eligibility predicate and increments the epoch.
 2. **A wait is a claim that is given straight back.** A row inside its execution deadline with no readable proof of the publication it owes takes the claim and releases it with `next_attempt_ms = now + CHECK_BACKOFF_MS[0]` — no send, no attempt spent.

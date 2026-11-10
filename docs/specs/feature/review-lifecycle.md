@@ -1,26 +1,25 @@
-# Review lifecycle (review-lifecycle)
+# Feature: review lifecycle
 
-> **Status:** Contract locked by PM 2026-09-12 after product-manager review, architect review with correction continuation, and writing-specialist corpus hygiene; product direction D1–D9 is preserved. Both implementation slices are now delivered — the M8 slice (§7.0–§7.8/§7.10/§7.11.1) and the M7 slice (§7.9/§7.11.2) — together with this §7.12–§7.13 documentation cutover, on scoped local behavioral evidence only; live GitHub/App behavior stays unverified (§7.13).
-> **Cross-iteration authority:** This tracked file contains the normative schemas, APIs, state machines, ordering and recovery contracts. Implementation task assignments own task breakdowns, current source anchors and scoped verification commands, not a second normative contract.
-> **Related authority:** [github-review-comment-mapping.md](github-review-comment-mapping.md) owns COMMENT-only publication vocabulary. The harness `mstar.review/v1` envelope and engine verdict remain unchanged. The local compass records D1–D9 verbatim; no normative contract below requires the compass to interpret it.
+## Scope
 
-## 1. Scope and user value
+Finding revalidation, exact owned-thread resolution, publication-before-result persistence, advisory Checks, and independently recoverable GitHub side effects.
 
-M8 verifies retained earlier findings against current code and discussion, renders closure in the existing overall comment, automatically resolves positively verified Inspector-owned threads, and recovers publication/lifecycle/resolution work without rerunning a paid review. M7 subsequently adds advisory execution Checks. M8 is independently deliverable; M7 depends on its publication contracts. Neither the model nor the Sandbox gains code-write, push or merge authority.
+## Current state
 
-## 2. Binding user decisions
+### 1. Scope and user value
 
-- **D1:** Two serial implementation slices: M8 before M7.
+The lifecycle verifies retained earlier findings against current code and discussion, renders closure in the existing overall comment, automatically resolves positively verified Inspector-owned threads, and recovers publication/lifecycle/resolution work without rerunning a paid review. Advisory execution Checks use the same publication-proof contract. Neither the model nor the Sandbox has code-write, push or merge authority.
+
+### 2. Authority boundaries
+
 - **D2:** Relevant discussion is untrusted evidence, not instructions or natural-language commands.
-- **D3:** A normal review publication concludes the Check against the App's configured review gate: `success` only when the applied review's verdict is one of the App's passing verdicts and its tally score meets the App's floor; a missed gate, an unreadable review, a degraded publication, an unconfirmed result and a failed execution are all `failure`. Check failure never blocks primary publication. (The user explicitly superseded the earlier "execution completion only" rule; see the §7.9 matrix.)
+- **D3:** A normal review publication concludes the Check against the App's configured review gate: `success` only when the applied review's verdict is one of the App's passing verdicts and its tally score meets the App's floor; a missed gate, an unreadable review, a degraded publication, an unconfirmed result and a failed execution are all `failure`. Check failure never blocks primary publication. 
 - **D4:** Closure belongs in the existing single overall-comment upsert, not another closure comment.
 - **D5:** One fresh-App contract, no old-App migration/permission-acceptance UX, compatibility layer or rollout toggle. The user deletes old test Apps; agents do not delete Apps or data. Forward-only feature migrations are allowed.
 - **D6:** Automatic resolution after evidence-backed verification is required. Only exactly mapped Inspector-owned threads; absence-only, unresolved concerns, unverifiable evidence, stale HEAD and failed API calls never authorize a resolve claim.
 - **D7:** Worker-only contents:write is authorized for resolution. Sandbox tokens are explicitly repository-scoped and read-only; broad tokens never enter Sandbox, prompts, files or logs.
-- **D8:** origin/main → review-lifecycle integration branch → final PR main; primary main checkout remains the local harness control directory. Plan implementation runs in feature worktrees.
-- **D9:** Pause after the sequential preparation chain and PM-owned lock/integration delivery. That preparation/architecture pass performed documentation changes only (no implementation, Git writes, deployment or live mutations); implementation then proceeded under the M8 slice's own tasks.
 
-## 3. Product requirements
+### 3. Product requirements
 
 - **RL-1:** Typed evidence, never prose parsing or fingerprint absence, determines addressed/dismissed/unverifiable. Conflicts and omissions remain conservative.
 - **RL-2:** A stable lifecycle row and an exact App-owned original publication/thread association authorize lookup. Model/user thread IDs, generic Bot authorship and copied markers do not authorize mutation.
@@ -30,32 +29,26 @@ M8 verifies retained earlier findings against current code and discussion, rende
 - **RL-6:** Sandbox read-only/repository restriction is checked against the returned grant. Every Worker client is explicitly purpose-scoped and routed by exact App and installation.
 - **RL-7:** Discussions and findings are untrusted evidence. No command interpretation, arbitrary resolution or model-supplied credentials/remote identity.
 - **RL-8:** Bounded closure in one overall comment distinguishes finding disposition from actual thread state. Repeat display/tally behavior and engine verdict/score authority are unchanged.
-- **RL-9:** Publication precedes all **published result** writes and thread mutations. Record classes are disjoint: (a) execution attempts/leases contain no findings; (b) a **private pre-publication recovery journal** may hold a validated/redacted complete payload, but is not a published result and has no dashboard/insights/settings/HTTP/reporting read exposure; (c) `reviews`, `findings`, lifecycle rows and associations are applied only after positive publication proof. This explicit journal exception replaces the earlier comment-before-any-data formulation, which could not recover the publish→persist crash window. Check failure terminalization without publication remains allowed; it carries execution facts, not a fabricated result.
+- **RL-9:** Publication precedes all **published result** writes and thread mutations. Record classes are disjoint: (a) execution attempts/leases contain no findings; (b) a **private pre-publication recovery journal** may hold a validated/redacted complete payload, but is not a published result and has no dashboard/insights/settings/HTTP/reporting read exposure; (c) `reviews`, `findings`, lifecycle rows and associations are applied only after positive publication proof. The journal is the explicit exception to comment-before-result-data ordering. Check failure terminalization without publication remains allowed; it carries execution facts, not a fabricated result.
 - **RL-10:** Eligible attempts show in-progress Checks at the authoritative SHA. Desired conclusion is derived from publication proof plus the applied review against the App's review gate, separately from observed remote state; remote update failure never converts a proven publication into execution failure. Genuine skip paths create no new Check.
 - **RL-11:** Fresh-App manifest/docs/test contracts agree; no legacy fallback, dual commit-status writes, annotations or rerun UI.
 - **RL-12:** Local fencing is not external exactly-once. GitHub offers neither conditional thread resolve nor idempotent Check/comment creation. Remaining remote races and unknown outcomes are stated honestly. No invented details URL or live-verification claim.
 
-## 4. Deferred candidates
+### 4. Deferred candidates
 
 | Candidate | Owner | Trigger | Done definition |
 |---|---|---|---|
-| Check rerequested, annotations, check-suite triggers | PM/product-manager | Explicit user demand after this delivery | Approved plan, implementation evidence and updated contract |
-| `/review` command extensions — **closed 2026-09-17, superseded**: retired outright (not extended) per the 2026-09-17 user direction to replace the command with the bare bot-mention trigger; the bare bot-mention trigger in `review-trigger-policy.md` now governs the comment trigger. RL-7 itself is unchanged | PM/product-manager | — (resolved; no longer awaiting demand) | Delivered: trigger-mode + mention contract and acceptance evidence alongside the superseding policy |
-| Fuzzy/alias thread re-anchoring | PM/product-manager | Explicit user demand revising exact mapping | Approved plan with detection/undo story and evidence; **not implemented here** |
+| Check rerequested, annotations, check-suite triggers | Product owner | Explicit user demand after this delivery | Explicit approval, implementation evidence and updated contract |
+| Comment-trigger extension — superseded by the bare mention in [review trigger policy](review-trigger-policy.md); RL-7 is unchanged | Product owner | — (resolved; no longer awaiting demand) | Delivered: trigger-mode + mention contract and acceptance evidence alongside the superseding policy |
+| Fuzzy/alias thread re-anchoring | Product owner | Explicit user demand revising exact mapping | Explicit approval with detection/undo story and evidence; **not implemented here** |
 
 Deferring fuzzy matching does **not** prohibit checking an existing row's original concern against current code or resolving its already-known thread. New-finding fingerprint drift alone never invalidates that association. Actual conflicting concern evidence stays unverifiable. Commit-status dual writing is a permanent non-goal.
 
-## 5. Non-goals
+### 5. Non-goals
 
 No App/data deletion, old-App backfill, broad historical scans, code edits by reviewers, merge approval, natural-language commands, harness body/schema changes, new dashboard result pages, or unrequested live/E2E workflow. Existing review pause/kill-switch governs new work; recovery policy is explicit in §7.6.
 
-## 6. Plan mapping
-
-- **M8:** RL-1–RL-9, RL-11/12; §7.0–§7.8, §7.10, §7.11.1 and its own cron composition.
-- **M7:** RL-10–RL-12; §7.9 and §7.11.2, extending the M8 credential/composition.
-- **Both:** §7.12–§7.13. Cross-slice consumer/manifest writes are serial. Both implementation slices are delivered: the M8 slice ships §7.0–§7.8, §7.10 and §7.11.1 with their own cron composition, and the M7 slice ships §7.9 and §7.11.2 on top of them (Check registry, adapter, consumer handoff and the independent Check recovery stage). This §7.12–§7.13 documentation cutover is delivered with them. Evidence caliber: §7.13 (scoped local behavioral evidence; live GitHub/App behavior unverified).
-
-## 7. Normative technical contract
+### 7. Normative technical contract
 
 ### 7.0 Conventions and ownership
 
@@ -65,7 +58,7 @@ New IDs are Worker-generated UUIDs. Fingerprints retain `computeFindingFingerpri
 
 ### 7.1 Storage schema
 
-The M8 slice creates **`migrations/0020_finding_lifecycle.sql`**. Existing migrations are untouched.
+`migrations/0020_finding_lifecycle.sql` defines the publication, finding and thread tables.
 
 ```sql
 CREATE TABLE review_publications (
@@ -137,7 +130,7 @@ CREATE INDEX idx_thread_recovery ON review_threads(resolution_state,next_attempt
 
 **Visibility:** the private journal is readable only by the consumer, M8 recovery and M7 publication-proof/conclusion reads. It is never joined by a reviewer-visible result API, even after apply. `listPublicationRecovery` belongs to M8 only; `readPublicationProof` may be used by consumer and M7. Result readers continue to query explicit public-result tables. This is verified with consumer-visible behavior, not a brittle source-text/exact-caller-count test. No inference that `applied_ms IS NULL` implies zero result rows: `store.put` may already have committed before a later lifecycle batch fails. Every such row still has confirmed publication proof.
 
-The M7 slice creates **`migrations/0021_review_checks.sql`**:
+`migrations/0021_review_checks.sql` defines the Check registry:
 
 ```sql
 CREATE TABLE review_checks (
@@ -193,7 +186,7 @@ export type Coverage = 'complete' | 'truncated' | 'unavailable';
 export type OriginalFinding = {
   title: string; body: string; filePath: string | null;
   lineStart: number | null; lineEnd: number | null;
-  mergeClass: 'must-fix' | 'should-fix' | 'nit'; category: string | null;
+  mergeClass: 'must-fix' | 'should-fix' | 'may-fix' | 'nit'; category: string | null;
   fingerprintHint: string | null;
 };
 export type RecheckTarget = {
@@ -335,9 +328,9 @@ export function assertSandboxGrant(grant: InstallationTokenGrant, expectedRepo: 
 // ReviewCommenter.getInstallationToken(input: TokenInput): Promise<InstallationTokenGrant>
 ```
 
-Retain the single `createAppAuth` construction point in `src/pipeline/comment.ts`. Mint with `auth({type:'installation',installationId,repositoryNames:[repo],permissions})`. `sandbox-read` explicitly requests `{contents:'read',metadata:'read',pull_requests:'read'}` (the last because the shipped §7.7 step-2 diff step runs `gh pr diff` with exactly this token); `review-write` explicitly requests `{contents:'write',metadata:'read',pull_requests:'write',issues:'write'}`, with `checks:'write'` added by 68. Worker `getOctokit` receives scope/purpose, explicitly mints that scoped grant through the same auth object, then creates a token-authenticated `Octokit({auth:grant.token})`; do not rely on unrestricted factory auto-auth refresh. Each operation obtains a current cached grant and a client for the exact purpose/repository. Token cache belongs to that App auth object and includes installation/repository/permissions. A token client never leaves the Worker.
+Retain the single `createAppAuth` construction point in `src/pipeline/comment.ts`. Mint with `auth({type:'installation',installationId,repositoryNames:[repo],permissions})`. `sandbox-read` explicitly requests `{contents:'read',metadata:'read',pull_requests:'read'}` (the last because the shipped §7.7 step-2 diff step runs `gh pr diff` with exactly this token); `review-write` explicitly requests `{contents:'write',metadata:'read',pull_requests:'write',issues:'write'}`, including `checks:'write'`. Worker `getOctokit` receives scope/purpose, explicitly mints that scoped grant through the same auth object, then creates a token-authenticated `Octokit({auth:grant.token})`; do not rely on unrestricted factory auto-auth refresh. Each operation obtains a current cached grant and a client for the exact purpose/repository. Token cache belongs to that App auth object and includes installation/repository/permissions. A token client never leaves the Worker.
 
-The installed auth-app 8.3.0 implementation maps returned `permissions`, `repository_selection`, `repositories[].id/name` into `permissions`, `repositorySelection`, `repositoryIds/Names`. The Sandbox guard requires nonempty token, contents/metadata/pull_requests read, all other returned permission values read, `repositorySelection === 'selected'`, and exactly one returned repository name equal to the requested repository. Missing repository list/selection or a broader grant fails closed. GitHub's token-create API contract additionally guarantees requested repository/permission scoping; the code must not present the **request** as proof of the **response**. No broad mint fallback or cross-purpose cache reuse.
+The installed auth-app 8.3.1 implementation maps returned `permissions`, `repository_selection`, `repositories[].id/name` into `permissions`, `repositorySelection`, `repositoryIds/Names`. The Sandbox guard requires nonempty token, contents/metadata/pull_requests read, all other returned permission values read, `repositorySelection === 'selected'`, and exactly one returned repository name equal to the requested repository. Missing repository list/selection or a broader grant fails closed. GitHub's token-create API contract additionally guarantees requested repository/permission scoping; the code must not present the **request** as proof of the **response**. No broad mint fallback or cross-purpose cache reuse.
 
 Routing query binds **both** durable `app_id` and `installation_id` through `app_installations` into the matching `github_apps` row; validates `github_app_id` against `GET /app`. It does not scan all active Apps and choose the only one for a repository. Account/repository metadata must agree with the requested installation before mint/use. Missing mapping, disabled/deleted App, changed identity or token denial means no GitHub mutation and a durable suspended reason. No credential substitution by another App or reinstall.
 
@@ -389,7 +382,7 @@ export function publishPrepared(input: { row: PublicationRow; lease: Lease }): P
 **Frozen consumer order:**
 
 1. Existing App/pause/config/guard gates; acquire Sandbox with the read grant; clone and establish authoritative SHA.
-2. Existing KV/D1 idempotency acks remain. Also check a journal for this exact scope/SHA before model work: an existing prepared/unknown/confirmed row hands off to recovery and ACKs without another paid review. Pending recovery is never deleted by same-SHA `/review`.
+2. Existing KV/D1 idempotency acks remain. Also check a journal for this exact scope/SHA before model work: an existing prepared/unknown/confirmed row hands off to recovery and ACKs without another paid review. Pending recovery is never deleted by same-SHA bot mention.
 3. Read/apply confirmed pending lifecycle work in order; capture targets, immutable diff evidence and discussions. Failure produces honest context-unavailable, not false first-round closure.
 4. After authoritative SHA/dedup and before model work, optional M7 hook attempts a fenced Check claim; failure is isolated and cannot prevent step 5.
 5. Execute normal review and concurrent bounded recheck (§7.8). Parse-degrade is typed and ACK-based, not normal envelope persistence or a queue retry of invalid model content.
@@ -430,7 +423,7 @@ Quick/default: a separate structured child on the existing read-only ToolSession
 
 ```ts
 export type ReviewRunResult = { envelope: MstarReviewV1; recheck: RecheckDoc | null };
-// AgentRuntimeRunInput gains optional recheck: RecheckInput; other fields unchanged.
+// AgentRuntimeRunInput has optional recheck: RecheckInput; other fields unchanged.
 // AgentRuntime.runReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult>
 export function recheckBudget(outerDeadlineMs: number, nowMs: number, capMs?: number): number; // 0 = skip
 ```
@@ -523,9 +516,9 @@ Titles/summaries are redacted and bounded; summary ≤2000 chars, error ≤300. 
 
 ### 7.10 Closure and consumer Check handoff
 
-`buildReviewBody` gains optional closure; final assembled body passes the existing size limit. The closure block is a COLLAPSED `<details>` section placed AFTER `### Findings` (its summary carries the "Revalidated findings" title), so an expanded table never pushes the current findings down; a zero-finding envelope adds the empty `### Findings` heading first, keeping the same order. Show ≤25 selected prior rows plus coverage/overflow count; columns are finding, disposition, evidence and thread. A pending resolve renders not-yet-resolved, not a prediction. Remote outcomes discovered after primary publication appear in the next round's single upsert; no second closure-only upsert. Superseded old thread state never stands in for the new occurrence.
+`buildReviewBody` accepts optional closure; final assembled body passes the existing size limit. The closure block is a COLLAPSED `<details>` section placed AFTER `### Findings` (its summary carries the "Revalidated findings" title), so an expanded table never pushes the current findings down; a zero-finding envelope adds the empty `### Findings` heading first, keeping the same order. Show ≤25 selected prior rows plus coverage/overflow count; columns are finding, disposition, evidence and thread. A pending resolve renders not-yet-resolved, not a prediction. Remote outcomes discovered after primary publication appear in the next round's single upsert; no second closure-only upsert. Superseded old thread state never stands in for the new occurrence.
 
-The M8 slice exposes the following optional ProcessDeps seam; the M7 slice supplies it. An absent dependency produces **no Checks**, while the M8 behavior remains fully operational. It does not claim the entire changed M8 pipeline is byte-identical to pre-M8.
+The following optional ProcessDeps seam separates lifecycle work from Check hooks. An absent dependency produces **no Checks**, while the M8 behavior remains fully operational. It does not claim the entire changed M8 pipeline is byte-identical to pre-M8.
 
 ```ts
 export type CheckHandle = { attemptId: string; scope: Scope; githubAppId: number; headSha: string; lease: Lease };
@@ -546,13 +539,13 @@ export type CheckLifecycleHooks = {
 };
 ```
 
-The M8 slice declares this seam using only §7.7 types (`Scope`, `Lease`); it never imports a §7.9 type, so M8 is deliverable without M7. The M7 slice owns the implementation and maps these fields onto its own `CheckIdentity`/`CheckAttempt` rows. Hook exceptions/timeouts are caught by the consumer; the handle is invocation-local, not ambient mutable singleton state. The begin hook has ≤2 requests / 2 seconds of consumer wait. The terminalize hook runs after the review reaches a terminal outcome — a pre-publication failure included: it sends at most one `checks.update` and waits inline at most the configured `review.check.terminalize_timeout_ms` (operator range 1 000–30 000 ms, absent-row default 10 000 ms), and its promise is handed to the invocation context so an overrun still finishes out of band. The single terminal send is itself bounded by `review.check.update_timeout_ms` (operator range 500–15 000 ms, absent-row default 5 000 ms), and a save is refused unless the terminalize wait exceeds that send bound. The READ applies the same cross-field rule to the EFFECTIVE pair: a stored pair that violates it answers the documented defaults with `degraded: true` and one `review_check_budgets_degraded` warn, and when only one row is stored the absent side is adjusted to the nearest value that preserves the invariant — the stored budget is never discarded and the consumer never waits less than the send it handed off. Both are read once per message from `review_runtime_settings`; no source constant is the live value. A successful publication is why the hook sits outside the publication critical path, not a precondition for running it. No publication path waits for hook retries; durable recovery owns longer adoption work. A same-SHA ignored job may signal recovery but never creates a new Check or discards existing pending work.
+The seam uses only §7.7 types (`Scope`, `Lease`), without importing §7.9 types. The Check implementation maps these fields onto its own `CheckIdentity`/`CheckAttempt` rows. Hook exceptions/timeouts are caught by the consumer; the handle is invocation-local, not ambient mutable singleton state. The begin hook has ≤2 requests / 2 seconds of consumer wait. The terminalize hook runs after the review reaches a terminal outcome — a pre-publication failure included: it sends at most one `checks.update` and waits inline at most the configured `review.check.terminalize_timeout_ms` (operator range 1 000–30 000 ms, absent-row default 10 000 ms), and its promise is handed to the invocation context so an overrun still finishes out of band. The single terminal send is itself bounded by `review.check.update_timeout_ms` (operator range 500–15 000 ms, absent-row default 5 000 ms), and a save is refused unless the terminalize wait exceeds that send bound. The READ applies the same cross-field rule to the EFFECTIVE pair: a stored pair that violates it answers the documented defaults with `degraded: true` and one `review_check_budgets_degraded` warn, and when only one row is stored the absent side is adjusted to the nearest value that preserves the invariant — the stored budget is never discarded and the consumer never waits less than the send it handed off. Both are read once per message from `review_runtime_settings`; no source constant is the live value. A successful publication is why the hook sits outside the publication critical path, not a precondition for running it. No publication path waits for hook retries; durable recovery owns longer adoption work. A same-SHA ignored job may signal recovery but never creates a new Check or discards existing pending work.
 
 **Give-up releases the lease.** When that terminalize wait elapses, the hook throws, the checkout contradicts the claimed head, or a publication-journal hand-off supersedes the review, the consumer calls `abandonTerminalize` instead of leaving the attempt on a live lease nothing will follow up on. A frozen terminal intent is NEVER replaced: the fallback `failure/unconfirmed` (or, for a contradicted claim, the `superseded` failure) is written only while the row still wants `in_progress`, and that condition is part of the UPDATE predicate — so a terminalize that froze proof-derived text concurrently keeps both its conclusion and its exact summary. The lease is then released under the same `(id, holder, lease_epoch, lease_until_ms > now)` fence with `recovery_state='remote-unconfirmed'` and the first 60 s backoff rung, on BOTH branches. A handoff that FAILS (a store fault on either write) is reported to the caller: for a contradicted claim the consumer then reviews the checked-out commit with NO Check rather than claiming a second attempt whose predecessor may still hold its lease. It sends no remote request, and a lease recovery has already claimed refuses every one of its writes — a second call is a silent no-op. What follows is recovery, not a guarantee: the row is due after that first backoff rung and the minute cron picks it up on its next tick, so a give-up normally terminalizes about one to two minutes later — not at the next quarter hour after the immutable execution deadline. A release that came from a publication-journal hand-off is WAITED OUT rather than concluded: before terminalizing a `proof === null` attempt, the recovery lane asks whether the exact App/scope/SHA still owns an in-flight journal (`prepared`/`sending`/`unknown`) and, if so and the execution deadline is still ahead, gives the claim back with no send and no attempt spent so the next tick can re-check. The proof is never guaranteed to arrive — once `execution_deadline_ms` passes the lane stops waiting and the unconfirmed failure becomes terminal. Every give-up is diagnosable: structured `check_terminalize_budget_exceeded`, `check_terminalize_failed`, `check_abandon_released` (the fenced release changed the row), `check_abandon_not_owned` (it changed nothing — recovery already owns the attempt, its lease expired, or it already ended; a legitimate no-op, not a fault) and `check_abandon_failed` (the hand-off itself faulted on a store error) lines carry `attempt_id` and the reason. The handoff never delays the review: its promise goes to the invocation context when one exists, and is awaited inline (two fenced writes: the intent and the release) only when it does not. **No exit after the claim returns without one of the two:** every post-claim ACK either terminalizes the run with a conclusion it can justify or releases it with `abandonTerminalize`. A bare ACK would leave the attempt on the visitor's execution lease for the full 15-minute window and then close red on a commit that was never reviewed — the journal hand-off above is therefore a release, never a terminal `skipped`/`neutral`.
 
 ### 7.11 Independent bounded recovery
 
-`triggers.crons` holds TWO expressions, declared in the top-level Worker **and** in every named environment (triggers are not inherited): `*/15 * * * *` composes `runSweep` → `reconcileReviewLifecycle` (M8), each caught independently, and `* * * * *` runs `reconcileReviewChecks` alone — the Check lane's own cadence and its ONLY driver (both expressions fire on `:00`/`:15`/`:30`/`:45`, so running it in the quarter-hour branch too would duplicate the pass — including its suspension and backoff writes — for no extra coverage). A released attempt is due only after its first 60 s backoff rung, so the minute cron normally picks it up on the next tick: about one to two minutes from release, plus the terminal call itself, instead of the next quarter hour after its execution deadline. `scheduled` routes by `controller.cron`, and every stage keeps its own try/catch, so one expression's failure can never break the other. Both reconcilers are idempotent, so the quarter-hour minute that also runs the Check lane costs one no-op pass. `src/worker/sweep.ts` remains read-only. `ScheduledEnv` gains the already-used App-decryption secret binding; no new dashboard surface.
+`triggers.crons` holds TWO expressions, declared in the top-level Worker **and** in every named environment (triggers are not inherited): `*/15 * * * *` composes `runSweep` → `reconcileReviewLifecycle` (M8), each caught independently, and `* * * * *` runs `reconcileReviewChecks` alone — the Check lane's own cadence and its ONLY driver (both expressions fire on `:00`/`:15`/`:30`/`:45`, so running it in the quarter-hour branch too would duplicate the pass — including its suspension and backoff writes — for no extra coverage). A released attempt is due only after its first 60 s backoff rung, so the minute cron normally picks it up on the next tick: about one to two minutes from release, plus the terminal call itself, instead of the next quarter hour after its execution deadline. `scheduled` routes by `controller.cron`, and every stage keeps its own try/catch, so one expression's failure can never break the other. Both reconcilers are idempotent, so the quarter-hour minute that also runs the Check lane costs one no-op pass. `src/worker/sweep.ts` remains read-only. `ScheduledEnv` includes the App-decryption secret binding; no new dashboard surface.
 
 #### 7.11.1 M8 publication and thread recovery
 
@@ -572,7 +565,7 @@ Backoff after an actual failed recovery attempt: 1,2,4,8,16 minutes; at 5 failur
 
 Budgets: ≤15 GitHub requests per thread operation (lookup pages + two conversation snapshots + issue fence + mutate/post-observe), ≤80 requests/45s for the whole M8 run; each request ≤5s and additionally capped by remaining run deadline. Publication lane gets at most half the run budget before the thread lane; unfinished pagination persists cursor work or remains due with no mutation, and budget exhaustion is not a failed attempt. Local apply batches ≤25 row transitions each; a larger payload is resumed idempotently with applied-publication/association IDs, never marks complete early. Do not claim every remote thread must close during persistent API failure.
 
-`retryLifecycleWork` is an internal operator-only store helper (no new HTTP/command surface): require exactly one work ID and matching complete scope, no live lease; reset attempts/due/error state while retaining payload, proof, remote IDs, verified snapshot and epochs. It cannot waive ownership/HEAD/conversation gates. New `/review` remains no-force; the cron and this explicit recovery path never rerun the paid review.
+`retryLifecycleWork` is an internal operator-only store helper (no new HTTP/command surface): require exactly one work ID and matching complete scope, no live lease; reset attempts/due/error state while retaining payload, proof, remote IDs, verified snapshot and epochs. It cannot waive ownership/HEAD/conversation gates. A new bot mention remains no-force; the cron and this explicit recovery path never rerun the paid review.
 
 #### 7.11.2 M7 Check recovery
 
@@ -611,21 +604,30 @@ A lease is authority over a row that still wants `in_progress`; it stops being a
 
 ### 7.12 Fresh-App surfaces
 
-M8 updates contents:write; M7 adds checks:write. Final manifest permissions: contents write, metadata read, pull_requests write, issues write, checks write. Events remain pull_request and issue_comment only. Direct surfaces: `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, operator smoke documentation and the publication companion spec. No old-App acceptance branch. Documentation explains Worker-only writes, read-only Sandbox, gate-aware Check conclusions (a green Check means the App's review gate was met, not merge approval), branch protection user control, and historical same-name Check generations (newest applicable attempt, not universal cross-App authority). The M8 slice ships the four-permission set in all named direct surfaces (manifest, env mirror, README, deploy runbook and the smoke runbook); the Check-facing items (gate-aware conclusions, branch protection user control, same-name Check generations) describe the frozen M7 contract and are not shipped by M8 — the M7 slice ships them on the same surfaces (the final five-permission set above), together with §7.9/§7.11.2.
+Final manifest permissions: contents write, metadata read, pull_requests write, issues write, checks write. Events remain pull_request and issue_comment only. Direct surfaces: `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, operator smoke documentation and the publication companion spec. No old-App acceptance branch. Documentation explains Worker-only writes, read-only Sandbox, gate-aware Check conclusions (a green Check means the App's review gate was met, not merge approval), branch protection user control, and historical same-name Check generations (newest applicable attempt, not universal cross-App authority).
 
-### 7.13 Verification caliber and source basis
+## Invariants
 
-Implementation requires scoped behavioral unit evidence for identity/domain boundaries, recurrence, actual evidence range/content validation, capture truncation, every crash boundary, private-result invisibility, lease races, proof/observed separation and both independent reconcilers. No source-text/exact-call-count tests in lieu of behavior. The M8 slice's implementation and its scoped local behavioral tests confirm the code path; the documentation cutover itself runs static link/claim checks only (no tests, build, lint or formatter). QA consumes scoped evidence; **live/E2E is not an iteration gate**. Actual remote behavior remains unverified — in particular the returned installation grant and live thread resolution — unless the user explicitly authorizes a separate scoped run.
+- Model/discussion text is untrusted evidence, never commands or authority to mutate arbitrary remote IDs.
+- Result writes require persisted publication proof; the private recovery journal is never exposed as a published result.
+- Worker-only purpose-scoped writes and returned read-only Sandbox grants remain separated.
+- Desired terminal intent, observed remote state, immutable execution deadlines and fenced leases remain distinct.
+- GitHub supplies no external exactly-once or conditional resolve guarantee; unknown outcomes stay unknown.
 
-Source/API basis (read-only evidence, not live behavior):
+## Where it lives
 
-- `src/store/fingerprint.ts:113-120`: arbitrary nonblank hint is returned verbatim; opaque UUID markers avoid changing that domain.
-- `src/store/artifact-store.ts:218-321`: `put` validates the complete envelope and atomically inserts reviews/findings; it cannot be recreated from assessments alone or claimed atomic with an external lifecycle batch.
-- `src/pipeline/consumer.ts`: at lock time the primary comment post preceded KV done, line comments and the store write; §7.7's frozen order replaced that unsafe persistence window (staged payload before the send, then KV done, line comments and resolution last) — implemented in the M8 slice.
-- `src/pipeline/comment.ts`: at lock time the upsert incremented a round on every invocation and discarded response IDs, and the auth factory minted unrestricted installation tokens. Those behaviors are replaced — implemented in the M8 slice — by the prepared publication identity plus typed posted/not-posted results, and by the purpose-scoped mint (`getInstallationToken({scope, purpose})`) with the returned-capability `assertSandboxGrant` on the Sandbox path.
-- `node_modules/@octokit/auth-app/dist-src/get-installation-authentication.js:76-105`: request restrictions and returned grant fields; [official installation token API](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app) documents restrictions. [GET /app](https://docs.github.com/en/rest/apps/apps#get-the-authenticated-app) requires JWT and returns authenticated App identity.
-- [GraphQL Pulls reference](https://docs.github.com/en/graphql/reference/pulls): `PullRequest.headRefOid`, `reviewThreads`, thread `isResolved`/`isOutdated`/`line`/`originalLine`, `comments` connections with `before`/`last`/`totalCount`, comment `fullDatabaseId`, `originalCommit`, `pullRequestReview`, and the `resolveReviewThread` mutation returning the thread. `databaseId` is documented as deprecated with removal on 2024-07-01, hence §7.5's `fullDatabaseId` bridge. The reference does not promise atomic read→mutation fencing.
-- [Checks Runs API](https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference): external_id, app.id, head_sha, filter=all, app_id and status/conclusion support exact adoption/observation; external_id is correlation, not server idempotency.
-- `packages/runner/src/runtime-omp.ts:720-821,899-930` and installed `dist/types/task/structured-subagent.d.ts:34-68`: deep parent yield capture differs from independent structured children; maxRuntimeMs/signal are available. Separate deep recheck session avoids contaminating the envelope capture.
-- `migrations/0004_github_apps.sql:20-41`: internal/numeric App IDs and exact App-installation join; no one-App-per-repository constraint.
-- contents:write for resolveReviewThread rests on [GitHub-maintained issue 35726](https://github.com/github/gh-aw/issues/35726) and its [maintainer explanation](https://github.com/github/gh-aw/issues/35726#issuecomment-4693962674), not an official per-mutation permission table. The user accepted the Worker-only boundary. No live permission success is claimed or required without separate authorization.
+- `migrations/0020_finding_lifecycle.sql`, `migrations/0021_review_checks.sql`: complete storage DDL above.
+- `packages/shared/src/recheck-wire.ts`: recheck types, constants and validation.
+- `packages/runner/src/runtime-omp.ts`: independent read-only recheck execution and budgets.
+- `src/store/finding-lifecycle.ts`, `src/store/review-checks.ts`: durable state, leases, proof and recovery selection.
+- `src/store/artifact-store.ts`: envelope validation and atomic review/findings write.
+- `src/store/fingerprint.ts`: `computeFindingFingerprint`, including arbitrary nonblank hints.
+- `src/pipeline/consumer.ts`, `src/pipeline/comment.ts`, `src/pipeline/checks.ts`: publication order, scoped credentials, exact identity and Check hooks.
+- `src/worker/lifecycle-reconcile.ts`, `src/worker/check-reconcile.ts`, `src/worker/index.ts`: independent recovery and scheduled composition; `src/worker/sweep.ts` stays read-only.
+- `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, `scripts/sandbox-smoke.ts`, `src/pipeline/smoke-entry.ts`: fresh-App and purpose-scoped smoke contracts.
+
+## Change obligations
+
+Update wire shapes, schema, markers, publication order, both recovery selectors and all direct permission surfaces together. Scoped behavioral evidence must cover identity/domain boundaries, recurrence, evidence range/content validation, truncation, crash boundaries, private-result invisibility, lease races, proof/observation separation and independent reconcilers; source-text/exact-call-count tests do not substitute for behavior. Live installation grants, remote thread resolution and other GitHub effects remain unverified without separately authorized live checks. The `contents:write` requirement for `resolveReviewThread` is based on [GitHub-maintained issue 35726](https://github.com/github/gh-aw/issues/35726) and its [maintainer explanation](https://github.com/github/gh-aw/issues/35726#issuecomment-4693962674), not an official per-mutation permission table; the Worker-only boundary does not claim live permission success.
+
+Decision history: [private publication journal](../../../.agents/adr/implemented/architecture/2026-09-12-private-publication-journal.md).

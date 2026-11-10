@@ -1,6 +1,6 @@
-# Knowledge Index
+# Knowledge Guide
 
-Implementation SSOT and reusable designs. Each document lives at `<category>/<slug>.md`; register new docs here. Maintained via `mstar-compound` / `mstar-compound-refresh`.
+Engineering experience and reusable designs — what the work taught. Current-state contracts live in `docs/specs/` and decision history in `.agents/adr/`; knowledge never describes current state, so a page here that still reads like a contract is legacy capture awaiting promotion into `docs/specs/` or demotion to experience, never the authority for current behaviour. Each document lives at `<category>/<slug>.md`; the catalog (`mstar catalog list --kind document`) is the registry — this README is a prose guide. Maintained via `mstar-compound` / `mstar-compound-refresh`.
 
 | Document | Source | Description | Status |
 |-----------|-------------|-------------|--------|

@@ -3,9 +3,10 @@
  * the harness `mstar.review/v1` envelope. SSOT for the vocabulary is the
  * pinned engine (`@mstar-harness/engine` `validateMstarReviewV1` /
  * `synthesizeReview`); the publishing contract is
- * `.mstar/specs/github-review-comment-mapping.md`. The M1
- * findings-schema.md contract is write-retired — it is never the write
- * authority again.
+ * `docs/specs/architecture/github-review-comment-mapping.md`. The M1
+ * review-output contract is write-retired — it survives only as
+ * `.agents/adr/archived/architecture/2026-08-25-m1-review-output-contract.md`
+ * and is never the write authority again.
  *
  * Vocab is imported from the engine — never re-declared:
  *   - verdict:              PR_VERDICTS   = "ship it" | "needs fixes" | "blocked" | "incomplete"

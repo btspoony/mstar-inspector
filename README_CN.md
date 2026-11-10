@@ -156,7 +156,7 @@ Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.revie
 - **崩溃安全的发布**：完整发布 payload 在任何 GitHub 变更之前先私密地暂存在 D1。若崩溃或 API 故障
   打断了发送或随后的数据库落库，15 分钟 cron reconciler 会从该 journal 完成发布——或重试一次已授权
   的 thread resolve——不重跑已付费的审查，带界重试并有可见的终态放弃状态。契约：
-  [`.mstar/specs/review-lifecycle.md`](.mstar/specs/review-lifecycle.md) §7。
+  [`docs/specs/feature/review-lifecycle.md`](docs/specs/feature/review-lifecycle.md) §7。
 
 > 上述生命周期、凭据与恢复行为由实现的范围化行为测试与静态检查覆盖。线上 GitHub / GitHub App 行为
 > ——尤其是返回的 installation grant 与远端 thread resolution——**未在本仓库验证**：未授权任何线上
@@ -211,7 +211,7 @@ bun test
 |------|------|
 | [`docs/deploy.md`](docs/deploy.md) | 完整部署 runbook：Cloudflare 资源、D1 迁移、secrets 清单、手工参考步骤、Multi-App go-live checklist、回滚——以及本仓库自己的运营文档（staging/production 自动部署、`DEPLOYMENT_MODE`） |
 | [`docs/release.md`](docs/release.md) | 发版文档：切定版（片段 changelog → `release vX` PR → tag + GitHub Release）、首切 live 验收 checklist、失败与恢复路径 |
-| [`.mstar/specs/`](.mstar/specs/README.md) | 实现背后的行为 spec（如 [`review-lifecycle.md`](.mstar/specs/review-lifecycle.md)）——测试与文档引用的契约 |
+| [`docs/specs/`](docs/specs/README.md) | 实现背后的行为 spec（如 [`review-lifecycle.md`](docs/specs/feature/review-lifecycle.md)）——测试与文档引用的契约 |
 
 ## 许可
 
