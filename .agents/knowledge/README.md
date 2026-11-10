@@ -1,6 +1,6 @@
 # Knowledge Guide
 
-Implementation SSOT and reusable designs. Each document lives at `<category>/<slug>.md`; the catalog (`mstar catalog list --kind document`) is the registry — this README is a prose guide. Maintained via `mstar-compound` / `mstar-compound-refresh`.
+Engineering experience and reusable designs — what the work taught, not what the system currently is (current-state contracts live in `docs/specs/`, decision history in `.agents/adr/`). Each document lives at `<category>/<slug>.md`; the catalog (`mstar catalog list --kind document`) is the registry — this README is a prose guide. Maintained via `mstar-compound` / `mstar-compound-refresh`.
 
 | Document | Source | Description | Status |
 |-----------|-------------|-------------|--------|

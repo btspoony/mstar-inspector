@@ -11,7 +11,7 @@ GitHub publication vocabulary, COMMENT-only event discipline, user-visible comme
 | Surface | Legal values | Retired M1 values rejected on persistence |
 |---|---|---|
 | verdict | `ship it` / `needs fixes` / `blocked` / `incomplete` | `comment` / `request_changes` / `approve` |
-| finding class | `must-fix` / `should-fix` / `nit` | `critical` / `warning` / `suggestion` / `info` |
+| finding class | `must-fix` / `should-fix` / `may-fix` / `nit` | `critical` / `warning` / `suggestion` / `info` |
 
 `score_pct` never rewrites the verdict. The engine `computePrTally` owns formula and tally keys; Inspector invents neither. Score is one App Check gate condition alongside the passing-verdict set ([review lifecycle](../feature/review-lifecycle.md), §7.9); in the comment it remains display-only.
 
@@ -30,7 +30,7 @@ Issues Comments API has no event field and follows the same discipline; it must 
 
 ### Comment body
 
-- Align with the review report: verdict line, tally (`must-fix` / `should-fix` / `nit` / `unverified`), and findings grouped by merge class.
+- Align with the review report: verdict line, tally (`must-fix` / `should-fix` / `may-fix` / `nit` / `unverified`), and findings grouped by merge class.
 - Render verdict and finding class verbatim; never translate them into M1 verdict/severity vocabulary.
 - For `incomplete`, immediately after verdict and any tally, render its required facts exactly once: `cause:` = `reason`, `unscanned:` = uncovered scope (`none` for an empty list). Rendering has a display budget; persistence retains validated original values. Other verdict bodies remain byte-identical.
 - The overall comment is the publication authority for the round. Line-comment anchoring follows the existing line-comment implementation.

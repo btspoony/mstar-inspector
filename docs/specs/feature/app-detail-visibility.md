@@ -12,13 +12,13 @@ Dashboard App detail routing, member identity-only reads, manager-only operation
 |----|----------|
 | D2 | The global insights face is **removed entirely** (page, SPA route/nav, `GET /api/insights/summary`). No admin-only global variant exists: insights have no global concept. |
 | D3 | `/dashboard/apps/:appId` (the numeric `github_app_id`) becomes the **应用详情 (App detail)** page with exactly two tabs: **应用设置** (existing settings capability, unchanged) and **洞察** (per-App insights view). |
-| D4 | A member who is neither the App creator nor an admin sees **GitHub App identity info only** on the detail face. The identity set: `github_app_id`, `status`, `review_enabled`, `created_by`, `created_at` — the App identity fields, plus creation time — **and** the App's cached public GitHub profile (`github_name`, `github_slug`, `github_description`, `github_html_url`, `github_avatar_url`, `github_metadata_synced_at`), plus local App `id` and top-level server-resolved `workspace_id` (the pair composing the manager-visible webhook URL). Operational fields — `installations`, `deliveries`, `delivery_summary`, `last_webhook_at`, `sandbox_image_id`, `review_trigger_mode`, the settings payload — remain behind the `canManageApp` branch; insights 403; every mutation 403. Non-managers receive no operational payload. |
-| D5 | The insights tab (and its data endpoint) is **creator-or-admin** (`canManageApp`), consistent with D4. Members see insights for Apps they manage (their own, or any if admin). |
+| D4 | A member without the workspace owner/admin role sees **GitHub App identity info only** on the detail face. The identity set: `github_app_id`, `status`, `review_enabled`, `created_by`, `created_at` — the App identity fields, plus creation time — **and** the App's cached public GitHub profile (`github_name`, `github_slug`, `github_description`, `github_html_url`, `github_avatar_url`, `github_metadata_synced_at`), plus local App `id` and top-level server-resolved `workspace_id` (the pair composing the manager-visible webhook URL). Operational fields — `installations`, `deliveries`, `delivery_summary`, `last_webhook_at`, `sandbox_image_id`, `review_trigger_mode`, the settings payload — remain behind the `canManageApp` branch; insights 403; every mutation 403. Non-managers receive no operational payload. |
+| D5 | The insights tab (and its data endpoint) is **workspace owner-or-admin** (`canManageApp`, which is `canManageRole(scope.role)`), consistent with D4. Creating an App grants nothing: the creator of an App they are a plain member of gets the same 403 as any other member. |
 | D6 | The Apps list stays visible to all members with its current columns/payload; every row links into the detail page. The list renders no manage affordances today; any affordance added later must be `can_manage`-gated. |
 
 ### AuthZ matrix
 
-| Surface | member (non-manager) | creator / admin |
+| Surface | member (non-manager) | workspace owner / admin |
 |---|---|---|
 | `GET /api/apps` (list) | visible (unchanged) | visible |
 | App detail identity set (github_app_id, status, review_enabled, created_by, created_at, cached public GitHub profile `github_*`, local App `id`; top-level `workspace_id`) | visible | visible |
