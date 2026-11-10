@@ -168,6 +168,11 @@
 # (`packages/runner/package.json` and its lockfile are image inputs, and the
 # pinned ref is the tree the skills are cloned from; a stale image would run
 # the previous engine against this Worker).
+# rebuild: the runner's engine pin, the CLI global-install pin and the harness
+# clone ref move to 4.4.1 (`packages/runner/package.json`, its lockfile and
+# `sandbox-image/cli-global/package.json` are image inputs, and the pinned ref
+# is the tree the skills are cloned from; a stale image would run the previous
+# engine and skills against this Worker).
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via
@@ -287,7 +292,7 @@ RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.c
     && { echo "bun $(/usr/local/bin/bun --version)"; gh --version | head -1; } > /etc/mstar-image-versions \
     && cat /etc/mstar-image-versions
 
-# mstar-harness plugin, pinned ref a6721f5231e74ade74e80af5b1596edc6898f4be (tag v4.4.0, bumped 2026-11-09).
+# mstar-harness plugin, pinned ref e834dce3ff66403463207e267fd4bcf62c8d4d55 (tag v4.4.1, bumped 2026-11-10).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -298,7 +303,7 @@ RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.c
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin a6721f5231e74ade74e80af5b1596edc6898f4be \
+    && git -C /opt/mstar-harness fetch --depth 1 origin e834dce3ff66403463207e267fd4bcf62c8d4d55 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && git -C /opt/mstar-harness rev-parse HEAD > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git
