@@ -3,7 +3,7 @@
  * the harness `mstar.review/v1` envelope. SSOT for the vocabulary is the
  * pinned engine (`@mstar-harness/engine` `validateMstarReviewV1` /
  * `synthesizeReview`); the publishing contract is
- * `.mstar/specs/github-review-comment-mapping.md`. The M1
+ * `docs/specs/architecture/github-review-comment-mapping.md`. The M1
  * findings-schema.md contract is write-retired — it is never the write
  * authority again.
  *

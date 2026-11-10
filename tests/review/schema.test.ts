@@ -1,7 +1,7 @@
 /**
  * Unit tests for the mstar.review/v1 envelope schema.
  *
- * Contract under test (specs/github-review-comment-mapping.md §1 + the
+ * Contract under test (docs/specs/architecture/github-review-comment-mapping.md §1 + the
  * engine `validateMstarReviewV1` mirror in src/review/schema.ts):
  *   parseReviewOutput(raw) → { ok: true, output: ReviewOutput } | { ok: false, error: string }
  * - verdict vocab is ship it | needs fixes | blocked; M1 verdicts

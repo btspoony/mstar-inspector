@@ -1,6 +1,6 @@
 -- 0002_mstar_review_v1.sql — mstar.review/v1 consumption.
 -- Era model: reviews.envelope IS NOT NULL ⇔ 该行走 v0.3+ 路径（mstar.review/v1）。
--- M1 行保留 raw_output + M1 词表，只读历史（.mstar/specs/findings-schema.md），永不改写。
+-- M1 行保留 raw_output + M1 词表，只读历史（.agents/adr/archived/architecture/2026-08-25-m1-review-output-contract.md），永不改写。
 -- findings.severity 语义切换（architect 锁）：v1 行的 finding class 列 = severity，
 -- 取值 harness merge-class 词表（must-fix | should-fix | nit）；M1 行保持
 -- critical | warning | suggestion | info。判代 = join reviews.envelope IS NOT NULL。

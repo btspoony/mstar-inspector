@@ -1,0 +1,14 @@
+[config]
+# Morning Star harness repo-local config (.mstarc).
+# All directory keys resolve relative to this file's location (repo root); absolute paths allowed.
+harness_dir=.mstar
+plan_dir=.mstar/plans
+sdd_dir=.mstar/sdd
+iteration_dir=.mstar/iterations
+knowledge_dir=.agents/knowledge
+adr_dir=.agents/adr
+specs_dir=docs/specs
+workflow_dir=.mstar/workflows
+project_dir=.mstar/projects
+# Repo-level gate policy: hard = hard gates, soft = local rollback. Unset = warn-only (default).
+# enforcement=hard

@@ -252,7 +252,7 @@ describe("token layer boundary", () => {
  * paint a theme face. An authored `dark:` split bypasses it and is a second
  * colour answer for the same face — the 2026-11-01 migration removed
  * twenty-one utilities that had drifted that way. The rule lives in
- * `.mstar/knowledge/best-practices/tailwind-dark-variant-vs-data-theme.md`
+ * `.agents/knowledge/best-practices/tailwind-dark-variant-vs-data-theme.md`
  * (it states the post-binding mechanism, the attribute-absence trap, and why
  * the ban survives); this is the repo-wide guard it asks for, so a `dark:`
  * cannot re-enter one primitive, pattern or page at a time. The module is

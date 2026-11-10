@@ -1,17 +1,18 @@
-# Entitlement and deployment modes (entitlement-and-deployment-modes)
+# Architecture: entitlement and deployment modes
 
-> **Status:** FROZEN 2026-10-25 — promoted at iteration close from the iteration package, after architect review and a three-seat plan QC plus mandatory QA on the two plans that implement it.
-> **SSOT:** This file — the plan catalogue, the nullable-limit contract, the free-slot rule and the deployment-mode split.
-> **Authority:** Delivered 2026-10-25; the code paths named below are the implementation references.
+## Scope
 
-## 1. Plan catalogue
+Plan catalogue, nullable seat limits, membership-based free slots, and SaaS/self-hosted boundaries.
+
+## Current state
+### 1. Plan catalogue
 
 `plans` rows are the only plan definitions. Code reads exactly one column today:
 `included_members`. NULL on a quota column means unlimited (migration
 `0031_plans_usage.sql` header, lines 4-11, which names `platform_key_limit`,
-`reviews_included` and `apps_per_workspace`). Migration `0032` extends that
-contract to `included_members`: the column is `INTEGER NOT NULL` today
-(`0031_plans_usage.sql:56`), so `0032` relaxes it to nullable first (SQLite
+`reviews_included` and `apps_per_workspace`). Migration `0032_unlimited_plan.sql` extends that
+contract to `included_members`: the original column is `INTEGER NOT NULL`
+(`0031_plans_usage.sql:56`), so `0032_unlimited_plan.sql` relaxes it to nullable first (SQLite
 table rebuild under `PRAGMA defer_foreign_keys`; the seeded rows and the
 `workspace_subscriptions` FK are preserved) and then inserts the `unlimited`
 row.
@@ -19,17 +20,16 @@ row.
 | id | included_members | meaning |
 |----|------------------|---------|
 | `free` | 5 | SaaS default for a newly created workspace |
-| `pro` | 5 (unchanged this iteration) | SaaS sellable tier; seat count unchanged from its seeded value |
+| `pro` | 5 | SaaS sellable tier; seeded seat count |
 | `unlimited` | NULL | no seat cap; assigned to every self-hosted workspace |
 
 `unlimited` is added as a catalogue row plus a code constant. It is not a
 sentinel: no code may treat `-1`, `0` or `Infinity` as "unlimited".
 
-Editing the catalogue itself (price, seat numbers of `free`/`pro`) is NOT part of
-this iteration. Operator Admin changes a **workspace's** `plan_id`; it does not
+Operator Admin changes a **workspace's** `plan_id`; it does not
 edit `plans` rows.
 
-## 2. Resolution rules
+### 2. Resolution rules
 
 `resolveWorkspacePlan(db, workspaceId, mode)` returns:
 
@@ -37,44 +37,43 @@ edit `plans` rows.
 2. else the active subscription's plan.
 3. else the seeded `free` row (throwing when that row is absent, as today).
 
-`PlanLimits.includedMembers` becomes `number | null`:
+`PlanLimits.includedMembers` is `number | null`:
 
 - `null` → no seat cap. `memberSlotAvailable` returns true unconditionally.
 - `number` → existing rule: members + live pending invites `< limit`.
 
 Every seat-cap enforcement point must accept `null`, not just the UI:
 
-- route fast-fail before an invite (`src/dashboard/index.ts:1780-1788`)
+- route fast-fail before an invite (`src/dashboard/index.ts`)
 - write-time `SEAT_GUARD_SQL` insert in `createInvite` — guard text
-  `src/dashboard/invite-store.ts:163-166`, the insert carrying it `:232-249`,
-  refusal `:257`
+  `src/dashboard/invite-store.ts`
 - invite-acceptance path
 
-The write-time guard is the trap: `SEAT_GUARD_SQL` binds the limit into the
-insert as `?8` (`invite-store.ts:248`), and SQL `count < NULL` evaluates to
+The write-time guard is the trap: `SEAT_GUARD_SQL` compares against the named
+`:limit` bind (`createInvite`, via `bindNamed`), and SQL `count < NULL` evaluates to
 NULL — the insert would write no row and mint a spurious refusal. A null
 limit therefore short-circuits BEFORE the bind: when
 `includedMembers === null` the insert runs without the seat condition; the
 numeric path's SQL text is unchanged.
 
-The refusal copy currently hardcodes "five" (`entitlement.ts:104-105`). It becomes
+The refusal functions in `src/dashboard/entitlement.ts` name
 the plan's actual limit; for an unlimited plan the refusal is unreachable and
 must not be produced.
 
-## 3. Free-workspace slot (unchanged rule)
+### 3. Free-workspace slot (unchanged rule)
 
 One free workspace per login, counted across **membership** — being invited into
 someone else's free workspace consumes your slot. The rule's shape and its two
 guards are unchanged where the rule applies (`saas`):
 
 - create: `FREE_SLOT_GUARD_SQL` + `countFreeMembershipsForLogin`
-- accept: `ACCEPT_FREE_SLOT_GUARD_SQL` (`invite-store.ts:176-188`)
+- accept: `ACCEPT_FREE_SLOT_GUARD_SQL` (`src/dashboard/invite-store.ts`)
 
 Both already treat "plan id that is not `free`" as paid, so `unlimited` members do
-not consume a slot. This must stay true after the new tier is added: the guards
+not consume a slot. This must stay true after the unlimited tier is used: the guards
 compare against `FREE_PLAN_ID` explicitly, never against a list of non-free ids.
 
-Enforcement domain (architect decision, 2026-10-25): the free-slot rule binds
+Enforcement domain: the free-slot rule binds
 `saas` only. Both guards are row-based SQL baked into write batches and never
 see the resolver, while `self-hosted` keeps writing `active free` rows — so
 `createWorkspace` and `acceptInvite` receive the mode and the guard condition
@@ -87,9 +86,9 @@ so both guards are inert and the `saas` SQL texts stay byte-identical.
 New workspaces are always created on `free` in SaaS mode. Upgrade happens only
 through Operator Admin.
 
-## 4. Deployment modes
+### 4. Deployment modes
 
-`DEPLOYMENT_MODE` (`src/worker/env.ts:84`, resolver `:112-118`) is the only mode
+`DEPLOYMENT_MODE` (`src/worker/env.ts`) is the only mode
 switch. Invalid or unset values throw — do not add a default.
 
 | Surface | `saas` | `self-hosted` |
@@ -97,7 +96,7 @@ switch. Invalid or unset values throw — do not add a default.
 | Member page plan card | shown | not rendered |
 | Seat cap | plan-driven | unlimited (all workspaces `unlimited`) |
 | Invite refusal for seat cap | possible | unreachable |
-| "New workspace" menu item | disabled at the free-slot cap, or when the `workspace_creation_open` flag is off (`operator-admin-surface.md` §3.1); the reason under the label names which | always allowed |
+| "New workspace" menu item | disabled at the free-slot cap, or when the `workspace_creation_open` flag is off ([operator admin](operator-admin-surface.md), server flags); the reason under the label names which | always allowed |
 | Operator Admin (menu + routes) | present for a listed operator | absent; routes not registered |
 | `GET /api/members` `plan` field | present | still present in the payload (single data model), never rendered |
 
@@ -111,12 +110,12 @@ no subscription row is rewritten. The resolution order is the one in §2 (mode
 first, before any DB read) — §4 adds only why that ordering is load-bearing:
 
 Step 1 must come first because every workspace created today already carries an
-`active free` subscription row (`workspace-store.ts:460-508`). Conditioning
+`active free` subscription row (`src/dashboard/workspace-store.ts`). Conditioning
 `unlimited` on "no active subscription" would leave all existing self-hosted
 workspaces capped at five — the exact requirement failure this rule exists to
 avoid.
 
-Consequences:
+Mode-switch behavior:
 
 - No migration mutates subscription rows. A SQL migration cannot read
   `DEPLOYMENT_MODE`, and a shared backfill would silently grant unlimited seats to
@@ -131,9 +130,22 @@ Consequences:
   free-row workspaces created while self-hosted must drop to one before
   creating another. The rows stay truthful; the guards key on them again.
 
-## 5. What must not change
+## Invariants
 
-- The free-slot rule's strictness (membership-based).
-- `usage_events` metering: counts only, no enforcement.
-- Soft-delete semantics for workspaces.
-- `PLATFORM_OPERATORS` parsing and `isPlatformOperator`.
+- Free slots count memberships, not ownership.
+- `usage_events` is counts-only metering, not enforcement.
+- Workspace soft deletion and `PLATFORM_OPERATORS` / `isPlatformOperator` parsing are unchanged.
+- Unlimited means `null`, never a numeric sentinel.
+
+## Where it lives
+
+- `src/dashboard/entitlement.ts`: `resolveWorkspacePlan`, `resolveWorkspacePlans`, `memberSlotAvailable`.
+- `src/dashboard/invite-store.ts`: `createInvite`, `acceptInvite`, seat/free-slot SQL guards.
+- `src/dashboard/workspace-store.ts`: `createWorkspace` and subscription writes.
+- `src/dashboard/index.ts`: members/invite routes and plan rendering.
+- `src/worker/env.ts`: `deploymentModeOf`.
+- `migrations/0031_plans_usage.sql`, `migrations/0032_unlimited_plan.sql`: catalogue and nullable column.
+
+## Change obligations
+
+Update this page with any catalogue, resolution, guard, wire or mode-rendering change. Numeric guard SQL must retain its semantics; every nullable-limit consumer and its tests must change together.

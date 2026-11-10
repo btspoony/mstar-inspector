@@ -1322,7 +1322,7 @@ than `ok`.
 
 The App is created by the dashboard manifest flow (`src/dashboard/manifest.ts`
 `buildManifest`); the requested permission set is the locked contract in
-[`.mstar/specs/review-lifecycle.md`](../.mstar/specs/review-lifecycle.md) §7.6
+[`docs/specs/feature/review-lifecycle.md`](./specs/feature/review-lifecycle.md) §7.6
 and mirrored in `.env.example`:
 
 | Permission | Access | Why |
@@ -2342,7 +2342,7 @@ Operator note: the structured-log `event` label for comment-triggered
 reviews retires `review_command` → `issue_comment`; operator-saved log
 filters keyed on the old label stop matching after deploy.
 Contract:
-[`.mstar/specs/review-trigger-policy.md`](../.mstar/specs/review-trigger-policy.md)
+[`docs/specs/feature/review-trigger-policy.md`](./specs/feature/review-trigger-policy.md)
 (§2.1 classification matrix, §3 mention grammar).
 
 ### Review depth (per App, with an operator default)
@@ -2708,7 +2708,7 @@ The bounded exceptions — local apply of already-confirmed publications,
 read-only proof discovery, and previously-authorized resolution retries —
 continue only for an **otherwise active** exact App; a disabled, deleted,
 missing or identity-mismatched App keeps its suspension (frozen policy).
-Budgets and the exact selection predicates: `.mstar/specs/review-lifecycle.md`
+Budgets and the exact selection predicates: `docs/specs/feature/review-lifecycle.md`
 §7.11.1.
 
 ### Check recovery (§7.11.2)

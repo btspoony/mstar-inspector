@@ -4,16 +4,17 @@ Morning Star harness subtree rules. Root `AGENTS.md` keeps repo-level long-term 
 
 ## Paths
 
-Directory layout is declared in root `.mstarc` (`[config]`) — single source of truth; do not duplicate it here. Git split (process local / results shared): tracked = `AGENTS.md`, `knowledge/**`, `specs/**`; everything else under `.mstar/` is gitignored. `workflows/` and `projects/` are created by engine writers on demand — never pre-create.
+Directory layout is declared in root `.mstarc` (`[config]`) — single source of truth; do not duplicate it here. Tracked results are `AGENTS.md`, `.agents/knowledge/**`, `.agents/adr/**`, `docs/specs/**`; everything else under `.mstar/` is gitignored process data. `workflows/` and `projects/` are created by engine writers on demand — never pre-create.
 
-`knowledge/` holds captured solutions and reusable patterns. Before implement, review or planning work, read the entries whose area matches the task; the catalog (`mstar catalog list --kind document`) is the index, not the README prose.
+`{KNOWLEDGE_DIR}` holds captured engineering experience and reusable patterns. Before implement, review or planning work, read the entries whose area matches the task; the catalog (`mstar catalog list --kind document`) is the registry, not the README prose.
 
 ## Content Boundaries
 
 - `docs/` — human docs (install, contributing). Never process artifacts.
-- `{SPECS_DIR}` — frozen specs / ADRs.
+- `{KNOWLEDGE_DIR}` — engineering experience: captured solutions and reusable patterns.
+- `{SPECS_DIR}` — current state: frozen specs.
+- `{ADR_DIR}` — one decision with its alternatives.
 - `{PLAN_DIR}` — main plans + durable gate summaries only. QC/QA raw reports go to `{SDD_DIR}/review/`, not here.
-- `{KNOWLEDGE_DIR}` — implementation SSOT, reusable designs.
 - `{ITERATION_DIR}` — iteration packages (compass + guides).
 
 ## State & Gates

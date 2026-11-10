@@ -440,8 +440,9 @@ describe("no deployment-wide review brake survives", () => {
     "tests",
     "docs",
     ".github",
-    ".mstar/specs",
-    ".mstar/knowledge",
+    "docs/specs",
+    ".agents/knowledge",
+    ".agents/adr",
   ] as const;
   const SCANNED_FILES = [
     "wrangler.jsonc",

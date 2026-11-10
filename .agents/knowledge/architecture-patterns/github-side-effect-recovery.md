@@ -25,7 +25,7 @@ tags:
 
 A queue consumer can publish the primary review successfully while a secondary GitHub mutation—thread resolution or Check Run update—times out, crashes, or returns an ambiguous transport result. Replaying the paid review to repair that side effect is wasteful and can duplicate comments. Treating a timeout as “not sent” is unsafe because GitHub may have accepted the request after the caller stopped waiting.
 
-The repository implements this pattern across `src/pipeline/checks.ts`, `src/pipeline/consumer.ts`, `src/store/review-checks.ts`, and `src/worker/check-reconcile.ts`. The normative product contract is `.mstar/specs/review-lifecycle.md` §7.5, §7.7, §7.9, and §7.11.
+The repository implements this pattern across `src/pipeline/checks.ts`, `src/pipeline/consumer.ts`, `src/store/review-checks.ts`, and `src/worker/check-reconcile.ts`. The normative product contract is `docs/specs/feature/review-lifecycle.md` §7.5, §7.7, §7.9, and §7.11.
 
 ## Guidance
 
