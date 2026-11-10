@@ -8,11 +8,12 @@
 -- not queryable after the fact. Recovery then closed the row and overwrote the
 -- only evidence.
 --
--- `completed` means the hook actually finished a terminal send — the writer
--- derives it from `observed = desired`, not from "the promise resolved": a hook
--- that freezes nothing (fence refused) or hands the attempt to recovery
--- resolves just as normally, and those rows record `handed-off` instead. The
--- reconciler lane writes nothing here at all.
+-- `completed` means the row proves a terminal send landed — the writer derives
+-- it from `observed = desired`, never from "the promise resolved". Everything
+-- else that resolves records `handed-off`: a fence-refused freeze, an
+-- ownership loss, and a `completeCheck` that could not confirm all return
+-- normally and release the attempt to recovery. The reconciler lane writes
+-- nothing here at all.
 --
 -- `terminalize_elapsed_ms` is how long the consumer waited on its hook —
 -- distinct from `terminal_ms`, the row's own terminal timestamp, and from the

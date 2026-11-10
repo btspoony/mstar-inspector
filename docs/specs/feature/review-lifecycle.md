@@ -151,6 +151,7 @@ CREATE TABLE review_checks (
   publication_id TEXT REFERENCES review_publications(id),
   attempts INTEGER NOT NULL DEFAULT 0, next_attempt_ms INTEGER,
   last_error TEXT, terminal_ms INTEGER,
+  terminalize_outcome TEXT, terminalize_elapsed_ms INTEGER,  -- migration 0052
   created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
   UNIQUE(attempt_key,generation)
 );
@@ -159,6 +160,8 @@ CREATE INDEX idx_check_recovery ON review_checks(recovery_state,next_attempt_ms,
 ```
 
 The partial unique index, not merely `(key,generation)` uniqueness, prevents simultaneous active generations. A generation, `external_id` and known remote ID are never recycled. `terminal_ms` records local completion/give-up; remote observation remains separate. Terminal history is never silently overwritten by a fresh attempt.
+
+`terminalize_outcome` (migration `0052`) is diagnostic and says which exit the invocation took: `completed` only when the row proves a terminal send landed (`observed = desired`), `handed-off` when the hook returned without that proof — including a fence-refused freeze and a `completeCheck` that could not confirm, both of which release the attempt to recovery — `budget-exceeded`, `hook-failed`, or `no-handle` (the begin budget expired, so the consumer never held a handle). The reconciler lane writes neither column, so a terminal row carrying no outcome is one recovery closed. `terminalize_elapsed_ms` is the consumer's wait on its hook, distinct from `terminal_ms` and from the `review.check.terminalize_timeout_ms` budget. Neither column is read by any decision.
 
 ### 7.2 Lifecycle state and fair scheduling
 
