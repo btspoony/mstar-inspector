@@ -37,7 +37,11 @@ const TAIL_ANCHOR = "0038_webhook_path_drop.sql";
  * migration that touches another below-anchor table adds its creating
  * migration here — never to the individual shapes.
  */
-export const TAIL_PREREQUISITES = ["0010_review_failures.sql", "0020_finding_lifecycle.sql"] as const;
+export const TAIL_PREREQUISITES = [
+  "0010_review_failures.sql",
+  "0020_finding_lifecycle.sql",
+  "0021_review_checks.sql",
+] as const;
 
 /** The directory-derived tail after the shared anchor. */
 export const DERIVED_TAIL = migrationsAfter(TAIL_ANCHOR);
