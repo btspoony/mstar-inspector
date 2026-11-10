@@ -106,7 +106,12 @@ import { hasUsageEventForExecutionToken, recordUsageEvent } from "../store/usage
 import { computeFindingFingerprint } from "../store/fingerprint";
 // The hand-off's two fenced writes live in the Check registry (§7.9/§7.11.2):
 // linking the publication the probe found, and releasing the claim to recovery.
-import { CHECK_BACKOFF_MS, deferCheckRecovery, linkCheckPublication } from "../store/review-checks";
+import {
+  CHECK_BACKOFF_MS,
+  deferCheckRecovery,
+  linkCheckPublication,
+  recordTerminalizeOutcome,
+} from "../store/review-checks";
 import {
   applyPublishedLifecycle,
   claimPublication,
@@ -3714,6 +3719,23 @@ async function processMessage(
     // The give-up handoff the overrun callback starts: awaited below when no
     // invocation context can own it (spec §7.10's no-context fallback).
     let giveUpRelease: Promise<boolean> | undefined;
+    // Elapsed time is the diagnostic that separates "the hook never ran" from
+    // "it ran and timed out"; recorded on the attempt (migration 0052) because
+    // the log lines below are not queryable after the fact.
+    const startedMs = Date.now();
+    const record = (outcome: "completed" | "budget-exceeded" | "hook-failed"): Promise<void> =>
+      recordTerminalizeOutcome(deps.env.DB, handle.attemptId, outcome, Date.now() - startedMs).catch(
+        () => {},
+      );
+    /**
+     * The overrun callback cannot await, and it must not add a second
+     * `waitUntil` entry: the invocation already holds the abandon release,
+     * whose D1 round-trip keeps the isolate alive long enough for this one-line
+     * diagnostic write to land. Losing it costs a diagnostic row, never a Check.
+     */
+    const recordDetached = (outcome: "budget-exceeded"): void => {
+      void record(outcome);
+    };
     try {
       const terminalize = deps.checks!.terminalize({
         handle,
@@ -3761,12 +3783,14 @@ async function processMessage(
           // what made the Check terminalize up to 15 minutes late. The promise
           // is awaited right below when no invocation context can own it.
           giveUpRelease = abandonCheck(handle, `terminalize budget exceeded (${budgets.terminalizeMs}ms)`);
+          recordDetached("budget-exceeded");
         },
       );
       // The overrun path has the same no-context fallback as the throw path:
       // one fenced D1 write, never a remote send, so the lease is released
       // before this consumer returns even without `waitUntil`.
       if (giveUpRelease !== undefined && deps.background === undefined) await giveUpRelease;
+      if (!abandoned) await record("completed");
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(
@@ -3778,6 +3802,7 @@ async function processMessage(
         },
         `check terminalize hook failed (isolated): ${detail}`,
       );
+      await record("hook-failed");
       // Awaited only when no invocation context can own it (one fenced write).
       const release = abandonCheck(handle, `terminalize hook threw: ${detail}`);
       if (deps.background === undefined) await release;

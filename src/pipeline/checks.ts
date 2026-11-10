@@ -72,6 +72,7 @@ import {
   type Scope,
   getCheckAttempt,
   getCheckOwnership,
+  recordTerminalizeOutcome,
 } from "../store/review-checks";
 import { redactSecrets } from "./redact";
 import { CHECK_UPDATE_DEFAULT } from "./check-budgets-reader";
@@ -106,8 +107,13 @@ export type ChecksUpdateParams = {
   check_run_id: number;
   status: "completed";
   conclusion: CheckConclusion["desired"];
-  title: string;
-  summary: string;
+  /**
+   * GitHub's only carrier for the human-facing text. A top-level
+   * `title`/`summary` pair is not part of `PATCH /check-runs/{id}` — the API
+   * drops unknown fields silently, which left every run a bare name plus
+   * conclusion while the frozen gate result stayed only in D1.
+   */
+  output: { title: string; summary: string };
 };
 
 export type ChecksListParams = {
@@ -600,8 +606,12 @@ async function completeCheckWith(
       check_run_id: input.checkRunId,
       status: "completed",
       conclusion: frozen.desired,
-      title: frozen.title,
-      summary: frozen.summary,
+      // GitHub reads the human-facing text from `output`, never from a
+      // top-level title/summary: an un-nested pair is dropped silently, which
+      // left every run a bare name + conclusion while the frozen gate text
+      // stayed only in D1 (spec §7.9 requires the summary to say what bar was
+      // missed).
+      output: { title: frozen.title, summary: frozen.summary },
     }),
     input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT,
     "check update",
@@ -1357,6 +1367,10 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     const fence = fenceFor(lease);
     if (!(await attachCheckRunId(deps.db, identity.attemptId, fence.lease, remoteId, fence.nowMs))) return;
     await abandonUnterminalized(identity.attemptId, lease, "the creating invocation was abandoned by the consumer budget", true);
+    // The consumer never received a handle for this run, so its step-12
+    // terminalize cannot fire at all; recovery owns the conclusion from here.
+    // Recorded so the row says so (migration 0052) instead of only the log.
+    await recordTerminalizeOutcome(deps.db, identity.attemptId, "no-handle", null).catch(() => {});
   };
 
   return {
@@ -1424,6 +1438,15 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
           true,
         );
         return null;
+      }
+      // Observation only, no behaviour change: the consumer's 2 s budget may
+      // have expired while this attach ran, in which case the handle below is
+      // returned into a promise nobody awaits and the attempt holds a live
+      // lease nothing will terminalize — it then waits out the 900 s execution
+      // deadline. Recording it here (migration 0052) is what tells that case
+      // apart from a hook that ran and failed.
+      if (input.latch?.isAbandoned() === true) {
+        await recordTerminalizeOutcome(deps.db, identity.attemptId, "no-handle", null).catch(() => {});
       }
       return {
         attemptId: identity.attemptId,

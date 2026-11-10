@@ -211,6 +211,10 @@ export type ReviewCheckRow = {
   next_attempt_ms: number | null;
   last_error: string | null;
   terminal_ms: number | null;
+  /** Why the consumer's terminalize exited; NULL on a row recovery closed. */
+  terminalize_outcome: string | null;
+  /** How long the consumer waited on its terminalize hook, in ms. */
+  terminalize_elapsed_ms: number | null;
   created_ms: number;
   updated_ms: number;
 };

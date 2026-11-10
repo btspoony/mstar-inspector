@@ -863,8 +863,16 @@ describe("completeCheck — the terminal send", () => {
     expect(result.kind).toBe("completed");
     expect(fake.updates).toHaveLength(1);
     const raw = fake.updates[0]!.raw;
-    expect(raw).toMatchObject({ check_run_id: 4242, status: "completed", conclusion: "success", title: CHECK_NAME });
-    expect(raw.summary).toBe(SUCCESS.summary);
+    expect(raw).toMatchObject({
+      check_run_id: 4242,
+      status: "completed",
+      conclusion: "success",
+      output: { title: CHECK_NAME, summary: SUCCESS.summary },
+    });
+    // The text belongs to GitHub's `output` object only: a top-level pair is
+    // dropped by the API, so a run would carry no gate result at all.
+    expect("title" in raw).toBe(false);
+    expect("summary" in raw).toBe(false);
     expect("details_url" in raw).toBe(false);
     expect("external_id" in raw).toBe(false); // the caller cannot re-point a run at another identity
   });
@@ -1109,9 +1117,10 @@ describe("frozen terminal intent (spec §7.9)", () => {
     expect(result.kind).toBe("completed");
     expect(fake.updates).toHaveLength(1);
     const raw = fake.updates[0]!.raw;
-    expect(raw.title).toBe(CHECK_NAME);
-    expect(raw.summary).toBe(SUCCESS.summary);
-    expect(raw.summary).not.toContain("xxxx");
+    const output = raw.output as { title: string; summary: string };
+    expect(output.title).toBe(CHECK_NAME);
+    expect(output.summary).toBe(SUCCESS.summary);
+    expect(output.summary).not.toContain("xxxx");
   });
 
   test("an oversized or multi-line intent is bounded at persistence", async () => {
@@ -1729,14 +1738,14 @@ describe("empty increment inheritance (spec §7.9)", () => {
         desired: testCase.desired,
         observed: testCase.desired,
       });
-      expect(fake.updates[0]!.raw.summary).toContain(`No new changes at ${SHA.slice(0, 7)}`);
-      expect(fake.updates[0]!.raw.summary).toContain(BASE7);
+      expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain(`No new changes at ${SHA.slice(0, 7)}`);
+      expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain(BASE7);
       if (testCase.baseline === null) {
         // A baseline that cannot be read fails the check closed.
-        expect(fake.updates[0]!.raw.summary).toContain("could not be read");
-        expect(fake.updates[0]!.raw.summary).toContain("failing closed");
+        expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain("could not be read");
+        expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain("failing closed");
       } else if (testCase.gate !== null) {
-        expect(fake.updates[0]!.raw.summary).toContain(`verdict "${testCase.baseline.verdict}"`);
+        expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain(`verdict "${testCase.baseline.verdict}"`);
       }
     }
   });
@@ -1803,7 +1812,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
 
     expect(fake.updates).toHaveLength(1);
     expect(fake.updates[0]!.raw.conclusion).toBe("failure");
-    expect(fake.updates[0]!.raw.summary).toBe(
+    expect((fake.updates[0]!.raw.output as { summary: string }).summary).toBe(
       "Review attempt could not be confirmed complete; publication status is unknown.",
     );
     const row = await rowOf(db, attempt);
@@ -1884,7 +1893,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
 
     expect(fake.updates).toHaveLength(1);
     expect(fake.updates[0]!.raw.conclusion).toBe("failure");
-    expect(fake.updates[0]!.raw.summary).toBe(
+    expect((fake.updates[0]!.raw.output as { summary: string }).summary).toBe(
       "Review attempt could not be confirmed complete; publication status is unknown.",
     );
     const row = await rowOf(db, attempt);
