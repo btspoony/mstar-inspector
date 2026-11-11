@@ -171,6 +171,11 @@ export function reviewAttribution(
 ): string {
   if (review.provider === "") return review.model;
   if (review.model === "") return review.provider;
+  // The configured head IS the serving provider when the round never switched:
+  // rendering "provider/model" then prints the same name twice ("ark/ark/…").
+  // Repairing it HERE also fixes rows already persisted with both values, and
+  // leaves the stored `reviews.provider` contract untouched.
+  if (review.provider === review.model) return review.model;
   return t(locale, "pullRequests.reviewMeta", { model: review.model, provider: review.provider });
 }
 
