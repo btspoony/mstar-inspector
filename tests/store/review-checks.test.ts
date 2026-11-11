@@ -50,6 +50,7 @@ import {
   type CheckAttempt,
   type CheckConclusion,
   type CheckRemote,
+  claimAttachedCheckForSettlement,
   claimAttempt,
   claimCheckRecovery,
   deferCheckRecovery,
@@ -1119,6 +1120,44 @@ describe("a settled neutral row does not retire the head (spec §7.9)", () => {
     expect(second.attempt.identity.generation).toBe(2);
     expect(second.attempt.identity.attemptId).not.toBe(firstId);
     expect(second.attempt.identity.externalId).not.toBe(first.attempt.identity.externalId);
+  });
+});
+describe("the settlement claim takes only a RELEASED row (spec §7.9)", () => {
+  test("a row under a delivery holder is never taken, fresh or stale", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:attach",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    const settle = () =>
+      claimAttachedCheckForSettlement(db, {
+        scope: SCOPE,
+        headSha: SHA,
+        triggeredBy: "octocat",
+        action: "review",
+        holder: "skip:settler",
+        executionDeadlineMs: T0 + CHECK_LEASE_MS,
+        nowMs: T0,
+      });
+
+    // Fresh: the delivery path is still attaching this row.
+    expect(await settle()).toBeNull();
+    // Stale: a stalled delivery holder still OWNS its row. The grace/deadline
+    // lane is that shape's owner — a skip settlement never takes it.
+    db.raw.prepare("UPDATE review_checks SET updated_ms = ? WHERE id = ?").run(T0 - 60_000, id);
+    expect(await settle()).toBeNull();
+    const held = await getCheckAttempt(db, id);
+    expect(held?.lease?.holder).toBe("delivery:attach");
+    expect(held?.lease?.epoch).toBe(1);
+
+    // Released: the same claim takes it, which is the case the settlement owns.
+    expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
+    const taken = await settle();
+    expect(taken).not.toBeNull();
+    expect(taken!.lease.holder).toBe("skip:settler");
+    expect(taken!.lease.epoch).toBe(2);
   });
 });
 describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {

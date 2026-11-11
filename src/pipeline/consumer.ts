@@ -865,6 +865,53 @@ export type AdmissionRefusalFields = Required<Pick<ConsumerLogFields, "system_ca
   };
 
 /**
+ * §7.9 skip settlement over one delivery's identity: a delivery that ACKs
+ * before (or without) a handle leaves its attached run with nobody to
+ * terminalize it, so the lifecycle takes that row and concludes it `neutral`
+ * with the skip reason (RL-10).
+ *
+ * `attachedHeadSha` MUST be the PAYLOAD's head SHA — the one the delivery path
+ * attached with (`payload.head_sha`), never the authoritative checkout SHA:
+ * after a force push the checkout names a commit with no attach row, and
+ * settling on it would be a silent no-op while the stale run waited out its
+ * window. Dedup KEYS still use the checkout SHA; only this settlement identity
+ * follows the attach. A job that carried no SHA (a bot mention) has nothing to
+ * settle.
+ *
+ * Best-effort by contract: one warn on a fault, and the caller's ACK/return is
+ * never changed.
+ */
+async function settleSkippedRow(
+  deps: ProcessDeps,
+  payload: ReviewJobPayload,
+  attachedHeadSha: string | null | undefined,
+  reason: string,
+): Promise<void> {
+  if (deps.checks?.settleSkipped === undefined || attachedHeadSha === null || attachedHeadSha === undefined) return;
+  try {
+    await deps.checks.settleSkipped({
+      scope: {
+        appId: payload.appRef.appId,
+        installationId: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+      },
+      headSha: attachedHeadSha,
+      triggeredBy: payload.triggered_by,
+      action: payload.action,
+      reason,
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(
+      { ...payloadIdentityFields(payload), event: "check_skip_settle_failed" },
+      `check skip settlement failed (the row is left to the recovery lane): ${detail}`,
+    );
+  }
+}
+
+/**
  * Handle a guard-held message (bugbot BB-3). The guard is not an error
  * state: instead of throwing (which burns the queue's three immediate
  * retries and DLQs the job — including later synchronize events for the same
@@ -981,6 +1028,14 @@ async function handleGuardHeld(
     admission.reason === "pr-held"
       ? ` — the in-flight review holds head_sha ${heldSha}, so this commit was never reviewed`
       : "";
+  // §7.9: the TERMINAL refusal is the only guard outcome that settles this
+  // delivery's attached run. The retried refusals (60/300/2100 s) settle
+  // nothing — a duplicate delivery shares this attempt_key, and the live
+  // review's row must never be closed `neutral` by another message's refusal.
+  // This is the real drop: the run attached for this message will never
+  // execute, so it is settled `neutral` with the refusal named. Best-effort;
+  // the ack and the drop record are unaffected.
+  await settleSkippedRow(deps, message.body, message.body.head_sha, `review admission refused: ${admission.reason}`);
   return deps.failureStore
     .record({
       installation_id: message.body.installation_id,
@@ -4069,52 +4124,6 @@ async function processMessage(
     }
   };
 
-  /**
-   * §7.9 skip settlement over one SHA: a delivery that ACKs before (or without)
-   * a handle leaves its attached run with nobody to terminalize it, and the
-   * recovery lane would keep deferring it until the attach window expired —
-   * a red Check on a commit that was never reviewed (RL-10). The lifecycle
-   * takes that row and concludes it `neutral` with the skip reason.
-   *
-   * `attachedHeadSha` MUST be the PAYLOAD's head SHA — the one the delivery
-   * path attached with (`payload.head_sha`), never the authoritative checkout
-   * SHA: after a force push the checkout names a commit that has no attach row,
-   * and settling on it would be a silent no-op while the stale run waited out
-   * its window. Dedup KEYS still use the checkout SHA; only this settlement
-   * identity follows the attach. A job that carried no SHA (a bot mention) has
-   * nothing to settle.
-   *
-   * Best-effort by contract: one warn on a fault, and the ACK/return is never
-   * changed.
-   */
-  const settleSkippedCheck = async (
-    reason: string,
-    attachedHeadSha: string | null | undefined,
-  ): Promise<void> => {
-    if (deps.checks?.settleSkipped === undefined || attachedHeadSha === null || attachedHeadSha === undefined) return;
-    try {
-      await deps.checks.settleSkipped({
-        scope: {
-          appId: payload.appRef.appId,
-          installationId: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          prNumber: payload.pr_number,
-        },
-        headSha: attachedHeadSha,
-        triggeredBy: payload.triggered_by,
-        action: payload.action,
-        reason,
-      });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(
-        { ...(baseFields ?? payloadIdentityFields(payload)), event: "check_skip_settle_failed" },
-        `check skip settlement failed (the row is left to the recovery lane): ${detail}`,
-      );
-    }
-  };
-
   try {
     baseFields = toBaseFields(payload);
     // Durable per-comment claim (migration 0048) — the atomic step that turns
@@ -4204,7 +4213,7 @@ async function processMessage(
       }
       // §7.9: a delivery attached before the App was paused still has a run to
       // close, and this path never reaches `begin` — settle it `neutral`.
-      await settleSkippedCheck("review paused", payload.head_sha);
+      await settleSkippedRow(deps, payload, payload.head_sha, "review paused");
       return { kind: "paused" };
     }
     const { commenter, githubAppId, workspaceId } = resolution;
@@ -4285,7 +4294,7 @@ async function processMessage(
         }
         // §7.9: this delivery is a leftover and never reaches `begin`, so its
         // attached run is settled `neutral` instead of closing red later.
-        await settleSkippedCheck("superseded by a newer commit", payloadHeadSha);
+        await settleSkippedRow(deps, payload, payloadHeadSha, "superseded by a newer commit");
         return { kind: "superseded" };
       }
     }
@@ -4422,13 +4431,9 @@ async function processMessage(
       // refused attempt would write "failure" rows for reviews that a later
       // delayed attempt goes on to complete. `pr-held` carries the live row's
       // sha so that ack can tell a duplicate from a commit it never covers.
-      // §7.9: a guard refusal never reaches `begin`, so its attached run has
-      // nobody to terminalize it. It is settled `neutral` with the refusal
-      // named — on EVERY refusal, not only the last one: a neutral settlement
-      // does not retire the head, so the delayed retry still claims a fresh
-      // generation and mints its own run. Best-effort: a fault is one warn and
-      // never changes the ACK/retry semantics.
-      await settleSkippedCheck(`review admission refused: ${admission.reason}`, payload.head_sha);
+      // Deliberately settled in `handleGuardHeld`'s TERMINAL branch only (§7.9):
+      // the first three refusals are retried, and a duplicate delivery shares
+      // this attempt_key — settling here could close the live review's own run.
       return {
         kind: "guard-held",
         admission: refusal,
@@ -4594,14 +4599,14 @@ async function processMessage(
       // §7.9: with no handle (the adoption refused) the attached run would
       // otherwise wait out the attach window and close red. The settlement is
       // keyed on the PAYLOAD SHA — what the attach used — not this checkout SHA.
-      await settleSkippedCheck("already reviewed for this head", payload.head_sha);
+      await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
       return { kind: "ok" };
     }
     const existing = await deps.store.findByIdempotencyKey(key);
     if (existing) {
       deps.log.info(fields, "idempotency hit — ack");
       await terminalizeCheck(null, "skipped", headSha);
-      await settleSkippedCheck("already reviewed for this head", payload.head_sha);
+      await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
       return { kind: "ok" };
     }
     // §7.7 step 2 (second half) — the publication journal: an existing
@@ -4680,7 +4685,7 @@ async function processMessage(
       } else {
         // §7.9: no handle was adopted for this hand-off, so the delivery's own
         // attached run has nobody to close it — settle it `neutral`.
-        await settleSkippedCheck("a publication for this head already exists", payload.head_sha);
+        await settleSkippedRow(deps, payload, payload.head_sha, "a publication for this head already exists");
       }
       return { kind: "ok" };
     }

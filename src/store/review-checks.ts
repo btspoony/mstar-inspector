@@ -888,15 +888,20 @@ export async function adoptReleasedCheckAttempt(
 /**
  * Take the ATTACH row of one delivery for settlement (spec §7.9): a delivery
  * that is skipped BEFORE execution must close its attached run, and the skip
- * path holds no handle — the row may still be RELEASED, or still under a
- * stalled delivery holder. This is the same fenced one-statement claim as
+ * path holds no handle. This is the same fenced one-statement claim as
  * `adoptReleasedCheckAttempt`, keyed by the delivery's own `attempt_key`
  * instead of an attempt id.
  *
- * A live CONSUMER holder, a frozen intent, a terminal row and a row without a
- * proven run id are never taken. The candidate is SELECTed first only to learn
- * its id; the UPDATE repeats every predicate, so a row that stopped being
- * claimable between the two statements writes nothing.
+ * ONLY a RELEASED row is taken (`holder IS NULL AND lease_until_ms IS NULL`).
+ * A row still under ANY holder is somebody's work in progress and is never
+ * touched — including a `delivery:*` holder inside its own attach window, whose
+ * attach will release it, and a live `consumer:*` holder running the review.
+ * The settle path is a skip, not a takeover: if nobody releases the row, the
+ * grace/deadline lane closes it, which is the honest owner of that case.
+ * A frozen intent, a terminal row and a row without a proven run id are never
+ * taken either. The candidate is SELECTed first only to learn its id; the
+ * UPDATE repeats every predicate, so a row that stopped being claimable between
+ * the two statements writes nothing.
  */
 export async function claimAttachedCheckForSettlement(
   db: D1Like,
@@ -927,20 +932,18 @@ export async function claimAttachedCheckForSettlement(
     triggeredBy: input.triggeredBy,
     action: input.action,
   });
-  // Shared by both statements: the row must still be an unattended, attached,
-  // unfrozen attempt inside its window. Bound order matches the UPDATE.
+  // Shared by both statements: the row must be RELEASED (nobody's work in
+  // progress), attached, unfrozen and inside its window. Bound order matches
+  // the UPDATE.
   const claimable = `terminal_ms IS NULL
+          AND holder IS NULL AND lease_until_ms IS NULL
           AND create_state = 'known' AND check_run_id IS NOT NULL
           AND desired = 'in_progress'
           AND recovery_state IN ('pending','remote-unconfirmed')
-          AND execution_deadline_ms > ?
-          AND (
-            (holder IS NULL AND lease_until_ms IS NULL)
-            OR (holder LIKE 'delivery:%' AND lease_until_ms > ? AND updated_ms <= ?)
-          )`;
+          AND execution_deadline_ms > ?`;
   const candidate = await db
     .prepare(`SELECT id FROM review_checks WHERE attempt_key = ? AND ${claimable} ORDER BY generation DESC LIMIT 1`)
-    .bind(key, input.nowMs, input.nowMs, input.nowMs - CHECK_ATTACH_HOLDER_STALE_MS)
+    .bind(key, input.nowMs)
     .first<{ id: string }>();
   if (candidate === null) return null;
   const claimed = await db
@@ -958,8 +961,6 @@ export async function claimAttachedCheckForSettlement(
       candidate.id,
       key,
       input.nowMs,
-      input.nowMs,
-      input.nowMs - CHECK_ATTACH_HOLDER_STALE_MS,
     )
     .run();
   if (claimed.meta.changes !== 1) return null;

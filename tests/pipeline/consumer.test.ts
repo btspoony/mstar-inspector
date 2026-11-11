@@ -6288,17 +6288,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.some((request) => request.op === "update")).toBe(false);
   });
 
-  test("check lifecycle: a guard-held refusal settles its attached run neutral", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
-    const adapter = checksAdapterFor(db);
-    const payload = makePayload();
-    // The delivery attached this message's run; the guard then holds it for a
-    // delayed retry. The refusal settles that run neutral (naming the refusal)
-    // so it cannot close red at the attach window — and because a neutral
-    // settlement no longer retires the head, the retry still claims its own
-    // generation.
+  /** Attach one run for the default payload and arm the guard. */
+  async function guardHeldWithAttachedRun(
+    db: TestD1,
+    adapter: ChecksAdapter,
+    payload: ReviewJobPayload,
+    heldHeadSha: string = SHA,
+  ) {
     const attached = await attachCheckAtAcceptance(
       { db: db as never, adapter, nowMs: () => Date.now() },
       {
@@ -6316,15 +6312,57 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       },
     );
     expect(attached.kind).toBe("attached");
-    await seedInflight(db);
+    await seedInflight(db, { headSha: heldHeadSha });
+  }
+
+  test("check lifecycle: the first three guard refusals settle nothing", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const payload = makePayload();
+    await guardHeldWithAttachedRun(db, adapter, payload);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
+    // Refusals 1-3 are RETRIED: they settle nothing. A duplicate delivery
+    // shares this attempt_key, so a settlement here could close the live
+    // review's own run — a premature `neutral` pass.
+    for (const attempts of [1, 2, 3]) {
+      queueState.attempts = attempts;
+      await consumer(makeBatch(payload));
+      const row = checkRowFor(db, SHA);
+      expect(row.desired).toBe("in_progress");
+      expect(row.observed).toBe("unknown");
+      expect(row.terminal_ms).toBeNull();
+    }
+    expect(messageRetryCalls).toHaveLength(3);
+    expect(checkRequests.some((request) => request.op === "update")).toBe(false);
+  });
+
+  test("check lifecycle: the terminal guard refusal settles the released run neutral", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const payload = makePayload();
+    // The in-flight review holds a DIFFERENT commit, so this delivery is a real
+    // drop (never reviewed), not the benign same-sha duplicate that returns
+    // before the drop record.
+    await guardHeldWithAttachedRun(db, adapter, payload, "feedfacefeedfacefeedfacefeedfacefeedface");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    // The 4th attempt is the terminal drop: this message will never run, so
+    // its released attach row is settled `neutral` with the refusal named.
+    queueState.attempts = 4;
     await consumer(makeBatch(payload));
 
-    expect(messageRetryCalls).toHaveLength(1);
+    expect(messageAckCalls).toHaveLength(1);
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("neutral");
     expect(row.observed).toBe("neutral");
