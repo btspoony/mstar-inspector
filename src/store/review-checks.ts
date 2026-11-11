@@ -222,6 +222,18 @@ export const CHECK_ATTACH_WINDOW_MS = 3_600_000;
  * silent for minutes while the model runs and is never taken this way.
  */
 export const CHECK_ATTACH_HOLDER_STALE_MS = 5_000;
+/**
+ * How long a RELEASED attach row waits for the admitted message to adopt it
+ * before the recovery lane may take it (spec §7.9). It exists because the two
+ * paths overlap: the delivery path may release the row after the message was
+ * admitted, and a consumer that answered `busy` once does not come back. The
+ * due time makes the minute reconciler adopt an unclaimed attach row about two
+ * minutes after the attach instead of leaving it invisible until the one-hour
+ * window expires. It is a BOUND on that invisibility, not a schedule: the
+ * consumer's adoption ignores the due time, so the ordinary path still takes
+ * the row immediately, and the grace only decides when recovery may step in.
+ */
+export const CHECK_ATTACH_GRACE_MS = 120_000;
 /** Recovery lease (spec §7.9: "Recovery lease is 120,000ms"). */
 export const CHECK_RECOVERY_LEASE_MS = 120_000;
 /**
@@ -881,6 +893,25 @@ export async function releaseCheckClaim(
   nowMs: CheckClock,
 ): Promise<boolean> {
   return runFenced(db, id, lease, `holder = NULL, lease_until_ms = NULL`, [], nowMs);
+}
+
+/**
+ * Release a successfully ATTACHED attempt with a due time (spec §7.9): the
+ * admitted message adopts the row immediately (adoption ignores
+ * `next_attempt_ms`), while the recovery lane may take it once the grace has
+ * passed — so a released attach row that nobody claims is closed by the same
+ * lane as every other Check instead of staying invisible until the attach
+ * window expires. Writes nothing else: identity, run id, `create_state`,
+ * `desired` and `recovery_state` are preserved, and no attempt is spent.
+ */
+export async function releaseAttachedCheck(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nextAttemptMs: number,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  return runFenced(db, id, lease, `holder = NULL, lease_until_ms = NULL, next_attempt_ms = ?`, [nextAttemptMs], nowMs);
 }
 
 /**

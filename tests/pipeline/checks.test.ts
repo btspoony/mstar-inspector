@@ -33,6 +33,7 @@ import {
   adoptReleasedCheckAttempt,
   claimAttempt,
   attachCheckRunId,
+  CHECK_ATTACH_GRACE_MS,
   CHECK_ATTACH_WINDOW_MS,
   CHECK_LEASE_MS,
   CHECK_NAME,
@@ -40,6 +41,7 @@ import {
   rollbackCheckCreateDispatch,
   readPublishedReview,
   recordTerminalizeOutcome,
+  releaseAttachedCheck,
   releaseCheckClaim,
   setCheckCreateState,
   setCheckDesired,
@@ -2370,6 +2372,10 @@ describe("attach on delivery acceptance (spec §7.7 step 4)", () => {
     // The attach window, not the execution window: a queued message admitted
     // minutes later must still find its row adoptable.
     expect(row.execution_deadline_ms).toBe(T0 + CHECK_ATTACH_WINDOW_MS);
+    // ...and if nobody adopts it, the recovery lane may take it at the grace
+    // instead of at the window's expiry. A due time, not a delay: adoption
+    // ignores it, so the ordinary path still takes the row immediately.
+    expect(row.next_attempt_ms).toBe(T0 + CHECK_ATTACH_GRACE_MS);
   });
 
   test("a duplicate delivery for the same head mints no second run", async () => {
@@ -2580,6 +2586,106 @@ describe("adoption of a released attach row (spec §7.9)", () => {
     // matches, so it cannot overwrite the adopting invocation's row.
     expect(await releaseCheckClaim(db, attempt.identity.attemptId, deliveryLease, CLOCK)).toBe(false);
     expect((await rowOf(db, attempt)).holder).toBe(handle!.lease.holder);
+  });
+
+  test("an attach that releases inside the retry slice is adopted by the retry", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // The message was admitted while the delivery holder was still mid-attach:
+    // the first adoption refuses a fresh live holder, then the attach releases
+    // ~60 ms later — inside the 250 ms retry slice.
+    const { attempt, lease: deliveryLease } = await claimedAttempt(db, {
+      holder: "delivery:attach-in-flight",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    await attachedRun(db, attempt, deliveryLease, 4242);
+    const releasing = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        void releaseAttachedCheck(
+          db,
+          attempt.identity.attemptId,
+          deliveryLease,
+          T0 + CHECK_ATTACH_GRACE_MS,
+          CLOCK,
+        ).then(() => resolve());
+      }, 60);
+    });
+    const fake = fakeChecks({ create: echoCreate });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
+    await releasing;
+
+    // The retry took the released row: same attempt, same run, live lease.
+    expect(handle).not.toBeNull();
+    expect(handle!.attemptId).toBe(attempt.identity.attemptId);
+    expect(handle!.lease.untilMs).toBeGreaterThan(CLOCK);
+    expect(fake.creates).toHaveLength(0);
+    const row = await rowOf(db, attempt);
+    expect(row.holder).toBe(handle!.lease.holder);
+    expect(row.lease_epoch).toBe(2);
+    expect(row.execution_deadline_ms).toBe(CLOCK + CHECK_LEASE_MS);
+  });
+
+  test("the retry never waits on a consumer holder", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const { attempt, lease } = await claimedAttempt(db, { holder: "consumer:another-run" });
+    await attachedRun(db, attempt, lease, 4242);
+    const fake = fakeChecks({ create: echoCreate });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const startedAt = Date.now();
+    const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
+    const elapsed = Date.now() - startedAt;
+
+    // A running review's holder is not waited for: no handle, and no 250 ms
+    // retry slice either.
+    expect(handle).toBeNull();
+    expect(elapsed).toBeLessThan(200);
+    const row = await rowOf(db, attempt);
+    expect(row.holder).toBe("consumer:another-run");
+    expect(row.lease_epoch).toBe(1);
+  });
+
+  test("the retry never waits on a frozen intent", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const { attempt, lease } = await claimedAttempt(db, {
+      holder: "delivery:attach",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    await attachedRun(db, attempt, lease, 4242);
+    expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
+    const fake = fakeChecks({ create: echoCreate });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const startedAt = Date.now();
+    const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
+    const elapsed = Date.now() - startedAt;
+
+    // A frozen intent belongs to recovery: no handle, no retry slice.
+    expect(handle).toBeNull();
+    expect(elapsed).toBeLessThan(200);
+    const row = await rowOf(db, attempt);
+    expect(row.desired).toBe("success");
+    expect(row.holder).toBe("delivery:attach");
+    expect(row.lease_epoch).toBe(1);
   });
 
   test("an adoption that lands after the begin budget releases the row instead of returning a handle", async () => {

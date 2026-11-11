@@ -39,6 +39,8 @@ import {
 import {
   attemptKey,
   attachCheckRunId,
+  CHECK_ATTACH_GRACE_MS,
+  CHECK_ATTACH_WINDOW_MS,
   CHECK_BACKOFF_MS,
   CHECK_EXTERNAL_ID_PREFIX,
   CHECK_LEASE_MS,
@@ -64,6 +66,7 @@ import {
   checkSuspensionKindOf,
   checkSuspensionReason,
   listReenableableCheckPairs,
+  releaseAttachedCheck,
   releaseCheckClaim,
   suspendCheckForPause,
   releaseExpiredCheckClaim,
@@ -1029,6 +1032,38 @@ describe("zero-dispatch rollback and the no-request claim release (integrated se
     const stale: Lease = { holder: lease.holder, epoch: lease.epoch + 5, untilMs: lease.untilMs };
     expect(await releaseExpiredCheckClaim(db, id, stale, T0)).toBe(false);
     expect((await rawRow(db, id)).holder).toBe(lease.holder);
+  });
+});
+
+describe("attach grace (spec §7.9)", () => {
+  test("a released attach row is due at the grace, not before", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:attach",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    const grace = T0 + CHECK_ATTACH_GRACE_MS;
+    expect(await releaseAttachedCheck(db, id, lease, grace, T0)).toBe(true);
+
+    // The row keeps everything it needs to be adopted; only the due time is new.
+    const row = (await db.prepare(`SELECT * FROM review_checks WHERE id = ?`).bind(id).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(row.next_attempt_ms).toBe(grace);
+    expect(row.holder).toBeNull();
+    expect(row.create_state).toBe("known");
+    expect(row.check_run_id).toBe(4242);
+    expect(row.desired).toBe("in_progress");
+    expect(row.attempts).toBe(0);
+
+    // Invisible to the recovery lane before the grace, due AT it: two minutes
+    // after the attach instead of at the one-hour window's expiry.
+    expect(await listCheckReconcileBatch(db, grace - 1)).toEqual([]);
+    expect((await listCheckReconcileBatch(db, grace)).map((candidate) => candidate.identity.attemptId)).toEqual([id]);
+    expect(await claimCheckRecovery(db, id, "reconciler", grace)).not.toBeNull();
   });
 });
 

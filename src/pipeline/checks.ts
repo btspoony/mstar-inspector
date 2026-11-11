@@ -50,6 +50,7 @@ import type { D1Like } from "../store/types";
 import {
   adoptReleasedCheckAttempt,
   attachCheckRunId,
+  CHECK_ATTACH_GRACE_MS,
   CHECK_ATTACH_WINDOW_MS,
   CHECK_BACKOFF_MS,
   CHECK_NAME,
@@ -59,7 +60,7 @@ import {
   readPublicationProof,
   readPublishedReview,
   recordCheckObservation,
-  releaseCheckClaim,
+  releaseAttachedCheck,
   rollbackCheckCreateDispatch,
   setCheckCreateState,
   setCheckDesired,
@@ -1363,11 +1364,12 @@ export async function attachCheckAtAcceptance(
     return { kind: "failed", reason };
   }
   // Give the row back with every durable fact intact (identity, the run id,
-  // `create_state = 'known'`, `recovery_state = 'pending'`) and NO due time:
-  // the admitted message adopts it through `adoptReleasedCheckAttempt`, and a
-  // row nobody ever adopts is closed by the reconciler when the attach window
-  // expires.
-  if (!(await releaseCheckClaim(deps.db, identity.attemptId, claimed.lease, deps.nowMs()))) {
+  // `create_state = 'known'`, `recovery_state = 'pending'`) plus a grace due
+  // time: the admitted message adopts it through `adoptReleasedCheckAttempt`
+  // (which ignores the due time), and if nobody does, the minute reconciler
+  // takes it once the grace passes instead of at the one-hour window's expiry.
+  const nowMs = deps.nowMs();
+  if (!(await releaseAttachedCheck(deps.db, identity.attemptId, claimed.lease, nowMs + CHECK_ATTACH_GRACE_MS, nowMs))) {
     return { kind: "failed", reason: "the attached row could not be released to the admitted message" };
   }
   return { kind: "attached" };
@@ -1393,6 +1395,28 @@ async function releaseToRecovery(
     },
     nowMs,
   );
+}
+
+/**
+ * How long the consumer waits before its ONE retry of a refused adoption
+ * (spec §7.9). The delivery path can still be mid-attach when the message is
+ * admitted — a fresh `delivery:*` holder, or a run id not yet written — so the
+ * first adoption refuses; this slice is enough for that attach to finish and
+ * well inside the 2 s begin budget.
+ */
+export const CHECK_ATTACH_OVERLAP_RETRY_MS = 250;
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Whether a refused adoption is worth exactly one retry: the active row must
+ * still be owned by the DELIVERY path (its attach may simply not have finished
+ * — that is the overlap the ordering cannot remove) and must still want
+ * `in_progress`. A consumer holder is a review that is running, and a frozen
+ * intent belongs to recovery; neither is waited for or taken.
+ */
+function retryableOverlap(attempt: CheckAttempt): boolean {
+  return attempt.lease !== null && attempt.lease.holder.startsWith("delivery:") && attempt.desired === "in_progress";
 }
 
 /**
@@ -1537,13 +1561,23 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // terminal = a generation of this key already ended with a proven
       // publication: no Check here.
       if (claim.kind === "busy") {
-        const adopted = await adoptReleasedCheckAttempt(deps.db, {
-          attemptId: claim.attempt.identity.attemptId,
-          githubAppId: input.githubAppId,
-          holder: `consumer:${crypto.randomUUID()}`,
-          executionDeadlineMs: input.executionDeadlineMs,
-          nowMs: deps.nowMs(),
-        });
+        const busy = claim.attempt;
+        const adopt = (): Promise<Lease | null> =>
+          adoptReleasedCheckAttempt(deps.db, {
+            attemptId: busy.identity.attemptId,
+            githubAppId: input.githubAppId,
+            holder: `consumer:${crypto.randomUUID()}`,
+            executionDeadlineMs: input.executionDeadlineMs,
+            nowMs: deps.nowMs(),
+          });
+        let adopted = await adopt();
+        // One bounded retry when the delivery holder is still mid-attach: the
+        // message was admitted before that attach released the row, and a
+        // consumer that gives up here leaves the run to the recovery lane.
+        if (adopted === null && retryableOverlap(busy)) {
+          await delay(CHECK_ATTACH_OVERLAP_RETRY_MS);
+          adopted = await adopt();
+        }
         if (adopted === null) return null;
         // The adoption is one D1 round trip, but the consumer's begin budget is
         // only 2 s: if it elapsed while this write was in flight, the handle

@@ -31,6 +31,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import {
+  attachCheckRunId,
+  CHECK_ATTACH_GRACE_MS,
+  CHECK_ATTACH_WINDOW_MS,
   CHECK_BACKOFF_MS,
   CHECK_MAX_ATTEMPTS,
   CHECK_NAME,
@@ -42,6 +45,7 @@ import {
   deferCheckRecovery,
   getCheckAttempt,
   listCheckReconcileBatch,
+  releaseAttachedCheck,
   retryCheckRecovery,
   setCheckCreateState,
   setCheckDesired,
@@ -148,6 +152,51 @@ describe("budget and selector constants (spec §7.11.2)", () => {
 // ---------------------------------------------------------------------------
 // Selection
 // ---------------------------------------------------------------------------
+
+describe("an attach row nobody adopted (spec §7.9 / §7.11.2)", () => {
+  test("the reconciler takes it at the attach grace and never creates a second run", async () => {
+    const db = seededDb();
+    // The delivery path attached the run and released the row with its grace.
+    const { attempt, lease } = await claim(db, {
+      nowMs: T0,
+      holder: "delivery:attach",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await setCheckCreateState(db, id, lease, "sending", undefined, T0);
+    expect(await attachCheckRunId(db, id, lease, 4242, T0)).toBe(true);
+    const grace = T0 + CHECK_ATTACH_GRACE_MS;
+    expect(await releaseAttachedCheck(db, id, lease, grace, T0)).toBe(true);
+
+    const fetchStub = stubFetch();
+    try {
+      // Before the grace the lane does not even select it: the one-hour window
+      // is no longer what decides when recovery may look.
+      const early = await run(db, { now: () => grace - 1, credentials: scriptedCredentials(db, agreeingScript()) });
+      expect(early.examined).toBe(0);
+
+      // AT the grace it is due: the pass claims it and gives the claim back to
+      // wait for the publication proof. No create, no second run, no request.
+      const summary = await run(db, { now: () => grace, credentials: scriptedCredentials(db, agreeingScript()) });
+      expect(summary.examined).toBe(1);
+      expect(summary.deferred).toBe(1);
+      expect(summary.errors).toBe(0);
+      expect(fetchStub.urls).toHaveLength(0);
+    } finally {
+      fetchStub.restore();
+    }
+
+    // One row, the SAME run, still nonterminal: recovery adopted nothing new
+    // and created nothing — it is now merely due again on the first rung.
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM review_checks").get() as { n: number };
+    expect(count.n).toBe(1);
+    const row = await rawRow(db, id);
+    expect(row.check_run_id).toBe(4242);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.holder).toBeNull();
+    expect(row.next_attempt_ms).toBe(grace + CHECK_BACKOFF_MS[0]!);
+  });
+});
 
 describe("due selection (spec §7.11.2 predicate)", () => {
   test("a LIVE lease is never examined, claimed or mutated by a stale reconciler", async () => {
