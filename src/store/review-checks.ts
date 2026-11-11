@@ -213,6 +213,15 @@ export const CHECK_LEASE_MS = 900_000;
  * adopts is closed by the reconciler when this window expires.
  */
 export const CHECK_ATTACH_WINDOW_MS = 3_600_000;
+/**
+ * How long an attach row may sit under its DELIVERY holder before an admitted
+ * message takes it over (spec §7.9). Seconds, not minutes, because the two
+ * holders do different work: the delivery holder only mints a token, creates
+ * one run and writes two rows, so a holder silent this long is stalled (an
+ * expired inline budget plus a slow create), while the CONSUMER holder stays
+ * silent for minutes while the model runs and is never taken this way.
+ */
+export const CHECK_ATTACH_HOLDER_STALE_MS = 5_000;
 /** Recovery lease (spec §7.9: "Recovery lease is 120,000ms"). */
 export const CHECK_RECOVERY_LEASE_MS = 120_000;
 /**
@@ -775,13 +784,23 @@ export async function claimCheckRecovery(
  * message can take it over and terminalize inline instead of leaving the run
  * to the reconciler.
  *
- * ONE conditional UPDATE, like every other claim. Only a row that NO holder
- * owns is adopted — a row a live holder still owns belongs to that invocation
- * and is never taken — and the row must still want `in_progress`, carry a
- * KNOWN run id (nothing else is adoptable: a row without a proven run has no
- * handle to return) and still be inside its window. The epoch is bumped, so a
- * late write from the attach's own holder is refused by the same fence every
- * other mutation uses.
+ * ONE conditional UPDATE, like every other claim. Two shapes are adoptable:
+ *
+ *   - the row is RELEASED (no holder, no lease) — the ordinary attach; and
+ *   - the row is held by a STALLED DELIVERY holder: `holder` still starts with
+ *     `delivery:`, its lease is live, and it has written nothing for
+ *     `CHECK_ATTACH_HOLDER_STALE_MS`. That is the overlap the ordering cannot
+ *     remove (the delivery path waits a bounded time and then lets the attach
+ *     finish on the invocation context), and a delivery holder silent for
+ *     seconds is stalled — it only mints one token, creates one run and writes
+ *     two rows. A CONSUMER holder is never taken: its silence is the model
+ *     running, and it is minutes, not seconds.
+ *
+ * Either way the row must still want `in_progress`, carry a KNOWN run id
+ * (nothing else is adoptable: a row without a proven run has no handle to
+ * return) and still be inside its window. The epoch is bumped, so a late write
+ * from the attach's own holder is refused by the same fence every other
+ * mutation uses.
  *
  * `execution_deadline_ms` is NARROWED here to the adopted lease: the attach
  * window is long only so a queued message can still find its run, while the
@@ -811,12 +830,15 @@ export async function adoptReleasedCheckAttempt(
           SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?,
               execution_deadline_ms = ?, updated_ms = ?
         WHERE id = ? AND ${NONTERMINAL_WHERE}
-          AND holder IS NULL AND lease_until_ms IS NULL
           AND recovery_state IN ('pending','remote-unconfirmed')
           AND desired = 'in_progress'
           AND create_state = 'known' AND check_run_id IS NOT NULL
           AND github_app_id = ?
-          AND execution_deadline_ms > ?`,
+          AND execution_deadline_ms > ?
+          AND (
+            (holder IS NULL AND lease_until_ms IS NULL)
+            OR (holder LIKE 'delivery:%' AND lease_until_ms > ? AND updated_ms <= ?)
+          )`,
     )
     .bind(
       input.holder,
@@ -826,6 +848,8 @@ export async function adoptReleasedCheckAttempt(
       input.attemptId,
       input.githubAppId,
       input.nowMs,
+      input.nowMs,
+      input.nowMs - CHECK_ATTACH_HOLDER_STALE_MS,
     )
     .run();
   if (adopted.meta.changes !== 1) return null;

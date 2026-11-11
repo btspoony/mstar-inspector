@@ -70,6 +70,14 @@ export type HandlerDeps = {
   // per-App route fails closed on an unbound DB long before this handler runs.
   env: Pick<Env, "IDEMPOTENCY_KV" | "REVIEW_QUEUE"> & { DB: D1Database };
   log: HandlerLog;
+  /**
+   * Awaited after the durable claim and immediately BEFORE
+   * `REVIEW_QUEUE.send`, so a best-effort step (the Check attach) has already
+   * created its run by the time the message can be admitted. The caller owns
+   * its own time bound. A throw is logged and the enqueue proceeds: this hook
+   * never changes the outcome.
+   */
+  beforeEnqueue?: () => Promise<void>;
 };
 
 export type HandleOutcome =
@@ -219,6 +227,19 @@ export async function handleReviewJob(
     if (claim.meta.changes === 0) {
       deps.log.info(fields, "duplicate comment trigger — skipping enqueue");
       return { kind: "skipped", reason: "duplicate comment trigger" };
+    }
+  }
+
+  // Pre-enqueue step (the Check attach): it runs BEFORE the send so an
+  // admitted message finds the row it will adopt instead of racing its
+  // creator. It never changes the outcome — a throw is one warn and the
+  // enqueue proceeds.
+  if (deps.beforeEnqueue !== undefined) {
+    try {
+      await deps.beforeEnqueue();
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `pre-enqueue hook failed — enqueueing anyway: ${detail}`);
     }
   }
 

@@ -1301,6 +1301,18 @@ export type CheckAttachDeps = {
 };
 
 /**
+ * What one attach attempt produced. The caller must be able to tell a legitimate
+ * no-op (another delivery or an earlier attach owns this head) from a real
+ * failure, because only the failure arm owes the operator a warn (spec §7.9).
+ */
+export type CheckAttachResult =
+  | { kind: "attached" }
+  /** The key is already owned by another delivery/attempt, or already ended. */
+  | { kind: "skipped"; reason: "busy" | "terminal" }
+  /** The create, the run-id write or the release failed: recovery owns the row. */
+  | { kind: "failed"; reason: string };
+
+/**
  * Attach a Check to an ACCEPTED delivery (spec §7.7 step 4 / §7.9).
  *
  * The delivery path claims the attempt, creates the `in_progress` run against
@@ -1314,13 +1326,13 @@ export type CheckAttachDeps = {
  * delivery, a queue redelivery or a synchronize event that finds the key
  * `busy`/`terminal` creates nothing. Best-effort by contract: a failed create
  * releases the row to the recovery lane (which adopts rather than re-creates)
- * and returns `false`; the caller owns "never block the enqueue, never change
- * the response".
+ * and answers `failed`; the caller owns "never block the enqueue, never change
+ * the response" AND the one warn the failure arm owes.
  */
 export async function attachCheckAtAcceptance(
   deps: CheckAttachDeps,
   input: { scope: Scope; githubAppId: number; headSha: string; triggeredBy: string; action: string },
-): Promise<boolean> {
+): Promise<CheckAttachResult> {
   const claimed = await claimAttempt(deps.db, {
     scope: input.scope,
     githubAppId: input.githubAppId,
@@ -1334,7 +1346,7 @@ export async function attachCheckAtAcceptance(
   // `busy` (another delivery, or an earlier attach, owns a nonterminal row for
   // this key) and `terminal` (the head is already published) both mean the one
   // run this head may have already exists: nothing to attach, nothing to mint.
-  if (claimed.kind !== "claimed") return false;
+  if (claimed.kind !== "claimed") return { kind: "skipped", reason: claimed.kind };
   const { identity } = claimed.attempt;
   const begun = await deps.adapter.beginCheck({ identity, lease: claimed.lease });
   if (begun.kind !== "ready") {
@@ -1342,19 +1354,23 @@ export async function attachCheckAtAcceptance(
     // handed to the recovery lane as possibly-sent and adopted there instead of
     // being created a second time (RL-12).
     await releaseToRecovery(deps, identity.attemptId, claimed.lease, begun.reason, begun.requests > 0);
-    return false;
+    return { kind: "failed", reason: begun.reason };
   }
   const attached = await attachCheckRunId(deps.db, identity.attemptId, claimed.lease, begun.remote.id, deps.nowMs());
   if (!attached) {
-    await releaseToRecovery(deps, identity.attemptId, claimed.lease, "the attach could not record the created run", true);
-    return false;
+    const reason = "the attach could not record the created run";
+    await releaseToRecovery(deps, identity.attemptId, claimed.lease, reason, true);
+    return { kind: "failed", reason };
   }
   // Give the row back with every durable fact intact (identity, the run id,
   // `create_state = 'known'`, `recovery_state = 'pending'`) and NO due time:
   // the admitted message adopts it through `adoptReleasedCheckAttempt`, and a
   // row nobody ever adopts is closed by the reconciler when the attach window
   // expires.
-  return releaseCheckClaim(deps.db, identity.attemptId, claimed.lease, deps.nowMs());
+  if (!(await releaseCheckClaim(deps.db, identity.attemptId, claimed.lease, deps.nowMs()))) {
+    return { kind: "failed", reason: "the attached row could not be released to the admitted message" };
+  }
+  return { kind: "attached" };
 }
 
 /** Release an attach attempt to the recovery lane with the honest state. */
@@ -1529,6 +1545,21 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
           nowMs: deps.nowMs(),
         });
         if (adopted === null) return null;
+        // The adoption is one D1 round trip, but the consumer's begin budget is
+        // only 2 s: if it elapsed while this write was in flight, the handle
+        // would be returned into a promise nobody awaits and the row would hold
+        // a 900 s lease nothing terminalizes. Re-check AFTER the write (never
+        // only before) and hand the row back like the claimed branch does.
+        if (input.latch?.isAbandoned() === true) {
+          await recordTerminalizeOutcome(deps.db, claim.attempt.identity.attemptId, "no-handle", null).catch(() => {});
+          await abandonUnterminalized(
+            claim.attempt.identity.attemptId,
+            adopted,
+            "the adopting invocation was abandoned by the consumer budget after the run was adopted",
+            true,
+          );
+          return null;
+        }
         return {
           attemptId: claim.attempt.identity.attemptId,
           scope: claim.attempt.identity.scope,

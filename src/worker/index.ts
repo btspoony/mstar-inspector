@@ -191,13 +191,37 @@ async function readBodyWithinLimit(request: Request, limit: number): Promise<str
 }
 
 /**
+ * How long the delivery path waits for the Check attach before it enqueues
+ * (spec §7.9). The attach is one token mint, one create and two D1 writes in
+ * the normal case; past this bound the enqueue proceeds and the attach keeps
+ * running on the invocation context, where the consumer's bounded takeover of a
+ * stalled delivery holder covers the overlap.
+ */
+export const CHECK_ATTACH_INLINE_BUDGET_MS = 2_500;
+
+/**
+ * Resolve when `promise` settles or the budget elapses — whichever is first.
+ * The promise is NOT cancelled: its owner (the invocation context) still holds
+ * it, and a late attach is exactly what the consumer's takeover handles.
+ */
+async function withinBudget(promise: Promise<unknown>, budgetMs: number): Promise<void> {
+  const { promise: budget, resolve } = Promise.withResolvers<void>();
+  const timer = setTimeout(resolve, budgetMs);
+  try {
+    await Promise.race([promise.then(() => {}), budget]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Attach the review Check on the DELIVERY path (spec §7.7 step 4 / §7.9).
  *
- * Runs on `ctx.waitUntil` once the delivery is accepted and enqueued: the
- * attempt is claimed and its `in_progress` run created NOW, so the Check shows
- * up within seconds of the webhook instead of when a worker finally starts the
- * message. The row is then released with the run id persisted, which is
- * exactly what the consumer's `begin` adopts.
+ * Runs BEFORE the enqueue: the attempt is claimed and its `in_progress` run
+ * created NOW, so the Check shows up within seconds of the webhook instead of
+ * when a worker finally starts the message — and an admitted message finds a
+ * row it can adopt instead of racing this holder. The row is then released with
+ * the run id persisted, which is exactly what the consumer's `begin` adopts.
  *
  * Best-effort by contract: the client comes from the SAME
  * `createReviewCommenter` construction point every other Check send uses (spec
@@ -225,8 +249,15 @@ async function attachCheckOnAcceptance(input: {
       { db, nowMs: () => Date.now() },
     );
     const adapter = commenter.checks;
-    if (adapter === undefined) return;
-    await attachCheckAtAcceptance(
+    if (adapter === undefined) {
+      webhookWarn(
+        "check_attach_failed",
+        "the App's review-write client exposes no Checks surface",
+        "check attach failed — delivery unaffected (best-effort)",
+      );
+      return;
+    }
+    const result = await attachCheckAtAcceptance(
       { db, adapter, nowMs: () => Date.now() },
       {
         scope: {
@@ -242,6 +273,15 @@ async function attachCheckOnAcceptance(input: {
         action: payload.action,
       },
     );
+    // One warn for a real failure (a refusal, a failed run-id write, a failed
+    // release). A busy/terminal skip is a legitimate no-op and stays silent.
+    if (result.kind === "failed") {
+      webhookWarn(
+        "check_attach_failed",
+        redactSecrets(result.reason),
+        "check attach failed — delivery unaffected (best-effort)",
+      );
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     webhookWarn(
@@ -722,27 +762,30 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // Lock L3: the App identity is attached at the route handler — after
   // classification, before the queue send. The queue message carries the
   // appId reference only (lock L4: the PEM never leaves the consumer).
-  const handled = await handleReviewJob({ ...outcome.payload, appRef: { appId: row.id } }, {
+  await handleReviewJob({ ...outcome.payload, appRef: { appId: row.id } }, {
     // `db` is the route's already-narrowed binding (the unbound guard above
     // returned 500): the durable comment claim must never run against a
     // possibly-unbound DB.
     env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,
+    // The Check attaches HERE — BEFORE `REVIEW_QUEUE.send` — so an admitted
+    // message finds a released row to adopt instead of racing the delivery
+    // holder (spec §7.7 step 4 / §7.9). The webhook waits at most
+    // `CHECK_ATTACH_INLINE_BUDGET_MS`; past that the enqueue proceeds and the
+    // invocation context keeps the attach, which the consumer's bounded
+    // takeover of a stalled delivery holder covers.
+    beforeEnqueue: async () => {
+      const attach = attachCheckOnAcceptance({ db, env: c.env, row, payload: outcome.payload });
+      try {
+        c.executionCtx.waitUntil(attach);
+      } catch {
+        // No invocation context (tests, a non-Worker host): the attach is
+        // already running detached and is best-effort either way.
+        void attach;
+      }
+      await withinBudget(attach, CHECK_ATTACH_INLINE_BUDGET_MS);
+    },
   });
-  // The Check attaches HERE, on the delivery path, once the job is on the
-  // queue: the run is created while the message is still waiting, so the PR
-  // shows its Check immediately instead of when a worker starts. `waitUntil`
-  // owns it — the response and the enqueue never wait for a Check (spec §7.10).
-  if (handled.kind === "enqueued") {
-    const attach = attachCheckOnAcceptance({ db, env: c.env, row, payload: outcome.payload });
-    try {
-      c.executionCtx.waitUntil(attach);
-    } catch {
-      // No invocation context (tests, a non-Worker host): the attach is
-      // already running detached and is best-effort either way.
-      void attach;
-    }
-  }
   return c.text("accepted", 200);
 });
 
