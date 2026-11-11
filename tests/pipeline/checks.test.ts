@@ -38,6 +38,7 @@ import {
   CHECK_LEASE_MS,
   CHECK_NAME,
   CHECK_RECOVERY_LEASE_MS,
+  listCheckReconcileBatch,
   rollbackCheckCreateDispatch,
   readPublishedReview,
   recordTerminalizeOutcome,
@@ -2844,6 +2845,44 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     expect(row.recovery_state).toBe("done");
   });
 
+  test("without a Checks surface the skip freezes the neutral intent for the reconciler", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const fake = settlingFake();
+    const attemptId = await attachedAttempt(db, fake);
+    // No commenter/adapter at all (the paused gate makes zero credential
+    // calls, architect lock L4): the settlement must still take the row and
+    // leave a conclusion the recovery lane can send.
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => null,
+      getCheckGate: async () => GATE,
+    });
+
+    const settled = await lifecycle.settleSkipped({
+      scope: SCOPE,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      reason: "review paused",
+    });
+
+    expect(settled).toBe(true);
+    expect(fake.updates).toHaveLength(0);
+    const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("unknown");
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    // A frozen intent is due immediately: no due time, no proof to wait for.
+    expect((await listCheckReconcileBatch(db, T0)).map((candidate) => candidate.identity.attemptId)).toEqual([attemptId]);
+  });
   test("a duplicate skip is a no-op: the row is already terminal", async () => {
     const db = await seededDb();
     CLOCK = T0;

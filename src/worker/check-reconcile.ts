@@ -824,7 +824,12 @@ async function reconcileCheckAttempt(
   else if (pending.kind === "pending" && proofPublicationId === null) {
     proofPublicationId = pending.publicationId;
   }
-  if (beforeDeadline) {
+  // The wait belongs to a row that still OWES a conclusion — including a frozen
+  // `failure` the arriving proof may still correct. The ONE exception is a skip
+  // settlement's `neutral` (§7.9): that conclusion is final, nothing can
+  // correct it and it owes no publication, so waiting for a proof that will
+  // never exist would leave the run open for the whole window.
+  if (beforeDeadline && row.desired !== "neutral") {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6, §7.11.2
     // step 2): a row whose App is disabled/deleted or whose installation
     // mapping vanished must take the durable suspension path, never loop with

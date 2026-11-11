@@ -63,6 +63,7 @@ import {
   readPublishedReview,
   recordCheckObservation,
   releaseAttachedCheck,
+  releaseCheckClaim,
   rollbackCheckCreateDispatch,
   setCheckCreateState,
   setCheckDesired,
@@ -1723,9 +1724,11 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     },
 
     async settleSkipped(input) {
-      // Eligibility before any claim: no Checks surface means nothing to close.
+      // A missing Checks surface does NOT end the settlement: the store-only
+      // path below freezes the neutral intent and lets the reconciler send it,
+      // so a paused App (whose gate forbids any credential work) still closes
+      // its run without a commenter.
       const adapter = deps.getAdapter(input.scope);
-      if (adapter === null) return false;
       const nowMs = deps.nowMs();
       const claimed = await claimAttachedCheckForSettlement(deps.db, {
         scope: input.scope,
@@ -1751,6 +1754,15 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       const intentFence = fenceFor(claimed.lease);
       if (!(await setCheckDesired(deps.db, identity.attemptId, intentFence.lease, conclusion, null, intentFence.nowMs))) {
         return false;
+      }
+      if (adapter === null) {
+        // STORE-ONLY settlement (spec §7.9): the intent is frozen and the lease
+        // is given back, which makes the row immediately due — the selector's
+        // `desired <> 'in_progress'` disjunct needs no due time — so the minute
+        // reconciler performs the single remote update. No credential is
+        // touched here, which is what lets the paused gate settle a run while
+        // still making ZERO config/GitHub calls (architect lock L4).
+        return releaseCheckClaim(deps.db, identity.attemptId, claimed.lease, deps.nowMs());
       }
       const ownedFence = fenceFor(claimed.lease);
       const owned = await getCheckOwnership(deps.db, identity.attemptId, ownedFence.lease, ownedFence.nowMs);

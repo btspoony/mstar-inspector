@@ -2812,53 +2812,44 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   // resuming the App must reuse the warm instance, and the credential
   // fingerprint (`github_app_id` + `private_key_enc`) is immune to
   // review_enabled writes.
-  /**
-   * The cached or freshly built commenter for THIS row — construction only: no
-   * token is minted and no GitHub call is made, so warming it on the paused
-   * path below costs one decrypt and can never start work.
-   */
-  const ensureCommenter = async (): Promise<{ commenter: ReviewCommenter; githubAppId: number }> => {
-    // The credential-fingerprint hardening (architect lock L1): the fingerprint is the
-    // exact string pair read from the row THIS call already fetched — zero
-    // extra reads, no hashing, never `updated_at` (the per-webhook
-    // touchLastWebhook would churn it). A re-saved identical PEM yields a NEW
-    // AES-GCM envelope → one harmless rebuild; a real rotation rebuilds with
-    // the new credential on the very next message.
-    const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
-    const cached = deps.appCommenters.get(appRef.appId);
-    if (cached !== undefined && cached.fingerprint === fingerprint) {
-      return { commenter: cached.commenter, githubAppId: cached.githubAppId };
-    }
-    // Cache miss (first message for this App) or fingerprint mismatch
-    // (rotation): decrypt + build + REPLACE the entry. A decrypt failure here
-    // leaves any pre-rotation entry in place but UNREACHABLE — it can only
-    // ever be returned by an exact fingerprint match, i.e. the envelope
-    // reverting to that entry's own bytes.
-    const pem = await createSecretbox(deps.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
-      row.private_key_enc,
-      `github_apps.private_key_enc:${row.id}`,
-    );
-    const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
-    deps.appCommenters.set(appRef.appId, { commenter, fingerprint, githubAppId: row.github_app_id });
-    return { commenter, githubAppId: row.github_app_id };
-  };
   if (row.review_enabled === 0) {
-    // §7.9: a delivery attached BEFORE the pause still has a run to settle, and
-    // settling needs this App's Checks adapter. Warming it here is
-    // construction-only (no token mint, no GitHub call) and best-effort: a
-    // decrypt fault keeps the paused ACK intact.
-    try {
-      await ensureCommenter();
-    } catch {
-      // The paused ACK stands; the attach row falls to the grace/deadline path.
-    }
+    // Architect lock L4: the pause gate makes ZERO credential/GitHub calls —
+    // no decrypt, no commenter, no token. A delivery attached BEFORE the pause
+    // is settled by the STORE-only path (§7.9), which needs no commenter.
     return { kind: "paused" };
   }
-  const { commenter, githubAppId } = await ensureCommenter();
+  // The credential-fingerprint hardening (architect lock L1): the fingerprint is the
+  // exact string pair read from the row THIS call already fetched — zero
+  // extra reads, no hashing, never `updated_at` (the per-webhook
+  // touchLastWebhook would churn it). A re-saved identical PEM yields a NEW
+  // AES-GCM envelope → one harmless rebuild; a real rotation rebuilds with
+  // the new credential on the very next message.
+  const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
+  const cached = deps.appCommenters.get(appRef.appId);
+  if (cached !== undefined && cached.fingerprint === fingerprint) {
+    return {
+      kind: "ok",
+      commenter: cached.commenter,
+      githubAppId: cached.githubAppId,
+      workspaceId: row.workspace_id,
+      reviewLevel: row.review_level,
+    };
+  }
+  // Cache miss (first message for this App) or fingerprint mismatch
+  // (rotation): decrypt + build + REPLACE the entry. A decrypt failure here
+  // leaves any pre-rotation entry in place but UNREACHABLE — it can only
+  // ever be returned by an exact fingerprint match, i.e. the envelope
+  // reverting to that entry's own bytes.
+  const pem = await createSecretbox(deps.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
+    row.private_key_enc,
+    `github_apps.private_key_enc:${row.id}`,
+  );
+  const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
+  deps.appCommenters.set(appRef.appId, { commenter, fingerprint, githubAppId: row.github_app_id });
   return {
     kind: "ok",
     commenter,
-    githubAppId,
+    githubAppId: row.github_app_id,
     workspaceId: row.workspace_id,
     reviewLevel: row.review_level,
   };

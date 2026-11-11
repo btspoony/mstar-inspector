@@ -6275,13 +6275,17 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(makeBatch(payload));
 
     expect(messageAckCalls).toHaveLength(1);
+    // The paused gate makes ZERO credential/GitHub calls (architect lock L4),
+    // so the settlement here is STORE-ONLY: the neutral intent is frozen and
+    // the lease given back, and the minute reconciler sends the one update.
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("neutral");
-    expect(row.observed).toBe("neutral");
-    expect(row.terminal_ms).not.toBeNull();
-    const update = checkRequests.find((request) => request.op === "update")!;
-    expect((update.params as unknown as ChecksUpdateParams).conclusion).toBe("neutral");
-    expect((update.params as unknown as ChecksUpdateParams).output.summary).toContain("review paused");
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.holder).toBeNull();
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.desired_summary).toContain("review paused");
+    expect(checkRequests.some((request) => request.op === "update")).toBe(false);
   });
 
   test("check lifecycle: a DLQ-bound runner failure terminalizes the same attempt as failure", async () => {

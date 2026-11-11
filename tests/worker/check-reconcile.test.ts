@@ -46,6 +46,7 @@ import {
   getCheckAttempt,
   listCheckReconcileBatch,
   releaseAttachedCheck,
+  releaseCheckClaim,
   retryCheckRecovery,
   setCheckCreateState,
   setCheckDesired,
@@ -198,6 +199,56 @@ describe("an attach row nobody adopted (spec §7.9 / §7.11.2)", () => {
   });
 });
 
+describe("a store-only skip settlement (spec §7.9 / RL-10)", () => {
+  test("the reconciler sends the frozen neutral intent on the next tick", async () => {
+    const db = seededDb();
+    // What the paused (or any credential-less) skip path does: take the attach
+    // row, freeze the neutral intent, give the lease back. No commenter and no
+    // remote call happen on that path (architect lock L4).
+    const { attempt, lease } = await claim(db, { nowMs: T0, holder: "skip:settler", executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS });
+    const id = attempt.identity.attemptId;
+    await setCheckCreateState(db, id, lease, "sending", undefined, T0);
+    expect(await attachCheckRunId(db, id, lease, 4242, T0)).toBe(true);
+    expect(
+      await setCheckDesired(
+        db,
+        id,
+        lease,
+        { desired: "neutral", title: CHECK_NAME, summary: CHECK_SUMMARIES.skippedByDelivery("review paused") },
+        null,
+        T0,
+      ),
+    ).toBe(true);
+    expect(await releaseCheckClaim(db, id, lease, T0)).toBe(true);
+
+    const script: AdapterScript = {
+      ...agreeingScript("neutral", 4242),
+      complete: async (identity, checkRunId, conclusion) => ({
+        kind: "completed",
+        remote: remoteFor(identity, { id: checkRunId, status: "completed", conclusion: conclusion.desired }),
+      }),
+    };
+    const fetchStub = stubFetch();
+    try {
+      // A frozen intent is due immediately — no due time and no publication to
+      // wait for — so the very next pass sends its one update instead of
+      // deferring it to the deadline.
+      const summary = await run(db, { now: () => T0 + 1, credentials: scriptedCredentials(db, script) });
+      expect(summary.completed).toBe(1);
+      expect(summary.deferred).toBe(0);
+      // At least the one update request: the intent was already frozen, so the
+      // pass spends its budget on the send, not on deciding again.
+      expect(fetchStub.urls.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, id);
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("neutral");
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.check_run_id).toBe(4242);
+  });
+});
 describe("due selection (spec §7.11.2 predicate)", () => {
   test("a LIVE lease is never examined, claimed or mutated by a stale reconciler", async () => {
     const db = seededDb();
