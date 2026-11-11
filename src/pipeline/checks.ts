@@ -48,7 +48,9 @@
 
 import type { D1Like } from "../store/types";
 import {
+  adoptReleasedCheckAttempt,
   attachCheckRunId,
+  CHECK_ATTACH_WINDOW_MS,
   CHECK_BACKOFF_MS,
   CHECK_NAME,
   claimAttempt,
@@ -57,6 +59,7 @@ import {
   readPublicationProof,
   readPublishedReview,
   recordCheckObservation,
+  releaseCheckClaim,
   rollbackCheckCreateDispatch,
   setCheckCreateState,
   setCheckDesired,
@@ -1288,15 +1291,106 @@ export type CheckLifecycle = {
 };
 
 /**
+ * What the delivery-side attach needs: the registry plus ONE App's Checks
+ * adapter (the single purpose-scoped client, spec §7.6).
+ */
+export type CheckAttachDeps = {
+  db: D1Like;
+  adapter: ChecksAdapter;
+  nowMs: () => number;
+};
+
+/**
+ * Attach a Check to an ACCEPTED delivery (spec §7.7 step 4 / §7.9).
+ *
+ * The delivery path claims the attempt, creates the `in_progress` run against
+ * the payload's head SHA and gives the row straight back, so the run appears
+ * within seconds of the webhook instead of when a worker finally starts the
+ * message. The row keeps `create_state = 'known'` and the run id — the durable
+ * facts the consumer's `begin` adopts — and the long
+ * `CHECK_ATTACH_WINDOW_MS` deadline keeps it adoptable across the queue delay.
+ *
+ * One run per head: the claim goes through `claimAttempt`, so a duplicate
+ * delivery, a queue redelivery or a synchronize event that finds the key
+ * `busy`/`terminal` creates nothing. Best-effort by contract: a failed create
+ * releases the row to the recovery lane (which adopts rather than re-creates)
+ * and returns `false`; the caller owns "never block the enqueue, never change
+ * the response".
+ */
+export async function attachCheckAtAcceptance(
+  deps: CheckAttachDeps,
+  input: { scope: Scope; githubAppId: number; headSha: string; triggeredBy: string; action: string },
+): Promise<boolean> {
+  const claimed = await claimAttempt(deps.db, {
+    scope: input.scope,
+    githubAppId: input.githubAppId,
+    headSha: input.headSha,
+    triggeredBy: input.triggeredBy,
+    action: input.action,
+    holder: `delivery:${crypto.randomUUID()}`,
+    nowMs: deps.nowMs(),
+    executionDeadlineMs: deps.nowMs() + CHECK_ATTACH_WINDOW_MS,
+  });
+  // `busy` (another delivery, or an earlier attach, owns a nonterminal row for
+  // this key) and `terminal` (the head is already published) both mean the one
+  // run this head may have already exists: nothing to attach, nothing to mint.
+  if (claimed.kind !== "claimed") return false;
+  const { identity } = claimed.attempt;
+  const begun = await deps.adapter.beginCheck({ identity, lease: claimed.lease });
+  if (begun.kind !== "ready") {
+    // A request may already have reached GitHub (`requests > 0`), so the row is
+    // handed to the recovery lane as possibly-sent and adopted there instead of
+    // being created a second time (RL-12).
+    await releaseToRecovery(deps, identity.attemptId, claimed.lease, begun.reason, begun.requests > 0);
+    return false;
+  }
+  const attached = await attachCheckRunId(deps.db, identity.attemptId, claimed.lease, begun.remote.id, deps.nowMs());
+  if (!attached) {
+    await releaseToRecovery(deps, identity.attemptId, claimed.lease, "the attach could not record the created run", true);
+    return false;
+  }
+  // Give the row back with every durable fact intact (identity, the run id,
+  // `create_state = 'known'`, `recovery_state = 'pending'`) and NO due time:
+  // the admitted message adopts it through `adoptReleasedCheckAttempt`, and a
+  // row nobody ever adopts is closed by the reconciler when the attach window
+  // expires.
+  return releaseCheckClaim(deps.db, identity.attemptId, claimed.lease, deps.nowMs());
+}
+
+/** Release an attach attempt to the recovery lane with the honest state. */
+async function releaseToRecovery(
+  deps: CheckAttachDeps,
+  attemptId: string,
+  lease: Lease,
+  reason: string,
+  requestsSpent: boolean,
+): Promise<void> {
+  const nowMs = deps.nowMs();
+  await deferCheckRecovery(
+    deps.db,
+    attemptId,
+    lease,
+    {
+      state: requestsSpent ? "remote-unconfirmed" : "pending",
+      nextAttemptMs: nowMs + CHECK_BACKOFF_MS[0]!,
+      reason,
+    },
+    nowMs,
+  );
+}
+
+/**
  * The production §7.10 lifecycle.
  *
  * `begin` maps the seam input onto a FENCED attempt: an ineligible App (no
  * Checks surface) registers nothing, `claimAttempt` is the one race-decided
  * insert, and only a create whose response proved the attempt's identity is
- * attached to the row before the handle is returned. `busy` (a nonterminal
- * attempt owns the key — duplicate delivery included) and `terminal` (a
- * generation already ended with a PROVEN publication) both yield `null`: no
- * second row, no second remote run.
+ * attached to the row before the handle is returned. A `busy` answer whose
+ * active row the DELIVERY path already attached (released, `known`, run id
+ * present) is adopted through the same fenced claim and yields that row's
+ * handle, so the review terminalizes the run inline. A `busy` row a live
+ * holder owns, and `terminal` (a generation already ended with a PROVEN
+ * publication), yield `null`: no second row, no second remote run.
  *
  * `terminalize` decides from PERSISTED proof, never from the code path that
  * called it: only this attempt's OWN publication is read — RL-12 head reuse
@@ -1417,9 +1511,32 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         nowMs: deps.nowMs(),
         executionDeadlineMs: input.executionDeadlineMs,
       });
-      // busy = a nonterminal attempt already owns this key (a duplicate
-      // delivery's second pass included); terminal = a generation of this key
-      // already ended with a proven publication. Either way: no Check here.
+      // busy = a nonterminal attempt already owns this key: either the
+      // delivery path already attached this head's run (spec §7.7 step 4) or a
+      // duplicate delivery's second pass is looking at the first one's row. A
+      // row that was RELEASED with a known run id is adopted — the review then
+      // terminalizes that run inline instead of leaving it to the reconciler —
+      // while a row a live holder owns, or one whose intent is already frozen,
+      // is never taken (`adoptReleasedCheckAttempt` fences on exactly that).
+      // terminal = a generation of this key already ended with a proven
+      // publication: no Check here.
+      if (claim.kind === "busy") {
+        const adopted = await adoptReleasedCheckAttempt(deps.db, {
+          attemptId: claim.attempt.identity.attemptId,
+          githubAppId: input.githubAppId,
+          holder: `consumer:${crypto.randomUUID()}`,
+          executionDeadlineMs: input.executionDeadlineMs,
+          nowMs: deps.nowMs(),
+        });
+        if (adopted === null) return null;
+        return {
+          attemptId: claim.attempt.identity.attemptId,
+          scope: claim.attempt.identity.scope,
+          githubAppId: claim.attempt.identity.githubAppId,
+          headSha: claim.attempt.identity.headSha,
+          lease: adopted,
+        };
+      }
       if (claim.kind !== "claimed") return null;
       const { identity } = claim.attempt;
       const begun = await adapter.beginCheck({ identity, lease: claim.lease });

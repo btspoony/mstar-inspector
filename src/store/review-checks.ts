@@ -204,6 +204,15 @@ export const CHECK_NAME = "mstar-inspector review";
 export const CHECK_EXTERNAL_ID_PREFIX = "mstar-check:v1:";
 /** Claim lease == immutable execution deadline (spec §7.9: claim time + 900,000ms). */
 export const CHECK_LEASE_MS = 900_000;
+/**
+ * The delivery-side attach window (spec §7.9). The run is created when the
+ * delivery is ACCEPTED, but the queue may only hand the message to a consumer
+ * minutes later, so the attach row's deadline has to outlive that delay. It is
+ * NOT an execution window: the consumer narrows the row to
+ * `CHECK_EXECUTION_WINDOW_MS` the moment it adopts it, and a row nobody ever
+ * adopts is closed by the reconciler when this window expires.
+ */
+export const CHECK_ATTACH_WINDOW_MS = 3_600_000;
 /** Recovery lease (spec §7.9: "Recovery lease is 120,000ms"). */
 export const CHECK_RECOVERY_LEASE_MS = 120_000;
 /**
@@ -758,6 +767,74 @@ export async function claimCheckRecovery(
     .first<Pick<ReviewCheckRow, "holder" | "lease_epoch" | "lease_until_ms">>();
   if (row === null || row.holder !== holder || row.lease_until_ms === null) return null;
   return { holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+}
+
+/**
+ * Adopt a RELEASED attempt (spec §7.7 step 4 / §7.9): the delivery path
+ * creates the run at acceptance and gives the row back, so the admitted
+ * message can take it over and terminalize inline instead of leaving the run
+ * to the reconciler.
+ *
+ * ONE conditional UPDATE, like every other claim. Only a row that NO holder
+ * owns is adopted — a row a live holder still owns belongs to that invocation
+ * and is never taken — and the row must still want `in_progress`, carry a
+ * KNOWN run id (nothing else is adoptable: a row without a proven run has no
+ * handle to return) and still be inside its window. The epoch is bumped, so a
+ * late write from the attach's own holder is refused by the same fence every
+ * other mutation uses.
+ *
+ * `execution_deadline_ms` is NARROWED here to the adopted lease: the attach
+ * window is long only so a queued message can still find its run, while the
+ * execution window is the normal one (spec §7.9).
+ */
+export async function adoptReleasedCheckAttempt(
+  db: D1Like,
+  input: {
+    attemptId: string;
+    /** The App these credentials authenticate as — never a foreign App's row. */
+    githubAppId: number;
+    holder: string;
+    /** The execution deadline the adopting invocation owns (`now + 900,000`). */
+    executionDeadlineMs: number;
+    nowMs: number;
+  },
+): Promise<Lease | null> {
+  if (input.holder.length === 0) {
+    throw new Error("review-checks: adoption requires a nonblank holder identity");
+  }
+  if (input.executionDeadlineMs <= input.nowMs) {
+    throw new Error("review-checks: execution deadline must be after the adoption time");
+  }
+  const adopted = await db
+    .prepare(
+      `UPDATE review_checks
+          SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?,
+              execution_deadline_ms = ?, updated_ms = ?
+        WHERE id = ? AND ${NONTERMINAL_WHERE}
+          AND holder IS NULL AND lease_until_ms IS NULL
+          AND recovery_state IN ('pending','remote-unconfirmed')
+          AND desired = 'in_progress'
+          AND create_state = 'known' AND check_run_id IS NOT NULL
+          AND github_app_id = ?
+          AND execution_deadline_ms > ?`,
+    )
+    .bind(
+      input.holder,
+      input.executionDeadlineMs,
+      input.executionDeadlineMs,
+      input.nowMs,
+      input.attemptId,
+      input.githubAppId,
+      input.nowMs,
+    )
+    .run();
+  if (adopted.meta.changes !== 1) return null;
+  const row = await db
+    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM review_checks WHERE id = ?`)
+    .bind(input.attemptId)
+    .first<Pick<ReviewCheckRow, "holder" | "lease_epoch" | "lease_until_ms">>();
+  if (row === null || row.holder !== input.holder || row.lease_until_ms === null) return null;
+  return { holder: input.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
 }
 
 /**

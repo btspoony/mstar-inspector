@@ -22,6 +22,7 @@
 
 import { describe, expect, mock, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
+import type { ExecutionContext } from "@cloudflare/workers-types";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
@@ -273,6 +274,53 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       queued: "2026-03-01T10:00:00.000Z",
       ledger: "2026-03-01T10:00:00.000Z",
     });
+  });
+
+  test("the accepted delivery attaches the Check on the delivery path, and a Check failure never changes the answer", async () => {
+    const db = createMigratedTestD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+    // The invocation context is what owns the attach (spec §7.10): collect its
+    // promises so the assertion below observes a finished attach, not a race.
+    const waited: Array<Promise<unknown>> = [];
+    const ctx = {
+      waitUntil: (promise: Promise<unknown>) => {
+        waited.push(promise);
+      },
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext;
+
+    const res = await worker.fetch(
+      new Request("https://worker.local/webhook/default/app-x", {
+        method: "POST",
+        headers: { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+        body,
+      }),
+      env,
+      ctx,
+    );
+
+    // A Check failure (this fixture's "private key" is not a real PEM, so the
+    // create is refused) must never change the answer or cost the enqueue.
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(waited).toHaveLength(1);
+    await Promise.all(waited);
+
+    // The attach still claimed the attempt for the payload's head and left the
+    // row with NO holder — released for the consumer to adopt, or for the
+    // reconciler once its window expires.
+    const rows = db.raw
+      .query("SELECT head_sha, holder, lease_until_ms, check_run_id FROM review_checks")
+      .all() as Array<{ head_sha: string; holder: string | null; lease_until_ms: number | null; check_run_id: number | null }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.head_sha).toBe("abc123");
+    expect(rows[0]!.holder).toBeNull();
+    expect(rows[0]!.lease_until_ms).toBeNull();
+    expect(rows[0]!.check_run_id).toBeNull();
   });
 
   test("wrong-App secret signature → 401, zero enqueue (sibling-App isolation, AC-B5-isolation)", async () => {

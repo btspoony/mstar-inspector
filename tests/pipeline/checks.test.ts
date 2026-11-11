@@ -30,13 +30,16 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  adoptReleasedCheckAttempt,
   claimAttempt,
   attachCheckRunId,
+  CHECK_ATTACH_WINDOW_MS,
   CHECK_LEASE_MS,
   CHECK_NAME,
   CHECK_RECOVERY_LEASE_MS,
   rollbackCheckCreateDispatch,
   readPublishedReview,
+  recordTerminalizeOutcome,
   setCheckCreateState,
   setCheckDesired,
   type CheckAttempt,
@@ -49,6 +52,7 @@ import {
 import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
+  attachCheckAtAcceptance,
   createChecksAdapter,
   createCheckBeginLatch,
   createCheckLifecycle,
@@ -2303,6 +2307,217 @@ describe("the remote non-idempotency boundary (RL-12)", () => {
     const adopt = fakeChecks({});
     expect((await adapterFor(db, adopt.octokit).adoptCheckRun({ identity: attempt.identity })).kind).toBe("incomplete");
     expect(adopt.creates).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Attach at delivery acceptance (spec §7.7 step 4) and adoption (§7.9)
+// ---------------------------------------------------------------------------
+
+/** The delivery-side attach call, over the real registry and a scripted surface. */
+const ATTACH_INPUT = {
+  scope: SCOPE,
+  githubAppId: GITHUB_APP_ID,
+  headSha: SHA,
+  triggeredBy: "octocat",
+  action: "review",
+} as const;
+
+/** A create response that echoes the attempt's own identity (the adapter's proof). */
+function echoCreate(params: ChecksCreateParams): CheckRunPayload {
+  return {
+    id: 4242,
+    name: CHECK_NAME,
+    head_sha: params.head_sha,
+    external_id: params.external_id,
+    status: "in_progress",
+    conclusion: null,
+    app: { id: GITHUB_APP_ID },
+  };
+}
+
+async function attachRow(db: TestD1): Promise<Record<string, string | number | null>> {
+  return (await db.prepare("SELECT * FROM review_checks ORDER BY created_ms, id LIMIT 1").first()) as Record<
+    string,
+    string | number | null
+  >;
+}
+
+describe("attach on delivery acceptance (spec §7.7 step 4)", () => {
+  test("creates exactly one run and leaves the row adoptable for the consumer", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const fake = fakeChecks({ create: echoCreate });
+
+    const attached = await attachCheckAtAcceptance(
+      { db, adapter: adapterFor(db, fake.octokit), nowMs: () => CLOCK },
+      ATTACH_INPUT,
+    );
+
+    expect(attached).toBe(true);
+    expect(fake.creates).toHaveLength(1);
+    const row = await attachRow(db);
+    // The durable facts the consumer's `begin` adopts, and nothing else: no
+    // holder, no lease, no spent attempt — the row is released, not owned.
+    expect(row.create_state).toBe("known");
+    expect(row.check_run_id).toBe(4242);
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
+    expect(row.desired).toBe("in_progress");
+    expect(row.attempts).toBe(0);
+    // The attach window, not the execution window: a queued message admitted
+    // minutes later must still find its row adoptable.
+    expect(row.execution_deadline_ms).toBe(T0 + CHECK_ATTACH_WINDOW_MS);
+  });
+
+  test("a duplicate delivery for the same head mints no second run", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const fake = fakeChecks({ create: echoCreate });
+    const deps = { db, adapter: adapterFor(db, fake.octokit), nowMs: () => CLOCK };
+
+    expect(await attachCheckAtAcceptance(deps, ATTACH_INPUT)).toBe(true);
+    // A queue redelivery / a second webhook for the same head: the claim is
+    // `busy`, so nothing is created and nothing is overwritten.
+    expect(await attachCheckAtAcceptance(deps, ATTACH_INPUT)).toBe(false);
+    expect(fake.creates).toHaveLength(1);
+    const rows = (await db.prepare("SELECT COUNT(*) AS n FROM review_checks").first()) as { n: number };
+    expect(rows.n).toBe(1);
+  });
+
+  test("a failing create never throws: the row goes to the recovery lane as possibly-sent", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // The scripted surface rejects the create (an API/permission failure).
+    const fake = fakeChecks({});
+
+    const attached = await attachCheckAtAcceptance(
+      { db, adapter: adapterFor(db, fake.octokit), nowMs: () => CLOCK },
+      ATTACH_INPUT,
+    );
+
+    expect(attached).toBe(false);
+    expect(fake.creates).toHaveLength(1);
+    const row = await attachRow(db);
+    expect(row.holder).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toBe(T0 + 60_000);
+    // The run id is unknown, so recovery adopts instead of blindly creating.
+    expect(row.check_run_id).toBeNull();
+  });
+});
+
+describe("adoption of a released attach row (spec §7.9)", () => {
+  test("the consumer adopts the attached run and terminalizes it inline", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    let externalId = "";
+    const fake = fakeChecks({
+      create: (params) => {
+        externalId = params.external_id;
+        return echoCreate(params);
+      },
+      update: (params) => ({
+        id: params.check_run_id,
+        name: CHECK_NAME,
+        head_sha: SHA,
+        external_id: externalId,
+        status: "completed",
+        conclusion: params.conclusion,
+        app: { id: GITHUB_APP_ID },
+      }),
+    });
+    const adapter = adapterFor(db, fake.octokit);
+    expect(await attachCheckAtAcceptance({ db, adapter, nowMs: () => CLOCK }, ATTACH_INPUT)).toBe(true);
+    const row = await attachRow(db);
+    const attemptId = row.id as string;
+
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapter,
+      getCheckGate: async () => GATE,
+    });
+    const handle = await lifecycle.begin({
+      ...ATTACH_INPUT,
+      executionDeadlineMs: CLOCK + CHECK_LEASE_MS,
+    });
+
+    // The SAME row and the SAME run: no second generation, no second create.
+    expect(handle).not.toBeNull();
+    expect(handle!.attemptId).toBe(attemptId);
+    expect(fake.creates).toHaveLength(1);
+    const adopted = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(adopted.holder).toBe(handle!.lease.holder);
+    expect(adopted.lease_epoch).toBe(handle!.lease.epoch);
+    // The long attach window is narrowed to the execution window the adopting
+    // invocation owns.
+    expect(adopted.execution_deadline_ms).toBe(CLOCK + CHECK_LEASE_MS);
+
+    // Step 12 runs against the adopted lease: the run reaches its conclusion
+    // inline, which is what the consumer records as `completed`.
+    await lifecycle.terminalize({ handle: handle!, publicationId: null, outcome: "publication-unknown" });
+    expect(fake.updates).toHaveLength(1);
+    const terminal = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(terminal.desired).toBe("failure");
+    expect(terminal.observed).toBe("failure");
+    expect(terminal.terminal_ms).not.toBeNull();
+    await recordTerminalizeOutcome(db, attemptId, "completed", 5);
+    const recorded = (await db.prepare("SELECT terminalize_outcome FROM review_checks WHERE id = ?").bind(attemptId).first()) as {
+      terminalize_outcome: string;
+    };
+    expect(recorded.terminalize_outcome).toBe("completed");
+  });
+
+  test("a row a live holder owns is not adopted, so the review proceeds without a handle", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const { attempt, lease } = await claimedAttempt(db, { holder: "run-a" });
+    await attachedRun(db, attempt, lease, 4242);
+    const fake = fakeChecks({ create: echoCreate });
+
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+    const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
+
+    expect(handle).toBeNull();
+    expect(fake.creates).toHaveLength(0);
+    const row = await rowOf(db, attempt);
+    // The live holder keeps its lease: the epoch did not move.
+    expect(row.holder).toBe("run-a");
+    expect(row.lease_epoch).toBe(1);
+  });
+
+  test("a terminal row is never adopted", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const fake = fakeChecks({ create: echoCreate });
+    expect(await attachCheckAtAcceptance({ db, adapter: adapterFor(db, fake.octokit), nowMs: () => CLOCK }, ATTACH_INPUT)).toBe(true);
+    const row = await attachRow(db);
+    const attemptId = row.id as string;
+    await db.prepare("UPDATE review_checks SET terminal_ms = ? WHERE id = ?").bind(T0, attemptId).run();
+
+    expect(
+      await adoptReleasedCheckAttempt(db, {
+        attemptId,
+        githubAppId: GITHUB_APP_ID,
+        holder: "consumer:late",
+        executionDeadlineMs: CLOCK + CHECK_LEASE_MS,
+        nowMs: CLOCK,
+      }),
+    ).toBeNull();
   });
 });
 
