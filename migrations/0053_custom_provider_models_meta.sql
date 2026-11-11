@@ -1,0 +1,18 @@
+-- 0053_custom_provider_models_meta.sql — per-model metadata declared
+-- beside a custom provider's model ids.
+--
+-- app_custom_providers.model_ids stays the membership face: the ordered TEXT
+-- JSON id array every reader already parses (and the migration that carries it
+-- across). models_meta is an OVERLAY keyed by those ids, carrying what the
+-- App owner stated about each model:
+--   { "<model_id>": { contextWindow?: number, maxTokens?: number,
+--                     name?: string, reasoning?: boolean, input?: string[] } }
+-- An unset fact is a missing key or a JSON null — never zero and never a
+-- guessed number, so a declaration with ids only stays "saved, not usable"
+-- instead of gaining a size nobody stated.
+--
+-- Append-only: one ADD COLUMN with the '{}' default, which carries every
+-- existing row (no backfill DML) and leaves its model ids untouched. The
+-- dashboard store validates the overlay on write and fails loud on a tampered
+-- row on read.
+ALTER TABLE app_custom_providers ADD COLUMN models_meta TEXT NOT NULL DEFAULT '{}';

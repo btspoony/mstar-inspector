@@ -1963,7 +1963,9 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       JSON.stringify(CUSTOM.model_ids),
       legacyEnc,
     );
-    applyMigrations(db, ["0024_provider_multi_key.sql"]);
+    // 0053 rides along because the assertions below drive the CURRENT store,
+    // which reads and writes the models_meta overlay on this table.
+    applyMigrations(db, ["0024_provider_multi_key.sql", "0053_custom_provider_models_meta.sql"]);
     const store = configStore(db);
     // The legacy row still decrypts through the consumer face and is promoted
     // to the three-segment AAD under its derived id.

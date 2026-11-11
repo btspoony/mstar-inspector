@@ -199,8 +199,19 @@ export const WEBHOOK_DELIVERIES_MIGRATIONS: readonly string[] = [
   "0038_webhook_path_drop.sql",
 ];
 
-/** 0011 plus every migration after the 0038 rebuild (the delivery branch's tail). */
-export const WEBHOOK_DELIVERIES_TAIL: readonly string[] = ["0011_webhook_deliveries.sql", ...DERIVED_TAIL];
+/**
+ * 0011 plus every migration after the 0038 rebuild (the delivery branch's tail).
+ * 0012 creates `app_custom_providers`, which a later tail migration alters,
+ * and alters `app_provider_keys` (0006) — this shape never applied either in
+ * its prefix, so both are listed here at their wrangler position instead of a
+ * table-less tail failing at the ALTER.
+ */
+export const WEBHOOK_DELIVERIES_TAIL: readonly string[] = [
+  "0006_app_provider_config.sql",
+  "0011_webhook_deliveries.sql",
+  "0012_custom_providers_and_key_updated_at.sql",
+  ...DERIVED_TAIL,
+];
 
 // The delivery branch's full shape: the shared prefix, then 0011 + the tail.
 shape("webhook-deliveries", [...WEBHOOK_DELIVERIES_MIGRATIONS, ...WEBHOOK_DELIVERIES_TAIL]);
