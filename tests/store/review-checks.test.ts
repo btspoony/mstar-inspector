@@ -1067,6 +1067,60 @@ describe("attach grace (spec §7.9)", () => {
   });
 });
 
+describe("a settled neutral row does not retire the head (spec §7.9)", () => {
+  test("a later claim for the same head is a new generation with a new run id", async () => {
+    const db = seededDb();
+    const first = await claim(db);
+    const firstId = first.attempt.identity.attemptId;
+    await attachRun(db, firstId, first.lease, 4242);
+    // What a skip settlement leaves: a neutral intent AND observation with NO
+    // publication link — nothing was published for this head.
+    expect(
+      await setCheckDesired(
+        db,
+        firstId,
+        first.lease,
+        { desired: "neutral", title: CHECK_NAME, summary: "review paused" },
+        null,
+        T0,
+      ),
+    ).toBe(true);
+    expect(
+      await recordCheckObservation(
+        db,
+        firstId,
+        first.lease,
+        {
+          id: 4242,
+          name: CHECK_NAME,
+          head_sha: SHA,
+          external_id: first.attempt.identity.externalId,
+          app: { id: APP_NUMERIC_ID },
+          status: "completed",
+          conclusion: "neutral",
+        },
+        T0,
+      ),
+    ).toBe(true);
+    const settled = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(firstId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(settled.observed).toBe("neutral");
+    expect(settled.terminal_ms).not.toBeNull();
+    expect(settled.publication_id).toBeNull();
+
+    // The same head is claimable again: a neutral settlement proves nothing was
+    // published, so a retried (or resumed) delivery must still be able to run
+    // its own review. The new generation gets a fresh row and run id.
+    const second = await claimAttempt(db, claimInput({ holder: "run-b", nowMs: T0 + 60_000 }));
+    expect(second.kind).toBe("claimed");
+    if (second.kind !== "claimed") return;
+    expect(second.attempt.identity.generation).toBe(2);
+    expect(second.attempt.identity.attemptId).not.toBe(firstId);
+    expect(second.attempt.identity.externalId).not.toBe(first.attempt.identity.externalId);
+  });
+});
 describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
   test("a live claim lease hides a row; the release makes it a candidate", async () => {
     const db = seededDb();

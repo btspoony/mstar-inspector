@@ -6288,6 +6288,101 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.some((request) => request.op === "update")).toBe(false);
   });
 
+  test("check lifecycle: a guard-held delivery never settles its attached run", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const payload = makePayload();
+    // The delivery attached this message's run; the guard then holds it for a
+    // delayed retry. That retry reviews the SAME head, so freezing the intent
+    // now would retire the head it is about to review.
+    const attached = await attachCheckAtAcceptance(
+      { db: db as never, adapter, nowMs: () => Date.now() },
+      {
+        scope: {
+          appId: payload.appRef.appId,
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        },
+        githubAppId: 424242,
+        headSha: SHA,
+        triggeredBy: payload.triggered_by,
+        action: payload.action,
+      },
+    );
+    expect(attached.kind).toBe("attached");
+    await seedInflight(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(payload));
+
+    expect(messageRetryCalls).toHaveLength(1);
+    // Untouched: the retry adopts this row and runs its own review.
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("in_progress");
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    expect(checkRequests.some((request) => request.op === "update")).toBe(false);
+  });
+
+  test("check lifecycle: the settlement is keyed on the payload SHA, not the checkout SHA", async () => {
+    reset();
+    const checkoutSha = "feedfacefeedfacefeedfacefeedfacefeedface";
+    sandbox.resolvedSha = checkoutSha;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    kvState.getValue = "done"; // the CHECKOUT sha already has a completed review
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const payload = makePayload(); // payload head_sha = SHA
+    const attached = await attachCheckAtAcceptance(
+      { db: db as never, adapter, nowMs: () => Date.now() },
+      {
+        scope: {
+          appId: payload.appRef.appId,
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        },
+        githubAppId: 424242,
+        headSha: SHA,
+        triggeredBy: payload.triggered_by,
+        action: payload.action,
+      },
+    );
+    expect(attached.kind).toBe("attached");
+    // The overlap: this invocation's begin yields no handle, so the skip path
+    // is what has to close the delivery's own row.
+    const real = createCheckLifecycle({
+      db: db as never,
+      nowMs: () => Date.now(),
+      getAdapter: () => adapter,
+      getCheckGate: async () => GATE,
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+      checks: { ...real, begin: async () => null },
+    });
+
+    await consumer(makeBatch(payload));
+
+    // The row attached at the PAYLOAD sha is settled; a settlement keyed on the
+    // checkout sha would have found no row and left this one in progress.
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("neutral");
+    expect(row.terminal_ms).not.toBeNull();
+    const update = checkRequests.find((request) => request.op === "update")!;
+    expect((update.params as unknown as ChecksUpdateParams).conclusion).toBe("neutral");
+    expect(checkRows(db)).toHaveLength(1);
+  });
   test("check lifecycle: a DLQ-bound runner failure terminalizes the same attempt as failure", async () => {
     reset();
     sandbox.runnerExitCode = 1;

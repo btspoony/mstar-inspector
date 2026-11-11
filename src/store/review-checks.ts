@@ -571,6 +571,17 @@ export async function claimAttempt(
   // publication — so gating on `observed` would mint generation N+1 for a head
   // that is durably published.
   //
+  // `neutral` ALONE no longer blocks a claim. A skip SETTLEMENT closes its row
+  // `neutral` with no publication link, because nothing was published: retiring
+  // the head there would leave a later, ADMITTED delivery of the same head
+  // unable to run its own review (a retried guard refusal, a paused-then-resumed
+  // App) — a published review with no in-progress run and no final Check. Only a
+  // PROVEN outcome blocks: `observed = 'success'` here, plus the EXACT-proof
+  // subquery below (a link alone never suppresses a claim — an unproven, foreign
+  // or malformed link is not a publication). The new generation gets a fresh row
+  // and run id, so the remote surface shows the newest run, which is the honest
+  // one. `failure` was always retryable for the same reason.
+  //
   // The proof test is EXACT, because suppressing a claim is itself a claim of
   // success: a merely non-null FK would let a foreign-scope publication id, a
   // prepared payload, or malformed JSON silently dedup a head that was never
@@ -645,7 +656,7 @@ export async function claimAttempt(
   )`;
   const noProvenPublication = `(
     (SELECT COUNT(*) FROM review_checks p
-      WHERE p.attempt_key = ? AND p.observed IN ('success','neutral')) = 0
+      WHERE p.attempt_key = ? AND p.observed = 'success') = 0
     AND ${provenPublication} = 0
   )`;
   const insert = db

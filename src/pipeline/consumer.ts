@@ -4076,12 +4076,22 @@ async function processMessage(
    * a red Check on a commit that was never reviewed (RL-10). The lifecycle
    * takes that row and concludes it `neutral` with the skip reason.
    *
+   * `attachedHeadSha` MUST be the PAYLOAD's head SHA — the one the delivery
+   * path attached with (`payload.head_sha`), never the authoritative checkout
+   * SHA: after a force push the checkout names a commit that has no attach row,
+   * and settling on it would be a silent no-op while the stale run waited out
+   * its window. Dedup KEYS still use the checkout SHA; only this settlement
+   * identity follows the attach. A job that carried no SHA (a bot mention) has
+   * nothing to settle.
+   *
    * Best-effort by contract: one warn on a fault, and the ACK/return is never
-   * changed. `headSha` is the payload's — the same SHA the delivery attached —
-   * so a job that carried none (a bot mention) has nothing to settle.
+   * changed.
    */
-  const settleSkippedCheck = async (reason: string, headSha: string | null | undefined): Promise<void> => {
-    if (deps.checks?.settleSkipped === undefined || headSha === null || headSha === undefined) return;
+  const settleSkippedCheck = async (
+    reason: string,
+    attachedHeadSha: string | null | undefined,
+  ): Promise<void> => {
+    if (deps.checks?.settleSkipped === undefined || attachedHeadSha === null || attachedHeadSha === undefined) return;
     try {
       await deps.checks.settleSkipped({
         scope: {
@@ -4091,7 +4101,7 @@ async function processMessage(
           repo: payload.repo,
           prNumber: payload.pr_number,
         },
-        headSha,
+        headSha: attachedHeadSha,
         triggeredBy: payload.triggered_by,
         action: payload.action,
         reason,
@@ -4412,9 +4422,9 @@ async function processMessage(
       // refused attempt would write "failure" rows for reviews that a later
       // delayed attempt goes on to complete. `pr-held` carries the live row's
       // sha so that ack can tell a duplicate from a commit it never covers.
-      // §7.9: a refused admission never reaches `begin`, so an attached run is
-      // settled `neutral` rather than left to close red at the attach window.
-      await settleSkippedCheck(`the review was not admitted (${admission.reason})`, payload.head_sha);
+      // Deliberately NOT settled (§7.9): a guard refusal RETRIES this same
+      // message, so freezing its intent now would retire the head the retry is
+      // about to review. The attach row stays untouched and the retry adopts it.
       return {
         kind: "guard-held",
         admission: refusal,
@@ -4578,15 +4588,16 @@ async function processMessage(
       // empty increment), never a `neutral` that would mask a failing gate.
       await terminalizeCheck(null, "skipped", headSha);
       // §7.9: with no handle (the adoption refused) the attached run would
-      // otherwise wait out the attach window and close red.
-      await settleSkippedCheck("already reviewed for this head", headSha);
+      // otherwise wait out the attach window and close red. The settlement is
+      // keyed on the PAYLOAD SHA — what the attach used — not this checkout SHA.
+      await settleSkippedCheck("already reviewed for this head", payload.head_sha);
       return { kind: "ok" };
     }
     const existing = await deps.store.findByIdempotencyKey(key);
     if (existing) {
       deps.log.info(fields, "idempotency hit — ack");
       await terminalizeCheck(null, "skipped", headSha);
-      await settleSkippedCheck("already reviewed for this head", headSha);
+      await settleSkippedCheck("already reviewed for this head", payload.head_sha);
       return { kind: "ok" };
     }
     // §7.7 step 2 (second half) — the publication journal: an existing
@@ -4665,7 +4676,7 @@ async function processMessage(
       } else {
         // §7.9: no handle was adopted for this hand-off, so the delivery's own
         // attached run has nobody to close it — settle it `neutral`.
-        await settleSkippedCheck("a publication for this head already exists", headSha);
+        await settleSkippedCheck("a publication for this head already exists", payload.head_sha);
       }
       return { kind: "ok" };
     }
