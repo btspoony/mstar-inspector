@@ -6,15 +6,21 @@
  * did not state.
  */
 import { describe, expect, test } from "bun:test";
-import { createTestD1, migrationsAfter, type TestD1 } from "./helpers";
+import { createTestD1, migrationNumber, migrationsAfter, type TestD1 } from "./helpers";
 import { applyMigrations } from "../helpers/migration-shapes";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 
 const OVERLAY_MIGRATION = "0053_custom_provider_models_meta.sql";
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 
-/** Every migration before the overlay one, in wrangler's apply order. */
-const BEFORE_OVERLAY = migrationsAfter(2).filter((name) => name !== OVERLAY_MIGRATION);
+/**
+ * Every migration BEFORE the overlay one, in wrangler's apply order. Derived by
+ * PREFIX, not by excluding one filename: a later migration (0054+) must be part
+ * of the "after" half, or the production order this test replays would skip it.
+ */
+const BEFORE_OVERLAY = migrationsAfter(2).filter(
+  (name) => migrationNumber(name) < migrationNumber(OVERLAY_MIGRATION),
+);
 
 /** One github_apps row of the post-0038 shape (no crypto path needed here). */
 function seedApp(db: TestD1, id: string): void {

@@ -3873,12 +3873,14 @@ describe("createReviewConsumer", () => {
   });
 
   test("guardRetryDelaysSeconds per level — the schedule covers the guard TTL (AC-4)", () => {
-    // quick/default 60/300/2100; deep 90/480/2100. Every entry must stay
-    // below the level's guard TTL so no single delay outlives the lock, and
-    // the CUMULATIVE sum must EXCEED it so the final attempt can reclaim an
-    // expired row instead of being dropped. The last entry is DERIVED from that
-    // TTL (2460s / 2670s here): a step added to GUARD_TIMED_SANDBOX_STEPS grows
-    // the TTL and forces it, so the schedule cannot silently fall short.
+    // quick/default 60/300/2100; deep 90/480/2100. GUARD_RETRY_DELAYS_SECONDS is
+    // a literal table — nothing derives it — so this test is what keeps it
+    // honest as the TTL moves: every entry must stay BELOW
+    // reviewGuardTtlSeconds(level) (2412s quick/default, 2652s deep) so no
+    // single delay outlives the lock, and the cumulative sum (2460s / 2670s)
+    // must EXCEED it, so the final delayed attempt finds the row expired and
+    // reclaims it instead of being dropped. Add a step to
+    // GUARD_TIMED_SANDBOX_STEPS and this case fails until the table is raised.
     expect(guardRetryDelaysSeconds("quick")).toEqual([60, 300, 2100]);
     expect(guardRetryDelaysSeconds("default")).toEqual([60, 300, 2100]);
     expect(guardRetryDelaysSeconds("deep")).toEqual([90, 480, 2100]);

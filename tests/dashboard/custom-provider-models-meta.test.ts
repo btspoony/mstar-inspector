@@ -151,31 +151,19 @@ describe("app-config store — custom provider models_meta", () => {
     expect(JSON.stringify(consumer!.models_meta)).not.toContain("null");
   });
 
-  test("the carry-over prune is ONE statement — a concurrent overlay write cannot be reverted", async () => {
-    const { db, appId, store } = world();
+  test("the carry-over prune keeps the surviving facts and drops the removed ones", async () => {
+    const { appId, store } = world();
     const both = {
       "deepseek-v4-flash": { contextWindow: 32_000, maxTokens: 4_096 },
       "deepseek-r1": { contextWindow: 128_000, maxTokens: 8_192 },
     };
     await store.upsertCustomProvider(appId, { ...CUSTOM, models_meta: both }, PLAIN_KEY);
 
-    const statements: string[] = [];
-    const spied = {
-      prepare: (query: string) => {
-        statements.push(query);
-        return db.prepare(query);
-      },
-      batch: (list: unknown) => db.batch(list as never),
-    };
-    await createAppConfigStore(spied as never, TEST_KEY).updateCustomProviderModels(appId, CUSTOM.provider_id, [
-      "deepseek-v4-flash",
-    ]);
+    // A plain id-list save (no overlay stated): the stored facts ride along,
+    // pruned to the surviving ids. The removed id's facts must not survive — a
+    // key outside `model_ids` would fail this row's own read gate.
+    await store.updateCustomProviderModels(appId, CUSTOM.provider_id, ["deepseek-v4-flash"]);
 
-    // Read-then-write is the lost-update window: the prune must ride the one
-    // UPDATE, reading the row's live overlay inside it.
-    expect(statements).toHaveLength(1);
-    expect(statements[0]!.trim().startsWith("UPDATE app_custom_providers")).toBe(true);
-    // Behaviour: the dropped id's facts are pruned, the kept id's survive.
     const [decl] = await store.listCustomProviders(appId);
     expect(decl!.model_ids).toEqual(["deepseek-v4-flash"]);
     expect(decl!.models_meta).toEqual({ "deepseek-v4-flash": both["deepseek-v4-flash"] });

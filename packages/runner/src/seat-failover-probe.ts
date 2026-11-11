@@ -156,7 +156,10 @@ export function walkSeatGates(opts: {
         gate: "registry",
         registry: { resolved: false, metadata: null },
         poolKey: { configured: false },
-        context: { fits: false, retryContextTokens: opts.retryContextTokens ?? null, contextWindow: null, fitBudget: null },
+        // An unresolved selector never reached the context gate: "not
+        // evaluated" (null), matching `contextFit` and this shape's contract —
+        // `false` would read as "measured and it did not fit".
+        context: { fits: null, retryContextTokens: opts.retryContextTokens ?? null, contextWindow: null, fitBudget: null },
       });
       continue;
     }

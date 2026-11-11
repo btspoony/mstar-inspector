@@ -57,6 +57,9 @@ describe("seat failover probe — the three gates stay distinguishable", () => {
     expect(ghost.gate).toBe("registry");
     expect(ghost.registry.resolved).toBe(false);
     expect(ghost.registry.metadata).toBeNull();
+    // An unresolved selector never reached the context gate: it reports "not
+    // evaluated" (null), never "measured, does not fit".
+    expect(ghost.context.fits).toBeNull();
     expect(report.droppedCandidate?.selector).toBe("nowhere-provider/ghost-model");
   });
 
@@ -142,6 +145,12 @@ describe("seat failover probe — the three gates stay distinguishable", () => {
     ]);
     // Every gate reports the evidence it used, and only that evidence fails.
     expect([missing.selectors[0]!.registry.resolved, unkeyed.selectors[0]!.registry.resolved]).toEqual([false, true]);
+    // The unresolved entry's context is NOT EVALUATED (null); every entry that
+    // DID resolve carries a measured verdict, whichever gate then drops it.
+    expect(missing.selectors[0]!.context.fits).toBeNull();
+    expect(unkeyed.selectors[0]!.context.fits).toBe(true);
+    expect(oversized.selectors[0]!.context.fits).toBe(false);
+    expect(ok.selectors[0]!.context.fits).toBe(true);
     expect([unkeyed.selectors[0]!.poolKey.configured, oversized.selectors[0]!.poolKey.configured]).toEqual([false, true]);
     expect([oversized.selectors[0]!.context.fits, ok.selectors[0]!.context.fits]).toEqual([false, true]);
   });

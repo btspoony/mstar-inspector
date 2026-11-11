@@ -557,6 +557,38 @@ describe("pull request detail face (static SSR)", () => {
     ]);
   });
 
+  test("a review whose configured head IS the serving provider prints its name once", async () => {
+    // The round never switched: `reviews.provider` and `reviews.model` carry the
+    // same value, so the `provider/model` template would print it twice. The
+    // renderer collapses them — which also repairs rows already persisted that
+    // way, without touching the stored contract.
+    const same = "commandcode/deepseek/deepseek-v4.1-flash";
+    const meta = await withMarkup(
+      face(
+        {
+          reviews: page([
+            {
+              verdict: "ship it",
+              model: same,
+              provider: same,
+              reviewed_at: "2026-11-01 08:00:00",
+              head_sha: "aaa111b",
+              round: 1,
+              duration_ms: null,
+              severity_counts: {},
+            },
+          ]),
+        },
+        {},
+        { verdict: "ship it", reviewed_at: "2026-11-01 08:00:00", model: same, provider: same },
+      ),
+      (container) => container.querySelector('[data-slot="pr-meta"]')?.textContent ?? "",
+    );
+    // The name appears exactly once — the template's interpolation of both
+    // fields would print it twice.
+    expect(meta.split(same).length - 1).toBe(1);
+    expect(meta).toContain(t("en", "pullRequests.latestReview"));
+  });
   test("the band wears the danger face for a non-shipping verdict and any failure", async () => {
     const tones = await withMarkup(face(), (container) =>
       [...container.querySelectorAll('[data-slot="metric-value"]')].map((value) => value.getAttribute("data-tone")),
