@@ -1,7 +1,7 @@
 ---
 module: sandbox-image
 date: 2026-11-03
-last_updated: 2026-11-03
+last_updated: 2026-11-11
 problem_type: best_practice
 category: best-practices
 severity: high
@@ -93,6 +93,15 @@ evaluateImageGate(paths: string[], dockerfileDiff: string, containersChanged: bo
 The CLI takes `--base <sha>`, reads changed paths and the Dockerfile diff, and exits non-zero
 with the instruction naming every covered family. Tests pin both directions: an input change
 without the marker fails, the same change with a `# rebuild:` line passes, a rename out of a
-family fails, and a non-ASCII path is matched. A separate test derives the Dockerfile `COPY`
+family fails, and a non-ASCII path is matched.
+
+**The marker is judged per line, by its prefix.** The gate reads the Dockerfile diff and
+accepts only an added or removed line whose text starts with `# rebuild:`. Rewriting a
+*continuation* line of an existing marker block — the body under a `# rebuild:` first line —
+satisfies the sentence being corrected and still fails the gate, because no marker-prefixed
+line changed. The repair is to put the correction on the `# rebuild:` line itself, which keeps
+the marker count and every line position identical while giving the gate the change it hashes.
+Also note the gate reads `base...HEAD`, so it sees committed state only: a pre-commit probe
+still reports the failure after the edit is made. A separate test derives the Dockerfile `COPY`
 sources and fails when one is not covered, and another compares the code list against the
 `AGENTS.md` and `docs/deploy.md` bullets so prose cannot drift silently.
