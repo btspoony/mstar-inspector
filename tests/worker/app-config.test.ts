@@ -4474,6 +4474,61 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     ]);
   });
 
+  test("update-provider-models stores the declared per-model metadata; a missing required size is refused naming model + fact", async () => {
+    const { db, app } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const meta = {
+      "fresh-a": { contextWindow: 128000, maxTokens: 8192, name: "Fresh A", reasoning: true, input: ["text"] },
+      "fresh-b": { contextWindow: 32000, maxTokens: 4096 },
+    };
+    const saved = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a, fresh-b",
+      models_meta: JSON.stringify(meta),
+    });
+    expect(saved.status).toBe(200);
+    const [decl] = await configStore(db).listCustomProviders(app.id);
+    expect(decl!.model_ids).toEqual(["fresh-a", "fresh-b"]);
+    expect(decl!.models_meta).toEqual(meta);
+    // The SPA payload the form re-seeds from carries the overlay too.
+    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const body = (await payload.json()) as {
+      custom_providers: Array<{ provider_id: string; models_meta?: Record<string, unknown> }>;
+    };
+    expect(body.custom_providers.find((p) => p.provider_id === "my-custom")!.models_meta).toEqual(meta);
+
+    // A selected model with no context window: refused, nothing stored, the
+    // previously stored list AND overlay untouched.
+    const refused = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a, fresh-b",
+      models_meta: JSON.stringify({ "fresh-a": { contextWindow: 1, maxTokens: 1 }, "fresh-b": { maxTokens: 4 } }),
+    });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toMatchObject({
+      key: "settings.error.modelContextWindowRequired",
+      params: { model: "fresh-b" },
+    });
+    const [afterRefusal] = await configStore(db).listCustomProviders(app.id);
+    expect(afterRefusal!.model_ids).toEqual(["fresh-a", "fresh-b"]);
+    expect(afterRefusal!.models_meta).toEqual(meta);
+
+    // A stated but non-positive size is refused with the invalid-value key.
+    const invalid = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a",
+      models_meta: JSON.stringify({ "fresh-a": { contextWindow: 0, maxTokens: 8 } }),
+    });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({
+      key: "settings.error.modelMetaInvalid",
+      params: { model: "fresh-a", field: "context window" },
+    });
+  });
+
   test("update-provider-models refuses an undeclared provider with the keyed 400, zero writes", async () => {
     const { db } = await seededWorld();
     const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {

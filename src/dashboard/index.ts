@@ -145,6 +145,8 @@ import {
   parseModelChain,
   type AppConfigBatchFace,
   type AppConfigStore,
+  type CustomProviderModelMeta,
+  type CustomProviderModelsMeta,
 } from "./app-config-store";
 // Display-only picker grouping (AD-547). Never a mechanics input —
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
@@ -2988,6 +2990,10 @@ const SETTINGS_400_KEYS = {
   modelIdTooLong: "settings.error.modelIdTooLong",
   customProviderDeclRejected: "settings.error.customProviderDeclRejected",
   customProviderUndeclared: "settings.error.customProviderUndeclared",
+  modelContextWindowRequired: "settings.error.modelContextWindowRequired",
+  modelMaxTokensRequired: "settings.error.modelMaxTokensRequired",
+  modelMetaInvalid: "settings.error.modelMetaInvalid",
+  modelMetaMalformed: "settings.error.modelMetaMalformed",
   providerEndpointLocked: "settings.error.providerEndpointLocked",
   templateUnknown: "settings.error.templateUnknown",
   templateIncomplete: "settings.error.templateIncomplete",
@@ -3018,6 +3024,93 @@ const SETTINGS_400_KEYS = {
   /** Per-key usage probe: the declaration yields no readable host. */
   usageProbeUnreadableEndpoint: "settings.error.usageProbeUnreadableEndpoint",
 } as const satisfies Record<string, DictionaryKey>;
+
+/** The two REQUIRED per-model sizes and the field label a refusal names. */
+const MODEL_SIZE_FIELDS = [
+  ["contextWindow", "context window"],
+  ["maxTokens", "max token count"],
+] as const;
+
+/**
+ * The per-model facts an `update-provider-models` form states (compass D10).
+ * An ABSENT field is the plain id-list save: no metadata claim, so the stored
+ * overlay is carried over (an id-only declaration stays saved-but-not-usable,
+ * never backfilled). A PRESENT field must state BOTH sizes for every selected
+ * model id — a missing one names the model and the fact, an out-of-shape one
+ * names the field, and both write nothing. Optional facts stay optional and
+ * stay unstated when blank.
+ */
+function parseCustomProviderModelsMeta(
+  raw: string,
+  modelIds: readonly string[],
+): { meta: CustomProviderModelsMeta | undefined } | { error: DictionaryKey; params: Record<string, string> } {
+  if (raw.trim() === "") return { meta: undefined };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { error: SETTINGS_400_KEYS.modelMetaMalformed, params: {} };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: SETTINGS_400_KEYS.modelMetaMalformed, params: {} };
+  }
+  const entries = parsed as Record<string, unknown>;
+  const invalid = (model: string, field: string) => ({
+    error: SETTINGS_400_KEYS.modelMetaInvalid,
+    params: { model, field },
+  });
+  const meta: CustomProviderModelsMeta = {};
+  for (const modelId of modelIds) {
+    const entry = entries[modelId];
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      return { error: SETTINGS_400_KEYS.modelContextWindowRequired, params: { model: modelId } };
+    }
+    const record = entry as Record<string, unknown>;
+    const statement: CustomProviderModelMeta = {};
+    for (const [field, label] of MODEL_SIZE_FIELDS) {
+      const value = record[field];
+      if (value === undefined || value === null) {
+        return {
+          error:
+            field === "contextWindow"
+              ? SETTINGS_400_KEYS.modelContextWindowRequired
+              : SETTINGS_400_KEYS.modelMaxTokensRequired,
+          params: { model: modelId },
+        };
+      }
+      if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+        return invalid(modelId, label);
+      }
+      statement[field] = value;
+    }
+    if (record.name !== undefined) {
+      if (typeof record.name !== "string") return invalid(modelId, "display name");
+      statement.name = record.name;
+    }
+    if (record.reasoning !== undefined) {
+      if (typeof record.reasoning !== "boolean") return invalid(modelId, "reasoning");
+      statement.reasoning = record.reasoning;
+    }
+    if (record.input !== undefined) {
+      if (!Array.isArray(record.input) || record.input.some((modality) => typeof modality !== "string")) {
+        return invalid(modelId, "accepted inputs");
+      }
+      statement.input = [...record.input];
+    }
+    for (const key of Object.keys(record)) {
+      if (key !== "contextWindow" && key !== "maxTokens" && key !== "name" && key !== "reasoning" && key !== "input") {
+        return invalid(modelId, key);
+      }
+    }
+    meta[modelId] = statement;
+  }
+  // An entry for an id the form did not select is unreachable data: the row's
+  // own read gate would reject it, so it is refused here instead.
+  for (const modelId of Object.keys(entries)) {
+    if (!modelIds.includes(modelId)) return invalid(modelId, "model id");
+  }
+  return { meta };
+}
 
 /**
  * Keyed 400 for the settings POST family: native `<form>`
@@ -3452,11 +3545,14 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // The declaration face of the settings payload keeps its existing shape:
       // `has_keys` is a membership-gate input for the models / chain faces, not
       // a UI field, so it never rides this response (the store read is shared).
-      custom_providers: customProviders.map(({ provider_id, base_url, api, model_ids }) => ({
+      custom_providers: customProviders.map(({ provider_id, base_url, api, model_ids, models_meta }) => ({
         provider_id,
         base_url,
         api,
         model_ids: [...model_ids],
+        // Absent when the owner stated nothing: the form seeds blank sizes and
+        // shows the row as saved-but-not-usable instead of inventing a number.
+        ...(models_meta === undefined ? {} : { models_meta }),
       })),
       // Clean cutover: the App's PERSISTED provider state only — a stored
       // key (masked tail) or a saved custom-provider declaration. No
@@ -4434,8 +4530,17 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         limit: MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
       });
     }
+    // Per-model facts (compass D10): checked BEFORE the store so a save that
+    // omits a required size writes nothing at all (ids included).
+    const stated = parseCustomProviderModelsMeta(
+      typeof form.models_meta === "string" ? form.models_meta : "",
+      modelIds,
+    );
+    if ("error" in stated) {
+      return settings400Response(c, gate.app.github_app_id, stated.error, stated.params);
+    }
     try {
-      await store.updateCustomProviderModels(gate.app.id, providerId, modelIds);
+      await store.updateCustomProviderModels(gate.app.id, providerId, modelIds, stated.meta);
     } catch (err) {
       logSettingsFailure("update_provider_models", gate.app.id, err);
       if (err instanceof InvalidCustomProviderError) {

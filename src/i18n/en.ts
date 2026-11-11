@@ -637,6 +637,12 @@ export const en = {
       modelIdsRequired: "Enter at least one model id for the custom provider.",
       modelIdsTooMany: "Too many model ids ({count}) — at most {limit}. Nothing was stored.",
       modelIdTooLong: "Model ids are limited to {limit} characters each. Nothing was stored.",
+      modelContextWindowRequired:
+        "{model} needs a context window — we do not guess. Nothing was stored.",
+      modelMaxTokensRequired:
+        "{model} needs a max token count — we do not guess. Nothing was stored.",
+      modelMetaInvalid: "{model}'s {field} is not a valid value — nothing was stored.",
+      modelMetaMalformed: "The per-model details could not be read — nothing was stored.",
       customProviderDeclRejected: "The custom provider was rejected — nothing was stored.",
       customProviderUndeclared:
         "{provider} is not a declared custom provider for this App — declare it before adding keys. Nothing was stored.",
@@ -762,6 +768,33 @@ export const en = {
         capReached: "At the {max}-model cap — uncheck one to add another.",
         noMatch: 'No models match "{query}".',
         save: "Save models",
+        /**
+         * The per-model facts group. Required sizes come first; the optional
+         * facts stay blank when the owner states nothing (we do not invent a
+         * name or a capability). Refusal wording direction: name the model,
+         * name the fact, then "Nothing was stored."
+         */
+        requirements:
+          "Every selected model needs a context window and a max token count — we do not guess.",
+        notUsable:
+          "Saved, not usable for failover until you state a context window and a max token count. We do not guess.",
+        requirementsRequired: "Required",
+        requirementsOptional: "Optional",
+        fields: {
+          contextWindow: "{model} context window",
+          maxTokens: "{model} max token count",
+          name: "{model} display name (optional)",
+          reasoning: "{model} reasoning (optional)",
+          input: "{model} accepted inputs (optional, comma-separated)",
+          contextWindowHint: "Tokens the model can hold",
+          maxTokensHint: "Token cap for one completion",
+          nameHint: "Blank shows the model id",
+          inputHint: "Blank is not a claim: e.g. text, image",
+          reasoningUnset: "Not stated",
+          reasoningYes: "Reasoning",
+          reasoningNo: "No reasoning",
+        },
+        incomplete: "{model} needs a {field} — we do not guess. Nothing was stored.",
       },
       /** The two-step add-provider dialog: its indicator, its back step and its in-progress copy. */
       stepPick: "Choose",

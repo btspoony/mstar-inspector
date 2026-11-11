@@ -2232,30 +2232,46 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * its own read gate (a key outside model_ids is tamper). The row is read
      * first to carry the surviving entries across; a dropped declaration still
      * refuses on the guarded UPDATE below.
+     *
+     * `modelsMeta` is the settings form's STATED overlay: absent = this save
+     * states nothing about the models (the stored overlay is carried over,
+     * pruned to the surviving ids — an id-only row stays id-only, never
+     * backfilled), while a supplied overlay replaces it whole and is gated by
+     * the same shape rule the declaration write uses, so the model-list editor
+     * cannot store what the declaration gate would refuse.
      */
-    async updateCustomProviderModels(appId: string, providerId: string, modelIds: string[]): Promise<void> {
+    async updateCustomProviderModels(
+      appId: string,
+      providerId: string,
+      modelIds: string[],
+      modelsMeta?: CustomProviderModelsMeta,
+    ): Promise<void> {
       assertCustomProviderModelIds(modelIds);
-      const current = await db
-        .prepare(`SELECT model_ids, models_meta FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
-        .bind(appId, providerId)
-        .first<{ model_ids: string; models_meta: string }>();
-      const keptMeta: CustomProviderModelsMeta = {};
-      if (current !== null) {
-        const previous = parseModelsMetaJson(
-          current.models_meta,
-          parseModelIdsJson(current.model_ids, "app_custom_providers.model_ids"),
-          "app_custom_providers.models_meta",
-        );
-        for (const [modelId, meta] of Object.entries(previous ?? {})) {
-          if (modelIds.includes(modelId)) keptMeta[modelId] = meta;
+      if (modelsMeta !== undefined) assertCustomProviderModelsMeta(modelsMeta, modelIds);
+      const carried: CustomProviderModelsMeta = {};
+      if (modelsMeta === undefined) {
+        const current = await db
+          .prepare(`SELECT model_ids, models_meta FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+          .bind(appId, providerId)
+          .first<{ model_ids: string; models_meta: string }>();
+        if (current !== null) {
+          const previous = parseModelsMetaJson(
+            current.models_meta,
+            parseModelIdsJson(current.model_ids, "app_custom_providers.model_ids"),
+            "app_custom_providers.models_meta",
+          );
+          for (const [modelId, meta] of Object.entries(previous ?? {})) {
+            if (modelIds.includes(modelId)) carried[modelId] = meta;
+          }
         }
       }
+      const overlay = modelsMeta ?? carried;
       const res = await db
         .prepare(
           `UPDATE app_custom_providers SET model_ids = ?, models_meta = ?, updated_at = datetime('now')
             WHERE app_id = ? AND provider_id = ?`,
         )
-        .bind(JSON.stringify(modelIds), JSON.stringify(keptMeta), appId, providerId)
+        .bind(JSON.stringify(modelIds), JSON.stringify(overlay), appId, providerId)
         .run();
       if (res.meta.changes === 0) {
         throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(providerId)} is not declared for this app`);

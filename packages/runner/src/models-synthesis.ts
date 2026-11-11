@@ -111,6 +111,18 @@ function providerBlock(decl: CustomProviderDeclaration): string {
   lines.push("    models:");
   for (const id of decl.model_ids) {
     lines.push(`      - id: ${yamlQuote(id)}`);
+    // Only what the owner STATED: the capability-host key order and
+    // indentation, no default and no guessed number. An id-only model keeps
+    // the bare `- id:` entry it has always had.
+    const meta = decl.models_meta?.[id];
+    if (meta === undefined) continue;
+    if (meta.name !== undefined) lines.push(`        name: ${yamlQuote(meta.name)}`);
+    if (meta.reasoning !== undefined) lines.push(`        reasoning: ${meta.reasoning}`);
+    if (meta.input !== undefined) {
+      lines.push(`        input: [${meta.input.map((modality) => yamlQuote(modality)).join(", ")}]`);
+    }
+    if (meta.contextWindow !== undefined) lines.push(`        contextWindow: ${meta.contextWindow}`);
+    if (meta.maxTokens !== undefined) lines.push(`        maxTokens: ${meta.maxTokens}`);
   }
   return lines.join("\n");
 }
