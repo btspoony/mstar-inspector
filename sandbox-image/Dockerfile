@@ -184,6 +184,12 @@
 # capability-host key order, and only the facts the owner stated. A stale image
 # still emits `- id:` alone, so omp's registry falls back to ITS defaults and
 # the model is judged against numbers nobody declared.
+# rebuild: the runner ships a one-shot seat-failover probe
+# (`packages/runner/src/seat-failover-probe.ts`). It is a diagnostic, not a
+# runtime path: it builds the round's own inputs and names which gate drops a
+# chain candidate. No in-image code imports it, but it IS copied into the image
+# with the runner tree — a stale image would not carry the probe whose verdict
+# is the input to the next change.
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via
