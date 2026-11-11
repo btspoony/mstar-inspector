@@ -233,7 +233,37 @@ export type ReviewRunResult = {
    * published sections to `none`.
    */
   report: ReportDoc | null;
+  /**
+   * The `provider/model` the run's session ACTUALLY served on — observed by the
+   * runner, never derived from the configured chain. ABSENT means no model
+   * served (a round that failed before any prompt), which is a different fact
+   * from "the chain head": a consumer that fell back to the chain head would
+   * report what we asked for instead of what ran.
+   */
+  appliedModel?: string;
 };
+
+/**
+ * The applied model's side document (fixed in-image path). The published
+ * envelope is the engine's schema and must not grow fields, so this crosses the
+ * container boundary as its OWN document — `{"appliedModel":"provider/model"}`.
+ * ABSENCE of the file means no model served.
+ */
+export const APPLIED_MODEL_PATH = "/workspace/review-applied-model.json";
+
+/** The side document's shape — one optional string, nothing else. */
+export type AppliedModelDoc = { appliedModel: string };
+
+/**
+ * What `reviews.provider` may hold: the selector's `provider/model` prefix —
+ * one slash, no whitespace. The consumer validates the document against THIS
+ * shape before persisting it, so a container-authored file cannot land an
+ * arbitrary string in the column.
+ */
+export const APPLIED_MODEL_PATTERN = /^[^/\s]+\/[^\s]+$/;
+
+/** Bound on that value (the column is a short provider/model pair). */
+export const APPLIED_MODEL_MAX_CHARS = 256;
 
 export interface AgentRuntime {
   /**

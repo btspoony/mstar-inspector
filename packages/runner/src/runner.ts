@@ -93,7 +93,8 @@
  * the run's own outcome).
  */
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent";
+import { join } from "node:path";
+import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import {
   isReviewLevel,
   REVIEW_LEVELS,
@@ -106,8 +107,15 @@ import {
 } from "../../shared/src/runtime";
 import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
+import {
+  attributeChain,
+  attributionEntries,
+  formatFailureAttribution,
+  walkSeatGates,
+} from "./seat-failover-probe";
 import { writePerReviewModelsYaml } from "./models-synthesis";
 import { decodeCredentialPayload } from "../../shared/src/credential-payload";
+import { APPLIED_MODEL_PATH, type AppliedModelDoc } from "../../shared/src/runtime";
 import { RECHECK_STATUS_PATH, type RecheckInput, type RecheckStatus } from "../../shared/src/recheck-wire";
 import { type PrContext } from "../../shared/src/report-wire";
 
@@ -682,6 +690,35 @@ export function writeRecheckStatus(
 }
 
 /**
+ * The failed round's per-selector disposition, produced by the seat-failover
+ * probe's OWN gate walker (one rule, one place). No live context exists at
+ * this point, so the context gate is reported as not evaluated rather than
+ * guessed. A throw here is swallowed into a BOUNDED line — every failure
+ * path shares the formatter's budget, including this one: attribution is
+ * diagnosis, never a second failure.
+ */
+export function chainAttributionBlock(
+  cause: string,
+  chain: readonly string[],
+  agentDir: string,
+  authStorage: AuthStorage,
+): string {
+  try {
+    const registry = new ModelRegistry(authStorage, join(agentDir, "models.yml"));
+    return formatFailureAttribution(
+      cause,
+      attributionEntries(attributeChain(walkSeatGates({ registry, chain }))),
+    );
+  } catch (error) {
+    // The attribution itself failed. The diagnostic still goes through the ONE
+    // budgeted formatter as a single entry: a multi-kilobyte stack trace must
+    // not push the original provider error out of the Worker's stderr tail —
+    // which is exactly when the operator needs it most.
+    return formatFailureAttribution(cause, [`chain attribution unavailable: ${(error as Error).message}`]);
+  }
+}
+
+/**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1
  * envelope JSON to stdout and diagnostics to stderr. Exported for
  * deterministic tests, which inject a fake `runtime` AND a fake credential
@@ -693,6 +730,10 @@ export async function main(
   runtime: AgentRuntime = ompAgentRuntime,
   readStdin: () => Promise<string> = readCredentialStdin,
   statusPath: string = process.env.MSTAR_RECHECK_STATUS_PATH?.trim() || RECHECK_STATUS_PATH,
+  // The applied-model document's path: fixed in the image, a parameter for the
+  // SAME reason as `statusPath` — a test must write its own file, never the
+  // production one.
+  appliedModelPath: string = APPLIED_MODEL_PATH,
 ): Promise<number> {
   let level: string;
   let inputPath: string;
@@ -722,6 +763,10 @@ export async function main(
   const stale: string[] = [];
   if (recheckOutPath !== undefined) stale.push(recheckOutPath, statusPath);
   if (reportOutPath !== undefined) stale.push(reportOutPath);
+  // The applied-model document is THIS round's fact and this round may report
+  // none: a leftover from an earlier run in the same container would otherwise
+  // be read back as this round's provider. Always cleared.
+  stale.push(appliedModelPath);
   for (const path of stale) {
     try {
       rmSync(path, { force: true });
@@ -750,6 +795,9 @@ export async function main(
   let authStorage: AuthStorage | undefined;
 
   try {
+    // The chain rides this run's runtime input AND the failure attribution
+    // below — parsed once so the two can never disagree.
+    const chain = parseModelSelectors(Bun.env.OMP_REVIEW_MODEL);
     let input: AgentRuntimeRunInput;
     try {
       const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
@@ -802,7 +850,7 @@ export async function main(
         level,
         worktreePath: json.worktreePath ?? process.cwd(),
         reconFacts: json.reconFacts ?? [],
-        modelSelectors: parseModelSelectors(Bun.env.OMP_REVIEW_MODEL),
+        modelSelectors: chain,
         // Optional per-role overrides: included ONLY when the map
         // is present, so legacy input builds a byte-identical runtime input.
         ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
@@ -834,7 +882,41 @@ export async function main(
     }
 
     try {
-      const { envelope, recheck, recheckStatus, report } = await runtime.runReview(input);
+      const { envelope, recheck, recheckStatus, report, appliedModel } = await runtime.runReview(input);
+      // The applied model crosses the container boundary as its OWN document:
+      // the published envelope is the engine's schema and must not grow fields.
+      // Written only when a model actually served — an absent file is the
+      // round's "no model served", which the Worker must never read as "the
+      // chain head". A write failure is logged, never turned into a failed
+      // review: the review is already valid, and losing the attribution must
+      // not lose the review with it.
+      if (appliedModel === undefined) {
+        // No model served: the file must NOT exist, so the Worker's proven-absent
+        // read is the truth rather than a stale document from an earlier round.
+        try {
+          rmSync(appliedModelPath, { force: true });
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "applied_model_clear_failed",
+              path: appliedModelPath,
+              reason: (error as Error).message,
+            }),
+          );
+        }
+      } else {
+        try {
+          writeFileSync(appliedModelPath, JSON.stringify({ appliedModel } satisfies AppliedModelDoc));
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "applied_model_write_failed",
+              path: appliedModelPath,
+              reason: (error as Error).message,
+            }),
+          );
+        }
+      }
       // The optional --recheck-out file is written only when a
       // recheck result exists, and BEFORE the envelope reaches stdout — a
       // write failure is a genuine I-O failure (exit 1, no stdout), not a
@@ -882,7 +964,22 @@ export async function main(
       console.log(JSON.stringify(envelope));
       return 0;
     } catch (error) {
-      console.error(`review: runtime failed: ${(error as Error).message}`);
+      const cause = (error as Error).message;
+      // The round is over, but the CONFIGURED chain's eligibility is still
+      // knowable: the probe's gate walker runs over this run's own inputs (the
+      // synthesized models.yml and the pool it loaded). It is ONE bounded
+      // block — cause first, dispositions after, folded by a counted marker —
+      // because the Worker persists only the tail of stderr. Nothing here
+      // claims a selector SERVED: the failure path carries no observation, and
+      // chain order is not one. Attribution is diagnosis; it never changes the
+      // round's outcome.
+      if (agentDir !== undefined && authStorage !== undefined) {
+        console.error(chainAttributionBlock(cause, chain, agentDir, authStorage));
+      } else {
+        // No synthesized models.yml to walk: the cause alone, still through the
+        // formatter so even this path cannot print an unbounded block.
+        console.error(formatFailureAttribution(cause, []));
+      }
       return 1;
     }
   } finally {

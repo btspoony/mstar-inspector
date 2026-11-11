@@ -184,6 +184,34 @@
 # capability-host key order, and only the facts the owner stated. A stale image
 # still emits `- id:` alone, so omp's registry falls back to ITS defaults and
 # the model is judged against numbers nobody declared.
+# rebuild: the runner ships a one-shot seat-failover probe
+# (`packages/runner/src/seat-failover-probe.ts`). It is a diagnostic, not a
+# runtime path: it builds the round's own inputs and names which gate drops a
+# chain candidate. No in-image code imports it, but it IS copied into the image
+# with the runner tree — a stale image would not carry the probe whose verdict
+# is the input to the next change.
+# rebuild: a failed round now prints its per-selector chain attribution after
+# the provider's own error (`runner.ts` calls the probe's gate walker over the
+# run's synthesized models.yml and loaded pool). A stale image keeps ending the
+# round with only the first provider's message, so the dropped candidate and
+# its gate stay invisible in `review_failures`.
+# rebuild: a successful round now records WHICH provider served it. The runner
+# observes the session's model and writes `/workspace/review-applied-model.json`
+# beside the recheck/report side documents (`packages/runner/src/runtime-omp.ts`,
+# `runner.ts`); the Worker reads it into `reviews.provider`. A stale image writes
+# no such document, so the column stays NULL — the round is attributed to nobody.
+# rebuild: the runner now attributes a served seat to the SDK's OWN serving model
+# (`AgentSession.servingModel`, captured the moment the seat settles) and deletes
+# a leftover applied-model document when no model served. A stale image writes a
+# stale or missing document, so the Worker records the wrong provider or none.
+# rebuild: a failed round now emits ONE bounded failure block — the original
+# cause first, then each configured selector's own eligibility (never a
+# "served" claim it did not observe), folded with a counted marker to fit the
+# Worker's 600-character stderr tail. A stale image keeps asserting the
+# configured head as served and lets a long chain evict the cause.
+# rebuild: the attribution's own exception path now shares that budget too — its
+# diagnostic is one truncated entry under the same formatter. A stale image
+# concatenates a multi-kilobyte stack trace after the cause and evicts it again.
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via
