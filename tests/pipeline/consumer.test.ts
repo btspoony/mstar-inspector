@@ -70,6 +70,7 @@ import type { CommenterCall } from "../helpers/review-commenter";
 import { PreparedSendRejected } from "../../src/pipeline/comment";
 import {
   CHECK_SUMMARIES,
+  attachCheckAtAcceptance,
   createCheckLifecycle,
   createChecksAdapter,
   type CheckRunPayload,
@@ -6236,6 +6237,51 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(messageAckCalls).toHaveLength(1);
     expect(checkRequests).toHaveLength(0);
     expect(checkRows(db)).toHaveLength(0);
+  });
+
+  test("check lifecycle: a delivery skipped before execution settles its attached run neutral", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const payload = makePayload();
+    // The delivery path already attached this message's run, and the App is
+    // paused before the consumer runs: the consumer ACKs without a review, so
+    // the attached run must be settled neutral instead of waiting out the
+    // attach window and closing red (RL-10).
+    const attached = await attachCheckAtAcceptance(
+      { db: db as never, adapter, nowMs: () => Date.now() },
+      {
+        scope: {
+          appId: payload.appRef.appId,
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        },
+        githubAppId: 424242,
+        headSha: SHA,
+        triggeredBy: payload.triggered_by,
+        action: payload.action,
+      },
+    );
+    expect(attached.kind).toBe("attached");
+    db.raw.prepare("UPDATE github_apps SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(payload));
+
+    expect(messageAckCalls).toHaveLength(1);
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("neutral");
+    expect(row.terminal_ms).not.toBeNull();
+    const update = checkRequests.find((request) => request.op === "update")!;
+    expect((update.params as unknown as ChecksUpdateParams).conclusion).toBe("neutral");
+    expect((update.params as unknown as ChecksUpdateParams).output.summary).toContain("review paused");
   });
 
   test("check lifecycle: a DLQ-bound runner failure terminalizes the same attempt as failure", async () => {

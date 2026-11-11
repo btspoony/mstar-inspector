@@ -53,7 +53,9 @@ import {
   CHECK_ATTACH_GRACE_MS,
   CHECK_ATTACH_WINDOW_MS,
   CHECK_BACKOFF_MS,
+  CHECK_LEASE_MS,
   CHECK_NAME,
+  claimAttachedCheckForSettlement,
   claimAttempt,
   deferCheckRecovery,
   readInheritedReview,
@@ -923,6 +925,13 @@ export const CHECK_SUMMARIES = {
    */
   superseded: (sha7: string) =>
     `Review attempt was superseded by a newer commit; no review was published for ${sha7}.`,
+  /**
+   * A delivery that was SKIPPED before execution (RL-10): the attached run is
+   * settled `neutral` with the reason, never `failure` — nothing was
+   * reviewed, so the skip is not a verdict on the commit.
+   */
+  skippedByDelivery: (reason: string) =>
+    `Review was skipped for this head: ${boundedText(reason, "the delivery was skipped before execution")}. No review was published.`,
 } as const;
 
 /**
@@ -1260,6 +1269,31 @@ export type CheckLifecycle = {
     updateBudgetMs?: number;
   }): Promise<void>;
   /**
+   * §7.9 skip settlement: the delivery was SKIPPED before execution (an
+   * idempotency hit, a publication-journal hand-off, an in-flight guard
+   * rejection, a paused App), so its attached run has no review to report and
+   * nobody holds a handle to terminalize it. The attached row — released, or
+   * still under a stalled delivery holder — is taken with the same fenced
+   * claim and concluded `neutral` with the skip reason.
+   *
+   * Deliberately NOT routed through `decideConclusion`: that function's
+   * contract is "no proof ⇒ failure", which is right for an EXECUTED attempt
+   * and wrong for a delivery that was never going to run (RL-10). A live
+   * consumer holder, a frozen intent and a terminal row are never taken;
+   * `false` means there was nothing to settle. A store or transport fault
+   * rejects — the caller logs it and the ACK is unaffected.
+   */
+  settleSkipped(input: {
+    scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    /** Why the delivery was skipped — the Check summary names it. */
+    reason: string;
+    /** The operator-configured bound on the one terminal `checks.update`. */
+    updateBudgetMs?: number;
+  }): Promise<boolean>;
+  /**
    * The consumer gave up on `terminalize` (its bounded wait elapsed, or the
    * hook threw): hand the attempt to recovery NOW with `remote-unconfirmed`,
    * so the minute Check reconciler closes the run instead of waiting out the
@@ -1308,8 +1342,12 @@ export type CheckAttachDeps = {
  */
 export type CheckAttachResult =
   | { kind: "attached" }
-  /** The key is already owned by another delivery/attempt, or already ended. */
-  | { kind: "skipped"; reason: "busy" | "terminal" }
+  /**
+   * The key is already owned by another delivery/attempt, already ended, or
+   * the admitted consumer adopted the row before this invocation could release
+   * it — the expected overlap, not a failure.
+   */
+  | { kind: "skipped"; reason: "busy" | "terminal" | "adopted" }
   /** The create, the run-id write or the release failed: recovery owns the row. */
   | { kind: "failed"; reason: string };
 
@@ -1370,6 +1408,17 @@ export async function attachCheckAtAcceptance(
   // takes it once the grace passes instead of at the one-hour window's expiry.
   const nowMs = deps.nowMs();
   if (!(await releaseAttachedCheck(deps.db, identity.attemptId, claimed.lease, nowMs + CHECK_ATTACH_GRACE_MS, nowMs))) {
+    // A zero-row release has one EXPECTED cause: the admitted consumer took the
+    // row first (the stalled-delivery takeover bumps the epoch, so this
+    // invocation's fence no longer matches). Re-read once and classify it — an
+    // adopting consumer is not a failure, and no write is issued here.
+    const current = await getCheckAttempt(deps.db, identity.attemptId).catch(() => null);
+    const adoptedByConsumer =
+      current !== null &&
+      current.lease !== null &&
+      current.lease.holder.startsWith("consumer:") &&
+      current.lease.untilMs > nowMs;
+    if (adoptedByConsumer) return { kind: "skipped", reason: "adopted" };
     return { kind: "failed", reason: "the attached row could not be released to the admitted message" };
   }
   return { kind: "attached" };
@@ -1671,6 +1720,62 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         headSha: identity.headSha,
         lease: claim.lease,
       };
+    },
+
+    async settleSkipped(input) {
+      // Eligibility before any claim: no Checks surface means nothing to close.
+      const adapter = deps.getAdapter(input.scope);
+      if (adapter === null) return false;
+      const nowMs = deps.nowMs();
+      const claimed = await claimAttachedCheckForSettlement(deps.db, {
+        scope: input.scope,
+        headSha: input.headSha,
+        triggeredBy: input.triggeredBy,
+        action: input.action,
+        holder: `skip:${crypto.randomUUID()}`,
+        executionDeadlineMs: nowMs + CHECK_LEASE_MS,
+        nowMs,
+      });
+      // Nothing to settle: no attach row for this delivery, or the row is a
+      // live consumer's, already frozen, or terminal.
+      if (claimed === null) return false;
+      const { identity } = claimed.attempt;
+      // The conclusion is written DIRECTLY (RL-10): a skip is not a verdict on
+      // the commit, so it must never reach `decideConclusion`'s
+      // "no proof ⇒ failure" rule.
+      const conclusion: CheckConclusion = {
+        desired: "neutral",
+        title: CHECK_NAME,
+        summary: CHECK_SUMMARIES.skippedByDelivery(input.reason),
+      };
+      const intentFence = fenceFor(claimed.lease);
+      if (!(await setCheckDesired(deps.db, identity.attemptId, intentFence.lease, conclusion, null, intentFence.nowMs))) {
+        return false;
+      }
+      const ownedFence = fenceFor(claimed.lease);
+      const owned = await getCheckOwnership(deps.db, identity.attemptId, ownedFence.lease, ownedFence.nowMs);
+      if (owned === null) return false;
+      if (owned.checkRunId === null) {
+        // The selector proved a run id a moment ago; a row without one is not
+        // this lane's to close remotely, so it is released with its frozen
+        // intent and recovery finishes it.
+        await releaseForRecovery(identity.attemptId, claimed.lease, "the skipped attempt has no attached run", false);
+        return false;
+      }
+      const completed = await adapter.completeCheck({
+        identity: owned.identity,
+        lease: claimed.lease,
+        checkRunId: owned.checkRunId,
+        conclusion,
+        updateBudgetMs: input.updateBudgetMs,
+      });
+      if (completed.kind !== "completed") {
+        // Recovery status/error/backoff only — the frozen intent stays.
+        await releaseForRecovery(identity.attemptId, claimed.lease, completed.reason, completed.requests > 0);
+        return false;
+      }
+      const observedFence = fenceFor(claimed.lease);
+      return recordCheckObservation(deps.db, identity.attemptId, observedFence.lease, completed.remote, observedFence.nowMs);
     },
 
     async terminalize(input) {

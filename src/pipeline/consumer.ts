@@ -437,7 +437,7 @@ export type ConsumerLogFields = {
    * hand-off has no event of its own; its only line is the info above it
    * ("publication journal hit"), printed before the link.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -1065,6 +1065,23 @@ export type CheckLifecycleHooks = {
    * changed nothing and resolves `false`; a store fault rejects.
    */
   abandonTerminalize?(input: { handle: CheckHandle; reason: string; outcome?: "superseded" }): Promise<boolean>;
+  /**
+   * §7.9 skip settlement (optional, additive): the delivery ACKs before (or
+   * without) a handle — an idempotency hit, a publication-journal hand-off, an
+   * in-flight guard rejection, a paused App — so its attached run has nobody to
+   * terminalize it. The lifecycle takes that row and concludes it `neutral`
+   * with the skip reason instead of leaving it to close red at the attach
+   * window (RL-10). `false` means there was nothing to settle; a fault
+   * rejects and the caller logs it.
+   */
+  settleSkipped?(input: {
+    scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    reason: string;
+    updateBudgetMs?: number;
+  }): Promise<boolean>;
 };
 
 /**
@@ -2795,41 +2812,53 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   // resuming the App must reuse the warm instance, and the credential
   // fingerprint (`github_app_id` + `private_key_enc`) is immune to
   // review_enabled writes.
+  /**
+   * The cached or freshly built commenter for THIS row — construction only: no
+   * token is minted and no GitHub call is made, so warming it on the paused
+   * path below costs one decrypt and can never start work.
+   */
+  const ensureCommenter = async (): Promise<{ commenter: ReviewCommenter; githubAppId: number }> => {
+    // The credential-fingerprint hardening (architect lock L1): the fingerprint is the
+    // exact string pair read from the row THIS call already fetched — zero
+    // extra reads, no hashing, never `updated_at` (the per-webhook
+    // touchLastWebhook would churn it). A re-saved identical PEM yields a NEW
+    // AES-GCM envelope → one harmless rebuild; a real rotation rebuilds with
+    // the new credential on the very next message.
+    const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
+    const cached = deps.appCommenters.get(appRef.appId);
+    if (cached !== undefined && cached.fingerprint === fingerprint) {
+      return { commenter: cached.commenter, githubAppId: cached.githubAppId };
+    }
+    // Cache miss (first message for this App) or fingerprint mismatch
+    // (rotation): decrypt + build + REPLACE the entry. A decrypt failure here
+    // leaves any pre-rotation entry in place but UNREACHABLE — it can only
+    // ever be returned by an exact fingerprint match, i.e. the envelope
+    // reverting to that entry's own bytes.
+    const pem = await createSecretbox(deps.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
+      row.private_key_enc,
+      `github_apps.private_key_enc:${row.id}`,
+    );
+    const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
+    deps.appCommenters.set(appRef.appId, { commenter, fingerprint, githubAppId: row.github_app_id });
+    return { commenter, githubAppId: row.github_app_id };
+  };
   if (row.review_enabled === 0) {
+    // §7.9: a delivery attached BEFORE the pause still has a run to settle, and
+    // settling needs this App's Checks adapter. Warming it here is
+    // construction-only (no token mint, no GitHub call) and best-effort: a
+    // decrypt fault keeps the paused ACK intact.
+    try {
+      await ensureCommenter();
+    } catch {
+      // The paused ACK stands; the attach row falls to the grace/deadline path.
+    }
     return { kind: "paused" };
   }
-  // The credential-fingerprint hardening (architect lock L1): the fingerprint is the
-  // exact string pair read from the row THIS call already fetched — zero
-  // extra reads, no hashing, never `updated_at` (the per-webhook
-  // touchLastWebhook would churn it). A re-saved identical PEM yields a NEW
-  // AES-GCM envelope → one harmless rebuild; a real rotation rebuilds with
-  // the new credential on the very next message.
-  const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
-  const cached = deps.appCommenters.get(appRef.appId);
-  if (cached !== undefined && cached.fingerprint === fingerprint) {
-    return {
-      kind: "ok",
-      commenter: cached.commenter,
-      githubAppId: cached.githubAppId,
-      workspaceId: row.workspace_id,
-      reviewLevel: row.review_level,
-    };
-  }
-  // Cache miss (first message for this App) or fingerprint mismatch
-  // (rotation): decrypt + build + REPLACE the entry. A decrypt failure here
-  // leaves any pre-rotation entry in place but UNREACHABLE — it can only
-  // ever be returned by an exact fingerprint match, i.e. the envelope
-  // reverting to that entry's own bytes.
-  const pem = await createSecretbox(deps.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
-    row.private_key_enc,
-    `github_apps.private_key_enc:${row.id}`,
-  );
-  const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
-  deps.appCommenters.set(appRef.appId, { commenter, fingerprint, githubAppId: row.github_app_id });
+  const { commenter, githubAppId } = await ensureCommenter();
   return {
     kind: "ok",
     commenter,
-    githubAppId: row.github_app_id,
+    githubAppId,
     workspaceId: row.workspace_id,
     reviewLevel: row.review_level,
   };
@@ -4049,6 +4078,42 @@ async function processMessage(
     }
   };
 
+  /**
+   * §7.9 skip settlement over one SHA: a delivery that ACKs before (or without)
+   * a handle leaves its attached run with nobody to terminalize it, and the
+   * recovery lane would keep deferring it until the attach window expired —
+   * a red Check on a commit that was never reviewed (RL-10). The lifecycle
+   * takes that row and concludes it `neutral` with the skip reason.
+   *
+   * Best-effort by contract: one warn on a fault, and the ACK/return is never
+   * changed. `headSha` is the payload's — the same SHA the delivery attached —
+   * so a job that carried none (a bot mention) has nothing to settle.
+   */
+  const settleSkippedCheck = async (reason: string, headSha: string | null | undefined): Promise<void> => {
+    if (deps.checks?.settleSkipped === undefined || headSha === null || headSha === undefined) return;
+    try {
+      await deps.checks.settleSkipped({
+        scope: {
+          appId: payload.appRef.appId,
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        },
+        headSha,
+        triggeredBy: payload.triggered_by,
+        action: payload.action,
+        reason,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        { ...(baseFields ?? payloadIdentityFields(payload)), event: "check_skip_settle_failed" },
+        `check skip settlement failed (the row is left to the recovery lane): ${detail}`,
+      );
+    }
+  };
+
   try {
     baseFields = toBaseFields(payload);
     // Durable per-comment claim (migration 0048) — the atomic step that turns
@@ -4136,6 +4201,9 @@ async function processMessage(
           );
         }
       }
+      // §7.9: a delivery attached before the App was paused still has a run to
+      // close, and this path never reaches `begin` — settle it `neutral`.
+      await settleSkippedCheck("review paused", payload.head_sha);
       return { kind: "paused" };
     }
     const { commenter, githubAppId, workspaceId } = resolution;
@@ -4214,6 +4282,9 @@ async function processMessage(
             `superseded-claim KV write failed (a redelivery may review this obsolete commit): ${detail}`,
           );
         }
+        // §7.9: this delivery is a leftover and never reaches `begin`, so its
+        // attached run is settled `neutral` instead of closing red later.
+        await settleSkippedCheck("superseded by a newer commit", payloadHeadSha);
         return { kind: "superseded" };
       }
     }
@@ -4350,6 +4421,9 @@ async function processMessage(
       // refused attempt would write "failure" rows for reviews that a later
       // delayed attempt goes on to complete. `pr-held` carries the live row's
       // sha so that ack can tell a duplicate from a commit it never covers.
+      // §7.9: a refused admission never reaches `begin`, so an attached run is
+      // settled `neutral` rather than left to close red at the attach window.
+      await settleSkippedCheck(`the review was not admitted (${admission.reason})`, payload.head_sha);
       return {
         kind: "guard-held",
         admission: refusal,
@@ -4512,12 +4586,16 @@ async function processMessage(
       // — and it must carry THIS head's existing result (inherited like an
       // empty increment), never a `neutral` that would mask a failing gate.
       await terminalizeCheck(null, "skipped", headSha);
+      // §7.9: with no handle (the adoption refused) the attached run would
+      // otherwise wait out the attach window and close red.
+      await settleSkippedCheck("already reviewed for this head", headSha);
       return { kind: "ok" };
     }
     const existing = await deps.store.findByIdempotencyKey(key);
     if (existing) {
       deps.log.info(fields, "idempotency hit — ack");
       await terminalizeCheck(null, "skipped", headSha);
+      await settleSkippedCheck("already reviewed for this head", headSha);
       return { kind: "ok" };
     }
     // §7.7 step 2 (second half) — the publication journal: an existing
@@ -4593,6 +4671,10 @@ async function processMessage(
             `publication journal handoff faulted (the Check row is left to the recovery lane): ${detail}`,
           );
         }
+      } else {
+        // §7.9: no handle was adopted for this hand-off, so the delivery's own
+        // attached run has nobody to close it — settle it `neutral`.
+        await settleSkippedCheck("a publication for this head already exists", headSha);
       }
       return { kind: "ok" };
     }

@@ -816,7 +816,8 @@ export async function claimCheckRecovery(
  *
  * `execution_deadline_ms` is NARROWED here to the adopted lease: the attach
  * window is long only so a queued message can still find its run, while the
- * execution window is the normal one (spec §7.9).
+ * execution window is whatever the caller passes as `executionDeadlineMs`
+ * (the consumer's `now + 900,000`).
  */
 export async function adoptReleasedCheckAttempt(
   db: D1Like,
@@ -871,6 +872,92 @@ export async function adoptReleasedCheckAttempt(
     .first<Pick<ReviewCheckRow, "holder" | "lease_epoch" | "lease_until_ms">>();
   if (row === null || row.holder !== input.holder || row.lease_until_ms === null) return null;
   return { holder: input.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+}
+
+/**
+ * Take the ATTACH row of one delivery for settlement (spec §7.9): a delivery
+ * that is skipped BEFORE execution must close its attached run, and the skip
+ * path holds no handle — the row may still be RELEASED, or still under a
+ * stalled delivery holder. This is the same fenced one-statement claim as
+ * `adoptReleasedCheckAttempt`, keyed by the delivery's own `attempt_key`
+ * instead of an attempt id.
+ *
+ * A live CONSUMER holder, a frozen intent, a terminal row and a row without a
+ * proven run id are never taken. The candidate is SELECTed first only to learn
+ * its id; the UPDATE repeats every predicate, so a row that stopped being
+ * claimable between the two statements writes nothing.
+ */
+export async function claimAttachedCheckForSettlement(
+  db: D1Like,
+  input: {
+    scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    holder: string;
+    /** The settling invocation's execution deadline (`now + 900,000`). */
+    executionDeadlineMs: number;
+    nowMs: number;
+  },
+): Promise<{ attempt: CheckAttempt; lease: Lease } | null> {
+  if (input.holder.length === 0) {
+    throw new Error("review-checks: settlement requires a nonblank holder identity");
+  }
+  if (input.executionDeadlineMs <= input.nowMs) {
+    throw new Error("review-checks: execution deadline must be after the settlement time");
+  }
+  const key = attemptKey({
+    appId: input.scope.appId,
+    installationId: input.scope.installationId,
+    owner: input.scope.owner,
+    repo: input.scope.repo,
+    prNumber: input.scope.prNumber,
+    headSha: input.headSha,
+    triggeredBy: input.triggeredBy,
+    action: input.action,
+  });
+  // Shared by both statements: the row must still be an unattended, attached,
+  // unfrozen attempt inside its window. Bound order matches the UPDATE.
+  const claimable = `terminal_ms IS NULL
+          AND create_state = 'known' AND check_run_id IS NOT NULL
+          AND desired = 'in_progress'
+          AND recovery_state IN ('pending','remote-unconfirmed')
+          AND execution_deadline_ms > ?
+          AND (
+            (holder IS NULL AND lease_until_ms IS NULL)
+            OR (holder LIKE 'delivery:%' AND lease_until_ms > ? AND updated_ms <= ?)
+          )`;
+  const candidate = await db
+    .prepare(`SELECT id FROM review_checks WHERE attempt_key = ? AND ${claimable} ORDER BY generation DESC LIMIT 1`)
+    .bind(key, input.nowMs, input.nowMs, input.nowMs - CHECK_ATTACH_HOLDER_STALE_MS)
+    .first<{ id: string }>();
+  if (candidate === null) return null;
+  const claimed = await db
+    .prepare(
+      `UPDATE review_checks
+          SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?,
+              execution_deadline_ms = ?, updated_ms = ?
+        WHERE id = ? AND attempt_key = ? AND ${claimable}`,
+    )
+    .bind(
+      input.holder,
+      input.executionDeadlineMs,
+      input.executionDeadlineMs,
+      input.nowMs,
+      candidate.id,
+      key,
+      input.nowMs,
+      input.nowMs,
+      input.nowMs - CHECK_ATTACH_HOLDER_STALE_MS,
+    )
+    .run();
+  if (claimed.meta.changes !== 1) return null;
+  const row = await db.prepare(`SELECT * FROM review_checks WHERE id = ?`).bind(candidate.id).first<ReviewCheckRow>();
+  if (row === null || row.holder !== input.holder || row.lease_until_ms === null) return null;
+  return {
+    attempt: attemptOf(row),
+    lease: { holder: input.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms },
+  };
 }
 
 /**

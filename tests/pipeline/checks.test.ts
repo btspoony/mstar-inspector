@@ -2339,6 +2339,32 @@ function echoCreate(params: ChecksCreateParams): CheckRunPayload {
   };
 }
 
+/**
+ * Count the adoption claim's ONE statement (epoch bump + execution-deadline
+ * move) instead of timing the retry: "was the second attempt entered?" is then
+ * a number, not a wall clock. `before` runs synchronously just before the Nth
+ * statement, which is how a test drives a state change strictly BETWEEN the two
+ * attempts.
+ */
+function countingAdoptions(
+  db: TestD1,
+  before?: (n: number) => void,
+): { db: TestD1; adoptions: () => number } {
+  let n = 0;
+  const wrapped = {
+    raw: db.raw,
+    batch: db.batch.bind(db),
+    prepare(query: string) {
+      if (query.includes("lease_epoch = lease_epoch + 1") && query.includes("execution_deadline_ms = ?")) {
+        n += 1;
+        before?.(n);
+      }
+      return db.prepare(query);
+    },
+  } as unknown as TestD1;
+  return { db: wrapped, adoptions: () => n };
+}
+
 async function attachRow(db: TestD1): Promise<Record<string, string | number | null>> {
   return (await db.prepare("SELECT * FROM review_checks ORDER BY created_ms, id LIMIT 1").first()) as Record<
     string,
@@ -2588,40 +2614,40 @@ describe("adoption of a released attach row (spec §7.9)", () => {
     expect((await rowOf(db, attempt)).holder).toBe(handle!.lease.holder);
   });
 
-  test("an attach that releases inside the retry slice is adopted by the retry", async () => {
+  test("an attach that releases between the two adoption attempts is adopted by the retry", async () => {
     const db = await seededDb();
     CLOCK = T0;
     // The message was admitted while the delivery holder was still mid-attach:
-    // the first adoption refuses a fresh live holder, then the attach releases
-    // ~60 ms later — inside the 250 ms retry slice.
+    // the first adoption refuses a fresh live holder, and the attach releases
+    // strictly BETWEEN the two attempts — driven from the second adoption
+    // statement, so nothing races a wall clock.
     const { attempt, lease: deliveryLease } = await claimedAttempt(db, {
       holder: "delivery:attach-in-flight",
       executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
     });
     await attachedRun(db, attempt, deliveryLease, 4242);
-    const releasing = new Promise<void>((resolve) => {
-      setTimeout(() => {
-        void releaseAttachedCheck(
-          db,
-          attempt.identity.attemptId,
-          deliveryLease,
-          T0 + CHECK_ATTACH_GRACE_MS,
-          CLOCK,
-        ).then(() => resolve());
-      }, 60);
+    const counting = countingAdoptions(db, (n) => {
+      if (n !== 2) return;
+      db.raw
+        .prepare(
+          `UPDATE review_checks
+              SET holder = NULL, lease_until_ms = NULL, next_attempt_ms = ?
+            WHERE id = ? AND holder = ? AND lease_epoch = ?`,
+        )
+        .run(T0 + CHECK_ATTACH_GRACE_MS, attempt.identity.attemptId, "delivery:attach-in-flight", 1);
     });
     const fake = fakeChecks({ create: echoCreate });
     const lifecycle = createCheckLifecycle({
-      db,
+      db: counting.db,
       nowMs: () => CLOCK,
       getAdapter: () => adapterFor(db, fake.octokit),
       getCheckGate: async () => GATE,
     });
 
     const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
-    await releasing;
 
-    // The retry took the released row: same attempt, same run, live lease.
+    // Exactly two adoption statements ran, and the second one took the row.
+    expect(counting.adoptions()).toBe(2);
     expect(handle).not.toBeNull();
     expect(handle!.attemptId).toBe(attempt.identity.attemptId);
     expect(handle!.lease.untilMs).toBeGreaterThan(CLOCK);
@@ -2638,21 +2664,20 @@ describe("adoption of a released attach row (spec §7.9)", () => {
     const { attempt, lease } = await claimedAttempt(db, { holder: "consumer:another-run" });
     await attachedRun(db, attempt, lease, 4242);
     const fake = fakeChecks({ create: echoCreate });
+    const counting = countingAdoptions(db);
     const lifecycle = createCheckLifecycle({
-      db,
+      db: counting.db,
       nowMs: () => CLOCK,
       getAdapter: () => adapterFor(db, fake.octokit),
       getCheckGate: async () => GATE,
     });
 
-    const startedAt = Date.now();
     const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
-    const elapsed = Date.now() - startedAt;
 
-    // A running review's holder is not waited for: no handle, and no 250 ms
-    // retry slice either.
+    // A running review's holder is not waited for: one adoption statement, no
+    // second attempt, no handle.
     expect(handle).toBeNull();
-    expect(elapsed).toBeLessThan(200);
+    expect(counting.adoptions()).toBe(1);
     const row = await rowOf(db, attempt);
     expect(row.holder).toBe("consumer:another-run");
     expect(row.lease_epoch).toBe(1);
@@ -2668,20 +2693,20 @@ describe("adoption of a released attach row (spec §7.9)", () => {
     await attachedRun(db, attempt, lease, 4242);
     expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
     const fake = fakeChecks({ create: echoCreate });
+    const counting = countingAdoptions(db);
     const lifecycle = createCheckLifecycle({
-      db,
+      db: counting.db,
       nowMs: () => CLOCK,
       getAdapter: () => adapterFor(db, fake.octokit),
       getCheckGate: async () => GATE,
     });
 
-    const startedAt = Date.now();
     const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
-    const elapsed = Date.now() - startedAt;
 
-    // A frozen intent belongs to recovery: no handle, no retry slice.
+    // A frozen intent belongs to recovery: one adoption statement, no second
+    // attempt, no handle.
     expect(handle).toBeNull();
-    expect(elapsed).toBeLessThan(200);
+    expect(counting.adoptions()).toBe(1);
     const row = await rowOf(db, attempt);
     expect(row.desired).toBe("success");
     expect(row.holder).toBe("delivery:attach");
@@ -2749,6 +2774,197 @@ describe("adoption of a released attach row (spec §7.9)", () => {
         nowMs: CLOCK,
       }),
     ).toBeNull();
+  });
+});
+
+describe("skip settlement (spec §7.9 / RL-10)", () => {
+  /** Attach one run for the fixture scope and return the row's attempt id. */
+  async function attachedAttempt(db: TestD1, fake: ReturnType<typeof fakeChecks>): Promise<string> {
+    const result = await attachCheckAtAcceptance(
+      { db, adapter: adapterFor(db, fake.octokit), nowMs: () => CLOCK },
+      ATTACH_INPUT,
+    );
+    expect(result.kind).toBe("attached");
+    return (await attachRow(db)).id as string;
+  }
+
+  /** A scripted surface whose update echoes the intended terminal state. */
+  function settlingFake(): ReturnType<typeof fakeChecks> {
+    let externalId = "";
+    return fakeChecks({
+      create: (params) => {
+        externalId = params.external_id;
+        return echoCreate(params);
+      },
+      update: (params) => ({
+        id: params.check_run_id,
+        name: CHECK_NAME,
+        head_sha: SHA,
+        external_id: externalId,
+        status: "completed",
+        conclusion: params.conclusion,
+        app: { id: GITHUB_APP_ID },
+      }),
+    });
+  }
+
+  test("a skipped delivery settles the attached run neutral with the reason", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const fake = settlingFake();
+    const attemptId = await attachedAttempt(db, fake);
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const settled = await lifecycle.settleSkipped({
+      scope: SCOPE,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      reason: "already reviewed for this head",
+    });
+
+    expect(settled).toBe(true);
+    // ONE bounded update, carrying neutral and the skip reason — never a
+    // proof-derived failure.
+    expect(fake.updates).toHaveLength(1);
+    expect(fake.updates[0]!.params.conclusion).toBe("neutral");
+    expect(fake.updates[0]!.params.output.summary).toContain("already reviewed for this head");
+    const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("neutral");
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.recovery_state).toBe("done");
+  });
+
+  test("a duplicate skip is a no-op: the row is already terminal", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const fake = settlingFake();
+    await attachedAttempt(db, fake);
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+    const settle = () =>
+      lifecycle.settleSkipped({
+        scope: SCOPE,
+        headSha: SHA,
+        triggeredBy: "octocat",
+        action: "review",
+        reason: "already reviewed for this head",
+      });
+
+    expect(await settle()).toBe(true);
+    // The second delivery's skip finds a terminal row: nothing to take, no
+    // second remote update.
+    expect(await settle()).toBe(false);
+    expect(fake.updates).toHaveLength(1);
+  });
+
+  test("a skip never takes a live consumer holder", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const { attempt, lease } = await claimedAttempt(db, { holder: "consumer:running" });
+    await attachedRun(db, attempt, lease, 4242);
+    const fake = settlingFake();
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const settled = await lifecycle.settleSkipped({
+      scope: SCOPE,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      reason: "review paused",
+    });
+
+    expect(settled).toBe(false);
+    expect(fake.updates).toHaveLength(0);
+    const row = await rowOf(db, attempt);
+    expect(row.holder).toBe("consumer:running");
+    expect(row.lease_epoch).toBe(1);
+    expect(row.desired).toBe("in_progress");
+    expect(row.terminal_ms).toBeNull();
+  });
+
+  test("a skip never takes a frozen intent", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const { attempt, lease } = await claimedAttempt(db, {
+      holder: "delivery:attach",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    await attachedRun(db, attempt, lease, 4242);
+    expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
+    const fake = settlingFake();
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const settled = await lifecycle.settleSkipped({
+      scope: SCOPE,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      reason: "review paused",
+    });
+
+    expect(settled).toBe(false);
+    expect(fake.updates).toHaveLength(0);
+    const row = await rowOf(db, attempt);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("unknown");
+  });
+
+  test("a release fenced out by an adopting consumer is a skip, not an attach failure", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const fake = fakeChecks({ create: echoCreate });
+    // The admitted consumer adopts the row before this invocation releases it:
+    // the epoch moves, so the release matches zero rows. Driving the adoption
+    // from the release statement makes the overlap exact.
+    const wrapped = {
+      raw: db.raw,
+      batch: db.batch.bind(db),
+      prepare(query: string) {
+        if (query.includes("holder = NULL") && query.includes("next_attempt_ms = ?")) {
+          db.raw
+            .prepare(
+              `UPDATE review_checks
+                  SET holder = 'consumer:winner', lease_epoch = lease_epoch + 1,
+                      lease_until_ms = ?, execution_deadline_ms = ?, updated_ms = ?
+                WHERE holder LIKE 'delivery:%'`,
+            )
+            .run(T0 + CHECK_LEASE_MS, T0 + CHECK_LEASE_MS, T0);
+        }
+        return db.prepare(query);
+      },
+    } as unknown as TestD1;
+
+    const result = await attachCheckAtAcceptance(
+      { db: wrapped, adapter: adapterFor(db, fake.octokit), nowMs: () => CLOCK },
+      ATTACH_INPUT,
+    );
+
+    // The consumer owns the row now: nothing failed, and the attach says so.
+    expect(result).toEqual({ kind: "skipped", reason: "adopted" });
   });
 });
 
