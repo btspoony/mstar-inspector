@@ -1440,6 +1440,16 @@ export type PostOctokit = {
      */
     pulls?: {
       createReview?: (parameters: Record<string, unknown>) => Promise<unknown>;
+      /**
+       * The created review's comments connection (§7.5 discovery anchor):
+       * GitHub's create-review response carries no comments array, so the
+       * created line-comment ids are read back from this route. Optional and
+       * guarded — a missing surface or a failed read keeps today's
+       * `captured: false` outcome.
+       */
+      listCommentsForReview?: (
+        parameters: Record<string, unknown>,
+      ) => Promise<{ data: Array<{ id?: unknown; path?: unknown; line?: unknown }> }>;
     };
   };
 };
@@ -2007,9 +2017,30 @@ export async function postLineCommentsWithOctokit(
     data?: { id?: unknown; comments?: Array<{ id?: unknown; path?: unknown; line?: unknown }> | null };
   } | undefined;
 
-  const returned = Array.isArray(response?.data?.comments) ? response!.data!.comments! : null;
+  const echoed = Array.isArray(response?.data?.comments) ? response!.data!.comments! : null;
   const reviewIdRaw = response?.data?.id;
   const reviewId = typeof reviewIdRaw === "number" ? reviewIdRaw : null;
+  // GitHub's create-review response carries no comments array, so the created
+  // ids are read back from the review's comments connection — one bounded
+  // page. A missing surface, a throw or a malformed answer is NOT a failed
+  // post: the comments may well have landed, so capture stays false and the
+  // review id is still reported.
+  let returned = echoed;
+  const listCommentsForReview = octokit.rest?.pulls?.listCommentsForReview;
+  if (returned === null && reviewId !== null && listCommentsForReview !== undefined) {
+    try {
+      const listed = await listCommentsForReview({
+        owner: input.owner,
+        repo: input.repo,
+        pull_number: input.prNumber,
+        review_id: reviewId,
+        per_page: 100,
+      });
+      returned = Array.isArray(listed?.data) ? listed.data : null;
+    } catch {
+      returned = null;
+    }
+  }
   const posted: PostedLineComments["posted"] = [];
   const ambiguous: string[] = [];
   if (returned === null) {
