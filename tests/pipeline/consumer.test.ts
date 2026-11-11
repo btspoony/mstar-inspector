@@ -183,7 +183,11 @@ import {
 import { withFrozenClock } from "../helpers/clock";
 import { PR_CONTEXT_MAX_ISSUES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
-import { attributeChain, formatFailureAttribution } from "../../packages/runner/src/seat-failover-probe";
+import {
+  attributeChain,
+  attributionEntries,
+  formatFailureAttribution,
+} from "../../packages/runner/src/seat-failover-probe";
 
 /** Runner exec call's env (the sandbox fake stores opts as unknown). */
 function runnerExecEnv(): Record<string, string> {
@@ -1083,7 +1087,7 @@ describe("createReviewConsumer", () => {
     sandbox.runnerExitCode = 1;
     sandbox.runnerStderr = formatFailureAttribution(
       "seat 0 failed: 400 You have insufficient credits",
-      attributeChain(verdicts),
+      attributionEntries(attributeChain(verdicts)),
     );
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);

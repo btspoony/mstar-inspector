@@ -63,6 +63,7 @@ import { encodeCredentialPayload } from "../../packages/shared/src/credential-pa
 import type { RecheckStatus } from "../../packages/shared/src/recheck-wire";
 import { readRecheckStatusCommand } from "../../src/pipeline/gitops";
 import {
+  chainAttributionBlock,
   createInMemoryAuthStorage,
   main,
   parseRunnerInput,
@@ -699,6 +700,31 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(stderr).not.toContain("served");
   });
 
+  test("an attribution failure keeps the provider cause and stays inside the budget", async () => {
+    // A deliberately unusable credential store makes the attribution THROW (the
+    // registry dereferences it) — the exception path, whose diagnostic is a
+    // multi-kilobyte message. Before the fix that path concatenated the raw
+    // diagnostic unbounded, evicting the cause from the Worker's 600-char tail.
+    const cause = "seat 0 failed: 400 You have insufficient credits";
+    const diagnostic = `x`.repeat(3000);
+    // The credential store throws a MULTI-KILOBYTE message the moment the
+    // registry dereferences it, so the catch's diagnostic is the long case.
+    const explodingAuth = new Proxy({} as never, {
+      get(): never {
+        throw new Error(diagnostic);
+      },
+    });
+    const block = chainAttributionBlock(cause, [CHAIN], "/nonexistent-agent-dir", explodingAuth);
+
+    // The cause survives, first …
+    expect(block).toContain(cause);
+    expect(block.indexOf(cause)).toBeLessThan(block.indexOf("attribution unavailable"));
+    // … and the whole block is inside the runner-owned budget, however long the
+    // diagnostic is.
+    expect(block.length).toBeLessThanOrEqual(FAILURE_BLOCK_BUDGET_CHARS);
+    expect(block).toContain("chain attribution unavailable");
+    expect(block).not.toContain(diagnostic);
+  });
   test("a fully-keyed failed round names no gate as the cause", async () => {
     process.env.OMP_REVIEW_MODEL = CHAIN;
     runtimeError = new Error("seat 0 failed: 400 You have insufficient credits");

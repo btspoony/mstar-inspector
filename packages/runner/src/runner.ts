@@ -107,7 +107,12 @@ import {
 } from "../../shared/src/runtime";
 import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
-import { attributeChain, formatFailureAttribution, walkSeatGates } from "./seat-failover-probe";
+import {
+  attributeChain,
+  attributionEntries,
+  formatFailureAttribution,
+  walkSeatGates,
+} from "./seat-failover-probe";
 import { writePerReviewModelsYaml } from "./models-synthesis";
 import { decodeCredentialPayload } from "../../shared/src/credential-payload";
 import { APPLIED_MODEL_PATH, type AppliedModelDoc } from "../../shared/src/runtime";
@@ -688,10 +693,11 @@ export function writeRecheckStatus(
  * The failed round's per-selector disposition, produced by the seat-failover
  * probe's OWN gate walker (one rule, one place). No live context exists at
  * this point, so the context gate is reported as not evaluated rather than
- * guessed. A throw here is swallowed into a single line: attribution is
+ * guessed. A throw here is swallowed into a BOUNDED line — every failure
+ * path shares the formatter's budget, including this one: attribution is
  * diagnosis, never a second failure.
  */
-function chainAttributionBlock(
+export function chainAttributionBlock(
   cause: string,
   chain: readonly string[],
   agentDir: string,
@@ -699,9 +705,16 @@ function chainAttributionBlock(
 ): string {
   try {
     const registry = new ModelRegistry(authStorage, join(agentDir, "models.yml"));
-    return formatFailureAttribution(cause, attributeChain(walkSeatGates({ registry, chain })));
+    return formatFailureAttribution(
+      cause,
+      attributionEntries(attributeChain(walkSeatGates({ registry, chain }))),
+    );
   } catch (error) {
-    return `review: runtime failed: ${cause}\nreview: chain attribution unavailable: ${(error as Error).message}`;
+    // The attribution itself failed. The diagnostic still goes through the ONE
+    // budgeted formatter as a single entry: a multi-kilobyte stack trace must
+    // not push the original provider error out of the Worker's stderr tail —
+    // which is exactly when the operator needs it most.
+    return formatFailureAttribution(cause, [`chain attribution unavailable: ${(error as Error).message}`]);
   }
 }
 
@@ -963,7 +976,9 @@ export async function main(
       if (agentDir !== undefined && authStorage !== undefined) {
         console.error(chainAttributionBlock(cause, chain, agentDir, authStorage));
       } else {
-        console.error(`review: runtime failed: ${cause}`);
+        // No synthesized models.yml to walk: the cause alone, still through the
+        // formatter so even this path cannot print an unbounded block.
+        console.error(formatFailureAttribution(cause, []));
       }
       return 1;
     }

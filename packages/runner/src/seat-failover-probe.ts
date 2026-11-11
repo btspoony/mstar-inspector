@@ -312,6 +312,19 @@ export const FAILURE_BLOCK_BUDGET_CHARS = 500;
 /** The cause's share of that budget: enough for a provider's own message. */
 export const FAILURE_CAUSE_MAX_CHARS = 240;
 
+/**
+ * One entry's cap. An entry larger than this is TRUNCATED (with an ellipsis),
+ * not dropped: a single oversized diagnostic — the exception path's
+ * multi-kilobyte message — must still say what failed, and folding it away
+ * would leave the block naming no cause at all.
+ */
+export const FAILURE_ENTRY_MAX_CHARS = 180;
+
+/** The rendered form of one configured chain's attribution (the formatter takes plain lines). */
+export function attributionEntries(attributions: readonly ChainAttribution[]): string[] {
+  return attributions.map((entry) => `${entry.selector} ${entry.reason}`);
+}
+
 /** The counted fold that replaces the entries the budget could not carry. */
 function omittedMarker(count: number): string {
   return `+${count} more chain ${count === 1 ? "entry" : "entries"} omitted`;
@@ -330,7 +343,7 @@ function omittedMarker(count: number): string {
  */
 export function formatFailureAttribution(
   cause: string,
-  attributions: readonly ChainAttribution[],
+  entries: readonly string[],
   budgetChars: number = FAILURE_BLOCK_BUDGET_CHARS,
 ): string {
   const causeText = cause.trim();
@@ -338,20 +351,24 @@ export function formatFailureAttribution(
     causeText.length <= FAILURE_CAUSE_MAX_CHARS
       ? `review: runtime failed: ${causeText}`
       : `review: runtime failed: ${causeText.slice(0, FAILURE_CAUSE_MAX_CHARS - 1)}…`;
-  if (attributions.length === 0) {
-    return `${causeLine}\nreview: chain attribution (configured): no model chain was configured`;
-  }
+  // No disposition to add: the cause alone IS the block — still bounded, so a
+  // pathologically long cause cannot evict itself from the Worker's tail.
+  if (entries.length === 0) return causeLine;
   const head = `\nreview: chain attribution (configured): `;
-  const entries = attributions.map((entry) => `${entry.selector} ${entry.reason}`);
+  // Each entry is bounded FIRST, so an oversized one is truncated rather than
+  // folded away — the fold is for a count of entries, not for one long message.
+  const bounded = entries.map((entry) =>
+    entry.length <= FAILURE_ENTRY_MAX_CHARS ? entry : `${entry.slice(0, FAILURE_ENTRY_MAX_CHARS - 1)}…`,
+  );
   // The LONGEST prefix whose folded form still fits: the fold's own length
   // depends on the count it states, so it is recomputed at every step.
   const assemble = (count: number): string => {
-    const omitted = entries.length - count;
-    const body = entries.slice(0, count).join("; ");
+    const omitted = bounded.length - count;
+    const body = bounded.slice(0, count).join("; ");
     const fold = omitted === 0 ? "" : count === 0 ? omittedMarker(omitted) : `; ${omittedMarker(omitted)}`;
     return `${causeLine}${head}${body}${fold}`;
   };
-  for (let count = entries.length; count >= 0; count--) {
+  for (let count = bounded.length; count >= 0; count--) {
     const candidate = assemble(count);
     if (candidate.length <= budgetChars) return candidate;
   }

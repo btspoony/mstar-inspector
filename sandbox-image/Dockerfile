@@ -209,6 +209,9 @@
 # "served" claim it did not observe), folded with a counted marker to fit the
 # Worker's 600-character stderr tail. A stale image keeps asserting the
 # configured head as served and lets a long chain evict the cause.
+# rebuild: the attribution's own exception path now shares that budget too — its
+# diagnostic is one truncated entry under the same formatter. A stale image
+# concatenates a multi-kilobyte stack trace after the cause and evicts it again.
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via
