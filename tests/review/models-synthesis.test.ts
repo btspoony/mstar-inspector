@@ -143,6 +143,51 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
     expect(yaml.match(/^    auth: oauth$/gm)).toHaveLength(2);
   });
 
+  test("a declared model's metadata is emitted with the capability-host keys; an unstated fact is absent", () => {
+    const withMeta: CustomProviderDeclaration = {
+      ...CUSTOM,
+      model_ids: ["full-model", "sizes-only", "id-only"],
+      models_meta: {
+        "full-model": {
+          contextWindow: 128000,
+          maxTokens: 8192,
+          name: 'My "Model"',
+          reasoning: true,
+          input: ["text", "image"],
+        },
+        "sizes-only": { contextWindow: 32000, maxTokens: 4096 },
+      },
+    };
+    const yaml = synthesizeModelsYaml(BASE_YAML, [withMeta]);
+    // Same keys, same 6/8-space indentation and the same ORDER as the
+    // capability-host block; user-derived scalars quoted (yamlQuote), numbers
+    // and booleans bare.
+    expect(yaml).toContain(
+      [
+        '      - id: "full-model"',
+        '        name: "My \\"Model\\""',
+        "        reasoning: true",
+        '        input: ["text", "image"]',
+        "        contextWindow: 128000",
+        "        maxTokens: 8192",
+        '      - id: "sizes-only"',
+        "        contextWindow: 32000",
+        "        maxTokens: 4096",
+        '      - id: "id-only"',
+      ].join("\n"),
+    );
+    // The id-only model gains NO line: an unstated fact is absent, never a
+    // guessed number (the defect this field closes, one layer down).
+    const tail = yaml.slice(yaml.indexOf('      - id: "id-only"'));
+    expect(tail).not.toMatch(/contextWindow|maxTokens|name:|reasoning:|input:/);
+  });
+
+  test("a declared model with no metadata at all is emitted as a bare id — the legacy shape", () => {
+    const yaml = synthesizeModelsYaml(BASE_YAML, [CUSTOM]);
+    expect(yaml).toContain('      - id: "my-model-1"\n      - id: "my-model-2"');
+    expect(yaml.slice(yaml.indexOf('"my-provider":'))).not.toMatch(/contextWindow/);
+  });
+
   test("ZERO custom declarations → the base text unchanged (byte-identical zero-custom path)", () => {
     expect(synthesizeModelsYaml(BASE_YAML, [])).toBe(BASE_YAML);
   });

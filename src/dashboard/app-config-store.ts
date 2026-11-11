@@ -265,6 +265,7 @@ export type AppCustomProviderRow = {
   base_url: string;
   api: string;
   model_ids: string;
+  models_meta: string;
   created_at: string;
   updated_at: string;
 };
@@ -282,7 +283,34 @@ export type AppCustomProvider = {
   base_url: string;
   api: CustomProviderApi;
   model_ids: string[];
+  /**
+   * What the owner stated about each model id, keyed by that id (migration
+   * 0053). ABSENT means nothing was stated — the legacy declaration shape, and
+   * the reason an existing row keeps its stored bytes. A field inside an entry
+   * that is absent (or null) is unset too; zero is never an "unset" stand-in.
+   */
+  models_meta?: CustomProviderModelsMeta;
 };
+
+/**
+ * What one declared model's owner stated about it. `contextWindow` and
+ * `maxTokens` are what make the model a usable failover candidate; the rest
+ * may stay unset and stay unset — the product never invents a capability
+ * either. A stored entry may carry a subset, so an id-only declaration is
+ * storable while the settings form is the surface that requires the two sizes.
+ */
+export type CustomProviderModelMeta = {
+  /** Tokens the model can hold — a positive whole count. */
+  contextWindow?: number;
+  /** Token cap one completion may spend — a positive whole count. */
+  maxTokens?: number;
+  name?: string;
+  reasoning?: boolean;
+  input?: string[];
+};
+
+/** The per-model overlay of ONE declaration, keyed by a declared model id. */
+export type CustomProviderModelsMeta = Record<string, CustomProviderModelMeta>;
 /**
  * A declaration as the settings / model faces read it: the declaration PLUS
  * whether its pool currently holds a credential. A drained pool leaves the
@@ -309,6 +337,8 @@ export type CustomProviderConsumerConfig = {
   base_url: string;
   api: CustomProviderApi;
   model_ids: string[];
+  /** Absent when the declaration states nothing (the legacy input shape). */
+  models_meta?: CustomProviderModelsMeta;
   api_keys: string[];
 };
 
@@ -323,6 +353,7 @@ type CustomProviderKeyJoinRow = {
   base_url: string;
   api: string;
   model_ids: string;
+  models_meta: string;
   key_id: string | null;
   key_enc: string | null;
   key_created_at: string | null;
@@ -478,6 +509,122 @@ function parseModelIdsJson(raw: string, source: string): string[] {
     throw new Error(`app-config-store: ${source} is not a JSON array of strings: ${JSON.stringify(raw)}`);
   }
   return parsed;
+}
+
+/**
+ * One stored entry with its legacy `null` fields dropped — the READ boundary's
+ * normalization to the canonical "unset = absent". Explicit `false`, `0`-free
+ * numbers and empty arrays are statements and are preserved; only nulls go.
+ */
+function normalizeModelMeta(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const normalized: Record<string, unknown> = {};
+  // EVERY non-null field is carried through — an unknown field must still
+  // reach the shape rule and fail loud, never be dropped here.
+  for (const [field, fieldValue] of Object.entries(value as Record<string, unknown>)) {
+    if (fieldValue === null || fieldValue === undefined) continue;
+    normalized[field] = fieldValue;
+  }
+  return normalized;
+}
+
+/** The fields one model's overlay entry may carry — anything else is a typo. */
+const CUSTOM_PROVIDER_MODEL_META_FIELDS: readonly string[] = [
+  "contextWindow",
+  "maxTokens",
+  "name",
+  "reasoning",
+  "input",
+];
+
+/**
+ * The ONE shape rule for one model's metadata entry: what is malformed about
+ * it, or `null` when it is well-formed. Shared by the write gate (which turns
+ * the reason into InvalidCustomProviderError) and the read path (which throws
+ * it, the getAppConfig tamper convention), so a stored row can never be
+ * laxer than an incoming one. A `null` field is unset — the same thing as a
+ * missing key.
+ */
+function customProviderModelMetaProblem(modelId: string, value: unknown): string | null {
+  const named = `model ${JSON.stringify(modelId)}`;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return `${named} metadata is not a JSON object`;
+  }
+  const entry = value as Record<string, unknown>;
+  for (const field of Object.keys(entry)) {
+    if (!CUSTOM_PROVIDER_MODEL_META_FIELDS.includes(field)) {
+      return `${named} metadata carries an unknown field ${JSON.stringify(field)}`;
+    }
+  }
+  // Canonical wire form: an unset fact is ABSENT. `null` is the legacy
+  // spelling the read boundary normalizes away, so it is refused here — a
+  // write may never introduce a second shape for "unset".
+  for (const field of CUSTOM_PROVIDER_MODEL_META_FIELDS) {
+    if (entry[field] === null) return `${named} ${field} must not be null (leave it out to leave it unset)`;
+  }
+  for (const field of ["contextWindow", "maxTokens"]) {
+    const raw = entry[field];
+    if (raw === undefined) continue;
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw <= 0) {
+      return `${named} ${field} must be a positive integer`;
+    }
+  }
+  if (entry.name !== undefined && typeof entry.name !== "string") {
+    return `${named} name must be a string`;
+  }
+  if (entry.reasoning !== undefined && typeof entry.reasoning !== "boolean") {
+    return `${named} reasoning must be a boolean`;
+  }
+  if (entry.input !== undefined) {
+    if (!Array.isArray(entry.input) || !entry.input.every((modality) => typeof modality === "string")) {
+      return `${named} input must be an array of strings`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse a stored `app_custom_providers.models_meta` overlay, fail-loud on a
+ * tampered row: a non-object, a key that is not one of THIS declaration's
+ * model ids, or an entry that breaks the shape rule throws here rather than
+ * reaching a caller. An entry of JSON null is unset and is dropped; an overlay
+ * with nothing left returns `undefined`, so a declaration that states nothing
+ * reads exactly as it did before the column existed.
+ */
+function parseModelsMetaJson(
+  raw: string,
+  modelIds: readonly string[],
+  source: string,
+): CustomProviderModelsMeta | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`app-config-store: ${source} is not a JSON object: ${JSON.stringify(raw)}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`app-config-store: ${source} is not a JSON object: ${JSON.stringify(raw)}`);
+  }
+  const meta: CustomProviderModelsMeta = {};
+  for (const [modelId, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!modelIds.includes(modelId)) {
+      throw new Error(
+        `app-config-store: ${source} names model ${JSON.stringify(modelId)}, which is not in app_custom_providers.model_ids`,
+      );
+    }
+    if (value === null) continue;
+    // Legacy rows were written while `null` counted as unset. Normalize at
+    // THIS boundary so every consumer sees the one canonical form — an absent
+    // key — and never a null that would render as "No reasoning" or throw on
+    // an `input` spread. The canonical shape rule then judges the cleaned
+    // entry, so a null-free row can never be laxer than a freshly written one.
+    const normalized = normalizeModelMeta(value) as Record<string, unknown>;
+    const problem = customProviderModelMetaProblem(modelId, normalized);
+    if (problem !== null) throw new Error(`app-config-store: ${source}: ${problem}`);
+    // An entry whose every field was null is itself unstated.
+    if (Object.keys(normalized).length > 0) meta[modelId] = normalized as CustomProviderModelMeta;
+  }
+  return Object.keys(meta).length === 0 ? undefined : meta;
 }
 
 /**
@@ -788,6 +935,35 @@ export function assertCustomProviderModelIds(modelIds: readonly string[]): void 
   }
 }
 
+/**
+ * The metadata overlay's write gate, stated once: every key must be one of the
+ * ids the SAME declaration carries (an overlay entry for a model the provider
+ * does not serve is unreachable data), and every stated field must have the
+ * shape `customProviderModelMetaProblem` accepts. The error names the offending
+ * model id and field — the settings route re-renders it — and the caller writes
+ * nothing. A declaration that states nothing passes: an id-only row is stored,
+ * never refused (it is shown as saved-but-not-usable, not silently completed).
+ */
+export function assertCustomProviderModelsMeta(
+  meta: CustomProviderModelsMeta | undefined,
+  modelIds: readonly string[],
+): void {
+  if (meta === undefined) return;
+  if (meta === null || typeof meta !== "object" || Array.isArray(meta)) {
+    throw new InvalidCustomProviderError("custom provider models_meta must be an object keyed by model id");
+  }
+  for (const [modelId, value] of Object.entries(meta)) {
+    if (!modelIds.includes(modelId)) {
+      throw new InvalidCustomProviderError(
+        `custom provider models_meta names model ${JSON.stringify(modelId)}, which is not in model_ids`,
+      );
+    }
+    if (value === null) continue;
+    const problem = customProviderModelMetaProblem(modelId, value);
+    if (problem !== null) throw new InvalidCustomProviderError(`custom provider models_meta: ${problem}`);
+  }
+}
+
 function assertCustomProvider(decl: AppCustomProvider, plainKey: string, capabilityHostIds: readonly string[]): void {
   if (!CUSTOM_PROVIDER_ID_PATTERN.test(decl.provider_id)) {
     throw new InvalidCustomProviderError(
@@ -824,6 +1000,7 @@ function assertCustomProvider(decl: AppCustomProvider, plainKey: string, capabil
     );
   }
   assertCustomProviderModelIds(decl.model_ids);
+  assertCustomProviderModelsMeta(decl.models_meta, decl.model_ids);
   if (plainKey === "") {
     throw new InvalidCustomProviderError("custom provider API key is required at declaration");
   }
@@ -1966,8 +2143,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         ? db
             .prepare(
               `WITH now AS (SELECT datetime('now') AS ts)
-               INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, created_at, updated_at)
-               SELECT ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now)
+               INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, models_meta, created_at, updated_at)
+               SELECT ?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now)
                WHERE ${declarationGrowthAdmission()}
                  AND ${poolAdmission(CUSTOM_KEY_TABLE)}
                  AND NOT EXISTS (SELECT 1 FROM app_custom_providers
@@ -1976,6 +2153,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
                  base_url = excluded.base_url,
                  api = excluded.api,
                  model_ids = excluded.model_ids,
+                 models_meta = excluded.models_meta,
                  updated_at = (SELECT ts FROM now)`,
             )
             .bind(
@@ -1984,6 +2162,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
               decl.base_url,
               decl.api,
               JSON.stringify(decl.model_ids),
+              JSON.stringify(decl.models_meta ?? {}),
               appId,
               // growth admission: the count and the same-id existence branch.
               appId,
@@ -2001,7 +2180,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         : db
             .prepare(
               `WITH now AS (SELECT datetime('now') AS ts)
-               UPDATE app_custom_providers SET base_url = ?, api = ?, model_ids = ?, updated_at = (SELECT ts FROM now)
+               UPDATE app_custom_providers SET base_url = ?, api = ?, model_ids = ?, models_meta = ?, updated_at = (SELECT ts FROM now)
                WHERE app_id = ? AND provider_id = ?
                  AND ${poolAdmission(CUSTOM_KEY_TABLE)}
                  AND (base_url = ? AND api = ?
@@ -2011,6 +2190,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
               decl.base_url,
               decl.api,
               JSON.stringify(decl.model_ids),
+              JSON.stringify(decl.models_meta ?? {}),
               appId,
               decl.provider_id,
               ...admissionBinds,
@@ -2076,16 +2256,54 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * cannot report a saved list that nothing holds. Its atomicity is also why
      * the route needs no declaration read of its own — a declaration removed
      * between a read and this write still refuses.
+     *
+     * The metadata overlay is keyed by THIS declaration's ids, so an id the
+     * edit drops must take its metadata with it — otherwise the row would fail
+     * its own read gate (a key outside model_ids is tamper). The row is read
+     * first to carry the surviving entries across; a dropped declaration still
+     * refuses on the guarded UPDATE below.
+     *
+     * `modelsMeta` is the settings form's STATED overlay: absent = this save
+     * states nothing about the models (the stored overlay is carried over,
+     * pruned to the surviving ids — an id-only row stays id-only, never
+     * backfilled), while a supplied overlay replaces it whole and is gated by
+     * the same shape rule the declaration write uses, so the model-list editor
+     * cannot store what the declaration gate would refuse.
      */
-    async updateCustomProviderModels(appId: string, providerId: string, modelIds: string[]): Promise<void> {
+    async updateCustomProviderModels(
+      appId: string,
+      providerId: string,
+      modelIds: string[],
+      modelsMeta?: CustomProviderModelsMeta,
+    ): Promise<void> {
       assertCustomProviderModelIds(modelIds);
-      const res = await db
-        .prepare(
-          `UPDATE app_custom_providers SET model_ids = ?, updated_at = datetime('now')
-            WHERE app_id = ? AND provider_id = ?`,
-        )
-        .bind(JSON.stringify(modelIds), appId, providerId)
-        .run();
+      if (modelsMeta !== undefined) assertCustomProviderModelsMeta(modelsMeta, modelIds);
+      // ONE statement in both shapes: a read-then-write pair would let a
+      // concurrent save of this declaration land between the read and the
+      // write and be silently reverted by the carried snapshot. The carry-over
+      // prune therefore rides the UPDATE itself, reading the row's live
+      // overlay through `json_each`.
+      const idsJson = JSON.stringify(modelIds);
+      const statement =
+        modelsMeta === undefined
+          ? db
+              .prepare(
+                `UPDATE app_custom_providers
+                    SET model_ids = ?,
+                        models_meta = (SELECT COALESCE(json_group_object(entry.key, entry.value), '{}')
+                                         FROM json_each(app_custom_providers.models_meta) AS entry
+                                        WHERE entry.key IN (SELECT value FROM json_each(?))),
+                        updated_at = datetime('now')
+                  WHERE app_id = ? AND provider_id = ?`,
+              )
+              .bind(idsJson, idsJson, appId, providerId)
+          : db
+              .prepare(
+                `UPDATE app_custom_providers SET model_ids = ?, models_meta = ?, updated_at = datetime('now')
+                  WHERE app_id = ? AND provider_id = ?`,
+              )
+              .bind(idsJson, JSON.stringify(modelsMeta), appId, providerId);
+      const res = await statement.run();
       if (res.meta.changes === 0) {
         throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(providerId)} is not declared for this app`);
       }
@@ -2126,13 +2344,20 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         )
         .bind(appId)
         .all<AppCustomProviderRow & { has_keys: number }>();
-      return res.results.map((row) => ({
-        provider_id: row.provider_id,
-        base_url: row.base_url,
-        api: row.api as CustomProviderApi,
-        model_ids: parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids"),
-        has_keys: row.has_keys > 0,
-      }));
+      return res.results.map((row) => {
+        const modelIds = parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids");
+        const modelsMeta = parseModelsMetaJson(row.models_meta, modelIds, "app_custom_providers.models_meta");
+        return {
+          provider_id: row.provider_id,
+          base_url: row.base_url,
+          api: row.api as CustomProviderApi,
+          model_ids: modelIds,
+          // Absent, never `{}`: a declaration that states no metadata keeps the
+          // read shape it had before the column existed.
+          ...(modelsMeta === undefined ? {} : { models_meta: modelsMeta }),
+          has_keys: row.has_keys > 0,
+        };
+      });
     },
 
     /**
@@ -2223,7 +2448,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     async getCustomProvidersForConsumer(appId: string): Promise<CustomProviderConsumerConfig[]> {
       const res = await db
         .prepare(
-          `SELECT d.provider_id, d.base_url, d.api, d.model_ids,
+          `SELECT d.provider_id, d.base_url, d.api, d.model_ids, d.models_meta,
                   k.key_id, k.key_enc, k.created_at AS key_created_at, k.updated_at AS key_updated_at,
                   k.verified_at AS key_verified_at, k.verified_status AS key_verified_status
              FROM app_custom_providers d
@@ -2238,12 +2463,15 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       for (const row of res.results) {
         let entry = pools.get(row.provider_id);
         if (entry === undefined) {
+          const modelIds = parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids");
+          const modelsMeta = parseModelsMetaJson(row.models_meta, modelIds, "app_custom_providers.models_meta");
           entry = {
             decl: {
               provider_id: row.provider_id,
               base_url: row.base_url,
               api: row.api as CustomProviderApi,
-              model_ids: parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids"),
+              model_ids: modelIds,
+              ...(modelsMeta === undefined ? {} : { models_meta: modelsMeta }),
             },
             keys: [],
           };

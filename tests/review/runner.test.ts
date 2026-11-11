@@ -60,7 +60,13 @@ import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { RecheckStatus } from "../../packages/shared/src/recheck-wire";
 import { readRecheckStatusCommand } from "../../src/pipeline/gitops";
-import { createInMemoryAuthStorage, main, readCredentialStdin, writeRecheckStatus } from "../../packages/runner/src/runner";
+import {
+  createInMemoryAuthStorage,
+  main,
+  parseRunnerInput,
+  readCredentialStdin,
+  writeRecheckStatus,
+} from "../../packages/runner/src/runner";
 import { sk } from "../helpers/fake-secrets";
 
 /** Envelope the fake runtime resolves with; overridden per test. */
@@ -500,6 +506,48 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     }
   });
 
+  test("customProviders.models_meta: every malformed shape exits 1 naming the field", async () => {
+    const malformed: Array<[unknown, RegExp]> = [
+      ["nope", /models_meta must be an object keyed by model id/],
+      [[], /models_meta must be an object keyed by model id/],
+      [{ "m": 42 }, /models_meta\["m"\] must be an object/],
+      [{ "ghost": { contextWindow: 1, maxTokens: 2 } }, /models_meta\["ghost"\] names a model that is not in model_ids/],
+      [{ "m": { contextWindow: 0, maxTokens: 8 } }, /\.contextWindow must be a positive integer/],
+      [{ "m": { contextWindow: 1.5, maxTokens: 8 } }, /\.contextWindow must be a positive integer/],
+      [{ "m": { contextWindow: "128000", maxTokens: 8 } }, /\.contextWindow must be a positive integer/],
+      [{ "m": { contextWindow: 8, maxTokens: -1 } }, /\.maxTokens must be a positive integer/],
+      [{ "m": { contextWindow: 8, maxTokens: true } }, /\.maxTokens must be a positive integer/],
+      [{ "m": { name: 42 } }, /\.name must be a string/],
+      [{ "m": { reasoning: "yes" } }, /\.reasoning must be a boolean/],
+      [{ "m": { input: "text" } }, /\.input must be an array of strings/],
+      [{ "m": { input: ["text", 42] } }, /\.input must be an array of strings/],
+      [{ "m": { contextwindow: 8 } }, /is not a known model-metadata field/],
+      // "Unset" has ONE canonical spelling on the wire: an absent key. A null
+      // is a malformed declaration, never a second way to say "not stated".
+      [{ "m": { contextWindow: null, maxTokens: 8 } }, /\.contextWindow must be a positive integer/],
+      [{ "m": { contextWindow: 8, maxTokens: 8, name: null } }, /\.name must be a string/],
+      [{ "m": { contextWindow: 8, maxTokens: 8, input: null } }, /\.input must be an array of strings/],
+    ];
+    for (const [modelsMeta, message] of malformed) {
+      const inputPath = writeInput({
+        capabilityHosts: OMP_HOSTS,
+        customProviders: [
+          {
+            provider_id: "p",
+            base_url: "https://p.example.com/v1",
+            api: "openai-completions",
+            model_ids: ["m"],
+            models_meta: modelsMeta,
+          },
+        ],
+      });
+      const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+      expect(code).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toMatch(message);
+    }
+  });
+
   test("non-finite model numbers → exit 1 (QC fix wave 1: typeof alone admits ±Infinity)", async () => {
     // JSON.stringify cannot carry NaN/±Infinity, so the non-finite path is
     // exercised through raw JSON text: JSON.parse("1e999") === Infinity.
@@ -601,6 +649,49 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(yaml).toContain('"my-provider":');
     expect(yaml).toContain("auth: oauth");
     expect(yaml).not.toContain(sk("live"));
+  });
+
+  test("customProviders.models_meta: the parsed input keeps every stated fact and no absent one", () => {
+    const input = parseRunnerInput({
+      capabilityHosts: OMP_HOSTS,
+      customProviders: [
+        {
+          provider_id: "with-meta",
+          base_url: "https://with-meta.example.com/v1",
+          api: "openai-completions",
+          model_ids: ["m1"],
+          models_meta: {
+            m1: { contextWindow: 128_000, maxTokens: 8_192, name: "M1", reasoning: true, input: ["text", "image"] },
+          },
+        },
+        {
+          provider_id: "id-only",
+          base_url: "https://id-only.example.com/v1",
+          api: "anthropic-messages",
+          model_ids: ["m2"],
+        },
+      ],
+    });
+    expect(input.customProviders).toEqual([
+      {
+        provider_id: "with-meta",
+        base_url: "https://with-meta.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["m1"],
+        models_meta: {
+          m1: { contextWindow: 128_000, maxTokens: 8_192, name: "M1", reasoning: true, input: ["text", "image"] },
+        },
+      },
+      {
+        provider_id: "id-only",
+        base_url: "https://id-only.example.com/v1",
+        api: "anthropic-messages",
+        model_ids: ["m2"],
+      },
+    ]);
+    // Absent stays absent — an empty object would be the claim "the owner
+    // stated nothing about any model", which is a different statement.
+    expect(Object.keys(input.customProviders![1]!)).toEqual(["provider_id", "base_url", "api", "model_ids"]);
   });
 
   test("customProviders colliding with a capability host id: skipped with a structured stderr warn (id + count, no keys)", async () => {

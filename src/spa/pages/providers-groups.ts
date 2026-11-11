@@ -7,14 +7,19 @@
  * group, a catalog-only id forms none (the catalog is the discovery surface,
  * not configured state).
  */
-import type { ProviderKeyRow, SettingsManagePayload } from "./data";
+import type { CustomProviderModelsMeta, ProviderKeyRow, SettingsManagePayload } from "./data";
 
 export type ProviderGroup = {
   providerId: string;
   label: string;
   kind: "builtin" | "template" | "custom";
   keys: ProviderKeyRow[];
-  declaration: { base_url: string; api: string; model_ids: string[] } | null;
+  declaration: {
+    base_url: string;
+    api: string;
+    model_ids: string[];
+    models_meta?: CustomProviderModelsMeta;
+  } | null;
   summary: { total: number; ok: number; reachable: number; failed: number; unverified: number };
 };
 

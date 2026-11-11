@@ -1173,6 +1173,70 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     expect(serialized).not.toContain(sk("custom-fixture"));
   });
 
+  test("model metadata rides the input verbatim, and an absent overlay stays absent (never {})", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const store = createAppConfigStore(db, TEST_KEY);
+    const meta = {
+      "my-model-1": {
+        contextWindow: 128_000,
+        maxTokens: 8_192,
+        name: "My Model 1",
+        reasoning: true,
+        input: ["text"],
+      },
+      "my-model-2": { contextWindow: 32_000, maxTokens: 4_096 },
+    };
+    await store.upsertCustomProvider(
+      appX.id,
+      {
+        provider_id: "my-provider",
+        base_url: "https://my-provider.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["my-model-1", "my-model-2"],
+        models_meta: meta,
+      },
+      sk("custom-fixture-AAA"),
+    );
+    // A second declaration states NOTHING about its models: it is the "saved,
+    // not usable" row, and the input must not claim it stated an empty set.
+    await store.upsertCustomProvider(
+      appX.id,
+      {
+        provider_id: "id-only",
+        base_url: "https://id-only.example.com/v1",
+        api: "anthropic-messages",
+        model_ids: ["b-model"],
+      },
+      sk("custom-fixture-BBB"),
+    );
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await withFrozenClock(() => consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))));
+
+    const input = runnerInputs()[0]!;
+    // provider_id-ascending, the store's read order.
+    expect(input.customProviders).toEqual([
+      {
+        provider_id: "id-only",
+        base_url: "https://id-only.example.com/v1",
+        api: "anthropic-messages",
+        model_ids: ["b-model"],
+      },
+      {
+        provider_id: "my-provider",
+        base_url: "https://my-provider.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["my-model-1", "my-model-2"],
+        models_meta: meta,
+      },
+    ]);
+    expect("models_meta" in (input.customProviders as Array<Record<string, unknown>>)[0]!).toBe(false);
+    // Still keyless: the overlay is declaration data, never credentials.
+    expect(JSON.stringify(input)).not.toContain(sk("custom-fixture"));
+  });
+
   test("chain referencing a custom provider id passes the fail-closed gate and transports its pool (qc3 F-001 — custom branch)", async () => {
     reset();
     const db = createMigratedTestD1();
