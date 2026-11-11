@@ -15,7 +15,7 @@
  * 600,000ms and deep 840,000ms. The seat's cap is the anchored TIER's own
  * clock (`PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes` — quick 300,000ms,
  * default 600,000ms, deep 900,000ms), bounded by
- * `outerDeadline - now - 60,000` so publication keeps its tail;
+ * `outerDeadline - now - PUBLICATION_TAIL_MS` so publication keeps its tail;
  * `recheckBudget(outerDeadline, now, cap)` then clamps to that cap and to
  * `outerDeadline - now - 5000`, 0 = skip (below 30,000ms remaining). The
  * runner anchors the ABSOLUTE outer deadline once per process
