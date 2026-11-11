@@ -46,7 +46,38 @@ export type CustomProviderDeclaration = {
   base_url: string;
   api: string;
   model_ids: string[];
+  /**
+   * What the App owner stated about each of `model_ids` (keyed by that id).
+   * ABSENT means nothing was stated — this is NOT the same statement as `{}`,
+   * and the consumer never produces the empty object. An absent fact inside an
+   * entry is absent too: the runner must not read zero as "unset".
+   */
+  models_meta?: CustomProviderModelsMeta;
 };
+
+/**
+ * One declared model's metadata as the runner input JSON carries it. Shape
+ * rule and validation live dashboard-side (`src/dashboard/app-config-store.ts`
+ * validates the same fields on write); the runner guard re-checks the wire
+ * types only. This declaration is MIRRORED here rather than imported because
+ * the in-image runner graph is exactly `packages/runner/src` +
+ * `packages/shared/src` and may not reach into Worker directories.
+ *
+ * `contextWindow` and `maxTokens` are what make the model a usable failover
+ * candidate; `name`, `reasoning` and `input` may stay unset and stay unset.
+ */
+export type CustomProviderModelMeta = {
+  /** Tokens the model can hold — a positive whole count. */
+  contextWindow?: number;
+  /** Token cap one completion may spend — a positive whole count. */
+  maxTokens?: number;
+  name?: string;
+  reasoning?: boolean;
+  input?: string[];
+};
+
+/** The per-model overlay of ONE declaration, keyed by a declared model id. */
+export type CustomProviderModelsMeta = Record<string, CustomProviderModelMeta>;
 
 /**
  * One capability-host model the runtime synthesizer materializes into the

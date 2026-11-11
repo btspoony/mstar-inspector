@@ -173,6 +173,12 @@
 # `sandbox-image/cli-global/package.json` are image inputs, and the pinned ref
 # is the tree the skills are cloned from; a stale image would run the previous
 # engine and skills against this Worker).
+# rebuild: custom providers now carry per-model metadata (`models_meta`) from
+# the declaration through the runner input, and the runner's input guard
+# validates it instead of ignoring it. Both copied trees changed
+# (`packages/shared/src/runtime.ts`, `packages/runner/src/runner.ts`): a stale
+# image accepts the new input but keeps an id-only entry in the synthesized
+# models.yml, so the failover candidate is unjudgeable again.
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via

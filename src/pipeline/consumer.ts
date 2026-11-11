@@ -2963,12 +2963,25 @@ async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps)
  * payload (under the declaration's own provider id).
  */
 function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomProviderDeclaration {
-  return {
+  const declaration: CustomProviderDeclaration = {
     provider_id: provider.provider_id,
     base_url: provider.base_url,
     api: provider.api,
     model_ids: [...provider.model_ids],
   };
+  // Absent stays absent: a declaration that states nothing must reach the
+  // runner WITHOUT the field. An empty object would be the different claim
+  // "the owner stated nothing about any model", which the synthesis would then
+  // have to disambiguate from an absence. Values are copied, never invented.
+  if (provider.models_meta !== undefined) {
+    declaration.models_meta = Object.fromEntries(
+      Object.entries(provider.models_meta).map(([modelId, meta]) => [
+        modelId,
+        { ...meta, ...(meta.input === undefined ? {} : { input: [...meta.input] }) },
+      ]),
+    );
+  }
+  return declaration;
 }
 
 /**

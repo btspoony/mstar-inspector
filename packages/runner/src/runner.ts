@@ -101,6 +101,8 @@ import {
   type AgentRuntimeRunInput,
   type CapabilityHost,
   type CustomProviderDeclaration,
+  type CustomProviderModelMeta,
+  type CustomProviderModelsMeta,
 } from "../../shared/src/runtime";
 import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
@@ -114,12 +116,109 @@ const USAGE =
   "[--recheck-out <path>] [--report-out <path>] " +
   "(input JSON: { capabilityHosts: [{ id, catalogProviderId, apiKeyEnv, baseUrl, api, auth, models }], " +
   "worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string>, " +
-  "customProviders?: [{ provider_id, base_url, api, model_ids }], recheck?: mstar.recheck-input/v1 document, " +
+  "customProviders?: [{ provider_id, base_url, api, model_ids, models_meta? }], recheck?: mstar.recheck-input/v1 document, " +
   "recheckAssignmentMaxBytes?: integer > 0, outerDeadlineEpochMs?: integer epoch ms, " +
   "prContext?: { prBody: string, issues: [{ number, title, body }] } })";
 
+/**
+ * One `customProviders` entry: the shipped shape guard (the id pattern, base
+ * URL and api vocabulary live dashboard-side in assertCustomProvider) plus the
+ * per-model metadata overlay. Every stated field is re-checked against its wire
+ * type and copied into the returned declaration — a malformed entry FAILS, it
+ * is never dropped silently: a silently discarded size is exactly the
+ * invisible gate this field exists to remove.
+ */
+function parseCustomProviderEntry(entry: unknown, index: number): CustomProviderDeclaration {
+  const at = `input JSON field \`customProviders\`[${index}]`;
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new Error(`${at} must be an object`);
+  }
+  const decl = entry as Record<string, unknown>;
+  if (typeof decl.provider_id !== "string") {
+    throw new Error(`${at}.provider_id must be a string`);
+  }
+  if (typeof decl.base_url !== "string") {
+    throw new Error(`${at}.base_url must be a string`);
+  }
+  if (typeof decl.api !== "string") {
+    throw new Error(`${at}.api must be a string`);
+  }
+  if (!Array.isArray(decl.model_ids) || decl.model_ids.some((id: unknown) => typeof id !== "string")) {
+    throw new Error(`${at}.model_ids must be an array of strings`);
+  }
+  const declaration: CustomProviderDeclaration = {
+    provider_id: decl.provider_id,
+    base_url: decl.base_url,
+    api: decl.api,
+    model_ids: [...decl.model_ids],
+  };
+  if (decl.models_meta !== undefined) {
+    declaration.models_meta = parseCustomProviderModelsMeta(
+      decl.models_meta,
+      declaration.model_ids,
+      `${at}.models_meta`,
+    );
+  }
+  return declaration;
+}
+
+/**
+ * The metadata overlay's wire guard: an object keyed by ids THIS declaration
+ * lists, each entry an object of the five known fields with their wire types.
+ * A key outside `model_ids` is unreachable data (the dashboard write gate
+ * refuses it too) and a non-positive size is not a statement — both fail here
+ * rather than surfacing as an invented default one layer down.
+ */
+function parseCustomProviderModelsMeta(
+  raw: unknown,
+  modelIds: readonly string[],
+  at: string,
+): CustomProviderModelsMeta {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`${at} must be an object keyed by model id when present`);
+  }
+  const meta: CustomProviderModelsMeta = {};
+  for (const [modelId, value] of Object.entries(raw as Record<string, unknown>)) {
+    const atModel = `${at}[${JSON.stringify(modelId)}]`;
+    if (!modelIds.includes(modelId)) {
+      throw new Error(`${atModel} names a model that is not in model_ids`);
+    }
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`${atModel} must be an object`);
+    }
+    const entry: CustomProviderModelMeta = {};
+    for (const [field, fieldValue] of Object.entries(value as Record<string, unknown>)) {
+      if (field === "contextWindow" || field === "maxTokens") {
+        if (typeof fieldValue !== "number" || !Number.isInteger(fieldValue) || fieldValue <= 0) {
+          throw new Error(`${atModel}.${field} must be a positive integer when present`);
+        }
+        entry[field] = fieldValue;
+      } else if (field === "name") {
+        if (typeof fieldValue !== "string") {
+          throw new Error(`${atModel}.name must be a string when present`);
+        }
+        entry.name = fieldValue;
+      } else if (field === "reasoning") {
+        if (typeof fieldValue !== "boolean") {
+          throw new Error(`${atModel}.reasoning must be a boolean when present`);
+        }
+        entry.reasoning = fieldValue;
+      } else if (field === "input") {
+        if (!Array.isArray(fieldValue) || fieldValue.some((modality) => typeof modality !== "string")) {
+          throw new Error(`${atModel}.input must be an array of strings when present`);
+        }
+        entry.input = [...fieldValue];
+      } else {
+        throw new Error(`${atModel}.${field} is not a known model-metadata field`);
+      }
+    }
+    meta[modelId] = entry;
+  }
+  return meta;
+}
+
 /** Validated shape of the --input JSON file. */
-type RunnerInputJson = {
+export type RunnerInputJson = {
   capabilityHosts: CapabilityHost[];
   worktreePath?: string;
   reconFacts?: string[];
@@ -168,7 +267,7 @@ function parseArgs(argv: string[]): {
 }
 
 /** Validate the untrusted --input JSON with small type guards (no schema dep here). */
-function parseRunnerInput(parsed: unknown): RunnerInputJson {
+export function parseRunnerInput(parsed: unknown): RunnerInputJson {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("input JSON must be an object");
   }
@@ -293,30 +392,7 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
           "(keys ride the stdin credential payload, never the input)",
       );
     }
-    input.customProviders = list.map((entry, index) => {
-      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-        throw new Error(`input JSON field \`customProviders\`[${index}] must be an object`);
-      }
-      const decl = entry as Record<string, unknown>;
-      if (typeof decl.provider_id !== "string") {
-        throw new Error(`input JSON field \`customProviders\`[${index}].provider_id must be a string`);
-      }
-      if (typeof decl.base_url !== "string") {
-        throw new Error(`input JSON field \`customProviders\`[${index}].base_url must be a string`);
-      }
-      if (typeof decl.api !== "string") {
-        throw new Error(`input JSON field \`customProviders\`[${index}].api must be a string`);
-      }
-      if (!Array.isArray(decl.model_ids) || decl.model_ids.some((id: unknown) => typeof id !== "string")) {
-        throw new Error(`input JSON field \`customProviders\`[${index}].model_ids must be an array of strings`);
-      }
-      return {
-        provider_id: decl.provider_id,
-        base_url: decl.base_url,
-        api: decl.api,
-        model_ids: [...decl.model_ids],
-      };
-    });
+    input.customProviders = list.map((entry, index) => parseCustomProviderEntry(entry, index));
   }
   if (record.recheck !== undefined) {
     // Shape validation ONLY — the §7.3 wire SSOT is
