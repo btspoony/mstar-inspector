@@ -305,7 +305,10 @@ export type AdoptOutcome = { kind: "found"; remote: CheckRemote } | { kind: "abs
 export type BeginOutcome =
   | { kind: "ready"; remote: CheckRemote }
   | { kind: "unavailable"; reason: string; requests?: number };
-export type FetchOutcome = { kind: "found"; remote: CheckRemote } | { kind: "absent" } | { kind: "unavailable"; reason: string };
+export type FetchOutcome =
+  | { kind: "found"; remote: CheckRemote }
+  | { kind: "absent" }
+  | { kind: "unavailable"; reason: string; requests?: number };
 export type CompleteOutcome =
   | { kind: "completed"; remote: CheckRemote }
   | { kind: "unavailable"; reason: string; requests?: number };
@@ -429,10 +432,17 @@ export function scriptedAdapter(db: TestD1, script: AdapterScript, transport: Ch
       return { ...begun, requests };
     },
     fetchCheckRun: async ({ identity, checkRunId }) => {
-      if (!(await spend())) return { kind: "unavailable", reason: "request budget refused before dispatch" };
-      return script.fetch === undefined
-        ? { kind: "unavailable", reason: "no fetch scripted" }
-        : script.fetch(identity, checkRunId);
+      if (!(await spend())) {
+        return { kind: "unavailable", reason: "request budget refused before dispatch", requests: 0 };
+      }
+      if (script.fetch === undefined) {
+        return { kind: "unavailable", reason: "no fetch scripted", requests: 1 };
+      }
+      const fetched = await script.fetch(identity, checkRunId);
+      if (fetched.kind !== "unavailable") return fetched;
+      // Same additive contract as `completeCheck`: a script that does not say
+      // otherwise describes a dispatched read, so it reports a positive count.
+      return { ...fetched, requests: fetched.requests ?? 1 };
     },
     completeCheck: async ({ identity, checkRunId, conclusion }) => {
       if (!(await spend())) {

@@ -268,7 +268,9 @@ export type ChecksAdapter = {
     identity: CheckIdentity;
     checkRunId: number;
   }): Promise<
-    { kind: "found"; remote: CheckRemote } | { kind: "absent" } | { kind: "unavailable"; reason: string }
+    | { kind: "found"; remote: CheckRemote }
+    | { kind: "absent" }
+    | { kind: "unavailable"; reason: string; requests: number }
   >;
 };
 
@@ -405,12 +407,12 @@ async function beginCheckWith(
   // nothing has been attempted, so the row must stay `not-sent` (an honest
   // `sending` mark here would strand the attempt as possibly-sent forever).
   const client = await clientFor(deps, identity.scope);
-  if (client === null) return refused("no review-write Checks client for this App");
+  if ("reason" in client) return refused(client.reason);
   // Preflight the EXACT callable before recording anything (a surface can exist
   // while `create` is missing on an older/foreign client). A missing method is
   // a definitive pre-send refusal: the row must keep its honest `not-sent`
   // state rather than be marked as a create that could never have left.
-  if (!hasChecksMethod(client, "create")) {
+  if (!hasChecksMethod(client.client, "create")) {
     return refused("Checks surface has no callable create method");
   }
   // Persist `sending` BEFORE the request leaves (spec §7.9): if the response is
@@ -438,7 +440,7 @@ async function beginCheckWith(
   }
   const { scope } = identity;
   const attempted = await sendRequests(
-    client.rest.checks.create({
+    client.client.rest.checks.create({
       owner: scope.owner,
       repo: scope.repo,
       name: CHECK_NAME,
@@ -489,8 +491,9 @@ async function adoptCheckRunWith(
   const persisted = await persistedIdentity(deps, input.identity);
   if (persisted.kind === "unavailable") return { kind: "incomplete" };
   const identity = persisted.identity;
-  const client = await clientFor(deps, identity.scope);
-  if (client === null) return { kind: "incomplete" };
+  const resolvedClient = await clientFor(deps, identity.scope);
+  if ("reason" in resolvedClient) return { kind: "incomplete" };
+  const client = resolvedClient.client;
   const { scope } = identity;
   const matches: CheckRemote[] = [];
   let saturated = false;
@@ -587,8 +590,9 @@ async function completeCheckWith(
   if (owned.data.checkRunId !== input.checkRunId) {
     return refused("check run id is not the one this attempt persisted");
   }
-  const client = await clientFor(deps, identity.scope);
-  if (client === null) return refused("no review-write Checks client for this App");
+  const resolvedClient = await clientFor(deps, identity.scope);
+  if ("reason" in resolvedClient) return refused(resolvedClient.reason);
+  const client = resolvedClient.client;
   if (!hasChecksMethod(client, "update")) {
     return refused("Checks surface has no callable update method");
   }
@@ -643,13 +647,20 @@ async function fetchCheckRunWith(
   deps: ChecksDeps,
   input: { identity: CheckIdentity; checkRunId: number },
 ): Promise<
-  { kind: "found"; remote: CheckRemote } | { kind: "absent" } | { kind: "unavailable"; reason: string }
+  | { kind: "found"; remote: CheckRemote }
+  | { kind: "absent" }
+  | { kind: "unavailable"; reason: string; requests: number }
 > {
   const persisted = await persistedIdentity(deps, input.identity);
-  if (persisted.kind === "unavailable") return persisted;
+  if (persisted.kind === "unavailable") {
+    return { kind: "unavailable", reason: persisted.reason, requests: 0 };
+  }
   const identity = persisted.identity;
-  const client = await clientFor(deps, identity.scope);
-  if (client === null) return { kind: "unavailable", reason: "no review-write Checks client for this App" };
+  const resolvedClient = await clientFor(deps, identity.scope);
+  if ("reason" in resolvedClient) {
+    return { kind: "unavailable", reason: resolvedClient.reason, requests: 0 };
+  }
+  const client = resolvedClient.client;
   const { scope } = identity;
   try {
     const { data } = await client.rest.checks.get({
@@ -658,12 +669,16 @@ async function fetchCheckRunWith(
       check_run_id: input.checkRunId,
     });
     const remote = toCheckRemote(data);
-    if (remote === null) return { kind: "unavailable", reason: "check get returned a malformed payload" };
-    if (remote.id !== input.checkRunId) return { kind: "unavailable", reason: "check get returned a different run" };
+    if (remote === null) {
+      return { kind: "unavailable", reason: "check get returned a malformed payload", requests: 1 };
+    }
+    if (remote.id !== input.checkRunId) {
+      return { kind: "unavailable", reason: "check get returned a different run", requests: 1 };
+    }
     return remoteBelongsTo(remote, identity) ? { kind: "found", remote } : { kind: "absent" };
   } catch (error) {
     if (httpStatus(error) === 404) return { kind: "absent" };
-    return { kind: "unavailable", reason: surfaceFailure(error, "check get") };
+    return { kind: "unavailable", reason: surfaceFailure(error, "check get"), requests: 1 };
   }
 }
 
@@ -773,12 +788,22 @@ async function stillLive(deps: ChecksDeps, identity: CheckIdentity, lease: Lease
   }
 }
 
-/** Client resolution — a null or throwing transport is `unavailable`, never a throw. */
-async function clientFor(deps: ChecksDeps, scope: Scope): Promise<ChecksOctokit | null> {
+/**
+ * Client resolution — a throwing transport is `unavailable`, never a throw.
+ * The failure TEXT rides the resolution: the mint's own reason (permissions,
+ * rate limit, timeout) is the only diagnosis a recovery row can carry, and
+ * collapsing every cause into "no client" made a permanent in_progress Check
+ * unexplainable from `review_checks.last_error`.
+ */
+async function clientFor(
+  deps: ChecksDeps,
+  scope: Scope,
+): Promise<{ client: ChecksOctokit } | { reason: string }> {
   try {
-    return await deps.getOctokit({ scope });
-  } catch {
-    return null;
+    const client = await deps.getOctokit({ scope });
+    return client === null ? { reason: "no review-write Checks client for this App" } : { client };
+  } catch (error) {
+    return { reason: `no review-write Checks client for this App: ${safeDetail(error)}` };
   }
 }
 

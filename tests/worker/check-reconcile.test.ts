@@ -1994,6 +1994,90 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
   });
 });
 
+describe("zero-dispatch fetch/complete refusals stay due (no attempt spent)", () => {
+  // The observed production shape: the terminal update's client resolution
+  // failed five times (token mint), each charged as a spent attempt, so the row
+  // gave up to `local-error` while GitHub still showed the Check
+  // `in_progress` — and nothing ever revisited it.
+  test("a client-resolution failure on the terminal UPDATE keeps the row due instead of giving up", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    db.raw
+      .prepare(`UPDATE review_checks SET create_state = 'known', check_run_id = 321 WHERE id = ?`)
+      .run(id);
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          // Adoption is skipped (id known); the read proves a running run, so
+          // the flow reaches the terminal update.
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { id: 321, status: "in_progress", conclusion: null }),
+          }),
+          complete: async () => ({
+            kind: "unavailable",
+            reason: "no review-write Checks client for this App: token mint failed",
+            requests: 0,
+          }),
+        }),
+      });
+      expect(summary.gaveUp).toBe(0);
+      expect(summary.unconfirmed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, id);
+    // Nothing ran remotely, so nothing is charged: no attempt, backoff or error.
+    expect(row.attempts).toBe(0);
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.last_error).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
+    // The frozen terminal intent survives, and the claim went back.
+    expect(row.desired).toBe("failure");
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+  });
+
+  test("a zero-dispatch read refusal releases the claim without spending an attempt", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    db.raw
+      .prepare(`UPDATE review_checks SET create_state = 'known', check_run_id = 321 WHERE id = ?`)
+      .run(id);
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          fetch: async () => ({
+            kind: "unavailable",
+            reason: "no review-write Checks client for this App: token mint failed",
+            requests: 0,
+          }),
+        }),
+      });
+      expect(summary.gaveUp).toBe(0);
+      expect(summary.unconfirmed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, id);
+    expect(row.attempts).toBe(0);
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.last_error).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
+    expect(row.holder).toBeNull();
+    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+  });
+});
+
 describe("operator retry accepts a recorded in-progress observation (L2 fix 1 finding 5)", () => {
   test("an in_progress observation survives give-up and is reopened by retry with its identity intact", async () => {
     const db = seededDb();

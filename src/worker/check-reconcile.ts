@@ -1090,6 +1090,15 @@ async function reconcileCheckAttempt(
     return;
   }
   if (fetched.kind === "unavailable") {
+    // §7.11.2 step 5: a refusal proven zero-dispatched (no client, no
+    // callable, a pre-send fence) ran no remote work, so it must not spend an
+    // attempt. Charging it is what let five token-mint failures turn a live
+    // run into a terminal `local-error` while GitHub still showed the Check
+    // `in_progress` — an outcome nothing would ever revisit.
+    if (fetched.requests === 0) {
+      await releaseUndispatchedClaim(db, attemptId, lease, now, log, "fetch");
+      return;
+    }
     await settleFailedAttempt(db, now, attemptsBefore, row, lease, fetched.reason, log, summary);
     return;
   }
@@ -1122,6 +1131,13 @@ async function reconcileCheckAttempt(
     return;
   }
   if (completed.kind === "unavailable") {
+    // Same §7.11.2 step 5 rule as the fetch path: an undispatched update owes
+    // no attempt — the row stays due and the next pass retries the SAME
+    // terminal intent instead of giving up on work that never ran.
+    if (completed.requests === 0) {
+      await releaseUndispatchedClaim(db, attemptId, lease, now, log, "complete");
+      return;
+    }
     // §7.11.2 step 4: preserve desired and actual observed, stay
     // `remote-unconfirmed`, back off, release the lease.
     await settleFailedAttempt(db, now, attemptsBefore, row, lease, completed.reason, log, summary);
@@ -1159,6 +1175,38 @@ async function recordTerminal(
   if (!written) return "lost";
   summary.completed += 1;
   return "recorded";
+}
+
+/**
+ * Hand a claim back after a refusal PROVEN zero-dispatched (§7.11.2 step 5):
+ * nothing reached GitHub, so no attempt is spent and the row is selector-due
+ * again at the SAME instant rather than after the 120-second lapse.
+ *
+ * The fence is identity, not liveness: a client-resolution refusal is often
+ * the live-time fence itself (the mint outlived `lease.untilMs`), so a
+ * liveness-fenced release would write nothing on exactly the path that needs
+ * it. A lost race leaves the row to its new owner and mutates nothing.
+ */
+async function releaseUndispatchedClaim(
+  db: D1Like,
+  attemptId: string,
+  lease: Lease,
+  now: () => number,
+  log: CheckReconcileLog,
+  op: string,
+): Promise<void> {
+  const released = await releaseExpiredCheckClaim(db, attemptId, lease, now());
+  if (!released) {
+    log.warn(
+      { event: "ops_check_reconcile_zero_dispatch_release_missed", detail: `attempt=${attemptId} op=${op}` },
+      "zero-dispatch refusal hit a claim that had already moved",
+    );
+    return;
+  }
+  log.info(
+    { event: "ops_check_reconcile_zero_dispatch_deferral", detail: `attempt=${attemptId} op=${op}` },
+    "no-request refusal — row released, no attempt spent",
+  );
 }
 
 /**

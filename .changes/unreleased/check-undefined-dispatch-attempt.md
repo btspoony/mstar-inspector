@@ -1,0 +1,12 @@
+---
+category: Fixed
+---
+
+- **A Check refusal that never reached GitHub no longer spends a recovery attempt, so a transient token-mint failure can no longer strand a running Check.** The reconciliation lanes charged every `unavailable` read or update as a failed attempt; five credential-mint failures in a row therefore walked a live attempt to `local-error`/`terminal_ms`, which the selector never revisits, while GitHub still showed the run `in_progress`. Observed on production: one Check sat `in_progress` for over four hours with `last_error` = "gave up after 5 attempts … no review-write Checks client for this App". Read and terminal-update refusals proven zero-dispatched now release the claim under the identity fence like the create lane already did: no attempt, no backoff, due again at the same instant. The credential resolution's own redacted text now rides the reason, so `last_error` names the cause instead of collapsing every failure into "no client".
+- **Checks that ran to their execution deadline are unchanged**: an attempt that really dispatched and exhausted its window still concludes at the deadline.
+- **A repository renamed after its scope was persisted no longer freezes the Check forever.** GitHub matches a token's `repositoryNames` exactly while the REST paths follow the rename, so the old name 404s every scoped mint — and the persisted identity is immutable. Observed on production: a Check stayed `in_progress` for over four hours on a PR whose repository had been renamed minutes earlier. The `review-write` mint now retries once, on a 404, with the same installation and permission set and no repository narrowing; `sandbox-read` still fails closed.
+
+<!-- CN -->
+- **未真正到达 GitHub 的 Check 拒绝不再消耗一次 recovery attempt，因此一次瞬时 token mint 失败不会再把运行中的 Check 判死。** reconciler 过去把每一次 `unavailable` 的读取或更新都记成一次失败尝试；连续五次凭证 mint 失败就会把活着的 attempt 推到 `local-error`/`terminal_ms`——选择器此后永不回看——而 GitHub 上该 run 仍是 `in_progress`。生产实测：一条 Check 挂了四个多小时，`last_error` 为 "gave up after 5 attempts … no review-write Checks client for this App"。读取与终态更新的「可证明零派发」拒绝现在与 create 通道一致，在身份栅栏下交还 claim：不计 attempt、不设退避、立即重新到期。凭证解析自身的脱敏文本也进入 reason，`last_error` 因此能指出原因，而不是把所有失败压成 "no client"。
+- **真正跑满执行窗口的 Check 行为不变**：确实派发过并耗尽窗口的 attempt 仍在期限处收尾。
+- **持久化 scope 之后被改名的仓库，不再永久冻结 Check。** GitHub 对 token 的 `repositoryNames` 做精确匹配，而 REST 路径本身会跟随改名，于是旧名让每一次 scoped mint 都 404，而持久化身份又是不可变的。生产实测：某个仓库在几分钟前改名，其 PR 上的 Check 挂了四个多小时仍是 `in_progress`。`review-write` 的 mint 现在在 404 时重试一次，仍用同一 installation、同一权限集，只是不再按仓库收窄；`sandbox-read` 保持 fail-closed。

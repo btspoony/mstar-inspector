@@ -2105,6 +2105,60 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     expect(seam.constructed).toHaveLength(1);
   });
 
+  test("a renamed repository mints installation-wide instead of failing the Checks lane", async () => {
+    // Observed production shape: the persisted scope names a repository that
+    // was renamed afterwards. GitHub matches `repositoryNames` EXACTLY, so the
+    // scoped mint 404s forever while the REST paths themselves follow the
+    // rename — the Check then never leaves `in_progress`.
+    const db = await seededDb();
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2_048,
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    const seam: AuthSeam = { constructed: [], minted: [] };
+    const mintBodies: string[] = [];
+    const fetchImpl: CommenterFetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (!url.includes("/access_tokens")) {
+        return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      }
+      mintBodies.push(typeof init?.body === "string" ? init.body : "");
+      if (mintBodies.length === 1) {
+        return new Response(JSON.stringify({ message: "Not Found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          token: "ghs_wide",
+          expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+          permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write", checks: "write" },
+          repository_selection: "all",
+        }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      );
+    };
+    const commenter = createReviewCommenter(
+      { APP_ID: String(GITHUB_APP_ID), PRIVATE_KEY: privateKey },
+      { db, nowMs: () => T0, fetchImpl, authSeam: seam },
+    );
+
+    const grant = await commenter.getInstallationToken({ scope: SCOPE, purpose: "review-write" });
+    expect(grant.token).toBe("ghs_wide");
+    expect(mintBodies).toHaveLength(2);
+    // The first mint was narrowed to the (now stale) repository name; the retry
+    // is the same installation and permission set, simply not repository-scoped.
+    expect(mintBodies[0]).toContain('"repositories"');
+    expect(mintBodies[1]).not.toContain('"repositories"');
+    const writeMints = seam.minted.filter((m) => m.purpose === "review-write");
+    expect(writeMints).toHaveLength(2);
+    expect(writeMints[0]?.installationWide).toBeUndefined();
+    expect(writeMints[1]?.installationWide).toBe(true);
+    expect(writeMints[1]?.permissions.checks).toBe("write");
+  });
+
   test("a typed pre-dispatch refusal reports zero requests, an unknown failure stays conservative", async () => {
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
