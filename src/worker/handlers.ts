@@ -74,10 +74,15 @@ export type HandlerDeps = {
    * Awaited after the durable claim and immediately BEFORE
    * `REVIEW_QUEUE.send`, so a best-effort step (the Check attach) has already
    * created its run by the time the message can be admitted. The caller owns
-   * its own time bound. A throw is logged and the enqueue proceeds: this hook
-   * never changes the outcome.
+   * its own time bound.
+   *
+   * It may return the payload to enqueue: the attach adds its delivery identity
+   * to the message (`attachDeliveryId`), and that field is what lets a later
+   * skip settlement tell this delivery's Check row from another's. A throw is
+   * logged and the enqueue proceeds unchanged: this hook never changes the
+   * outcome.
    */
-  beforeEnqueue?: () => Promise<void>;
+  beforeEnqueue?: (payload: ReviewJobPayload) => Promise<ReviewJobPayload | void>;
 };
 
 export type HandleOutcome =
@@ -234,9 +239,10 @@ export async function handleReviewJob(
   // admitted message finds the row it will adopt instead of racing its
   // creator. It never changes the outcome — a throw is one warn and the
   // enqueue proceeds.
+  let outgoing = payload;
   if (deps.beforeEnqueue !== undefined) {
     try {
-      await deps.beforeEnqueue();
+      outgoing = (await deps.beforeEnqueue(payload)) ?? payload;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(fields, `pre-enqueue hook failed — enqueueing anyway: ${detail}`);
@@ -244,7 +250,7 @@ export async function handleReviewJob(
   }
 
   try {
-    await deps.env.REVIEW_QUEUE.send(payload);
+    await deps.env.REVIEW_QUEUE.send(outgoing);
   } catch (err) {
     // Seven-field structured log on the send failure path (QC F-002): the
     // operator must be able to map the 500 to the specific event. Rethrow —

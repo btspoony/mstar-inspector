@@ -892,16 +892,26 @@ export async function adoptReleasedCheckAttempt(
  * `adoptReleasedCheckAttempt`, keyed by the delivery's own `attempt_key`
  * instead of an attempt id.
  *
- * ONLY a RELEASED row is taken (`holder IS NULL AND lease_until_ms IS NULL`).
- * A row still under ANY holder is somebody's work in progress and is never
- * touched — including a `delivery:*` holder inside its own attach window, whose
- * attach will release it, and a live `consumer:*` holder running the review.
- * The settle path is a skip, not a takeover: if nobody releases the row, the
- * grace/deadline lane closes it, which is the honest owner of that case.
- * A frozen intent, a terminal row and a row without a proven run id are never
- * taken either. The candidate is SELECTed first only to learn its id; the
- * UPDATE repeats every predicate, so a row that stopped being claimable between
- * the two statements writes nothing.
+ * TWO shapes are taken, and only these:
+ *
+ *   - a RELEASED row (`holder IS NULL AND lease_until_ms IS NULL`) — the
+ *     ordinary attach already gave it back; and
+ *   - a row still held by THIS delivery's own attach holder
+ *     (`holder = delivery:<attachDeliveryId>`, ANY age — fresh or stale).
+ *
+ * The IDENTITY is what separates the two failure modes a staleness window could
+ * not: taking a fresh `delivery:*` holder may be this delivery's own attach
+ * (which has already created the run and only needs to finish releasing), but
+ * it may equally be ANOTHER delivery's run — the same `attempt_key` is shared
+ * by every delivery of one event — and settling that one would close a live
+ * review's Check `neutral` (a premature pass). A consumer holder, another
+ * delivery's holder, a frozen intent and a terminal row are therefore never
+ * taken; a row nobody releases stays with the grace/deadline lane. A caller
+ * with NO attach identity settles nothing at all: it never created a row.
+ *
+ * The candidate is SELECTed first only to learn its id; the UPDATE repeats
+ * every predicate, so a row that stopped being claimable between the two
+ * statements writes nothing.
  */
 export async function claimAttachedCheckForSettlement(
   db: D1Like,
@@ -910,6 +920,12 @@ export async function claimAttachedCheckForSettlement(
     headSha: string;
     triggeredBy: string;
     action: string;
+    /**
+     * THIS delivery's attach identity (`payload.attachDeliveryId`): the id its
+     * attach holder was written under. Absent → the delivery created no row of
+     * its own, so nothing is claimable.
+     */
+    attachDeliveryId?: string;
     holder: string;
     /** The settling invocation's execution deadline (`now + 900,000`). */
     executionDeadlineMs: number;
@@ -918,6 +934,11 @@ export async function claimAttachedCheckForSettlement(
 ): Promise<{ attempt: CheckAttempt; lease: Lease } | null> {
   if (input.holder.length === 0) {
     throw new Error("review-checks: settlement requires a nonblank holder identity");
+  }
+  // No attach identity = this delivery never created a row. Claiming a released
+  // row for the same key would take ANOTHER delivery's run (§7.9).
+  if (input.attachDeliveryId === undefined || input.attachDeliveryId === null || input.attachDeliveryId.length === 0) {
+    return null;
   }
   if (input.executionDeadlineMs <= input.nowMs) {
     throw new Error("review-checks: execution deadline must be after the settlement time");
@@ -932,18 +953,22 @@ export async function claimAttachedCheckForSettlement(
     triggeredBy: input.triggeredBy,
     action: input.action,
   });
-  // Shared by both statements: the row must be RELEASED (nobody's work in
-  // progress), attached, unfrozen and inside its window. Bound order matches
-  // the UPDATE.
+  // Shared by both statements: the row must be unattended, attached, unfrozen
+  // and inside its window, and it must either be released or held by THIS
+  // delivery's own attach. Bound order matches the UPDATE.
   const claimable = `terminal_ms IS NULL
-          AND holder IS NULL AND lease_until_ms IS NULL
           AND create_state = 'known' AND check_run_id IS NOT NULL
           AND desired = 'in_progress'
           AND recovery_state IN ('pending','remote-unconfirmed')
-          AND execution_deadline_ms > ?`;
+          AND execution_deadline_ms > ?
+          AND (
+            (holder IS NULL AND lease_until_ms IS NULL)
+            OR holder = ?
+          )`;
+  const ownHolder = `delivery:${input.attachDeliveryId}`;
   const candidate = await db
     .prepare(`SELECT id FROM review_checks WHERE attempt_key = ? AND ${claimable} ORDER BY generation DESC LIMIT 1`)
-    .bind(key, input.nowMs)
+    .bind(key, input.nowMs, ownHolder)
     .first<{ id: string }>();
   if (candidate === null) return null;
   const claimed = await db
@@ -961,6 +986,7 @@ export async function claimAttachedCheckForSettlement(
       candidate.id,
       key,
       input.nowMs,
+      ownHolder,
     )
     .run();
   if (claimed.meta.changes !== 1) return null;

@@ -1289,6 +1289,12 @@ export type CheckLifecycle = {
     headSha: string;
     triggeredBy: string;
     action: string;
+    /**
+     * THIS delivery's attach identity (`payload.attachDeliveryId`). Required to
+     * settle anything: without it the delivery created no row of its own, so
+     * taking a row would mean taking another delivery's.
+     */
+    attachDeliveryId?: string;
     /** Why the delivery was skipped — the Check summary names it. */
     reason: string;
     /** The operator-configured bound on the one terminal `checks.update`. */
@@ -1342,7 +1348,8 @@ export type CheckAttachDeps = {
  * failure, because only the failure arm owes the operator a warn (spec §7.9).
  */
 export type CheckAttachResult =
-  | { kind: "attached" }
+  /** The delivery created a row of its own; `deliveryId` is its attach identity. */
+  | { kind: "attached"; deliveryId: string }
   /**
    * The key is already owned by another delivery/attempt, already ended, or
    * the admitted consumer adopted the row before this invocation could release
@@ -1373,13 +1380,17 @@ export async function attachCheckAtAcceptance(
   deps: CheckAttachDeps,
   input: { scope: Scope; githubAppId: number; headSha: string; triggeredBy: string; action: string },
 ): Promise<CheckAttachResult> {
+  // The delivery's attach identity: the holder it claims under AND the id it
+  // hands to the enqueued message (spec §7.9), so a later settlement can tell
+  // THIS delivery's row from another delivery's.
+  const deliveryId = crypto.randomUUID();
   const claimed = await claimAttempt(deps.db, {
     scope: input.scope,
     githubAppId: input.githubAppId,
     headSha: input.headSha,
     triggeredBy: input.triggeredBy,
     action: input.action,
-    holder: `delivery:${crypto.randomUUID()}`,
+    holder: `delivery:${deliveryId}`,
     nowMs: deps.nowMs(),
     executionDeadlineMs: deps.nowMs() + CHECK_ATTACH_WINDOW_MS,
   });
@@ -1408,7 +1419,14 @@ export async function attachCheckAtAcceptance(
   // (which ignores the due time), and if nobody does, the minute reconciler
   // takes it once the grace passes instead of at the one-hour window's expiry.
   const nowMs = deps.nowMs();
-  if (!(await releaseAttachedCheck(deps.db, identity.attemptId, claimed.lease, nowMs + CHECK_ATTACH_GRACE_MS, nowMs))) {
+  const released = await releaseAttachedCheck(
+    deps.db,
+    identity.attemptId,
+    claimed.lease,
+    nowMs + CHECK_ATTACH_GRACE_MS,
+    nowMs,
+  );
+  if (!released) {
     // A zero-row release has one EXPECTED cause: the admitted consumer took the
     // row first (the stalled-delivery takeover bumps the epoch, so this
     // invocation's fence no longer matches). Re-read once and classify it — an
@@ -1422,7 +1440,7 @@ export async function attachCheckAtAcceptance(
     if (adoptedByConsumer) return { kind: "skipped", reason: "adopted" };
     return { kind: "failed", reason: "the attached row could not be released to the admitted message" };
   }
-  return { kind: "attached" };
+  return { kind: "attached", deliveryId };
 }
 
 /** Release an attach attempt to the recovery lane with the honest state. */
@@ -1735,6 +1753,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         headSha: input.headSha,
         triggeredBy: input.triggeredBy,
         action: input.action,
+        attachDeliveryId: input.attachDeliveryId,
         holder: `skip:${crypto.randomUUID()}`,
         executionDeadlineMs: nowMs + CHECK_LEASE_MS,
         nowMs,

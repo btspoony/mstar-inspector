@@ -227,18 +227,23 @@ async function withinBudget(promise: Promise<unknown>, budgetMs: number): Promis
  * `createReviewCommenter` construction point every other Check send uses (spec
  * §7.6 — no second App auth), and every failure is ONE structured warn. The
  * `accepted` answer and the enqueue are never affected.
+ *
+ * Resolves the delivery's attach identity when this delivery created a row of
+ * its own — the id the enqueued message carries so a later skip settlement can
+ * tell THIS delivery's Check row from another's (§7.9). `undefined` means no
+ * row of its own: a busy/terminal key, a failure, or a budget that expired.
  */
 async function attachCheckOnAcceptance(input: {
   db: D1Database;
   env: Env;
   row: Pick<GithubAppTenantRow, "id" | "github_app_id" | "private_key_enc">;
   payload: Omit<ReviewJobPayload, "appRef">;
-}): Promise<void> {
+}): Promise<string | undefined> {
   const { db, env, row, payload } = input;
   const headSha = payload.head_sha;
   // A bot-mention delivery carries no SHA: the consumer claims after its own
   // `rev-parse`, exactly as before.
-  if (headSha === null) return;
+  if (headSha === null) return undefined;
   try {
     const pem = await createSecretbox(env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
       row.private_key_enc,
@@ -255,7 +260,7 @@ async function attachCheckOnAcceptance(input: {
         "the App's review-write client exposes no Checks surface",
         "check attach failed — delivery unaffected (best-effort)",
       );
-      return;
+      return undefined;
     }
     const result = await attachCheckAtAcceptance(
       { db, adapter, nowMs: () => Date.now() },
@@ -282,6 +287,7 @@ async function attachCheckOnAcceptance(input: {
         "check attach failed — delivery unaffected (best-effort)",
       );
     }
+    return result.kind === "attached" ? result.deliveryId : undefined;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     webhookWarn(
@@ -290,6 +296,7 @@ async function attachCheckOnAcceptance(input: {
       "check attach failed — delivery unaffected (best-effort)",
     );
   }
+  return undefined;
 }
 
 // `version` rides the healthz face — additive field, `ok:true`
@@ -774,8 +781,11 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     // `CHECK_ATTACH_INLINE_BUDGET_MS`; past that the enqueue proceeds and the
     // invocation context keeps the attach, which the consumer's bounded
     // takeover of a stalled delivery holder covers.
-    beforeEnqueue: async () => {
-      const attach = attachCheckOnAcceptance({ db, env: c.env, row, payload: outcome.payload });
+    beforeEnqueue: async (payload) => {
+      let attachDeliveryId: string | undefined;
+      const attach = attachCheckOnAcceptance({ db, env: c.env, row, payload }).then((deliveryId) => {
+        attachDeliveryId = deliveryId;
+      });
       try {
         c.executionCtx.waitUntil(attach);
       } catch {
@@ -784,6 +794,10 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
         void attach;
       }
       await withinBudget(attach, CHECK_ATTACH_INLINE_BUDGET_MS);
+      // Only a delivery that created a row of its own carries an identity: when
+      // the budget expired the field stays absent, and such a message settles
+      // nothing rather than taking another delivery's row (spec §7.9).
+      return attachDeliveryId === undefined ? undefined : { ...payload, attachDeliveryId };
     },
   });
   return c.text("accepted", 200);

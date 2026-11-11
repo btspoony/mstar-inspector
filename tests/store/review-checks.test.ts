@@ -1122,42 +1122,75 @@ describe("a settled neutral row does not retire the head (spec §7.9)", () => {
     expect(second.attempt.identity.externalId).not.toBe(first.attempt.identity.externalId);
   });
 });
-describe("the settlement claim takes only a RELEASED row (spec §7.9)", () => {
-  test("a row under a delivery holder is never taken, fresh or stale", async () => {
+describe("the settlement claim follows the delivery identity (spec §7.9)", () => {
+  /** Claim for settlement as `attachDeliveryId`'s own delivery. */
+  const settleAs = (db: TestD1, attachDeliveryId?: string) =>
+    claimAttachedCheckForSettlement(db, {
+      scope: SCOPE,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      attachDeliveryId,
+      holder: "skip:settler",
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+      nowMs: T0,
+    });
+
+  test("a row under the MESSAGE'S OWN delivery holder is taken, without waiting for staleness", async () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db, {
-      holder: "delivery:attach",
+      holder: "delivery:mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    await attachRun(db, attempt.identity.attemptId, lease);
+
+    // Fresh — the identity, not the age, is what makes the row ours: the
+    // delivery already created the run and only needs to finish releasing.
+    const taken = await settleAs(db, "mine");
+    expect(taken).not.toBeNull();
+    expect(taken!.lease.holder).toBe("skip:settler");
+    expect(taken!.lease.epoch).toBe(2);
+  });
+
+  test("ANOTHER delivery's holder is never taken, fresh or stale", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:other",
       executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
     });
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
-    const settle = () =>
-      claimAttachedCheckForSettlement(db, {
-        scope: SCOPE,
-        headSha: SHA,
-        triggeredBy: "octocat",
-        action: "review",
-        holder: "skip:settler",
-        executionDeadlineMs: T0 + CHECK_LEASE_MS,
-        nowMs: T0,
-      });
 
-    // Fresh: the delivery path is still attaching this row.
-    expect(await settle()).toBeNull();
-    // Stale: a stalled delivery holder still OWNS its row. The grace/deadline
-    // lane is that shape's owner — a skip settlement never takes it.
+    // Fresh: another delivery's attach is still working on this row.
+    expect(await settleAs(db, "mine")).toBeNull();
+    // Stale: still not ours. Only the owner (or the grace/deadline lane) may
+    // close it — settling here would close a live review's Check neutral.
     db.raw.prepare("UPDATE review_checks SET updated_ms = ? WHERE id = ?").run(T0 - 60_000, id);
-    expect(await settle()).toBeNull();
+    expect(await settleAs(db, "mine")).toBeNull();
     const held = await getCheckAttempt(db, id);
-    expect(held?.lease?.holder).toBe("delivery:attach");
+    expect(held?.lease?.holder).toBe("delivery:other");
     expect(held?.lease?.epoch).toBe(1);
+    // The OWNER settles it, fresh or stale alike.
+    expect(await settleAs(db, "other")).not.toBeNull();
+  });
 
-    // Released: the same claim takes it, which is the case the settlement owns.
+  test("no attach identity settles nothing, even a released row", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
     expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
-    const taken = await settle();
-    expect(taken).not.toBeNull();
-    expect(taken!.lease.holder).toBe("skip:settler");
-    expect(taken!.lease.epoch).toBe(2);
+
+    // A delivery whose attach found the key owned created no row: it must not
+    // take this one, which belongs to the delivery that did.
+    expect(await settleAs(db, undefined)).toBeNull();
+    const released = await getCheckAttempt(db, id);
+    expect(released?.lease).toBeNull();
+    // With its own identity the claim works.
+    expect(await settleAs(db, "mine")).not.toBeNull();
   });
 });
 describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {

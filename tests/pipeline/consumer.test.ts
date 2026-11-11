@@ -6265,7 +6265,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         action: payload.action,
       },
     );
-    expect(attached.kind).toBe("attached");
+    if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
+    // The delivery identity travels on the message: it is what lets the skip
+    // settlement tell THIS delivery's row from another's (§7.9).
+    payload.attachDeliveryId = attached.deliveryId;
     db.raw.prepare("UPDATE github_apps SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
@@ -6311,8 +6314,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         action: payload.action,
       },
     );
-    expect(attached.kind).toBe("attached");
+    if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
     await seedInflight(db, { headSha: heldHeadSha });
+    return attached;
   }
 
   test("check lifecycle: the first three guard refusals settle nothing", async () => {
@@ -6351,7 +6355,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // The in-flight review holds a DIFFERENT commit, so this delivery is a real
     // drop (never reviewed), not the benign same-sha duplicate that returns
     // before the drop record.
-    await guardHeldWithAttachedRun(db, adapter, payload, "feedfacefeedfacefeedfacefeedfacefeedface");
+    const attached = await guardHeldWithAttachedRun(db, adapter, payload, "feedfacefeedfacefeedfacefeedfacefeedface");
+    payload.attachDeliveryId = attached.deliveryId;
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
       createAppCommenter: () => commenterWithChecks(adapter),
@@ -6398,7 +6403,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         action: payload.action,
       },
     );
-    expect(attached.kind).toBe("attached");
+    if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
+    payload.attachDeliveryId = attached.deliveryId;
     // The overlap: this invocation's begin yields no handle, so the skip path
     // is what has to close the delivery's own row.
     const real = createCheckLifecycle({

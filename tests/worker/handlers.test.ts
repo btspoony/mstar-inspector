@@ -145,6 +145,23 @@ describe("handleReviewJob — enqueue once", () => {
     });
   });
 
+  test("a pre-enqueue step may patch the payload — the attach identity rides the message", async () => {
+    const { kv } = makeKvStub();
+    const { queue, sent } = makeQueueStub();
+    const log = makeLog();
+
+    const outcome = await handleReviewJob(prPayload(), {
+      env: handlerEnv(kv, queue),
+      log,
+      // The Check attach runs here and hands its delivery identity to the
+      // message, so a later skip settlement can tell its own row from another's.
+      beforeEnqueue: async (payload) => ({ ...payload, attachDeliveryId: "delivery-uuid" }),
+    });
+
+    expect(outcome).toEqual({ kind: "enqueued" });
+    expect(queue.send).toHaveBeenCalledTimes(1);
+    expect(sent[0]!.attachDeliveryId).toBe("delivery-uuid");
+  });
   test("second delivery with the same non-null head_sha is skipped (put-if-absent) and not enqueued", async () => {
     const { kv } = makeKvStub();
     const { queue, sent } = makeQueueStub();

@@ -2780,13 +2780,16 @@ describe("adoption of a released attach row (spec §7.9)", () => {
 
 describe("skip settlement (spec §7.9 / RL-10)", () => {
   /** Attach one run for the fixture scope and return the row's attempt id. */
-  async function attachedAttempt(db: TestD1, fake: ReturnType<typeof fakeChecks>): Promise<string> {
+  async function attachedAttempt(
+    db: TestD1,
+    fake: ReturnType<typeof fakeChecks>,
+  ): Promise<{ attemptId: string; deliveryId: string }> {
     const result = await attachCheckAtAcceptance(
       { db, adapter: adapterFor(db, fake.octokit), nowMs: () => CLOCK },
       ATTACH_INPUT,
     );
-    expect(result.kind).toBe("attached");
-    return (await attachRow(db)).id as string;
+    if (result.kind !== "attached") throw new Error(`fixture: expected attached, got ${result.kind}`);
+    return { attemptId: (await attachRow(db)).id as string, deliveryId: result.deliveryId };
   }
 
   /** A scripted surface whose update echoes the intended terminal state. */
@@ -2813,7 +2816,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     const db = await seededDb();
     CLOCK = T0;
     const fake = settlingFake();
-    const attemptId = await attachedAttempt(db, fake);
+    const { attemptId, deliveryId } = await attachedAttempt(db, fake);
     const lifecycle = createCheckLifecycle({
       db,
       nowMs: () => CLOCK,
@@ -2826,6 +2829,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
       headSha: SHA,
       triggeredBy: "octocat",
       action: "review",
+      attachDeliveryId: deliveryId,
       reason: "already reviewed for this head",
     });
 
@@ -2849,7 +2853,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     const db = await seededDb();
     CLOCK = T0;
     const fake = settlingFake();
-    const attemptId = await attachedAttempt(db, fake);
+    const { attemptId, deliveryId } = await attachedAttempt(db, fake);
     // No commenter/adapter at all (the paused gate makes zero credential
     // calls, architect lock L4): the settlement must still take the row and
     // leave a conclusion the recovery lane can send.
@@ -2865,6 +2869,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
       headSha: SHA,
       triggeredBy: "octocat",
       action: "review",
+      attachDeliveryId: deliveryId,
       reason: "review paused",
     });
 
@@ -2906,7 +2911,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
       }),
     });
     const adapter = adapterFor(db, fake.octokit);
-    const firstId = await attachedAttempt(db, fake);
+    const { attemptId: firstId, deliveryId } = await attachedAttempt(db, fake);
     const lifecycle = createCheckLifecycle({
       db,
       nowMs: () => CLOCK,
@@ -2921,6 +2926,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
         headSha: SHA,
         triggeredBy: "octocat",
         action: "review",
+        attachDeliveryId: deliveryId,
         reason: "review admission refused: pr-held",
       }),
     ).toBe(true);
@@ -2953,7 +2959,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     const db = await seededDb();
     CLOCK = T0;
     const fake = settlingFake();
-    await attachedAttempt(db, fake);
+    const { deliveryId } = await attachedAttempt(db, fake);
     const lifecycle = createCheckLifecycle({
       db,
       nowMs: () => CLOCK,
@@ -2966,6 +2972,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
         headSha: SHA,
         triggeredBy: "octocat",
         action: "review",
+        attachDeliveryId: deliveryId,
         reason: "already reviewed for this head",
       });
 
@@ -2981,6 +2988,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     CLOCK = T0;
     const { attempt, lease } = await claimedAttempt(db, { holder: "consumer:running" });
     await attachedRun(db, attempt, lease, 4242);
+    const deliveryId = "own-delivery";
     const fake = settlingFake();
     const lifecycle = createCheckLifecycle({
       db,
@@ -2994,6 +3002,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
       headSha: SHA,
       triggeredBy: "octocat",
       action: "review",
+      attachDeliveryId: deliveryId,
       reason: "review paused",
     });
 
@@ -3015,6 +3024,9 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     });
     await attachedRun(db, attempt, lease, 4242);
     expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
+    // The id MATCHES the row's own delivery holder: the refusal here is the
+    // frozen intent, not a missing identity.
+    const deliveryId = "attach";
     const fake = settlingFake();
     const lifecycle = createCheckLifecycle({
       db,
@@ -3028,6 +3040,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
       headSha: SHA,
       triggeredBy: "octocat",
       action: "review",
+      attachDeliveryId: deliveryId,
       reason: "review paused",
     });
 

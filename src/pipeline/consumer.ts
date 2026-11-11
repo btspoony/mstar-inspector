@@ -900,6 +900,10 @@ async function settleSkippedRow(
       headSha: attachedHeadSha,
       triggeredBy: payload.triggered_by,
       action: payload.action,
+      // THIS delivery's attach identity: a message whose attach found the key
+      // owned (or whose inline budget expired) carries none, so it settles
+      // nothing rather than taking another delivery's run (§7.9).
+      attachDeliveryId: payload.attachDeliveryId,
       reason,
     });
   } catch (err) {
@@ -1134,6 +1138,8 @@ export type CheckLifecycleHooks = {
     headSha: string;
     triggeredBy: string;
     action: string;
+    /** THIS delivery's attach identity — absent means it created no row. */
+    attachDeliveryId?: string;
     reason: string;
     updateBudgetMs?: number;
   }): Promise<boolean>;
