@@ -282,8 +282,8 @@ describe("recheckBudget (spec §7.8: min(cap, deadline-now-5000); 0 = skip)", ()
 /**
  * The cap each tier actually gets, as a literal table — NOT a copy of the
  * implementation's `min` formula, so the expectation cannot move with the
- * implementation. Quick's 5-minute clock fits inside its 9-minute outer
- * window (300,000); default's 10-minute clock is bounded by the outer guard's
+ * implementation. Quick's 5-minute clock fits inside its 10-minute outer
+ * window (600,000); default's 10-minute clock is bounded by the outer guard's
  * 60s tail (600,000 - 60,000 = 540,000); deep's 15-minute clock is bounded by
  * its 14-minute outer guard (840,000 - 60,000 = 780,000).
  */

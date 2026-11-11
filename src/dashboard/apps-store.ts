@@ -1676,11 +1676,12 @@ export function createAppsStore(db: AppsStoreD1) {
      * cross-App duplicate is a config mistake visible in the delivery health
      * panel, not a silent data problem.
      *
-     * `PAGING_EXCLUDED_STAGES` rows are NOT failures of the review:
-     * both are per-round attribution written for rounds that continued
+     * `PAGING_EXCLUDED_STAGES` rows are NOT failures of the review —
+     * each is per-round attribution written for rounds that continued
      * (`recheck` a budget skip / dead seat / invalid document, `usage` a
-     * failed `usage_events` insert), so a clean PR would otherwise read a
-     * non-zero failure count. This count excludes both, exactly as the sweep
+     * failed `usage_events` insert, `rate-limit` a GitHub-throttled
+     * degraded-comment sweep), so a clean PR would otherwise read a non-zero
+     * failure count. This count excludes the whole set, exactly as the sweep
      * and the detail face's own failure count and history do: one rule, so the
      * tab number, the pager and the rows can never disagree.
      */

@@ -442,9 +442,8 @@ export type ConsumerLogFields = {
   app_id?: string;
   idempotency_key?: string;
   /**
-   * review_check_attempts.attempt_id — the Check attempt a line is about, and
-   * the only join key a give-up line carries: it names the `review_checks` row
-   * that owns the remote run id.
+   * review_checks.id — the Check attempt row a line is about, and the only
+   * join key a give-up line carries: that row owns the remote run id.
    */
   attempt_id?: string;
   /**
@@ -838,9 +837,10 @@ export type ProcessOutcome =
   | { kind: "degraded" }
   /**
    * The ledger already holds a NEWER commit for this PR (`pull_requests`
-   * migration 0044): this delivery is acked directly before any config read,
-   * admission row or container — no retry, no DLQ, no failure row. The next
-   * delivery for the PR reviews the newest commit.
+   * migration 0044): this delivery is acked after per-App credential
+   * resolution (the paused gate needs it) and before admission, sandbox, Check
+   * or publication — no retry, no DLQ, no failure row. The next delivery for
+   * the PR reviews the newest commit.
    */
   | { kind: "superseded" };
 
@@ -3333,7 +3333,8 @@ const STDERR_TAIL_MAX = 600;
  * The runner stage's failure detail. stderr is the ONLY diagnosis a non-zero
  * exit carries (exit 124 = the exec bound fired, and the run leaves 0B of
  * stdout), so a redacted tail rides the message that reaches the durable
- * review_failures row and the log line. Redaction runs BEFORE the tail cut:
+ * review_failures row and the log line. `stdout` is counted in UTF-8 bytes,
+ * never in UTF-16 units. Redaction runs BEFORE the tail cut:
  * a secret sliced in half would survive the exact-value pass.
  */
 function runnerFailureDetail(
@@ -3342,7 +3343,7 @@ function runnerFailureDetail(
 ): string {
   // review_failures.error is unbounded TEXT (migration 0010), so the bounded
   // tail below cannot overflow the column.
-  const base = `runner failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`;
+  const base = `runner failed: exit ${run.exitCode}, stdout ${new TextEncoder().encode(run.stdout).length}B`;
   const tail = redactExactSecrets(redactSecrets(run.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
   return tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
 }

@@ -1050,6 +1050,23 @@ describe("createReviewConsumer", () => {
     );
   });
 
+  test("runner failure reports stdout in UTF-8 bytes, not UTF-16 units", async () => {
+    reset();
+    sandbox.runnerExitCode = 124;
+    // Two code units, six UTF-8 bytes: `String.length` would print 2.
+    sandbox.runnerStdout = "✓✓";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    const message = await consumer(makeBatch(makePayload())).then(
+      () => "",
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+    expect(message).toContain("stdout 6B");
+    // The durable row carries the same unit as the thrown message.
+    expect(failureRows(db)[0]!.error).toContain("stdout 6B");
+  });
+
   test("runner failure keeps the stderr TAIL, bounded", async () => {
     reset();
     sandbox.runnerExitCode = 124;
