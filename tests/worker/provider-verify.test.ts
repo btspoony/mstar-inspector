@@ -1327,3 +1327,36 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     expect(row.verified_status).toBe("ok");
   });
 });
+
+// --- failure arms consume or cancel the response body ---
+
+describe("failure arms consume or cancel the response body", () => {
+  // A body the classifier returns past without reading must still be torn
+  // down: an unconsumed, uncancelled body pins the provider connection.
+  const spyResponse = (status: number): { res: Response; cancels: () => number } => {
+    let cancels = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode("error body"));
+      },
+      cancel() {
+        cancels += 1;
+      },
+    });
+    return { res: new Response(body, { status }), cancels: () => cancels };
+  };
+
+  for (const [status, provider, reason] of [
+    [401, "openai", "invalid_key"],
+    [403, "openai", "invalid_key"],
+    [402, "copilot", "quota_exhausted"],
+    [429, "copilot", "rate_limited"],
+  ] as const) {
+    test(`${status} → ${reason} and the body stream is cancelled`, async () => {
+      const { res, cancels } = spyResponse(status);
+      const result = await verifyProviderKey({ fetch: mockFetch(res) }, provider, PLAIN_KEY);
+      expect(result).toEqual({ ok: false, reason });
+      expect(cancels()).toBe(1);
+    });
+  }
+});

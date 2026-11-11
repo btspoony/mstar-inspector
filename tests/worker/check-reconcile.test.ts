@@ -2782,7 +2782,7 @@ const FUTURE_DEADLINE = T0 + 900_000;
  * `desired` stays `in_progress` because abandonment concludes nothing, and the
  * release records the first backoff rung as the row's own due time.
  */
-async function abandonedAttempt(db: TestD1): Promise<{ attempt: CheckAttempt; id: string }> {
+async function abandonedAttempt(db: TestD1, deadlineMs: number = FUTURE_DEADLINE): Promise<{ attempt: CheckAttempt; id: string }> {
   const transport: CheckTransport = {
     boundMs: () => CHECK_RECONCILE_PER_REQUEST_MS,
     fetchImpl: (input, init) => fetch(input, init),
@@ -2813,7 +2813,7 @@ async function abandonedAttempt(db: TestD1): Promise<{ attempt: CheckAttempt; id
     headSha: SHA,
     triggeredBy: "octocat",
     action: "review",
-    executionDeadlineMs: FUTURE_DEADLINE,
+    executionDeadlineMs: deadlineMs,
     latch,
   });
   expect(handle).toBeNull();
@@ -2929,6 +2929,46 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     const deferred = events.filter((fields) => fields.event === "check_recovery_deferred_pending_publication");
     expect(deferred).toHaveLength(1);
     expect(deferred[0]!.probe_state).toBe("none");
+  });
+
+  test("a deadline inside the deferred rung selects the row on the pass after it, not only after next_attempt_ms", async () => {
+    const db = seededDb();
+    // The execution deadline falls INSIDE the first rung the wait pushes the
+    // due time to: a rung that ignores it would hold the row past its own
+    // hard stop.
+    const deadline = T0 + 150_000;
+    const deferredAt = T0 + 120_000;
+    // The premise this case rests on: the deadline is strictly inside the rung.
+    expect(deadline).toBeLessThan(deferredAt + CHECK_BACKOFF_MS[0]!);
+    const { id } = await abandonedAttempt(db, deadline);
+    const stub = stubFetch();
+    try {
+      const waiting = await run(db, {
+        now: () => deferredAt,
+        credentials: scriptedCredentials(db),
+      });
+      expect(waiting.deferred).toBe(1);
+      // The due time the wait pushes never outlives the deadline.
+      expect((await rawRow(db, id)).next_attempt_ms).toBe(deadline);
+
+      // The pass AFTER the deadline — the rung has not elapsed yet — must
+      // already select the row and conclude it.
+      expect(await listCheckReconcileBatch(db, deadline + 1_000)).toHaveLength(1);
+      const summary = await run(db, {
+        now: () => deadline + 1_000,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          complete: async (identity, _id, conclusion) => ({ kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) }),
+        }),
+      });
+      expect(summary.examined).toBe(1);
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+    expect((await rawRow(db, id)).terminal_ms).not.toBeNull();
   });
 
   test("a proof linked to THIS attempt ends the wait before the deadline and decides", async () => {
