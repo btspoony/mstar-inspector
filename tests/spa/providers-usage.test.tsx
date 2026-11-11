@@ -752,9 +752,11 @@ describe("UsagePanel — inline probe under the owning row", () => {
 
   test("a re-render handing the panel a new onClose leaves Escape with the panel opened last", async () => {
     // Both panels mount in the same commit — the first ahead of the second, so
-    // the second owns Escape — and the mount point hands each a fresh arrow on
-    // every render, as the settings page does. A later re-render that renews
-    // only the first panel's callback must leave that ownership alone.
+    // the second owns Escape. On the re-render below the second keeps a STABLE
+    // callback while only the first is handed a new one; that asymmetry is what
+    // proves the fix. The settings page renews both, but a fresh arrow on the
+    // second would re-register its listener under the old component too, and
+    // the case would pass against it.
     const { win, cleanup: cleanupDom } = installDom("http://localhost/dashboard/acme/apps");
     const container = win.document.createElement("div");
     win.document.body.appendChild(container);
