@@ -128,8 +128,11 @@ const LOCKFILES: readonly (readonly [string, string])[] = [
 
 /**
  * What a manager leaves INSIDE `node_modules` once it has installed there — the
- * only provenance a filesystem read can see. Bun leaves no marker, so a bun tree
- * is reported as unidentified rather than guessed.
+ * only provenance a filesystem read can see.
+ *
+ * shortcut: bun leaves no marker inside node_modules, so a bun-installed tree in
+ * a repository whose lockfiles name only npm is not reported as foreign; add a
+ * marker read if a second manager ever installs into this repo.
  */
 const INSTALL_MARKERS: readonly (readonly [string, string])[] = [
   [".package-lock.json", "npm"],
