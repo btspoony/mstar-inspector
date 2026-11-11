@@ -420,6 +420,7 @@ function ProviderGroupCard({
           provider={group.providerId}
           label={group.label}
           storedModelIds={group.declaration.model_ids}
+          storedModelsMeta={group.declaration.models_meta}
           catalogModelIds={catalog?.models ?? []}
           onSettings={onSettings}
           onOutcome={onOutcome}

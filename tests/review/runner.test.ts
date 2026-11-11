@@ -51,16 +51,25 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import type { MstarReviewV1 } from "@mstar-harness/engine";
+import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
+import { FAILURE_BLOCK_BUDGET_CHARS } from "../../packages/runner/src/seat-failover-probe";
 import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../packages/shared/src/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { RecheckStatus } from "../../packages/shared/src/recheck-wire";
 import { readRecheckStatusCommand } from "../../src/pipeline/gitops";
-import { createInMemoryAuthStorage, main, readCredentialStdin, writeRecheckStatus } from "../../packages/runner/src/runner";
+import {
+  chainAttributionBlock,
+  createInMemoryAuthStorage,
+  main,
+  parseRunnerInput,
+  readCredentialStdin,
+  writeRecheckStatus,
+} from "../../packages/runner/src/runner";
 import { sk } from "../helpers/fake-secrets";
 
 /** Envelope the fake runtime resolves with; overridden per test. */
@@ -73,6 +82,10 @@ let fakeRecheckStatus: RecheckStatus | undefined;
 let fakeReport: Record<string, unknown> | null = null;
 /** Error the fake runtime rejects with; takes precedence when set. */
 let runtimeError: Error | undefined;
+/** The applied model the fake runtime reports; undefined = no model served. */
+let fakeAppliedModel: string | undefined;
+/** The reported chain: the first provider serves, the second is the candidate. */
+const CHAIN = "commandcode/deepseek/deepseek-v4.1-flash, opencode-go/deepseek-v4.1-flash";
 /** Captured runReview inputs. */
 const runInputs: AgentRuntimeRunInput[] = [];
 /** Per-run directories the runs under test handed to the runtime. */
@@ -122,6 +135,7 @@ const fakeRuntime: AgentRuntime = {
       recheck: fakeRecheck as ReviewRunResult["recheck"],
       ...(fakeRecheckStatus !== undefined ? { recheckStatus: fakeRecheckStatus } : {}),
       report: fakeReport as ReviewRunResult["report"],
+      ...(fakeAppliedModel !== undefined ? { appliedModel: fakeAppliedModel } : {}),
     };
   }),
 };
@@ -174,6 +188,7 @@ function statusPathForRun(): string {
 async function runCli(
   argv: string[],
   payload = encodeCredentialPayload({}),
+  appliedModelPath = APPLIED_MODEL_PATH,
 ): Promise<{ code: number; stdout: string; stderr: string; statusPath: string }> {
   const logs: string[] = [];
   const errors: string[] = [];
@@ -185,7 +200,7 @@ async function runCli(
   try {
     // The credential payload rides STDIN in production; the injected reader is
     // the same seam the runtime double uses.
-    const code = await main(argv, fakeRuntime, async () => payload, statusPath);
+    const code = await main(argv, fakeRuntime, async () => payload, statusPath, appliedModelPath);
     return { code, stdout: logs.join("\n"), stderr: errors.join("\n"), statusPath };
   } finally {
     console.log = originalLog;
@@ -325,6 +340,7 @@ afterEach(() => {
   fakeRecheckStatus = undefined;
   fakeReport = null;
   runtimeError = undefined;
+  fakeAppliedModel = undefined;
   cleanupAgentDirs();
   runInputs.length = 0;
   runStores.length = 0;
@@ -500,6 +516,48 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     }
   });
 
+  test("customProviders.models_meta: every malformed shape exits 1 naming the field", async () => {
+    const malformed: Array<[unknown, RegExp]> = [
+      ["nope", /models_meta must be an object keyed by model id/],
+      [[], /models_meta must be an object keyed by model id/],
+      [{ "m": 42 }, /models_meta\["m"\] must be an object/],
+      [{ "ghost": { contextWindow: 1, maxTokens: 2 } }, /models_meta\["ghost"\] names a model that is not in model_ids/],
+      [{ "m": { contextWindow: 0, maxTokens: 8 } }, /\.contextWindow must be a positive integer/],
+      [{ "m": { contextWindow: 1.5, maxTokens: 8 } }, /\.contextWindow must be a positive integer/],
+      [{ "m": { contextWindow: "128000", maxTokens: 8 } }, /\.contextWindow must be a positive integer/],
+      [{ "m": { contextWindow: 8, maxTokens: -1 } }, /\.maxTokens must be a positive integer/],
+      [{ "m": { contextWindow: 8, maxTokens: true } }, /\.maxTokens must be a positive integer/],
+      [{ "m": { name: 42 } }, /\.name must be a string/],
+      [{ "m": { reasoning: "yes" } }, /\.reasoning must be a boolean/],
+      [{ "m": { input: "text" } }, /\.input must be an array of strings/],
+      [{ "m": { input: ["text", 42] } }, /\.input must be an array of strings/],
+      [{ "m": { contextwindow: 8 } }, /is not a known model-metadata field/],
+      // "Unset" has ONE canonical spelling on the wire: an absent key. A null
+      // is a malformed declaration, never a second way to say "not stated".
+      [{ "m": { contextWindow: null, maxTokens: 8 } }, /\.contextWindow must be a positive integer/],
+      [{ "m": { contextWindow: 8, maxTokens: 8, name: null } }, /\.name must be a string/],
+      [{ "m": { contextWindow: 8, maxTokens: 8, input: null } }, /\.input must be an array of strings/],
+    ];
+    for (const [modelsMeta, message] of malformed) {
+      const inputPath = writeInput({
+        capabilityHosts: OMP_HOSTS,
+        customProviders: [
+          {
+            provider_id: "p",
+            base_url: "https://p.example.com/v1",
+            api: "openai-completions",
+            model_ids: ["m"],
+            models_meta: modelsMeta,
+          },
+        ],
+      });
+      const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+      expect(code).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toMatch(message);
+    }
+  });
+
   test("non-finite model numbers → exit 1 (QC fix wave 1: typeof alone admits ±Infinity)", async () => {
     // JSON.stringify cannot carry NaN/±Infinity, so the non-finite path is
     // exercised through raw JSON text: JSON.parse("1e999") === Infinity.
@@ -537,6 +595,188 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     const input = runInputs[0]!;
     expect(input.modelOverrides).toEqual(overrides);
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
+  });
+
+  test("a failed round names every chain selector and the gate that dropped it", async () => {
+    process.env.OMP_REVIEW_MODEL = CHAIN;
+    runtimeError = new Error("seat 0 failed: 400 You have insufficient credits");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+    // Only the FIRST provider has a transported credential — the case the probe
+    // identified as the one gate that can drop this chain.
+    const { code, stdout, stderr } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ commandcode: [sk("probe-first")] }),
+    );
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    // The failure line still names the provider error …
+    expect(stderr).toContain("400 You have insufficient credits");
+    // … and the disposition names each selector, the gate, and the operator's
+    // action for a missing credential.
+    expect(stderr).toContain("commandcode/deepseek/deepseek-v4.1-flash");
+    expect(stderr).toContain("opencode-go/deepseek-v4.1-flash");
+    expect(stderr).toContain("pool_key");
+    expect(stderr).toContain("the App stores no credential for provider opencode-go");
+    // NO selector is claimed to have SERVED: the failure path carries no
+    // observation, and chain order is configuration, not one.
+    expect(stderr).not.toContain("served");
+    // The Worker persists only the LAST 600 characters of stderr; the whole
+    // block is budgeted to survive that tail.
+    expect(stderr.trim().length).toBeLessThanOrEqual(FAILURE_BLOCK_BUDGET_CHARS);
+    // Zero credential material — not even a key prefix.
+    expect(stderr).not.toContain(sk("probe-first"));
+  });
+
+  test("a pre-prompt failure claims no provider served — every entry reports its own verdict", async () => {
+    process.env.OMP_REVIEW_MODEL = CHAIN;
+    // The runtime throws BEFORE any prompt was sent (a session/seat setup
+    // failure): nothing observed a provider, so nothing may claim one.
+    runtimeError = new Error("seat 0 failed: model provider unreachable during setup");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+    const { code, stderr } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ commandcode: [sk("probe-first")], "opencode-go": [sk("probe-second")] }),
+    );
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("unreachable during setup");
+    // Both configured entries are present with their OWN verdict …
+    expect(stderr).toContain("commandcode/deepseek/deepseek-v4.1-flash eligible");
+    expect(stderr).toContain("opencode-go/deepseek-v4.1-flash eligible");
+    // … and neither is called served.
+    expect(stderr).not.toContain("served");
+    expect(stderr).not.toContain("observed serving this round");
+  });
+
+  test("a run whose seat override replaced the chain does not name the configured head as served", async () => {
+    process.env.OMP_REVIEW_MODEL = CHAIN;
+    runtimeError = new Error("seat 0 failed: 429 rate limited");
+    const inputPath = writeInput({
+      capabilityHosts: OMP_HOSTS,
+      // The per-role override wins over the configured chain (runtime-omp
+      // seatModelChain): the configured head is NOT what ran.
+      modelOverrides: { "mstar-review-seat": "my-custom/model-a" },
+      customProviders: [
+        {
+          provider_id: "my-custom",
+          base_url: "https://custom.example.invalid/v1",
+          api: "openai-completions",
+          model_ids: ["model-a"],
+        },
+      ],
+    });
+    const { code, stderr } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ "my-custom": [sk("probe-third")] }),
+    );
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("429 rate limited");
+    // The disposition is about the CONFIGURED chain (the override lives on the
+    // runner's seat chain, not in this diagnosis), and it never asserts that
+    // the configured head served the failed request.
+    expect(stderr).toContain("chain attribution (configured)");
+    expect(stderr).not.toContain("served");
+  });
+
+  test("a chain longer than the persisted tail keeps the cause and folds the overflow with a count", async () => {
+    // Twenty long selectors: the unbounded join would be far past the Worker's
+    // 600-character tail, and an unbounded formatter would evict the cause.
+    const longChain = Array.from({ length: 20 }, (_, i) => `provider-with-a-long-id-${i}/model-with-a-long-id-${i}`).join(", ");
+    process.env.OMP_REVIEW_MODEL = longChain;
+    runtimeError = new Error("seat 0 failed: 400 You have insufficient credits");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+    const { code, stderr } = await runCli(["--level", "quick", "--input", inputPath], encodeCredentialPayload({}));
+
+    expect(code).toBe(1);
+    expect(stderr.trim().length).toBeLessThanOrEqual(FAILURE_BLOCK_BUDGET_CHARS);
+    // The cause survives, first …
+    expect(stderr).toContain("400 You have insufficient credits");
+    // … the first entries survive …
+    expect(stderr).toContain("provider-with-a-long-id-0/model-with-a-long-id-0");
+    // … and the overflow is a COUNTED fold, not a silent cut.
+    expect(stderr).toMatch(/\+\d+ more chain entries omitted/);
+    expect(stderr).not.toContain("served");
+  });
+
+  test("an attribution failure keeps the provider cause and stays inside the budget", async () => {
+    // A deliberately unusable credential store makes the attribution THROW (the
+    // registry dereferences it) — the exception path, whose diagnostic is a
+    // multi-kilobyte message. Before the fix that path concatenated the raw
+    // diagnostic unbounded, evicting the cause from the Worker's 600-char tail.
+    const cause = "seat 0 failed: 400 You have insufficient credits";
+    const diagnostic = `x`.repeat(3000);
+    // The credential store throws a MULTI-KILOBYTE message the moment the
+    // registry dereferences it, so the catch's diagnostic is the long case.
+    const explodingAuth = new Proxy({} as never, {
+      get(): never {
+        throw new Error(diagnostic);
+      },
+    });
+    const block = chainAttributionBlock(cause, [CHAIN], "/nonexistent-agent-dir", explodingAuth);
+
+    // The cause survives, first …
+    expect(block).toContain(cause);
+    expect(block.indexOf(cause)).toBeLessThan(block.indexOf("attribution unavailable"));
+    // … and the whole block is inside the runner-owned budget, however long the
+    // diagnostic is.
+    expect(block.length).toBeLessThanOrEqual(FAILURE_BLOCK_BUDGET_CHARS);
+    expect(block).toContain("chain attribution unavailable");
+    expect(block).not.toContain(diagnostic);
+  });
+  test("a fully-keyed failed round names no gate as the cause", async () => {
+    process.env.OMP_REVIEW_MODEL = CHAIN;
+    runtimeError = new Error("seat 0 failed: 400 You have insufficient credits");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+    const { code, stderr } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ commandcode: [sk("probe-first")], "opencode-go": [sk("probe-second")] }),
+    );
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("opencode-go/deepseek-v4.1-flash");
+    // Every gate passes, so the text must not accuse one: it states each entry
+    // is eligible. It also must not claim either one SERVED — the round failed
+    // without an observation.
+    expect(stderr).not.toContain("dropped at");
+    expect(stderr).toContain("eligible");
+    expect(stderr).not.toContain("served");
+  });
+
+  test("a served round writes the applied-model side document; a round with none removes any leftover", async () => {
+    fakeEnvelope = ENVELOPE;
+    const target = join(mkdtempSync(join(tmpdir(), "applied-model-")), "review-applied-model.json");
+    try {
+      // A document an earlier round left at the fixed path.
+      writeFileSync(target, JSON.stringify({ appliedModel: "stale/leftover" }));
+      // 1. The runtime reports which model served: the document carries it,
+      //    and the published envelope stays the engine's shape (no new field).
+      fakeAppliedModel = "anthropic/claude-app";
+      const servedPath = writeInput({ capabilityHosts: OMP_HOSTS });
+      const served = await runCli(["--level", "quick", "--input", servedPath], undefined, target);
+      expect(served.code).toBe(0);
+      expect(JSON.parse(readFileSync(target, "utf8"))).toEqual({
+        appliedModel: "anthropic/claude-app",
+      });
+      const published = JSON.parse(served.stdout) as Record<string, unknown>;
+      expect(published.appliedModel).toBeUndefined();
+      expect(published.schema).toBe("mstar.review/v1");
+
+      // 2. No model served: no document at all — absence is the fact the
+      //    consumer reads as "leave provider null", never "use the chain head".
+      // 2. No model served: the document must NOT survive. A leftover from an
+      //    earlier round in this container would otherwise be read back as this
+      //    round's provider — so the absent case actively removes it.
+      fakeAppliedModel = undefined;
+      const idlePath = writeInput({ capabilityHosts: OMP_HOSTS });
+      const idle = await runCli(["--level", "quick", "--input", idlePath], undefined, target);
+      expect(idle.code).toBe(0);
+      expect(existsSync(target)).toBe(false);
+    } finally {
+      rmSync(APPLIED_MODEL_PATH, { force: true });
+      rmSync(dirname(target), { recursive: true, force: true });
+    }
   });
 
   test("runtime failure → exit 1, stdout empty, stderr diagnostic", async () => {
@@ -601,6 +841,49 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(yaml).toContain('"my-provider":');
     expect(yaml).toContain("auth: oauth");
     expect(yaml).not.toContain(sk("live"));
+  });
+
+  test("customProviders.models_meta: the parsed input keeps every stated fact and no absent one", () => {
+    const input = parseRunnerInput({
+      capabilityHosts: OMP_HOSTS,
+      customProviders: [
+        {
+          provider_id: "with-meta",
+          base_url: "https://with-meta.example.com/v1",
+          api: "openai-completions",
+          model_ids: ["m1"],
+          models_meta: {
+            m1: { contextWindow: 128_000, maxTokens: 8_192, name: "M1", reasoning: true, input: ["text", "image"] },
+          },
+        },
+        {
+          provider_id: "id-only",
+          base_url: "https://id-only.example.com/v1",
+          api: "anthropic-messages",
+          model_ids: ["m2"],
+        },
+      ],
+    });
+    expect(input.customProviders).toEqual([
+      {
+        provider_id: "with-meta",
+        base_url: "https://with-meta.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["m1"],
+        models_meta: {
+          m1: { contextWindow: 128_000, maxTokens: 8_192, name: "M1", reasoning: true, input: ["text", "image"] },
+        },
+      },
+      {
+        provider_id: "id-only",
+        base_url: "https://id-only.example.com/v1",
+        api: "anthropic-messages",
+        model_ids: ["m2"],
+      },
+    ]);
+    // Absent stays absent — an empty object would be the claim "the owner
+    // stated nothing about any model", which is a different statement.
+    expect(Object.keys(input.customProviders![1]!)).toEqual(["provider_id", "base_url", "api", "model_ids"]);
   });
 
   test("customProviders colliding with a capability host id: skipped with a structured stderr warn (id + count, no keys)", async () => {

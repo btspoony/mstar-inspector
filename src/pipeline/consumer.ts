@@ -96,6 +96,7 @@ import {
 } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
+import { APPLIED_MODEL_MAX_CHARS, APPLIED_MODEL_PATH, APPLIED_MODEL_PATTERN } from "../../packages/shared/src/runtime";
 import type { CustomProviderDeclaration, ReviewLevel } from "../../packages/shared/src/runtime";
 import { providerEnvName } from "./provider-catalog";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
@@ -277,16 +278,22 @@ const OMP_AGENT_DIR = "/opt/omp-agent";
 export const EXEC_TIMEOUT_GIT_MS = 120_000;
 /**
  * Bound for the bounded reads issued AFTER the paid runner (ms): the recheck
- * document, the recheck status and the report document. They are local file
- * reads — no git-sized window — and they share the round clock with the
- * capture and the runner, so the PR-context gate reserves their worst case.
+ * document, the recheck status, the report document and the applied-model
+ * document. They are local file reads — no git-sized window — and they share
+ * the round clock with the capture and the runner, so the PR-context gate
+ * reserves their worst case.
  */
 export const POST_RUNNER_READ_TIMEOUT_MS = 30_000;
-/** Post-runner bounded reads per round — the count the gate reserves. */
+/**
+ * Post-runner read WINDOWS per round — the count the gate reserves. FOUR reads
+ * occupy THREE windows: `readRecheckDoc` issues the recheck document and status
+ * reads in one `Promise.all`, then the report document and the applied-model
+ * document each bill their own.
+ */
 const POST_RUNNER_READ_COUNT = 3;
 /**
- * Worst case the round clock owes those reads (ms): every one may consume its
- * whole `POST_RUNNER_READ_TIMEOUT_MS`. 90_000ms at the current count.
+ * Worst case the round clock owes those reads (ms): every window may consume
+ * its whole `POST_RUNNER_READ_TIMEOUT_MS`. 90_000ms at the current count.
  */
 export const POST_RUNNER_READ_BUDGET_MS = POST_RUNNER_READ_COUNT * POST_RUNNER_READ_TIMEOUT_MS;
 /**
@@ -634,6 +641,12 @@ export type ConsumerLogFields = {
    * `report_doc_error`; `stale-head` carries the head the document was bound to
    * in `report_doc_head_sha` (a validated sha, never free text).
    */
+  /**
+   * The runner's applied-model document read: `absent` is the ordinary
+   * no-model-served shape; the rest name a fault that left `reviews.provider`
+   * unrecorded (never replaced by the chain head).
+   */
+  applied_model?: "absent" | "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document";
   report_doc?: "absent" | "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document" | "stale-head";
   report_doc_error?: string;
   report_doc_head_sha?: string;
@@ -693,6 +706,7 @@ export const GUARD_TIMED_SANDBOX_STEPS: readonly string[] = [
   "runner-input-write",
   "recheck-reads",
   "report-document-read",
+  "applied-model-read",
 ];
 /** Slack for the untimed steps (token mint, sandbox create, comment post, D1 puts). */
 const GUARD_SLACK_MS = 120_000;
@@ -703,7 +717,7 @@ const GUARD_SLACK_MS = 120_000;
  * runner step (runnerTimeoutMs(level) — 600s quick/default, 840s deep), the
  * whole inline-resolution budget (`INLINE_RESOLVE_BUDGET_MS`, which runs
  * last), plus `GUARD_SLACK_MS` — so the row can never expire mid-review and
- * unblock a concurrent duplicate. 2292s quick/default, 2532s deep. Pinned
+ * unblock a concurrent duplicate. 2412s quick/default, 2652s deep. Pinned
  * exactly by consumer.test.ts — the per-level arithmetic AND a maximal round's
  * command count — so a future step addition re-breaks loudly.
  */
@@ -759,12 +773,12 @@ export const ROUND_BUDGET_MS = 900_000;
 
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
- * — the first delivery is attempt 1). quick/default: 60s → 300s → 2040s; deep: 90s → 480s → 2040s.
+ * — the first delivery is attempt 1). quick/default: 60s → 300s → 2100s; deep: 90s → 480s → 2100s.
  *
  * The schedule must COVER the level's guard TTL, and its last entry must be
  * able to reclaim it: every entry stays BELOW the level's guard TTL
- * (2292s / 2532s) so no single delay outlives the lock, while the CUMULATIVE
- * sum (2400s / 2610s) EXCEEDS it — so by the final delayed attempt the
+ * (2412s / 2652s) so no single delay outlives the lock, while the CUMULATIVE
+ * sum (2460s / 2670s) EXCEEDS it — so by the final delayed attempt the
  * in-flight row has expired and the admission's expired-reclaim branch lets
  * this message take the lock instead of being dropped. Without that sum, a
  * legal review (600s+ runner) could hold the PR past the whole backoff and a
@@ -775,9 +789,9 @@ export const ROUND_BUDGET_MS = 900_000;
  * DLQ).
  */
 const GUARD_RETRY_DELAYS_SECONDS: Record<ReviewLevel, readonly [number, number, number]> = {
-  quick: [60, 300, 2040],
-  default: [60, 300, 2040],
-  deep: [90, 480, 2040],
+  quick: [60, 300, 2100],
+  default: [60, 300, 2100],
+  deep: [90, 480, 2100],
 };
 
 /** Guard-held backoff schedule for the job's review level (spec d5-budget L4). */
@@ -859,7 +873,7 @@ export type AdmissionRefusalFields = Required<Pick<ConsumerLogFields, "system_ca
  * `heldHeadSha` is the live row's sha: a `pr-held` drop is only benign while
  * that review covers THIS message's commit. The cumulative backoff
  * (2400s quick/default, 2610s deep) now EXCEEDS the level's guard TTL
- * (2292s / 2532s), so the final delayed attempt can reclaim the expired row
+ * (2412s / 2652s), so the final delayed attempt can reclaim the expired row
  * and review the new commit. A drop that still happens — a cap/storage
  * refusal, or a row that outlived the schedule — must leave a trace, so the
  * terminal ack records the drop row for a commit the live review never
@@ -1241,6 +1255,67 @@ async function applyPendingLifecycleJournals(
  * reach a public body — the seat's text is model output like any other, and a
  * prompt-injected credential can hide in a PR description it quoted.
  */
+/**
+ * The runner's applied-model document: WHICH `provider/model` actually served
+ * the round, or null when the runner wrote none (no model served). This is a
+ * projection of the runner's observation — never a derivation from the
+ * configured chain, which would report what we asked for instead of what ran.
+ * A broken read or document is null with one warn: losing the attribution must
+ * never lose the review, and it must never invent a provider either.
+ */
+async function readAppliedProvider(
+  sandbox: ReviewSandbox,
+  secretValues: string[],
+  log: ConsumerLog,
+  fields: ConsumerLogFields,
+): Promise<string | null> {
+  const read = await boundedRead(sandbox, readReportCommand(APPLIED_MODEL_PATH), POST_RUNNER_READ_TIMEOUT_MS, true);
+  if (read.failure !== null) {
+    // `absent` is the ordinary no-model-served shape — no warn without a fault.
+    if (read.failure !== "absent") {
+      log.warn({ ...fields, applied_model: read.failure }, `applied-model document ${read.failure}`);
+    }
+    return null;
+  }
+  if (read.text === null || read.text.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(read.text);
+  } catch {
+    log.warn({ ...fields, applied_model: "invalid-json" }, "applied-model document is not JSON — left unrecorded");
+    return null;
+  }
+  const value = (parsed as { appliedModel?: unknown } | null)?.appliedModel;
+  if (typeof value !== "string") {
+    log.warn(
+      { ...fields, applied_model: "invalid-document" },
+      "applied-model document carries no provider — left unrecorded",
+    );
+    return null;
+  }
+  // The document is container-authored, like the recheck status and the report:
+  // bounded FIRST (a value over the column's bound is refused whatever it
+  // contains), then redacted, then validated to the shape the column advertises
+  // (`provider/model`) — never persisted as whatever string it carried.
+  const trimmed = value.trim();
+  if (trimmed.length > APPLIED_MODEL_MAX_CHARS) {
+    log.warn(
+      { ...fields, applied_model: "invalid-document" },
+      "applied-model document exceeds the provider bound — left unrecorded",
+    );
+    return null;
+  }
+  const redacted = redactExactSecrets(redactSecrets(trimmed), secretValues).trim();
+  if (!APPLIED_MODEL_PATTERN.test(redacted)) {
+    log.warn(
+      { ...fields, applied_model: "invalid-document" },
+      "applied-model document does not name a provider/model pair — left unrecorded",
+    );
+    return null;
+  }
+  return redacted;
+}
+
 async function readReportDoc(
   sandbox: ReviewSandbox,
   secretValues: string[],
@@ -2963,12 +3038,25 @@ async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps)
  * payload (under the declaration's own provider id).
  */
 function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomProviderDeclaration {
-  return {
+  const declaration: CustomProviderDeclaration = {
     provider_id: provider.provider_id,
     base_url: provider.base_url,
     api: provider.api,
     model_ids: [...provider.model_ids],
   };
+  // Absent stays absent: a declaration that states nothing must reach the
+  // runner WITHOUT the field. An empty object would be the different claim
+  // "the owner stated nothing about any model", which the synthesis would then
+  // have to disambiguate from an absence. Values are copied, never invented.
+  if (provider.models_meta !== undefined) {
+    declaration.models_meta = Object.fromEntries(
+      Object.entries(provider.models_meta).map(([modelId, meta]) => [
+        modelId,
+        { ...meta, ...(meta.input === undefined ? {} : { input: [...meta.input] }) },
+      ]),
+    );
+  }
+  return declaration;
 }
 
 /**
@@ -5102,6 +5190,13 @@ async function processMessage(
     const report: ReportDoc | null =
       prContext !== undefined ? await readReportDoc(sandbox, secretValues, headSha, deps.log, fields) : null;
 
+    // Which provider actually served — the runner's own observation, projected
+    // here and NOWHERE derived again. null = the runner reported none (no model
+    // served), which stays null on the row; it is never replaced with the chain
+    // head, because that would report the configured first selector as if it
+    // had run.
+    const appliedProvider = await readAppliedProvider(sandbox, secretValues, deps.log, fields);
+
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
     // parseReviewOutput is a pure function of run.stdout —
@@ -5450,7 +5545,7 @@ async function processMessage(
         payload: output,
         appId: payload.appRef.appId,
         model: chainHeadSelector(effectiveModelChain(appCfg).chain),
-        provider: null,
+        provider: appliedProvider,
         // A stale-context round (its pending lifecycle journal failed to
         // apply OR its capture failed) still publishes, but its row must
         // never be an incremental base: the flag rides the staged artifact

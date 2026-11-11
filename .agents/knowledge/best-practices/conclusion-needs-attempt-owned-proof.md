@@ -1,7 +1,7 @@
 ---
 module: review-checks
 date: 2026-11-06
-last_updated: 2026-11-07
+last_updated: 2026-11-11
 problem_type: best_practice
 category: best-practices
 severity: high
@@ -109,3 +109,5 @@ second payload for the same head. A test that only covers the pass case would hi
 The cost stays explicit: an attempt whose publication is still unproven waits out its execution
 deadline, then turns red with a named cause. That bounded late red is correct; an early red that a
 later proof contradicts is not.
+
+The sibling question for failure text: a durable failure row may name only state the process observed, and it must be composed under a budget the producer owns - see `bounded-failure-text-in-a-log-tail.md`.

@@ -1219,6 +1219,35 @@ const DEEP_NO_YIELD_CAUSE = "deep parent turn produced no structured yield (msta
  * deadline leaves no room — the seat itself never throws, so a failure
  * resolves `recheck: null` without touching the envelope.
  */
+/**
+ * `provider/model` of the model a session's produced work is attributed to, or
+ * `undefined` when the session never selected one. The ONE spelling of the
+ * applied-model value: the runner is the only authority for "which model
+ * actually served", and this is the only place the `provider/id` form is built.
+ *
+ * `servingModel` WINS over `model`: the pinned SDK's own attribution
+ * (`agent-session-handle.ts`, "Model actually serving requests when a fallback
+ * is active"; `turn-recovery.ts` "attribution only ever names a model that has
+ * settled a turn here") already answers this question, down to
+ * `modelIdentity` = "Provider/id including routing, with no added thinking
+ * suffix". `model` is only the CONFIGURED selection, so it is the fallback for
+ * a session with no served turn yet.
+ */
+export function servedModel(
+  session:
+    | {
+        model?: { provider: string; id: string };
+        servingModel?: { modelIdentity?: string; selector?: string };
+      }
+    | undefined
+    | null,
+): string | undefined {
+  const identity = session?.servingModel?.modelIdentity ?? session?.servingModel?.selector;
+  if (identity !== undefined && identity.includes("/")) return identity;
+  const model = session?.model;
+  return model === undefined ? undefined : `${model.provider}/${model.id}`;
+}
+
 async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult> {
   const pluginRoot = resolveHarnessRoot();
   const skills = await loadHarnessSkills(pluginRoot);
@@ -1531,11 +1560,14 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           console.error(JSON.stringify({ event: "report_skipped", reason: "session-failed" }), error);
         }
       }
+      // The deep parent IS the reviewer: its session model is the applied one.
+      const appliedModel = servedModel(session);
       return {
         envelope,
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
         report,
+        ...(appliedModel === undefined ? {} : { appliedModel }),
       };
     });
   } finally {
@@ -1716,6 +1748,8 @@ export const ompAgentRuntime: AgentRuntime = {
       // address THAT seat while it runs instead of racing the SDK's own
       // allocation for an id it never reports back.
       const seats = plans.map((plan, index) => ({ plan, index, id: `${plan.domain}-${plan.seat}` }));
+      // Each seat's served model, captured the moment it settles (below).
+      const servedBySeat = new Map<string, string | undefined>();
       // The hard cap this wave dispatches with: one figure for every seat of
       // the review, read at the moment they actually start.
       const seatCapMs = seatMaxRuntimeMs(Date.now(), input.level);
@@ -1744,6 +1778,13 @@ export const ompAgentRuntime: AgentRuntime = {
             });
             return seatOutput(result, index, plan);
           } finally {
+            // Capture the served model HERE, at the seat's own settlement: the
+            // registry ref survives a keep-alive child
+            // (packages/runner/node_modules/@oh-my-pi/pi-coding-agent/src/task/
+            // executor.ts — only a non-keep-alive run unregisters), but an idle
+            // park nulls its `session`, so a read at the END of the fan-out
+            // would race that.
+            servedBySeat.set(id, servedModel(AgentRegistry.global().get(id)?.session));
             settledSeats.add(id);
           }
         }),
@@ -1916,11 +1957,23 @@ export const ompAgentRuntime: AgentRuntime = {
         settled?.doc ?? null,
         runTeardownSignal(teardown, input),
       );
+      // The SEATS served the round, not the host session: read each dispatched
+      // seat's own session model (the same registry the supervisor addresses
+      // them through). A unanimous answer is the applied model; seats that
+      // disagree on one round have no single applied model, which is ABSENT —
+      // never a guess at whichever ran first.
+      const served = new Set<string>();
+      for (const { id } of seats) {
+        const applied = servedBySeat.get(id);
+        if (applied !== undefined) served.add(applied);
+      }
+      const appliedModel = served.size === 1 ? [...served][0]! : undefined;
       return {
         envelope,
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
         report,
+        ...(appliedModel === undefined ? {} : { appliedModel }),
       };
     } finally {
       // Signal before the session settles: a report seat still in flight on the

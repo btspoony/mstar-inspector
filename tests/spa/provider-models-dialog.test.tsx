@@ -38,6 +38,7 @@ function Opener({ factory }: { factory: (open: boolean, onOpenChange: (open: boo
 async function mount(overrides: {
   storedModelIds?: string[];
   catalogModelIds?: string[];
+  storedModelsMeta?: Record<string, { contextWindow?: number; maxTokens?: number; name?: string; reasoning?: boolean; input?: string[] }>;
   onSettings?: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome?: (outcome: OpNotice) => void;
 }) {
@@ -63,6 +64,7 @@ async function mount(overrides: {
           provider: "my-gateway",
           label: "My Gateway",
           storedModelIds,
+          storedModelsMeta: overrides.storedModelsMeta,
           catalogModelIds: overrides.catalogModelIds ?? [],
           onSettings,
           onOutcome: (outcome) => {
@@ -104,6 +106,20 @@ async function mount(overrides: {
 
   const search = () => dialog()?.querySelector('input[type="search"]') as unknown as HTMLInputElement | null;
 
+  const FIELD_KEYS = {
+    contextWindow: "settings.providers.models.fields.contextWindow",
+    maxTokens: "settings.providers.models.fields.maxTokens",
+    name: "settings.providers.models.fields.name",
+    input: "settings.providers.models.fields.input",
+    reasoning: "settings.providers.models.fields.reasoning",
+  } as const;
+
+  /** One per-model fact input, found by its model-scoped label. */
+  const field = (modelId: string, key: keyof typeof FIELD_KEYS) =>
+    dialog()?.querySelector(
+      `[aria-label="${t(locale, FIELD_KEYS[key], { model: modelId })}"]`,
+    ) as unknown as HTMLInputElement | null;
+
   return {
     win,
     dialog,
@@ -113,6 +129,7 @@ async function mount(overrides: {
     click,
     type,
     search,
+    field,
     calls,
     outcomes,
     reload,
@@ -152,8 +169,62 @@ describe("ProviderModelsDialog", () => {
       expect(legacy?.checked).toBe(true);
       // Saving keeps the orphan id in the POST body.
       await view.click(view.saveButton());
+      // The overlay is ALWAYS posted (one entry per selected id, blanks
+      // absent) so the server can refuse an incomplete statement instead of
+      // reading an omitted field as "no statement".
       expect(view.calls).toEqual([
-        { op: "update-provider-models", provider: "my-gateway", model_ids: "m-1,legacy-model" },
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1,legacy-model",
+          models_meta: JSON.stringify({ "m-1": {}, "legacy-model": {} }),
+        },
+      ]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a legacy id-only declaration shows the not-usable note and blank size fields", async () => {
+    const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"] });
+    try {
+      // The sentence is a DATA statement about the declaration, never a
+      // runtime promise: the pinned registry back-fills its own defaults for
+      // an id-only model, so claiming the file blocks failover would be false.
+      const sizesUnstated = t(locale, "settings.providers.models.sizesUnstated");
+      expect(view.dialog()?.textContent).toContain(sizesUnstated);
+      expect(sizesUnstated).toContain("unstated");
+      expect(sizesUnstated).toContain("incomplete");
+      expect(sizesUnstated).not.toMatch(/not usable|failover/i);
+      expect(view.field("m-1", "contextWindow")?.value).toBe("");
+      expect(view.field("m-1", "maxTokens")?.value).toBe("");
+      expect(view.field("m-1", "name")?.value).toBe("");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("stated per-model facts are seeded from the store and posted back verbatim", async () => {
+    const stored = {
+      "m-1": { contextWindow: 128000, maxTokens: 8192, name: "Model One", reasoning: true, input: ["text"] },
+    };
+    const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"], storedModelsMeta: stored });
+    try {
+      // Round-trip: the stored values are the seed, so an untouched save
+      // re-sends exactly what the owner stated.
+      expect(view.field("m-1", "contextWindow")?.value).toBe("128000");
+      expect(view.field("m-1", "maxTokens")?.value).toBe("8192");
+      expect(view.field("m-1", "name")?.value).toBe("Model One");
+      // A legacy row is not shown as usable: the note disappears once stated.
+      expect(view.dialog()?.textContent).not.toContain(t(locale, "settings.providers.models.sizesUnstated"));
+      await view.click(view.saveButton());
+      expect(view.calls).toEqual([
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1",
+          models_meta: JSON.stringify(stored),
+        },
       ]);
     } finally {
       await view.cleanup();
@@ -286,7 +357,12 @@ describe("ProviderModelsDialog", () => {
       await view.click(view.checkboxes()[3]); // m-4
       await view.click(view.saveButton());
       expect(view.calls).toEqual([
-        { op: "update-provider-models", provider: "my-gateway", model_ids: "m-1,m-4" },
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1,m-4",
+          models_meta: JSON.stringify({ "m-1": {}, "m-4": {} }),
+        },
       ]);
       expect(view.outcomes).toEqual([notice("success", "stored")]);
       expect(view.dialog()).toBeNull();

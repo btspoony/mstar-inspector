@@ -13,11 +13,47 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Button, Input } from "@design-system";
-import { t } from "../../i18n";
+import { t, type DictionaryKey } from "../../i18n";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../contracts/provider-models";
 import type { SpaBoot } from "../boot";
 import { StepDialog } from "../components/StepDialog";
+import type { CustomProviderModelMeta, CustomProviderModelsMeta } from "./data";
 import { NoticeRegion, type OpNotice } from "./PageNotice";
+
+/**
+ * What the owner typed for ONE selected model. Strings, never numbers: a blank
+ * field is the absent fact (we do not guess), and a value that is not a whole
+ * number is sent as typed so the server names the field instead of silently
+ * dropping it.
+ */
+type FieldState = {
+  contextWindow: string;
+  maxTokens: string;
+  name: string;
+  /** "" = not stated (distinct from an explicit no), "true" / "false" = stated. */
+  reasoning: "" | "true" | "false";
+  input: string;
+};
+
+function fieldStateOf(meta: CustomProviderModelMeta | undefined): FieldState {
+  // Canonical "unset" is an ABSENT field (the store's read boundary normalizes
+  // any legacy null away). The null checks stay as the last line of defence at
+  // THIS boundary: a null must render blank, never as "No reasoning".
+  const size = (value: number | null | undefined): string => (value === undefined || value === null ? "" : String(value));
+  return {
+    contextWindow: size(meta?.contextWindow),
+    maxTokens: size(meta?.maxTokens),
+    name: meta?.name ?? "",
+    reasoning: meta?.reasoning === undefined || meta.reasoning === null ? "" : meta.reasoning ? "true" : "false",
+    input: meta?.input?.join(", ") ?? "",
+  };
+}
+
+function seedFields(ids: readonly string[], meta: CustomProviderModelsMeta | undefined): Record<string, FieldState> {
+  const fields: Record<string, FieldState> = {};
+  for (const id of ids) fields[id] = fieldStateOf(meta?.[id]);
+  return fields;
+}
 
 export function ProviderModelsDialog({
   locale,
@@ -26,6 +62,7 @@ export function ProviderModelsDialog({
   provider,
   label,
   storedModelIds,
+  storedModelsMeta,
   catalogModelIds,
   onSettings,
   onOutcome,
@@ -39,6 +76,8 @@ export function ProviderModelsDialog({
   label: string;
   /** The declaration's stored ids — the selection seed. */
   storedModelIds: readonly string[];
+  /** The owner's stored per-model facts — the field seed (absent = unstated). */
+  storedModelsMeta?: CustomProviderModelsMeta;
   /** The catalog vocabulary for the provider. */
   catalogModelIds: readonly string[];
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
@@ -49,6 +88,9 @@ export function ProviderModelsDialog({
   // folds duplicate stored ids into one row: the write path never deduped.
   const allIds = [...new Set([...catalogModelIds, ...storedModelIds])];
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set(storedModelIds));
+  const [fields, setFields] = useState<Record<string, FieldState>>(() =>
+    seedFields(storedModelIds, storedModelsMeta),
+  );
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
@@ -68,13 +110,20 @@ export function ProviderModelsDialog({
     if (wasOpenRef.current) return;
     wasOpenRef.current = true;
     setSelected(new Set(storedModelIds));
+    setFields(seedFields(storedModelIds, storedModelsMeta));
     setQuery("");
     setNotice(null);
-  }, [open, storedModelIds]);
+  }, [open, storedModelIds, storedModelsMeta]);
 
   const needle = query.trim().toLowerCase();
   const filtered = needle === "" ? allIds : allIds.filter((id) => id.toLowerCase().includes(needle));
   const atCap = selected.size >= MAX_CUSTOM_PROVIDER_MODEL_IDS;
+  // Any selected model whose statement lacks a required size: the row is
+  // usable only when the owner stated both, and we never guess them.
+  const incomplete = [...selected].some((id) => {
+    const state = stateOf(id);
+    return state.contextWindow.trim() === "" || state.maxTokens.trim() === "";
+  });
   // Select-all acts on the rendered list, so it has nothing to do once every
   // visible id is checked — the cap alone never disables it.
   const allFilteredSelected = filtered.every((id) => selected.has(id));
@@ -89,6 +138,51 @@ export function ProviderModelsDialog({
       }
       return next;
     });
+  }
+
+  /** The typed state of one selected model (a never-touched id seeds from store). */
+  function stateOf(id: string): FieldState {
+    return fields[id] ?? fieldStateOf(storedModelsMeta?.[id]);
+  }
+
+  function setField(id: string, key: keyof FieldState, value: string): void {
+    setFields((current) => ({
+      ...current,
+      [id]: { ...(current[id] ?? fieldStateOf(storedModelsMeta?.[id])), [key]: value },
+    }));
+  }
+
+  /**
+   * The metadata statement this form carries. ALWAYS posted, one entry per
+   * selected id, blanks simply absent from their entry: an omitted field would
+   * read as "no statement" and let a save change the id set while never
+   * stating the sizes the product requires. The server refuses the first
+   * selected model that lacks one, naming it.
+   */
+  function overlayStatement(): string {
+    const meta: CustomProviderModelsMeta = {};
+    for (const id of selected) {
+      const state = stateOf(id);
+      const entry: Record<string, unknown> = {};
+      for (const key of ["contextWindow", "maxTokens"] as const) {
+        const text = state[key].trim();
+        if (text === "") continue;
+        const value = Number(text);
+        // A non-numeric entry travels as typed so the server names the field
+        // rather than the dialog dropping it silently.
+        entry[key] = Number.isFinite(value) ? value : text;
+      }
+      if (state.name.trim() !== "") entry.name = state.name.trim();
+      if (state.reasoning !== "") entry.reasoning = state.reasoning === "true";
+      if (state.input.trim() !== "") {
+        entry.input = state.input
+          .split(",")
+          .map((part) => part.trim())
+          .filter((part) => part !== "");
+      }
+      meta[id] = entry as CustomProviderModelMeta;
+    }
+    return JSON.stringify(meta);
   }
 
   function selectAll(): void {
@@ -113,6 +207,7 @@ export function ProviderModelsDialog({
           op: "update-provider-models",
           provider,
           model_ids: [...selected].join(","),
+          models_meta: overlayStatement(),
         });
       } catch {
         outcome = { kind: "error", message: t(locale, "settings.providers.submitFailed") };
@@ -202,6 +297,72 @@ export function ProviderModelsDialog({
               );
             })}
           </ul>
+        )}
+        {selected.size === 0 ? null : (
+          <fieldset className="flex flex-col gap-3">
+            <legend className="text-sm font-medium">
+              {t(locale, "settings.providers.models.requirements")}
+            </legend>
+            {incomplete ? (
+              <p className="text-sm text-muted-foreground">
+                {t(locale, "settings.providers.models.sizesUnstated")}
+              </p>
+            ) : null}
+            <ul className="flex flex-col gap-3">
+              {[...selected].map((id) => {
+                const state = stateOf(id);
+                const label = (key: DictionaryKey) => t(locale, key, { model: id });
+                return (
+                  <li
+                    key={id}
+                    className="rounded-(--radius-control) border border-(--border-default) bg-(--surface-inset) px-3 py-2"
+                  >
+                    <p className="font-mono text-xs">{id}</p>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      <Input
+                        inputMode="numeric"
+                        aria-label={label("settings.providers.models.fields.contextWindow")}
+                        placeholder={t(locale, "settings.providers.models.fields.contextWindowHint")}
+                        value={state.contextWindow}
+                        onChange={(event) => setField(id, "contextWindow", event.target.value)}
+                      />
+                      <Input
+                        inputMode="numeric"
+                        aria-label={label("settings.providers.models.fields.maxTokens")}
+                        placeholder={t(locale, "settings.providers.models.fields.maxTokensHint")}
+                        value={state.maxTokens}
+                        onChange={(event) => setField(id, "maxTokens", event.target.value)}
+                      />
+                      <Input
+                        type="text"
+                        aria-label={label("settings.providers.models.fields.name")}
+                        placeholder={t(locale, "settings.providers.models.fields.nameHint")}
+                        value={state.name}
+                        onChange={(event) => setField(id, "name", event.target.value)}
+                      />
+                      <Input
+                        type="text"
+                        aria-label={label("settings.providers.models.fields.input")}
+                        placeholder={t(locale, "settings.providers.models.fields.inputHint")}
+                        value={state.input}
+                        onChange={(event) => setField(id, "input", event.target.value)}
+                      />
+                      <select
+                        aria-label={label("settings.providers.models.fields.reasoning")}
+                        className="h-9 rounded-(--radius-control) border border-(--border-default) bg-(--surface-page) px-2 text-sm"
+                        value={state.reasoning}
+                        onChange={(event) => setField(id, "reasoning", event.target.value)}
+                      >
+                        <option value="">{t(locale, "settings.providers.models.fields.reasoningUnset")}</option>
+                        <option value="true">{t(locale, "settings.providers.models.fields.reasoningYes")}</option>
+                        <option value="false">{t(locale, "settings.providers.models.fields.reasoningNo")}</option>
+                      </select>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </fieldset>
         )}
       </form>
     </StepDialog>

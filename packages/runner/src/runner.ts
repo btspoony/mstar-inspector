@@ -93,7 +93,8 @@
  * the run's own outcome).
  */
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent";
+import { join } from "node:path";
+import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import {
   isReviewLevel,
   REVIEW_LEVELS,
@@ -101,11 +102,20 @@ import {
   type AgentRuntimeRunInput,
   type CapabilityHost,
   type CustomProviderDeclaration,
+  type CustomProviderModelMeta,
+  type CustomProviderModelsMeta,
 } from "../../shared/src/runtime";
 import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
+import {
+  attributeChain,
+  attributionEntries,
+  formatFailureAttribution,
+  walkSeatGates,
+} from "./seat-failover-probe";
 import { writePerReviewModelsYaml } from "./models-synthesis";
 import { decodeCredentialPayload } from "../../shared/src/credential-payload";
+import { APPLIED_MODEL_PATH, type AppliedModelDoc } from "../../shared/src/runtime";
 import { RECHECK_STATUS_PATH, type RecheckInput, type RecheckStatus } from "../../shared/src/recheck-wire";
 import { type PrContext } from "../../shared/src/report-wire";
 
@@ -114,12 +124,109 @@ const USAGE =
   "[--recheck-out <path>] [--report-out <path>] " +
   "(input JSON: { capabilityHosts: [{ id, catalogProviderId, apiKeyEnv, baseUrl, api, auth, models }], " +
   "worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string>, " +
-  "customProviders?: [{ provider_id, base_url, api, model_ids }], recheck?: mstar.recheck-input/v1 document, " +
+  "customProviders?: [{ provider_id, base_url, api, model_ids, models_meta? }], recheck?: mstar.recheck-input/v1 document, " +
   "recheckAssignmentMaxBytes?: integer > 0, outerDeadlineEpochMs?: integer epoch ms, " +
   "prContext?: { prBody: string, issues: [{ number, title, body }] } })";
 
+/**
+ * One `customProviders` entry: the shipped shape guard (the id pattern, base
+ * URL and api vocabulary live dashboard-side in assertCustomProvider) plus the
+ * per-model metadata overlay. Every stated field is re-checked against its wire
+ * type and copied into the returned declaration — a malformed entry FAILS, it
+ * is never dropped silently: a silently discarded size is exactly the
+ * invisible gate this field exists to remove.
+ */
+function parseCustomProviderEntry(entry: unknown, index: number): CustomProviderDeclaration {
+  const at = `input JSON field \`customProviders\`[${index}]`;
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new Error(`${at} must be an object`);
+  }
+  const decl = entry as Record<string, unknown>;
+  if (typeof decl.provider_id !== "string") {
+    throw new Error(`${at}.provider_id must be a string`);
+  }
+  if (typeof decl.base_url !== "string") {
+    throw new Error(`${at}.base_url must be a string`);
+  }
+  if (typeof decl.api !== "string") {
+    throw new Error(`${at}.api must be a string`);
+  }
+  if (!Array.isArray(decl.model_ids) || decl.model_ids.some((id: unknown) => typeof id !== "string")) {
+    throw new Error(`${at}.model_ids must be an array of strings`);
+  }
+  const declaration: CustomProviderDeclaration = {
+    provider_id: decl.provider_id,
+    base_url: decl.base_url,
+    api: decl.api,
+    model_ids: [...decl.model_ids],
+  };
+  if (decl.models_meta !== undefined) {
+    declaration.models_meta = parseCustomProviderModelsMeta(
+      decl.models_meta,
+      declaration.model_ids,
+      `${at}.models_meta`,
+    );
+  }
+  return declaration;
+}
+
+/**
+ * The metadata overlay's wire guard: an object keyed by ids THIS declaration
+ * lists, each entry an object of the five known fields with their wire types.
+ * A key outside `model_ids` is unreachable data (the dashboard write gate
+ * refuses it too) and a non-positive size is not a statement — both fail here
+ * rather than surfacing as an invented default one layer down.
+ */
+function parseCustomProviderModelsMeta(
+  raw: unknown,
+  modelIds: readonly string[],
+  at: string,
+): CustomProviderModelsMeta {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`${at} must be an object keyed by model id when present`);
+  }
+  const meta: CustomProviderModelsMeta = {};
+  for (const [modelId, value] of Object.entries(raw as Record<string, unknown>)) {
+    const atModel = `${at}[${JSON.stringify(modelId)}]`;
+    if (!modelIds.includes(modelId)) {
+      throw new Error(`${atModel} names a model that is not in model_ids`);
+    }
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`${atModel} must be an object`);
+    }
+    const entry: CustomProviderModelMeta = {};
+    for (const [field, fieldValue] of Object.entries(value as Record<string, unknown>)) {
+      if (field === "contextWindow" || field === "maxTokens") {
+        if (typeof fieldValue !== "number" || !Number.isInteger(fieldValue) || fieldValue <= 0) {
+          throw new Error(`${atModel}.${field} must be a positive integer when present`);
+        }
+        entry[field] = fieldValue;
+      } else if (field === "name") {
+        if (typeof fieldValue !== "string") {
+          throw new Error(`${atModel}.name must be a string when present`);
+        }
+        entry.name = fieldValue;
+      } else if (field === "reasoning") {
+        if (typeof fieldValue !== "boolean") {
+          throw new Error(`${atModel}.reasoning must be a boolean when present`);
+        }
+        entry.reasoning = fieldValue;
+      } else if (field === "input") {
+        if (!Array.isArray(fieldValue) || fieldValue.some((modality) => typeof modality !== "string")) {
+          throw new Error(`${atModel}.input must be an array of strings when present`);
+        }
+        entry.input = [...fieldValue];
+      } else {
+        throw new Error(`${atModel}.${field} is not a known model-metadata field`);
+      }
+    }
+    meta[modelId] = entry;
+  }
+  return meta;
+}
+
 /** Validated shape of the --input JSON file. */
-type RunnerInputJson = {
+export type RunnerInputJson = {
   capabilityHosts: CapabilityHost[];
   worktreePath?: string;
   reconFacts?: string[];
@@ -168,7 +275,7 @@ function parseArgs(argv: string[]): {
 }
 
 /** Validate the untrusted --input JSON with small type guards (no schema dep here). */
-function parseRunnerInput(parsed: unknown): RunnerInputJson {
+export function parseRunnerInput(parsed: unknown): RunnerInputJson {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("input JSON must be an object");
   }
@@ -293,30 +400,7 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
           "(keys ride the stdin credential payload, never the input)",
       );
     }
-    input.customProviders = list.map((entry, index) => {
-      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-        throw new Error(`input JSON field \`customProviders\`[${index}] must be an object`);
-      }
-      const decl = entry as Record<string, unknown>;
-      if (typeof decl.provider_id !== "string") {
-        throw new Error(`input JSON field \`customProviders\`[${index}].provider_id must be a string`);
-      }
-      if (typeof decl.base_url !== "string") {
-        throw new Error(`input JSON field \`customProviders\`[${index}].base_url must be a string`);
-      }
-      if (typeof decl.api !== "string") {
-        throw new Error(`input JSON field \`customProviders\`[${index}].api must be a string`);
-      }
-      if (!Array.isArray(decl.model_ids) || decl.model_ids.some((id: unknown) => typeof id !== "string")) {
-        throw new Error(`input JSON field \`customProviders\`[${index}].model_ids must be an array of strings`);
-      }
-      return {
-        provider_id: decl.provider_id,
-        base_url: decl.base_url,
-        api: decl.api,
-        model_ids: [...decl.model_ids],
-      };
-    });
+    input.customProviders = list.map((entry, index) => parseCustomProviderEntry(entry, index));
   }
   if (record.recheck !== undefined) {
     // Shape validation ONLY — the §7.3 wire SSOT is
@@ -606,6 +690,35 @@ export function writeRecheckStatus(
 }
 
 /**
+ * The failed round's per-selector disposition, produced by the seat-failover
+ * probe's OWN gate walker (one rule, one place). No live context exists at
+ * this point, so the context gate is reported as not evaluated rather than
+ * guessed. A throw here is swallowed into a BOUNDED line — every failure
+ * path shares the formatter's budget, including this one: attribution is
+ * diagnosis, never a second failure.
+ */
+export function chainAttributionBlock(
+  cause: string,
+  chain: readonly string[],
+  agentDir: string,
+  authStorage: AuthStorage,
+): string {
+  try {
+    const registry = new ModelRegistry(authStorage, join(agentDir, "models.yml"));
+    return formatFailureAttribution(
+      cause,
+      attributionEntries(attributeChain(walkSeatGates({ registry, chain }))),
+    );
+  } catch (error) {
+    // The attribution itself failed. The diagnostic still goes through the ONE
+    // budgeted formatter as a single entry: a multi-kilobyte stack trace must
+    // not push the original provider error out of the Worker's stderr tail —
+    // which is exactly when the operator needs it most.
+    return formatFailureAttribution(cause, [`chain attribution unavailable: ${(error as Error).message}`]);
+  }
+}
+
+/**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1
  * envelope JSON to stdout and diagnostics to stderr. Exported for
  * deterministic tests, which inject a fake `runtime` AND a fake credential
@@ -617,6 +730,10 @@ export async function main(
   runtime: AgentRuntime = ompAgentRuntime,
   readStdin: () => Promise<string> = readCredentialStdin,
   statusPath: string = process.env.MSTAR_RECHECK_STATUS_PATH?.trim() || RECHECK_STATUS_PATH,
+  // The applied-model document's path: fixed in the image, a parameter for the
+  // SAME reason as `statusPath` — a test must write its own file, never the
+  // production one.
+  appliedModelPath: string = APPLIED_MODEL_PATH,
 ): Promise<number> {
   let level: string;
   let inputPath: string;
@@ -646,6 +763,10 @@ export async function main(
   const stale: string[] = [];
   if (recheckOutPath !== undefined) stale.push(recheckOutPath, statusPath);
   if (reportOutPath !== undefined) stale.push(reportOutPath);
+  // The applied-model document is THIS round's fact and this round may report
+  // none: a leftover from an earlier run in the same container would otherwise
+  // be read back as this round's provider. Always cleared.
+  stale.push(appliedModelPath);
   for (const path of stale) {
     try {
       rmSync(path, { force: true });
@@ -674,6 +795,9 @@ export async function main(
   let authStorage: AuthStorage | undefined;
 
   try {
+    // The chain rides this run's runtime input AND the failure attribution
+    // below — parsed once so the two can never disagree.
+    const chain = parseModelSelectors(Bun.env.OMP_REVIEW_MODEL);
     let input: AgentRuntimeRunInput;
     try {
       const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
@@ -726,7 +850,7 @@ export async function main(
         level,
         worktreePath: json.worktreePath ?? process.cwd(),
         reconFacts: json.reconFacts ?? [],
-        modelSelectors: parseModelSelectors(Bun.env.OMP_REVIEW_MODEL),
+        modelSelectors: chain,
         // Optional per-role overrides: included ONLY when the map
         // is present, so legacy input builds a byte-identical runtime input.
         ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
@@ -758,7 +882,41 @@ export async function main(
     }
 
     try {
-      const { envelope, recheck, recheckStatus, report } = await runtime.runReview(input);
+      const { envelope, recheck, recheckStatus, report, appliedModel } = await runtime.runReview(input);
+      // The applied model crosses the container boundary as its OWN document:
+      // the published envelope is the engine's schema and must not grow fields.
+      // Written only when a model actually served — an absent file is the
+      // round's "no model served", which the Worker must never read as "the
+      // chain head". A write failure is logged, never turned into a failed
+      // review: the review is already valid, and losing the attribution must
+      // not lose the review with it.
+      if (appliedModel === undefined) {
+        // No model served: the file must NOT exist, so the Worker's proven-absent
+        // read is the truth rather than a stale document from an earlier round.
+        try {
+          rmSync(appliedModelPath, { force: true });
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "applied_model_clear_failed",
+              path: appliedModelPath,
+              reason: (error as Error).message,
+            }),
+          );
+        }
+      } else {
+        try {
+          writeFileSync(appliedModelPath, JSON.stringify({ appliedModel } satisfies AppliedModelDoc));
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "applied_model_write_failed",
+              path: appliedModelPath,
+              reason: (error as Error).message,
+            }),
+          );
+        }
+      }
       // The optional --recheck-out file is written only when a
       // recheck result exists, and BEFORE the envelope reaches stdout — a
       // write failure is a genuine I-O failure (exit 1, no stdout), not a
@@ -806,7 +964,22 @@ export async function main(
       console.log(JSON.stringify(envelope));
       return 0;
     } catch (error) {
-      console.error(`review: runtime failed: ${(error as Error).message}`);
+      const cause = (error as Error).message;
+      // The round is over, but the CONFIGURED chain's eligibility is still
+      // knowable: the probe's gate walker runs over this run's own inputs (the
+      // synthesized models.yml and the pool it loaded). It is ONE bounded
+      // block — cause first, dispositions after, folded by a counted marker —
+      // because the Worker persists only the tail of stderr. Nothing here
+      // claims a selector SERVED: the failure path carries no observation, and
+      // chain order is not one. Attribution is diagnosis; it never changes the
+      // round's outcome.
+      if (agentDir !== undefined && authStorage !== undefined) {
+        console.error(chainAttributionBlock(cause, chain, agentDir, authStorage));
+      } else {
+        // No synthesized models.yml to walk: the cause alone, still through the
+        // formatter so even this path cannot print an unbounded block.
+        console.error(formatFailureAttribution(cause, []));
+      }
       return 1;
     }
   } finally {

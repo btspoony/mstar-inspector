@@ -195,6 +195,22 @@ export type ProviderKeyRow = {
 };
 
 /**
+ * What the App owner stated about ONE declared model. An absent field is
+ * genuinely unstated — never zero and never a guess — so the form renders it
+ * blank and the synthesis writes no line for it.
+ */
+export type CustomProviderModelMeta = {
+  contextWindow?: number;
+  maxTokens?: number;
+  name?: string;
+  reasoning?: boolean;
+  input?: string[];
+};
+
+/** The per-model overlay of one declaration, keyed by a declared model id. */
+export type CustomProviderModelsMeta = Record<string, CustomProviderModelMeta>;
+
+/**
  * The stored key rows of one provider, in payload order (provider-ascending,
  * then pool order). Every row comes back — a second key of a provider is its
  * own row, not an overwrite of the first.
@@ -553,7 +569,14 @@ export type SettingsManagePayload = {
   model_chain: string | null;
   model_roles: Record<string, string>;
   model_chains: ModelChainEntry[];
-  custom_providers: Array<{ provider_id: string; base_url: string; api: string; model_ids: string[] }>;
+  custom_providers: Array<{
+    provider_id: string;
+    base_url: string;
+    api: string;
+    model_ids: string[];
+    /** Absent when the owner stated nothing about any model (legacy rows). */
+    models_meta?: CustomProviderModelsMeta;
+  }>;
   /** The App's persisted provider state ONLY — empty is the valid unconfigured case. */
   configured_providers: ConfiguredProvider[];
   /** Discovery metadata + eligibility — never configured state. */

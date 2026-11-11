@@ -46,7 +46,38 @@ export type CustomProviderDeclaration = {
   base_url: string;
   api: string;
   model_ids: string[];
+  /**
+   * What the App owner stated about each of `model_ids` (keyed by that id).
+   * ABSENT means nothing was stated — this is NOT the same statement as `{}`,
+   * and the consumer never produces the empty object. An absent fact inside an
+   * entry is absent too: the runner must not read zero as "unset".
+   */
+  models_meta?: CustomProviderModelsMeta;
 };
+
+/**
+ * One declared model's metadata as the runner input JSON carries it. Shape
+ * rule and validation live dashboard-side (`src/dashboard/app-config-store.ts`
+ * validates the same fields on write); the runner guard re-checks the wire
+ * types only. This declaration is MIRRORED here rather than imported because
+ * the in-image runner graph is exactly `packages/runner/src` +
+ * `packages/shared/src` and may not reach into Worker directories.
+ *
+ * `contextWindow` and `maxTokens` are what make the model a usable failover
+ * candidate; `name`, `reasoning` and `input` may stay unset and stay unset.
+ */
+export type CustomProviderModelMeta = {
+  /** Tokens the model can hold — a positive whole count. */
+  contextWindow?: number;
+  /** Token cap one completion may spend — a positive whole count. */
+  maxTokens?: number;
+  name?: string;
+  reasoning?: boolean;
+  input?: string[];
+};
+
+/** The per-model overlay of ONE declaration, keyed by a declared model id. */
+export type CustomProviderModelsMeta = Record<string, CustomProviderModelMeta>;
 
 /**
  * One capability-host model the runtime synthesizer materializes into the
@@ -202,7 +233,37 @@ export type ReviewRunResult = {
    * published sections to `none`.
    */
   report: ReportDoc | null;
+  /**
+   * The `provider/model` the run's session ACTUALLY served on — observed by the
+   * runner, never derived from the configured chain. ABSENT means no model
+   * served (a round that failed before any prompt), which is a different fact
+   * from "the chain head": a consumer that fell back to the chain head would
+   * report what we asked for instead of what ran.
+   */
+  appliedModel?: string;
 };
+
+/**
+ * The applied model's side document (fixed in-image path). The published
+ * envelope is the engine's schema and must not grow fields, so this crosses the
+ * container boundary as its OWN document — `{"appliedModel":"provider/model"}`.
+ * ABSENCE of the file means no model served.
+ */
+export const APPLIED_MODEL_PATH = "/workspace/review-applied-model.json";
+
+/** The side document's shape — one optional string, nothing else. */
+export type AppliedModelDoc = { appliedModel: string };
+
+/**
+ * What `reviews.provider` may hold: the selector's `provider/model` prefix —
+ * one slash, no whitespace. The consumer validates the document against THIS
+ * shape before persisting it, so a container-authored file cannot land an
+ * arbitrary string in the column.
+ */
+export const APPLIED_MODEL_PATTERN = /^[^/\s]+\/[^\s]+$/;
+
+/** Bound on that value (the column is a short provider/model pair). */
+export const APPLIED_MODEL_MAX_CHARS = 256;
 
 export interface AgentRuntime {
   /**
