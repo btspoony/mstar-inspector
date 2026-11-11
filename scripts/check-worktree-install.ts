@@ -34,7 +34,7 @@
  * before a comparison claim measured inside a worktree.
  */
 import { readdirSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** What a verdict established, with the paths the message can print. */
 export type InstallVerdict =
@@ -42,7 +42,7 @@ export type InstallVerdict =
   | { kind: "inherited"; target: string; modules: string }
   | { kind: "none"; target: string }
   | { kind: "unproven"; target: string; modules: string; reason: string }
-  | { kind: "foreign"; target: string; modules: string; installed: string; marker: string; lockfiles: string }
+  | { kind: "foreign"; target: string; modules: string; markers: string[]; lockfiles: string }
   | { kind: "uninspectable"; target: string; path: string; reason: string };
 
 function reasonOf(error: unknown): string {
@@ -171,8 +171,10 @@ function inspectLocal(target: string, modules: string): InstallVerdict {
   } catch (error) {
     return { kind: "uninspectable", target, path: modules, reason: reasonOf(error) };
   }
+  // Containment by SEGMENTS, not by string prefix: a directory named "..deps"
+  // is inside the worktree, while ".." as a segment is not.
   const within = relative(target, real);
-  if (within === "" || within.startsWith("..") || isAbsolute(within)) {
+  if (within === "" || isAbsolute(within) || within.split(sep).includes("..")) {
     return {
       kind: "unproven",
       target,
@@ -195,24 +197,32 @@ function inspectLocal(target: string, modules: string): InstallVerdict {
       reason: `it holds no packages (empty, or only a manager's dot entries)${also}`
     };
   }
-  const marker = INSTALL_MARKERS.find(([file]) => probe(join(real, file)).kind === "file");
-  if (marker === undefined) return { kind: "local", target, modules };
-  const [file, manager] = marker;
+  // Every marker present counts: a tree written by two managers, or by one the
+  // lockfiles do not name, is not the tree the lockfiles describe — a first
+  // match must not shadow a later foreign marker.
+  const found: { manager: string; path: string }[] = [];
+  for (const [file, manager] of INSTALL_MARKERS) {
+    const path = join(real, file);
+    if (probe(path).kind === "file") found.push({ manager, path });
+  }
+  if (found.length === 0) return { kind: "local", target, modules };
+  const managers = [...new Set(found.map((entry) => entry.manager))];
   const expected = new Map([
     ...lockfileManagers(repositoryRoot(target)),
     ...lockfileManagers(target)
   ]);
-  if (expected.size > 0 && !expected.has(manager)) {
+  const foreign =
+    managers.length > 1 || (expected.size > 0 && managers.some((name) => !expected.has(name)));
+  if (foreign) {
     return {
       kind: "foreign",
       target,
       modules,
-      installed: manager,
-      marker: join(real, file),
-      lockfiles: [...expected.values()].join(", ")
+      markers: found.map((entry) => `${entry.manager} (${entry.path})`),
+      lockfiles: expected.size === 0 ? "none in the repository" : [...expected.values()].join(", ")
     };
   }
-  return { kind: "local", target, modules, manager };
+  return { kind: "local", target, modules, manager: managers[0] };
 }
 
 /**
@@ -301,7 +311,7 @@ if (import.meta.main) {
 
   if (verdict.kind === "foreign") {
     console.error(
-      `::error::worktree-install-foreign: ${verdict.modules} was installed by ${verdict.installed} (${verdict.marker}), but the repository's lockfiles name ${verdict.lockfiles}. The tree is not the one the lockfiles describe.`,
+      `::error::worktree-install-foreign: ${verdict.modules} carries install markers the repository's lockfiles do not describe — ${verdict.markers.join("; ")}; repository lockfiles: ${verdict.lockfiles}. The tree is not the one the lockfiles describe.`,
     );
     console.error(
       `Repair: reinstall in the worktree with the repository's manager — cd ${verdict.target} && bun install — and re-run this check.`,

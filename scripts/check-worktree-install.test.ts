@@ -213,6 +213,43 @@ describe("check-worktree-install", () => {
     }
   });
 
+  test("a tree carrying a foreign marker next to an allowed one is still foreign", () => {
+    const { dir, cleanup } = fixture();
+    try {
+      const worktree = join(dir, "worktree");
+      modules(worktree);
+      writeFileSync(join(worktree, "package-lock.json"), "{}\n");
+      // The first marker matches the repository; the second one must not be
+      // shadowed by it.
+      writeFileSync(join(worktree, "node_modules", ".package-lock.json"), "{}\n");
+      writeFileSync(join(worktree, "node_modules", ".modules.yaml"), "\n");
+      const { code, out } = run(worktree);
+      expect(code).toBe(1);
+      expect(out).toContain("worktree-install-foreign");
+      expect(out).toContain(".modules.yaml");
+      expect(out).toContain("pnpm");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("an internal path whose first segment starts with two dots is inside", () => {
+    const { dir, cleanup } = fixture();
+    try {
+      const worktree = join(dir, "worktree");
+      mkdirSync(worktree, { recursive: true });
+      modules(join(worktree, "..deps"));
+      // Inside the worktree: only a segment NAME starts with two dots.
+      symlinkSync(join("..deps", "node_modules"), join(worktree, "node_modules"));
+      const { code, out } = run(worktree);
+      expect(code).toBe(0);
+      expect(out).toContain("has its own node_modules");
+      expect(out).not.toContain("outside the worktree");
+    } finally {
+      cleanup();
+    }
+  });
+
   test("an unreadable path refuses instead of passing", () => {
     const { code, out } = run(join(tmpdir(), "does-not-exist-worktree-install"));
     expect(code).toBe(1);
