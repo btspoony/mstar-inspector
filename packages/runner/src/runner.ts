@@ -745,6 +745,10 @@ export async function main(
   const stale: string[] = [];
   if (recheckOutPath !== undefined) stale.push(recheckOutPath, statusPath);
   if (reportOutPath !== undefined) stale.push(reportOutPath);
+  // The applied-model document is THIS round's fact and this round may report
+  // none: a leftover from an earlier run in the same container would otherwise
+  // be read back as this round's provider. Always cleared.
+  stale.push(appliedModelPath);
   for (const path of stale) {
     try {
       rmSync(path, { force: true });
@@ -868,7 +872,21 @@ export async function main(
       // chain head". A write failure is logged, never turned into a failed
       // review: the review is already valid, and losing the attribution must
       // not lose the review with it.
-      if (appliedModel !== undefined) {
+      if (appliedModel === undefined) {
+        // No model served: the file must NOT exist, so the Worker's proven-absent
+        // read is the truth rather than a stale document from an earlier round.
+        try {
+          rmSync(appliedModelPath, { force: true });
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "applied_model_clear_failed",
+              path: appliedModelPath,
+              reason: (error as Error).message,
+            }),
+          );
+        }
+      } else {
         try {
           writeFileSync(appliedModelPath, JSON.stringify({ appliedModel } satisfies AppliedModelDoc));
         } catch (error) {

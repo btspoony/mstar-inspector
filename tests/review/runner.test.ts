@@ -644,10 +644,12 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(stderr).toContain("eligible");
   });
 
-  test("a served round writes the applied-model side document; a round with none writes nothing", async () => {
+  test("a served round writes the applied-model side document; a round with none removes any leftover", async () => {
     fakeEnvelope = ENVELOPE;
     const target = join(mkdtempSync(join(tmpdir(), "applied-model-")), "review-applied-model.json");
     try {
+      // A document an earlier round left at the fixed path.
+      writeFileSync(target, JSON.stringify({ appliedModel: "stale/leftover" }));
       // 1. The runtime reports which model served: the document carries it,
       //    and the published envelope stays the engine's shape (no new field).
       fakeAppliedModel = "anthropic/claude-app";
@@ -663,7 +665,9 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
 
       // 2. No model served: no document at all — absence is the fact the
       //    consumer reads as "leave provider null", never "use the chain head".
-      rmSync(target, { force: true });
+      // 2. No model served: the document must NOT survive. A leftover from an
+      //    earlier round in this container would otherwise be read back as this
+      //    round's provider — so the absent case actively removes it.
       fakeAppliedModel = undefined;
       const idlePath = writeInput({ capabilityHosts: OMP_HOSTS });
       const idle = await runCli(["--level", "quick", "--input", idlePath], undefined, target);

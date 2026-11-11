@@ -254,6 +254,17 @@ export const APPLIED_MODEL_PATH = "/workspace/review-applied-model.json";
 /** The side document's shape — one optional string, nothing else. */
 export type AppliedModelDoc = { appliedModel: string };
 
+/**
+ * What `reviews.provider` may hold: the selector's `provider/model` prefix —
+ * one slash, no whitespace. The consumer validates the document against THIS
+ * shape before persisting it, so a container-authored file cannot land an
+ * arbitrary string in the column.
+ */
+export const APPLIED_MODEL_PATTERN = /^[^/\s]+\/[^\s]+$/;
+
+/** Bound on that value (the column is a short provider/model pair). */
+export const APPLIED_MODEL_MAX_CHARS = 256;
+
 export interface AgentRuntime {
   /**
    * 跑一次审查。仅以「已通过 validateMstarReviewV1 的 mstar.review/v1」

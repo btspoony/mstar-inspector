@@ -2016,7 +2016,7 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(2);
   });
 
-  test("App row review_level 'deep' → derived runner exec timeout 666_000 + admission TTL 2532; quick/default stay 600_000 (AC-S10-clock)", async () => {
+  test("App row review_level 'deep' → derived runner exec timeout 666_000 + admission TTL 2652; quick/default stay 600_000 (AC-S10-clock)", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -2037,10 +2037,10 @@ describe("createReviewConsumer", () => {
     // reserve), so an oversized-diff fallback fits inside the same 900s cap.
     expect(runnerExecTimeout()).toBe(666_000);
     // The admission row's TTL follows the same level table (AC-S10-guard):
-    // deep is 2532s. Pinned as the table's figure, like the runner budgets
+    // deep is 2652s. Pinned as the table's figure, like the runner budgets
     // below — the arithmetic that produces it is pinned once, by the guard
     // test.
-    expect(admissionTtlMs).toBe(2_532_000);
+    expect(admissionTtlMs).toBe(2_652_000);
     // The quick/default 10-minute table is frozen (spec: 禁止把 quick 全局改成 deep 档预算).
     expect(runnerTimeoutMs("quick")).toBe(600_000);
     expect(runnerTimeoutMs("default")).toBe(600_000);
@@ -2831,7 +2831,7 @@ describe("createReviewConsumer", () => {
     expect(infoLine!.fields.workspace_cap).toBe(WORKSPACE_CONCURRENCY_DEFAULT);
   });
 
-  test("guard-held backoff escalates 60s → 300s → 2040s across attempts (BB-3)", async () => {
+  test("guard-held backoff escalates 60s → 300s → 2100s across attempts (BB-3)", async () => {
     reset();
     const db = await createSeededTestD1();
     await seedInflight(db);
@@ -2839,7 +2839,7 @@ describe("createReviewConsumer", () => {
     for (const [attempts, delaySeconds] of [
       [1, 60],
       [2, 300],
-      [3, 2040],
+      [3, 2100],
     ] as const) {
       queueState.attempts = attempts;
       await consumer(makeBatch(makePayload()));
@@ -2847,12 +2847,12 @@ describe("createReviewConsumer", () => {
     expect(messageRetryCalls).toEqual([
       { attempts: 1, delaySeconds: 60 },
       { attempts: 2, delaySeconds: 300 },
-      { attempts: 3, delaySeconds: 2040 },
+      { attempts: 3, delaySeconds: 2100 },
     ]);
     expect(messageAckCalls).toHaveLength(0);
     expect(sandbox.calls).toHaveLength(0);
   });
-  test("App row review_level 'deep' guard-held → delayed retries use the deep backoff 90s → 480s → 2040s (AC-S10-guard)", async () => {
+  test("App row review_level 'deep' guard-held → delayed retries use the deep backoff 90s → 480s → 2100s (AC-S10-guard)", async () => {
     reset();
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
@@ -2861,7 +2861,7 @@ describe("createReviewConsumer", () => {
     for (const [attempts, delaySeconds] of [
       [1, 90],
       [2, 480],
-      [3, 2040],
+      [3, 2100],
     ] as const) {
       queueState.attempts = attempts;
       await consumer(makeBatch(makePayload()));
@@ -2869,7 +2869,7 @@ describe("createReviewConsumer", () => {
     expect(messageRetryCalls).toEqual([
       { attempts: 1, delaySeconds: 90 },
       { attempts: 2, delaySeconds: 480 },
-      { attempts: 3, delaySeconds: 2040 },
+      { attempts: 3, delaySeconds: 2100 },
     ]);
     expect(messageAckCalls).toHaveLength(0);
     expect(sandbox.calls).toHaveLength(0);
@@ -3722,14 +3722,14 @@ describe("createReviewConsumer", () => {
     // `gh pr view`, up to 3 report `gh issue view` reads, recheck-doc read,
     // report-document read) × 120s + the LEVEL's runner budget + the 12s
     // inline-resolution budget + 120s slack for the untimed steps (token
-    // mint, sandbox create, comment post, KV/D1 puts) = 2292s quick/default,
-    // 2532s deep (spec d5-budget L4). Every earlier step addition (numstat,
+    // mint, sandbox create, comment post, KV/D1 puts) = 2412s quick/default,
+    // 2652s deep (spec d5-budget L4). Every earlier step addition (numstat,
     // the input write, the recheck read, now the increment/report reads) went
     // uncounted — any future step or ceiling change must recompute this
     // helper ON PURPOSE.
-    expect(reviewGuardTtlSeconds("quick")).toBe(2292);
-    expect(reviewGuardTtlSeconds("default")).toBe(2292);
-    expect(reviewGuardTtlSeconds("deep")).toBe(2532);
+    expect(reviewGuardTtlSeconds("quick")).toBe(2412);
+    expect(reviewGuardTtlSeconds("default")).toBe(2412);
+    expect(reviewGuardTtlSeconds("deep")).toBe(2652);
   });
 
   test("round budget: the reserve covers the live post-runner tail and derives the runner deadline", () => {
@@ -3818,21 +3818,24 @@ describe("createReviewConsumer", () => {
     expect(captured).toHaveLength(1 + PR_CONTEXT_MAX_ISSUES);
     // One command per billed window — except `readRecheckDoc`, which races the
     // document and status reads in ONE Promise.all window (two commands, one
-    // entry; the `+1` below), and the applied-model read, which bills a window
-    // the step ledger does not itemise (the `+2`). A new sandbox step without
-    // its ledger entry — or one more post-runner read than these two accounted
-    // for — breaks this.
-    expect(timed.length + captured.length + postRunner.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 2);
+    // entry, the `+1`). Every other post-runner read is itemised in
+    // GUARD_TIMED_SANDBOX_STEPS, so a new sandbox step without its ledger entry
+    // breaks this instead of being absorbed by a wider delta.
+    expect(GUARD_TIMED_SANDBOX_STEPS).toContain("applied-model-read");
+    expect(GUARD_TIMED_SANDBOX_STEPS).toContain("report-document-read");
+    expect(timed.length + captured.length + postRunner.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 1);
   });
 
   test("guardRetryDelaysSeconds per level — the schedule covers the guard TTL (AC-4)", () => {
-    // quick/default 60/300/2040; deep 90/480/2040. Every entry must stay
+    // quick/default 60/300/2100; deep 90/480/2100. Every entry must stay
     // below the level's guard TTL so no single delay outlives the lock, and
     // the CUMULATIVE sum must EXCEED it so the final attempt can reclaim an
-    // expired row instead of being dropped.
-    expect(guardRetryDelaysSeconds("quick")).toEqual([60, 300, 2040]);
-    expect(guardRetryDelaysSeconds("default")).toEqual([60, 300, 2040]);
-    expect(guardRetryDelaysSeconds("deep")).toEqual([90, 480, 2040]);
+    // expired row instead of being dropped. The last entry is DERIVED from that
+    // TTL (2460s / 2670s here): a step added to GUARD_TIMED_SANDBOX_STEPS grows
+    // the TTL and forces it, so the schedule cannot silently fall short.
+    expect(guardRetryDelaysSeconds("quick")).toEqual([60, 300, 2100]);
+    expect(guardRetryDelaysSeconds("default")).toEqual([60, 300, 2100]);
+    expect(guardRetryDelaysSeconds("deep")).toEqual([90, 480, 2100]);
     for (const level of ["quick", "default", "deep"] as const) {
       const delays = guardRetryDelaysSeconds(level);
       const ttl = reviewGuardTtlSeconds(level);

@@ -60,7 +60,7 @@ import type {
   ReviewLevel,
   ReviewRunResult,
 } from "../../packages/shared/src/runtime";
-import type { SupervisedSeat } from "../../packages/runner/src/runtime-omp";
+import { servedModel, type SupervisedSeat } from "../../packages/runner/src/runtime-omp";
 import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
 import { REPORT_OUTPUT_SCHEMA } from "../../packages/runner/src/report";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
@@ -3211,5 +3211,45 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
 
     release.resolve();
     await run;
+  });
+});
+
+/**
+ * The applied-model rule, pinned at its own seam. The quick/default attribution
+ * reads each settled seat's session through the process-global agent registry,
+ * so the SDK facts this rests on are stated once, here:
+ *   - `AgentRegistry.register` stores the child's session on its ref
+ *     (`src/registry/agent-registry.ts:217-244`), and `AgentRef.session` is
+ *     "Null exactly when parked/aborted" (`:74-75`);
+ *   - a structured subagent is KEEP-ALIVE by default (`src/task/executor.ts:5397`
+ *     — `keepAlive: options.keepAlive !== false`), and only a non-keep-alive run
+ *     disposes + unregisters (`:3755-3762`); the keep-alive path sets `idle` and
+ *     adopts the ref (`:3758+`). So the entry — and its session — is still
+ *     readable the moment the seat settles, which is exactly when the runner
+ *     now captures it (an idle park may null the session later).
+ *   - WHICH model: `AgentSession.servingModel` (`src/session/agent-session.ts:7030`
+ *     → `src/session/turn-recovery.ts:502`) is the SDK's own attribution —
+ *     "attribution only ever names a model that has settled a turn here" — and
+ *     its `modelIdentity` is "Provider/id including routing, with no added
+ *     thinking suffix". `model` is only the configured selection.
+ */
+describe("servedModel — the single applied-model rule", () => {
+  test("servingModel wins over the configured model, and its modelIdentity is used verbatim", () => {
+    expect(
+      servedModel({
+        model: { provider: "commandcode", id: "deepseek/deepseek-v4.1-flash" },
+        servingModel: { modelIdentity: "opencode-go/deepseek-v4.1-flash", selector: "opencode-go/deepseek-v4.1-flash" },
+      }),
+    ).toBe("opencode-go/deepseek-v4.1-flash");
+  });
+
+  test("a session with no served turn falls back to its configured model", () => {
+    expect(servedModel({ model: { provider: "arks", id: "m1" } })).toBe("arks/m1");
+  });
+
+  test("a session that never selected a model is ABSENT, not a guess", () => {
+    expect(servedModel(undefined)).toBeUndefined();
+    expect(servedModel(null)).toBeUndefined();
+    expect(servedModel({})).toBeUndefined();
   });
 });

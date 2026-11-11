@@ -200,6 +200,10 @@
 # beside the recheck/report side documents (`packages/runner/src/runtime-omp.ts`,
 # `runner.ts`); the Worker reads it into `reviews.provider`. A stale image writes
 # no such document, so the column stays NULL — the round is attributed to nobody.
+# rebuild: the runner now attributes a served seat to the SDK's OWN serving model
+# (`AgentSession.servingModel`, captured the moment the seat settles) and deletes
+# a leftover applied-model document when no model served. A stale image writes a
+# stale or missing document, so the Worker records the wrong provider or none.
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via

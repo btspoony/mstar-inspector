@@ -1156,6 +1156,39 @@ describe("applied-provider attribution (runner observation → reviews.provider)
     expect(model.model).toBe("openai/gpt-app");
   });
 
+  test("a malformed or oversized applied-model document is refused, not persisted", async () => {
+    for (const doc of [
+      // No provider/model pair at all.
+      JSON.stringify({ appliedModel: "anthropic" }),
+      // No provider segment, or whitespace where none belongs. (A model id may
+      // itself contain slashes — the reported chain's does — so only the
+      // provider segment is slash-free.)
+      JSON.stringify({ appliedModel: "/claude-app" }),
+      JSON.stringify({ appliedModel: "anthropic/claude app" }),
+      // The shape is right but the value is unbounded — a document may not
+      // smuggle an arbitrary string into a short provider/model column.
+      JSON.stringify({ appliedModel: `a/${"b".repeat(300)}` }),
+      // Not even a string.
+      JSON.stringify({ appliedModel: 42 }),
+      JSON.stringify({ appliedModel: "" }),
+    ]) {
+      reset();
+      const db = createMigratedTestD1();
+      const appX = await seedApp(db, "app-x");
+      await configureApp(db, appX.id, "openai/gpt-app", { openai: sk("app-x-openai-SECRET") });
+      appliedModelDoc = doc;
+
+      const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+      await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+
+      const row = db.raw.query("SELECT provider FROM reviews WHERE pr_number = 42").get() as {
+        provider: string | null;
+      };
+      expect(row.provider, doc).toBeNull();
+      expect(logLines.some((line) => line.fields.applied_model === "invalid-document"), doc).toBe(true);
+    }
+  });
+
   test("a round that applied NO model leaves provider null — never the chain head", async () => {
     reset();
     const db = createMigratedTestD1();
