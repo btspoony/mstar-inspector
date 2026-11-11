@@ -1096,7 +1096,7 @@ async function reconcileCheckAttempt(
     // run into a terminal `local-error` while GitHub still showed the Check
     // `in_progress` — an outcome nothing would ever revisit.
     if (fetched.requests === 0) {
-      await releaseUndispatchedClaim(db, attemptId, lease, now, log, "fetch");
+      await releaseUndispatchedClaim(db, attemptId, lease, now, log, "fetch", fetched.reason);
       return;
     }
     await settleFailedAttempt(db, now, attemptsBefore, row, lease, fetched.reason, log, summary);
@@ -1135,7 +1135,7 @@ async function reconcileCheckAttempt(
     // no attempt — the row stays due and the next pass retries the SAME
     // terminal intent instead of giving up on work that never ran.
     if (completed.requests === 0) {
-      await releaseUndispatchedClaim(db, attemptId, lease, now, log, "complete");
+      await releaseUndispatchedClaim(db, attemptId, lease, now, log, "complete", completed.reason);
       return;
     }
     // §7.11.2 step 4: preserve desired and actual observed, stay
@@ -1194,19 +1194,19 @@ async function releaseUndispatchedClaim(
   now: () => number,
   log: CheckReconcileLog,
   op: string,
+  reason: string,
 ): Promise<void> {
+  // The reason rides the log, never the row: the refusal is un-proven by
+  // definition, so nothing is written except the claim release. Without it a
+  // lane that keeps refusing zero-dispatched is indistinguishable from one that
+  // never ran — the exact blind spot that hid a permanent 404 mint.
+  const detail = `attempt=${attemptId} op=${op} reason=${reason}`;
   const released = await releaseExpiredCheckClaim(db, attemptId, lease, now());
   if (!released) {
-    log.warn(
-      { event: "ops_check_reconcile_zero_dispatch_release_missed", detail: `attempt=${attemptId} op=${op}` },
-      "zero-dispatch refusal hit a claim that had already moved",
-    );
+    log.warn({ event: "ops_check_reconcile_zero_dispatch_release_missed", detail }, "zero-dispatch refusal hit a claim that had already moved");
     return;
   }
-  log.info(
-    { event: "ops_check_reconcile_zero_dispatch_deferral", detail: `attempt=${attemptId} op=${op}` },
-    "no-request refusal — row released, no attempt spent",
-  );
+  log.info({ event: "ops_check_reconcile_zero_dispatch_deferral", detail }, "no-request refusal — row released, no attempt spent");
 }
 
 /**

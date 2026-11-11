@@ -66,6 +66,7 @@ import {
 import { generateKeyPairSync } from "node:crypto";
 import {
   createReviewCommenter,
+  isNameRefusal,
   type CommenterFetch,
   REVIEW_WRITE_PERMISSIONS,
   SANDBOX_READ_PERMISSIONS,
@@ -2118,6 +2119,9 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     });
     const seam: AuthSeam = { constructed: [], minted: [] };
     const mintBodies: string[] = [];
+    // GitHub answers a rename with 404 on some paths and 422 on others; both
+    // must trigger the same retry.
+    const refusalStatus = 422;
     const fetchImpl: CommenterFetch = async (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (!url.includes("/access_tokens")) {
@@ -2125,8 +2129,8 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
       }
       mintBodies.push(typeof init?.body === "string" ? init.body : "");
       if (mintBodies.length === 1) {
-        return new Response(JSON.stringify({ message: "Not Found" }), {
-          status: 404,
+        return new Response(JSON.stringify({ message: "Repository not found" }), {
+          status: refusalStatus,
           headers: { "content-type": "application/json" },
         });
       }
@@ -2157,6 +2161,22 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     expect(writeMints[0]?.installationWide).toBeUndefined();
     expect(writeMints[1]?.installationWide).toBe(true);
     expect(writeMints[1]?.permissions.checks).toBe("write");
+  });
+
+  test("the rename refusal is recognised on the error, its response, or only its message", () => {
+    // A guard that reads one shape silently disables the mint fallback, which is
+    // how a renamed repository froze a Check for hours.
+    expect(isNameRefusal(Object.assign(new Error("boom"), { status: 404 }))).toBe(true);
+    expect(isNameRefusal(Object.assign(new Error("boom"), { status: 422 }))).toBe(true);
+    expect(isNameRefusal({ message: "x", response: { status: 404 } })).toBe(true);
+    expect(isNameRefusal({ message: "Repository not found" })).toBe(true);
+    expect(isNameRefusal(new Error("Not Found"))).toBe(true);
+    expect(isNameRefusal(Object.assign(new Error("nope"), { cause: { status: 422 } }))).toBe(true);
+    // Anything else stays a real failure, never a retry.
+    expect(isNameRefusal(Object.assign(new Error("boom"), { status: 500 }))).toBe(false);
+    expect(isNameRefusal(new Error("rate limited"))).toBe(false);
+    expect(isNameRefusal(null)).toBe(false);
+    expect(isNameRefusal("plain string")).toBe(false);
   });
 
   test("a typed pre-dispatch refusal reports zero requests, an unknown failure stays conservative", async () => {

@@ -1136,6 +1136,30 @@ export type ReviewCommenterOptions = {
 
 /** One `createAppAuth` construction, as observed through `authSeam`. */
 export type AuthConstruction = { appId: string };
+/**
+ * Whether a mint failure says the requested repository NAME is not this
+ * installation's any more (a rename). GitHub answers 404 or 422 depending on
+ * the endpoint's validation path, and the status can sit on the error, on its
+ * `response`, or only in the message once a transport re-wraps it — all three
+ * are read, because a guard that recognises only one of them silently disables
+ * the fallback (the failure mode this helper exists to end).
+ */
+export function isNameRefusal(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof current !== "object" || current === null) return false;
+    for (const holder of [current, "response" in current ? current.response : undefined]) {
+      if (typeof holder !== "object" || holder === null || !("status" in holder)) continue;
+      if (holder.status === 404 || holder.status === 422) return true;
+    }
+    if ("message" in current && typeof current.message === "string" && /repository not found|\bnot found\b/i.test(current.message)) {
+      return true;
+    }
+    current = "cause" in current ? current.cause : undefined;
+  }
+  return false;
+}
+
 /** One minted installation grant, as observed through `authSeam`. */
 export type AuthMint = {
   installationId: number;
@@ -2101,13 +2125,11 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       // repository — every caller still addresses the persisted owner/repo and
       // every Checks write is identity-fenced, so the wider grant cannot reach
       // another tenant's data.
-      const status =
-        typeof error === "object" && error !== null && "status" in error ? error.status : undefined;
       // Only the review-write family falls back: its callers address one exact
       // owner/repo per request. A `sandbox-read` mint stays fail-closed — an
       // installation-wide grant cannot satisfy `assertSandboxGrant` anyway, and
       // minting one only to reject it widens a credential for nothing.
-      if (status !== 404 || input.purpose !== "review-write") throw error;
+      if (!isNameRefusal(error) || input.purpose !== "review-write") throw error;
       options?.authSeam?.minted.push({
         installationId: input.installationId,
         repo: input.repo,
