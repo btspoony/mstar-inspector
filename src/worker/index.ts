@@ -20,7 +20,7 @@
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
-import type { ExecutionContext, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
+import type { D1Database, ExecutionContext, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import type { Env, ScheduledEnv } from "./env";
 import { defaultSweepLog, runSweep } from "./sweep";
 import { reconcileReviewLifecycle } from "./lifecycle-reconcile";
@@ -39,7 +39,14 @@ import {
   type WebhookOutcome,
 } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
-import { createAppsStore, type AppAllowlist, type DeliveryOutcome } from "../dashboard/apps-store";
+import {
+  createAppsStore,
+  type AppAllowlist,
+  type DeliveryOutcome,
+  type GithubAppTenantRow,
+} from "../dashboard/apps-store";
+import { attachCheckAtAcceptance } from "../pipeline/checks";
+import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
 import { adminApp } from "../admin/index";
@@ -181,6 +188,115 @@ async function readBodyWithinLimit(request: Request, limit: number): Promise<str
     offset += chunk.byteLength;
   }
   return new TextDecoder().decode(bytes);
+}
+
+/**
+ * How long the delivery path waits for the Check attach before it enqueues
+ * (spec §7.9). The attach is one token mint, one create and two D1 writes in
+ * the normal case; past this bound the enqueue proceeds and the attach keeps
+ * running on the invocation context, where the consumer's bounded takeover of a
+ * stalled delivery holder covers the overlap.
+ */
+export const CHECK_ATTACH_INLINE_BUDGET_MS = 2_500;
+
+/**
+ * Resolve when `promise` settles or the budget elapses — whichever is first.
+ * The promise is NOT cancelled: its owner (the invocation context) still holds
+ * it, and a late attach is exactly what the consumer's takeover handles.
+ */
+async function withinBudget(promise: Promise<unknown>, budgetMs: number): Promise<void> {
+  const { promise: budget, resolve } = Promise.withResolvers<void>();
+  const timer = setTimeout(resolve, budgetMs);
+  try {
+    await Promise.race([promise.then(() => {}), budget]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Attach the review Check on the DELIVERY path (spec §7.7 step 4 / §7.9).
+ *
+ * Runs BEFORE the enqueue: the attempt is claimed and its `in_progress` run
+ * created NOW, so the Check shows up within seconds of the webhook instead of
+ * when a worker finally starts the message — and an admitted message finds a
+ * row it can adopt instead of racing this holder. The row is then released with
+ * the run id persisted, which is exactly what the consumer's `begin` adopts.
+ *
+ * Best-effort by contract: the client comes from the SAME
+ * `createReviewCommenter` construction point every other Check send uses (spec
+ * §7.6 — no second App auth), and every failure is ONE structured warn. The
+ * `accepted` answer and the enqueue are never affected.
+ *
+ * `deliveryId` is generated BEFORE this call and recorded on the row it claims
+ * (§7.9): the enqueued message carries the same id, so a later skip settlement
+ * can tell THIS delivery's Check row from another's even after the release.
+ */
+async function attachCheckOnAcceptance(input: {
+  db: D1Database;
+  env: Env;
+  row: Pick<GithubAppTenantRow, "id" | "github_app_id" | "private_key_enc">;
+  payload: Omit<ReviewJobPayload, "appRef">;
+  /** Generated BEFORE the attach starts, so the message always carries it. */
+  deliveryId: string;
+}): Promise<void> {
+  const { db, env, row, payload, deliveryId } = input;
+  const headSha = payload.head_sha;
+  // A bot-mention delivery carries no SHA: the consumer claims after its own
+  // `rev-parse`, exactly as before.
+  if (headSha === null) return;
+  try {
+    const pem = await createSecretbox(env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
+      row.private_key_enc,
+      `github_apps.private_key_enc:${row.id}`,
+    );
+    const commenter = createReviewCommenter(
+      { APP_ID: String(row.github_app_id), PRIVATE_KEY: pem },
+      { db, nowMs: () => Date.now() },
+    );
+    const adapter = commenter.checks;
+    if (adapter === undefined) {
+      webhookWarn(
+        "check_attach_failed",
+        "the App's review-write client exposes no Checks surface",
+        "check attach failed — delivery unaffected (best-effort)",
+      );
+      return;
+    }
+    const result = await attachCheckAtAcceptance(
+      { db, adapter, nowMs: () => Date.now() },
+      {
+        scope: {
+          appId: row.id,
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        },
+        githubAppId: row.github_app_id,
+        headSha,
+        triggeredBy: payload.triggered_by,
+        action: payload.action,
+        deliveryId,
+      },
+    );
+    // One warn for a real failure (a refusal, a failed run-id write, a failed
+    // release). A busy/terminal skip is a legitimate no-op and stays silent.
+    if (result.kind === "failed") {
+      webhookWarn(
+        "check_attach_failed",
+        redactSecrets(result.reason),
+        "check attach failed — delivery unaffected (best-effort)",
+      );
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    webhookWarn(
+      "check_attach_failed",
+      redactSecrets(detail),
+      "check attach failed — delivery unaffected (best-effort)",
+    );
+  }
 }
 
 // `version` rides the healthz face — additive field, `ok:true`
@@ -659,6 +775,29 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     // possibly-unbound DB.
     env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,
+    // The Check attaches HERE — BEFORE `REVIEW_QUEUE.send` — so an admitted
+    // message finds a released row to adopt instead of racing the delivery
+    // holder (spec §7.7 step 4 / §7.9). The webhook waits at most
+    // `CHECK_ATTACH_INLINE_BUDGET_MS`; past that the enqueue proceeds and the
+    // invocation context keeps the attach, which the consumer's bounded
+    // takeover of a stalled delivery holder covers.
+    beforeEnqueue: async (payload) => {
+      // Generated BEFORE the attach starts (spec §7.9): the message must carry
+      // the identity even when the inline budget expires and the attach only
+      // finishes later — that row records the same id, so a later skip can
+      // still settle it.
+      const attachDeliveryId = crypto.randomUUID();
+      const attach = attachCheckOnAcceptance({ db, env: c.env, row, payload, deliveryId: attachDeliveryId });
+      try {
+        c.executionCtx.waitUntil(attach);
+      } catch {
+        // No invocation context (tests, a non-Worker host): the attach is
+        // already running detached and is best-effort either way.
+        void attach;
+      }
+      await withinBudget(attach, CHECK_ATTACH_INLINE_BUDGET_MS);
+      return { ...payload, attachDeliveryId };
+    },
   });
   return c.text("accepted", 200);
 });

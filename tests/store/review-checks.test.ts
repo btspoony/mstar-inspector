@@ -39,6 +39,8 @@ import {
 import {
   attemptKey,
   attachCheckRunId,
+  CHECK_ATTACH_GRACE_MS,
+  CHECK_ATTACH_WINDOW_MS,
   CHECK_BACKOFF_MS,
   CHECK_EXTERNAL_ID_PREFIX,
   CHECK_LEASE_MS,
@@ -48,6 +50,7 @@ import {
   type CheckAttempt,
   type CheckConclusion,
   type CheckRemote,
+  claimAttachedCheckForSettlement,
   claimAttempt,
   claimCheckRecovery,
   deferCheckRecovery,
@@ -64,6 +67,7 @@ import {
   checkSuspensionKindOf,
   checkSuspensionReason,
   listReenableableCheckPairs,
+  releaseAttachedCheck,
   releaseCheckClaim,
   suspendCheckForPause,
   releaseExpiredCheckClaim,
@@ -1032,6 +1036,216 @@ describe("zero-dispatch rollback and the no-request claim release (integrated se
   });
 });
 
+describe("attach grace (spec §7.9)", () => {
+  test("a released attach row is due at the grace, not before", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:attach",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    const grace = T0 + CHECK_ATTACH_GRACE_MS;
+    expect(await releaseAttachedCheck(db, id, lease, grace, T0)).toBe(true);
+
+    // The row keeps everything it needs to be adopted; only the due time is new.
+    const row = (await db.prepare(`SELECT * FROM review_checks WHERE id = ?`).bind(id).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(row.next_attempt_ms).toBe(grace);
+    expect(row.holder).toBeNull();
+    expect(row.create_state).toBe("known");
+    expect(row.check_run_id).toBe(4242);
+    expect(row.desired).toBe("in_progress");
+    expect(row.attempts).toBe(0);
+
+    // Invisible to the recovery lane before the grace, due AT it: two minutes
+    // after the attach instead of at the one-hour window's expiry.
+    expect(await listCheckReconcileBatch(db, grace - 1)).toEqual([]);
+    expect((await listCheckReconcileBatch(db, grace)).map((candidate) => candidate.identity.attemptId)).toEqual([id]);
+    expect(await claimCheckRecovery(db, id, "reconciler", grace)).not.toBeNull();
+  });
+});
+
+describe("a settled neutral row does not retire the head (spec §7.9)", () => {
+  test("a later claim for the same head is a new generation with a new run id", async () => {
+    const db = seededDb();
+    const first = await claim(db);
+    const firstId = first.attempt.identity.attemptId;
+    await attachRun(db, firstId, first.lease, 4242);
+    // What a skip settlement leaves: a neutral intent AND observation with NO
+    // publication link — nothing was published for this head.
+    expect(
+      await setCheckDesired(
+        db,
+        firstId,
+        first.lease,
+        { desired: "neutral", title: CHECK_NAME, summary: "review paused" },
+        null,
+        T0,
+      ),
+    ).toBe(true);
+    expect(
+      await recordCheckObservation(
+        db,
+        firstId,
+        first.lease,
+        {
+          id: 4242,
+          name: CHECK_NAME,
+          head_sha: SHA,
+          external_id: first.attempt.identity.externalId,
+          app: { id: APP_NUMERIC_ID },
+          status: "completed",
+          conclusion: "neutral",
+        },
+        T0,
+      ),
+    ).toBe(true);
+    const settled = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(firstId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(settled.observed).toBe("neutral");
+    expect(settled.terminal_ms).not.toBeNull();
+    expect(settled.publication_id).toBeNull();
+
+    // The same head is claimable again: a neutral settlement proves nothing was
+    // published, so a retried (or resumed) delivery must still be able to run
+    // its own review. The new generation gets a fresh row and run id.
+    const second = await claimAttempt(db, claimInput({ holder: "run-b", nowMs: T0 + 60_000 }));
+    expect(second.kind).toBe("claimed");
+    if (second.kind !== "claimed") return;
+    expect(second.attempt.identity.generation).toBe(2);
+    expect(second.attempt.identity.attemptId).not.toBe(firstId);
+    expect(second.attempt.identity.externalId).not.toBe(first.attempt.identity.externalId);
+  });
+});
+describe("the settlement claim follows the delivery identity (spec §7.9)", () => {
+  /** Claim for settlement as `attachDeliveryId`'s own delivery. */
+  const settleAs = (db: TestD1, attachDeliveryId?: string) =>
+    claimAttachedCheckForSettlement(db, {
+      scope: SCOPE,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      attachDeliveryId,
+      holder: "skip:settler",
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+      nowMs: T0,
+    });
+
+  test("a row under the MESSAGE'S OWN delivery holder is taken, without waiting for staleness", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:mine",
+      attachDeliveryId: "mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    await attachRun(db, attempt.identity.attemptId, lease);
+
+    // Fresh — the identity, not the age, is what makes the row ours: the
+    // delivery already created the run and only needs to finish releasing.
+    const taken = await settleAs(db, "mine");
+    expect(taken).not.toBeNull();
+    expect(taken!.lease.holder).toBe("skip:settler");
+    expect(taken!.lease.epoch).toBe(2);
+  });
+
+  test("ANOTHER delivery's holder is never taken, fresh or stale", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:other",
+      attachDeliveryId: "other",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+
+    // Fresh: another delivery's attach is still working on this row.
+    expect(await settleAs(db, "mine")).toBeNull();
+    // Stale: still not ours. Only the owner (or the grace/deadline lane) may
+    // close it — settling here would close a live review's Check neutral.
+    db.raw.prepare("UPDATE review_checks SET updated_ms = ? WHERE id = ?").run(T0 - 60_000, id);
+    expect(await settleAs(db, "mine")).toBeNull();
+    const held = await getCheckAttempt(db, id);
+    expect(held?.lease?.holder).toBe("delivery:other");
+    expect(held?.lease?.epoch).toBe(1);
+    // The OWNER settles it, fresh or stale alike.
+    expect(await settleAs(db, "other")).not.toBeNull();
+  });
+
+  test("a RELEASED row created by this delivery is taken — the budget-expiry arm", async () => {
+    const db = seededDb();
+    // The attach outlived the inline budget: the message was enqueued with its
+    // id, the attach finished later and released the row. No holder names the
+    // creator any more — the column does.
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:mine",
+      attachDeliveryId: "mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
+
+    const taken = await settleAs(db, "mine");
+    expect(taken).not.toBeNull();
+    expect(taken!.lease.holder).toBe("skip:settler");
+    expect(taken!.attempt.identity.attemptId).toBe(id);
+  });
+
+  test("a delivery whose attach found the key owned settles nothing", async () => {
+    const db = seededDb();
+    // This delivery's attach answered `busy`: it created no row, so nothing on
+    // this key records its id.
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:other",
+      attachDeliveryId: "other",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    await attachRun(db, attempt.identity.attemptId, lease);
+
+    expect(await settleAs(db, "mine")).toBeNull();
+  });
+
+  test("another delivery's RELEASED row is not taken either", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:other",
+      attachDeliveryId: "other",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
+
+    // Released, but created by ANOTHER delivery: a skip must not close it.
+    expect(await settleAs(db, "mine")).toBeNull();
+    // Its own delivery can.
+    expect(await settleAs(db, "other")).not.toBeNull();
+  });
+  test("no attach identity settles nothing, even a released row", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:mine",
+      attachDeliveryId: "mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
+
+    // A delivery whose attach found the key owned created no row: it must not
+    // take this one, which belongs to the delivery that did.
+    expect(await settleAs(db, undefined)).toBeNull();
+    const released = await getCheckAttempt(db, id);
+    expect(released?.lease).toBeNull();
+    // With its own identity the claim works.
+    expect(await settleAs(db, "mine")).not.toBeNull();
+  });
+});
 describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
   test("a live claim lease hides a row; the release makes it a candidate", async () => {
     const db = seededDb();

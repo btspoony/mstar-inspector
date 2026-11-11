@@ -221,7 +221,11 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toEqual({
+    // The delivery identity is generated BEFORE the attach and always rides the
+    // message — here the attach itself fails (the fixture key is not a real
+    // PEM), so an id that depended on the attach succeeding would be missing.
+    const { attachDeliveryId, ...queued } = sent[0]!;
+    expect(queued).toEqual({
       installation_id: 123,
       owner: "test-owner",
       repo: "test-repo",
@@ -231,6 +235,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       triggered_by: "pull_request",
       appRef: { appId: appRow.id },
     });
+    expect(attachDeliveryId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     // The same delivery lands its PR-ledger row (migration 0039): the fixture
     // carries the table, so a missing/failed write here is a real regression
     // rather than the "no such table" warn branch this suite used to take.
@@ -273,6 +278,60 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       queued: "2026-03-01T10:00:00.000Z",
       ledger: "2026-03-01T10:00:00.000Z",
     });
+  });
+
+  test("the Check attaches BEFORE the enqueue, and a refused attach still answers accepted with one warn", async () => {
+    const db = createMigratedTestD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const sent: ReviewJobPayload[] = [];
+    // The attach is ordered before the send (spec §7.9): the queue stub reads
+    // the registry at send time, so a row that exists there proves the order.
+    let rowsAtSend = -1;
+    const queue = {
+      send: mock(async (message: ReviewJobPayload) => {
+        rowsAtSend = (db.raw.query("SELECT COUNT(*) AS n FROM review_checks").get() as { n: number }).n;
+        sent.push(message);
+      }),
+    };
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const { warn, stop } = captureWarn();
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+        env,
+      );
+    } finally {
+      stop();
+    }
+
+    // A refused attach (this fixture's "private key" is not a real PEM, so the
+    // create is refused) must never change the answer or cost the enqueue.
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    // The attach ran first: the attempt row already existed when the job was
+    // sent, so an admitted message can adopt it instead of racing its creator.
+    expect(rowsAtSend).toBe(1);
+    // A real failure is not silent (the busy/terminal skip is, and this is not
+    // one): exactly the one structured warn the contract promises.
+    const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toContain("check_attach_failed");
+
+    // The row is left with NO holder — released for the consumer to adopt, or
+    // for the reconciler once its window expires.
+    const rows = db.raw
+      .query("SELECT head_sha, holder, lease_until_ms, check_run_id FROM review_checks")
+      .all() as Array<{ head_sha: string; holder: string | null; lease_until_ms: number | null; check_run_id: number | null }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.head_sha).toBe("abc123");
+    expect(rows[0]!.holder).toBeNull();
+    expect(rows[0]!.lease_until_ms).toBeNull();
+    expect(rows[0]!.check_run_id).toBeNull();
   });
 
   test("wrong-App secret signature → 401, zero enqueue (sibling-App isolation, AC-B5-isolation)", async () => {

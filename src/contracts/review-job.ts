@@ -50,4 +50,15 @@ export type ReviewJobPayload = {
   action: string;
   triggered_by: "pull_request" | "issue_comment";
   appRef: { appId: string };
+  /**
+   * The Check attach identity of the DELIVERY that created this job's Check run
+   * (spec §7.9): the id the delivery path used as its holder
+   * (`delivery:<id>`). The queue carries the ID only — never credentials.
+   *
+   * Absent when this delivery's attach found the key already owned (a duplicate
+   * delivery, a queue redelivery) or when its inline budget expired before the
+   * attach finished: such a message never created a row of its own, so its skip
+   * paths must settle nothing rather than take another delivery's run.
+   */
+  attachDeliveryId?: string;
 };

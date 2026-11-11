@@ -70,6 +70,7 @@ import type { CommenterCall } from "../helpers/review-commenter";
 import { PreparedSendRejected } from "../../src/pipeline/comment";
 import {
   CHECK_SUMMARIES,
+  attachCheckAtAcceptance,
   createCheckLifecycle,
   createChecksAdapter,
   type CheckRunPayload,
@@ -6238,6 +6239,207 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRows(db)).toHaveLength(0);
   });
 
+  test("check lifecycle: a delivery skipped before execution settles its attached run neutral", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const payload = makePayload();
+    // The delivery path already attached this message's run, and the App is
+    // paused before the consumer runs: the consumer ACKs without a review, so
+    // the attached run must be settled neutral instead of waiting out the
+    // attach window and closing red (RL-10).
+    const attached = await attachCheckAtAcceptance(
+      { db: db as never, adapter, nowMs: () => Date.now() },
+      {
+        scope: {
+          appId: payload.appRef.appId,
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        },
+        githubAppId: 424242,
+        headSha: SHA,
+        triggeredBy: payload.triggered_by,
+        action: payload.action,
+        // The delivery identity the attach records on its row; it rides the
+        // message so a skip can settle exactly this delivery's run.
+        deliveryId: "consumer-test-delivery",
+      },
+    );
+    if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
+    // The delivery identity travels on the message: it is what lets the skip
+    // settlement tell THIS delivery's row from another's (§7.9).
+    payload.attachDeliveryId = attached.deliveryId;
+    db.raw.prepare("UPDATE github_apps SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(payload));
+
+    expect(messageAckCalls).toHaveLength(1);
+    // The paused gate makes ZERO credential/GitHub calls (architect lock L4),
+    // so the settlement here is STORE-ONLY: the neutral intent is frozen and
+    // the lease given back, and the minute reconciler sends the one update.
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.holder).toBeNull();
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.desired_summary).toContain("review paused");
+    expect(checkRequests.some((request) => request.op === "update")).toBe(false);
+  });
+
+  /** Attach one run for the default payload and arm the guard. */
+  async function guardHeldWithAttachedRun(
+    db: TestD1,
+    adapter: ChecksAdapter,
+    payload: ReviewJobPayload,
+    heldHeadSha: string = SHA,
+  ) {
+    const attached = await attachCheckAtAcceptance(
+      { db: db as never, adapter, nowMs: () => Date.now() },
+      {
+        scope: {
+          appId: payload.appRef.appId,
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        },
+        githubAppId: 424242,
+        headSha: SHA,
+        triggeredBy: payload.triggered_by,
+        action: payload.action,
+        // The delivery identity the attach records on its row; it rides the
+        // message so a skip can settle exactly this delivery's run.
+        deliveryId: "consumer-test-delivery",
+      },
+    );
+    if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
+    await seedInflight(db, { headSha: heldHeadSha });
+    return attached;
+  }
+
+  test("check lifecycle: the first three guard refusals settle nothing", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const payload = makePayload();
+    await guardHeldWithAttachedRun(db, adapter, payload);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    // Refusals 1-3 are RETRIED: they settle nothing. A duplicate delivery
+    // shares this attempt_key, so a settlement here could close the live
+    // review's own run — a premature `neutral` pass.
+    for (const attempts of [1, 2, 3]) {
+      queueState.attempts = attempts;
+      await consumer(makeBatch(payload));
+      const row = checkRowFor(db, SHA);
+      expect(row.desired).toBe("in_progress");
+      expect(row.observed).toBe("unknown");
+      expect(row.terminal_ms).toBeNull();
+    }
+    expect(messageRetryCalls).toHaveLength(3);
+    expect(checkRequests.some((request) => request.op === "update")).toBe(false);
+  });
+
+  test("check lifecycle: the terminal guard refusal settles the released run neutral", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const payload = makePayload();
+    // The in-flight review holds a DIFFERENT commit, so this delivery is a real
+    // drop (never reviewed), not the benign same-sha duplicate that returns
+    // before the drop record.
+    const attached = await guardHeldWithAttachedRun(db, adapter, payload, "feedfacefeedfacefeedfacefeedfacefeedface");
+    payload.attachDeliveryId = attached.deliveryId;
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    // The 4th attempt is the terminal drop: this message will never run, so
+    // its released attach row is settled `neutral` with the refusal named.
+    queueState.attempts = 4;
+    await consumer(makeBatch(payload));
+
+    expect(messageAckCalls).toHaveLength(1);
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("neutral");
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.desired_summary).toContain("review admission refused");
+    const update = checkRequests.find((request) => request.op === "update")!;
+    expect((update.params as unknown as ChecksUpdateParams).conclusion).toBe("neutral");
+    expect((update.params as unknown as ChecksUpdateParams).output.summary).toContain("review admission refused");
+  });
+
+  test("check lifecycle: the settlement is keyed on the payload SHA, not the checkout SHA", async () => {
+    reset();
+    const checkoutSha = "feedfacefeedfacefeedfacefeedfacefeedface";
+    sandbox.resolvedSha = checkoutSha;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    kvState.getValue = "done"; // the CHECKOUT sha already has a completed review
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const payload = makePayload(); // payload head_sha = SHA
+    const attached = await attachCheckAtAcceptance(
+      { db: db as never, adapter, nowMs: () => Date.now() },
+      {
+        scope: {
+          appId: payload.appRef.appId,
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        },
+        githubAppId: 424242,
+        headSha: SHA,
+        triggeredBy: payload.triggered_by,
+        action: payload.action,
+        // The delivery identity the attach records on its row; it rides the
+        // message so a skip can settle exactly this delivery's run.
+        deliveryId: "consumer-test-delivery",
+      },
+    );
+    if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
+    payload.attachDeliveryId = attached.deliveryId;
+    // The overlap: this invocation's begin yields no handle, so the skip path
+    // is what has to close the delivery's own row.
+    const real = createCheckLifecycle({
+      db: db as never,
+      nowMs: () => Date.now(),
+      getAdapter: () => adapter,
+      getCheckGate: async () => GATE,
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+      checks: { ...real, begin: async () => null },
+    });
+
+    await consumer(makeBatch(payload));
+
+    // The row attached at the PAYLOAD sha is settled; a settlement keyed on the
+    // checkout sha would have found no row and left this one in progress.
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("neutral");
+    expect(row.terminal_ms).not.toBeNull();
+    const update = checkRequests.find((request) => request.op === "update")!;
+    expect((update.params as unknown as ChecksUpdateParams).conclusion).toBe("neutral");
+    expect(checkRows(db)).toHaveLength(1);
+  });
   test("check lifecycle: a DLQ-bound runner failure terminalizes the same attempt as failure", async () => {
     reset();
     sandbox.runnerExitCode = 1;

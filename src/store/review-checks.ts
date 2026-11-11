@@ -204,6 +204,36 @@ export const CHECK_NAME = "mstar-inspector review";
 export const CHECK_EXTERNAL_ID_PREFIX = "mstar-check:v1:";
 /** Claim lease == immutable execution deadline (spec §7.9: claim time + 900,000ms). */
 export const CHECK_LEASE_MS = 900_000;
+/**
+ * The delivery-side attach window (spec §7.9). The run is created when the
+ * delivery is ACCEPTED, but the queue may only hand the message to a consumer
+ * minutes later, so the attach row's deadline has to outlive that delay. It is
+ * NOT an execution window: the consumer narrows the row to
+ * `CHECK_EXECUTION_WINDOW_MS` the moment it adopts it, and a row nobody ever
+ * adopts is closed by the reconciler when this window expires.
+ */
+export const CHECK_ATTACH_WINDOW_MS = 3_600_000;
+/**
+ * How long an attach row may sit under its DELIVERY holder before an admitted
+ * message takes it over (spec §7.9). Seconds, not minutes, because the two
+ * holders do different work: the delivery holder only mints a token, creates
+ * one run and writes two rows, so a holder silent this long is stalled (an
+ * expired inline budget plus a slow create), while the CONSUMER holder stays
+ * silent for minutes while the model runs and is never taken this way.
+ */
+export const CHECK_ATTACH_HOLDER_STALE_MS = 5_000;
+/**
+ * How long a RELEASED attach row waits for the admitted message to adopt it
+ * before the recovery lane may take it (spec §7.9). It exists because the two
+ * paths overlap: the delivery path may release the row after the message was
+ * admitted, and a consumer that answered `busy` once does not come back. The
+ * due time makes the minute reconciler adopt an unclaimed attach row about two
+ * minutes after the attach instead of leaving it invisible until the one-hour
+ * window expires. It is a BOUND on that invisibility, not a schedule: the
+ * consumer's adoption ignores the due time, so the ordinary path still takes
+ * the row immediately, and the grace only decides when recovery may step in.
+ */
+export const CHECK_ATTACH_GRACE_MS = 120_000;
 /** Recovery lease (spec §7.9: "Recovery lease is 120,000ms"). */
 export const CHECK_RECOVERY_LEASE_MS = 120_000;
 /**
@@ -503,6 +533,13 @@ export async function claimAttempt(
     holder: string;
     nowMs: number;
     executionDeadlineMs: number;
+    /**
+     * The DELIVERY that created this row (spec §7.9), recorded so a later skip
+     * settlement can tell its own released row from another delivery's. Absent
+     * for claims that are not the delivery attach (the consumer's admission
+     * claim, recovery) — such a row is only ever closed by the recovery lane.
+     */
+    attachDeliveryId?: string;
   },
 ): Promise<ClaimAttemptResult> {
   if (input.holder.length === 0) {
@@ -540,6 +577,17 @@ export async function claimAttempt(
   // `observed = 'unknown'` — e.g. `markCheckLocalError` after a successful
   // publication — so gating on `observed` would mint generation N+1 for a head
   // that is durably published.
+  //
+  // `neutral` ALONE no longer blocks a claim. A skip SETTLEMENT closes its row
+  // `neutral` with no publication link, because nothing was published: retiring
+  // the head there would leave a later, ADMITTED delivery of the same head
+  // unable to run its own review (a retried guard refusal, a paused-then-resumed
+  // App) — a published review with no in-progress run and no final Check. Only a
+  // PROVEN outcome blocks: `observed = 'success'` here, plus the EXACT-proof
+  // subquery below (a link alone never suppresses a claim — an unproven, foreign
+  // or malformed link is not a publication). The new generation gets a fresh row
+  // and run id, so the remote surface shows the newest run, which is the honest
+  // one. `failure` was always retryable for the same reason.
   //
   // The proof test is EXACT, because suppressing a claim is itself a claim of
   // success: a merely non-null FK would let a foreign-scope publication id, a
@@ -615,7 +663,7 @@ export async function claimAttempt(
   )`;
   const noProvenPublication = `(
     (SELECT COUNT(*) FROM review_checks p
-      WHERE p.attempt_key = ? AND p.observed IN ('success','neutral')) = 0
+      WHERE p.attempt_key = ? AND p.observed = 'success') = 0
     AND ${provenPublication} = 0
   )`;
   const insert = db
@@ -626,13 +674,13 @@ export async function claimAttempt(
           check_run_id, create_state, holder, lease_epoch, lease_until_ms,
           execution_deadline_ms, desired, desired_title, desired_summary, observed,
           recovery_state, publication_id, attempts, next_attempt_ms, last_error,
-          terminal_ms, created_ms, updated_ms)
+          terminal_ms, created_ms, updated_ms, attach_delivery_id)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
               ${NEXT_GENERATION_SQL},
               ${EXTERNAL_ID_SQL},
               NULL, 'not-sent', ?, 1, ?, ?,
               'in_progress', NULL, NULL, 'unknown',
-              'pending', NULL, 0, NULL, NULL, NULL, ?, ?
+              'pending', NULL, 0, NULL, NULL, NULL, ?, ?, ?
          FROM (SELECT 1) AS seed
         WHERE NOT EXISTS (SELECT 1 FROM review_checks o WHERE o.attempt_key = ? AND ${NONTERMINAL_WHERE})
           AND ${noProvenPublication}`,
@@ -644,7 +692,7 @@ export async function claimAttempt(
       key,
       attemptId, key,
       input.holder, input.executionDeadlineMs, input.executionDeadlineMs,
-      nowMs, nowMs,
+      nowMs, nowMs, input.attachDeliveryId ?? null,
       key,
       key,
       key,
@@ -761,6 +809,215 @@ export async function claimCheckRecovery(
 }
 
 /**
+ * Adopt a RELEASED attempt (spec §7.7 step 4 / §7.9): the delivery path
+ * creates the run at acceptance and gives the row back, so the admitted
+ * message can take it over and terminalize inline instead of leaving the run
+ * to the reconciler.
+ *
+ * ONE conditional UPDATE, like every other claim. Two shapes are adoptable:
+ *
+ *   - the row is RELEASED (no holder, no lease) — the ordinary attach; and
+ *   - the row is held by a STALLED DELIVERY holder: `holder` still starts with
+ *     `delivery:`, its lease is live, and it has written nothing for
+ *     `CHECK_ATTACH_HOLDER_STALE_MS`. That is the overlap the ordering cannot
+ *     remove (the delivery path waits a bounded time and then lets the attach
+ *     finish on the invocation context), and a delivery holder silent for
+ *     seconds is stalled — it only mints one token, creates one run and writes
+ *     two rows. A CONSUMER holder is never taken: its silence is the model
+ *     running, and it is minutes, not seconds.
+ *
+ * Either way the row must still want `in_progress`, carry a KNOWN run id
+ * (nothing else is adoptable: a row without a proven run has no handle to
+ * return) and still be inside its window. The epoch is bumped, so a late write
+ * from the attach's own holder is refused by the same fence every other
+ * mutation uses.
+ *
+ * `execution_deadline_ms` is NARROWED here to the adopted lease: the attach
+ * window is long only so a queued message can still find its run, while the
+ * execution window is whatever the caller passes as `executionDeadlineMs`
+ * (the consumer's `now + 900,000`).
+ */
+export async function adoptReleasedCheckAttempt(
+  db: D1Like,
+  input: {
+    attemptId: string;
+    /** The App these credentials authenticate as — never a foreign App's row. */
+    githubAppId: number;
+    holder: string;
+    /** The execution deadline the adopting invocation owns (`now + 900,000`). */
+    executionDeadlineMs: number;
+    nowMs: number;
+  },
+): Promise<Lease | null> {
+  if (input.holder.length === 0) {
+    throw new Error("review-checks: adoption requires a nonblank holder identity");
+  }
+  if (input.executionDeadlineMs <= input.nowMs) {
+    throw new Error("review-checks: execution deadline must be after the adoption time");
+  }
+  const adopted = await db
+    .prepare(
+      `UPDATE review_checks
+          SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?,
+              execution_deadline_ms = ?, updated_ms = ?
+        WHERE id = ? AND ${NONTERMINAL_WHERE}
+          AND recovery_state IN ('pending','remote-unconfirmed')
+          AND desired = 'in_progress'
+          AND create_state = 'known' AND check_run_id IS NOT NULL
+          AND github_app_id = ?
+          AND execution_deadline_ms > ?
+          AND (
+            (holder IS NULL AND lease_until_ms IS NULL)
+            OR (holder LIKE 'delivery:%' AND lease_until_ms > ? AND updated_ms <= ?)
+          )`,
+    )
+    .bind(
+      input.holder,
+      input.executionDeadlineMs,
+      input.executionDeadlineMs,
+      input.nowMs,
+      input.attemptId,
+      input.githubAppId,
+      input.nowMs,
+      input.nowMs,
+      input.nowMs - CHECK_ATTACH_HOLDER_STALE_MS,
+    )
+    .run();
+  if (adopted.meta.changes !== 1) return null;
+  const row = await db
+    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM review_checks WHERE id = ?`)
+    .bind(input.attemptId)
+    .first<Pick<ReviewCheckRow, "holder" | "lease_epoch" | "lease_until_ms">>();
+  if (row === null || row.holder !== input.holder || row.lease_until_ms === null) return null;
+  return { holder: input.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+}
+
+/**
+ * Take the ATTACH row of one delivery for settlement (spec §7.9): a delivery
+ * that is skipped BEFORE execution must close its attached run, and the skip
+ * path holds no handle. This is the same fenced one-statement claim as
+ * `adoptReleasedCheckAttempt`, keyed by the delivery's own `attempt_key`
+ * instead of an attempt id.
+ *
+ * TWO shapes are taken, and only these:
+ *
+ *   - a row still held by THIS delivery's own attach holder
+ *     (`holder = delivery:<attachDeliveryId>`, ANY age — fresh or stale); and
+ *   - a RELEASED row (`holder IS NULL AND lease_until_ms IS NULL`) **created by
+ *     this delivery** (`attach_delivery_id = <attachDeliveryId>`).
+ *
+ * The IDENTITY is what separates the two failure modes a staleness window could
+ * not: taking a fresh `delivery:*` holder may be this delivery's own attach
+ * (which has already created the run and only needs to finish releasing), but
+ * it may equally be ANOTHER delivery's run — the same `attempt_key` is shared
+ * by every delivery of one event — and settling that one would close a live
+ * review's Check `neutral` (a premature pass). The creator COLUMN covers the
+ * other arm: the attach may still be running when the message is enqueued (the
+ * inline budget expired), so its row is released only later and no holder names
+ * it — without the column that run would close red at the deadline.
+ *
+ * A consumer holder, another delivery's holder, a frozen intent and a terminal
+ * row are therefore never taken; a row nobody releases stays with the
+ * grace/deadline lane. A delivery whose attach found the key owned created no
+ * row, so its settlements are no-ops by the predicate itself.
+ *
+ * The candidate is SELECTed first only to learn its id; the UPDATE repeats
+ * every predicate, so a row that stopped being claimable between the two
+ * statements writes nothing.
+ */
+export async function claimAttachedCheckForSettlement(
+  db: D1Like,
+  input: {
+    scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    /**
+     * THIS delivery's attach identity (`payload.attachDeliveryId`): the id its
+     * attach holder was written under. Absent → the delivery created no row of
+     * its own, so nothing is claimable.
+     */
+    attachDeliveryId?: string;
+    holder: string;
+    /** The settling invocation's execution deadline (`now + 900,000`). */
+    executionDeadlineMs: number;
+    nowMs: number;
+  },
+): Promise<{ attempt: CheckAttempt; lease: Lease } | null> {
+  if (input.holder.length === 0) {
+    throw new Error("review-checks: settlement requires a nonblank holder identity");
+  }
+  // Defensive: a message enqueued before the identity existed carries none, and
+  // the predicate below could not match its row anyway (`attach_delivery_id`
+  // is NULL). The busy/terminal rule is the PREDICATE's, not this guard's: such
+  // a delivery DOES carry an id, it just has no row recording it.
+  if (input.attachDeliveryId === undefined || input.attachDeliveryId === null || input.attachDeliveryId.length === 0) {
+    return null;
+  }
+  if (input.executionDeadlineMs <= input.nowMs) {
+    throw new Error("review-checks: execution deadline must be after the settlement time");
+  }
+  const key = attemptKey({
+    appId: input.scope.appId,
+    installationId: input.scope.installationId,
+    owner: input.scope.owner,
+    repo: input.scope.repo,
+    prNumber: input.scope.prNumber,
+    headSha: input.headSha,
+    triggeredBy: input.triggeredBy,
+    action: input.action,
+  });
+  // Shared by both statements: the row must be attached, unfrozen and inside
+  // its window, and it must either be held by THIS delivery's own attach or be
+  // RELEASED **and created by** it (`attach_delivery_id`). The column is what
+  // makes the budget-expiry arm recoverable: the attach may still be running
+  // when the message is enqueued, so its row is released only later — the
+  // holder alone cannot name the creator by then. Bound order matches the
+  // UPDATE.
+  const claimable = `terminal_ms IS NULL
+          AND create_state = 'known' AND check_run_id IS NOT NULL
+          AND desired = 'in_progress'
+          AND recovery_state IN ('pending','remote-unconfirmed')
+          AND execution_deadline_ms > ?
+          AND (
+            holder = ?
+            OR (holder IS NULL AND lease_until_ms IS NULL AND attach_delivery_id = ?)
+          )`;
+  const ownHolder = `delivery:${input.attachDeliveryId}`;
+  const candidate = await db
+    .prepare(`SELECT id FROM review_checks WHERE attempt_key = ? AND ${claimable} ORDER BY generation DESC LIMIT 1`)
+    .bind(key, input.nowMs, ownHolder, input.attachDeliveryId)
+    .first<{ id: string }>();
+  if (candidate === null) return null;
+  const claimed = await db
+    .prepare(
+      `UPDATE review_checks
+          SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?,
+              execution_deadline_ms = ?, updated_ms = ?
+        WHERE id = ? AND attempt_key = ? AND ${claimable}`,
+    )
+    .bind(
+      input.holder,
+      input.executionDeadlineMs,
+      input.executionDeadlineMs,
+      input.nowMs,
+      candidate.id,
+      key,
+      input.nowMs,
+      ownHolder,
+      input.attachDeliveryId,
+    )
+    .run();
+  if (claimed.meta.changes !== 1) return null;
+  const row = await db.prepare(`SELECT * FROM review_checks WHERE id = ?`).bind(candidate.id).first<ReviewCheckRow>();
+  if (row === null || row.holder !== input.holder || row.lease_until_ms === null) return null;
+  return {
+    attempt: attemptOf(row),
+    lease: { holder: input.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms },
+  };
+}
+
+/**
  * Release a recovery claim WITHOUT spending an attempt (spec §7.11.2 step 5:
  * a budget deferral "does not spend an attempt"; the same applies to a paused
  * App's not-sent row, which must stay due rather than be charged). Everything
@@ -780,6 +1037,25 @@ export async function releaseCheckClaim(
   nowMs: CheckClock,
 ): Promise<boolean> {
   return runFenced(db, id, lease, `holder = NULL, lease_until_ms = NULL`, [], nowMs);
+}
+
+/**
+ * Release a successfully ATTACHED attempt with a due time (spec §7.9): the
+ * admitted message adopts the row immediately (adoption ignores
+ * `next_attempt_ms`), while the recovery lane may take it once the grace has
+ * passed — so a released attach row that nobody claims is closed by the same
+ * lane as every other Check instead of staying invisible until the attach
+ * window expires. Writes nothing else: identity, run id, `create_state`,
+ * `desired` and `recovery_state` are preserved, and no attempt is spent.
+ */
+export async function releaseAttachedCheck(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nextAttemptMs: number,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  return runFenced(db, id, lease, `holder = NULL, lease_until_ms = NULL, next_attempt_ms = ?`, [nextAttemptMs], nowMs);
 }
 
 /**
