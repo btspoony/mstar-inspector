@@ -1040,6 +1040,26 @@ describe("cursor", () => {
     ]);
   });
 
+  /** The start-alias fallback reset, read back through one countable bucket. */
+  async function fallbackReset(start: string): Promise<number | undefined> {
+    const snapshot = await probeProviderUsage(
+      { fetch: stubFetch(json(200, { plan: { used: 1, limit: 10 }, startOfMonth: start })) },
+      "cursor",
+      "cur-key",
+    );
+    return snapshot.limits[0]?.resetsAt;
+  }
+
+  test("a month-end start clamps the fallback reset to the last day of the following month", async () => {
+    // 2026 is not a leap year: Jan 29-31 must not spill past February.
+    expect(await fallbackReset("2026-01-31T00:00:00.000Z")).toBe(Date.UTC(2026, 1, 28));
+    expect(await fallbackReset("2026-01-29T00:00:00.000Z")).toBe(Date.UTC(2026, 1, 28));
+    // A day the target month has advances exactly one month.
+    expect(await fallbackReset("2026-02-28T00:00:00.000Z")).toBe(Date.UTC(2026, 2, 28));
+    // A 31-day month lands in a 30-day one.
+    expect(await fallbackReset("2026-03-31T00:00:00.000Z")).toBe(Date.UTC(2026, 3, 30));
+  });
+
   test("an uncapped, empty or unreadable bucket yields no limit — never an uncapped bar", async () => {
     const snapshot = await probeProviderUsage(
       {

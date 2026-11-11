@@ -933,7 +933,11 @@ function cursorResetsAt(payload: Record<string, unknown>): number | undefined {
   const start = resetOf(payload, ["startOfMonth", "billingCycleStart", "startOfBillingCycle"]);
   if (start === undefined) return undefined;
   const date = new Date(start);
-  date.setUTCMonth(date.getUTCMonth() + 1);
+  const targetMonth = date.getUTCMonth() + 1;
+  date.setUTCMonth(targetMonth);
+  // A day the target month lacks (Jan 31 -> Feb) rolls into the next month;
+  // pin it to the last day of the month it was meant to land in.
+  if (date.getUTCMonth() !== targetMonth % 12) date.setUTCDate(0);
   return date.getTime();
 }
 
