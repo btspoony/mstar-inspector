@@ -17,8 +17,9 @@
  * real `node_modules` directory counts as an install.
  *
  * Exit codes: 0 = the worktree has its own install, or nothing is reachable to
- * inherit; 1 = an install is inherited from a parent tree, or the directory
- * could not be inspected (an unreadable answer is never a pass).
+ * inherit; 1 = an install is inherited from a parent tree, or the worktree (or
+ * a path on the way up) could not be inspected — an unreadable answer is never
+ * a pass.
  *
  * Deliberately not a CI step: a CI checkout has no parent tree above the
  * workspace, so there this check can only ever report the neutral pass. Its own
@@ -33,26 +34,54 @@ import { dirname, join, resolve } from "node:path";
 export type InstallVerdict =
   | { kind: "local"; target: string; modules: string }
   | { kind: "inherited"; target: string; modules: string }
-  | { kind: "none"; target: string };
+  | { kind: "none"; target: string }
+  | { kind: "uninspectable"; target: string; path: string; reason: string };
 
-function isDirectory(path: string): boolean {
+/**
+ * What one `node_modules` path is, as the filesystem answers: a directory,
+ * absent, or unanswerable. `ENOENT`/`ENOTDIR` mean "no install at this
+ * spelling" and the walk continues; every other error — a permission-restricted
+ * ancestor, a symlink loop — means the question was not answered, and a
+ * can't-answer must never be read as "nothing installed".
+ */
+type Probe =
+  | { kind: "directory" }
+  | { kind: "absent" }
+  | { kind: "unknown"; reason: string };
+
+function probe(path: string): Probe {
   try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
+    return statSync(path).isDirectory() ? { kind: "directory" } : { kind: "absent" };
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { kind: "absent" };
+    return {
+      kind: "unknown",
+      reason: `${code ?? "stat failed"}: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
 }
 
+export type AncestorInstall =
+  | { kind: "inherited"; modules: string }
+  | { kind: "none" }
+  | { kind: "unknown"; path: string; reason: string };
+
 /**
- * The nearest ancestor install reachable from `dir`, or `undefined` when the
- * walk reaches the filesystem root without one. `dir` itself is not asked —
- * the caller already decided it has no install.
+ * The nearest ancestor install reachable from `dir`, or `none` when the walk
+ * reaches the filesystem root without one. `dir` itself is not asked — the
+ * caller already decided it has no install. An ancestor whose `node_modules`
+ * cannot be inspected is `unknown`, never `none`.
  */
-export function inheritedInstall(dir: string): string | undefined {
+export function inheritedInstall(dir: string): AncestorInstall {
   for (let current = dirname(dir); ; current = dirname(current)) {
     const modules = join(current, "node_modules");
-    if (isDirectory(modules)) return modules;
-    if (dirname(current) === current) return undefined;
+    const answer = probe(modules);
+    if (answer.kind === "directory") return { kind: "inherited", modules };
+    if (answer.kind === "unknown") {
+      return { kind: "unknown", path: modules, reason: answer.reason };
+    }
+    if (dirname(current) === current) return { kind: "none" };
   }
 }
 
@@ -64,11 +93,17 @@ export function inheritedInstall(dir: string): string | undefined {
 export function evaluateInstall(dir: string): InstallVerdict {
   const target = realpathSync(resolve(dir));
   const local = join(target, "node_modules");
-  if (isDirectory(local)) return { kind: "local", target, modules: local };
-  const inherited = inheritedInstall(target);
-  return inherited === undefined
-    ? { kind: "none", target }
-    : { kind: "inherited", target, modules: inherited };
+  const localAnswer = probe(local);
+  if (localAnswer.kind === "directory") return { kind: "local", target, modules: local };
+  if (localAnswer.kind === "unknown") {
+    return { kind: "uninspectable", target, path: local, reason: localAnswer.reason };
+  }
+  const ancestor = inheritedInstall(target);
+  if (ancestor.kind === "none") return { kind: "none", target };
+  if (ancestor.kind === "unknown") {
+    return { kind: "uninspectable", target, path: ancestor.path, reason: ancestor.reason };
+  }
+  return { kind: "inherited", target, modules: ancestor.modules };
 }
 
 function printUsage(): void {
@@ -111,6 +146,13 @@ if (import.meta.main) {
       `worktree install: ${verdict.target} has no node_modules and no parent tree is reachable — nothing to inherit, nothing to claim`,
     );
     process.exit(0);
+  }
+
+  if (verdict.kind === "uninspectable") {
+    console.error(
+      `::error::worktree-install-uninspectable: could not inspect ${verdict.path} while looking for a reachable install from ${verdict.target} — ${verdict.reason}; treat as unverified, not a pass`,
+    );
+    process.exit(1);
   }
 
   console.error(

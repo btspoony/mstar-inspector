@@ -8,7 +8,7 @@
  * never this repository, never a real install.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -91,6 +91,40 @@ describe("check-worktree-install", () => {
       });
       expect(proc.exitCode).toBe(0);
       expect(proc.stdout.toString() + proc.stderr.toString()).toContain(worktree);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("an ancestor that cannot be inspected refuses instead of passing", () => {
+    const { dir, cleanup } = fixture();
+    try {
+      const worktree = join(dir, "a", "worktree");
+      mkdirSync(worktree, { recursive: true });
+      // The path exists but stat cannot answer (ELOOP): an unreadable answer,
+      // never the neutral "nothing to inherit" pass.
+      symlinkSync("node_modules", join(dir, "a", "node_modules"));
+      const { code, out } = run(worktree);
+      expect(code).toBe(1);
+      expect(out).toContain("worktree-install-uninspectable");
+      expect(out).toContain(join(realpathSync(dir), "a", "node_modules"));
+      expect(out).not.toContain("nothing to inherit");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("an absent ancestor keeps the walk going", () => {
+    const { dir, cleanup } = fixture();
+    try {
+      const worktree = join(dir, "a", "worktree");
+      mkdirSync(worktree, { recursive: true });
+      // A dangling link: nothing is installed there, so the walk must continue
+      // to the neutral pass instead of refusing.
+      symlinkSync("missing-target", join(dir, "a", "node_modules"));
+      const { code, out } = run(worktree);
+      expect(code).toBe(0);
+      expect(out).toContain("nothing to inherit");
     } finally {
       cleanup();
     }
