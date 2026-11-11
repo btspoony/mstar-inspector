@@ -2325,6 +2325,9 @@ const ATTACH_INPUT = {
   headSha: SHA,
   triggeredBy: "octocat",
   action: "review",
+  // The delivery identity the attach records on its row and hands to the
+  // message: a later settlement must match BOTH.
+  deliveryId: "fixture-delivery",
 } as const;
 
 /** A create response that echoes the attempt's own identity (the adapter's proof). */

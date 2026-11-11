@@ -1140,6 +1140,7 @@ describe("the settlement claim follows the delivery identity (spec §7.9)", () =
     const db = seededDb();
     const { attempt, lease } = await claim(db, {
       holder: "delivery:mine",
+      attachDeliveryId: "mine",
       executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
     });
     await attachRun(db, attempt.identity.attemptId, lease);
@@ -1156,6 +1157,7 @@ describe("the settlement claim follows the delivery identity (spec §7.9)", () =
     const db = seededDb();
     const { attempt, lease } = await claim(db, {
       holder: "delivery:other",
+      attachDeliveryId: "other",
       executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
     });
     const id = attempt.identity.attemptId;
@@ -1174,10 +1176,61 @@ describe("the settlement claim follows the delivery identity (spec §7.9)", () =
     expect(await settleAs(db, "other")).not.toBeNull();
   });
 
+  test("a RELEASED row created by this delivery is taken — the budget-expiry arm", async () => {
+    const db = seededDb();
+    // The attach outlived the inline budget: the message was enqueued with its
+    // id, the attach finished later and released the row. No holder names the
+    // creator any more — the column does.
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:mine",
+      attachDeliveryId: "mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
+
+    const taken = await settleAs(db, "mine");
+    expect(taken).not.toBeNull();
+    expect(taken!.lease.holder).toBe("skip:settler");
+    expect(taken!.attempt.identity.attemptId).toBe(id);
+  });
+
+  test("a delivery whose attach found the key owned settles nothing", async () => {
+    const db = seededDb();
+    // This delivery's attach answered `busy`: it created no row, so nothing on
+    // this key records its id.
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:other",
+      attachDeliveryId: "other",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    await attachRun(db, attempt.identity.attemptId, lease);
+
+    expect(await settleAs(db, "mine")).toBeNull();
+  });
+
+  test("another delivery's RELEASED row is not taken either", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:other",
+      attachDeliveryId: "other",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
+
+    // Released, but created by ANOTHER delivery: a skip must not close it.
+    expect(await settleAs(db, "mine")).toBeNull();
+    // Its own delivery can.
+    expect(await settleAs(db, "other")).not.toBeNull();
+  });
   test("no attach identity settles nothing, even a released row", async () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db, {
       holder: "delivery:mine",
+      attachDeliveryId: "mine",
       executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
     });
     const id = attempt.identity.attemptId;

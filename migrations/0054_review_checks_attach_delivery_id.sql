@@ -1,0 +1,16 @@
+-- 0054_review_checks_attach_delivery_id.sql — which DELIVERY created this
+-- Check attempt row.
+--
+-- The delivery path attaches the run before the message is enqueued, and a
+-- message that is later skipped must settle exactly its OWN run — never a
+-- duplicate delivery's row for the same attempt key. The holder names the
+-- delivery only while it owns the row; the attach releases the row so the
+-- admitted message can adopt it, and after that release the identity would be
+-- gone. Recording the creator here keeps it: the queue message's
+-- `attachDeliveryId` is compared against this column when a skip settlement
+-- finds a released row.
+--
+-- Nullable: rows written before this migration, and rows no delivery created,
+-- carry NULL — such a row can only be closed by the recovery lane, never by a
+-- skip settlement.
+ALTER TABLE review_checks ADD COLUMN attach_delivery_id TEXT;

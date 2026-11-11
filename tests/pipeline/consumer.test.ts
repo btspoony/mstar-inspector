@@ -6263,6 +6263,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         headSha: SHA,
         triggeredBy: payload.triggered_by,
         action: payload.action,
+        // The delivery identity the attach records on its row; it rides the
+        // message so a skip can settle exactly this delivery's run.
+        deliveryId: "consumer-test-delivery",
       },
     );
     if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
@@ -6312,6 +6315,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         headSha: SHA,
         triggeredBy: payload.triggered_by,
         action: payload.action,
+        // The delivery identity the attach records on its row; it rides the
+        // message so a skip can settle exactly this delivery's run.
+        deliveryId: "consumer-test-delivery",
       },
     );
     if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
@@ -6401,6 +6407,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         headSha: SHA,
         triggeredBy: payload.triggered_by,
         action: payload.action,
+        // The delivery identity the attach records on its row; it rides the
+        // message so a skip can settle exactly this delivery's run.
+        deliveryId: "consumer-test-delivery",
       },
     );
     if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);

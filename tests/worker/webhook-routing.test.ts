@@ -221,7 +221,11 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toEqual({
+    // The delivery identity is generated BEFORE the attach and always rides the
+    // message — here the attach itself fails (the fixture key is not a real
+    // PEM), so an id that depended on the attach succeeding would be missing.
+    const { attachDeliveryId, ...queued } = sent[0]!;
+    expect(queued).toEqual({
       installation_id: 123,
       owner: "test-owner",
       repo: "test-repo",
@@ -231,6 +235,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       triggered_by: "pull_request",
       appRef: { appId: appRow.id },
     });
+    expect(attachDeliveryId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     // The same delivery lands its PR-ledger row (migration 0039): the fixture
     // carries the table, so a missing/failed write here is a real regression
     // rather than the "no such table" warn branch this suite used to take.

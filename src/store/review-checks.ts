@@ -533,6 +533,13 @@ export async function claimAttempt(
     holder: string;
     nowMs: number;
     executionDeadlineMs: number;
+    /**
+     * The DELIVERY that created this row (spec §7.9), recorded so a later skip
+     * settlement can tell its own released row from another delivery's. Absent
+     * for claims that are not the delivery attach (the consumer's admission
+     * claim, recovery) — such a row is only ever closed by the recovery lane.
+     */
+    attachDeliveryId?: string;
   },
 ): Promise<ClaimAttemptResult> {
   if (input.holder.length === 0) {
@@ -667,13 +674,13 @@ export async function claimAttempt(
           check_run_id, create_state, holder, lease_epoch, lease_until_ms,
           execution_deadline_ms, desired, desired_title, desired_summary, observed,
           recovery_state, publication_id, attempts, next_attempt_ms, last_error,
-          terminal_ms, created_ms, updated_ms)
+          terminal_ms, created_ms, updated_ms, attach_delivery_id)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
               ${NEXT_GENERATION_SQL},
               ${EXTERNAL_ID_SQL},
               NULL, 'not-sent', ?, 1, ?, ?,
               'in_progress', NULL, NULL, 'unknown',
-              'pending', NULL, 0, NULL, NULL, NULL, ?, ?
+              'pending', NULL, 0, NULL, NULL, NULL, ?, ?, ?
          FROM (SELECT 1) AS seed
         WHERE NOT EXISTS (SELECT 1 FROM review_checks o WHERE o.attempt_key = ? AND ${NONTERMINAL_WHERE})
           AND ${noProvenPublication}`,
@@ -685,7 +692,7 @@ export async function claimAttempt(
       key,
       attemptId, key,
       input.holder, input.executionDeadlineMs, input.executionDeadlineMs,
-      nowMs, nowMs,
+      nowMs, nowMs, input.attachDeliveryId ?? null,
       key,
       key,
       key,
@@ -894,20 +901,25 @@ export async function adoptReleasedCheckAttempt(
  *
  * TWO shapes are taken, and only these:
  *
- *   - a RELEASED row (`holder IS NULL AND lease_until_ms IS NULL`) — the
- *     ordinary attach already gave it back; and
  *   - a row still held by THIS delivery's own attach holder
- *     (`holder = delivery:<attachDeliveryId>`, ANY age — fresh or stale).
+ *     (`holder = delivery:<attachDeliveryId>`, ANY age — fresh or stale); and
+ *   - a RELEASED row (`holder IS NULL AND lease_until_ms IS NULL`) **created by
+ *     this delivery** (`attach_delivery_id = <attachDeliveryId>`).
  *
  * The IDENTITY is what separates the two failure modes a staleness window could
  * not: taking a fresh `delivery:*` holder may be this delivery's own attach
  * (which has already created the run and only needs to finish releasing), but
  * it may equally be ANOTHER delivery's run — the same `attempt_key` is shared
  * by every delivery of one event — and settling that one would close a live
- * review's Check `neutral` (a premature pass). A consumer holder, another
- * delivery's holder, a frozen intent and a terminal row are therefore never
- * taken; a row nobody releases stays with the grace/deadline lane. A caller
- * with NO attach identity settles nothing at all: it never created a row.
+ * review's Check `neutral` (a premature pass). The creator COLUMN covers the
+ * other arm: the attach may still be running when the message is enqueued (the
+ * inline budget expired), so its row is released only later and no holder names
+ * it — without the column that run would close red at the deadline.
+ *
+ * A consumer holder, another delivery's holder, a frozen intent and a terminal
+ * row are therefore never taken; a row nobody releases stays with the
+ * grace/deadline lane. A delivery whose attach found the key owned created no
+ * row, so its settlements are no-ops by the predicate itself.
  *
  * The candidate is SELECTed first only to learn its id; the UPDATE repeats
  * every predicate, so a row that stopped being claimable between the two
@@ -935,8 +947,10 @@ export async function claimAttachedCheckForSettlement(
   if (input.holder.length === 0) {
     throw new Error("review-checks: settlement requires a nonblank holder identity");
   }
-  // No attach identity = this delivery never created a row. Claiming a released
-  // row for the same key would take ANOTHER delivery's run (§7.9).
+  // Defensive: a message enqueued before the identity existed carries none, and
+  // the predicate below could not match its row anyway (`attach_delivery_id`
+  // is NULL). The busy/terminal rule is the PREDICATE's, not this guard's: such
+  // a delivery DOES carry an id, it just has no row recording it.
   if (input.attachDeliveryId === undefined || input.attachDeliveryId === null || input.attachDeliveryId.length === 0) {
     return null;
   }
@@ -953,22 +967,26 @@ export async function claimAttachedCheckForSettlement(
     triggeredBy: input.triggeredBy,
     action: input.action,
   });
-  // Shared by both statements: the row must be unattended, attached, unfrozen
-  // and inside its window, and it must either be released or held by THIS
-  // delivery's own attach. Bound order matches the UPDATE.
+  // Shared by both statements: the row must be attached, unfrozen and inside
+  // its window, and it must either be held by THIS delivery's own attach or be
+  // RELEASED **and created by** it (`attach_delivery_id`). The column is what
+  // makes the budget-expiry arm recoverable: the attach may still be running
+  // when the message is enqueued, so its row is released only later — the
+  // holder alone cannot name the creator by then. Bound order matches the
+  // UPDATE.
   const claimable = `terminal_ms IS NULL
           AND create_state = 'known' AND check_run_id IS NOT NULL
           AND desired = 'in_progress'
           AND recovery_state IN ('pending','remote-unconfirmed')
           AND execution_deadline_ms > ?
           AND (
-            (holder IS NULL AND lease_until_ms IS NULL)
-            OR holder = ?
+            holder = ?
+            OR (holder IS NULL AND lease_until_ms IS NULL AND attach_delivery_id = ?)
           )`;
   const ownHolder = `delivery:${input.attachDeliveryId}`;
   const candidate = await db
     .prepare(`SELECT id FROM review_checks WHERE attempt_key = ? AND ${claimable} ORDER BY generation DESC LIMIT 1`)
-    .bind(key, input.nowMs, ownHolder)
+    .bind(key, input.nowMs, ownHolder, input.attachDeliveryId)
     .first<{ id: string }>();
   if (candidate === null) return null;
   const claimed = await db
@@ -987,6 +1005,7 @@ export async function claimAttachedCheckForSettlement(
       key,
       input.nowMs,
       ownHolder,
+      input.attachDeliveryId,
     )
     .run();
   if (claimed.meta.changes !== 1) return null;
