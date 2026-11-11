@@ -1373,6 +1373,74 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body.split("\n").filter((line) => /^ {0,3}~{3,}/.test(line))).toHaveLength(2);
   });
 
+  // A lone surrogate is a high half with no low half after it, or a low half
+  // with no high half before it.
+  const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  test("a clamp cut between the halves of an emoji leaves no lone surrogate", () => {
+    // The clamp keeps `REVIEW_BODY_LIMIT - 1` units of the rendered core, so the
+    // cut index is fixed. One probe build locates the finding body inside that
+    // core; the emoji is then placed exactly on the cut. A finding body renders
+    // verbatim, so both builds share the same renderer prefix and cut index.
+    const AT = "\u27E6finding-body\u27E7";
+    const review = (body: string) =>
+      buildReviewBody({
+        schema: "mstar.review/v1",
+        verdict: "blocked",
+        summary_md: "x",
+        findings: [{ mergeClass: "must-fix", title: "Emoji", file_path: "src/a.ts", line_start: 1, line_end: 1, body }],
+      });
+    const bodyAt = review(`${AT}${"y".repeat(REVIEW_BODY_LIMIT)}`).indexOf(AT);
+    expect(bodyAt).toBeGreaterThan(0);
+    const pad = "y".repeat(REVIEW_BODY_LIMIT);
+    // Body-relative index of the first unit the cut drops.
+    const firstDropped = REVIEW_BODY_LIMIT - 1 - bodyAt;
+    // Two units swapped for the pair, so the total length — and the cut — hold.
+    const withEmoji = (highAt: number): string => `${pad.slice(0, highAt)}😀${pad.slice(highAt + 2)}`;
+    // The cut keeps the high half and drops the low one.
+    const split = review(withEmoji(firstDropped - 1));
+    expect(split.endsWith("…")).toBe(true);
+    // Nothing but the cut marker is reserved here, so the back-off shortens the
+    // body by exactly one unit — the pin that says this case really took the cut.
+    expect(split.length).toBe(REVIEW_BODY_LIMIT - 1);
+    expect(split).not.toMatch(loneSurrogate);
+
+    // The boundary case: the pair ends exactly on the last kept unit, so it survives whole.
+    const whole = review(withEmoji(firstDropped - 2));
+    expect(whole).toContain("😀");
+    expect(whole).not.toMatch(loneSurrogate);
+  });
+
+  test("a clamp cut inside an open fence leaves no lone surrogate", () => {
+    // The head's closers come out of the budget, so an open fence routes the cut
+    // through the SECOND slice; without one the clamp returns before it. The
+    // fence sits in a first, short finding; the pair straddles the end of a long
+    // second body, where that slice lands.
+    const AT = "\u27E6finding-body\u27E7";
+    const review = (bodies: string[]) =>
+      buildReviewBody({
+        schema: "mstar.review/v1",
+        verdict: "blocked",
+        summary_md: "x",
+        findings: bodies.map((body) => ({ mergeClass: "must-fix", title: "Emoji", file_path: "src/a.ts", line_start: 1, line_end: 1, body })),
+      });
+    const fence = "```\nts\n";
+    const pad = "y".repeat(REVIEW_BODY_LIMIT);
+    const bodyAt = review([fence, `${AT}${pad}`]).indexOf(AT);
+    expect(bodyAt).toBeGreaterThan(0);
+    // The closers' length comes out of the budget, so the second cut's index is
+    // measured rather than assumed: a body without the pair shows the last unit
+    // it keeps, and the tail shows the closer really came out of the budget.
+    const plain = review([fence, pad]);
+    expect(plain.endsWith("\n```…")).toBe(true);
+    const kept = plain.lastIndexOf("y") - bodyAt;
+    expect(kept).toBeGreaterThan(0);
+    const split = review([fence, `${pad.slice(0, kept)}😀${pad.slice(kept + 2)}`]);
+    expect(split.endsWith("\n```…")).toBe(true);
+    expect(split.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
+    expect(split).not.toMatch(loneSurrogate);
+  });
+
   test("within-limit bodies pass through verbatim", () => {
     const publicationMarker = buildPublicationMarker({
       publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",

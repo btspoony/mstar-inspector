@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDictionaryKey, t } from "../../src/i18n";
+import { settingsErrorMessage, verifyRefusalMessage } from "../../src/spa/pages/SettingsPage";
 
 const settingsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
 
@@ -85,5 +86,43 @@ describe("SPA 400-body resolution contract", () => {
     // 「添加 Provider」 pin).
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("「添加模型提供方」");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
+  });
+});
+describe("malformed refusal params (both readers)", () => {
+  // A params map whose values are objects or arrays cannot be interpolated:
+  // String({...}) is "[object Object]" and an array matches no placeholder, so
+  // both readers must refuse the keyed face and render their generic copy.
+  const malformed: unknown[] = [{ provider: { id: "acme" } }, ["acme"]];
+
+  test("settingsErrorMessage: an object/array param refuses the keyed face (site 1)", () => {
+    for (const params of malformed) {
+      const face = settingsErrorMessage(
+        "en",
+        JSON.stringify({ key: "settings.error.providerUnknown", params }),
+      );
+      expect(face).toBe(t("en", "common.loadFailed"));
+      expect(face).not.toContain("[object Object]");
+    }
+  });
+
+  test("verifyRefusalMessage: an object/array param renders the reason's copy (site 2)", () => {
+    for (const params of malformed) {
+      const face = verifyRefusalMessage(
+        "en",
+        JSON.stringify({
+          reason: "unsupported_provider",
+          key: "settings.error.providerUnknown",
+          params,
+        }),
+      );
+      expect(face).toBe(t("en", "settings.verify.unsupported_provider"));
+      expect(face).not.toContain("[object Object]");
+    }
+  });
+
+  test("a well-formed params map still interpolates at both sites", () => {
+    const body = JSON.stringify({ key: "settings.error.providerUnknown", params: { provider: "acme" } });
+    expect(settingsErrorMessage("en", body)).toBe(t("en", "settings.error.providerUnknown", { provider: "acme" }));
+    expect(verifyRefusalMessage("en", body)).toBe(t("en", "settings.error.providerUnknown", { provider: "acme" }));
   });
 });

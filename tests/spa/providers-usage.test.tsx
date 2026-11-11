@@ -36,6 +36,7 @@ import {
   type SettingsManagePayload,
 } from "../../src/spa/pages/data";
 import { ProvidersSection } from "../../src/spa/pages/settings-providers";
+import { UsagePanel } from "../../src/spa/pages/usage-panel";
 import type { OpNotice } from "../../src/spa/pages/PageNotice";
 import { installDom } from "./dom";
 
@@ -746,6 +747,88 @@ describe("UsagePanel — inline probe under the owning row", () => {
       expect(view.panel()).toBeNull();
     } finally {
       await view.cleanup();
+    }
+  });
+
+  test("a re-render handing the panel a new onClose leaves Escape with the panel opened last", async () => {
+    // Both panels mount in the same commit — the first ahead of the second, so
+    // the second owns Escape. The second commit renews only the FIRST panel's
+    // callback: that asymmetry is what proves the ownership fix, because a
+    // fresh arrow on the second would re-register its listener under the old
+    // component too (the pre-fix `[open, onClose]` deps) and the case would
+    // pass against them.
+    //
+    // The third commit renews the WINNER's callback with a distinct closure,
+    // changing nothing else. The listener keeps its stack place, so Escape must
+    // still reach that panel — and must call the closure it was handed last:
+    // the ref mirror. Without the mirror the listener calls the closure it
+    // registered with, and the labels below record the stale one.
+    const { win, cleanup: cleanupDom } = installDom("http://localhost/dashboard/acme/apps");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    const closed: string[] = [];
+    const openSnapshot = (percent: number) =>
+      snapshotBody({ limits: [{ id: "commandcode:session", kind: "window", usedFraction: percent / 100, unit: "percent" }] });
+    queue.push(() => new Response(openSnapshot(30)));
+    queue.push(() => new Response(openSnapshot(50)));
+    const firstV2 = () => {
+      closed.push("first:v2");
+    };
+    const secondV1 = () => {
+      closed.push("second:v1");
+    };
+    const secondV2 = () => {
+      closed.push("second:v2");
+    };
+    const tree = (first: () => void, second: () => void) =>
+      createElement(
+        "div",
+        null,
+        createElement(UsagePanel, {
+          key: "first",
+          locale,
+          appId: 42,
+          provider: probedProvider,
+          keyId: "aaaa1111bbbb2222",
+          open: true,
+          onClose: first,
+        }),
+        createElement(UsagePanel, {
+          key: "second",
+          locale,
+          appId: 42,
+          provider: probedProvider,
+          keyId: "cccc3333dddd4444",
+          open: true,
+          onClose: second,
+        }),
+      );
+    const pressEscape = async () => {
+      await act(async () => {
+        (win.document as unknown as Document).dispatchEvent(
+          new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as unknown as Event,
+        );
+      });
+    };
+    try {
+      await act(async () => root.render(tree(() => closed.push("first:v1"), secondV1)));
+      await act(async () => {});
+      // A re-render that renews only the first panel's callback.
+      await act(async () => root.render(tree(firstV2, secondV1)));
+      await act(async () => {});
+      await pressEscape();
+      expect(closed).toEqual(["second:v1"]);
+
+      // Renew only the winning panel's callback: it still owns the key, and the
+      // closure Escape invokes is the new one.
+      await act(async () => root.render(tree(firstV2, secondV2)));
+      await act(async () => {});
+      await pressEscape();
+      expect(closed).toEqual(["second:v1", "second:v2"]);
+    } finally {
+      await act(async () => root.unmount());
+      cleanupDom();
     }
   });
 
