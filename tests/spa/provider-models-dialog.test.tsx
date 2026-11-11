@@ -180,7 +180,14 @@ describe("ProviderModelsDialog", () => {
   test("a legacy id-only declaration shows the not-usable note and blank size fields", async () => {
     const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"] });
     try {
-      expect(view.dialog()?.textContent).toContain(t(locale, "settings.providers.models.notUsable"));
+      // The sentence is a DATA statement about the declaration, never a
+      // runtime promise: the pinned registry back-fills its own defaults for
+      // an id-only model, so claiming the file blocks failover would be false.
+      const sizesUnstated = t(locale, "settings.providers.models.sizesUnstated");
+      expect(view.dialog()?.textContent).toContain(sizesUnstated);
+      expect(sizesUnstated).toContain("unstated");
+      expect(sizesUnstated).toContain("incomplete");
+      expect(sizesUnstated).not.toMatch(/not usable|failover/i);
       expect(view.field("m-1", "contextWindow")?.value).toBe("");
       expect(view.field("m-1", "maxTokens")?.value).toBe("");
       expect(view.field("m-1", "name")?.value).toBe("");
@@ -201,7 +208,7 @@ describe("ProviderModelsDialog", () => {
       expect(view.field("m-1", "maxTokens")?.value).toBe("8192");
       expect(view.field("m-1", "name")?.value).toBe("Model One");
       // A legacy row is not shown as usable: the note disappears once stated.
-      expect(view.dialog()?.textContent).not.toContain(t(locale, "settings.providers.models.notUsable"));
+      expect(view.dialog()?.textContent).not.toContain(t(locale, "settings.providers.models.sizesUnstated"));
       await view.click(view.saveButton());
       expect(view.calls).toEqual([
         {

@@ -776,8 +776,15 @@ export const en = {
          */
         requirements:
           "Every selected model needs a context window and a max token count — we do not guess.",
-        notUsable:
-          "Saved, not usable for failover until you state a context window and a max token count. We do not guess.",
+        /**
+         * A DATA statement, not a runtime promise: the pinned omp registry
+         * back-fills its own defaults for an id-only model, so the copy must
+         * not claim the file blocks a failover candidate. It says only what
+         * this product does — keeps the declaration, shows it incomplete, and
+         * does not invent the numbers.
+         */
+        sizesUnstated:
+          "Saved, but its context window and max token count are unstated — the declaration is incomplete until you state both. We do not guess.",
         requirementsRequired: "Required",
         requirementsOptional: "Optional",
         fields: {
@@ -794,7 +801,6 @@ export const en = {
           reasoningYes: "Reasoning",
           reasoningNo: "No reasoning",
         },
-        incomplete: "{model} needs a {field} — we do not guess. Nothing was stored.",
       },
       /** The two-step add-provider dialog: its indicator, its back step and its in-progress copy. */
       stepPick: "Choose",

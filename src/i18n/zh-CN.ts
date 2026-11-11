@@ -648,7 +648,7 @@ export const zhCN: Dictionary = {
         noMatch: "没有匹配「{query}」的模型。",
         save: "保存模型",
         requirements: "每个被选中的模型都需要上下文窗口和最大 token 数 — 我们不会猜测。",
-        notUsable: "已保存，但在你填写上下文窗口和最大 token 数之前无法用于故障转移。我们不会猜测。",
+        sizesUnstated: "已保存，但其上下文窗口和最大 token 数尚未填写 — 在你填写这两项之前，该声明是不完整的。我们不会猜测。",
         requirementsRequired: "必填",
         requirementsOptional: "可选",
         fields: {
@@ -665,7 +665,6 @@ export const zhCN: Dictionary = {
           reasoningYes: "支持推理",
           reasoningNo: "不支持推理",
         },
-        incomplete: "{model} 需要填写{field} — 我们不会猜测。未存储任何内容。",
       },
       stepPick: "选择",
       stepConfigure: "配置",

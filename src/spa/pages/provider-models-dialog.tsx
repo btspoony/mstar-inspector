@@ -314,7 +314,7 @@ export function ProviderModelsDialog({
             </legend>
             {incomplete ? (
               <p className="text-sm text-muted-foreground">
-                {t(locale, "settings.providers.models.notUsable")}
+                {t(locale, "settings.providers.models.sizesUnstated")}
               </p>
             ) : null}
             <ul className="flex flex-col gap-3">
