@@ -214,7 +214,7 @@
 # concatenates a multi-kilobyte stack trace after the cause and evicts it again.
 # rebuild: the failover probe's unresolved-selector verdict now reports "context
 # not evaluated" (null) instead of "does not fit". A stale image keeps telling an
-# operator a resolved-but-unmeasured candidate failed the window gate.
+# operator an unresolved (registry-gate) candidate failed the window gate.
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via
