@@ -343,6 +343,13 @@ export function runnerTimeoutMs(level: ReviewLevel): number {
  * for M8 — which owns long convergence with proper backoff.
  */
 export const INLINE_RESOLVE_MAX_ENTRIES = 3;
+/**
+ * Discovery bound for the associations a round must bind BEFORE its discussion
+ * capture (§7.5/§7.8): at most this many sequential GitHub lookups per message,
+ * the rest stay unbound for a later round — same admission discipline as the
+ * inline resolve lane above.
+ */
+export const BIND_UNBOUND_THREADS_MAX_ENTRIES = 5;
 /** Whole inline resolution budget (ms) across every entry of this message. */
 export const INLINE_RESOLVE_BUDGET_MS = 12_000;
 /** Per-entry slice (ms) — one §7.5 discover + resolve must fit inside it. */
@@ -3645,6 +3652,77 @@ export function createReviewConsumer(
 }
 
 /**
+ * §7.5 discovery ahead of the §7.8 discussion capture. The recheck round can
+ * only emit a resolution for an association whose thread id is BOUND, but the
+ * lane that binds it runs after the capture — so an association whose send
+ * response was lost would never appear in the discussion and could never earn
+ * a verified resolution. Binding here spends at most
+ * {@link BIND_UNBOUND_THREADS_MAX_ENTRIES} sequential GitHub discoveries per
+ * message; anything left over stays unbound for a later round and is counted
+ * in `skipped`. `discoverThreadWithDeps` persists the ids itself — this helper
+ * writes no SQL.
+ */
+export async function bindUnboundThreads(
+  deps: { DB: D1Database; commenter: ReviewCommenter; log: ConsumerLog; fields: ConsumerLogFields },
+  scope: Scope,
+  targets: RecheckTarget[],
+): Promise<{ bound: number; skipped: number }> {
+  const result = { bound: 0, skipped: 0 };
+  if (targets.length === 0 || deps.commenter.discoverThread === undefined) return result;
+  const placeholders = targets.map(() => "?").join(",");
+  let rows: Array<{ id: string; intent_json: string }>;
+  try {
+    const read = await deps.DB
+      .prepare(
+        `SELECT id, intent_json FROM review_threads
+         WHERE finding_row_id IN (${placeholders}) AND thread_id IS NULL
+           AND superseded_by_publication_id IS NULL
+         ORDER BY created_ms, id
+         LIMIT ?`,
+      )
+      .bind(...targets.map((target) => target.rowId), BIND_UNBOUND_THREADS_MAX_ENTRIES)
+      .all<{ id: string; intent_json: string }>();
+    rows = read.results;
+  } catch (err) {
+    // Context binding is best-effort: a failed read leaves the associations to
+    // a later round instead of failing a round that could still run.
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(deps.fields, `unbound thread read failed — binding left to a later round: ${detail}`);
+    return result;
+  }
+  for (const row of rows) {
+    let intent: LineIntent;
+    try {
+      intent = JSON.parse(row.intent_json) as LineIntent;
+    } catch {
+      result.skipped += 1;
+      deps.log.warn(deps.fields, `association ${row.id} intent_json unreadable — left unbound for a later round`);
+      continue;
+    }
+    try {
+      const discovery = await deps.commenter.discoverThread({ scope, intent, reviewId: null });
+      if (discovery.kind === "found") {
+        result.bound += 1;
+        continue;
+      }
+      result.skipped += 1;
+      deps.log.warn(
+        deps.fields,
+        `thread discovery for association ${row.id} returned ${discovery.kind} — left unbound for a later round`,
+      );
+    } catch (err) {
+      result.skipped += 1;
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        deps.fields,
+        `thread binding for association ${row.id} failed (left unbound for a later round): ${detail}`,
+      );
+    }
+  }
+  return result;
+}
+
+/**
  * @param attempts the delivery number of this message (1 = first delivery);
  *   only the value past the queue's retry budget matters — it stamps the
  *   idempotency key `failed` so a DLQ-bound commit stops counting as reviewed-
@@ -4803,6 +4881,16 @@ async function processMessage(
           };
     const catalogExcluded: ReadonlySet<string> = catalog.excludedTargets;
     const catalogBudgetExcluded: ReadonlySet<string> = catalog.catalogBudgetExcluded;
+
+    // §7.5 discovery BEFORE the §7.8 capture: an association whose remote
+    // thread was never bound cannot enter the discussion, and the recheck's
+    // resolution fences only ever verify a thread the seat actually saw — so
+    // binding it first is what lets this round resolve it at all. Bounded: any
+    // association the budget could not reach stays unbound for a later round.
+    const bound = await bindUnboundThreads({ DB: deps.env.DB, commenter, log: deps.log, fields }, lifecycleScope, targets);
+    if (bound.skipped > 0) {
+      deps.log.warn(fields, `${bound.skipped} association(s) left unbound for a later round`);
+    }
 
     // Bounded discussion capture (§7.8) for the selected targets' known
     // threads. API failure is unavailable — never empty/complete.

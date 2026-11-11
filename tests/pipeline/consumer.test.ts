@@ -189,6 +189,10 @@ import {
   formatFailureAttribution,
 } from "../../packages/runner/src/seat-failover-probe";
 
+// The binding helper is exercised DIRECTLY as well as through the pipeline.
+// Loaded dynamically (after the harness) so the workerd shim still runs first.
+const { bindUnboundThreads, BIND_UNBOUND_THREADS_MAX_ENTRIES } = await import("../../src/pipeline/consumer");
+
 /** Runner exec call's env (the sandbox fake stores opts as unknown). */
 function runnerExecEnv(): Record<string, string> {
   const call = sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
@@ -5461,6 +5465,153 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
     expect(
       logLines.some((l) => l.msg.includes("inline resolution admission exhausted") && l.msg.includes(unvisited.assocId)),
     ).toBe(true);
+  });
+});
+
+describe("bind unbound review threads before the discussion capture (§7.5/§7.8)", () => {
+  const SCOPE = { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
+  const TARGETS = [{ rowId: TARGET_ROW_ID } as RecheckTarget];
+
+  /**
+   * One association row for the seeded target. The row id IS the association
+   * id, so a discovery call can be attributed to exactly one row.
+   */
+  function seedThread(
+    db: TestD1,
+    associationId: string,
+    {
+      threadId = null,
+      intentJson,
+      superseded = false,
+      createdMs = 3_000,
+    }: { threadId?: string | null; intentJson?: string; superseded?: boolean; createdMs?: number } = {},
+  ): void {
+    const intent =
+      intentJson ??
+      JSON.stringify({
+        associationId,
+        findingRowId: TARGET_ROW_ID,
+        publicationId: PRIOR_PUB_ID,
+        scope: SCOPE,
+        originalSha: PRIOR_SHA,
+        round: 1,
+        path: "src/auth.ts",
+        line: 21,
+        body: "old comment body",
+        bodySha256: "digest-old",
+      });
+    db.raw
+      .prepare(
+        `INSERT INTO review_threads
+           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+            original_sha, round, intent_json, resolution_state, thread_id,
+            superseded_by_publication_id, created_ms, updated_ms)
+         VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, 1, ?, 'pending', ?, ?, ?, ?)`,
+      )
+      .run(
+        associationId,
+        TARGET_ROW_ID,
+        PRIOR_PUB_ID,
+        TEST_APP_ID,
+        PRIOR_SHA,
+        intent,
+        threadId,
+        superseded ? PRIOR_PUB_ID : null,
+        createdMs,
+        createdMs,
+      );
+  }
+
+  test("bind: the eligible null-thread association is discovered exactly once; bound, superseded and unreadable rows are not", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    seedThread(db, ASSOC_ID);
+    seedThread(db, "bound-assoc", { threadId: "PRRT_bound" });
+    seedThread(db, "superseded-assoc", { superseded: true });
+    seedThread(db, "unreadable-assoc", { intentJson: "{not json" });
+
+    const result = await bindUnboundThreads(
+      { DB: db as never, commenter: fakeCommenter, log: testLog, fields: {} as never },
+      SCOPE,
+      TARGETS,
+    );
+
+    expect(result).toEqual({ bound: 1, skipped: 1 });
+    const discovered = commenterCalls.filter((c) => c.op === "discover");
+    expect(discovered).toHaveLength(1);
+    const input = discovered[0]!.args as {
+      scope: unknown;
+      intent: { associationId: string };
+      reviewId: number | null;
+    };
+    expect(input.reviewId).toBeNull();
+    expect(input.scope).toEqual(SCOPE);
+    expect(input.intent.associationId).toBe(ASSOC_ID);
+    const warns = logLines.filter((l) => l.level === "warn");
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.msg).toContain("unreadable-assoc");
+  });
+
+  test("bind: stops at the budget cap when more associations are eligible than one round may bind", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    const eligible = BIND_UNBOUND_THREADS_MAX_ENTRIES + 2;
+    for (let i = 0; i < eligible; i += 1) seedThread(db, `cap-assoc-${i}`, { createdMs: 3_000 + i });
+
+    const result = await bindUnboundThreads(
+      { DB: db as never, commenter: fakeCommenter, log: testLog, fields: {} as never },
+      SCOPE,
+      TARGETS,
+    );
+
+    expect(result.bound).toBe(BIND_UNBOUND_THREADS_MAX_ENTRIES);
+    expect(result.skipped).toBe(0);
+    expect(commenterCalls.filter((c) => c.op === "discover")).toHaveLength(BIND_UNBOUND_THREADS_MAX_ENTRIES);
+  });
+
+  test("bind: the null-thread association is discovered BEFORE the discussion capture, so the round can then resolve it", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, null);
+    commenterState.discussion = {
+      items: [],
+      issueCoverage: "complete",
+      issueModelCoverage: "complete",
+      issueDigest: "issue-digest",
+      capturedMs: 0,
+      threads: [
+        {
+          associationId: ASSOC_ID,
+          threadId: "PRRT_thread1",
+          commentId: 8,
+          headSha: SHA,
+          digest: "thread-digest-1",
+          commentCount: 2,
+          capturedMs: 0,
+          coverage: "complete",
+          modelCoverage: "complete",
+        },
+      ],
+    };
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const discoverIdx = commenterCalls.findIndex((c) => c.op === "discover");
+    const discussionIdx = commenterCalls.findIndex((c) => c.op === "list-discussion");
+    const resolveIdx = commenterCalls.findIndex((c) => c.op === "resolve");
+    expect(discoverIdx).toBeGreaterThan(-1);
+    expect(discussionIdx).toBeGreaterThan(discoverIdx);
+    expect(resolveIdx).toBeGreaterThan(discussionIdx);
   });
 });
 
