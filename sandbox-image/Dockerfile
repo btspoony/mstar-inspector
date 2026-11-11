@@ -212,9 +212,9 @@
 # rebuild: the attribution's own exception path now shares that budget too — its
 # diagnostic is one truncated entry under the same formatter. A stale image
 # concatenates a multi-kilobyte stack trace after the cause and evicts it again.
-# rebuild: the failover probe's unresolved-selector verdict now reports "context
-# not evaluated" (null) instead of "does not fit". A stale image keeps telling an
-# operator an unresolved (registry-gate) candidate failed the window gate.
+# rebuild: the failover probe's unresolved-selector verdict now reports "context not evaluated"
+# (null) instead of "does not fit". A stale image keeps telling an operator an unresolved
+# (registry-gate) candidate failed the window gate.
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via
