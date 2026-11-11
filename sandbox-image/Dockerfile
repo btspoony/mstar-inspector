@@ -204,6 +204,11 @@
 # (`AgentSession.servingModel`, captured the moment the seat settles) and deletes
 # a leftover applied-model document when no model served. A stale image writes a
 # stale or missing document, so the Worker records the wrong provider or none.
+# rebuild: a failed round now emits ONE bounded failure block — the original
+# cause first, then each configured selector's own eligibility (never a
+# "served" claim it did not observe), folded with a counted marker to fit the
+# Worker's 600-character stderr tail. A stale image keeps asserting the
+# configured head as served and lets a long chain evict the cause.
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via

@@ -56,6 +56,7 @@ import { dirname, join } from "node:path";
 import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
+import { FAILURE_BLOCK_BUDGET_CHARS } from "../../packages/runner/src/seat-failover-probe";
 import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../packages/shared/src/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
@@ -610,20 +611,92 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(stdout).toBe("");
     // The failure line still names the provider error …
     expect(stderr).toContain("400 You have insufficient credits");
-    // … and the attribution names each selector, the gate, and the operator's
+    // … and the disposition names each selector, the gate, and the operator's
     // action for a missing credential.
     expect(stderr).toContain("commandcode/deepseek/deepseek-v4.1-flash");
     expect(stderr).toContain("opencode-go/deepseek-v4.1-flash");
     expect(stderr).toContain("pool_key");
     expect(stderr).toContain("the App stores no credential for provider opencode-go");
-    // The Worker persists only the LAST 600 characters of stderr, so the
-    // attribution must be the final line and fit inside that tail.
-    const lastLine = stderr.trim().split("\n").at(-1)!;
-    expect(lastLine).toContain("opencode-go/deepseek-v4.1-flash");
-    expect(lastLine).toContain("pool_key");
-    expect(lastLine.length).toBeLessThan(600);
+    // NO selector is claimed to have SERVED: the failure path carries no
+    // observation, and chain order is configuration, not one.
+    expect(stderr).not.toContain("served");
+    // The Worker persists only the LAST 600 characters of stderr; the whole
+    // block is budgeted to survive that tail.
+    expect(stderr.trim().length).toBeLessThanOrEqual(FAILURE_BLOCK_BUDGET_CHARS);
     // Zero credential material — not even a key prefix.
     expect(stderr).not.toContain(sk("probe-first"));
+  });
+
+  test("a pre-prompt failure claims no provider served — every entry reports its own verdict", async () => {
+    process.env.OMP_REVIEW_MODEL = CHAIN;
+    // The runtime throws BEFORE any prompt was sent (a session/seat setup
+    // failure): nothing observed a provider, so nothing may claim one.
+    runtimeError = new Error("seat 0 failed: model provider unreachable during setup");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+    const { code, stderr } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ commandcode: [sk("probe-first")], "opencode-go": [sk("probe-second")] }),
+    );
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("unreachable during setup");
+    // Both configured entries are present with their OWN verdict …
+    expect(stderr).toContain("commandcode/deepseek/deepseek-v4.1-flash eligible");
+    expect(stderr).toContain("opencode-go/deepseek-v4.1-flash eligible");
+    // … and neither is called served.
+    expect(stderr).not.toContain("served");
+    expect(stderr).not.toContain("observed serving this round");
+  });
+
+  test("a run whose seat override replaced the chain does not name the configured head as served", async () => {
+    process.env.OMP_REVIEW_MODEL = CHAIN;
+    runtimeError = new Error("seat 0 failed: 429 rate limited");
+    const inputPath = writeInput({
+      capabilityHosts: OMP_HOSTS,
+      // The per-role override wins over the configured chain (runtime-omp
+      // seatModelChain): the configured head is NOT what ran.
+      modelOverrides: { "mstar-review-seat": "my-custom/model-a" },
+      customProviders: [
+        {
+          provider_id: "my-custom",
+          base_url: "https://custom.example.invalid/v1",
+          api: "openai-completions",
+          model_ids: ["model-a"],
+        },
+      ],
+    });
+    const { code, stderr } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ "my-custom": [sk("probe-third")] }),
+    );
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("429 rate limited");
+    // The disposition is about the CONFIGURED chain (the override lives on the
+    // runner's seat chain, not in this diagnosis), and it never asserts that
+    // the configured head served the failed request.
+    expect(stderr).toContain("chain attribution (configured)");
+    expect(stderr).not.toContain("served");
+  });
+
+  test("a chain longer than the persisted tail keeps the cause and folds the overflow with a count", async () => {
+    // Twenty long selectors: the unbounded join would be far past the Worker's
+    // 600-character tail, and an unbounded formatter would evict the cause.
+    const longChain = Array.from({ length: 20 }, (_, i) => `provider-with-a-long-id-${i}/model-with-a-long-id-${i}`).join(", ");
+    process.env.OMP_REVIEW_MODEL = longChain;
+    runtimeError = new Error("seat 0 failed: 400 You have insufficient credits");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+    const { code, stderr } = await runCli(["--level", "quick", "--input", inputPath], encodeCredentialPayload({}));
+
+    expect(code).toBe(1);
+    expect(stderr.trim().length).toBeLessThanOrEqual(FAILURE_BLOCK_BUDGET_CHARS);
+    // The cause survives, first …
+    expect(stderr).toContain("400 You have insufficient credits");
+    // … the first entries survive …
+    expect(stderr).toContain("provider-with-a-long-id-0/model-with-a-long-id-0");
+    // … and the overflow is a COUNTED fold, not a silent cut.
+    expect(stderr).toMatch(/\+\d+ more chain entries omitted/);
+    expect(stderr).not.toContain("served");
   });
 
   test("a fully-keyed failed round names no gate as the cause", async () => {
@@ -637,11 +710,12 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
 
     expect(code).toBe(1);
     expect(stderr).toContain("opencode-go/deepseek-v4.1-flash");
-    // Every gate passes, so the text must not accuse one: it states the
-    // candidate was eligible and that the failure came from the served
-    // selector, not from a gate.
+    // Every gate passes, so the text must not accuse one: it states each entry
+    // is eligible. It also must not claim either one SERVED — the round failed
+    // without an observation.
     expect(stderr).not.toContain("dropped at");
     expect(stderr).toContain("eligible");
+    expect(stderr).not.toContain("served");
   });
 
   test("a served round writes the applied-model side document; a round with none removes any leftover", async () => {

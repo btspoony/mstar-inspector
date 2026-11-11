@@ -183,6 +183,7 @@ import {
 import { withFrozenClock } from "../helpers/clock";
 import { PR_CONTEXT_MAX_ISSUES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
+import { attributeChain, formatFailureAttribution } from "../../packages/runner/src/seat-failover-probe";
 
 /** Runner exec call's env (the sandbox fake stores opts as unknown). */
 function runnerExecEnv(): Record<string, string> {
@@ -1058,6 +1059,47 @@ describe("createReviewConsumer", () => {
     );
     expect(message).toContain("runner: seat budget exceeded after 600s");
     expect(message.length).toBeLessThan(700);
+  });
+
+  test("runner failure keeps the CAUSE and the counted chain fold inside the persisted tail", async () => {
+    reset();
+    // The runner's OWN bounded representation, built the way runner.ts builds it
+    // for a chain whose full disposition is far longer than the 600-character
+    // tail the Worker persists.
+    const chain = Array.from({ length: 24 }, (_, i) => `provider-with-a-long-id-${i}/model-with-a-long-id-${i}`);
+    const verdicts = chain.map((selector) => ({
+      selector,
+      provider: selector.slice(0, selector.indexOf("/")),
+      modelId: selector.slice(selector.indexOf("/") + 1),
+      gate: "pool_key" as const,
+      registry: { resolved: true, metadata: null },
+      poolKey: { configured: false },
+      context: { fits: null, retryContextTokens: null, contextWindow: null, fitBudget: null },
+    }));
+    // The unbounded form would be several times the tail — the case this pins.
+    const unbounded = `review: runtime failed: seat 0 failed: 400 You have insufficient credits\n` +
+      verdicts.map((v) => `${v.selector} dropped`).join("; ");
+    expect(unbounded.length).toBeGreaterThan(600);
+    sandbox.runnerExitCode = 1;
+    sandbox.runnerStderr = formatFailureAttribution(
+      "seat 0 failed: 400 You have insufficient credits",
+      attributeChain(verdicts),
+    );
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    const message = await consumer(makeBatch(makePayload())).then(
+      () => "",
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+    // The original cause survived the cut …
+    expect(message).toContain("400 You have insufficient credits");
+    // … the first configured entry's disposition survived …
+    expect(message).toContain("provider-with-a-long-id-0/model-with-a-long-id-0");
+    // … and the overflow is a counted fold, not a silent truncation.
+    expect(message).toMatch(/\+\d+ more chain entries omitted/);
+    // The whole persisted detail stays inside the tail budget plus its prefix.
+    expect(message.length).toBeLessThan(600 + 60);
   });
 
   test("infra failure with a failing failure-store → rethrow not masked (AL-6 best-effort)", async () => {

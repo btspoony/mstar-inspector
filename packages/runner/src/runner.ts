@@ -107,7 +107,7 @@ import {
 } from "../../shared/src/runtime";
 import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
-import { attributeChain, formatChainAttribution, walkSeatGates } from "./seat-failover-probe";
+import { attributeChain, formatFailureAttribution, walkSeatGates } from "./seat-failover-probe";
 import { writePerReviewModelsYaml } from "./models-synthesis";
 import { decodeCredentialPayload } from "../../shared/src/credential-payload";
 import { APPLIED_MODEL_PATH, type AppliedModelDoc } from "../../shared/src/runtime";
@@ -691,12 +691,17 @@ export function writeRecheckStatus(
  * guessed. A throw here is swallowed into a single line: attribution is
  * diagnosis, never a second failure.
  */
-function chainAttributionLine(chain: readonly string[], agentDir: string, authStorage: AuthStorage): string {
+function chainAttributionBlock(
+  cause: string,
+  chain: readonly string[],
+  agentDir: string,
+  authStorage: AuthStorage,
+): string {
   try {
     const registry = new ModelRegistry(authStorage, join(agentDir, "models.yml"));
-    return formatChainAttribution(attributeChain(walkSeatGates({ registry, chain })));
+    return formatFailureAttribution(cause, attributeChain(walkSeatGates({ registry, chain })));
   } catch (error) {
-    return `review: chain attribution unavailable: ${(error as Error).message}`;
+    return `review: runtime failed: ${cause}\nreview: chain attribution unavailable: ${(error as Error).message}`;
   }
 }
 
@@ -946,16 +951,19 @@ export async function main(
       console.log(JSON.stringify(envelope));
       return 0;
     } catch (error) {
-      console.error(`review: runtime failed: ${(error as Error).message}`);
-      // The round is over, but WHICH candidate it lost is still knowable: the
-      // probe's gate walker runs over this run's own inputs (the synthesized
-      // models.yml and the pool it loaded), so the persisted failure says
-      // which selector dropped at which gate instead of only naming the
-      // provider that answered first. Printed LAST: the Worker keeps the tail
-      // of stderr and nothing else. Attribution is diagnosis — it can never
-      // turn a failed round into a different outcome.
+      const cause = (error as Error).message;
+      // The round is over, but the CONFIGURED chain's eligibility is still
+      // knowable: the probe's gate walker runs over this run's own inputs (the
+      // synthesized models.yml and the pool it loaded). It is ONE bounded
+      // block — cause first, dispositions after, folded by a counted marker —
+      // because the Worker persists only the tail of stderr. Nothing here
+      // claims a selector SERVED: the failure path carries no observation, and
+      // chain order is not one. Attribution is diagnosis; it never changes the
+      // round's outcome.
       if (agentDir !== undefined && authStorage !== undefined) {
-        console.error(chainAttributionLine(chain, agentDir, authStorage));
+        console.error(chainAttributionBlock(cause, chain, agentDir, authStorage));
+      } else {
+        console.error(`review: runtime failed: ${cause}`);
       }
       return 1;
     }

@@ -218,10 +218,13 @@ export async function probeSeatFailover(input: ProbeInput): Promise<ProbeReport>
   }
 }
 
-/** One chain selector, as the failed round's attribution reports it. */
+/** One CONFIGURED chain selector, as the failed round's attribution reports it. */
 export type ChainAttribution = {
   selector: string;
-  /** The selector the round ran; every other entry is a failover candidate. */
+  /**
+   * `served` is set ONLY from an observation the runtime supplied; a configured
+   * entry the round never reported on is a `candidate`, whatever its position.
+   */
   role: "served" | "candidate";
   verdict: "served" | "dropped" | "eligible";
   gate: ProbeGate;
@@ -230,20 +233,30 @@ export type ChainAttribution = {
 };
 
 /**
- * Turn the gate walk into the round's disposition: the FIRST selector served
- * the failed request, every later one is a candidate that either dropped at a
- * named gate or was eligible. A missing credential names the provider and says
- * the App stores none — that is the operator's action, not a code defect.
+ * Turn the gate walk into the failed round's disposition. EVERY entry is a
+ * CONFIGURED selector with its own eligibility verdict — a missing credential
+ * names the provider and says the App stores none, which is the operator's
+ * action rather than a code defect.
+ *
+ * NOTHING here claims a selector SERVED unless `observed` names it: chain order
+ * is configuration, not an observation. The runtime may fail before any prompt
+ * was sent, a seat override may have replaced the chain, or a later fallback may
+ * have been the one that failed — all cases where "index zero served" would be
+ * an invented fact in a durable row. `observed` is only ever the runtime's own
+ * applied-model answer for this round; the failure path normally has none.
  */
-export function attributeChain(verdicts: readonly ProbeSelectorVerdict[]): ChainAttribution[] {
-  return verdicts.map((verdict, index): ChainAttribution => {
-    if (index === 0) {
+export function attributeChain(
+  verdicts: readonly ProbeSelectorVerdict[],
+  observed?: string,
+): ChainAttribution[] {
+  return verdicts.map((verdict): ChainAttribution => {
+    if (observed !== undefined && observed === `${verdict.provider}/${verdict.modelId}`) {
       return {
         selector: verdict.selector,
         role: "served",
         verdict: "served",
         gate: verdict.gate,
-        reason: "served the failed request",
+        reason: "observed serving this round",
       };
     }
     if (verdict.gate === "registry") {
@@ -287,13 +300,64 @@ export function attributeChain(verdicts: readonly ProbeSelectorVerdict[]): Chain
 }
 
 /**
- * The single stderr line a failed round carries after its provider error. It
- * is printed LAST so the Worker's bounded stderr tail (the only diagnosis a
- * non-zero exit keeps) contains it.
+ * The failure representation's budget, in CHARACTERS, owned HERE (the runner)
+ * rather than by whoever reads it. The Worker persists the last
+ * `STDERR_TAIL_MAX` = 600 characters of stderr and nothing else, so the whole
+ * block — cause first, disposition after — must fit well inside that with room
+ * for the consumer's own prefix ("runner failed: exit N, stdout NB, stderr
+ * tail: ", ~50 chars) and for redaction to only ever shrink it.
  */
-export function formatChainAttribution(attributions: readonly ChainAttribution[]): string {
-  if (attributions.length === 0) return "review: chain attribution: no model chain was configured";
-  return `review: chain attribution: ${attributions.map((entry) => `${entry.selector} ${entry.reason}`).join("; ")}`;
+export const FAILURE_BLOCK_BUDGET_CHARS = 500;
+
+/** The cause's share of that budget: enough for a provider's own message. */
+export const FAILURE_CAUSE_MAX_CHARS = 240;
+
+/** The counted fold that replaces the entries the budget could not carry. */
+function omittedMarker(count: number): string {
+  return `+${count} more chain ${count === 1 ? "entry" : "entries"} omitted`;
+}
+
+/**
+ * The ONE bounded failure representation a failed round emits: the ORIGINAL
+ * cause first (always preserved, truncated only when it alone would blow the
+ * budget), then every configured selector's disposition in chain order until
+ * the budget is reached, then a counted "N more entries omitted" fold.
+ *
+ * Why one block and one budget: the consumer keeps only the tail of stderr, so
+ * an unbounded disposition printed after the cause would evict the cause — and
+ * simply reordering would evict the disposition instead. Reserving the cause's
+ * room HERE is the only version where both survive the tail.
+ */
+export function formatFailureAttribution(
+  cause: string,
+  attributions: readonly ChainAttribution[],
+  budgetChars: number = FAILURE_BLOCK_BUDGET_CHARS,
+): string {
+  const causeText = cause.trim();
+  const causeLine =
+    causeText.length <= FAILURE_CAUSE_MAX_CHARS
+      ? `review: runtime failed: ${causeText}`
+      : `review: runtime failed: ${causeText.slice(0, FAILURE_CAUSE_MAX_CHARS - 1)}…`;
+  if (attributions.length === 0) {
+    return `${causeLine}\nreview: chain attribution (configured): no model chain was configured`;
+  }
+  const head = `\nreview: chain attribution (configured): `;
+  const entries = attributions.map((entry) => `${entry.selector} ${entry.reason}`);
+  // The LONGEST prefix whose folded form still fits: the fold's own length
+  // depends on the count it states, so it is recomputed at every step.
+  const assemble = (count: number): string => {
+    const omitted = entries.length - count;
+    const body = entries.slice(0, count).join("; ");
+    const fold = omitted === 0 ? "" : count === 0 ? omittedMarker(omitted) : `; ${omittedMarker(omitted)}`;
+    return `${causeLine}${head}${body}${fold}`;
+  };
+  for (let count = entries.length; count >= 0; count--) {
+    const candidate = assemble(count);
+    if (candidate.length <= budgetChars) return candidate;
+  }
+  // Not even the bare fold fits (a pathologically long cause): keep the cause
+  // and state the omission without an entry — never drop the fold itself.
+  return assemble(0);
 }
 
 /** One line per selector: the verdict, then the evidence that produced it. */
