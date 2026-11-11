@@ -852,8 +852,9 @@ async function reconcileCheckAttempt(
       if (waitingLease === null) return;
       // Spec §7.11.2 step 2 pins the claim's given-back due time to the FIRST
       // rung: the publication may prove itself at any moment, so a widened rung
-      // would only delay a proof that already exists.
-      const nextAttemptMs = now() + CHECK_BACKOFF_MS[0]!;
+      // would only delay a proof that already exists. The deadline clamps it:
+      // the wait never outlives the attempt's own hard stop.
+      const nextAttemptMs = Math.min(now() + CHECK_BACKOFF_MS[0]!, row.executionDeadlineMs);
       if (!(await deferCheckForPendingPublication(db, attemptId, waitingLease, nextAttemptMs, now()))) return;
       summary.deferred += 1;
       log.info(
