@@ -5573,6 +5573,36 @@ describe("bind unbound review threads before the discussion capture (§7.5/§7.8
     expect(commenterCalls.filter((c) => c.op === "discover")).toHaveLength(BIND_UNBOUND_THREADS_MAX_ENTRIES);
   });
 
+  test("bind: an undiscoverable head rotates behind younger associations instead of starving them on later rounds", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    const total = BIND_UNBOUND_THREADS_MAX_ENTRIES + 2;
+    for (let i = 0; i < total; i += 1) seedThread(db, `rot-assoc-${i}`, { createdMs: 3_000 + i });
+    const deps = { DB: db as never, commenter: fakeCommenter, log: testLog, fields: {} as never };
+    const discoveredIds = (): string[] =>
+      commenterCalls
+        .filter((c) => c.op === "discover")
+        .map((c) => (c.args as { intent: { associationId: string } }).intent.associationId);
+
+    // Round one spends its whole budget on the oldest rows and binds none.
+    commenterState.discoverResult = { kind: "unknown" };
+    const first = await bindUnboundThreads(deps, SCOPE, TARGETS);
+    expect(first).toEqual({ bound: 0, skipped: BIND_UNBOUND_THREADS_MAX_ENTRIES });
+    expect(discoveredIds()).toEqual(
+      Array.from({ length: BIND_UNBOUND_THREADS_MAX_ENTRIES }, (_, i) => `rot-assoc-${i}`),
+    );
+
+    // Round two must reach the two rows round one could not: the failed head
+    // rotated behind them instead of pinning the selection.
+    commenterState.discoverResult = { kind: "found", reviewId: 9, commentId: 8, threadId: "PRRT_late" };
+    const second = await bindUnboundThreads(deps, SCOPE, TARGETS);
+    const secondIds = discoveredIds().slice(BIND_UNBOUND_THREADS_MAX_ENTRIES);
+    expect(secondIds.slice(0, 2)).toEqual(["rot-assoc-5", "rot-assoc-6"]);
+    expect(second.bound).toBeGreaterThanOrEqual(2);
+  });
+
   test("bind: the null-thread association is discovered BEFORE the discussion capture, so the round can then resolve it", async () => {
     reset();
     sandbox.diffStdout = VALID_DIFF;

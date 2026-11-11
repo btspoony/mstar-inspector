@@ -3674,10 +3674,13 @@ export async function bindUnboundThreads(
   try {
     const read = await deps.DB
       .prepare(
+        // `updated_ms` is the rotation cursor: a row this pass could not bind
+        // is stamped with the pass time below, so it moves behind the rows the
+        // cap never reached instead of being retried as the oldest head.
         `SELECT id, intent_json FROM review_threads
          WHERE finding_row_id IN (${placeholders}) AND thread_id IS NULL
            AND superseded_by_publication_id IS NULL
-         ORDER BY created_ms, id
+         ORDER BY updated_ms, id
          LIMIT ?`,
       )
       .bind(...targets.map((target) => target.rowId), BIND_UNBOUND_THREADS_MAX_ENTRIES)
@@ -3690,6 +3693,19 @@ export async function bindUnboundThreads(
     deps.log.warn(deps.fields, `unbound thread read failed — binding left to a later round: ${detail}`);
     return result;
   }
+  // Best-effort rotation stamp: a row this pass could not bind moves to the
+  // back of the next pass's queue, so a permanently undiscoverable head can
+  // never consume the budget of the rows behind it.
+  const stampRotation = async (rowId: string): Promise<void> => {
+    try {
+      await deps.DB.prepare(`UPDATE review_threads SET updated_ms = ? WHERE id = ? AND thread_id IS NULL`)
+        .bind(Date.now(), rowId)
+        .run();
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(deps.fields, `bind rotation stamp failed for association ${rowId}: ${detail}`);
+    }
+  };
   for (const row of rows) {
     let intent: LineIntent;
     try {
@@ -3697,6 +3713,7 @@ export async function bindUnboundThreads(
     } catch {
       result.skipped += 1;
       deps.log.warn(deps.fields, `association ${row.id} intent_json unreadable — left unbound for a later round`);
+      await stampRotation(row.id);
       continue;
     }
     try {
@@ -3718,6 +3735,7 @@ export async function bindUnboundThreads(
         `thread binding for association ${row.id} failed (left unbound for a later round): ${detail}`,
       );
     }
+    await stampRotation(row.id);
   }
   return result;
 }
