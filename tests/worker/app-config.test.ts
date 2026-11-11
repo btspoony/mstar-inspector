@@ -4444,10 +4444,16 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
   test("update-provider-models rewrites one declaration's model_ids; the payload serves the new list", async () => {
     const { db, app } = await seededWorld();
     await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const meta = {
+      "fresh-a": { contextWindow: 128000, maxTokens: 8192 },
+      "fresh-b": { contextWindow: 32000, maxTokens: 4096 },
+      "fresh-c": { contextWindow: 128000, maxTokens: 8192 },
+    };
     const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
       provider: "my-custom",
       model_ids: "fresh-a, fresh-b , fresh-c",
+      models_meta: JSON.stringify(meta),
     });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Saved the my-custom model list for mallorys-app");
@@ -4459,6 +4465,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       base_url: CUSTOM_FORM.base_url!,
       api: "openai-completions",
       model_ids: ["fresh-a", "fresh-b", "fresh-c"],
+      models_meta: meta,
       has_keys: true,
     });
     // The settings payload the SPA re-reads reflects the new list.
@@ -4529,12 +4536,49 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     });
   });
 
+  test("update-provider-models refuses an all-blank statement (and an absent one) and keeps the stored ids + overlay", async () => {
+    const { db, app } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const store = configStore(db);
+    const before = await store.listCustomProviders(app.id);
+    // The form submits an overlay with every size blank: the required-fact
+    // rule cannot be bypassed by omitting the fields.
+    const allBlank = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a",
+      models_meta: JSON.stringify({ "fresh-a": {} }),
+    });
+    expect(allBlank.status).toBe(400);
+    expect(await allBlank.json()).toMatchObject({
+      key: "settings.error.modelContextWindowRequired",
+      params: { model: "fresh-a" },
+    });
+    // An omitted overlay is not "no statement" either — it is the same
+    // incomplete declaration, and it must not smuggle a new id set in.
+    const absent = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a",
+    });
+    expect(absent.status).toBe(400);
+    expect(await absent.json()).toMatchObject({
+      key: "settings.error.modelContextWindowRequired",
+      params: { model: "fresh-a" },
+    });
+    // Nothing moved: the stored ids AND the (unstated) overlay are untouched.
+    expect(await store.listCustomProviders(app.id)).toEqual(before);
+  });
+
   test("update-provider-models refuses an undeclared provider with the keyed 400, zero writes", async () => {
     const { db } = await seededWorld();
+    // A complete statement, so the refusal under test is the store's
+    // undeclared-declaration gate rather than the required-fact gate.
     const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
       provider: "ghost",
       model_ids: "m1",
+      models_meta: JSON.stringify({ m1: { contextWindow: 128000, maxTokens: 8192 } }),
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({

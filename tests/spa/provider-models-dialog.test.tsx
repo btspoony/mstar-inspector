@@ -169,8 +169,16 @@ describe("ProviderModelsDialog", () => {
       expect(legacy?.checked).toBe(true);
       // Saving keeps the orphan id in the POST body.
       await view.click(view.saveButton());
+      // The overlay is ALWAYS posted (one entry per selected id, blanks
+      // absent) so the server can refuse an incomplete statement instead of
+      // reading an omitted field as "no statement".
       expect(view.calls).toEqual([
-        { op: "update-provider-models", provider: "my-gateway", model_ids: "m-1,legacy-model" },
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1,legacy-model",
+          models_meta: JSON.stringify({ "m-1": {}, "legacy-model": {} }),
+        },
       ]);
     } finally {
       await view.cleanup();
@@ -218,7 +226,6 @@ describe("ProviderModelsDialog", () => {
           models_meta: JSON.stringify(stored),
         },
       ]);
-      // A save with NOTHING typed keeps the legacy body (no metadata claim).
     } finally {
       await view.cleanup();
     }
@@ -350,7 +357,12 @@ describe("ProviderModelsDialog", () => {
       await view.click(view.checkboxes()[3]); // m-4
       await view.click(view.saveButton());
       expect(view.calls).toEqual([
-        { op: "update-provider-models", provider: "my-gateway", model_ids: "m-1,m-4" },
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1,m-4",
+          models_meta: JSON.stringify({ "m-1": {}, "m-4": {} }),
+        },
       ]);
       expect(view.outcomes).toEqual([notice("success", "stored")]);
       expect(view.dialog()).toBeNull();

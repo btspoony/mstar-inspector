@@ -511,6 +511,23 @@ function parseModelIdsJson(raw: string, source: string): string[] {
   return parsed;
 }
 
+/**
+ * One stored entry with its legacy `null` fields dropped — the READ boundary's
+ * normalization to the canonical "unset = absent". Explicit `false`, `0`-free
+ * numbers and empty arrays are statements and are preserved; only nulls go.
+ */
+function normalizeModelMeta(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const normalized: Record<string, unknown> = {};
+  // EVERY non-null field is carried through — an unknown field must still
+  // reach the shape rule and fail loud, never be dropped here.
+  for (const [field, fieldValue] of Object.entries(value as Record<string, unknown>)) {
+    if (fieldValue === null || fieldValue === undefined) continue;
+    normalized[field] = fieldValue;
+  }
+  return normalized;
+}
+
 /** The fields one model's overlay entry may carry — anything else is a typo. */
 const CUSTOM_PROVIDER_MODEL_META_FIELDS: readonly string[] = [
   "contextWindow",
@@ -539,20 +556,26 @@ function customProviderModelMetaProblem(modelId: string, value: unknown): string
       return `${named} metadata carries an unknown field ${JSON.stringify(field)}`;
     }
   }
+  // Canonical wire form: an unset fact is ABSENT. `null` is the legacy
+  // spelling the read boundary normalizes away, so it is refused here — a
+  // write may never introduce a second shape for "unset".
+  for (const field of CUSTOM_PROVIDER_MODEL_META_FIELDS) {
+    if (entry[field] === null) return `${named} ${field} must not be null (leave it out to leave it unset)`;
+  }
   for (const field of ["contextWindow", "maxTokens"]) {
     const raw = entry[field];
-    if (raw === undefined || raw === null) continue;
+    if (raw === undefined) continue;
     if (typeof raw !== "number" || !Number.isInteger(raw) || raw <= 0) {
       return `${named} ${field} must be a positive integer`;
     }
   }
-  if (entry.name !== undefined && entry.name !== null && typeof entry.name !== "string") {
+  if (entry.name !== undefined && typeof entry.name !== "string") {
     return `${named} name must be a string`;
   }
-  if (entry.reasoning !== undefined && entry.reasoning !== null && typeof entry.reasoning !== "boolean") {
+  if (entry.reasoning !== undefined && typeof entry.reasoning !== "boolean") {
     return `${named} reasoning must be a boolean`;
   }
-  if (entry.input !== undefined && entry.input !== null) {
+  if (entry.input !== undefined) {
     if (!Array.isArray(entry.input) || !entry.input.every((modality) => typeof modality === "string")) {
       return `${named} input must be an array of strings`;
     }
@@ -590,9 +613,16 @@ function parseModelsMetaJson(
       );
     }
     if (value === null) continue;
-    const problem = customProviderModelMetaProblem(modelId, value);
+    // Legacy rows were written while `null` counted as unset. Normalize at
+    // THIS boundary so every consumer sees the one canonical form — an absent
+    // key — and never a null that would render as "No reasoning" or throw on
+    // an `input` spread. The canonical shape rule then judges the cleaned
+    // entry, so a null-free row can never be laxer than a freshly written one.
+    const normalized = normalizeModelMeta(value) as Record<string, unknown>;
+    const problem = customProviderModelMetaProblem(modelId, normalized);
     if (problem !== null) throw new Error(`app-config-store: ${source}: ${problem}`);
-    meta[modelId] = value as CustomProviderModelMeta;
+    // An entry whose every field was null is itself unstated.
+    if (Object.keys(normalized).length > 0) meta[modelId] = normalized as CustomProviderModelMeta;
   }
   return Object.keys(meta).length === 0 ? undefined : meta;
 }
@@ -2248,31 +2278,32 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     ): Promise<void> {
       assertCustomProviderModelIds(modelIds);
       if (modelsMeta !== undefined) assertCustomProviderModelsMeta(modelsMeta, modelIds);
-      const carried: CustomProviderModelsMeta = {};
-      if (modelsMeta === undefined) {
-        const current = await db
-          .prepare(`SELECT model_ids, models_meta FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
-          .bind(appId, providerId)
-          .first<{ model_ids: string; models_meta: string }>();
-        if (current !== null) {
-          const previous = parseModelsMetaJson(
-            current.models_meta,
-            parseModelIdsJson(current.model_ids, "app_custom_providers.model_ids"),
-            "app_custom_providers.models_meta",
-          );
-          for (const [modelId, meta] of Object.entries(previous ?? {})) {
-            if (modelIds.includes(modelId)) carried[modelId] = meta;
-          }
-        }
-      }
-      const overlay = modelsMeta ?? carried;
-      const res = await db
-        .prepare(
-          `UPDATE app_custom_providers SET model_ids = ?, models_meta = ?, updated_at = datetime('now')
-            WHERE app_id = ? AND provider_id = ?`,
-        )
-        .bind(JSON.stringify(modelIds), JSON.stringify(overlay), appId, providerId)
-        .run();
+      // ONE statement in both shapes: a read-then-write pair would let a
+      // concurrent save of this declaration land between the read and the
+      // write and be silently reverted by the carried snapshot. The carry-over
+      // prune therefore rides the UPDATE itself, reading the row's live
+      // overlay through `json_each`.
+      const idsJson = JSON.stringify(modelIds);
+      const statement =
+        modelsMeta === undefined
+          ? db
+              .prepare(
+                `UPDATE app_custom_providers
+                    SET model_ids = ?,
+                        models_meta = (SELECT COALESCE(json_group_object(entry.key, entry.value), '{}')
+                                         FROM json_each(app_custom_providers.models_meta) AS entry
+                                        WHERE entry.key IN (SELECT value FROM json_each(?))),
+                        updated_at = datetime('now')
+                  WHERE app_id = ? AND provider_id = ?`,
+              )
+              .bind(idsJson, idsJson, appId, providerId)
+          : db
+              .prepare(
+                `UPDATE app_custom_providers SET model_ids = ?, models_meta = ?, updated_at = datetime('now')
+                  WHERE app_id = ? AND provider_id = ?`,
+              )
+              .bind(idsJson, JSON.stringify(modelsMeta), appId, providerId);
+      const res = await statement.run();
       if (res.meta.changes === 0) {
         throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(providerId)} is not declared for this app`);
       }

@@ -3044,7 +3044,16 @@ function parseCustomProviderModelsMeta(
   raw: string,
   modelIds: readonly string[],
 ): { meta: CustomProviderModelsMeta | undefined } | { error: DictionaryKey; params: Record<string, string> } {
-  if (raw.trim() === "") return { meta: undefined };
+  // An omitted or blank overlay is NOT "no statement": the same save would
+  // otherwise change the id set while omitting the sizes the product requires
+  // for every selected model. It is refused as the first model's missing fact
+  // (the caller has already proven the list is non-empty).
+  if (raw.trim() === "") {
+    return {
+      error: SETTINGS_400_KEYS.modelContextWindowRequired,
+      params: { model: modelIds[0] ?? "" },
+    };
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

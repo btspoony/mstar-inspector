@@ -36,12 +36,16 @@ type FieldState = {
 };
 
 function fieldStateOf(meta: CustomProviderModelMeta | undefined): FieldState {
+  // Canonical "unset" is an ABSENT field (the store's read boundary normalizes
+  // any legacy null away). The null checks stay as the last line of defence at
+  // THIS boundary: a null must render blank, never as "No reasoning".
+  const size = (value: number | null | undefined): string => (value === undefined || value === null ? "" : String(value));
   return {
-    contextWindow: meta?.contextWindow === undefined ? "" : String(meta.contextWindow),
-    maxTokens: meta?.maxTokens === undefined ? "" : String(meta.maxTokens),
+    contextWindow: size(meta?.contextWindow),
+    maxTokens: size(meta?.maxTokens),
     name: meta?.name ?? "",
-    reasoning: meta?.reasoning === undefined ? "" : meta.reasoning ? "true" : "false",
-    input: meta?.input === undefined ? "" : meta.input.join(", "),
+    reasoning: meta?.reasoning === undefined || meta.reasoning === null ? "" : meta.reasoning ? "true" : "false",
+    input: meta?.input?.join(", ") ?? "",
   };
 }
 
@@ -149,48 +153,36 @@ export function ProviderModelsDialog({
   }
 
   /**
-   * The metadata statement this form carries. A save that states nothing sends
-   * NO field at all — the plain id-list save, which leaves an id-only
-   * declaration saved-but-not-usable instead of inventing a size. As soon as
-   * one fact is stated the overlay is posted, and the server refuses any
-   * selected model that does not carry both required sizes.
+   * The metadata statement this form carries. ALWAYS posted, one entry per
+   * selected id, blanks simply absent from their entry: an omitted field would
+   * read as "no statement" and let a save change the id set while never
+   * stating the sizes the product requires. The server refuses the first
+   * selected model that lacks one, naming it.
    */
-  function overlayStatement(): string | null {
+  function overlayStatement(): string {
     const meta: CustomProviderModelsMeta = {};
-    let stated = false;
     for (const id of selected) {
       const state = stateOf(id);
       const entry: Record<string, unknown> = {};
-      let entryStated = false;
       for (const key of ["contextWindow", "maxTokens"] as const) {
         const text = state[key].trim();
         if (text === "") continue;
-        entryStated = true;
         const value = Number(text);
         // A non-numeric entry travels as typed so the server names the field
         // rather than the dialog dropping it silently.
         entry[key] = Number.isFinite(value) ? value : text;
       }
-      if (state.name.trim() !== "") {
-        entryStated = true;
-        entry.name = state.name.trim();
-      }
-      if (state.reasoning !== "") {
-        entryStated = true;
-        entry.reasoning = state.reasoning === "true";
-      }
+      if (state.name.trim() !== "") entry.name = state.name.trim();
+      if (state.reasoning !== "") entry.reasoning = state.reasoning === "true";
       if (state.input.trim() !== "") {
-        entryStated = true;
         entry.input = state.input
           .split(",")
           .map((part) => part.trim())
           .filter((part) => part !== "");
       }
-      if (!entryStated) continue;
       meta[id] = entry as CustomProviderModelMeta;
-      stated = true;
     }
-    return stated ? JSON.stringify(meta) : null;
+    return JSON.stringify(meta);
   }
 
   function selectAll(): void {
@@ -209,14 +201,13 @@ export function ProviderModelsDialog({
     inFlight.current = true;
     setBusy(true);
     try {
-      const modelsMeta = overlayStatement();
       let outcome: OpNotice;
       try {
         outcome = await onSettings({
           op: "update-provider-models",
           provider,
           model_ids: [...selected].join(","),
-          ...(modelsMeta === null ? {} : { models_meta: modelsMeta }),
+          models_meta: overlayStatement(),
         });
       } catch {
         outcome = { kind: "error", message: t(locale, "settings.providers.submitFailed") };

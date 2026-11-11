@@ -522,6 +522,11 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
       [{ "m": { input: "text" } }, /\.input must be an array of strings/],
       [{ "m": { input: ["text", 42] } }, /\.input must be an array of strings/],
       [{ "m": { contextwindow: 8 } }, /is not a known model-metadata field/],
+      // "Unset" has ONE canonical spelling on the wire: an absent key. A null
+      // is a malformed declaration, never a second way to say "not stated".
+      [{ "m": { contextWindow: null, maxTokens: 8 } }, /\.contextWindow must be a positive integer/],
+      [{ "m": { contextWindow: 8, maxTokens: 8, name: null } }, /\.name must be a string/],
+      [{ "m": { contextWindow: 8, maxTokens: 8, input: null } }, /\.input must be an array of strings/],
     ];
     for (const [modelsMeta, message] of malformed) {
       const inputPath = writeInput({

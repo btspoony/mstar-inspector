@@ -126,6 +126,61 @@ describe("app-config store — custom provider models_meta", () => {
     await expect(store.listCustomProviders(appId)).rejects.toThrow(/models_meta/);
   });
 
+  test("a null-shaped stored field reads back as UNSTATED on both faces (never null, never false)", async () => {
+    const { db, appId, store } = world();
+    await store.upsertCustomProvider(appId, CUSTOM, PLAIN_KEY);
+    // A row written by the earlier shape rule, which accepted null as "unset".
+    // The read boundary must normalize it to the ONE canonical form: an absent
+    // key — otherwise the dialog renders "No reasoning" and the consumer
+    // spreads a null modality list.
+    db.raw
+      .prepare("UPDATE app_custom_providers SET models_meta = ? WHERE app_id = ?")
+      .run(
+        JSON.stringify({
+          "deepseek-r1": { contextWindow: 128000, maxTokens: 8192, name: null, reasoning: null, input: null },
+          "deepseek-v4-flash": { contextWindow: null, maxTokens: null },
+        }),
+        appId,
+      );
+
+    const [decl] = await store.listCustomProviders(appId);
+    expect(decl!.models_meta).toEqual({ "deepseek-r1": { contextWindow: 128000, maxTokens: 8192 } });
+    const [consumer] = await store.getCustomProvidersForConsumer(appId);
+    expect(consumer!.models_meta).toEqual({ "deepseek-r1": { contextWindow: 128000, maxTokens: 8192 } });
+    // No null survives the read, so no downstream spread of `input` can throw.
+    expect(JSON.stringify(consumer!.models_meta)).not.toContain("null");
+  });
+
+  test("the carry-over prune is ONE statement — a concurrent overlay write cannot be reverted", async () => {
+    const { db, appId, store } = world();
+    const both = {
+      "deepseek-v4-flash": { contextWindow: 32_000, maxTokens: 4_096 },
+      "deepseek-r1": { contextWindow: 128_000, maxTokens: 8_192 },
+    };
+    await store.upsertCustomProvider(appId, { ...CUSTOM, models_meta: both }, PLAIN_KEY);
+
+    const statements: string[] = [];
+    const spied = {
+      prepare: (query: string) => {
+        statements.push(query);
+        return db.prepare(query);
+      },
+      batch: (list: unknown) => db.batch(list as never),
+    };
+    await createAppConfigStore(spied as never, TEST_KEY).updateCustomProviderModels(appId, CUSTOM.provider_id, [
+      "deepseek-v4-flash",
+    ]);
+
+    // Read-then-write is the lost-update window: the prune must ride the one
+    // UPDATE, reading the row's live overlay inside it.
+    expect(statements).toHaveLength(1);
+    expect(statements[0]!.trim().startsWith("UPDATE app_custom_providers")).toBe(true);
+    // Behaviour: the dropped id's facts are pruned, the kept id's survive.
+    const [decl] = await store.listCustomProviders(appId);
+    expect(decl!.model_ids).toEqual(["deepseek-v4-flash"]);
+    expect(decl!.models_meta).toEqual({ "deepseek-v4-flash": both["deepseek-v4-flash"] });
+  });
+
   test("removing a model id drops its overlay so the row stays readable", async () => {
     const { appId, store } = world();
     await store.upsertCustomProvider(appId, { ...CUSTOM, models_meta: META }, PLAIN_KEY);
