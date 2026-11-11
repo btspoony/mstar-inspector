@@ -751,10 +751,10 @@ describe("UsagePanel — inline probe under the owning row", () => {
   });
 
   test("a re-render handing the panel a new onClose leaves Escape with the panel opened last", async () => {
-    // Two panels, opened in tree order (a then b), and a mount point that hands
-    // each one a fresh arrow on every render — the settings page's own shape.
-    // A re-render that only renews the FIRST panel's callback must not move
-    // Escape ownership to it.
+    // Both panels mount in the same commit — the first ahead of the second, so
+    // the second owns Escape — and the mount point hands each a fresh arrow on
+    // every render, as the settings page does. A later re-render that renews
+    // only the first panel's callback must leave that ownership alone.
     const { win, cleanup: cleanupDom } = installDom("http://localhost/dashboard/acme/apps");
     const container = win.document.createElement("div");
     win.document.body.appendChild(container);

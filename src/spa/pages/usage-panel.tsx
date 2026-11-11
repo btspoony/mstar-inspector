@@ -99,9 +99,13 @@ export function UsagePanel({
   // not set state under another key's row or after close.
   const generation = useRef(0);
   // The mount point hands a fresh closure on every render; the listener reads
-  // it through a ref so a re-render cannot move its place in the stack.
+  // the latest one through a ref, so a re-render cannot move its place in the
+  // stack. Mirrored in an effect (this file's sibling pages do the same) so
+  // render stays free of side effects.
   const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
 
   const probe = useCallback(async () => {
     const mine = ++generation.current;
