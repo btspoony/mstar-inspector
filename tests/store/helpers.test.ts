@@ -4,8 +4,8 @@
  * `INSERT … SELECT … RETURNING` matched, `0` when it did not — with `results`
  * unchanged and a plain read changing nothing.
  */
-import { describe, expect, mock, test } from "bun:test";
-import * as fs from "node:fs";
+import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter } from "./helpers";
 
 const AT = "2026-10-27T00:00:00.000Z";
@@ -51,36 +51,28 @@ describe("test D1 double", () => {
   });
 });
 
-/**
- * The REAL `node:fs` exports, captured before any mock. Bun's `mock.module`
- * registry is process-global (see `tests/review/runtime-omp.test.ts`), and
- * `mock.restore()` does not undo a builtin mock, so the synthetic-directory
- * case below restores `node:fs` by re-registering this snapshot.
- */
-const REAL_FS = { ...fs };
-
 describe("migration order", () => {
-  test("a synthetic duplicate pair orders by filename, never by readdir order", async () => {
+  test("a synthetic duplicate pair orders by filename, never by readdir order", () => {
     // `zzz` before `aaa` is the order a non-lexical directory listing hands
     // back. `number(a) - number(b)` alone keeps it; the byte-order tie-break
     // is what the duplicates in `migrations/` depend on, so reverting that
-    // tie-break fails exactly here.
-    mock.module("node:fs", () => ({
-      ...REAL_FS,
-      readdirSync: () => ["0043_zzz_synthetic.sql", "0043_aaa_synthetic.sql"],
-    }));
-    // Dynamic import with a query: the mock must be registered before
-    // `./helpers` loads, and the query keeps this file's registry key apart
-    // from the statically imported real module above.
-    const SPEC = "./helpers.ts?synthetic-ordinals";
-    try {
-      const synthetic = (await import(SPEC)) as { migrationsAfter: typeof migrationsAfter };
-      expect(synthetic.migrationsAfter(0)).toEqual([
-        "0043_aaa_synthetic.sql",
-        "0043_zzz_synthetic.sql",
-      ]);
-    } finally {
-      mock.module("node:fs", () => REAL_FS);
-    }
+    // tie-break fails exactly here. The listing is injected, not mocked:
+    // `mock.module("node:fs")` leaves a process-wide registry entry that
+    // every later suite inherits.
+    const synthetic = migrationsAfter(0, () => [
+      "0043_zzz_synthetic.sql",
+      "0043_aaa_synthetic.sql",
+    ]);
+    expect(synthetic).toEqual(["0043_aaa_synthetic.sql", "0043_zzz_synthetic.sql"]);
+  });
+
+  test("a real readdirSync property still sees the builtin", async () => {
+    // The ordinal case above must leave the process-wide module registry as it
+    // found it: the next reader of `node:fs` gets the builtin, not a mock entry
+    // that only happens to carry the real functions.
+    const live = await import("node:fs");
+    expect(live.readdirSync(join(import.meta.dir, "../../migrations"))).toContain(
+      "0001_reviews.sql",
+    );
   });
 });

@@ -60,10 +60,17 @@ export function migrationNumber(name: string): number {
  * pairs (`0043`, `0047`, `0048`, `0049`) — break on the filename in byte order,
  * never on `readdir` order. With the repo's fixed-width 4-digit prefixes that
  * equals full-filename lexicographic order, the same order wrangler applies.
+ *
+ * `readDir` is the directory seam: a case that needs a synthetic listing
+ * injects one instead of mocking `node:fs`, whose registry entry is
+ * process-wide.
  */
-export function migrationsAfter(anchor: number | string): string[] {
+export function migrationsAfter(
+  anchor: number | string,
+  readDir: (dir: string) => string[] = readdirSync,
+): string[] {
   const from = typeof anchor === "number" ? anchor : migrationNumber(anchor);
-  return readdirSync(MIGRATIONS_DIR)
+  return readDir(MIGRATIONS_DIR)
     .filter((name) => name.endsWith(".sql"))
     .sort((a, b) => migrationNumber(a) - migrationNumber(b) || (a < b ? -1 : a > b ? 1 : 0))
     .filter((name) => migrationNumber(name) > from);

@@ -7,10 +7,11 @@
  * the count breaches the threshold.
  *
  * The attribution stages (PAGING_EXCLUDED_STAGES) are EXCLUDED from that
- * count. Both are degraded-but-successful attribution written for a review
- * that continued: `recheck` marks a budget skip, a dead seat or one invalid
- * document; `usage` marks a `usage_events` insert that failed while the
- * review went on.
+ * count — all of them are degraded-but-successful attribution written for a
+ * review that continued: `recheck` marks a budget skip, a dead seat or one
+ * invalid document; `usage` marks a `usage_events` insert that failed while
+ * the review went on; `rate-limit` marks a degraded-comment sweep GitHub
+ * throttled while the review itself stood.
  * Counting them would page ops for reviews that published normally. They stay
  * in `review_failures` — only the paging signal ignores them.
  *

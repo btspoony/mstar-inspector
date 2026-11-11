@@ -98,6 +98,14 @@ export function UsagePanel({
   // the same key (a fresh mount per key), so a probe that resolves late must
   // not set state under another key's row or after close.
   const generation = useRef(0);
+  // The mount point hands a fresh closure on every render; the listener reads
+  // the latest one through a ref, so a re-render cannot move its place in the
+  // stack. Mirrored in an effect (this file's sibling pages do the same) so
+  // render stays free of side effects.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
 
   const probe = useCallback(async () => {
     const mine = ++generation.current;
@@ -141,7 +149,9 @@ export function UsagePanel({
   // Escape collapses this panel only: panels in different cards coexist, so
   // just the one opened last owns the key, and an open modal layer above it
   // (the model picker, a step dialog) keeps its own Escape. Closing also
-  // bumps the generation.
+  // bumps the generation. Keyed on `open` alone — the listener holds the
+  // panel's stack place, so re-registering it would steal the key from the
+  // panel actually opened last.
   useEffect(() => {
     if (!open) return;
     const token = {};
@@ -151,7 +161,7 @@ export function UsagePanel({
       if (openPanels[openPanels.length - 1] !== token) return;
       if (document.querySelector('[role="dialog"], [role="alertdialog"]') !== null) return;
       generation.current += 1;
-      onClose();
+      onCloseRef.current();
     };
     document.addEventListener("keydown", onKeyDown);
     return () => {
@@ -159,7 +169,7 @@ export function UsagePanel({
       const at = openPanels.indexOf(token);
       if (at !== -1) openPanels.splice(at, 1);
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
   return (

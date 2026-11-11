@@ -100,7 +100,53 @@ function verifyReasonMessage(locale: SpaBoot["locale"], reason: string): string 
   return t(locale, "settings.verify.unexpected");
 }
 
-function settingsErrorMessage(locale: SpaBoot["locale"], body: string): string {
+/** A value `t()` can interpolate; anything else would render `[object Object]` or leave `{name}` bare. */
+function isParamValue(value: unknown): value is string | number {
+  return typeof value === "string" || typeof value === "number";
+}
+
+/**
+ * True when `t()` can fill a refusal body's params in: absent, or a map whose
+ * every value is a string or number. A malformed map (one object or array
+ * value) refuses the keyed face, so the reader renders its generic copy
+ * instead of `[object Object]` — the usage panel's `refusalOf` guard shape.
+ */
+function paramsInterpolable(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      Object.values(value).every(isParamValue))
+  );
+}
+
+/**
+ * The verify 400's face: the mapped key in the operator's locale when the
+ * body carries one, else the reason's copy. (CARRY-2)
+ */
+export function verifyRefusalMessage(locale: SpaBoot["locale"], body: string): string {
+  let reason = "unexpected";
+  let keyed: DictionaryKey | undefined;
+  let keyedParams: Record<string, string | number> | undefined;
+  try {
+    const parsed = JSON.parse(body) as { reason?: string; key?: unknown; params?: unknown };
+    if (typeof parsed.reason === "string") reason = parsed.reason;
+    if (
+      typeof parsed.key === "string" &&
+      isDictionaryKey(parsed.key) &&
+      paramsInterpolable(parsed.params)
+    ) {
+      keyed = parsed.key;
+      keyedParams = parsed.params as Record<string, string | number> | undefined;
+    }
+  } catch {
+    /* body is not JSON */
+  }
+  return keyed !== undefined ? t(locale, keyed, keyedParams) : verifyReasonMessage(locale, reason);
+}
+
+export function settingsErrorMessage(locale: SpaBoot["locale"], body: string): string {
   try {
     const parsed = JSON.parse(body) as {
       key?: unknown;
@@ -114,11 +160,11 @@ function settingsErrorMessage(locale: SpaBoot["locale"], body: string): string {
     // key (newer server, stale client) falls through to the English face
     // below — fail-visible, never blank.
     if (typeof parsed.key === "string" && isDictionaryKey(parsed.key)) {
-      const params =
-        typeof parsed.params === "object" && parsed.params !== null
-          ? (parsed.params as Record<string, string | number>)
-          : undefined;
-      return t(locale, parsed.key, params);
+      // A params map `t()` cannot fill in would print `[object Object]` or a
+      // bare `{name}`: the localized generic face renders instead of the raw
+      // JSON refusal body.
+      if (!paramsInterpolable(parsed.params)) return t(locale, "common.loadFailed");
+      return t(locale, parsed.key, parsed.params as Record<string, string | number> | undefined);
     }
     if (parsed.code === "not_in_verified_models" && typeof parsed.selector === "string") {
       return t(locale, "settings.membership.not_in_verified_models", { selector: parsed.selector });
@@ -255,29 +301,7 @@ export function SettingsView({
       return { kind: "error", message: t(locale, "common.saveFailed") };
     }
     if (status >= 400) {
-      let reason = "unexpected";
-      // (CARRY-2): the eligibility rejection additionally carries
-      // the keyed face — prefer the mapped key so the runtime-harness cause
-      // renders in the operator's locale; reason-only 400s keep the
-      // existing verify copy.
-      let keyed: DictionaryKey | undefined;
-      let keyedParams: Record<string, string | number> | undefined;
-      try {
-        const parsed = JSON.parse(body) as { reason?: string; key?: unknown; params?: unknown };
-        if (typeof parsed.reason === "string") reason = parsed.reason;
-        if (typeof parsed.key === "string" && isDictionaryKey(parsed.key)) {
-          keyed = parsed.key;
-          if (typeof parsed.params === "object" && parsed.params !== null) {
-            keyedParams = parsed.params as Record<string, string | number>;
-          }
-        }
-      } catch {
-        /* body is not JSON */
-      }
-      const outcome: OpNotice = {
-        kind: "error",
-        message: keyed !== undefined ? t(locale, keyed, keyedParams) : verifyReasonMessage(locale, reason),
-      };
+      const outcome: OpNotice = { kind: "error", message: verifyRefusalMessage(locale, body) };
       await onReload({ background: true });
       return outcome;
     }

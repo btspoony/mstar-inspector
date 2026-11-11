@@ -248,11 +248,11 @@ function closersFor(text: string): string {
  */
 function clampKeepingHead(text: string, budget: number): string {
   if (text.length <= budget) return text;
-  const head = text.slice(0, Math.max(0, budget - 1));
+  const head = sliceWithoutSplittingPair(text, Math.max(0, budget - 1));
   const closers = closersFor(head);
   const room = budget - 1 - closers.length;
   if (closers === "" || room <= 0) return `${head}…`;
-  return `${head.slice(0, room)}${closers}…`;
+  return `${sliceWithoutSplittingPair(head, room)}${closers}…`;
 }
 
 /**

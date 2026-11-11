@@ -20,7 +20,7 @@
  *       exit code, so no lost round is attributed to nothing at all;
  *   (h2) an absent exit code still names the `unknown` fallback;
  *   (i) the dispatched cap is the anchored TIER's clock: quick's 5-minute
- *       clock sits inside its 9-minute outer window, so the tier — not the
+ *       clock sits inside its 10-minute outer window, so the tier — not the
  *       outer guard or the retired fixed 180s — decides the figure;
  *   (j) a late dispatch still clears the contract floor instead of skipping;
  *   (k) the dispatch/skip boundary sits exactly at the floor plus the
@@ -552,7 +552,7 @@ describe("the recheck seat's wall clock comes from the anchored tier", () => {
     seatResult = { stderr: "", structuredOutput: { source: "caller", mode: "strict", status: "valid", data: doc([]) } };
     await run();
     expect(seatCalls).toHaveLength(1);
-    // Quick's 5-minute tier clock is TIGHTER than its 9-minute outer window
+    // Quick's 5-minute tier clock is TIGHTER than its 10-minute outer window
     // (600,000 - 60,000 = 540,000), so the two candidates differ: an
     // outer-derived cap would be 540,000 and the retired fixed cap 180,000.
     expect(seatCalls[0]!.maxRuntimeMs).toBe(300_000);

@@ -391,6 +391,15 @@ export async function failureBodySample(res: Response): Promise<string> {
 }
 
 /**
+ * Release a failure response's body without reading it: the status-decided
+ * arms return without consulting the body, but the stream must still be torn
+ * down — an unconsumed, uncancelled body pins the provider connection.
+ */
+async function discardFailureBody(res: Response): Promise<void> {
+  await res.body?.cancel().catch(() => {});
+}
+
+/**
  * The ONE classifier every non-2xx verification response goes through, so the
  * three entry points can never disagree. The status decides for every status
  * that carries its own meaning, and only the statuses with none reach the body:
@@ -406,9 +415,18 @@ export async function failureBodySample(res: Response): Promise<string> {
  *   anything else → unexpected_response.
  */
 async function failureReason(res: Response): Promise<VerifyFailureReason> {
-  if (res.status === 401 || res.status === 403) return "invalid_key";
-  if (res.status === 402) return "quota_exhausted";
-  if (res.status === 429) return "rate_limited";
+  if (res.status === 401 || res.status === 403) {
+    await discardFailureBody(res);
+    return "invalid_key";
+  }
+  if (res.status === 402) {
+    await discardFailureBody(res);
+    return "quota_exhausted";
+  }
+  if (res.status === 429) {
+    await discardFailureBody(res);
+    return "rate_limited";
+  }
   return QUOTA_BODY_SIGNAL.test(await failureBodySample(res)) ? "quota_exhausted" : "unexpected_response";
 }
 
