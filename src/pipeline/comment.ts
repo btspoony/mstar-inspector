@@ -1137,7 +1137,14 @@ export type ReviewCommenterOptions = {
 /** One `createAppAuth` construction, as observed through `authSeam`. */
 export type AuthConstruction = { appId: string };
 /** One minted installation grant, as observed through `authSeam`. */
-export type AuthMint = { installationId: number; repo: string; purpose: TokenPurpose; permissions: Record<string, string> };
+export type AuthMint = {
+  installationId: number;
+  repo: string;
+  purpose: TokenPurpose;
+  permissions: Record<string, string>;
+  /** The renamed-repository fallback: minted without the repository narrowing. */
+  installationWide?: boolean;
+};
 /** Records the credential construction/mint seam (test-only; see `authSeam`). */
 export type AuthSeam = { constructed: AuthConstruction[]; minted: AuthMint[] };
 
@@ -2077,12 +2084,39 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       purpose: input.purpose,
       permissions: { ...permissions },
     });
-    return auth({
-      type: "installation",
-      installationId: input.installationId,
-      repositoryNames: [input.repo],
-      permissions,
-    });
+    try {
+      return await auth({
+        type: "installation",
+        installationId: input.installationId,
+        repositoryNames: [input.repo],
+        permissions,
+      });
+    } catch (error) {
+      // A repository RENAMED after this scope was persisted 404s the
+      // repository-scoped mint: GitHub matches `repositoryNames` exactly, while
+      // the REST paths themselves follow the rename. The persisted row keeps its
+      // old name forever, so without this fallback every later Check write
+      // fails with "no client" and the run stays `in_progress`. The retry is the
+      // SAME installation and the SAME permission set, just not narrowed to one
+      // repository — every caller still addresses the persisted owner/repo and
+      // every Checks write is identity-fenced, so the wider grant cannot reach
+      // another tenant's data.
+      const status =
+        typeof error === "object" && error !== null && "status" in error ? error.status : undefined;
+      // Only the review-write family falls back: its callers address one exact
+      // owner/repo per request. A `sandbox-read` mint stays fail-closed — an
+      // installation-wide grant cannot satisfy `assertSandboxGrant` anyway, and
+      // minting one only to reject it widens a credential for nothing.
+      if (status !== 404 || input.purpose !== "review-write") throw error;
+      options?.authSeam?.minted.push({
+        installationId: input.installationId,
+        repo: input.repo,
+        purpose: input.purpose,
+        permissions: { ...permissions },
+        installationWide: true,
+      });
+      return auth({ type: "installation", installationId: input.installationId, permissions });
+    }
   }
 
   /**
