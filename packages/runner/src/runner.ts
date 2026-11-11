@@ -93,7 +93,8 @@
  * the run's own outcome).
  */
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent";
+import { join } from "node:path";
+import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import {
   isReviewLevel,
   REVIEW_LEVELS,
@@ -106,6 +107,7 @@ import {
 } from "../../shared/src/runtime";
 import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
+import { attributeChain, formatChainAttribution, walkSeatGates } from "./seat-failover-probe";
 import { writePerReviewModelsYaml } from "./models-synthesis";
 import { decodeCredentialPayload } from "../../shared/src/credential-payload";
 import { RECHECK_STATUS_PATH, type RecheckInput, type RecheckStatus } from "../../shared/src/recheck-wire";
@@ -682,6 +684,22 @@ export function writeRecheckStatus(
 }
 
 /**
+ * The failed round's per-selector disposition, produced by the seat-failover
+ * probe's OWN gate walker (one rule, one place). No live context exists at
+ * this point, so the context gate is reported as not evaluated rather than
+ * guessed. A throw here is swallowed into a single line: attribution is
+ * diagnosis, never a second failure.
+ */
+function chainAttributionLine(chain: readonly string[], agentDir: string, authStorage: AuthStorage): string {
+  try {
+    const registry = new ModelRegistry(authStorage, join(agentDir, "models.yml"));
+    return formatChainAttribution(attributeChain(walkSeatGates({ registry, chain })));
+  } catch (error) {
+    return `review: chain attribution unavailable: ${(error as Error).message}`;
+  }
+}
+
+/**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1
  * envelope JSON to stdout and diagnostics to stderr. Exported for
  * deterministic tests, which inject a fake `runtime` AND a fake credential
@@ -750,6 +768,9 @@ export async function main(
   let authStorage: AuthStorage | undefined;
 
   try {
+    // The chain rides this run's runtime input AND the failure attribution
+    // below — parsed once so the two can never disagree.
+    const chain = parseModelSelectors(Bun.env.OMP_REVIEW_MODEL);
     let input: AgentRuntimeRunInput;
     try {
       const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
@@ -802,7 +823,7 @@ export async function main(
         level,
         worktreePath: json.worktreePath ?? process.cwd(),
         reconFacts: json.reconFacts ?? [],
-        modelSelectors: parseModelSelectors(Bun.env.OMP_REVIEW_MODEL),
+        modelSelectors: chain,
         // Optional per-role overrides: included ONLY when the map
         // is present, so legacy input builds a byte-identical runtime input.
         ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
@@ -883,6 +904,16 @@ export async function main(
       return 0;
     } catch (error) {
       console.error(`review: runtime failed: ${(error as Error).message}`);
+      // The round is over, but WHICH candidate it lost is still knowable: the
+      // probe's gate walker runs over this run's own inputs (the synthesized
+      // models.yml and the pool it loaded), so the persisted failure says
+      // which selector dropped at which gate instead of only naming the
+      // provider that answered first. Printed LAST: the Worker keeps the tail
+      // of stderr and nothing else. Attribution is diagnosis — it can never
+      // turn a failed round into a different outcome.
+      if (agentDir !== undefined && authStorage !== undefined) {
+        console.error(chainAttributionLine(chain, agentDir, authStorage));
+      }
       return 1;
     }
   } finally {

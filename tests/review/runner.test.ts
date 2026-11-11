@@ -79,6 +79,8 @@ let fakeRecheckStatus: RecheckStatus | undefined;
 let fakeReport: Record<string, unknown> | null = null;
 /** Error the fake runtime rejects with; takes precedence when set. */
 let runtimeError: Error | undefined;
+/** The reported chain: the first provider serves, the second is the candidate. */
+const CHAIN = "commandcode/deepseek/deepseek-v4.1-flash, opencode-go/deepseek-v4.1-flash";
 /** Captured runReview inputs. */
 const runInputs: AgentRuntimeRunInput[] = [];
 /** Per-run directories the runs under test handed to the runtime. */
@@ -585,6 +587,55 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     const input = runInputs[0]!;
     expect(input.modelOverrides).toEqual(overrides);
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
+  });
+
+  test("a failed round names every chain selector and the gate that dropped it", async () => {
+    process.env.OMP_REVIEW_MODEL = CHAIN;
+    runtimeError = new Error("seat 0 failed: 400 You have insufficient credits");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+    // Only the FIRST provider has a transported credential — the case the probe
+    // identified as the one gate that can drop this chain.
+    const { code, stdout, stderr } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ commandcode: [sk("probe-first")] }),
+    );
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    // The failure line still names the provider error …
+    expect(stderr).toContain("400 You have insufficient credits");
+    // … and the attribution names each selector, the gate, and the operator's
+    // action for a missing credential.
+    expect(stderr).toContain("commandcode/deepseek/deepseek-v4.1-flash");
+    expect(stderr).toContain("opencode-go/deepseek-v4.1-flash");
+    expect(stderr).toContain("pool_key");
+    expect(stderr).toContain("the App stores no credential for provider opencode-go");
+    // The Worker persists only the LAST 600 characters of stderr, so the
+    // attribution must be the final line and fit inside that tail.
+    const lastLine = stderr.trim().split("\n").at(-1)!;
+    expect(lastLine).toContain("opencode-go/deepseek-v4.1-flash");
+    expect(lastLine).toContain("pool_key");
+    expect(lastLine.length).toBeLessThan(600);
+    // Zero credential material — not even a key prefix.
+    expect(stderr).not.toContain(sk("probe-first"));
+  });
+
+  test("a fully-keyed failed round names no gate as the cause", async () => {
+    process.env.OMP_REVIEW_MODEL = CHAIN;
+    runtimeError = new Error("seat 0 failed: 400 You have insufficient credits");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+    const { code, stderr } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ commandcode: [sk("probe-first")], "opencode-go": [sk("probe-second")] }),
+    );
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("opencode-go/deepseek-v4.1-flash");
+    // Every gate passes, so the text must not accuse one: it states the
+    // candidate was eligible and that the failure came from the served
+    // selector, not from a gate.
+    expect(stderr).not.toContain("dropped at");
+    expect(stderr).toContain("eligible");
   });
 
   test("runtime failure → exit 1, stdout empty, stderr diagnostic", async () => {

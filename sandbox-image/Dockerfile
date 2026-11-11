@@ -190,6 +190,11 @@
 # chain candidate. No in-image code imports it, but it IS copied into the image
 # with the runner tree — a stale image would not carry the probe whose verdict
 # is the input to the next change.
+# rebuild: a failed round now prints its per-selector chain attribution after
+# the provider's own error (`runner.ts` calls the probe's gate walker over the
+# run's synthesized models.yml and loaded pool). A stale image keeps ending the
+# round with only the first provider's message, so the dropped candidate and
+# its gate stay invisible in `review_failures`.
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via

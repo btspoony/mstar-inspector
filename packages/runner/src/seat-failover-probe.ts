@@ -61,8 +61,9 @@ export type ProbeSelectorVerdict = {
   registry: { resolved: boolean; metadata: ProbeModelMetadata | null };
   poolKey: { configured: boolean };
   context: {
-    fits: boolean;
-    retryContextTokens: number;
+    /** null = not evaluated (no live context was available to measure it). */
+    fits: boolean | null;
+    retryContextTokens: number | null;
     contextWindow: number | null;
     /** `contextWindow - reserve`, the SDK's own fit budget (null when unresolved). */
     fitBudget: number | null;
@@ -110,12 +111,85 @@ function splitSelector(selector: string): { provider: string; modelId: string; l
 /**
  * `SessionMaintenance.contextFitsModel`'s arithmetic against a given context
  * size: a non-positive window fits everything (the SDK's own first line), and
- * otherwise the retry context must fit under `window - reserve`.
+ * otherwise the retry context must fit under `window - reserve`. An ABSENT
+ * retry context means the gate cannot be judged (a failed round never exposes
+ * its live context), so it reports `null` — never a pass and never a drop.
  */
-function contextFit(contextWindow: number, retryContextTokens: number): { fits: boolean; fitBudget: number } {
-  if (contextWindow <= 0) return { fits: true, fitBudget: contextWindow };
+function contextFit(
+  contextWindow: number,
+  retryContextTokens: number | undefined,
+):
+  | { fits: boolean; fitBudget: number }
+  | { fits: null; fitBudget: number } {
+  if (contextWindow <= 0) {
+    return { fits: retryContextTokens === undefined ? null : true, fitBudget: contextWindow };
+  }
   const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, DEFAULT_COMPACTION_SETTINGS));
+  if (retryContextTokens === undefined) return { fits: null, fitBudget };
   return { fits: retryContextTokens <= fitBudget, fitBudget };
+}
+
+/**
+ * The runtime's gate walk, over an ALREADY-BUILT registry — the ONE place the
+ * three rules are spelled. The one-shot probe (below) and the runner's failure
+ * attribution both call this, so an attribution can never drift from the
+ * diagnostic.
+ */
+export function walkSeatGates(opts: {
+  registry: ModelRegistry;
+  chain: readonly string[];
+  /** The retry context, when the caller knows it; absent = context not judged. */
+  retryContextTokens?: number;
+}): ProbeSelectorVerdict[] {
+  const { registry } = opts;
+  const selectors: ProbeSelectorVerdict[] = [];
+  for (const selector of opts.chain) {
+    const { provider, modelId, literalThenBase } = splitSelector(selector);
+    // The registry's own lookup — literal id first, then the thinking-suffix
+    // base, exactly the order the SDK's resolver applies.
+    const model = literalThenBase.map((id) => registry.find(provider, id)).find((entry) => entry !== undefined);
+    if (model === undefined) {
+      selectors.push({
+        selector,
+        provider,
+        modelId,
+        gate: "registry",
+        registry: { resolved: false, metadata: null },
+        poolKey: { configured: false },
+        context: { fits: false, retryContextTokens: opts.retryContextTokens ?? null, contextWindow: null, fitBudget: null },
+      });
+      continue;
+    }
+    const metadata: ProbeModelMetadata = {
+      provider: model.provider,
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      baseUrl: model.baseUrl,
+      contextWindow: model.contextWindow ?? 0,
+      maxTokens: model.maxTokens ?? 0,
+      reasoning: model.reasoning === true,
+      input: [...(model.input ?? [])],
+    };
+    const configured = registry.hasConfiguredAuth(model);
+    const fit = contextFit(metadata.contextWindow, opts.retryContextTokens);
+    selectors.push({
+      selector,
+      provider,
+      modelId,
+      // The runtime's gate order: resolution, then credential, then window.
+      gate: !configured ? "pool_key" : fit.fits === false ? "context" : "eligible",
+      registry: { resolved: true, metadata },
+      poolKey: { configured },
+      context: {
+        fits: fit.fits,
+        retryContextTokens: opts.retryContextTokens ?? null,
+        contextWindow: metadata.contextWindow,
+        fitBudget: fit.fitBudget,
+      },
+    });
+  }
+  return selectors;
 }
 
 /**
@@ -136,58 +210,90 @@ export async function probeSeatFailover(input: ProbeInput): Promise<ProbeReport>
       );
     }
     const registry = new ModelRegistry(authStorage, join(agentDir, "models.yml"));
-    const selectors: ProbeSelectorVerdict[] = [];
-    for (const selector of chain) {
-      const { provider, modelId, literalThenBase } = splitSelector(selector);
-      // The registry's own lookup — literal id first, then the thinking-suffix
-      // base, exactly the order the SDK's resolver applies.
-      const model = literalThenBase.map((id) => registry.find(provider, id)).find((entry) => entry !== undefined);
-      if (model === undefined) {
-        selectors.push({
-          selector,
-          provider,
-          modelId,
-          gate: "registry",
-          registry: { resolved: false, metadata: null },
-          poolKey: { configured: false },
-          context: { fits: false, retryContextTokens: input.retryContextTokens, contextWindow: null, fitBudget: null },
-        });
-        continue;
-      }
-      const metadata: ProbeModelMetadata = {
-        provider: model.provider,
-        id: model.id,
-        name: model.name,
-        api: model.api,
-        baseUrl: model.baseUrl,
-        contextWindow: model.contextWindow ?? 0,
-        maxTokens: model.maxTokens ?? 0,
-        reasoning: model.reasoning === true,
-        input: [...(model.input ?? [])],
-      };
-      const configured = registry.hasConfiguredAuth(model);
-      const fit = contextFit(metadata.contextWindow, input.retryContextTokens);
-      selectors.push({
-        selector,
-        provider,
-        modelId,
-        // The runtime's gate order: resolution, then credential, then window.
-        gate: !configured ? "pool_key" : !fit.fits ? "context" : "eligible",
-        registry: { resolved: true, metadata },
-        poolKey: { configured },
-        context: {
-          fits: fit.fits,
-          retryContextTokens: input.retryContextTokens,
-          contextWindow: metadata.contextWindow,
-          fitBudget: fit.fitBudget,
-        },
-      });
-    }
+    const selectors = walkSeatGates({ registry, chain, retryContextTokens: input.retryContextTokens });
     return { chain, selectors, droppedCandidate: selectors.find((verdict) => verdict.gate !== "eligible") ?? null };
   } finally {
     authStorage.close();
     await rm(agentDir, { recursive: true, force: true });
   }
+}
+
+/** One chain selector, as the failed round's attribution reports it. */
+export type ChainAttribution = {
+  selector: string;
+  /** The selector the round ran; every other entry is a failover candidate. */
+  role: "served" | "candidate";
+  verdict: "served" | "dropped" | "eligible";
+  gate: ProbeGate;
+  /** Operator-actionable sentence — never key material, never a pool size. */
+  reason: string;
+};
+
+/**
+ * Turn the gate walk into the round's disposition: the FIRST selector served
+ * the failed request, every later one is a candidate that either dropped at a
+ * named gate or was eligible. A missing credential names the provider and says
+ * the App stores none — that is the operator's action, not a code defect.
+ */
+export function attributeChain(verdicts: readonly ProbeSelectorVerdict[]): ChainAttribution[] {
+  return verdicts.map((verdict, index): ChainAttribution => {
+    if (index === 0) {
+      return {
+        selector: verdict.selector,
+        role: "served",
+        verdict: "served",
+        gate: verdict.gate,
+        reason: "served the failed request",
+      };
+    }
+    if (verdict.gate === "registry") {
+      return {
+        selector: verdict.selector,
+        role: "candidate",
+        verdict: "dropped",
+        gate: verdict.gate,
+        reason: "dropped at registry: no provider in the synthesized file or the bundled catalog resolves this model",
+      };
+    }
+    if (verdict.gate === "pool_key") {
+      return {
+        selector: verdict.selector,
+        role: "candidate",
+        verdict: "dropped",
+        gate: verdict.gate,
+        reason: `dropped at pool_key: the App stores no credential for provider ${verdict.provider}`,
+      };
+    }
+    if (verdict.gate === "context") {
+      return {
+        selector: verdict.selector,
+        role: "candidate",
+        verdict: "dropped",
+        gate: verdict.gate,
+        reason: `dropped at context: the retry context does not fit the declared window (${verdict.context.contextWindow ?? "unknown"})`,
+      };
+    }
+    return {
+      selector: verdict.selector,
+      role: "candidate",
+      verdict: "eligible",
+      gate: verdict.gate,
+      reason:
+        verdict.context.fits === null
+          ? "eligible: registry and credential pass; context not evaluated (no live context at failure)"
+          : "eligible: registry, credential and context all pass",
+    };
+  });
+}
+
+/**
+ * The single stderr line a failed round carries after its provider error. It
+ * is printed LAST so the Worker's bounded stderr tail (the only diagnosis a
+ * non-zero exit keeps) contains it.
+ */
+export function formatChainAttribution(attributions: readonly ChainAttribution[]): string {
+  if (attributions.length === 0) return "review: chain attribution: no model chain was configured";
+  return `review: chain attribution: ${attributions.map((entry) => `${entry.selector} ${entry.reason}`).join("; ")}`;
 }
 
 /** One line per selector: the verdict, then the evidence that produced it. */
