@@ -51,10 +51,11 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import type { MstarReviewV1 } from "@mstar-harness/engine";
+import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
 import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../packages/shared/src/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
@@ -79,6 +80,8 @@ let fakeRecheckStatus: RecheckStatus | undefined;
 let fakeReport: Record<string, unknown> | null = null;
 /** Error the fake runtime rejects with; takes precedence when set. */
 let runtimeError: Error | undefined;
+/** The applied model the fake runtime reports; undefined = no model served. */
+let fakeAppliedModel: string | undefined;
 /** The reported chain: the first provider serves, the second is the candidate. */
 const CHAIN = "commandcode/deepseek/deepseek-v4.1-flash, opencode-go/deepseek-v4.1-flash";
 /** Captured runReview inputs. */
@@ -130,6 +133,7 @@ const fakeRuntime: AgentRuntime = {
       recheck: fakeRecheck as ReviewRunResult["recheck"],
       ...(fakeRecheckStatus !== undefined ? { recheckStatus: fakeRecheckStatus } : {}),
       report: fakeReport as ReviewRunResult["report"],
+      ...(fakeAppliedModel !== undefined ? { appliedModel: fakeAppliedModel } : {}),
     };
   }),
 };
@@ -182,6 +186,7 @@ function statusPathForRun(): string {
 async function runCli(
   argv: string[],
   payload = encodeCredentialPayload({}),
+  appliedModelPath = APPLIED_MODEL_PATH,
 ): Promise<{ code: number; stdout: string; stderr: string; statusPath: string }> {
   const logs: string[] = [];
   const errors: string[] = [];
@@ -193,7 +198,7 @@ async function runCli(
   try {
     // The credential payload rides STDIN in production; the injected reader is
     // the same seam the runtime double uses.
-    const code = await main(argv, fakeRuntime, async () => payload, statusPath);
+    const code = await main(argv, fakeRuntime, async () => payload, statusPath, appliedModelPath);
     return { code, stdout: logs.join("\n"), stderr: errors.join("\n"), statusPath };
   } finally {
     console.log = originalLog;
@@ -333,6 +338,7 @@ afterEach(() => {
   fakeRecheckStatus = undefined;
   fakeReport = null;
   runtimeError = undefined;
+  fakeAppliedModel = undefined;
   cleanupAgentDirs();
   runInputs.length = 0;
   runStores.length = 0;
@@ -636,6 +642,37 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     // selector, not from a gate.
     expect(stderr).not.toContain("dropped at");
     expect(stderr).toContain("eligible");
+  });
+
+  test("a served round writes the applied-model side document; a round with none writes nothing", async () => {
+    fakeEnvelope = ENVELOPE;
+    const target = join(mkdtempSync(join(tmpdir(), "applied-model-")), "review-applied-model.json");
+    try {
+      // 1. The runtime reports which model served: the document carries it,
+      //    and the published envelope stays the engine's shape (no new field).
+      fakeAppliedModel = "anthropic/claude-app";
+      const servedPath = writeInput({ capabilityHosts: OMP_HOSTS });
+      const served = await runCli(["--level", "quick", "--input", servedPath], undefined, target);
+      expect(served.code).toBe(0);
+      expect(JSON.parse(readFileSync(target, "utf8"))).toEqual({
+        appliedModel: "anthropic/claude-app",
+      });
+      const published = JSON.parse(served.stdout) as Record<string, unknown>;
+      expect(published.appliedModel).toBeUndefined();
+      expect(published.schema).toBe("mstar.review/v1");
+
+      // 2. No model served: no document at all — absence is the fact the
+      //    consumer reads as "leave provider null", never "use the chain head".
+      rmSync(target, { force: true });
+      fakeAppliedModel = undefined;
+      const idlePath = writeInput({ capabilityHosts: OMP_HOSTS });
+      const idle = await runCli(["--level", "quick", "--input", idlePath], undefined, target);
+      expect(idle.code).toBe(0);
+      expect(existsSync(target)).toBe(false);
+    } finally {
+      rmSync(APPLIED_MODEL_PATH, { force: true });
+      rmSync(dirname(target), { recursive: true, force: true });
+    }
   });
 
   test("runtime failure → exit 1, stdout empty, stderr diagnostic", async () => {

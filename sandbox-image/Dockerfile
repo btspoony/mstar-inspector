@@ -195,6 +195,11 @@
 # run's synthesized models.yml and loaded pool). A stale image keeps ending the
 # round with only the first provider's message, so the dropped candidate and
 # its gate stay invisible in `review_failures`.
+# rebuild: a successful round now records WHICH provider served it. The runner
+# observes the session's model and writes `/workspace/review-applied-model.json`
+# beside the recheck/report side documents (`packages/runner/src/runtime-omp.ts`,
+# `runner.ts`); the Worker reads it into `reviews.provider`. A stale image writes
+# no such document, so the column stays NULL — the round is attributed to nobody.
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via

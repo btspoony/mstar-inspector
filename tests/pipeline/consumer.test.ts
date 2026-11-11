@@ -182,6 +182,7 @@ import {
 } from "../helpers/consumer-harness";
 import { withFrozenClock } from "../helpers/clock";
 import { PR_CONTEXT_MAX_ISSUES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
+import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
 
 /** Runner exec call's env (the sandbox fake stores opts as unknown). */
 function runnerExecEnv(): Record<string, string> {
@@ -518,6 +519,9 @@ describe("createReviewConsumer", () => {
       expect.stringContaining(
         "bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'",
       ),
+      // The applied-model read: the runner's own observation of which
+      // provider served, projected onto the review row.
+      expect.stringContaining("review-applied-model.json"),
     ]);
     // The runner input JSON carries the reconFacts the runtime folds into
     // the envelope target (owner/repo#pr + the AUTHORITATIVE checkout sha),
@@ -3790,6 +3794,9 @@ describe("createReviewConsumer", () => {
       readRecheckCommand(RECHECK_OUTPUT_PATH),
       readRecheckStatusCommand(RECHECK_STATUS_PATH),
       readReportCommand(REPORT_OUTPUT_PATH),
+      // The applied-model document: one more post-runner bounded read, on the
+      // same tighter bound as its siblings.
+      readReportCommand(APPLIED_MODEL_PATH),
     ]);
     const timed = sandbox.calls.filter(
       (call) => (call.opts as { timeout?: number } | undefined)?.timeout === EXEC_TIMEOUT_GIT_MS,
@@ -3797,7 +3804,7 @@ describe("createReviewConsumer", () => {
     // The post-runner bounded reads carry their own tighter bound, not the
     // git window (nor the capture's, which it happens to share numerically).
     const postRunner = sandbox.calls.filter((call) => postRunnerCmds.has(call.cmd));
-    expect(postRunner).toHaveLength(3);
+    expect(postRunner).toHaveLength(4);
     for (const read of postRunner) {
       expect((read.opts as { timeout?: number } | undefined)?.timeout).toBe(POST_RUNNER_READ_TIMEOUT_MS);
     }
@@ -3811,8 +3818,11 @@ describe("createReviewConsumer", () => {
     expect(captured).toHaveLength(1 + PR_CONTEXT_MAX_ISSUES);
     // One command per billed window — except `readRecheckDoc`, which races the
     // document and status reads in ONE Promise.all window (two commands, one
-    // entry). A new sandbox step without its ledger entry breaks this.
-    expect(timed.length + captured.length + postRunner.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 1);
+    // entry; the `+1` below), and the applied-model read, which bills a window
+    // the step ledger does not itemise (the `+2`). A new sandbox step without
+    // its ledger entry — or one more post-runner read than these two accounted
+    // for — breaks this.
+    expect(timed.length + captured.length + postRunner.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 2);
   });
 
   test("guardRetryDelaysSeconds per level — the schedule covers the guard TTL (AC-4)", () => {

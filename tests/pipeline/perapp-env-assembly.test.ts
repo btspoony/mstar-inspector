@@ -167,9 +167,22 @@ const sandboxCalls: Array<{ cmd: string; opts?: unknown; startedAt: number }> = 
 /** Numstat stdout for the next run (the reconFacts carrier; set per test). */
 let numstatStdout = "";
 
+/**
+ * The runner's applied-model document this test's container "wrote":
+ * `undefined` = the runner wrote none (no model served), a string = the
+ * document's JSON text. The double answers the SAME bounded-read contract the
+ * real file read produces (`<content>\n0\n`, or the proven-absence flag line).
+ */
+let appliedModelDoc: string | undefined;
+
 const fakeSandbox = {
   runCommand: mock(async (cmd: string, opts?: unknown) => {
     sandboxCalls.push({ cmd, opts, startedAt: Date.now() });
+    if (cmd.includes("review-applied-model.json")) {
+      return appliedModelDoc === undefined
+        ? { stdout: "\n2\n", stderr: "", exitCode: 0 }
+        : { stdout: `${appliedModelDoc}\n0\n`, stderr: "", exitCode: 0 };
+    }
     if (cmd.includes("rev-parse")) {
       return { stdout: `${SHA}\n`, stderr: "", exitCode: 0 };
     }
@@ -318,6 +331,7 @@ function makeBatch(...bodies: ReviewJobPayload[]): MessageBatch<ReviewJobPayload
 }
 
 function reset(): void {
+  appliedModelDoc = undefined;
   sandboxCalls.length = 0;
   appCalls.length = 0;
   kvGuardPuts.length = 0;
@@ -1108,6 +1122,56 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({ "frontend-dev": "my-provider/m1" });
     expect(appCalls).toEqual(["token", "plan", "post"]);
+  });
+});
+
+describe("applied-provider attribution (runner observation → reviews.provider)", () => {
+  const storedProvider = async (db: ReturnType<typeof createMigratedTestD1>): Promise<string | null> => {
+    const row = db.raw.query("SELECT provider FROM reviews WHERE pr_number = 42").get() as {
+      provider: string | null;
+    } | null;
+    return row?.provider ?? null;
+  };
+
+  test("a round whose seat applied the SECOND selector stores that provider, not the chain head", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    // The chain's head is the first selector; the round actually ran the second.
+    await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app", {
+      anthropic: sk("app-x-SECRET"),
+      openai: sk("app-x-openai-SECRET"),
+    });
+    appliedModelDoc = JSON.stringify({ appliedModel: "anthropic/claude-app" });
+
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+
+    // The ONE projection: the runner's observation reaches the row verbatim.
+    expect(await storedProvider(db)).toBe("anthropic/claude-app");
+    // …and the configured head is still recorded where it belongs.
+    const model = db.raw.query("SELECT model FROM reviews WHERE pr_number = 42").get() as {
+      model: string | null;
+    };
+    expect(model.model).toBe("openai/gpt-app");
+  });
+
+  test("a round that applied NO model leaves provider null — never the chain head", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app", {
+      anthropic: sk("app-x-SECRET"),
+      openai: sk("app-x-openai-SECRET"),
+    });
+    appliedModelDoc = undefined; // the runner wrote no document
+
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+
+    expect(await storedProvider(db)).toBeNull();
+    // The absence is visible as the ordinary shape, never as a fault.
+    expect(logLines.some((line) => line.fields.applied_model === "absent")).toBe(false);
   });
 });
 

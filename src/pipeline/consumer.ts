@@ -96,6 +96,7 @@ import {
 } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
+import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
 import type { CustomProviderDeclaration, ReviewLevel } from "../../packages/shared/src/runtime";
 import { providerEnvName } from "./provider-catalog";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
@@ -634,6 +635,12 @@ export type ConsumerLogFields = {
    * `report_doc_error`; `stale-head` carries the head the document was bound to
    * in `report_doc_head_sha` (a validated sha, never free text).
    */
+  /**
+   * The runner's applied-model document read: `absent` is the ordinary
+   * no-model-served shape; the rest name a fault that left `reviews.provider`
+   * unrecorded (never replaced by the chain head).
+   */
+  applied_model?: "absent" | "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document";
   report_doc?: "absent" | "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document" | "stale-head";
   report_doc_error?: string;
   report_doc_head_sha?: string;
@@ -1241,6 +1248,46 @@ async function applyPendingLifecycleJournals(
  * reach a public body — the seat's text is model output like any other, and a
  * prompt-injected credential can hide in a PR description it quoted.
  */
+/**
+ * The runner's applied-model document: WHICH `provider/model` actually served
+ * the round, or null when the runner wrote none (no model served). This is a
+ * projection of the runner's observation — never a derivation from the
+ * configured chain, which would report what we asked for instead of what ran.
+ * A broken read or document is null with one warn: losing the attribution must
+ * never lose the review, and it must never invent a provider either.
+ */
+async function readAppliedProvider(
+  sandbox: ReviewSandbox,
+  log: ConsumerLog,
+  fields: ConsumerLogFields,
+): Promise<string | null> {
+  const read = await boundedRead(sandbox, readReportCommand(APPLIED_MODEL_PATH), POST_RUNNER_READ_TIMEOUT_MS, true);
+  if (read.failure !== null) {
+    // `absent` is the ordinary no-model-served shape — no warn without a fault.
+    if (read.failure !== "absent") {
+      log.warn({ ...fields, applied_model: read.failure }, `applied-model document ${read.failure}`);
+    }
+    return null;
+  }
+  if (read.text === null || read.text.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(read.text);
+  } catch {
+    log.warn({ ...fields, applied_model: "invalid-json" }, "applied-model document is not JSON — left unrecorded");
+    return null;
+  }
+  const value = (parsed as { appliedModel?: unknown } | null)?.appliedModel;
+  if (typeof value !== "string" || value.trim() === "") {
+    log.warn(
+      { ...fields, applied_model: "invalid-document" },
+      "applied-model document carries no provider — left unrecorded",
+    );
+    return null;
+  }
+  return value.trim();
+}
+
 async function readReportDoc(
   sandbox: ReviewSandbox,
   secretValues: string[],
@@ -5115,6 +5162,13 @@ async function processMessage(
     const report: ReportDoc | null =
       prContext !== undefined ? await readReportDoc(sandbox, secretValues, headSha, deps.log, fields) : null;
 
+    // Which provider actually served — the runner's own observation, projected
+    // here and NOWHERE derived again. null = the runner reported none (no model
+    // served), which stays null on the row; it is never replaced with the chain
+    // head, because that would report the configured first selector as if it
+    // had run.
+    const appliedProvider = await readAppliedProvider(sandbox, deps.log, fields);
+
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
     // parseReviewOutput is a pure function of run.stdout —
@@ -5463,7 +5517,7 @@ async function processMessage(
         payload: output,
         appId: payload.appRef.appId,
         model: chainHeadSelector(effectiveModelChain(appCfg).chain),
-        provider: null,
+        provider: appliedProvider,
         // A stale-context round (its pending lifecycle journal failed to
         // apply OR its capture failed) still publishes, but its row must
         // never be an incremental base: the flag rides the staged artifact

@@ -110,6 +110,7 @@ import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
 import { attributeChain, formatChainAttribution, walkSeatGates } from "./seat-failover-probe";
 import { writePerReviewModelsYaml } from "./models-synthesis";
 import { decodeCredentialPayload } from "../../shared/src/credential-payload";
+import { APPLIED_MODEL_PATH, type AppliedModelDoc } from "../../shared/src/runtime";
 import { RECHECK_STATUS_PATH, type RecheckInput, type RecheckStatus } from "../../shared/src/recheck-wire";
 import { type PrContext } from "../../shared/src/report-wire";
 
@@ -711,6 +712,10 @@ export async function main(
   runtime: AgentRuntime = ompAgentRuntime,
   readStdin: () => Promise<string> = readCredentialStdin,
   statusPath: string = process.env.MSTAR_RECHECK_STATUS_PATH?.trim() || RECHECK_STATUS_PATH,
+  // The applied-model document's path: fixed in the image, a parameter for the
+  // SAME reason as `statusPath` — a test must write its own file, never the
+  // production one.
+  appliedModelPath: string = APPLIED_MODEL_PATH,
 ): Promise<number> {
   let level: string;
   let inputPath: string;
@@ -855,7 +860,27 @@ export async function main(
     }
 
     try {
-      const { envelope, recheck, recheckStatus, report } = await runtime.runReview(input);
+      const { envelope, recheck, recheckStatus, report, appliedModel } = await runtime.runReview(input);
+      // The applied model crosses the container boundary as its OWN document:
+      // the published envelope is the engine's schema and must not grow fields.
+      // Written only when a model actually served — an absent file is the
+      // round's "no model served", which the Worker must never read as "the
+      // chain head". A write failure is logged, never turned into a failed
+      // review: the review is already valid, and losing the attribution must
+      // not lose the review with it.
+      if (appliedModel !== undefined) {
+        try {
+          writeFileSync(appliedModelPath, JSON.stringify({ appliedModel } satisfies AppliedModelDoc));
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "applied_model_write_failed",
+              path: appliedModelPath,
+              reason: (error as Error).message,
+            }),
+          );
+        }
+      }
       // The optional --recheck-out file is written only when a
       // recheck result exists, and BEFORE the envelope reaches stdout — a
       // write failure is a genuine I-O failure (exit 1, no stdout), not a
