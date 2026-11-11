@@ -2937,16 +2937,19 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     // due time to: a rung that ignores it would hold the row past its own
     // hard stop.
     const deadline = T0 + 150_000;
+    const deferredAt = T0 + 120_000;
+    // The premise this case rests on: the deadline is strictly inside the rung.
+    expect(deadline).toBeLessThan(deferredAt + CHECK_BACKOFF_MS[0]!);
     const { id } = await abandonedAttempt(db, deadline);
     const stub = stubFetch();
     try {
       const waiting = await run(db, {
-        now: () => T0 + 120_000,
+        now: () => deferredAt,
         credentials: scriptedCredentials(db),
       });
       expect(waiting.deferred).toBe(1);
       // The due time the wait pushes never outlives the deadline.
-      expect((await rawRow(db, id)).next_attempt_ms).toBe(Math.min(T0 + 120_000 + CHECK_BACKOFF_MS[0]!, deadline));
+      expect((await rawRow(db, id)).next_attempt_ms).toBe(deadline);
 
       // The pass AFTER the deadline — the rung has not elapsed yet — must
       // already select the row and conclude it.
