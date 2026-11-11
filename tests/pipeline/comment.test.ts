@@ -1373,6 +1373,41 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body.split("\n").filter((line) => /^ {0,3}~{3,}/.test(line))).toHaveLength(2);
   });
 
+  test("a clamp cut between the halves of an emoji leaves no lone surrogate", () => {
+    // The clamp keeps `REVIEW_BODY_LIMIT - 1` units of the rendered core, so the
+    // cut index is fixed. One probe build locates the finding body inside that
+    // core; the emoji is then placed exactly on the cut. A finding body renders
+    // verbatim, so both builds share the same renderer prefix and cut index.
+    const AT = "\u27E6finding-body\u27E7";
+    const review = (body: string) =>
+      buildReviewBody({
+        schema: "mstar.review/v1",
+        verdict: "blocked",
+        summary_md: "x",
+        findings: [{ mergeClass: "must-fix", title: "Emoji", file_path: "src/a.ts", line_start: 1, line_end: 1, body }],
+      });
+    const bodyAt = review(`${AT}${"y".repeat(REVIEW_BODY_LIMIT)}`).indexOf(AT);
+    expect(bodyAt).toBeGreaterThan(0);
+    const pad = "y".repeat(REVIEW_BODY_LIMIT);
+    // Body-relative index of the first unit the cut drops.
+    const firstDropped = REVIEW_BODY_LIMIT - 1 - bodyAt;
+    // Two units swapped for the pair, so the total length — and the cut — hold.
+    const withEmoji = (highAt: number): string => `${pad.slice(0, highAt)}😀${pad.slice(highAt + 2)}`;
+    // A lone surrogate is a high half with no low half after it, or a low half
+    // with no high half before it.
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+    // The cut keeps the high half and drops the low one.
+    const split = review(withEmoji(firstDropped - 1));
+    expect(split.endsWith("…")).toBe(true);
+    expect(split).not.toMatch(lone);
+
+    // The boundary case: the pair ends exactly on the last kept unit, so it survives whole.
+    const whole = review(withEmoji(firstDropped - 2));
+    expect(whole).toContain("😀");
+    expect(whole).not.toMatch(lone);
+  });
+
   test("within-limit bodies pass through verbatim", () => {
     const publicationMarker = buildPublicationMarker({
       publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
