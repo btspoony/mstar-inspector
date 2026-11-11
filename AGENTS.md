@@ -37,9 +37,12 @@ Then run the check from that worktree (or pass `--path <dir>`). It prints the di
 bun scripts/check-worktree-install.ts
 ```
 
-- **exit 0, "has its own node_modules"** — a local tree; the comparison resolves what the worktree installed.
-- **exit 1, "worktree-install-inherited"** — no local tree, and a parent one is reachable; the message names both paths. Install, then re-run.
+- **exit 0, "has its own node_modules"** — a populated local tree that resolves inside the worktree, and whose manager marker (when the tree carries one) names a manager the repository's lockfiles name. It does not prove that every package resolves there.
 - **exit 0, "nothing to inherit"** — no local tree and none reachable: nothing to borrow, nothing to claim.
+- **exit 1, "worktree-install-inherited"** — no local tree, and a parent one is reachable; the message names both paths. Install, then re-run.
+- **exit 1, "worktree-install-unproven"** — a `node_modules` that is a link out of the worktree, or that holds no packages: the directory exists, but it proves no local install.
+- **exit 1, "worktree-install-foreign"** — the local tree carries another manager's marker (`npm`, `yarn`, `pnpm`) while the repository's lockfiles name a different one; the message names both.
+- **exit 1, "worktree-install-uninspectable"** — a path on the way could not be read (permissions, a symlink loop); an unreadable answer is never a pass.
 
 This is a documented guard, not a CI gate: a CI checkout has no parent tree above the workspace, so there the check can only ever print the neutral pass. Its own test runs in the normal test sweep.
 

@@ -8,7 +8,7 @@
  * never this repository, never a real install.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,7 +20,13 @@ function fixture(): { dir: string; cleanup: () => void } {
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
+/** A populated install: a directory that holds no packages proves nothing. */
 function modules(dir: string): void {
+  mkdirSync(join(dir, "node_modules", "some-pkg"), { recursive: true });
+}
+
+/** A bare `node_modules` directory — the shape that used to pass as an install. */
+function emptyModules(dir: string): void {
   mkdirSync(join(dir, "node_modules"), { recursive: true });
 }
 
@@ -125,6 +131,83 @@ describe("check-worktree-install", () => {
       const { code, out } = run(worktree);
       expect(code).toBe(0);
       expect(out).toContain("nothing to inherit");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("a local node_modules that resolves outside the worktree is not a pass", () => {
+    const { dir, cleanup } = fixture();
+    try {
+      modules(dir); // the parent tree a link would borrow
+      const worktree = join(dir, "worktree");
+      mkdirSync(worktree, { recursive: true });
+      symlinkSync(join(dir, "node_modules"), join(worktree, "node_modules"));
+      const { code, out } = run(worktree);
+      expect(code).toBe(1);
+      expect(out).toContain("worktree-install-unproven");
+      expect(out).toContain(join(realpathSync(dir), "node_modules"));
+      expect(out).not.toContain("has its own node_modules");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("an empty local node_modules does not certify an install", () => {
+    const { dir, cleanup } = fixture();
+    try {
+      modules(dir); // a reachable ancestor tree
+      const worktree = join(dir, "worktree");
+      emptyModules(worktree);
+      const { code, out } = run(worktree);
+      expect(code).toBe(1);
+      expect(out).toContain("worktree-install-unproven");
+      expect(out).toContain(join(realpathSync(dir), "node_modules"));
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("an empty local node_modules with no ancestor is still not a pass", () => {
+    const { dir, cleanup } = fixture();
+    try {
+      const worktree = join(dir, "worktree");
+      emptyModules(worktree);
+      const { code, out } = run(worktree);
+      expect(code).toBe(1);
+      expect(out).toContain("worktree-install-unproven");
+      expect(out).not.toContain("nothing to inherit");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("an install from a manager the repository does not use is reported", () => {
+    const { dir, cleanup } = fixture();
+    try {
+      const worktree = join(dir, "worktree");
+      modules(worktree);
+      writeFileSync(join(worktree, "bun.lock"), "");
+      writeFileSync(join(worktree, "node_modules", ".package-lock.json"), "{}\n");
+      const { code, out } = run(worktree);
+      expect(code).toBe(1);
+      expect(out).toContain("worktree-install-foreign");
+      expect(out).toContain("npm");
+      expect(out).toContain("bun.lock");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("a tree from the repository's own manager passes", () => {
+    const { dir, cleanup } = fixture();
+    try {
+      const worktree = join(dir, "worktree");
+      modules(worktree);
+      writeFileSync(join(worktree, "bun.lock"), "");
+      const { code, out } = run(worktree);
+      expect(code).toBe(0);
+      expect(out).toContain("has its own node_modules");
     } finally {
       cleanup();
     }
