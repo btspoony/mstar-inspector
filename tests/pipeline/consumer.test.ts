@@ -6288,15 +6288,17 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.some((request) => request.op === "update")).toBe(false);
   });
 
-  test("check lifecycle: a guard-held delivery never settles its attached run", async () => {
+  test("check lifecycle: a guard-held refusal settles its attached run neutral", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const payload = makePayload();
     // The delivery attached this message's run; the guard then holds it for a
-    // delayed retry. That retry reviews the SAME head, so freezing the intent
-    // now would retire the head it is about to review.
+    // delayed retry. The refusal settles that run neutral (naming the refusal)
+    // so it cannot close red at the attach window — and because a neutral
+    // settlement no longer retires the head, the retry still claims its own
+    // generation.
     const attached = await attachCheckAtAcceptance(
       { db: db as never, adapter, nowMs: () => Date.now() },
       {
@@ -6323,12 +6325,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(makeBatch(payload));
 
     expect(messageRetryCalls).toHaveLength(1);
-    // Untouched: the retry adopts this row and runs its own review.
     const row = checkRowFor(db, SHA);
-    expect(row.desired).toBe("in_progress");
-    expect(row.observed).toBe("unknown");
-    expect(row.terminal_ms).toBeNull();
-    expect(checkRequests.some((request) => request.op === "update")).toBe(false);
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("neutral");
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.desired_summary).toContain("review admission refused");
+    const update = checkRequests.find((request) => request.op === "update")!;
+    expect((update.params as unknown as ChecksUpdateParams).conclusion).toBe("neutral");
+    expect((update.params as unknown as ChecksUpdateParams).output.summary).toContain("review admission refused");
   });
 
   test("check lifecycle: the settlement is keyed on the payload SHA, not the checkout SHA", async () => {

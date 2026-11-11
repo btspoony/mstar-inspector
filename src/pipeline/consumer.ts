@@ -4422,9 +4422,13 @@ async function processMessage(
       // refused attempt would write "failure" rows for reviews that a later
       // delayed attempt goes on to complete. `pr-held` carries the live row's
       // sha so that ack can tell a duplicate from a commit it never covers.
-      // Deliberately NOT settled (§7.9): a guard refusal RETRIES this same
-      // message, so freezing its intent now would retire the head the retry is
-      // about to review. The attach row stays untouched and the retry adopts it.
+      // §7.9: a guard refusal never reaches `begin`, so its attached run has
+      // nobody to terminalize it. It is settled `neutral` with the refusal
+      // named — on EVERY refusal, not only the last one: a neutral settlement
+      // does not retire the head, so the delayed retry still claims a fresh
+      // generation and mints its own run. Best-effort: a fault is one warn and
+      // never changes the ACK/retry semantics.
+      await settleSkippedCheck(`review admission refused: ${admission.reason}`, payload.head_sha);
       return {
         kind: "guard-held",
         admission: refusal,

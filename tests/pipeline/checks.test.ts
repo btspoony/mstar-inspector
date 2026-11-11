@@ -2883,6 +2883,72 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     // A frozen intent is due immediately: no due time, no proof to wait for.
     expect((await listCheckReconcileBatch(db, T0)).map((candidate) => candidate.identity.attemptId)).toEqual([attemptId]);
   });
+  test("a retry after a neutral settlement claims a new generation and its own run", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // Each create mints a distinct run id, so "its own run" is provable.
+    let runSeq = 5000;
+    const externalByRun = new Map<number, string>();
+    const fake = fakeChecks({
+      create: (params) => {
+        runSeq += 1;
+        externalByRun.set(runSeq, params.external_id);
+        return { ...echoCreate(params), id: runSeq };
+      },
+      update: (params) => ({
+        id: params.check_run_id,
+        name: CHECK_NAME,
+        head_sha: SHA,
+        external_id: externalByRun.get(params.check_run_id) ?? "",
+        status: "completed",
+        conclusion: params.conclusion,
+        app: { id: GITHUB_APP_ID },
+      }),
+    });
+    const adapter = adapterFor(db, fake.octokit);
+    const firstId = await attachedAttempt(db, fake);
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapter,
+      getCheckGate: async () => GATE,
+    });
+
+    // The guard refusal settles this delivery's run neutral.
+    expect(
+      await lifecycle.settleSkipped({
+        scope: SCOPE,
+        headSha: SHA,
+        triggeredBy: "octocat",
+        action: "review",
+        reason: "review admission refused: pr-held",
+      }),
+    ).toBe(true);
+    const settled = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(firstId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(settled.observed).toBe("neutral");
+    expect(settled.terminal_ms).not.toBeNull();
+    const settledRunId = settled.check_run_id as number;
+
+    // The retry (60 s later) claims a NEW generation: the settled row does not
+    // retire the head, and the new generation mints its own run.
+    CLOCK = T0 + 60_000;
+    const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
+    expect(handle).not.toBeNull();
+    expect(handle!.attemptId).not.toBe(firstId);
+    expect(fake.creates).toHaveLength(2);
+    const retryRow = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(handle!.attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(retryRow.generation).toBe(2);
+    expect(retryRow.check_run_id).not.toBe(settledRunId);
+    expect(retryRow.check_run_id).not.toBeNull();
+    expect(retryRow.observed).toBe("unknown");
+    expect(retryRow.terminal_ms).toBeNull();
+  });
   test("a duplicate skip is a no-op: the row is already terminal", async () => {
     const db = await seededDb();
     CLOCK = T0;
