@@ -36,6 +36,7 @@ import {
   type SettingsManagePayload,
 } from "../../src/spa/pages/data";
 import { ProvidersSection } from "../../src/spa/pages/settings-providers";
+import { UsagePanel } from "../../src/spa/pages/usage-panel";
 import type { OpNotice } from "../../src/spa/pages/PageNotice";
 import { installDom } from "./dom";
 
@@ -746,6 +747,65 @@ describe("UsagePanel — inline probe under the owning row", () => {
       expect(view.panel()).toBeNull();
     } finally {
       await view.cleanup();
+    }
+  });
+
+  test("a re-render handing the panel a new onClose leaves Escape with the panel opened last", async () => {
+    // Two panels, opened in tree order (a then b), and a mount point that hands
+    // each one a fresh arrow on every render — the settings page's own shape.
+    // A re-render that only renews the FIRST panel's callback must not move
+    // Escape ownership to it.
+    const { win, cleanup: cleanupDom } = installDom("http://localhost/dashboard/acme/apps");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    const closed: string[] = [];
+    const openSnapshot = (percent: number) =>
+      snapshotBody({ limits: [{ id: "commandcode:session", kind: "window", usedFraction: percent / 100, unit: "percent" }] });
+    queue.push(() => new Response(openSnapshot(30)));
+    queue.push(() => new Response(openSnapshot(50)));
+    const second = () => {
+      closed.push("second");
+    };
+    const tree = (first: () => void) =>
+      createElement(
+        "div",
+        null,
+        createElement(UsagePanel, {
+          key: "first",
+          locale,
+          appId: 42,
+          provider: probedProvider,
+          keyId: "aaaa1111bbbb2222",
+          open: true,
+          onClose: first,
+        }),
+        createElement(UsagePanel, {
+          key: "second",
+          locale,
+          appId: 42,
+          provider: probedProvider,
+          keyId: "cccc3333dddd4444",
+          open: true,
+          onClose: second,
+        }),
+      );
+    try {
+      await act(async () => root.render(tree(() => closed.push("first"))));
+      await act(async () => {});
+      // A re-render that renews only the first panel's callback.
+      await act(async () => root.render(tree(() => closed.push("first"))));
+      await act(async () => {});
+
+      await act(async () => {
+        (win.document as unknown as Document).dispatchEvent(
+          new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as unknown as Event,
+        );
+      });
+      expect(closed).toEqual(["second"]);
+    } finally {
+      await act(async () => root.unmount());
+      cleanupDom();
     }
   });
 
