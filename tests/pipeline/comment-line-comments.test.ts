@@ -276,12 +276,15 @@ describe("renderLineCommentText (the LineIntent.body payload — marker appended
 
 type PullsCalls = {
   createReviewParams?: Record<string, unknown>;
+  listCommentsForReviewParams?: Record<string, unknown>;
 };
 
 function mockPullsOctok(options: {
   createReviewError?: unknown;
   omitCreateReview?: boolean;
   createReviewResponse?: unknown;
+  listCommentsForReviewError?: unknown;
+  listCommentsForReviewResponse?: unknown;
 }): { calls: PullsCalls; octokit: PostOctokit } {
   const calls: PullsCalls = {};
   const octokit: PostOctokit = {
@@ -310,6 +313,15 @@ function mockPullsOctok(options: {
                 return options.createReviewResponse ?? {};
               }),
             }),
+        listCommentsForReview: mock(
+          async (params: Record<string, unknown>): Promise<{ data: Array<{ id?: unknown; path?: unknown; line?: unknown }> }> => {
+            calls.listCommentsForReviewParams = params;
+            if (options.listCommentsForReviewError) throw options.listCommentsForReviewError;
+            return (options.listCommentsForReviewResponse ?? { data: [] }) as {
+              data: Array<{ id?: unknown; path?: unknown; line?: unknown }>;
+            };
+          },
+        ),
       },
     },
   };
@@ -403,6 +415,62 @@ describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 s
       ],
       ambiguous: [],
       captured: true,
+      reviewId: 55,
+    });
+    // An echoed comments array is the whole answer — no second request.
+    expect(calls.listCommentsForReviewParams).toBeUndefined();
+  });
+
+  test("comments-less create response: the review's comments connection is read once and maps both ids", async () => {
+    const { calls, octokit } = mockPullsOctok({
+      createReviewResponse: { data: { id: 55 } },
+      listCommentsForReviewResponse: {
+        data: [
+          { id: 301, path: "src/auth.ts", line: 21 },
+          { id: 302, path: "src/auth.ts", line: 33 },
+        ],
+      },
+    });
+    const result = await postLineCommentsWithOctokit(octokit, input);
+
+    expect(calls.listCommentsForReviewParams).toEqual({
+      owner: "acme",
+      repo: "widgets",
+      pull_number: 42,
+      review_id: 55,
+      per_page: 100,
+    });
+    expect(result).toEqual({
+      posted: [
+        { associationId: "11111111-2222-4333-8444-555555555555", commentId: 301, path: "src/auth.ts", line: 21 },
+        { associationId: "33333333-4444-4555-8666-777777777777", commentId: 302, path: "src/auth.ts", line: 33 },
+      ],
+      ambiguous: [],
+      captured: true,
+      reviewId: 55,
+    });
+  });
+
+  test("an unreadable comments connection is never fatal: capture stays false and the review id is still reported", async () => {
+    const { calls, octokit } = mockPullsOctok({
+      createReviewResponse: { data: { id: 55 } },
+      listCommentsForReviewError: Object.assign(new Error("Not Found"), { status: 404 }),
+    });
+    const result = await postLineCommentsWithOctokit(octokit, input);
+
+    expect(calls.listCommentsForReviewParams).toBeDefined();
+    expect(result).toEqual({ posted: [], ambiguous: [], captured: false, reviewId: 55 });
+  });
+
+  test("a malformed comments connection (non-array data) is a failed capture, not a crash", async () => {
+    const { octokit } = mockPullsOctok({
+      createReviewResponse: { data: { id: 55 } },
+      listCommentsForReviewResponse: { data: null },
+    });
+    expect(await postLineCommentsWithOctokit(octokit, input)).toEqual({
+      posted: [],
+      ambiguous: [],
+      captured: false,
       reviewId: 55,
     });
   });

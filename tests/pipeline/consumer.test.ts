@@ -63,7 +63,7 @@ import {
 } from "../../src/dashboard/runtime-config-store";
 import { REDACTED } from "../../src/pipeline/redact";
 import type { PipelineEnv } from "../../src/pipeline/consumer";
-import type { InstallationTokenGrant, ReviewCommenter, UpsertPlan } from "../../src/pipeline/comment";
+import type { DiscoveryResult, InstallationTokenGrant, ReviewCommenter, UpsertPlan } from "../../src/pipeline/comment";
 import type { CommenterCall } from "../helpers/review-commenter";
 // the Check lifecycle is driven through PRODUCTION code — the real
 // registry double plus a scripted GitHub Checks surface (no live request).
@@ -188,6 +188,10 @@ import {
   attributionEntries,
   formatFailureAttribution,
 } from "../../packages/runner/src/seat-failover-probe";
+
+// The binding helper is exercised DIRECTLY as well as through the pipeline.
+// Loaded dynamically (after the harness) so the workerd shim still runs first.
+const { bindUnboundThreads, BIND_UNBOUND_THREADS_MAX_ENTRIES } = await import("../../src/pipeline/consumer");
 
 /** Runner exec call's env (the sandbox fake stores opts as unknown). */
 function runnerExecEnv(): Record<string, string> {
@@ -5478,6 +5482,223 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
     expect(
       logLines.some((l) => l.msg.includes("inline resolution admission exhausted") && l.msg.includes(unvisited.assocId)),
     ).toBe(true);
+  });
+});
+
+describe("bind unbound review threads before the discussion capture (§7.5/§7.8)", () => {
+  const SCOPE = { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
+  const TARGETS = [{ rowId: TARGET_ROW_ID } as RecheckTarget];
+
+  /**
+   * One association row for the seeded target. The row id IS the association
+   * id, so a discovery call can be attributed to exactly one row.
+   */
+  function seedThread(
+    db: TestD1,
+    associationId: string,
+    {
+      threadId = null,
+      intentJson,
+      superseded = false,
+      createdMs = 3_000,
+    }: { threadId?: string | null; intentJson?: string; superseded?: boolean; createdMs?: number } = {},
+  ): void {
+    const intent =
+      intentJson ??
+      JSON.stringify({
+        associationId,
+        findingRowId: TARGET_ROW_ID,
+        publicationId: PRIOR_PUB_ID,
+        scope: SCOPE,
+        originalSha: PRIOR_SHA,
+        round: 1,
+        path: "src/auth.ts",
+        line: 21,
+        body: "old comment body",
+        bodySha256: "digest-old",
+      });
+    db.raw
+      .prepare(
+        `INSERT INTO review_threads
+           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+            original_sha, round, intent_json, resolution_state, thread_id,
+            superseded_by_publication_id, created_ms, updated_ms)
+         VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, 1, ?, 'pending', ?, ?, ?, ?)`,
+      )
+      .run(
+        associationId,
+        TARGET_ROW_ID,
+        PRIOR_PUB_ID,
+        TEST_APP_ID,
+        PRIOR_SHA,
+        intent,
+        threadId,
+        superseded ? PRIOR_PUB_ID : null,
+        createdMs,
+        createdMs,
+      );
+  }
+
+  test("bind: the eligible null-thread association is discovered exactly once; bound, superseded and unreadable rows are not", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    seedThread(db, ASSOC_ID);
+    seedThread(db, "bound-assoc", { threadId: "PRRT_bound" });
+    seedThread(db, "superseded-assoc", { superseded: true });
+    seedThread(db, "unreadable-assoc", { intentJson: "{not json" });
+
+    const result = await bindUnboundThreads(
+      { DB: db as never, commenter: fakeCommenter, log: testLog, fields: {} as never },
+      SCOPE,
+      TARGETS,
+    );
+
+    expect(result).toEqual({ bound: 1, skipped: 1 });
+    const discovered = commenterCalls.filter((c) => c.op === "discover");
+    expect(discovered).toHaveLength(1);
+    const input = discovered[0]!.args as {
+      scope: unknown;
+      intent: { associationId: string };
+      reviewId: number | null;
+    };
+    expect(input.reviewId).toBeNull();
+    expect(input.scope).toEqual(SCOPE);
+    expect(input.intent.associationId).toBe(ASSOC_ID);
+    const warns = logLines.filter((l) => l.level === "warn");
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.msg).toContain("unreadable-assoc");
+  });
+
+  test("bind: stops at the budget cap when more associations are eligible than one round may bind", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    const eligible = BIND_UNBOUND_THREADS_MAX_ENTRIES + 2;
+    for (let i = 0; i < eligible; i += 1) seedThread(db, `cap-assoc-${i}`, { createdMs: 3_000 + i });
+
+    const result = await bindUnboundThreads(
+      { DB: db as never, commenter: fakeCommenter, log: testLog, fields: {} as never },
+      SCOPE,
+      TARGETS,
+    );
+
+    expect(result.bound).toBe(BIND_UNBOUND_THREADS_MAX_ENTRIES);
+    expect(result.skipped).toBe(0);
+    expect(commenterCalls.filter((c) => c.op === "discover")).toHaveLength(BIND_UNBOUND_THREADS_MAX_ENTRIES);
+  });
+
+  test("bind: an undiscoverable head rotates behind younger associations instead of starving them on later rounds", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    const total = BIND_UNBOUND_THREADS_MAX_ENTRIES + 2;
+    for (let i = 0; i < total; i += 1) seedThread(db, `rot-assoc-${i}`, { createdMs: 3_000 + i });
+    const deps = { DB: db as never, commenter: fakeCommenter, log: testLog, fields: {} as never };
+    const discoveredIds = (): string[] =>
+      commenterCalls
+        .filter((c) => c.op === "discover")
+        .map((c) => (c.args as { intent: { associationId: string } }).intent.associationId);
+
+    // Round one spends its whole budget on the oldest rows and binds none.
+    commenterState.discoverResult = { kind: "unknown" };
+    const first = await bindUnboundThreads(deps, SCOPE, TARGETS);
+    expect(first).toEqual({ bound: 0, skipped: BIND_UNBOUND_THREADS_MAX_ENTRIES });
+    expect(discoveredIds()).toEqual(
+      Array.from({ length: BIND_UNBOUND_THREADS_MAX_ENTRIES }, (_, i) => `rot-assoc-${i}`),
+    );
+
+    // Round two must reach the two rows round one could not: the failed head
+    // rotated behind them instead of pinning the selection.
+    commenterState.discoverResult = { kind: "found", reviewId: 9, commentId: 8, threadId: "PRRT_late" };
+    const second = await bindUnboundThreads(deps, SCOPE, TARGETS);
+    const secondIds = discoveredIds().slice(BIND_UNBOUND_THREADS_MAX_ENTRIES);
+    expect(secondIds.slice(0, 2)).toEqual(["rot-assoc-5", "rot-assoc-6"]);
+    expect(second.bound).toBeGreaterThanOrEqual(2);
+  });
+
+  test("bind: a thread bound this round rides the SAME round's capture, model input and verified resolution", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, null);
+    // Doubles that honour the production contract the fix depends on:
+    // discovery PERSISTS the ids (as discoverThreadWithDeps does) and the
+    // capture answers ONLY the threads it was asked for. A broken
+    // bind -> DB -> capture bridge therefore fails this case, instead of being
+    // papered over by a pre-seeded snapshot.
+    const boundThreadId = "PRRT_bound_this_round";
+    const capturedThreads: { associationId: string; threadId: string }[] = [];
+    const statefulCommenter: ReviewCommenter = {
+      ...fakeCommenter,
+      discoverThread: mock(
+        async (input: Parameters<NonNullable<ReviewCommenter["discoverThread"]>>[0]): Promise<DiscoveryResult> => {
+          commenterCalls.push({ op: "discover", args: input });
+          db.raw
+            .prepare("UPDATE review_threads SET review_id = ?, comment_id = ?, thread_id = ?, updated_ms = ? WHERE id = ?")
+            .run(555, 8, boundThreadId, Date.now(), input.intent.associationId);
+          return { kind: "found", reviewId: 555, commentId: 8, threadId: boundThreadId };
+        },
+      ),
+      listDiscussion: mock(async (input: Parameters<ReviewCommenter["listDiscussion"]>[0]) => {
+        commenterCalls.push({ op: "list-discussion", args: input });
+        capturedThreads.push(...input.threads);
+        return {
+          items: [],
+          issueCoverage: "complete" as const,
+          issueModelCoverage: "complete" as const,
+          issueDigest: "issue-digest",
+          capturedMs: 0,
+          threads: input.threads.map((thread) => ({
+            associationId: thread.associationId,
+            threadId: thread.threadId,
+            commentId: 8,
+            headSha: SHA,
+            digest: "digest-" + thread.threadId,
+            commentCount: 1,
+            capturedMs: 0,
+            coverage: "complete" as const,
+            modelCoverage: "complete" as const,
+          })),
+        };
+      }),
+    };
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => statefulCommenter,
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // 1. The capture was asked for the thread this round bound (the binding
+    //    reached the DB before the capture query).
+    expect(capturedThreads).toContainEqual({ associationId: ASSOC_ID, threadId: boundThreadId });
+    // 2. That captured thread reached the model-visible recheck input.
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
+      recheck?: { discussion: { threads: { associationId: string; threadId: string }[] } };
+    };
+    expect(
+      runnerInput.recheck!.discussion.threads.map((thread) => ({
+        associationId: thread.associationId,
+        threadId: thread.threadId,
+      })),
+    ).toContainEqual({ associationId: ASSOC_ID, threadId: boundThreadId });
+    // 3. The resolution gate admitted it durably...
+    const threadRow = db.raw
+      .query("SELECT verified_json FROM review_threads WHERE id = ?")
+      .get(ASSOC_ID) as { verified_json: string | null };
+    expect(JSON.parse(threadRow.verified_json!).snapshot.threadId).toBe(boundThreadId);
+    // ...and the resolve ran for exactly that association.
+    expect(
+      commenterCalls.filter((c) => c.op === "resolve").map((c) => (c.args as { associationId: string }).associationId),
+    ).toEqual([ASSOC_ID]);
   });
 });
 
