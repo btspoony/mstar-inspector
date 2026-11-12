@@ -47,7 +47,8 @@ import {
   type VerifiedResolution,
 } from "../../src/store/finding-lifecycle";
 import type { D1Like } from "../../src/store/types";
-import { createReviewThreads } from "../../src/pipeline/review-threads";
+import { createReviewThreads, type GraphqlOctokit } from "../../src/pipeline/review-threads";
+import { listDiscussionWithOctokit } from "../../src/pipeline/discussion-context";
 import {
   reconcileReviewLifecycle,
   RECONCILE_MAX_REQUESTS,
@@ -1888,5 +1889,93 @@ describe("uncertain-publication discovery ownership (spec §7.5/§7.7, P67-QC-01
       }),
     });
     expect(pubRow(db, "pub-1")).toMatchObject({ phase: "applied", recovery_state: "done" });
+  });
+});
+
+
+/**
+ * `listDiscussion` backed by the REAL §7.8 capture over a GraphQL transport
+ * double: whether discovery can see a comment is decided by the capture switch
+ * the reconciler asks for, not by the fixture.
+ */
+function captureBackedDiscussion(
+  comments: Array<{ commentId: number; body: string; own: boolean }>,
+): NonNullable<Parameters<typeof okReviewer>[0]>["listDiscussion"] {
+  const octokit = {
+    graphql: async () => ({
+      repository: {
+        pullRequest: {
+          headRefOid: SHA,
+          comments: {
+            totalCount: comments.length,
+            pageInfo: { hasPreviousPage: false, startCursor: null },
+            nodes: comments.map((c) => ({
+              id: `i-${c.commentId}`,
+              fullDatabaseId: String(c.commentId),
+              body: c.body,
+              createdAt: "2026-01-01T00:00:00Z",
+              updatedAt: "2026-01-01T00:00:00Z",
+              author: { __typename: c.own ? "Bot" : "User", login: c.own ? "acme-inspector" : "mallory" },
+              viewerDidAuthor: c.own,
+            })),
+          },
+        },
+      },
+    }),
+  } as unknown as GraphqlOctokit;
+  return (input) => listDiscussionWithOctokit(octokit, input);
+}
+
+describe("uncertain-publication discovery through the real capture", () => {
+  const preparedBody = "<!-- mstar-inspector:review-degraded:v1 round=1 -->\n\na degraded body";
+
+  test("an App-authored comment carrying the prepared body proves the publication (no backoff)", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE, { body: preparedBody }), 120_000);
+    db.raw.prepare(`UPDATE review_publications SET phase = 'sending', attempts = 1 WHERE id = 'pub-1'`).run();
+
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: okReviewer(
+        {
+          listDiscussion: captureBackedDiscussion([
+            { commentId: 8001, body: "a human comment", own: false },
+            { commentId: 8002, body: preparedBody, own: true },
+          ]),
+        },
+        { botLogin: "acme-inspector[bot]" },
+      ),
+    });
+
+    // The comment existed all along; the capture was hiding it from the walk:
+    // the proof lands, the lifecycle applies, and no backoff is scheduled.
+    expect(pubRow(db, "pub-1")).toMatchObject({ phase: "applied", recovery_state: "done", last_error: null });
+    expect(summary.applied).toBe(1);
+    expect(summary.unknown).toBe(0);
+  });
+
+  test("a HUMAN comment carrying the identical body proves nothing and still settles as a miss", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE, { body: preparedBody }), 120_000);
+    db.raw.prepare(`UPDATE review_publications SET phase = 'sending', attempts = 1 WHERE id = 'pub-1'`).run();
+
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: okReviewer(
+        { listDiscussion: captureBackedDiscussion([{ commentId: 8003, body: preparedBody, own: false }]) },
+        { botLogin: "acme-inspector[bot]" },
+      ),
+    });
+
+    expect(pubRow(db, "pub-1").phase).toBe("unknown");
+    expect(pubRow(db, "pub-1").attempts).toBe(2);
+    expect(summary.applied).toBe(0);
+    expect(summary.unknown).toBe(1);
+    const unproven = db.raw
+      .query(`SELECT proof_json FROM review_publications WHERE id = 'pub-1'`)
+      .get() as { proof_json: string | null };
+    expect(unproven.proof_json).toBeNull();
   });
 });

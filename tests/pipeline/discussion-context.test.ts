@@ -240,6 +240,31 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
     );
   });
 
+  test("includeOwnPublications exposes the publication to items while digest and model context stay put", async () => {
+    const human = spec("i-human", 1, "please fix the null deref");
+    const own = {
+      ...spec("i-own", 2, "<!-- mstar-inspector:review:v1 round=2 -->\n\n## 📋 Review"),
+      authorType: "Bot",
+      authorLogin: BOT_LOGIN,
+      viewerDidAuthor: true,
+    };
+    const { octokit } = fakeOctokit({ issuePages: [{ comments: [human, own] }] });
+    const filtered = await listDiscussionWithOctokit(octokit, input());
+    const unfiltered = fakeOctokit({ issuePages: [{ comments: [human, own] }] });
+    const withOwn = await listDiscussionWithOctokit(unfiltered.octokit, { ...input(), includeOwnPublications: true });
+
+    // The recovery consumer sees the publication it may have posted…
+    expect(withOwn.items.map((i) => i.id)).toEqual(["1001", "1002"]);
+    expect(withOwn.items[1]!.ownAuthor).toBe(true);
+    // …while the digest stays over the filtered domain (unchanged PR, unchanged digest).
+    expect(withOwn.issueDigest).toBe(filtered.issueDigest);
+    expect(withOwn.issueCoverage).toBe(filtered.issueCoverage);
+    // …and the model context never gains it.
+    expect(boundDiscussion(withOwn).items.map((i) => i.id)).toEqual(
+      boundDiscussion(filtered).items.map((i) => i.id),
+    );
+  });
+
   test("issue API failure → issueCoverage unavailable, thread captures still run (never empty/complete)", async () => {
     const root = spec("c-root", 1, "root");
     const { octokit } = fakeOctokit({

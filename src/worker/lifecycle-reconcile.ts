@@ -940,6 +940,9 @@ async function discoverUncertainPublication(
       repo: scope.repo,
       prNumber: scope.prNumber,
       threads: [], // issue comments only — the publication lives on the PR conversation
+      // The comment this lane is looking for IS one of our own publications,
+      // so the capture must not hide it from the walk.
+      includeOwnPublications: true,
     });
     const hit = discussion.items.find(
       (item) => item.source === "issue" && item.ownAuthor === true && item.body === row.payload.body,
