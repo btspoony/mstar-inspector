@@ -903,13 +903,30 @@ function sameScope(row: AssociationRow, scope: Scope): boolean {
   );
 }
 
+/** REST reports this App as `<slug>[bot]`; GraphQL `author.login` drops the suffix. */
+const BOT_LOGIN_SUFFIX = "[bot]";
+
+/**
+ * The one App-bot login comparison, shared by every ownership gate: GitHub
+ * returns the same identity as `<slug>[bot]` over REST and as the bare
+ * `<slug>` from GraphQL `author.login`, so both shapes must match the one
+ * canonical `botLogin`. A `botLogin` that is not that canonical shape fails
+ * closed (a bare login is never treated as an App identity), as do null and
+ * blank authors — ownership never widens.
+ */
+export function sameAppBotLogin(login: string | null, botLogin: string): boolean {
+  if (login === null || !botLogin.endsWith(BOT_LOGIN_SUFFIX)) return false;
+  const slug = botLogin.slice(0, -BOT_LOGIN_SUFFIX.length);
+  return slug.length > 0 && (login === botLogin || login === slug);
+}
+
 function isBotAuthor(entry: ThreadCommentEntry, botLogin: string): boolean {
-  return entry.authorType === "Bot" && entry.authorLogin === botLogin;
+  return entry.authorType === "Bot" && sameAppBotLogin(entry.authorLogin, botLogin);
 }
 
 /** App-author gate for review stubs (author fields, not a full entry). */
 function isBotIdentity(authorType: string | null, authorLogin: string | null, botLogin: string): boolean {
-  return authorType === "Bot" && authorLogin === botLogin;
+  return authorType === "Bot" && sameAppBotLogin(authorLogin, botLogin);
 }
 
 /**

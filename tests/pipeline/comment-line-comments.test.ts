@@ -314,11 +314,13 @@ function mockPullsOctok(options: {
               }),
             }),
         listCommentsForReview: mock(
-          async (params: Record<string, unknown>): Promise<{ data: Array<{ id?: unknown; path?: unknown; line?: unknown }> }> => {
+          async (params: Record<string, unknown>): Promise<{
+            data: Array<{ id?: unknown; path?: unknown; line?: unknown; original_line?: unknown; body?: unknown }>;
+          }> => {
             calls.listCommentsForReviewParams = params;
             if (options.listCommentsForReviewError) throw options.listCommentsForReviewError;
             return (options.listCommentsForReviewResponse ?? { data: [] }) as {
-              data: Array<{ id?: unknown; path?: unknown; line?: unknown }>;
+              data: Array<{ id?: unknown; path?: unknown; line?: unknown; original_line?: unknown; body?: unknown }>;
             };
           },
         ),
@@ -449,6 +451,94 @@ describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 s
       captured: true,
       reviewId: 55,
     });
+  });
+
+  test("the review's comments connection reports null line/original_line — the marker maps every intent", async () => {
+    // Real shape: \`GET /pulls/{n}/reviews/{id}/comments\` answers with
+    // \`line: null, original_line: null, side: null\` for comments the PR-wide
+    // list anchors, so only the trusted thread marker identifies them.
+    const marked = (intent: (typeof intents)[number], id: number) => ({
+      id,
+      path: intent.path,
+      line: null,
+      original_line: null,
+      side: null,
+      body: buildLineCommentBody({
+        body: intent.body,
+        publicationId: PUBLICATION,
+        associationId: intent.associationId,
+      }),
+    });
+    const { octokit } = mockPullsOctok({
+      createReviewResponse: { data: { id: 55 } },
+      listCommentsForReviewResponse: { data: [marked(intents[0]!, 301), marked(intents[1]!, 302)] },
+    });
+    expect(await postLineCommentsWithOctokit(octokit, input)).toEqual({
+      posted: [
+        { associationId: "11111111-2222-4333-8444-555555555555", commentId: 301, path: "src/auth.ts", line: 21 },
+        { associationId: "33333333-4444-4555-8666-777777777777", commentId: 302, path: "src/auth.ts", line: 33 },
+      ],
+      ambiguous: [],
+      captured: true,
+      reviewId: 55,
+    });
+  });
+
+  test("an unmarked comment still maps through the row anchor (line or original_line)", async () => {
+    const { octokit } = mockPullsOctok({
+      createReviewResponse: { data: { id: 55 } },
+      listCommentsForReviewResponse: {
+        data: [
+          { id: 301, path: "src/auth.ts", line: null, original_line: 21, body: "**First** · must-fix" },
+          { id: 302, path: "src/auth.ts", line: 33, body: "**Second** · nit" },
+        ],
+      },
+    });
+    const result = await postLineCommentsWithOctokit(octokit, input);
+    expect(result.posted.map((p) => [p.associationId, p.commentId])).toEqual([
+      ["11111111-2222-4333-8444-555555555555", 301],
+      ["33333333-4444-4555-8666-777777777777", 302],
+    ]);
+    expect(result.captured).toBe(true);
+  });
+
+  test("an unknown marker never fabricates a mapping and never falls back to the anchor", async () => {
+    const stranger = buildLineCommentBody({
+      body: "somebody else's comment",
+      publicationId: PUBLICATION,
+      associationId: "99999999-aaaa-4bbb-8ccc-dddddddddddd",
+    });
+    const { octokit } = mockPullsOctok({
+      createReviewResponse: { data: { id: 55 } },
+      listCommentsForReviewResponse: {
+        data: [{ id: 301, path: "src/auth.ts", line: 21, original_line: 21, body: stranger }],
+      },
+    });
+    const result = await postLineCommentsWithOctokit(octokit, input);
+    expect(result.posted).toEqual([]);
+    expect(result.ambiguous).toEqual(["src/auth.ts:21", "src/auth.ts:33"]);
+    expect(result.captured).toBe(false);
+  });
+
+  test("a duplicated marker is ambiguous, never two ids for one association", async () => {
+    const duplicated = buildLineCommentBody({
+      body: intents[0]!.body,
+      publicationId: PUBLICATION,
+      associationId: intents[0]!.associationId,
+    });
+    const { octokit } = mockPullsOctok({
+      createReviewResponse: { data: { id: 55 } },
+      listCommentsForReviewResponse: {
+        data: [
+          { id: 301, path: "src/auth.ts", line: null, original_line: null, body: duplicated },
+          { id: 302, path: "src/auth.ts", line: null, original_line: null, body: duplicated },
+        ],
+      },
+    });
+    const result = await postLineCommentsWithOctokit(octokit, input);
+    expect(result.posted).toEqual([]);
+    expect(result.ambiguous).toEqual(["src/auth.ts:21", "src/auth.ts:33"]);
+    expect(result.captured).toBe(false);
   });
 
   test("an unreadable comments connection is never fatal: capture stays false and the review id is still reported", async () => {

@@ -43,6 +43,7 @@ import {
   lineMarker,
   parseLineBatchMarker,
   parseLineMarker,
+  sameAppBotLogin,
   stripInspectorMarkerSyntax,
 } from "../../src/pipeline/review-threads";
 import {
@@ -58,7 +59,10 @@ import { createMigratedTestD1, mapAppToDefaultWorkspace, type TestD1 } from "../
 const APP_ID = "11111111-2222-3333-4444-555555555555";
 const GITHUB_APP_ID = 1001;
 const SLUG = "test-inspector";
-const BOT_LOGIN = `${SLUG}[bot]`;
+// GraphQL `author.login` returns the bare slug for this App; REST
+// `user.login` carries the `[bot]` suffix — both are the same identity.
+const BOT_LOGIN = SLUG;
+const REST_BOT_LOGIN = `${SLUG}[bot]`;
 const INSTALLATION_ID = 123;
 const SCOPE: Scope = { appId: APP_ID, installationId: INSTALLATION_ID, owner: "acme", repo: "widgets", prNumber: 42 };
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -498,6 +502,30 @@ describe("opaque marker wire (§7.5)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// App-bot login shapes
+// ---------------------------------------------------------------------------
+
+describe("sameAppBotLogin — one predicate for both GitHub login shapes", () => {
+  const CANONICAL = `${SLUG}[bot]`;
+
+  test("the bare GraphQL author and the suffixed REST author both match", () => {
+    expect(sameAppBotLogin(SLUG, CANONICAL)).toBe(true);
+    expect(sameAppBotLogin(CANONICAL, CANONICAL)).toBe(true);
+  });
+
+  test("null, blank, another App and a non-canonical botLogin fail closed", () => {
+    expect(sameAppBotLogin(null, CANONICAL)).toBe(false);
+    expect(sameAppBotLogin("", CANONICAL)).toBe(false);
+    expect(sameAppBotLogin("other-app", CANONICAL)).toBe(false);
+    expect(sameAppBotLogin("other-app[bot]", CANONICAL)).toBe(false);
+    // A botLogin that is not the canonical `<slug>[bot]` never matches a bare
+    // login: a human account named after the slug is not an App identity.
+    expect(sameAppBotLogin(SLUG, SLUG)).toBe(false);
+    expect(sameAppBotLogin(CANONICAL, SLUG)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Discovery (§7.5 "Discovery/adoption")
 // ---------------------------------------------------------------------------
 
@@ -546,6 +574,28 @@ describe("discoverThread — ownership proof precedes adoption", () => {
     expect(await ops.discoverThread({ scope: SCOPE, intent, reviewId: 555 })).toEqual({ kind: "foreign" });
     // Rejected before the thread scan — the batch gate precedes adoption.
     expect(calls.some((c) => c.kind === "reviewThreads")).toBe(false);
+  });
+
+  test("the REST-shaped `<slug>[bot]` author also matches (GraphQL drops the suffix)", async () => {
+    const db = await createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    // Root comment from GraphQL (bare) while the batch review stub carries the
+    // REST shape — one predicate, both call sites.
+    const { octokit } = fakeOctokit({
+      reviews: [batchReview(PUB_ID, { authorLogin: REST_BOT_LOGIN })],
+      reviewThreadsPages: [{ threads: [discoveryThread(intent)], hasNextPage: false }],
+    });
+    expect(
+      await createReviewThreads(makeDeps(db, octokit)).discoverThread({ scope: SCOPE, intent, reviewId: 555 }),
+    ).toEqual({ kind: "found", reviewId: 555, commentId: ROOT_COMMENT_ID, threadId: THREAD_GQL_ID });
+
+    const suffixedRoot = fakeOctokit({
+      reviews: [batchReview(PUB_ID)],
+      reviewThreadsPages: [{ threads: [discoveryThread(intent, { authorLogin: REST_BOT_LOGIN })], hasNextPage: false }],
+    });
+    expect(
+      await createReviewThreads(makeDeps(db, suffixedRoot.octokit)).discoverThread({ scope: SCOPE, intent, reviewId: null }),
+    ).toEqual({ kind: "found", reviewId: 555, commentId: ROOT_COMMENT_ID, threadId: THREAD_GQL_ID });
   });
 
   test("a copied marker on a human account / with a different body is foreign, never authority", async () => {

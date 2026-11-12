@@ -1764,8 +1764,36 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
   });
 });
 
+/**
+ * Issue-only discussion seen by the discovery lane: `author` posted `body`,
+ * and `viewerDidAuthor` says whether THIS installation token wrote it.
+ */
+function issueOnlyDiscussion(author: string, body: string, ownAuthor = true) {
+  return {
+    listDiscussion: async () => ({
+      items: [
+        {
+          source: "issue" as const,
+          associationId: null,
+          id: "51",
+          author,
+          ownAuthor,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          body,
+        },
+      ],
+      issueCoverage: "complete" as const,
+      issueModelCoverage: "complete" as const,
+      issueDigest: "issue-digest",
+      capturedMs: T0,
+      threads: [],
+    }),
+  };
+}
+
 describe("uncertain-publication discovery ownership (spec §7.5/§7.7, P67-QC-011)", () => {
-  test("discovery matches ONLY the exact authenticated bot login, never a generic [bot] suffix", async () => {
+  test("discovery matches ONLY this App's authenticated authorship, never a generic [bot] suffix", async () => {
     const db = createMigratedTestD1();
     seedApp(db, APP);
     await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
@@ -1811,33 +1839,53 @@ describe("uncertain-publication discovery ownership (spec §7.5/§7.7, P67-QC-01
       .get() as { proof_json: string | null };
     expect(unproven.proof_json).toBeNull();
 
-    // The SAME body by OUR authenticated login is proof and applies.
+    // The SAME body by OUR authenticated login is proof and applies — in the
+    // bare shape GraphQL `author.login` returns.
     await reconcile(db, {
       now: () => T0 + 600_000,
-      reviewer: okReviewer(
-        {
-          listDiscussion: async () => ({
-            items: [
-              {
-                source: "issue",
-                associationId: null,
-                id: "51",
-                author: "acme-inspector[bot]",
-                ownAuthor: true,
-                createdAt: "2026-01-01T00:00:00Z",
-                updatedAt: "2026-01-01T00:00:00Z",
-                body,
-              },
-            ],
-            issueCoverage: "complete",
-            issueModelCoverage: "complete",
-            issueDigest: "issue-digest",
-            capturedMs: T0,
-            threads: [],
-          }),
-        },
-        { botLogin: "acme-inspector[bot]" },
-      ),
+      reviewer: okReviewer(issueOnlyDiscussion("acme-inspector", body), { botLogin: "acme-inspector[bot]" }),
+    });
+    expect(pubRow(db, "pub-1")).toMatchObject({ phase: "applied", recovery_state: "done" });
+  });
+
+  test("a HUMAN login equal to the App slug never proves authorship, even with the exact body", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
+    db.raw.prepare(`UPDATE review_publications SET phase = 'sending', attempts = 1 WHERE id = 'pub-1'`).run();
+
+    const body = "degraded body";
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: okReviewer(issueOnlyDiscussion("acme-inspector", body, false), {
+        botLogin: "acme-inspector[bot]",
+      }),
+    });
+
+    // The body (marker included) is copyable content, not authorship evidence:
+    // the bare login is the App's slug, so only the authenticated provenance
+    // can tell this comment apart from our own.
+    expect(pubRow(db, "pub-1").phase).toBe("unknown");
+    expect(pubRow(db, "pub-1").attempts).toBe(2); // the miss spent exactly one
+    expect(summary.applied).toBe(0);
+    expect(summary.unknown).toBe(1);
+    const unproven = db.raw
+      .query(`SELECT proof_json FROM review_publications WHERE id = 'pub-1'`)
+      .get() as { proof_json: string | null };
+    expect(unproven.proof_json).toBeNull();
+  });
+
+  test("the REST-shaped `<slug>[bot]` login is the same identity and still applies", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
+    db.raw.prepare(`UPDATE review_publications SET phase = 'sending', attempts = 1 WHERE id = 'pub-1'`).run();
+
+    await reconcile(db, {
+      now: () => T0,
+      reviewer: okReviewer(issueOnlyDiscussion("acme-inspector[bot]", "degraded body"), {
+        botLogin: "acme-inspector[bot]",
+      }),
     });
     expect(pubRow(db, "pub-1")).toMatchObject({ phase: "applied", recovery_state: "done" });
   });
