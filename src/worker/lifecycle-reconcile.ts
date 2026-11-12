@@ -16,7 +16,7 @@
  *        chain), proof persisted before any local apply;
  *      - `sending`/`unknown` → read-only discovery only: the PR's bounded
  *        newest issue comments are scanned for the EXACT prepared body
- *        (marker + digest match, this App's own login) — a hit proves the
+ *        (marker + digest match, this App's own authorship) — a hit proves the
  *        publication and applies the saved payload without the model; a
  *        miss stays unknown and defers with backoff ("never issue a blind
  *        second create").
@@ -95,7 +95,7 @@ import {
 } from "../store/finding-lifecycle";
 import { createSecretbox } from "../dashboard/secretbox";
 import { createReviewCommenter, PreparedSendRejected, type CommenterFetch, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
-import { sameAppBotLogin, sha256Hex } from "../pipeline/review-threads";
+import { sha256Hex } from "../pipeline/review-threads";
 
 // ---------------------------------------------------------------------------
 // Summary + budget constants (spec §7.11.1 verbatim values)
@@ -171,7 +171,17 @@ export type ReconcileReviewer = Pick<
 export type ReviewerUnavailableReason = "missing" | "deleted" | "disabled" | "decrypt-failed" | "identity-mismatch";
 
 export type ReviewerResolution =
-  | { kind: "ok"; reviewer: ReconcileReviewer; paused: boolean; botLogin: string }
+  | {
+      kind: "ok";
+      reviewer: ReconcileReviewer;
+      paused: boolean;
+      /**
+       * This App's canonical `<slug>[bot]` — NOT ownership evidence: publication
+       * discovery proves authorship from the capture's authenticated
+       * `viewerDidAuthor`, because login text and bodies are both copyable.
+       */
+      botLogin: string;
+    }
   | {
       kind: "unavailable";
       reason: ReviewerUnavailableReason;
@@ -901,12 +911,12 @@ async function sendPreparedPublication(
 /**
  * Read-only discovery for `sending`/`unknown` rows (§7.7 "Remote unknowns"):
  * scan the PR's bounded newest issue comments for the EXACT prepared body
- * (marker + digest — body equality implies both). Ownership is proven against
- * the EXACT authenticated login of this App (§7.5 / P67-QC-011) in either
- * shape GitHub reports it, never a generic `[bot]` suffix: the body embeds
- * an opaque publication UUID,
- * so the risk is low either way, but App-scoped ownership is the contract the
- * rest of the resolve path already enforces. A hit is proof: persist it and
+ * (marker + digest — body equality implies both). Ownership is proven from the
+ * AUTHENTICATED provenance the capture carries for this installation token
+ * (GraphQL `viewerDidAuthor`, §7.5 / P67-QC-011) — never from login text and
+ * never from a generic `[bot]` suffix. The body embeds an opaque publication
+ * UUID, so the risk is low either way, but App-scoped ownership is the contract
+ * the rest of the resolve path already enforces. A hit is proof: persist it and
  * apply the saved payload without the model. A miss defers with backoff —
  * never a blind second create; the cap leaves it local-error for operator
  * inspection.
@@ -932,8 +942,7 @@ async function discoverUncertainPublication(
       threads: [], // issue comments only — the publication lives on the PR conversation
     });
     const hit = discussion.items.find(
-      (item) =>
-        item.source === "issue" && sameAppBotLogin(item.author, resolved.botLogin) && item.body === row.payload.body,
+      (item) => item.source === "issue" && item.ownAuthor === true && item.body === row.payload.body,
     );
     if (hit === undefined) {
       await settleFailedPublicationAttempt(db, now, row, lease, "read-only discovery found no exact publication match", summary, true);
