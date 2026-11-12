@@ -88,6 +88,7 @@ import {
   buildLineBatchMarker,
   buildLineCommentBody,
   createReviewThreads,
+  parseLineMarker,
   sha256Hex,
   stripInspectorMarkerSyntax,
   type DiscoveryResult,
@@ -1980,8 +1981,9 @@ export type PostPreparedLineCommentsInput = {
  * bodies/digests were durably staged before any mutation (§7.7 step 7).
  *
  * Returns the §7.7 capture result: returned comment ids matched back to the
- * intents by exact path+line; a non-unique match lands in `ambiguous` and
- * is never fabricated. Empty intent set → zero API calls.
+ * intents by their trusted thread marker, with the row anchor as the fallback
+ * for a comment that carries none; a non-unique match lands in `ambiguous`
+ * and is never fabricated. Empty intent set → zero API calls.
  */
 export async function postLineCommentsWithOctokit(
   octokit: PostOctokit,
@@ -2014,7 +2016,16 @@ export async function postLineCommentsWithOctokit(
       }),
     })),
   })) as {
-    data?: { id?: unknown; comments?: Array<{ id?: unknown; path?: unknown; line?: unknown }> | null };
+    data?: {
+      id?: unknown;
+      comments?: Array<{
+        id?: unknown;
+        path?: unknown;
+        line?: unknown;
+        original_line?: unknown;
+        body?: unknown;
+      }> | null;
+    };
   } | undefined;
 
   const echoed = Array.isArray(response?.data?.comments) ? response!.data!.comments! : null;
@@ -2047,10 +2058,25 @@ export async function postLineCommentsWithOctokit(
     // No returned comments in the response — nothing can be captured.
     return { posted: [], ambiguous: [], captured: false, reviewId };
   }
+  // The review's comments connection reports `line`/`original_line` as null
+  // for comments the PR-wide comments list anchors, so the trusted thread
+  // marker is the primary key; the row anchor only backs a comment carrying no
+  // marker at all (an unknown or duplicated marker never falls back).
+  const associations = returned.map((c) =>
+    typeof c.body === "string" ? (parseLineMarker(c.body)?.associationId ?? null) : null,
+  );
   for (const intent of input.intents) {
-    const matches = returned.filter(
-      (c) => c.path === intent.path && c.line === intent.line && typeof c.id === "number",
-    );
+    const byMarker = returned.filter((c, i) => typeof c.id === "number" && associations[i] === intent.associationId);
+    const matches =
+      byMarker.length > 0
+        ? byMarker
+        : returned.filter(
+            (c, i) =>
+              typeof c.id === "number" &&
+              associations[i] === null &&
+              c.path === intent.path &&
+              (c.line ?? c.original_line) === intent.line,
+          );
     if (matches.length === 1) {
       posted.push({
         associationId: intent.associationId,
