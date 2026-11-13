@@ -8,6 +8,23 @@ fragment format and the per-change commit flow.
 
 ## [Unreleased]
 
+## [1.0.0-rc.2] - 2026-11-13
+
+### Fixed
+
+- **Installations match GitHub again.** An `installation.deleted` delivery now marks that installation removed instead of being dropped, so the App settings' installed list stops showing it; a later reinstall makes it appear again. A missed delivery is repaired by the existing GitHub metadata refresh, which now also reconciles the App's installation list with GitHub.
+- **Any configured provider can take another key**: the App settings add-key flow no longer refuses a `template`-tier or custom provider — its key is verified against that provider's own declaration (the base URL, protocol and model ids it was declared with) and appended to the same pool, so a provider with a single key no longer has to be re-declared to hold a second one. A provider the App never declared stays refused, with the copy naming it.
+- **Model details fold away in the model picker**: the dialog now shows the search field, the model list and the save controls by default; an "Edit model details" control opens one model picker and that one model's fields, so selecting several models no longer fills the dialog with empty form rows. What is typed for one model survives switching to another.
+- **Mixed-protocol providers are distinguishable in the provider picker**: a provider that ships one row per protocol (e.g. OpenCode Go, Command Code, ZenMux) now names the protocol in each row's label instead of showing identical entries.
+- **Addressed findings now close their GitHub conversations again**: the app's own published finding report no longer counts against the review model's discussion budget, so a thread whose root comment is that report is not marked truncated just for containing it — a thread with one human reply stays eligible to resolve. A human comment still counts in full, and a reply that spoofs the bot marker stays visible.
+- **Comments survive GitHub re-anchoring**: when code above a review comment moves and GitHub keeps the thread valid at a shifted line, the thread is still recognised as ours through the line it was originally published on. Threads that are outdated, point at another file, or carry a different original line stay unrecognised.
+
+### Changed
+
+- **Save feedback rides the button**: a settings save now answers where the user is already looking — the save button shows a spinner while the write is in flight, a check on success (reverting to the plain label after about two seconds) and an alert on failure — instead of leaving a full-width "Changes saved." notice box on the card until the next navigation. The success sentence is preserved as assistive text announced by a live region, and a failed save keeps its persistent, readable error notice alongside the button's error face. Success notices that remain on the op-outcome channel now expire on their own after about three seconds; warnings and errors stay until the next op replaces them.
+- **Production is served through Workers Routes.** The production Worker no longer holds a Custom Domain on `inspector.mstar.page`; it answers five specific patterns on the `mstar.page` zone (`inspector.mstar.page/dashboard*`, `inspector.mstar.page/_internal_admin*`, `inspector.mstar.page/webhook/*`, `inspector.mstar.page/healthz`, `inspector.mstar.page/app-assets/*`), which leaves the hostname root to the marketing site. The hostname now needs a proxied DNS record of its own — routes never create one.
+- **The SPA bundle moved to `/app-assets/`.** The build emits `dist/spa/app-assets/`, and `/assets/*` and `/index.html` now belong to the marketing site on this hostname.
+
 ## [1.0.0-rc.1] - 2026-11-13
 
 ### Added
