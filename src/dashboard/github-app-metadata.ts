@@ -291,23 +291,43 @@ export type FetchAppInstallationsResult =
   | { ok: false };
 
 /**
- * The `Link: <…>; rel="next"` target, or null on the last page. Only an
- * `https://api.github.com/app/installations` URL is followed: the header comes
- * from GitHub over TLS, but a reconcile must never be steered at another host.
+ * What a `Link` header says about the next page. Three states, because
+ * "no next page" and "a next page we refuse to follow" must not collapse:
+ * `unusable` is an answer the caller cannot reconcile against, while `none`
+ * means the list is complete.
  */
-function nextInstallationsPageUrl(linkHeader: string | null): string | null {
-  if (!linkHeader) return null;
+type NextInstallationsPage = { kind: "none" } | { kind: "next"; url: string } | { kind: "unusable" };
+
+/**
+ * Parse the `Link: <…>; rel="next"` target. Only an
+ * `https://api.github.com/app/installations` URL is followed: the header comes
+ * from GitHub over TLS, but a reconcile must never be steered at another host,
+ * and a rejected target makes the collected list untrustworthy rather than
+ * complete (it may be missing every later page).
+ */
+function nextInstallationsPage(linkHeader: string | null): NextInstallationsPage {
+  if (!linkHeader) return { kind: "none" };
   for (const segment of linkHeader.split(",")) {
     const match = /<([^>]+)>\s*;\s*rel="next"/.exec(segment.trim());
-    if (match && match[1]!.startsWith(`${GITHUB_APP_INSTALLATIONS_URL}?`)) return match[1]!;
+    if (match) {
+      return match[1]!.startsWith(`${GITHUB_APP_INSTALLATIONS_URL}?`)
+        ? { kind: "next", url: match[1]! }
+        : { kind: "unusable" };
+    }
   }
-  return null;
+  return { kind: "none" };
 }
 
 /**
  * Fetch this App's installation ids — `GET /app/installations?per_page=100`
  * with a freshly minted App JWT, following `Link rel="next"` up to
  * {@link MAX_INSTALLATION_PAGES} pages.
+ *
+ * All-or-nothing: the result is the COMPLETE list or `{ ok: false }`. A
+ * truncated list would reach `reconcileInstallations`, which stamps every
+ * active row absent from the set as removed — so hitting the page cap while a
+ * next page still exists, or a next link we refuse to follow, is a failure
+ * rather than a partial success.
  *
  * Same failure discipline as {@link fetchAppMetadata}: zero retries, a 5s
  * timeout per request, and a total catch-all — this function NEVER throws, so a
@@ -328,7 +348,11 @@ export async function fetchAppInstallations(
     };
     const installationIds: number[] = [];
     let url: string | null = `${GITHUB_APP_INSTALLATIONS_URL}?per_page=100`;
-    for (let page = 0; url !== null && page < MAX_INSTALLATION_PAGES; page++) {
+    for (let page = 0; url !== null; page++) {
+      // A next page we have no budget left to fetch: the collected ids are a
+      // strict subset of GitHub's, and a subset must never be treated as the
+      // authoritative set.
+      if (page >= MAX_INSTALLATION_PAGES) return { ok: false };
       const res = await fetch(url, {
         method: "GET",
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -349,7 +373,9 @@ export async function fetchAppInstallations(
         if (typeof id !== "number") return { ok: false };
         installationIds.push(id);
       }
-      url = nextInstallationsPageUrl(res.headers.get("link"));
+      const next = nextInstallationsPage(res.headers.get("link"));
+      if (next.kind === "unusable") return { ok: false };
+      url = next.kind === "next" ? next.url : null;
     }
     return { ok: true, installationIds };
   } catch {

@@ -586,16 +586,37 @@ describe("fetchAppInstallations (the reconcile face)", () => {
     expect(calls.map((call) => call.url)).toEqual([INSTALLATIONS_URL, page2]);
   });
 
-  test("a next link on another host is not followed — the first page stands", async () => {
+  test("a next link on another host makes the whole answer unusable — never a partial success", async () => {
     const { pem } = await pkcs8Fixture();
-    stubFetch(() =>
+    // The rejected target may be hiding every later page, so the ids collected
+    // so far are a subset — and a subset must never reach the reconcile.
+    const { calls } = stubFetch(() =>
       new Response(JSON.stringify([{ id: 7 }]), {
         status: 200,
         headers: { "content-type": "application/json", link: '<https://evil.example/steal>; rel="next"' },
       }),
     );
 
-    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: true, installationIds: [7] });
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+    expect(calls).toHaveLength(1); // the rejected target is never fetched
+  });
+
+  test("ten pages each still carrying a next link → {ok:false}: the cap is a hard stop, never a truncated list", async () => {
+    const { pem } = await pkcs8Fixture();
+    const { calls } = stubFetch((url) => {
+      const page = Number(new URL(url).searchParams.get("page") ?? "1");
+      const nextUrl = `${url.split("?")[0]}?per_page=100&page=${page + 1}`;
+      return new Response(JSON.stringify([{ id: page }]), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          link: `<${nextUrl}>; rel="next"`,
+        },
+      });
+    });
+
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+    expect(calls).toHaveLength(10); // no 11th request, and no ids escaped
   });
 
   test("non-200, malformed payload and an abort all collapse to {ok:false} — never a throw", async () => {
