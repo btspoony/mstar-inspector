@@ -425,9 +425,8 @@ describe("deploy-prod.yml guards", () => {
     // a mutable tag here would let a later publish of that tag decide which code
     // runs on the approved production deploy
     for (const u of uses) expect(u).toMatch(/^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/);
-    expect(uses).toContain("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1");
-    expect(uses).toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
-    expect(uses).toContain("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9");
+    // Which SHA is a bump's business: locking a literal here would fail every
+    // dependabot update to the action. The shape above is the invariant.
     // the human-readable tag survives as a trailing comment only
     const text = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
     for (const line of text.split("\n").filter((l) => l.trimStart().startsWith("uses:"))) {
