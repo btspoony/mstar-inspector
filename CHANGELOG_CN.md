@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-11-13
+
+### Changed
+
+- **harness 升至 4.5.3（根、runner 与审查镜像）**：根 manifest 的 `@mstar-harness/engine` 区间改为 `^4.5.3`，`packages/runner` 的精确 pin 改为 `4.5.3`，镜像全局安装的 `@mstar-harness/cli`、`HARNESS_VERSION` / `harnessRef` pin（ref `bc33a78c6d4fbc079c3e954833ae0bdc93a1ac3c`，tag `v4.5.3`）与 Dockerfile 克隆 ref 一并向 4.5.3 移动；所有 lock 重新生成，并在同一提交中更新镜像重建标记——这些 manifest 与所 pin 的 ref 都是镜像输入。4.5.3 是文档、打包与 harness 内部修复（accepted-limits ADR 落地且行为不变；release prep 改为打包已构建的 CLI/OpenCode dist；删除 consumer-manifest digest 门禁与 advisory artifact-byte 比对；`calibrate` 缺失产物错误改走 artifact helper）。本仓库已声明的语料布局，以及所消费的 review/seat 契约，不因这次 pin 升级而改变。
+- **模型尺寸来自目录，不再靠手工填写**：模型选择器会用提供方目录快照预填每个模型的上下文窗口与最大 token 数。操作者未改动的值会标注其快照来源，且不会作为覆盖写回；只有目录未收录的模型仍需填写这两项。若某项尺寸全部来自目录，保存时不会存储该覆盖字段。
+- **尺寸文案改为说明影响，而不是免责声明**：必填说明现在讲清这两个数值的作用（上下文何时被压缩、单次回复最长能跑多久），未完整声明的提示则点名缺失项与下一步。两个语言里都不再出现「我们不会猜测」。
+- **沙箱镜像不再声明 provider 或模型**：镜像 registry 只剩构建输入。每次审查的 `models.yml` 由 App 自己的 provider 声明合成，内置 provider 由运行时自身的目录解析。此前被当作产品能力塞进去的测试夹具已删除；App 的模型链必须写明它实际配置过的 provider。
+- **仍写着 `ark-plan` 的模型链会直接给出下一步**：失败信息变为「the ark-plan provider was removed — point the chain at a provider the runtime serves」，不再是笼统的「没有配置 key」。上一版本写在别名下的模型校验证据仍按 `ark` 池读出，设置页的模型列表不会静默清空。不做数据改写：运行时不再为该前缀声明 provider，选择器必须改为运行时目录里存在、且已配置 key 的内置 provider，或你自己的声明（步骤见 `docs/deploy.md`）。
+
+### Fixed
+
+- **增量审查不再吸收基线分支合入的提交**：仅当 compare 闸门回答 `ahead`、区间内没有 merge commit 且提交列表完整时，本轮才以先前已审查的 head 作为增量基线。此前，把基线分支合入自身的 PR 分支（"update branch"）会把基线分支的整批改动当作本 PR 的"上次审查以来的工作"交给审查席位，从而报告本 PR 从未改动的代码（PR #268 的实际观测：`fb75d4d...1352814` 回答 `ahead`、含 1 个 merge、62 个文件，全部来自另一个已单独合并的 PR，而 #268 只改了 9 个文件）。现在这类轮次改为审查完整 PR diff，并记录一条 `increment_status: "ahead-merge"`；exit 0 但回答不是闸门 JSON 时记录 `increment_status: "unusable"`。
+
 ## [1.0.0-rc.2] - 2026-11-13
 
 ### Fixed
