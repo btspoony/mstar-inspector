@@ -25,6 +25,7 @@ import { t, type DictionaryKey, type Locale } from "../../i18n";
 import { APP_VERSION } from "../../version";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
+import { useSaveSignal, type SaveStatus } from "../components/save-signal";
 import { PageNotice } from "../pages/PageNotice";
 import { concurrencySubmitBlocked } from "../pages/data";
 import { formatRelativeTime } from "../relative-time";
@@ -72,6 +73,33 @@ function oldestWait(locale: Locale, queue: QueueBacklog | null): string {
   return formatRelativeTime(queue.oldestMessageTimestamp, locale);
 }
 
+/**
+ * A runtime card's outcome face: errors keep the persistent notice box; a
+ * success rides the save button (spinner → check) and its copy survives as
+ * assistive text in a live region — never as a notice box.
+ */
+function CardOutcome({
+  notice,
+  status,
+}: {
+  notice: { kind: "success" | "error"; message: string } | null;
+  status: SaveStatus;
+}) {
+  if (notice === null) return null;
+  if (notice.kind === "success") {
+    return status === "success" ? (
+      <span role="status" className="sr-only">
+        {notice.message}
+      </span>
+    ) : null;
+  }
+  return (
+    <div className="mt-4">
+      <PageNotice kind={notice.kind} message={notice.message} />
+    </div>
+  );
+}
+
 export function RuntimePage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readRuntime);
   /** Only what the operator typed is local; the display falls back to the stored value. */
@@ -84,6 +112,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [levelDraft, setLevelDraft] = useState<string | null>(null);
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Every card's save rides its own button: the signal drives the spinner →
+  // check → alert face; the shared notice state carries the copy (the
+  // success copy as assistive text, the failure as the persistent box).
+  const concurrencySignal = useSaveSignal();
+  const checkBudgetsSignal = useSaveSignal();
+  const commentClaimSignal = useSaveSignal();
+  const reviewLevelSignal = useSaveSignal();
+  const recheckAssignmentSignal = useSaveSignal();
   // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
   // the terminalize/update relation included — reads as that field's error
   // instead of a page-wide banner.
@@ -106,6 +142,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     const next = Number((draft ?? String(stored)).trim());
     setBusy(true);
     setNotice(null);
+    concurrencySignal.start();
     try {
       const saved = await setSystemConcurrency(next);
       // A 2xx rewrote exactly the level this page reports, so the row is
@@ -118,6 +155,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
         message: t(locale, "admin.runtime.concurrencySaved"),
         source: "concurrency",
       });
+      concurrencySignal.succeed();
     } catch (error) {
       // Generic message primary, the server's own refusal text as secondary detail.
       const generic = t(locale, "admin.runtime.concurrencyFailed");
@@ -129,6 +167,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
             : generic,
         source: "concurrency",
       });
+      concurrencySignal.fail();
     } finally {
       setBusy(false);
     }
@@ -152,6 +191,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     const updateMs = Number((updateDraft ?? String(stored.updateMs)).trim());
     setBusy(true);
     setNotice(null);
+    checkBudgetsSignal.start();
     try {
       const saved = await setCheckBudgets({ terminalizeMs, updateMs }, stored);
       // A 2xx rewrote both rows, so the card reads as trusted again.
@@ -163,6 +203,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
         message: t(locale, "admin.runtime.checkSaved"),
         source: "checkBudgets",
       });
+      checkBudgetsSignal.succeed();
     } catch (error) {
       const generic = t(locale, "admin.runtime.checkFailed");
       setNotice({
@@ -173,6 +214,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
             : generic,
         source: "checkBudgets",
       });
+      checkBudgetsSignal.fail();
     } finally {
       setBusy(false);
     }
@@ -198,6 +240,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     const outboxCap = Number((outboxDraft ?? String(stored.outboxCap)).trim());
     setBusy(true);
     setNotice(null);
+    commentClaimSignal.start();
     try {
       const saved = await setCommentClaimSettings({ retryMs, maxAttempts, outboxCap }, stored);
       // A 2xx rewrote all three rows, so the card reads as trusted again.
@@ -210,6 +253,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
         message: t(locale, "admin.runtime.claimSaved"),
         source: "commentClaim",
       });
+      commentClaimSignal.succeed();
     } catch (error) {
       const generic = t(locale, "admin.runtime.claimFailed");
       setNotice({
@@ -220,6 +264,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
             : generic,
         source: "commentClaim",
       });
+      commentClaimSignal.fail();
     } finally {
       setBusy(false);
     }
@@ -233,6 +278,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     if (busy) return; // in-flight guard — no double submit
     setBusy(true);
     setNotice(null);
+    reviewLevelSignal.start();
     try {
       const saved = await setDefaultReviewLevel(levelDraft ?? stored.value, stored);
       // A 2xx rewrote the row, so it reads as trusted again.
@@ -243,6 +289,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
         message: t(locale, "admin.runtime.reviewLevelSaved"),
         source: "reviewLevel",
       });
+      reviewLevelSignal.succeed();
     } catch (error) {
       const generic = t(locale, "admin.runtime.reviewLevelFailed");
       setNotice({
@@ -253,6 +300,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
             : generic,
         source: "reviewLevel",
       });
+      reviewLevelSignal.fail();
     } finally {
       setBusy(false);
     }
@@ -270,6 +318,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     const maxBytes = Number((recheckDraft ?? String(stored.maxBytes)).trim());
     setBusy(true);
     setNotice(null);
+    recheckAssignmentSignal.start();
     try {
       const saved = await setRecheckAssignmentMaxBytes(maxBytes, stored);
       // A 2xx rewrote the row, so it reads as trusted again.
@@ -280,6 +329,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
         message: t(locale, "admin.runtime.recheckSaved"),
         source: "recheckAssignment",
       });
+      recheckAssignmentSignal.succeed();
     } catch (error) {
       const generic = t(locale, "admin.runtime.recheckFailed");
       setNotice({
@@ -290,6 +340,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
             : generic,
         source: "recheckAssignment",
       });
+      recheckAssignmentSignal.fail();
     } finally {
       setBusy(false);
     }
@@ -336,9 +387,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   {t(locale, "admin.runtime.concurrencyDescription")}
                 </p>
                 {notice?.source === "concurrency" ? (
-                  <div className="mt-4">
-                    <PageNotice kind={notice.kind} message={notice.message} />
-                  </div>
+                  <CardOutcome notice={notice} status={concurrencySignal.status} />
                 ) : null}
                 {data.degraded ? (
                   // The stored cap could not be trusted, so `data.concurrency` is
@@ -396,9 +445,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   {t(locale, "admin.runtime.checkDescription")}
                 </p>
                 {notice?.source === "checkBudgets" ? (
-                  <div className="mt-4">
-                    <PageNotice kind={notice.kind} message={notice.message} />
-                  </div>
+                  <CardOutcome notice={notice} status={checkBudgetsSignal.status} />
                 ) : null}
                 {budgets.degraded ? (
                   // Both numbers are the documented defaults, not the stored
@@ -479,9 +526,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   {t(locale, "admin.runtime.claimDescription")}
                 </p>
                 {notice?.source === "commentClaim" ? (
-                  <div className="mt-4">
-                    <PageNotice kind={notice.kind} message={notice.message} />
-                  </div>
+                  <CardOutcome notice={notice} status={commentClaimSignal.status} />
                 ) : null}
                 {claim.degraded ? (
                   // Every number is the documented default, not the stored
@@ -574,9 +619,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   {t(locale, "admin.runtime.reviewLevelDescription")}
                 </p>
                 {notice?.source === "reviewLevel" ? (
-                  <div className="mt-4">
-                    <PageNotice kind={notice.kind} message={notice.message} />
-                  </div>
+                  <CardOutcome notice={notice} status={reviewLevelSignal.status} />
                 ) : null}
                 {level.degraded ? (
                   // The stored row is unreadable, so the tier shown is the
@@ -638,9 +681,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   {t(locale, "admin.runtime.recheckDescription")}
                 </p>
                 {notice?.source === "recheckAssignment" ? (
-                  <div className="mt-4">
-                    <PageNotice kind={notice.kind} message={notice.message} />
-                  </div>
+                  <CardOutcome notice={notice} status={recheckAssignmentSignal.status} />
                 ) : null}
                 {recheck.degraded ? (
                   // The number shown is the documented default, not the stored

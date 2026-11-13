@@ -1765,7 +1765,11 @@ describe("section-scoped op feedback", () => {
     // add-chain (e.g. the not_in_verified_models 400) can no longer surface
     // on the page top.
     const editorBody = source.slice(source.indexOf("function ChainEditor"));
-    expect(editorBody).toContain("setNotice(await onSave(chain.join(\", \")))");
+    // The save rides the button now: a failure still resolves into this
+    // editor's own region (the region pin below), a success into the
+    // button's check plus assistive copy.
+    expect(editorBody).toContain('const outcome = await onSave(chain.join(", "));');
+    expect(editorBody).toContain("setNotice(outcome);");
     expect(editorBody).toContain("<NoticeRegion notice={notice} />");
     // The region renders after the save trigger — the feedback sits where the
     // user is looking when the outcome lands.
@@ -1879,10 +1883,13 @@ describe("section-scoped op feedback", () => {
     expect(seatsBody).toContain("disabled={busy}");
     // Stale-error rule (pinned): a region's content is replaced wholesale by
     // the next op targeting that same region — setters always receive the
-    // fresh outcome, no manual clears, no cross-card resets.
-    expect(source).toContain("setNotice(await onSettings({ op: \"save-sandbox-image\", sandbox_image_id: selected }))");
-    expect(source).toContain("setNotice(await onSave(chain.join(\", \")))");
-    expect(source).toContain("setNotice(await onSettings(fields))");
+    // fresh outcome, no manual clears, no cross-card resets. (The save
+    // clusters resolve the outcome into a local first, so a success can ride
+    // the button while a failure still reaches the region wholesale.)
+    expect(source).toContain("const outcome = await onSettings({ op: \"save-sandbox-image\", sandbox_image_id: selected });");
+    expect(source).toContain('const outcome = await onSave(chain.join(", "));');
+    expect(source).toContain("const outcome = await onSettings(fields);");
+    expect(source.match(/setNotice\(outcome\);/g)?.length).toBeGreaterThanOrEqual(3);
   });
 });
 

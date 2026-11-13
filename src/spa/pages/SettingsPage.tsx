@@ -74,6 +74,7 @@ import {
   type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
+import { useSaveSignal } from "../components/save-signal";
 import { LoadingNotice, LoadFailedNotice, NoticeRegion, PageNotice, type OpNotice } from "./PageNotice";
 import { ProvidersSection } from "./settings-providers";
 
@@ -930,6 +931,10 @@ export function AllowlistSection({
   const [owners, setOwners] = useState(allowlist.owners.join("\n"));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
+  // The save rides the button: the signal drives its face, the success copy
+  // survives as assistive text beside it — never as a notice box.
+  const signal = useSaveSignal();
+  const [savedCopy, setSavedCopy] = useState<string | null>(null);
   // Server-state mirror: the deps compare by content, so an unrelated
   // background reload (same stored values) never discards unsaved typing,
   // while this save's reload — or a failed one — resyncs from the row.
@@ -946,15 +951,21 @@ export function AllowlistSection({
 
   async function save(): Promise<void> {
     setBusy(true);
+    signal.start();
     try {
-      setNotice(
-        await postPinnedOutcome(
-          `${apiBase()}/apps/${encodeURIComponent(appId)}/settings`,
-          { op: "save-allowlist", enabled: enabled ? "1" : "0", owners },
-          locale,
-          () => onReload({ background: true }),
-        ),
+      const outcome = await postPinnedOutcome(
+        `${apiBase()}/apps/${encodeURIComponent(appId)}/settings`,
+        { op: "save-allowlist", enabled: enabled ? "1" : "0", owners },
+        locale,
+        () => onReload({ background: true }),
       );
+      if (outcome.kind === "success") {
+        setSavedCopy(outcome.message);
+        signal.succeed();
+      } else {
+        setNotice(outcome);
+        if (outcome.kind === "error") signal.fail();
+      }
     } finally {
       setBusy(false);
     }
@@ -1002,9 +1013,14 @@ export function AllowlistSection({
           </p>
         ) : null}
         <div>
-          <Button type="submit" disabled={busy}>
+          <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
             {t(locale, "settings.allowlistSave")}
           </Button>
+          {signal.status === "success" && savedCopy !== null ? (
+            <span role="status" className="sr-only">
+              {savedCopy}
+            </span>
+          ) : null}
         </div>
         <NoticeRegion notice={notice} />
       </form>
@@ -1053,18 +1069,28 @@ function ReviewGateRecovery({
 }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
+  // The reset rides the button: the signal drives its face, the success copy
+  // survives as assistive text beside it — never as a notice box.
+  const signal = useSaveSignal();
+  const [savedCopy, setSavedCopy] = useState<string | null>(null);
 
   async function reset(): Promise<void> {
     setBusy(true);
+    signal.start();
     try {
-      setNotice(
-        await onSettings(
-          checkGateSaveFields({
-            min_score: String(DEFAULT_CHECK_GATE.min_score),
-            pass_verdicts: DEFAULT_CHECK_GATE.pass_verdicts,
-          }),
-        ),
+      const outcome = await onSettings(
+        checkGateSaveFields({
+          min_score: String(DEFAULT_CHECK_GATE.min_score),
+          pass_verdicts: DEFAULT_CHECK_GATE.pass_verdicts,
+        }),
       );
+      if (outcome.kind === "success") {
+        setSavedCopy(outcome.message);
+        signal.succeed();
+      } else {
+        setNotice(outcome);
+        if (outcome.kind === "error") signal.fail();
+      }
     } finally {
       setBusy(false);
     }
@@ -1076,12 +1102,17 @@ function ReviewGateRecovery({
         {t(locale, "settings.reviewGateUnreadable")}
       </p>
       <div>
-        <Button type="button" disabled={busy} onClick={() => void reset()}>
+        <Button type="button" disabled={busy} onClick={() => void reset()} status={signal.status === "idle" ? undefined : signal.status}>
           {t(locale, "settings.reviewGateReset", {
             score: DEFAULT_CHECK_GATE.min_score,
             verdicts: DEFAULT_CHECK_GATE.pass_verdicts.join(", "),
           })}
         </Button>
+        {signal.status === "success" && savedCopy !== null ? (
+          <span role="status" className="sr-only">
+            {savedCopy}
+          </span>
+        ) : null}
       </div>
       <NoticeRegion notice={notice} />
     </FlowSection>
@@ -1101,6 +1132,10 @@ function ReviewGateEditor({
   const [verdicts, setVerdicts] = useState<string[]>([...gate.pass_verdicts]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
+  // The save rides the button: the signal drives its face, the success copy
+  // survives as assistive text beside it — never as a notice box.
+  const signal = useSaveSignal();
+  const [savedCopy, setSavedCopy] = useState<string | null>(null);
   // Content-compared mirror, same discipline as the allowlist's: unrelated
   // reloads keep unsaved edits; a landed save resyncs from the stored row.
   const storedVerdicts = gate.pass_verdicts.join(",");
@@ -1118,16 +1153,22 @@ function ReviewGateEditor({
 
   async function save(): Promise<void> {
     setBusy(true);
+    signal.start();
     try {
-      setNotice(
-        await onSettings(
-          checkGateSaveFields({
-            min_score: score.trim(),
-            // One field per checked box, in the canonical vocabulary order.
-            pass_verdicts: PR_VERDICTS.filter((verdict) => verdicts.includes(verdict)),
-          }),
-        ),
+      const outcome = await onSettings(
+        checkGateSaveFields({
+          min_score: score.trim(),
+          // One field per checked box, in the canonical vocabulary order.
+          pass_verdicts: PR_VERDICTS.filter((verdict) => verdicts.includes(verdict)),
+        }),
       );
+      if (outcome.kind === "success") {
+        setSavedCopy(outcome.message);
+        signal.succeed();
+      } else {
+        setNotice(outcome);
+        if (outcome.kind === "error") signal.fail();
+      }
     } finally {
       setBusy(false);
     }
@@ -1175,9 +1216,14 @@ function ReviewGateEditor({
           </p>
         ) : null}
         <div>
-          <Button type="submit" disabled={busy}>
+          <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
             {t(locale, "settings.reviewGateSave")}
           </Button>
+          {signal.status === "success" && savedCopy !== null ? (
+            <span role="status" className="sr-only">
+              {savedCopy}
+            </span>
+          ) : null}
         </div>
         <NoticeRegion notice={notice} />
       </form>
@@ -1240,10 +1286,13 @@ function RuntimeHarnessEditor({
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   const [selected, setSelected] = useState(payload.app.sandbox_image_id);
-  // The save outcome renders in this card, next to the trigger —
-  // the busy guard keeps the save button disabled while its POST is in flight.
+  // The save outcome rides the button next to the trigger — the busy guard
+  // keeps the save button disabled while its POST is in flight, and the
+  // success copy survives as assistive text, never as a notice box.
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
+  const signal = useSaveSignal();
+  const [savedCopy, setSavedCopy] = useState<string | null>(null);
 
   useEffect(() => {
     setSelected(payload.app.sandbox_image_id);
@@ -1251,8 +1300,16 @@ function RuntimeHarnessEditor({
 
   async function save(): Promise<void> {
     setBusy(true);
+    signal.start();
     try {
-      setNotice(await onSettings({ op: "save-sandbox-image", sandbox_image_id: selected }));
+      const outcome = await onSettings({ op: "save-sandbox-image", sandbox_image_id: selected });
+      if (outcome.kind === "success") {
+        setSavedCopy(outcome.message);
+        signal.succeed();
+      } else {
+        setNotice(outcome);
+        if (outcome.kind === "error") signal.fail();
+      }
     } finally {
       setBusy(false);
     }
@@ -1278,9 +1335,14 @@ function RuntimeHarnessEditor({
             </SelectContent>
           </Select>
         </div>
-        <Button type="button" disabled={busy} onClick={() => void save()}>
+        <Button type="button" disabled={busy} onClick={() => void save()} status={signal.status === "idle" ? undefined : signal.status}>
           {t(locale, "settings.saveRuntimeHarness")}
         </Button>
+        {signal.status === "success" && savedCopy !== null ? (
+          <span role="status" className="sr-only">
+            {savedCopy}
+          </span>
+        ) : null}
       </div>
       <NoticeRegion notice={notice} />
     </div>
@@ -1524,6 +1586,10 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
   // Section-local channel: an op outcome never rides the page-level notice.
   const [nameNotice, setNameNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
+  // The save rides the button: the signal drives its face, the success copy
+  // survives as assistive text beside it — never as a notice box.
+  const signal = useSaveSignal();
+  const [savedCopy, setSavedCopy] = useState<string | null>(null);
   const renameMembership = useRenameMembership();
 
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -1539,10 +1605,17 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
       return;
     }
     setBusy(true);
+    signal.start();
     try {
       const outcome = await submitWorkspaceName(next, locale, renameMembership);
-      if (outcome.kind === "success") setDraft(null);
-      setNameNotice(outcome);
+      if (outcome.kind === "success") {
+        setDraft(null);
+        setSavedCopy(outcome.message);
+        signal.succeed();
+      } else {
+        setNameNotice(outcome);
+        if (outcome.kind === "error") signal.fail();
+      }
     } finally {
       setBusy(false);
     }
@@ -1566,9 +1639,14 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
             onChange={(event) => setDraft(event.target.value)}
           />
         </div>
-        <Button type="submit" disabled={busy}>
+        <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
           {t(locale, "workspace.nameSave")}
         </Button>
+        {signal.status === "success" && savedCopy !== null ? (
+          <span role="status" className="sr-only">
+            {savedCopy}
+          </span>
+        ) : null}
       </form>
       <NoticeRegion notice={nameNotice} />
     </FlowSection>
@@ -1621,6 +1699,10 @@ function NumberSettingCard({
   // page-level notice.
   const [cardNotice, setCardNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
+  // The save rides the button: the signal drives its face, the success copy
+  // survives as assistive text beside it — never as a notice box.
+  const signal = useSaveSignal();
+  const [savedCopy, setSavedCopy] = useState<string | null>(null);
   // A degraded read starts the field empty and offers two ways out: type a
   // value (the repair write) or re-read.
   const [attempt, setAttempt] = useState(0);
@@ -1655,6 +1737,7 @@ function NumberSettingCard({
     // An untouched form must submit the STORED value, never a derived one: the
     // stored number is what the tenant set.
     setBusy(true);
+    signal.start();
     const submitted = Number((draft ?? String(loaded.value)).trim());
     try {
       const { status, body } = await putJson(`${apiBase()}${putPath}`, {
@@ -1672,10 +1755,15 @@ function NumberSettingCard({
         // and trustworthy: show it and clear the flag.
         setLoaded((previous) => previous && { ...previous, value: stored, degraded: false });
         setDraft(null);
+        setSavedCopy(outcome.message);
+        signal.succeed();
+      } else {
+        setCardNotice(outcome);
+        if (outcome.kind === "error") signal.fail();
       }
-      setCardNotice(outcome);
     } catch {
       setCardNotice({ kind: "error", message: t(locale, copy.failed) });
+      signal.fail();
     } finally {
       setBusy(false);
     }
@@ -1719,9 +1807,14 @@ function NumberSettingCard({
                   onChange={(event) => setDraft(event.target.value)}
                 />
               </div>
-              <Button type="submit" disabled={busy}>
+              <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
                 {t(locale, copy.save)}
               </Button>
+              {signal.status === "success" && savedCopy !== null ? (
+                <span role="status" className="sr-only">
+                  {savedCopy}
+                </span>
+              ) : null}
               {loaded.degraded ? (
                 <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
                   {t(locale, "common.retry")}
@@ -1903,9 +1996,13 @@ export function ReviewTriggerControl({
 }) {
   const [selected, setSelected] = useState<ReviewTriggerMode>(mode);
   const [busy, setBusy] = useState(false);
-  // The control's own region: this save's outcome renders here, next to
-  // the trigger — never through the card's dialog-ops region above.
+  // The control's own region: a failure renders here, next to the trigger —
+  // never through the card's dialog-ops region above. The trigger group has
+  // no button face, so a success confirms through the moved highlight plus
+  // the success copy as assistive text — never as a notice box.
   const [notice, setNotice] = useState<OpNotice | null>(null);
+  const signal = useSaveSignal();
+  const [savedCopy, setSavedCopy] = useState<string | null>(null);
 
   // Server-state mirror: after this save's (or any op's) background reload
   // lands a fresh payload, the selection tracks the stored mode — a failed
@@ -1921,14 +2018,21 @@ export function ReviewTriggerControl({
   async function save(next: string): Promise<void> {
     if (!isReviewTriggerMode(next) || next === selected) return;
     setBusy(true);
+    signal.start();
     try {
       const outcome = await onTriggerMode(next);
-      setNotice(outcome);
       // Success-path echo: success means stored, so the controlled
       // ToggleGroup highlights the new mode now instead of waiting for the
       // reload; a failure leaves the previous segment highlighted and the
       // reload resyncs `selected` from the stored mode (the effect above).
-      if (outcome.kind === "success") setSelected(next);
+      if (outcome.kind === "success") {
+        setSelected(next);
+        setSavedCopy(outcome.message);
+        signal.succeed();
+      } else {
+        setNotice(outcome);
+        if (outcome.kind === "error") signal.fail();
+      }
     } finally {
       setBusy(false);
     }
@@ -1972,6 +2076,11 @@ export function ReviewTriggerControl({
             {mention}
           </code>
         </p>
+      ) : null}
+      {signal.status === "success" && savedCopy !== null ? (
+        <span role="status" className="sr-only">
+          {savedCopy}
+        </span>
       ) : null}
       <NoticeRegion notice={notice} />
     </div>
@@ -2193,18 +2302,29 @@ function SeatsSection({
     setSeats(seatRoleValues(payload.model_role_ids, payload.model_roles, tabs));
   }, [tabIdSetKey]);
 
-  // The seat save reports in this card, under its own trigger.
+  // The seat save rides its button; a failure reports in this card, under
+  // its own trigger, and the success copy survives as assistive text.
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
+  const signal = useSaveSignal();
+  const [savedCopy, setSavedCopy] = useState<string | null>(null);
 
   async function submit(): Promise<void> {
     setBusy(true);
+    signal.start();
     try {
       const fields: Record<string, string> = { op: "save-roles" };
       for (const role of payload.model_role_ids) {
         fields[`role_${role}`] = seatSelectValue(tabs, seats[role]);
       }
-      setNotice(await onSettings(fields));
+      const outcome = await onSettings(fields);
+      if (outcome.kind === "success") {
+        setSavedCopy(outcome.message);
+        signal.succeed();
+      } else {
+        setNotice(outcome);
+        if (outcome.kind === "error") signal.fail();
+      }
     } finally {
       setBusy(false);
     }
@@ -2241,7 +2361,14 @@ function SeatsSection({
           </label>
         ))}
         <div>
-          <Button type="submit" disabled={busy}>{t(locale, "settings.saveRoleModels")}</Button>
+          <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
+            {t(locale, "settings.saveRoleModels")}
+          </Button>
+          {signal.status === "success" && savedCopy !== null ? (
+            <span role="status" className="sr-only">
+              {savedCopy}
+            </span>
+          ) : null}
         </div>
         <NoticeRegion notice={notice} />
       </form>
@@ -2380,11 +2507,14 @@ function ChainEditor({
 }) {
   const [chain, setChain] = useState(() => splitModelChain(stored));
   const [pick, setPick] = useState<string | undefined>(undefined);
-  // Each editor instance owns its region — a chain save's outcome
-  // renders inside its own tabpanel (the user-reported 400 case), never on
-  // the page top. The next save replaces the content (replace-on-submit).
+  // Each editor instance owns its region — a failed chain save renders
+  // inside its own tabpanel (the user-reported 400 case), never on the page
+  // top; the success rides the save button, its copy surviving as assistive
+  // text. The next save replaces the content (replace-on-submit).
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
+  const signal = useSaveSignal();
+  const [savedCopy, setSavedCopy] = useState<string | null>(null);
   const probeProviders = groups.filter((group) => group.source === "probe");
 
   useEffect(() => {
@@ -2393,17 +2523,37 @@ function ChainEditor({
 
   async function save(): Promise<void> {
     setBusy(true);
+    signal.start();
     try {
-      setNotice(await onSave(chain.join(", ")));
+      const outcome = await onSave(chain.join(", "));
+      if (outcome.kind === "success") {
+        setSavedCopy(outcome.message);
+        signal.succeed();
+      } else {
+        setNotice(outcome);
+        if (outcome.kind === "error") signal.fail();
+      }
     } finally {
       setBusy(false);
     }
   }
 
   const saveButton = (
-    <Button type="button" disabled={busy} onClick={() => void save()}>
-      {saveLabel ?? t(locale, "settings.saveChain")}
-    </Button>
+    <>
+      <Button
+        type="button"
+        disabled={busy}
+        onClick={() => void save()}
+        status={signal.status === "idle" ? undefined : signal.status}
+      >
+        {saveLabel ?? t(locale, "settings.saveChain")}
+      </Button>
+      {signal.status === "success" && savedCopy !== null ? (
+        <span role="status" className="sr-only">
+          {savedCopy}
+        </span>
+      ) : null}
+    </>
   );
 
   return (
