@@ -428,6 +428,35 @@ describe("omp provider union (third generator input)", () => {
     }
   });
 
+  test("a multi-row provider labels every row with its protocol; a single-row provider keeps its snapshot label", () => {
+    const groups = new Map<string, typeof OMP_SNAPSHOT.providers>();
+    for (const record of OMP_SNAPSHOT.providers) {
+      const providerId = record.sourceProviderId ?? record.id;
+      groups.set(providerId, [...(groups.get(providerId) ?? []), record]);
+    }
+    let multiRowGroups = 0;
+    for (const [providerId, records] of groups) {
+      // Only the rows that actually ship decide the label: a record another
+      // pass already covers does not make its provider "multi-protocol".
+      const shipped = records.filter((record) => Object.hasOwn(PROVIDER_CATALOG, record.id));
+      if (shipped.length > 1) {
+        multiRowGroups += 1;
+        const labels = shipped.map((record) => {
+          expect(PROVIDER_CATALOG[record.id]!.label, record.id).toBe(`${record.label} — ${record.api}`);
+          return PROVIDER_CATALOG[record.id]!.label;
+        });
+        // The picker lists one entry per row: identical labels would make the
+        // rows indistinguishable.
+        expect(new Set(labels).size, providerId).toBe(shipped.length);
+      } else if (shipped.length === 1) {
+        expect(PROVIDER_CATALOG[shipped[0]!.id]!.label, shipped[0]!.id).toBe(shipped[0]!.label);
+      }
+    }
+    // The committed snapshot really does carry mixed-protocol providers — the
+    // rule above is not vacuously true.
+    expect(multiRowGroups).toBeGreaterThan(0);
+  });
+
   test("commandcode is mixed-protocol: one row per protocol, no typesafe prefill", () => {
     // One custom-provider declaration carries exactly one protocol, so every
     // served protocol is a separate template row.

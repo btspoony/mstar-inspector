@@ -11063,7 +11063,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   },
   "commandcode": {
-    "label": "Command Code",
+    "label": "Command Code — openai-completions",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://api.commandcode.ai/provider/v1",
@@ -11123,7 +11123,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   },
   "commandcode-anthropic": {
-    "label": "Command Code",
+    "label": "Command Code — anthropic-messages",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://api.commandcode.ai/provider",
@@ -11144,7 +11144,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   },
   "commandcode-responses": {
-    "label": "Command Code",
+    "label": "Command Code — openai-responses",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://api.commandcode.ai/provider/v1",
@@ -11189,7 +11189,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   },
   "commandcode-typesafe": {
-    "label": "Command Code",
+    "label": "Command Code — typesafe",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://api.commandcode.ai/provider",
@@ -11383,7 +11383,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   },
   "zenmux": {
-    "label": "ZenMux",
+    "label": "ZenMux — openai-completions",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://zenmux.ai/api/v1",
@@ -11667,7 +11667,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   },
   "zenmux-anthropic": {
-    "label": "ZenMux",
+    "label": "ZenMux — anthropic-messages",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://zenmux.ai/api/anthropic",
@@ -11699,7 +11699,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   },
   "opencode-go": {
-    "label": "OpenCode Go",
+    "label": "OpenCode Go — openai-completions",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://opencode.ai/inference/go/v1",
@@ -11744,7 +11744,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   },
   "opencode-go-anthropic": {
-    "label": "OpenCode Go",
+    "label": "OpenCode Go — anthropic-messages",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://opencode.ai/inference/go",
@@ -11759,7 +11759,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   },
   "opencode-go-responses": {
-    "label": "OpenCode Go",
+    "label": "OpenCode Go — openai-responses",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://opencode.ai/inference/go/v1",

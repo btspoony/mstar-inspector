@@ -257,6 +257,66 @@ describe("POST /dashboard/api/apps/:appId/keys/verify", () => {
     expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
   });
 
+  // A `template`-tier or custom id is not a builtin: its key is verified
+  // against the App's OWN declaration and appended to that declaration's pool.
+  const TEMPLATE_DECL = {
+    provider_id: "opencode-go",
+    base_url: "https://opencode.example/v1",
+    api: "openai-completions" as const,
+    model_ids: ["go-model-1", "go-model-2"],
+  };
+  const CUSTOM_DECL = {
+    provider_id: "my-gateway",
+    base_url: "https://gateway.example/api",
+    api: "anthropic-messages" as const,
+    model_ids: ["local-7b"],
+  };
+
+  /** One declaration whose only key row was drained — the re-keyable state. */
+  async function declaredWorld(decl: typeof TEMPLATE_DECL | typeof CUSTOM_DECL) {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    const seedKey = sk("seed-key-1234");
+    await store.upsertCustomProvider(app.id, decl, seedKey);
+    await store.deleteCustomProviderKey(app.id, decl.provider_id, await keyIdOf(seedKey));
+    return { db, app, store };
+  }
+
+  for (const [tier, decl] of [
+    ["template-tier", TEMPLATE_DECL],
+    ["custom", CUSTOM_DECL],
+  ] as const) {
+    test(`a declared ${tier} id verifies against its declaration and appends one key`, async () => {
+      const { db, app, store } = await declaredWorld(decl);
+      // The endpoint the declaration owns decides where the probe goes — and
+      // the declaration paths never carried the omp-runtime precheck.
+      db.raw
+        .prepare("UPDATE github_apps SET sandbox_image_id = 'legacy-runtime' WHERE id = ?")
+        .run(app.id);
+      fetchSpy = mockStatus(200, {});
+      const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: decl.provider_id, key: PLAIN_KEY });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, provider: decl.provider_id });
+      const probe = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(probe[0].startsWith(decl.base_url)).toBe(true);
+      // Exactly one new row in the declaration's pool, none in the builtin pool.
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_provider_keys").get() as { n: number }).toEqual({ n: 1 });
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+      // The declaration is only READ: base_url / api / model_ids are unchanged.
+      expect(await store.listCustomProviders(app.id)).toEqual([{ ...decl, has_keys: true }]);
+    });
+  }
+
+  test("a declared id whose verify is rejected returns the structured reason and writes nothing", async () => {
+    const { db, app, store } = await declaredWorld(CUSTOM_DECL);
+    fetchSpy = mockStatus(401, { error: { message: "nope" } });
+    const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: CUSTOM_DECL.provider_id, key: PLAIN_KEY });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ ok: false, reason: "invalid_key" });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+    expect((await store.listCustomProviders(app.id)).map((row) => row.has_keys)).toEqual([false]);
+  });
+
   test("other member 403", async () => {
     const { db } = await seededWorld();
     const res = await postForm(VERIFY, "hubot", makeEnv(db), { provider: "anthropic", key: PLAIN_KEY });

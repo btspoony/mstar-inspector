@@ -3694,14 +3694,75 @@ const appModelsRoute = async (c: DashboardContext) => {
   }
 };
 
+/** Why a key could not join an App's declared-provider pool. */
+type DeclaredKeyAppendOutcome =
+  | { status: "appended" }
+  | { status: "undeclared" }
+  | { status: "endpoint-locked" }
+  | { status: "limit" }
+  | { status: "rejected"; reason: VerifyFailureReason };
+
+/**
+ * Verify one key against the App's STORED declaration for `providerId`, then
+ * append it to that declaration's pool. The declaration is only read: its
+ * base_url / api / model_ids are what the pool's keys were verified against, so
+ * this path can never move the endpoint (the store's endpoint lock keeps
+ * holding). A rejected verify writes nothing, and a declaration removed or
+ * re-pointed between the read and the write is refused the same way.
+ */
+async function appendDeclaredProviderKey(
+  store: AppConfigStore,
+  appId: string,
+  providerId: string,
+  plainKey: string,
+): Promise<DeclaredKeyAppendOutcome> {
+  const declared = (await store.listCustomProviders(appId)).find((row) => row.provider_id === providerId);
+  if (declared === undefined) return { status: "undeclared" };
+  const verified = await verifyProviderKey({ fetch: verifyFetch }, providerId, plainKey, {
+    baseUrl: declared.base_url,
+    api: declared.api,
+    modelIds: declared.model_ids,
+  });
+  if (!verified.ok) return { status: "rejected", reason: verified.reason };
+  try {
+    await store.addCustomProviderKey(appId, providerId, plainKey, {
+      base_url: declared.base_url,
+      api: declared.api,
+    });
+  } catch (err) {
+    if (err instanceof InvalidCustomProviderError) return { status: "undeclared" };
+    if (err instanceof ProviderEndpointLockedError) return { status: "endpoint-locked" };
+    if (err instanceof ProviderKeyLimitError) return { status: "limit" };
+    throw err;
+  }
+  return { status: "appended" };
+}
+
+/**
+ * The verify route's keyed 400: `key` + `params` let the SPA resolve the copy
+ * in the operator's locale, and `reason` stays inside the closed enum its
+ * fallback already maps.
+ */
+function verifyKeyed400(
+  c: DashboardContext,
+  key: DictionaryKey,
+  params: Record<string, string | number>,
+): Response {
+  return c.json({ ok: false, reason: "unexpected" as const, key, message: t("en", key, params), params }, 400);
+}
+
 /**
  * SPA add-key path: verify the as-typed key, then store. Failure
  * is 400 JSON with a structured reason (invalid_key / quota_exhausted /
  * rate_limited / unreachable / unexpected / unsupported_provider) and ZERO
  * writes. The key is never logged or returned.
- * An App whose selected runtime harness is not omp (unknown id
- * included — fail-closed) is refused with unsupported_provider before any
- * probe, mirroring the display face's eligibility gate.
+ * A BUILTIN id verifies against its catalog endpoint; an App whose selected
+ * runtime harness is not omp (unknown id included — fail-closed) is refused
+ * with unsupported_provider before any probe, mirroring the display face's
+ * eligibility gate. Any other id is a declared (`template` or custom)
+ * provider: it verifies against the App's stored declaration and appends to
+ * that pool, while an id the App never declared is a keyed 400 with zero
+ * writes.
  */
 const appKeyVerifyRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
@@ -3709,7 +3770,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const plainKey = typeof form.key === "string" ? form.key.trim() : "";
-  if (!PROVIDER_IDS.includes(provider) || plainKey === "" || plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+  if (provider === "" || plainKey === "" || plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
     return c.json({ ok: false, reason: "unexpected" as const }, 400);
   }
   // A `!`-prefixed key would be run as a shell command by the review
@@ -3728,12 +3789,40 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
       400,
     );
   }
-  // Fail-closed server-side precheck: the App's selected runtime
-  // image must carry an omp runtime for ANY provider key to be eligible —
-  // the same gate the settings display face stamps into provider_catalog
-  // (isOmpRuntimeImage). Unknown image id → not omp → 400. The precheck
-  // reuses the existing closed reason enum (no new value;
-  // CARRY-2 adds the optional keyed face so the SPA renders the
+  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+  // A `template`-tier or custom id is not a builtin: it verifies against the
+  // App's OWN declaration — the endpoint the pool's keys were stored against —
+  // and appends to that pool. An id the App never declared has nothing to
+  // verify against, so it is a keyed 400 with zero writes.
+  if (!PROVIDER_IDS.includes(provider)) {
+    try {
+      const outcome = await appendDeclaredProviderKey(store, gate.app.id, provider, plainKey);
+      if (outcome.status === "undeclared") {
+        return verifyKeyed400(c, SETTINGS_400_KEYS.customProviderUndeclared, { provider });
+      }
+      if (outcome.status === "endpoint-locked") {
+        return verifyKeyed400(c, SETTINGS_400_KEYS.providerEndpointLocked, { provider });
+      }
+      if (outcome.status === "limit") {
+        return verifyKeyed400(c, SETTINGS_400_KEYS.providerKeyLimit, {
+          provider,
+          limit: MAX_KEYS_PER_PROVIDER,
+        });
+      }
+      if (outcome.status === "rejected") {
+        return c.json({ ok: false, reason: mapVerifyReason(outcome.reason) }, 400);
+      }
+      return c.json({ ok: true, provider });
+    } catch (err) {
+      logSettingsFailure("verify_key", gate.app.id, err);
+      return c.json({ ok: false, reason: "unexpected" as const }, 500);
+    }
+  }
+  // Fail-closed server-side precheck: a BUILTIN provider's key is eligible only
+  // under a runtime image that carries an omp runtime — the same gate the
+  // settings display face stamps into provider_catalog (isOmpRuntimeImage).
+  // Unknown image id → not omp → 400. The precheck reuses the existing closed
+  // reason enum (no new value; the optional keyed face lets the SPA render the
   // runtime-harness copy in the operator's locale); zero writes.
   if (!isOmpRuntimeImage(gate.app.sandbox_image_id)) {
     return c.json(
@@ -3750,7 +3839,6 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
       400,
     );
   }
-  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
     const verified = await verifyProviderKey({ fetch: verifyFetch }, provider, plainKey);
     if (!verified.ok) {
@@ -3764,17 +3852,10 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
     // provider failure: the reason enum stays closed, the keyed face carries
     // the clear message the SPA resolves in the operator's locale.
     if (err instanceof ProviderKeyLimitError) {
-      const params = { provider, limit: MAX_KEYS_PER_PROVIDER };
-      return c.json(
-        {
-          ok: false,
-          reason: "unexpected" as const,
-          key: SETTINGS_400_KEYS.providerKeyLimit,
-          message: t("en", SETTINGS_400_KEYS.providerKeyLimit, params),
-          params,
-        },
-        400,
-      );
+      return verifyKeyed400(c, SETTINGS_400_KEYS.providerKeyLimit, {
+        provider,
+        limit: MAX_KEYS_PER_PROVIDER,
+      });
     }
     return c.json({ ok: false, reason: "unexpected" as const }, 500);
   }
@@ -4298,51 +4379,29 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     if (isCommandConfigKey(plainKey)) {
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyCommandPrefix);
     }
-    const declared = (await store.listCustomProviders(gate.app.id)).find((row) => row.provider_id === providerId);
-    if (declared === undefined) {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.customProviderUndeclared, {
-        provider: providerId,
-      });
-    }
     try {
-      const verified = await verifyProviderKey({ fetch: verifyFetch }, providerId, plainKey, {
-        baseUrl: declared.base_url,
-        api: declared.api,
-        modelIds: declared.model_ids,
-      });
-      if (!verified.ok) {
-        return settingsVerifyFailResponse(c, gate.app.github_app_id, verified.reason);
-      }
       // The append persists the verify outcome: the store records 'ok' or the
       // weaker 'reachable' from the SAME derived-URL decision the declaration
       // path applies, so the row the operator just verified renders its state.
-      // The verified endpoint rides along: the insert is gated on the
-      // declaration still carrying it, so a declaration removed and re-created
-      // at another endpoint while the verification was in flight refuses this
-      // credential instead of adopting it.
-      await store.addCustomProviderKey(gate.app.id, providerId, plainKey, {
-        base_url: declared.base_url,
-        api: declared.api,
-      });
-    } catch (err) {
-      logSettingsFailure("add_custom_provider_key", gate.app.id, err);
-      // The declaration was removed between the read and the write — the same
-      // keyed 400, nothing stored.
-      if (err instanceof InvalidCustomProviderError) {
+      const outcome = await appendDeclaredProviderKey(store, gate.app.id, providerId, plainKey);
+      if (outcome.status === "undeclared") {
         return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.customProviderUndeclared, {
           provider: providerId,
         });
       }
-      // The declaration now points at another endpoint than the one this key
-      // was verified against — the same keyed 400 the declare route answers.
-      if (err instanceof ProviderEndpointLockedError) {
+      if (outcome.status === "endpoint-locked") {
         return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerEndpointLocked, {
           provider: providerId,
         });
       }
-      if (err instanceof ProviderKeyLimitError) {
+      if (outcome.status === "limit") {
         return settingsKeyLimitResponse(c, gate.app.github_app_id, providerId);
       }
+      if (outcome.status === "rejected") {
+        return settingsVerifyFailResponse(c, gate.app.github_app_id, outcome.reason);
+      }
+    } catch (err) {
+      logSettingsFailure("add_custom_provider_key", gate.app.id, err);
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(
