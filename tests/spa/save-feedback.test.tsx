@@ -26,7 +26,8 @@ import { Button } from "../../src/design-system/primitives/button";
 import { useSaveSignal } from "../../src/spa/components/save-signal";
 import { NoticeRegion, type OpNotice } from "../../src/spa/pages/PageNotice";
 import { RuntimePage } from "../../src/spa/admin/RuntimePage";
-import { AddKeyDialog } from "../../src/spa/pages/providers-dialogs";
+import { AddKeyDialog, CustomProviderDialog } from "../../src/spa/pages/providers-dialogs";
+import type { SettingsManagePayload } from "../../src/spa/pages/data";
 import { WorkspaceSettingsPage } from "../../src/spa/pages/WorkspaceSettingsPage";
 import type { SpaBoot } from "../../src/spa/boot";
 import { installDom } from "./dom";
@@ -858,6 +859,53 @@ describe("in-flight save announcement", () => {
         resolveVerify?.({ kind: "success", message: "added" });
       });
       expect(savingRegions(doc, verifyingCopy)).toHaveLength(0);
+
+      await act(async () => root.unmount());
+    } finally {
+      jest.useRealTimers();
+      cleanup();
+    }
+  });
+
+  test("the custom-provider flow also mounts an in-flight region carrying its own copy — the disabled busy button's relabel is not the channel", async () => {
+    jest.useFakeTimers();
+    const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps");
+    let resolveSettings: ((notice: OpNotice) => void) | null = null;
+    try {
+      const { root } = mount(win);
+      await act(async () =>
+        root.render(
+          createElement(CustomProviderDialog, {
+            locale: "en",
+            open: true,
+            onOpenChange: () => {},
+            payload: { custom_provider_api_ids: ["openai-completions"] } as unknown as SettingsManagePayload,
+            onSettings: () =>
+              new Promise<OpNotice>((resolve) => {
+                resolveSettings = resolve;
+              }),
+            onOutcome: () => {},
+          }),
+        ),
+      );
+      const form = win.document.querySelector('input[type="password"]')?.closest("form") as unknown as
+        | HTMLFormElement
+        | undefined;
+      await act(async () => {
+        form?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+      expect(resolveSettings).not.toBeNull();
+      // Exactly one region with the copy that button's busy face names — the
+      // button is disabled while busy, so its own relabel is not a channel.
+      const savingCopy = t("en", "settings.providers.saving");
+      const doc = win.document as unknown as Element;
+      expect(savingRegions(doc, savingCopy)).toHaveLength(1);
+      expect(doc.querySelectorAll('[role="status"]')).toHaveLength(1);
+
+      await act(async () => {
+        resolveSettings?.({ kind: "success", message: "added" });
+      });
+      expect(savingRegions(doc, savingCopy)).toHaveLength(0);
 
       await act(async () => root.unmount());
     } finally {

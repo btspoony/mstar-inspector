@@ -492,6 +492,7 @@ export function CustomProviderDialog({
         >
           {busy ? t(locale, "settings.providers.saving") : t(locale, "settings.addCustomProvider")}
         </Button>
+        <SaveInFlight show={busy} locale={locale} message={t(locale, "settings.providers.saving")} />
       </form>
     </StepDialog>
   );

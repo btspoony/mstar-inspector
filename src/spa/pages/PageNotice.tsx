@@ -91,12 +91,14 @@ export function LoadingNotice({ locale }: { locale: Locale }) {
  * The in-flight face of a status-driving save button. While the button shows
  * its spinner the glyph is aria-hidden, so without this region the write
  * would be silent between submit and outcome — the success and error faces
- * keep their own announcements. The region narrates the action the button
- * NAMES, never a fixed string: a caller whose button face says "Verify"
- * passes that copy via `message`; a caller whose button swaps its own
- * accessible name to the in-flight copy needs no region at all (that name
- * change is the channel — mounting one would just repeat the same words).
- * Renders nothing in every other face.
+ * keep their own announcements. The region is the announcement channel
+ * precisely BECAUSE the submitting control disables itself while busy: a
+ * disabled, unfocused element's name change is not reliably announced
+ * (submit-by-click blurs it, submit-by-Enter leaves focus in an input), so
+ * the busy face a button swaps into its own label is not a channel. The
+ * invariant for callers: `message` must match the busy face of the button
+ * this region sits beside — a "Verify" face passes the verifying copy, a
+ * "Save" face takes the default. Renders nothing in every other face.
  */
 export function SaveInFlight({
   show,
