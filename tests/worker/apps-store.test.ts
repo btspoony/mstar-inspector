@@ -587,8 +587,9 @@ describe("apps-store (createAppsStore)", () => {
     await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "still-there" });
     await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: "gone" });
     await s.upsertInstallation({ appId: sibling.id, installationId: 3, accountLogin: "other-app" });
+    const observedAt = await s.currentTimestamp();
 
-    await s.reconcileInstallations(app.id, [1]);
+    await s.reconcileInstallations(app.id, [1], observedAt);
 
     expect(await s.listInstallations(app.id)).toEqual([
       expect.objectContaining({ installation_id: 1 }),
@@ -598,8 +599,13 @@ describe("apps-store (createAppsStore)", () => {
     const siblingRows = await s.listInstallations(sibling.id);
     expect(siblingRows).toEqual([expect.objectContaining({ installation_id: 3 })]);
 
-    // GitHub lists 2 again (a reinstall): the stored stamp is cleared.
-    await s.reconcileInstallations(app.id, [1, 2]);
+    // GitHub lists 2 again (a reinstall): the stored stamp is cleared. The
+    // stamp is backdated so it is unambiguously OLDER than the next
+    // observation (the same-second case is the ordering test below).
+    db.raw
+      .prepare("UPDATE app_installations SET removed_at = '2020-01-01 00:00:00' WHERE installation_id = 2")
+      .run();
+    await s.reconcileInstallations(app.id, [1, 2], await s.currentTimestamp());
     const restored = await s.listInstallations(app.id);
     expect(restored.map((row) => row.installation_id).sort()).toEqual([1, 2]);
   });
@@ -611,7 +617,7 @@ describe("apps-store (createAppsStore)", () => {
     await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "still-there" });
     await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: "gone" });
 
-    await s.reconcileInstallations(app.id, []);
+    await s.reconcileInstallations(app.id, [], await s.currentTimestamp());
 
     expect(await s.listInstallations(app.id)).toHaveLength(0);
     const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
@@ -628,16 +634,63 @@ describe("apps-store (createAppsStore)", () => {
     await s.upsertInstallation({ appId: app.id, installationId: 100, accountLogin: "in-100" });
     await s.upsertInstallation({ appId: app.id, installationId: 150, accountLogin: "in-150" });
     await s.markInstallationRemoved(app.id, 150);
+    db.raw
+      .prepare("UPDATE app_installations SET removed_at = '2020-01-01 00:00:00' WHERE installation_id = 150")
+      .run();
     await s.upsertInstallation({ appId: app.id, installationId: 151, accountLogin: "out-151" });
     await s.upsertInstallation({ appId: app.id, installationId: 999, accountLogin: "out-999" });
     const live = Array.from({ length: 150 }, (_, index) => index + 1);
 
-    await s.reconcileInstallations(app.id, live);
+    await s.reconcileInstallations(app.id, live, await s.currentTimestamp());
 
+    // The binding shape the test is named after: each statement binds one
+    // value pair (appId + the JSON snapshot), NOT one placeholder per id. A
+    // revert to per-id placeholders binds 151 values per statement here and
+    // fails this line.
+    expect(db.boundValueCounts!.slice(-2)).toEqual([2, 2]);
     const rows = await s.listInstallations(app.id);
     expect(rows.map((row) => row.installation_id).sort((a, b) => a - b)).toEqual([1, 100, 150]);
     const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
     expect(n.n).toBe(5); // nothing deleted
+  });
+
+  test("reconcileInstallations: rows newer than the observation stamp are neither stamped nor cleared", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    const observedAt = await s.currentTimestamp();
+    // Created AFTER the snapshot (seen_at is later than it): absent from the
+    // live set only because it did not exist yet — it must stay present.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('late', ?, 10, 'late-org', datetime('now', '+10 seconds'))",
+      )
+      .run(app.id);
+    // A removal observed AFTER the snapshot is newer news than the live set,
+    // so the clear leg must leave it stamped even though 20 is present.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at, removed_at) VALUES ('fresh-removal', ?, 20, 'gone-org', datetime('now'), datetime('now', '+10 seconds'))",
+      )
+      .run(app.id);
+    // …while a row older than the snapshot and absent from the live set is
+    // exactly what the stamping leg exists for.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('old', ?, 30, 'old-org', '2020-01-01 00:00:00')",
+      )
+      .run(app.id);
+
+    await s.reconcileInstallations(app.id, [20], observedAt);
+
+    const rows = db.raw
+      .query("SELECT installation_id, removed_at IS NOT NULL AS removed FROM app_installations ORDER BY installation_id")
+      .all() as Array<{ installation_id: number; removed: number }>;
+    expect(rows).toEqual([
+      { installation_id: 10, removed: 0 },
+      { installation_id: 20, removed: 1 },
+      { installation_id: 30, removed: 1 },
+    ]);
   });
 
   test("upsertInstallation: distinct installation ids are distinct rows; unknown app fails FK", async () => {

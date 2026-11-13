@@ -3338,11 +3338,16 @@ async function refreshGithubMetadata(
    * `{ok:false}` writes no row, and the whole leg sits in one catch-all, so a
    * store rejection is logged and can never turn a persisted profile refresh
    * into `failed`.
+   *
+   * The observation stamp is read BEFORE the listing is fetched: a row created
+   * (or a removal delivered) while the request is in flight is newer than the
+   * snapshot, and the store's guards must leave it alone.
    */
   const reconcileInstallations = async (decryptedPem: string): Promise<void> => {
     try {
+      const observedAt = await apps.currentTimestamp();
       const result = await fetchAppInstallations(app.github_app_id, decryptedPem);
-      if (result.ok) await apps.reconcileInstallations(app.id, result.installationIds);
+      if (result.ok) await apps.reconcileInstallations(app.id, result.installationIds, observedAt);
     } catch (err) {
       logSettingsFailure("github_installations", app.id, err);
     }

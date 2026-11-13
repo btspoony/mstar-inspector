@@ -42,12 +42,16 @@
  * nothing. It shares this module because it shares the
  * refresh's failure discipline and bounds, not because it shares the JWT path.
  *
- * Failure discipline (AD-531): ZERO retries (the caller's 24h TTL bounds
- * the cost to ≤1 fetch per request; ≤1/App/day once a sync succeeds), a
- * 5s AbortSignal timeout, and a total
- * catch-all — every failure (OpenSSH key, garbage PEM, import/sign error,
- * network failure, timeout, non-200, unexpected payload) collapses to the
- * structured `{ ok: false }`. This function NEVER throws: the settings read
+ * Failure discipline (AD-531): ZERO retries, a per-request AbortSignal
+ * timeout, and a total catch-all — every failure (OpenSSH key, garbage PEM,
+ * import/sign error, network failure, timeout, non-200, unexpected payload)
+ * collapses to the structured `{ ok: false }`.
+ *
+ * Cost bound of ONE real refresh (the fresh-TTL and key-missing paths cost
+ * nothing): profile `GET /app` ≤5s, then the installation listing ≤5s for
+ * its WHOLE leg (1–10 sequential pages sharing one deadline, 100 ids each),
+ * then the visibility probe ≤3s. Worst case ≈13s serial; the TTL keeps that
+ * to ≤1/App/day once a sync succeeds. This function NEVER throws: the settings read
  * path wraps decrypt → this fetch → saveGithubMetadata in its own
  * catch-all (fail-open by structure), so a metadata refresh can never
  * surface as a route 5xx. The PEM itself is the caller's decryption result
@@ -64,10 +68,20 @@ const GITHUB_APP_INSTALLATIONS_URL = "https://api.github.com/app/installations";
 /**
  * Pagination bound for the installation list: 100 per page, so ten pages is
  * 1000 installations for ONE App — far past any real installation count and a
- * hard stop for a `Link` header that never ends. The reconcile is fail-open, so
- * a truncated list is only ever a partial repair, never a wrong removal.
+ * hard stop for a `Link` header that never ends. Reaching it with a next page
+ * still pending is `{ ok: false }`: a truncated list must never reach the
+ * reconcile, whose `NOT IN` would hide every installation on the pages we did
+ * not read. This is the truncation guard only — an out-of-order observation is
+ * guarded in the store (`reconcileInstallations`).
  */
 const MAX_INSTALLATION_PAGES = 10;
+/**
+ * ONE wall-clock budget for the whole listing leg, shared by its pages: each
+ * request's signal is what is left of it, so N pages cost at most this and not
+ * N times the profile call's 5s. Exhausting it is `{ ok: false }` — the leg
+ * must never hand back the subset it managed to collect.
+ */
+const LISTING_BUDGET_MS = 5_000;
 /** Upstream budget (AD-531 lock): 5 seconds, zero retries. */
 const FETCH_TIMEOUT_MS = 5_000;
 /**
@@ -329,9 +343,9 @@ function nextInstallationsPage(linkHeader: string | null): NextInstallationsPage
  * next page still exists, or a next link we refuse to follow, is a failure
  * rather than a partial success.
  *
- * Same failure discipline as {@link fetchAppMetadata}: zero retries, a 5s
- * timeout per request, and a total catch-all — this function NEVER throws, so a
- * reconcile can never turn the settings read into a 5xx or a failed refresh.
+ * Same failure discipline as {@link fetchAppMetadata}: zero retries and a
+ * total catch-all, so a reconcile can never turn the settings read into a 5xx
+ * or a failed refresh.
  * Only each entry's numeric `id` leaves this module.
  */
 export async function fetchAppInstallations(
@@ -348,14 +362,17 @@ export async function fetchAppInstallations(
     };
     const installationIds: number[] = [];
     let url: string | null = `${GITHUB_APP_INSTALLATIONS_URL}?per_page=100`;
+    const deadline = Date.now() + LISTING_BUDGET_MS;
     for (let page = 0; url !== null; page++) {
       // A next page we have no budget left to fetch: the collected ids are a
       // strict subset of GitHub's, and a subset must never be treated as the
       // authoritative set.
       if (page >= MAX_INSTALLATION_PAGES) return { ok: false };
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return { ok: false };
       const res = await fetch(url, {
         method: "GET",
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: AbortSignal.timeout(Math.min(FETCH_TIMEOUT_MS, remainingMs)),
         headers,
       });
       if (!res.ok) {

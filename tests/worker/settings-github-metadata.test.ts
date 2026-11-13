@@ -556,7 +556,8 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
     // 10 = uninstalled while no delivery arrived (the reported defect);
-    // 20 = already stamped removed, but GitHub lists it again.
+    // 20 = already stamped removed (backdated, so the removal is unambiguously
+    // older than the refresh's observation stamp), but GitHub lists it again.
     db.raw
       .prepare(
         "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('seed-gone', ?, 10, 'gone-org', datetime('now'))",
@@ -564,7 +565,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
       .run(appId);
     db.raw
       .prepare(
-        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at, removed_at) VALUES ('seed-back', ?, 20, 'back-org', datetime('now'), datetime('now'))",
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at, removed_at) VALUES ('seed-back', ?, 20, 'back-org', datetime('now'), '2020-01-01 00:00:00')",
       )
       .run(appId);
     stubFetch(githubStub(GITHUB_PROFILE, 404, [20]));

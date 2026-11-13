@@ -185,9 +185,11 @@ async function decodeAndVerifyJwt(
 
 const origFetch = globalThis.fetch;
 const origAbortTimeout = AbortSignal.timeout;
+const origNow = Date.now;
 afterEach(() => {
   globalThis.fetch = origFetch;
   AbortSignal.timeout = origAbortTimeout;
+  Date.now = origNow;
 });
 
 describe("fetchAppMetadata (AD-531)", () => {
@@ -617,6 +619,28 @@ describe("fetchAppInstallations (the reconcile face)", () => {
 
     expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
     expect(calls).toHaveLength(10); // no 11th request, and no ids escaped
+  });
+
+  test("one overall listing budget: a page past it is {ok:false}, never the ids collected so far", async () => {
+    const { pem } = await pkcs8Fixture();
+    const page2 = "https://api.github.com/app/installations?per_page=100&page=2";
+    // The clock is the budget: the first page burns all of it, so the second
+    // page has none left and the leg must fail rather than return page one.
+    let clock = Date.now();
+    Date.now = () => clock;
+    const { calls } = stubFetch(() => {
+      clock += 5_000;
+      return new Response(JSON.stringify([{ id: 1 }]), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          link: `<${page2}>; rel="next"`,
+        },
+      });
+    });
+
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+    expect(calls).toHaveLength(1); // the deadline stopped it, not the page cap
   });
 
   test("non-200, malformed payload and an abort all collapse to {ok:false} — never a throw", async () => {

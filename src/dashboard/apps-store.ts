@@ -26,8 +26,10 @@
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
  * structurally. Declared locally instead of importing `store/types` because
  * dashboard modules must not import store/pipeline/review code (architect
- * decision Q2), and this store never uses D1 batch() — multi-row reads go
- * through IN-list queries (deliverySummaries) — so it needs a narrower face.
+ * decision Q2). The narrow face carries the operations this store needs:
+ * multi-row reads go through IN-list queries (deliverySummaries) and the
+ * writes that must commit together — App creation, the allowlist replace,
+ * the installation reconcile — go through `batch()`.
  *
  * Semantics (route call sites rely on these):
  *   - getAppForWebhook / getAppByGithubId / getAppById return the row
@@ -1429,11 +1431,28 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
+     * The database's own UTC clock, in the `YYYY-MM-DD HH:MM:SS` text form every
+     * timestamp column uses. A caller captures this BEFORE an upstream read so
+     * `reconcileInstallations` can tell which rows predate the snapshot.
+     */
+    async currentTimestamp(): Promise<string> {
+      const row = await db.prepare("SELECT datetime('now') AS now").first<{ now: string }>();
+      if (!row) throw new Error("D1 returned no clock row");
+      return row.now;
+    },
+
+    /**
      * Stamp one installation row as removed (`installation.deleted`). The row
      * SURVIVES — the credential-routing and failure-attribution joins read
      * `app_installations`, and the installation's historical reviews still
      * reference it. An unknown pair is a silent no-op: the delivery may
      * predate any local row, and refusing it would change the webhook answer.
+     *
+     * No order guard: a REPLAYED `installation.deleted` processed after a
+     * reinstall's `installation.created` still stamps the row, because the
+     * payload carries no reliable delivery order to compare. That window is
+     * bounded by the next metadata refresh, whose live set contains the
+     * installation and clears the stamp.
      */
     async markInstallationRemoved(appId: string, installationId: number): Promise<void> {
       await db
@@ -1453,33 +1472,57 @@ export function createAppsStore(db: AppsStoreD1) {
      * was missed. Rows are never deleted (see markInstallationRemoved); a null
      * `removed_at` is the only "present" state.
      *
-     * The live set is bound ONCE as a JSON array and tested with `json_each`,
-     * so each statement carries exactly TWO bounds (appId + the array) however
-     * many installations GitHub lists: D1 refuses a statement binding more than
-     * 100 parameters, and one placeholder per id would cross that at the first
-     * full page (`per_page=100`). Chunking is not an alternative — a chunked
-     * `NOT IN` would stamp ids that live in another chunk. An empty array is
-     * `json_each('[]')`, an empty set: the `NOT IN` stamps every active row and
-     * the `IN` clears none, so no special case is needed.
+     * `observedAt` is the store clock captured BEFORE the listing was fetched.
+     * The list is a snapshot and the table is not, so both statements are
+     * gated on it: a row created after the snapshot (`seen_at > observedAt`) is
+     * absent from the list only because it did not exist yet, and a removal
+     * observed after it (`removed_at >= observedAt`) is newer news than the
+     * snapshot — neither may be rewritten. Both UPDATEs run in ONE batch, so
+     * the stamp and the clear commit together.
+     *
+     * The snapshot (live ids + observation stamp) travels as ONE JSON value,
+     * tested with `json_each`: each statement binds exactly TWO values
+     * (appId + the snapshot) however many installations GitHub lists. D1
+     * refuses a statement binding more than 100 parameters, and one placeholder
+     * per id would cross that at the first full page (`per_page=100`).
+     * Chunking is not an alternative — a chunked `NOT IN` would stamp ids that
+     * live in another chunk. `json_each('[]')` is an empty set, so an empty
+     * list stamps every active row and clears none.
      */
-    async reconcileInstallations(appId: string, liveInstallationIds: readonly number[]): Promise<void> {
-      const live = JSON.stringify(liveInstallationIds);
-      await db
-        .prepare(
-          `UPDATE app_installations SET removed_at = datetime('now')
-           WHERE app_id = ? AND removed_at IS NULL
-             AND installation_id NOT IN (SELECT value FROM json_each(?))`,
-        )
-        .bind(appId, live)
-        .run();
-      await db
-        .prepare(
-          `UPDATE app_installations SET removed_at = NULL
-           WHERE app_id = ? AND removed_at IS NOT NULL
-             AND installation_id IN (SELECT value FROM json_each(?))`,
-        )
-        .bind(appId, live)
-        .run();
+    async reconcileInstallations(
+      appId: string,
+      liveInstallationIds: readonly number[],
+      observedAt: string,
+    ): Promise<void> {
+      // One binding per statement: the `WITH` CTE keeps `json_each` (ids) and
+      // `json_extract` (the stamp) reading the same bound value.
+      const snapshot = JSON.stringify({ ids: liveInstallationIds, observedAt });
+      await db.batch([
+        db
+          .prepare(
+            `WITH snapshot(body) AS (SELECT ?)
+             UPDATE app_installations SET removed_at = datetime('now')
+             WHERE app_id = ?
+               AND removed_at IS NULL
+               AND seen_at <= (SELECT json_extract(body, '$.observedAt') FROM snapshot)
+               AND installation_id NOT IN (
+                 SELECT value FROM json_each((SELECT body FROM snapshot), '$.ids')
+               )`,
+          )
+          .bind(snapshot, appId),
+        db
+          .prepare(
+            `WITH snapshot(body) AS (SELECT ?)
+             UPDATE app_installations SET removed_at = NULL
+             WHERE app_id = ?
+               AND removed_at IS NOT NULL
+               AND removed_at < (SELECT json_extract(body, '$.observedAt') FROM snapshot)
+               AND installation_id IN (
+                 SELECT value FROM json_each((SELECT body FROM snapshot), '$.ids')
+               )`,
+          )
+          .bind(snapshot, appId),
+      ]);
     },
 
     /**
