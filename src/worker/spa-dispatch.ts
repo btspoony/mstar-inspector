@@ -6,8 +6,9 @@
  * Accept variant (the legacy SSR home is retired); other
  * enumerated pages require HTML navigation (`Accept: text/html`) so API and
  * test clients never get the shell. Direct `GET /index.html` takes the same
- * boot path. `/assets/*` are the Vite hashed files — also ASSETS. Every
- * shell response re-reads membership (QC W-001): a session whose
+ * boot path (no production route sends it here — Workers Routes hand that path
+ * to the marketing Worker). `/app-assets/*` are the Vite hashed files, also
+ * ASSETS. Every shell response re-reads membership (QC W-001): a session whose
  * login has no users row gets the removedPage 403 instead of the shell.
  * No valid session → 302 `/dashboard/login` (the old null-boot
  * shell was the render-then-kick flash source); the SPA router guard is the

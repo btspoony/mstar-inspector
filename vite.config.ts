@@ -28,9 +28,11 @@ export default defineConfig({
   build: {
     outDir: "../../dist/spa",
     emptyOutDir: true,
-    assetsDir: "assets",
+    // `/app-assets`, not `/assets`: the marketing Worker owns `/` on this
+    // hostname, so the bundle must not compete for the path Vite defaults to.
+    assetsDir: "app-assets",
     rollupOptions: {
-      // Two documents, one hashed `/assets` bucket (`base` stays "/"): the
+      // Two documents, one hashed `/app-assets` bucket (`base` stays "/"): the
       // workspace shell and the hidden admin console. The console document is
       // answered only by the gated admin sub-app (`src/admin/index.ts`).
       input: {

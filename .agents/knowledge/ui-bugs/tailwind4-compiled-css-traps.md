@@ -15,7 +15,7 @@ tags:
 title: "Tailwind v4 compiled-CSS traps: dead utilities without theme keys + bare border currentColor + variant-prefix dedupe defeat"
 symptoms:
   - "visual feedback missing/incorrect while component tests stay green"
-  - "rules absent from (or wrong-valued in) dist/spa/assets/index-*.css"
+  - "rules absent from (or wrong-valued in) dist/spa/app-assets/*.css"
   - "consumption-site override class present in source and compiled CSS, yet the copy-in component's default value still renders (cascade loses to the variant-scoped base)"
 root_cause: "Tailwind v4 generates utilities only from @theme keys (missing --color-* mapping = dead class); bare width-only border inherits border-color from currentColor under preflight; an override whose variant prefix differs from the copy-in base class survives tailwind-merge (prefixes differ) and loses the cascade (variant-scoped specificity wins)"
 resolution_type: code_fix
@@ -35,7 +35,7 @@ Tailwind v4 CSS-first 配置下，两 类「源码看着对、测试全绿、页
 ## Symptoms
 
 - 视觉反馈缺失/异常但组件测试全绿；QC diff 审查才发现。
-- `dist/spa/assets/index-*.css` 里 grep 不到对应规则（死类）或规则值异常（currentColor）。
+- `dist/spa/app-assets/*.css` 里 grep 不到对应规则（死类）或规则值异常（currentColor）。
 
 ## What Didn't Work
 
@@ -46,7 +46,7 @@ Tailwind v4 CSS-first 配置下，两 类「源码看着对、测试全绿、页
 
 - **修**：`@theme inline` 补 `--color-primary-hover: var(--primary-hover)`（同族三个 key）；`TIER_FACES.secondary` 补 `border-border`（桥接到 `--border` → `--gray-alpha-400`）。
 - **防（pin 层）**：pin 必须断言 **theme coupling**（`@theme inline` 中映射 key 存在），而非源码 class 字符串；face pin 断言完整 class 串（如 `shadow-none border-border`）。
-- **防（验证层）**：涉及新 utility 的任务，QA 在 `dist/spa/assets/index-*.css` grep 编译产物作 kill proof（本仓已多次用：`.hover\:bg-primary-hover:hover{...}`、`.font-\(weight\:...\)`）。
+- **防（验证层）**：涉及新 utility 的任务，QA 在 `dist/spa/app-assets/*.css` grep 编译产物作 kill proof（本仓已多次用：`.hover\:bg-primary-hover:hover{...}`、`.font-\(weight\:...\)`）。
 
 ## Why This Works
 

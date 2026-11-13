@@ -155,9 +155,11 @@ describe("wantsHtml / asset paths", () => {
     expect(wantsHtml(null)).toBe(false);
   });
 
-  test("Vite hashed assets live under /assets/", () => {
-    expect(isSpaAssetPath("/assets/index-abc.js")).toBe(true);
-    expect(isSpaAssetPath("/index.html")).toBe(true);
+  test("Vite hashed assets live under /app-assets/", () => {
+    expect(isSpaAssetPath("/app-assets/index-abc.js")).toBe(true);
+    // The marketing Worker owns `/index.html` and `/assets/*` on this hostname.
+    expect(isSpaAssetPath("/index.html")).toBe(false);
+    expect(isSpaAssetPath("/assets/index-abc.js")).toBe(false);
     expect(isSpaAssetPath("/dashboard/insights")).toBe(false);
   });
 });
