@@ -12,6 +12,7 @@ tags:
   - readiness-probe
   - custom-domain
   - longest-match
+  - workers-dev
 title: "A Void-deployed Worker on a zone route needs an activated hostname as its readiness anchor"
 last_updated: 2026-11-13
 source: inspector.mstar.page hostname cutover
@@ -39,8 +40,22 @@ The marketing Worker therefore keeps `inspector-preview.mstar.page` as its readi
 ## Rules that follow
 
 - Never clean up `inspector-preview.mstar.page` as "unused": it is the probe path, not user traffic.
+- Keep `workers_dev` and `preview_urls` **off** on that Worker, and keep the preview Custom Domain as the **first** entry of `routes` with `custom_domain: true`. Enabling `workers_dev` does not help the probe; it overrides the anchor (see the counter-proof below).
 - A Custom Domain is the opposite trade for the Inspector: it owns the whole hostname and refuses a second Worker. That is why the Inspector moved to routes and gave up its root.
 - Route patterns are host-qualified and `*` is "zero or more of any character"; a literal `/` before it is part of the match, so `/x/*` never matches `/x`. The console document lives at the bare `/_internal_admin`, which is why that pattern carries no trailing slash.
+
+## Counter-proof: `workers_dev` is not a substitute, it is worse
+
+The obvious alternative — drop the preview Custom Domain, turn on `workers_dev: true` + `preview_urls: true`, and let the probe hit the `*.workers.dev` hostname — was tried on `mstar-product-site` and fails twice over:
+
+- Deploy run `43441149739` failed with `deploy: the uploaded Worker Version did not pass /__void/ready.`
+- `https://mstar-inspector-page.silent-dew-2478.workers.dev/` resolves (`2001:2::27a`) but answers **404**: the subdomain exists, the Worker is not published on it.
+
+The mechanism is a deadlock, not a propagation delay: Cloudflare publishes the `workers.dev` binding **after** a successful deploy, while Void probes `/__void/ready` **before** it will activate that deploy. Nothing can satisfy the first probe.
+
+The load-bearing detail is the precedence inside `@void/deploy-cloudflare`: `desiredTriggerConfig.workers_dev` outranks `customRouteReadinessUrl(routes)`. Enabling `workers_dev` therefore does not merely fail to help — it **displaces the working custom-route anchor**. With `workers_dev: true` and the preview Custom Domain both configured, the probe still targets `workers.dev` and still fails.
+
+`customRouteReadinessUrl` walks `routes` and takes the first one it can use, which is why the preview Custom Domain must be the **first** entry and must carry `custom_domain: true`.
 
 ## Verification for this split
 
