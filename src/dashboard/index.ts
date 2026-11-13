@@ -119,7 +119,12 @@ import {
   listPendingInvites,
   revokeInvite,
 } from "./invite-store";
-import { fetchAppMetadata, fetchAppVisibility, isGithubMetadataStale } from "./github-app-metadata";
+import {
+  fetchAppInstallations,
+  fetchAppMetadata,
+  fetchAppVisibility,
+  isGithubMetadataStale,
+} from "./github-app-metadata";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
   CLOUDFLARE_ACCOUNT_ID_PATTERN,
@@ -3324,6 +3329,24 @@ async function refreshGithubMetadata(
       logSettingsFailure("github_visibility", app.id, err);
     }
   };
+  /**
+   * Reconcile the App's installation rows against GitHub's authoritative list
+   * (`GET /app/installations`) — the repair path for a missed
+   * `installation.deleted` delivery. It runs ONLY inside a real refresh: the
+   * fresh short-circuit above returns first, so it shares the TTL/`force`
+   * bounds instead of costing a request per settings read. Fail-open twice:
+   * `{ok:false}` writes no row, and the whole leg sits in one catch-all, so a
+   * store rejection is logged and can never turn a persisted profile refresh
+   * into `failed`.
+   */
+  const reconcileInstallations = async (decryptedPem: string): Promise<void> => {
+    try {
+      const result = await fetchAppInstallations(app.github_app_id, decryptedPem);
+      if (result.ok) await apps.reconcileInstallations(app.id, result.installationIds);
+    } catch (err) {
+      logSettingsFailure("github_installations", app.id, err);
+    }
+  };
   try {
     const decryptedPem = await createSecretbox(encryptionKey).decryptSecret(
       app.private_key_enc,
@@ -3341,6 +3364,9 @@ async function refreshGithubMetadata(
       return { status: "failed", row: app };
     }
     await apps.saveGithubMetadata(app.id, result.metadata);
+    // After the metadata save: the profile write must not be lost to the
+    // reconcile leg, and a reconcile failure leaves every row as it was.
+    await reconcileInstallations(decryptedPem);
     // Probe with the slug this refresh just resolved, falling back to the
     // cached one (saveGithubMetadata COALESCE-preserves it when the payload
     // has none). Before the re-read so the returned row carries the fresh

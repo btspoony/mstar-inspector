@@ -101,8 +101,9 @@
  *     the metadata refresh's anonymous probe — machine-triggered, so like
  *     saveGithubMetadata it never writes updated_at.
  *   - listInstallations is the install-health read face for the settings
- *     panel: this App's installations, most recently seen
- *     first.
+ *     panel: this App's PRESENT installations (`removed_at IS NULL`), most
+ *     recently seen first. markInstallationRemoved / reconcileInstallations
+ *     stamp the rows GitHub no longer has — never delete them.
  *   - softDeleteApp is idempotent — the FIRST deleted_at wins; returns
  *     whether THIS call performed the delete.
  *   - recordDelivery / deliverySummary / listRecentDeliveries (migration
@@ -743,11 +744,16 @@ export const APP_READ_SQL = {
  * review traffic.
  */
 const UPSERT_INSTALLATION_SQL = {
+  // An AUTHORITATIVE delivery is the installation's own statement, so it also
+  // clears a removal stamp: a reinstall (`installation.created`) makes the row
+  // visible again. An INFERRED login is ordinary review traffic and says
+  // nothing about install state, so it never clears the stamp.
   authoritative: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
     VALUES (?, ?, ?, ?, datetime('now'))
     ON CONFLICT (app_id, installation_id) DO UPDATE SET
       account_login = COALESCE(excluded.account_login, account_login),
-      seen_at = datetime('now')`,
+      seen_at = datetime('now'),
+      removed_at = NULL`,
   inferred: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
     VALUES (?, ?, ?, ?, datetime('now'))
     ON CONFLICT (app_id, installation_id) DO UPDATE SET
@@ -1415,11 +1421,58 @@ export function createAppsStore(db: AppsStoreD1) {
       const res = await db
         .prepare(
           `SELECT installation_id, account_login, seen_at FROM app_installations
-           WHERE app_id = ? ORDER BY seen_at DESC, installation_id`,
+           WHERE app_id = ? AND removed_at IS NULL ORDER BY seen_at DESC, installation_id`,
         )
         .bind(appId)
         .all<AppInstallationRow>();
       return res.results;
+    },
+
+    /**
+     * Stamp one installation row as removed (`installation.deleted`). The row
+     * SURVIVES — the credential-routing and failure-attribution joins read
+     * `app_installations`, and the installation's historical reviews still
+     * reference it. An unknown pair is a silent no-op: the delivery may
+     * predate any local row, and refusing it would change the webhook answer.
+     */
+    async markInstallationRemoved(appId: string, installationId: number): Promise<void> {
+      await db
+        .prepare(
+          `UPDATE app_installations SET removed_at = datetime('now')
+           WHERE app_id = ? AND installation_id = ?`,
+        )
+        .bind(appId, installationId)
+        .run();
+    },
+
+    /**
+     * Reconcile this App's installation rows against GitHub's authoritative
+     * list (`GET /app/installations`): stamp the active rows the list does not
+     * contain and clear the stamp of a stored-removed row the list DOES
+     * contain. This is what repairs rows whose `installation.deleted` delivery
+     * was missed. Rows are never deleted (see markInstallationRemoved); a null
+     * `removed_at` is the only "present" state.
+     */
+    async reconcileInstallations(appId: string, liveInstallationIds: readonly number[]): Promise<void> {
+      const placeholders = liveInstallationIds.map(() => "?").join(", ");
+      // An empty authoritative list (the App has no installations at all) has
+      // no IN-clause to build; every active row is then absent by definition.
+      await db
+        .prepare(
+          `UPDATE app_installations SET removed_at = datetime('now')
+           WHERE app_id = ? AND removed_at IS NULL` +
+            (liveInstallationIds.length > 0 ? ` AND installation_id NOT IN (${placeholders})` : ""),
+        )
+        .bind(appId, ...liveInstallationIds)
+        .run();
+      if (liveInstallationIds.length === 0) return;
+      await db
+        .prepare(
+          `UPDATE app_installations SET removed_at = NULL
+           WHERE app_id = ? AND removed_at IS NOT NULL AND installation_id IN (${placeholders})`,
+        )
+        .bind(appId, ...liveInstallationIds)
+        .run();
     },
 
     /**

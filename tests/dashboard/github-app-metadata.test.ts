@@ -30,6 +30,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  fetchAppInstallations,
   fetchAppMetadata,
   fetchAppVisibility,
   githubAppSlugFromHtmlUrl,
@@ -533,5 +534,88 @@ describe("fetchAppVisibility (anonymous GET /apps/{slug})", () => {
       throw new TypeError("network down");
     });
     expect(await fetchAppVisibility("acme-inspector")).toBeNull();
+  });
+});
+
+describe("fetchAppInstallations (the reconcile face)", () => {
+  const INSTALLATIONS_URL = "https://api.github.com/app/installations?per_page=100";
+
+  test("one 200 page → its installation ids, one Bearer-authenticated GET with the 5s budget", async () => {
+    const { pem, publicKey } = await pkcs8Fixture();
+    const { calls } = stubFetch(() =>
+      jsonResponse([
+        { id: 500, account: { login: "octo-org" }, target_type: "Organization" },
+        { id: 501, account: { login: "octocat" }, target_type: "User" },
+      ]),
+    );
+
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: true, installationIds: [500, 501] });
+    expect(calls).toHaveLength(1); // zero retries
+    const call = calls[0]!;
+    expect(call.url).toBe(INSTALLATIONS_URL);
+    expect(call.init!.method).toBe("GET");
+    expect(call.init!.signal).toBeInstanceOf(AbortSignal);
+    const headers = new Headers(call.init!.headers);
+    expect(headers.get("accept")).toBe("application/vnd.github+json");
+    expect(headers.get("x-github-api-version")).toBe("2022-11-28");
+    expect(headers.get("user-agent")).toBe("mstar-inspector");
+    const auth = headers.get("authorization")!;
+    expect(auth.startsWith("Bearer ")).toBe(true);
+    const { valid } = await decodeAndVerifyJwt(auth.slice("Bearer ".length), publicKey);
+    expect(valid).toBe(true);
+  });
+
+  test("follows ONE Link rel=next page and merges both pages' ids", async () => {
+    const { pem } = await pkcs8Fixture();
+    const page2 = "https://api.github.com/app/installations?per_page=100&page=2";
+    const { calls } = stubFetch((url) => {
+      if (url === INSTALLATIONS_URL) {
+        return new Response(JSON.stringify([{ id: 1 }, { id: 2 }]), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            link: `<${page2}>; rel="next", <${page2}>; rel="last"`,
+          },
+        });
+      }
+      if (url === page2) return jsonResponse([{ id: 3 }]);
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: true, installationIds: [1, 2, 3] });
+    expect(calls.map((call) => call.url)).toEqual([INSTALLATIONS_URL, page2]);
+  });
+
+  test("a next link on another host is not followed — the first page stands", async () => {
+    const { pem } = await pkcs8Fixture();
+    stubFetch(() =>
+      new Response(JSON.stringify([{ id: 7 }]), {
+        status: 200,
+        headers: { "content-type": "application/json", link: '<https://evil.example/steal>; rel="next"' },
+      }),
+    );
+
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: true, installationIds: [7] });
+  });
+
+  test("non-200, malformed payload and an abort all collapse to {ok:false} — never a throw", async () => {
+    const { pem } = await pkcs8Fixture();
+    const notOk = stubFetch(() => jsonResponse({ message: "Bad credentials" }, 401));
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+    expect(notOk.calls).toHaveLength(1);
+
+    stubFetch(() => jsonResponse({ id: 1 })); // an object, not the id array
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+
+    stubFetch(() => jsonResponse([{ account: { login: "octo-org" } }])); // no numeric id
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+
+    stubFetch(() => new Response("<html>gateway error</html>", { status: 200 }));
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+
+    stubFetch(() => {
+      throw new DOMException("The operation was aborted.", "TimeoutError");
+    });
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
   });
 });

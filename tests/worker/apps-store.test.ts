@@ -550,6 +550,65 @@ describe("apps-store (createAppsStore)", () => {
     expect(await s.listInstallations(app.id)).toHaveLength(1);
   });
 
+  test("markInstallationRemoved: the row survives, leaves listInstallations, and only an AUTHORITATIVE upsert restores it", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    await s.upsertInstallation({ appId: app.id, installationId: 9, accountLogin: "old-org" });
+
+    await s.markInstallationRemoved(app.id, 9);
+    expect(await s.listInstallations(app.id)).toHaveLength(0);
+    // The row itself survives — the credential-routing / attribution joins
+    // read app_installations, so an uninstall may never delete it.
+    const rows = db.raw
+      .query("SELECT account_login, removed_at FROM app_installations")
+      .all() as Array<{ account_login: string | null; removed_at: string | null }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.account_login).toBe("old-org");
+    expect(rows[0]!.removed_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+
+    // Ordinary review traffic (INFERRED) says nothing about install state…
+    await s.upsertInstallation({ appId: app.id, installationId: 9, accountLogin: "inferred-owner" });
+    expect(await s.listInstallations(app.id)).toHaveLength(0);
+    // …an installation event (AUTHORITATIVE) is a reinstall: the row returns.
+    await s.upsertInstallation({ appId: app.id, installationId: 9, accountLogin: "new-org", authoritative: true });
+    expect(await s.listInstallations(app.id)).toEqual([
+      expect.objectContaining({ installation_id: 9, account_login: "new-org" }),
+    ]);
+  });
+
+  test("reconcileInstallations: stamps absent rows, clears present ones, never deletes a row", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const sibling = await seedApp(db, { githubAppId: 654321 });
+    const s = store(db);
+    // Two rows for this App (1 = still installed, 2 = uninstalled while no
+    // delivery arrived) and one row of a SIBLING App that must stay untouched.
+    await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "still-there" });
+    await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: "gone" });
+    await s.upsertInstallation({ appId: sibling.id, installationId: 3, accountLogin: "other-app" });
+
+    await s.reconcileInstallations(app.id, [1]);
+
+    expect(await s.listInstallations(app.id)).toEqual([
+      expect.objectContaining({ installation_id: 1 }),
+    ]);
+    const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
+    expect(n.n).toBe(3); // nothing deleted, the sibling untouched
+    const siblingRows = await s.listInstallations(sibling.id);
+    expect(siblingRows).toEqual([expect.objectContaining({ installation_id: 3 })]);
+
+    // GitHub lists 2 again (a reinstall): the stored stamp is cleared.
+    await s.reconcileInstallations(app.id, [1, 2]);
+    const restored = await s.listInstallations(app.id);
+    expect(restored.map((row) => row.installation_id).sort()).toEqual([1, 2]);
+
+    // An EMPTY authoritative list means no installation is present.
+    await s.reconcileInstallations(app.id, []);
+    expect(await s.listInstallations(app.id)).toHaveLength(0);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number }).n).toBe(3);
+  });
+
   test("upsertInstallation: distinct installation ids are distinct rows; unknown app fails FK", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db);

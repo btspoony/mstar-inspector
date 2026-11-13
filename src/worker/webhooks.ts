@@ -19,6 +19,8 @@
  * - `installation.{created,new_permissions_accepted}` whose payload carries
  *   `installation.account.login` — recorded as the install's account; not
  *   review work, so it never enqueues.
+ * - `installation.deleted` — the installation is gone, so the route marks the
+ *   local row removed; also not review work, also never enqueues.
  * Everything else returns 200 quickly — GitHub retries non-2xx, so
  * uninteresting events must not 4xx.
  */
@@ -35,9 +37,9 @@ export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as con
  * The install actions that carry the installing account's login
  * (`installation.account.login`). Both mean "this App is installed and
  * usable right now", which is when the settings table should stop reading
- * `未知`. Lifecycle-only actions (`deleted`, `suspend`, `unsuspend`, `added`,
- * `removed`) stay ignored — this whitelist records a login, it does not
- * track install state.
+ * `未知`. `deleted` is classified by its own outcome (the installation's
+ * removal), and the remaining lifecycle actions (`suspend`, `unsuspend`,
+ * `added`, `removed`) stay ignored.
  */
 export const INSTALLATION_ACTIONS = ["created", "new_permissions_accepted"] as const;
 
@@ -346,7 +348,14 @@ export type WebhookOutcome =
       installationId: number;
       accountLogin: string | null;
       accountAuthoritative: true;
-    };
+    }
+  /**
+   * An `installation.deleted` delivery: the installation no longer exists, so
+   * the route stamps the local row's `removed_at` (never deletes it — the
+   * historical reviews still reference it). Carries the installation id only;
+   * no login, no queue payload.
+   */
+  | { kind: "installation_removed"; installationId: number };
 
 /**
  * Minimal webhook payload shapes — only the fields the gateway consumes.
@@ -576,7 +585,7 @@ export function classifyEvent(
  * `installation.{created,new_permissions_accepted}` → the installing account's
  * login. This is the one path that observes a fresh install before any review
  * traffic exists, so it is the reason `app_installations.account_login` can be
- * filled at all.
+ * filled at all. `installation.deleted` names the installation being removed.
  *
  * Every malformed case is a 400 reject, exactly like the sibling classifiers:
  * GitHub retries non-2xx, but a payload that cannot name an installation is
@@ -591,11 +600,15 @@ function classifyInstallation(parsed: unknown): WebhookOutcome {
     return { kind: "reject", status: 400, reason: "installation payload failed validation" };
   }
   const { action, installation } = result.data;
-  if (!(INSTALLATION_ACTIONS as readonly string[]).includes(action)) {
+  const removed = action === "deleted";
+  if (!removed && !(INSTALLATION_ACTIONS as readonly string[]).includes(action)) {
     return { kind: "ignore", reason: `installation action ${action} is not whitelisted` };
   }
   if (installation?.id === undefined) {
     return { kind: "reject", status: 400, reason: "installation payload missing required fields" };
+  }
+  if (removed) {
+    return { kind: "installation_removed", installationId: installation.id };
   }
   return {
     kind: "installation",

@@ -83,6 +83,8 @@ const APP_AVATAR_URL = appAvatarUrl(APP_ID);
 /** The two upstream URLs one refresh can touch (the icon is derived, never fetched). */
 const GITHUB_APP_URL = "https://api.github.com/app";
 const GITHUB_PUBLIC_APPS_URL = "https://api.github.com/apps/";
+/** The authoritative installation list the same refresh reconciles against. */
+const GITHUB_INSTALLATIONS_URL = "https://api.github.com/app/installations?per_page=100";
 
 /**
  * One refresh = `GET /app` plus, only when the profile yields a slug, the
@@ -91,11 +93,15 @@ const GITHUB_PUBLIC_APPS_URL = "https://api.github.com/apps/";
  * else (503) = inconclusive, the "keep the stored value" branch. Any other
  * upstream URL is a failure, not a silent answer.
  */
-function githubStub(profile: Record<string, unknown>, probeStatus = 404) {
+function githubStub(profile: Record<string, unknown>, probeStatus = 404, installations: number[] = []) {
   const body = JSON.stringify(profile);
+  const idList = JSON.stringify(installations.map((id) => ({ id, account: { login: `org-${id}` } })));
   return (url: string) => {
     if (url === GITHUB_APP_URL) {
       return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url === GITHUB_INSTALLATIONS_URL) {
+      return new Response(idList, { status: 200, headers: { "content-type": "application/json" } });
     }
     if (url.startsWith(GITHUB_PUBLIC_APPS_URL)) return new Response(null, { status: probeStatus });
     throw new Error(`unexpected fetch: ${url}`);
@@ -224,9 +230,14 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    // One refresh: the App-JWT profile read, then the anonymous visibility
-    // probe carrying the slug that read just resolved.
-    expect(calls.map((call) => call.url)).toEqual([GITHUB_APP_URL, `${GITHUB_PUBLIC_APPS_URL}acme-inspector`]);
+    // One refresh: the App-JWT profile read, then the same JWT's
+    // authoritative installation list (the reconcile leg), then the
+    // anonymous visibility probe carrying the slug that read just resolved.
+    expect(calls.map((call) => call.url)).toEqual([
+      GITHUB_APP_URL,
+      GITHUB_INSTALLATIONS_URL,
+      `${GITHUB_PUBLIC_APPS_URL}acme-inspector`,
+    ]);
     expect(new Headers(appProfileCalls(calls)[0]!.init!.headers).get("authorization")!.startsWith("Bearer ")).toBe(true);
 
     const body = (await res.json()) as { app: Record<string, unknown> };
@@ -433,14 +444,16 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const env = makeEnv(db);
 
     expect((await getSettings("mallory", env)).status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual([GITHUB_APP_URL]); // no slug → no visibility probe
+    // No slug → no visibility probe; the installation list still runs with
+    // the same refresh.
+    expect(calls.map((call) => call.url)).toEqual([GITHUB_APP_URL, GITHUB_INSTALLATIONS_URL]);
     const row = cachedColumns(db, appId);
     expect(row.github_name).toBe("Acme Inspector");
     expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     expect(row.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 
     expect((await getSettings("hubot", env)).status).toBe(200);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2); // the attempt marker bounds the second read
   });
 
   test("force ignores the attempt marker: the manager's refresh always asks GitHub", async () => {
@@ -530,13 +543,69 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(viewerBody.app.github_slug).toBe("acme-inspector");
     expect(viewerBody.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     // The synced-at cache means the second face triggered NO second refresh:
-    // the profile read (plus its one visibility probe) belongs to the first
-    // face only.
+    // the profile read, its installation list and its one visibility probe
+    // belong to the first face only.
     expect(appProfileCalls(calls)).toHaveLength(1);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
     // The base-only face still carries no settings zones (pin).
     expect(viewerBody.keys).toBeUndefined();
     expect(viewerBody.provider_catalog).toBeUndefined();
+  });
+
+  test("a real refresh reconciles installations: an absent row is stamped, a stored-removed row is cleared", async () => {
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    // 10 = uninstalled while no delivery arrived (the reported defect);
+    // 20 = already stamped removed, but GitHub lists it again.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('seed-gone', ?, 10, 'gone-org', datetime('now'))",
+      )
+      .run(appId);
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at, removed_at) VALUES ('seed-back', ?, 20, 'back-org', datetime('now'), datetime('now'))",
+      )
+      .run(appId);
+    stubFetch(githubStub(GITHUB_PROFILE, 404, [20]));
+
+    const res = await getSettings("mallory", makeEnv(db));
+
+    expect(res.status).toBe(200);
+    const rows = db.raw
+      .query("SELECT installation_id, removed_at FROM app_installations ORDER BY installation_id")
+      .all() as Array<{ installation_id: number; removed_at: string | null }>;
+    expect(rows).toEqual([
+      { installation_id: 10, removed_at: expect.any(String) },
+      { installation_id: 20, removed_at: null },
+    ]);
+  });
+
+  test("an unusable installation list changes no row and does not turn the refresh into a failure", async () => {
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('seed-live', ?, 10, 'live-org', datetime('now'))",
+      )
+      .run(appId);
+    const profileStub = githubStub(GITHUB_PROFILE);
+    stubFetch((url) =>
+      url === GITHUB_INSTALLATIONS_URL
+        ? new Response("boom", { status: 500 })
+        : profileStub(url),
+    );
+
+    const res = await postRefresh("mallory", makeEnv(db));
+
+    // 200 (not the keyed 400): the metadata save succeeded, so the failed
+    // reconcile leg may not downgrade it. The row keeps its null stamp.
+    expect(res.status).toBe(200);
+    expect(cachedColumns(db, appId).github_name).toBe("Acme Inspector");
+    const row = db.raw
+      .query("SELECT removed_at FROM app_installations WHERE installation_id = 10")
+      .get() as { removed_at: string | null };
+    expect(row.removed_at).toBeNull();
   });
 });
 
