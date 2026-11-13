@@ -42,6 +42,7 @@ import {
   fetchThreadConversation,
   isOwnPublicationComment,
   issueDigestOf,
+  parseLineMarker,
   stripInspectorMarkerSyntax,
   threadDigestOf,
   type GraphqlOctokit,
@@ -295,32 +296,37 @@ function modelBodyOf(body: string, overCap: boolean): string {
  * changes relevant modelCoverage to truncated even if fetch completed" / "no
  * partial-context result is labelled complete" (spec §7.4/§7.8).
  * `issueCoverage` stays the FETCH result. Reports this app published itself are
- * excluded before the caps — bot author login AND its own marker prefix: the
- * recheck input already carries each target's original finding text, so they
- * are redundant context, not lost evidence, and counting them as "the model did
- * not see everything" made every PR with review history truncate forever. A
- * HUMAN body that copies the marker fails the authorship half and stays
- * visible, so it still truncates the view and still blocks a resolve.
+ * excluded before the caps — bot author login AND its own marker: the issue
+ * lane by the marker prefix on the body, the thread lane by the Inspector
+ * thread marker on the published line-comment root. The recheck input already
+ * carries each target's original finding text, so they are redundant context,
+ * not lost evidence, and counting them as "the model did not see everything"
+ * made every PR with review history — and every thread whose root is our own
+ * report — truncate forever. A HUMAN body that copies a marker fails the
+ * authorship half and stays visible, so it still truncates the view and still
+ * blocks a resolve.
  * `issueDigest` and the capture-time fields pass through unchanged; the
  * caller's captured items are never rewritten (their digests were computed over
  * the raw bodies).
  */
 export function boundDiscussion(discussion: Discussion): Discussion {
   // Chronological presentation order (oldest first), then apply the caps.
-  // Bodies this app publishes itself begin with its own marker AND carry
-  // `viewerDidAuthor` — the AUTHENTICATED provenance from the capture, never a
-  // login suffix. The recheck input already carries every target's original
-  // finding text, so spending the bounded view on our own history is what made
-  // every busy PR truncate. A human or another App can copy the marker; they
-  // fail the provenance half, stay visible, and still block a resolve through
-  // the model-coverage fence.
+  // Bodies this app publishes itself carry `viewerDidAuthor` — the
+  // AUTHENTICATED provenance from the capture, never a login suffix — plus its
+  // own marker: the review/degraded prefix on an issue comment, the thread
+  // marker on a published line-comment root. The recheck input already carries
+  // every target's original finding text, so spending the bounded view on our
+  // own history is what made every busy PR truncate. A human or another App can
+  // copy either marker; they fail the provenance half, stay visible, and still
+  // block a resolve through the model-coverage fence.
   const ordered = discussion.items
     .filter(
       (item) =>
         !(
-          item.source === "issue" &&
           item.ownAuthor &&
-          /^<!--\s*mstar-inspector:[a-zA-Z-]+:v1\b/.test(item.body.trimStart())
+          (item.source === "issue"
+            ? /^<!--\s*mstar-inspector:[a-zA-Z-]+:v1\b/.test(item.body.trimStart())
+            : parseLineMarker(item.body) !== null)
         ),
     )
     .sort((a, b) => {
@@ -366,9 +372,9 @@ export function boundDiscussion(discussion: Discussion): Discussion {
       createdAt: metaValue(item.createdAt),
       updatedAt: metaValue(item.updatedAt),
       body,
-      // Provenance passes through unchanged: thread items keep theirs, and an
-      // ISSUE item that reached here either lacks the marker or was not
-      // authored by this App (the predicate needs both).
+      // Provenance passes through unchanged: an item that reached here either
+      // lacks its marker or was not authored by this App (the predicate needs
+      // both halves).
       ownAuthor: item.ownAuthor,
     });
   }
