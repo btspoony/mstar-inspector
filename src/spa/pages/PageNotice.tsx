@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { CircleAlert, CircleCheck, TriangleAlert } from "lucide-react";
 import { t, type Locale } from "../../i18n";
 import styles from "../pages.module.css";
@@ -58,8 +59,27 @@ export type OpNotice = { kind: NoticeKind; message: string };
  * region's content is replaced wholesale by the next op targeting that same
  * region — no manual clears, no cross-card resets.
  */
+/** How long a success notice stays on the op channel before it expires. */
+export const SUCCESS_NOTICE_LIFETIME_MS = 3000;
+
 export function NoticeRegion({ notice }: { notice: OpNotice | null }) {
-  if (!notice) return null;
+  // A success notice expires on its own; warn and error keep today's
+  // lifetime (replaced wholesale by the next op). The hide is local to the
+  // region — the parent's state is never touched — and the clock restarts
+  // when the notice is replaced. The reset happens during render so a fresh
+  // notice shows immediately, and the timer clears on unmount.
+  const [timedOut, setTimedOut] = useState(false);
+  const [lastNotice, setLastNotice] = useState(notice);
+  if (notice !== lastNotice) {
+    setLastNotice(notice);
+    setTimedOut(false);
+  }
+  useEffect(() => {
+    if (notice?.kind !== "success") return;
+    const timer = setTimeout(() => setTimedOut(true), SUCCESS_NOTICE_LIFETIME_MS);
+    return () => clearTimeout(timer);
+  }, [notice]);
+  if (!notice || (notice.kind === "success" && timedOut)) return null;
   return <PageNotice kind={notice.kind} message={notice.message} />;
 }
 

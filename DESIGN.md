@@ -994,6 +994,16 @@ focus-visible wears the two-layer halo (`focus-ring` + the sitting surface).
 Transitions on color/border/shadow consume `duration-base` + `ease-in-out`;
 press feedback uses `duration-fast`.
 
+**Save-outcome face** (the SPA primitive's one extra prop, `status`):
+`loading` renders a leading spinner glyph and sets `aria-busy` — the
+motion folds under `prefers-reduced-motion` while the glyph still reads —
+`success` a leading check, `error` a leading alert. The glyphs are
+decorative (`aria-hidden`; the label and the card's live region carry the
+announcement) and `data-status` exposes the face for tests. The outcome
+copy never duplicates onto the button: a success keeps its sentence beside
+the button as assistive text in a live region, and an error keeps the
+persistent Notice face below the row.
+
 ### Input
 
 `field-*` in the component layer (`input` here): page fill, primary text,
@@ -1076,7 +1086,8 @@ their own beyond what the component layer already declares:
   the two vocabularies.
 - **Notice** — the soft strength of its tone at `copy-14`, control radius,
   `spacing-4` padding. Always state what happened and what to do next on
-  error.
+  error. A success notice on the op-outcome channel expires on its own after
+  ~3s; `warn` and `error` persist until the next op replaces them.
 - **field-row** — one labelled control plus the action that submits it, on a
   single line: the control stack (`label-14`, 6px, then the control) and the
   `button-md` action share a `flex-wrap items-end spacing-2` row, so

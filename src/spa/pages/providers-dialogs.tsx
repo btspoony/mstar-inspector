@@ -324,7 +324,11 @@ export function AddKeyDialog({
             placeholder={t(locale, "settings.apiKeyPlaceholder")}
           />
         </label>
-        <Button type="submit" disabled={busy || atLimit}>
+        <Button
+          type="submit"
+          disabled={busy || atLimit}
+          status={busy ? "loading" : notice ? "error" : undefined}
+        >
           {busy ? t(locale, "settings.providers.verifying") : t(locale, "settings.addKey")}
         </Button>
       </form>
@@ -480,7 +484,11 @@ export function CustomProviderDialog({
             placeholder={t(locale, "settings.apiKeyPlaceholder")}
           />
         </label>
-        <Button type="submit" disabled={busy}>
+        <Button
+          type="submit"
+          disabled={busy}
+          status={busy ? "loading" : notice ? "error" : undefined}
+        >
           {busy ? t(locale, "settings.providers.saving") : t(locale, "settings.addCustomProvider")}
         </Button>
       </form>
@@ -655,7 +663,7 @@ export function ProviderConfigForm({
             placeholder={t(locale, "settings.apiKeyPlaceholder")}
           />
         </label>
-        <Button type="submit" disabled={busy}>
+        <Button type="submit" disabled={busy} status={busy ? "loading" : undefined}>
           {busy
             ? t(locale, "settings.providers.verifying")
             : t(locale, "settings.addTemplate", { label: provider.label })}
@@ -710,7 +718,7 @@ export function ProviderConfigForm({
           placeholder={t(locale, "settings.apiKeyPlaceholder")}
         />
       </label>
-      <Button type="submit" disabled={busy}>
+      <Button type="submit" disabled={busy} status={busy ? "loading" : undefined}>
         {busy ? t(locale, "settings.providers.verifying") : t(locale, "settings.addKey")}
       </Button>
     </form>

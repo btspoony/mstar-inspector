@@ -1,6 +1,7 @@
 // Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over).
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
+import { CircleAlert, CircleCheck, LoaderCircle } from "lucide-react"
 import { Slot } from "@radix-ui/react-slot"
 
 import { cn } from "../cn"
@@ -44,26 +45,61 @@ const buttonVariants = cva(
   }
 )
 
+/**
+ * The save-outcome face: a leading glyph slot driven by one prop. The glyph
+ * is decorative (aria-hidden — the label and the card's live region carry
+ * the announcement); aria-busy carries the in-flight state; data-status
+ * exposes the face for tests. Without a status the primitive renders exactly
+ * what it always did.
+ */
+const BUTTON_STATUS_GLYPHS = {
+  loading: LoaderCircle,
+  success: CircleCheck,
+  error: CircleAlert,
+} as const
+
+export type ButtonStatus = keyof typeof BUTTON_STATUS_GLYPHS
+
 function Button({
   className,
   variant = "default",
   size = "default",
   asChild = false,
+  status,
+  children,
   ...props
 }: React.ComponentProps<"button"> &
   VariantProps<typeof buttonVariants> & {
     asChild?: boolean
+    status?: ButtonStatus
   }) {
   const Comp = asChild ? Slot : "button"
+  // Slot forwards to exactly one element child, so there is no room for an
+  // extra glyph; the asChild path keeps its shape and takes no glyph.
+  const StatusGlyph = status === undefined || asChild ? null : BUTTON_STATUS_GLYPHS[status]
 
   return (
     <Comp
       data-slot="button"
       data-variant={variant}
       data-size={size}
+      data-status={status}
+      aria-busy={status === "loading" ? true : undefined}
       className={cn(buttonVariants({ variant, size, className }))}
       {...props}
-    />
+    >
+      {StatusGlyph ? (
+        <>
+          <StatusGlyph
+            aria-hidden="true"
+            className={status === "loading" ? "animate-spin motion-reduce:animate-none" : undefined}
+          />
+          {children}
+        </>
+      ) : (
+        children
+      )}
+    </Comp>
   )
 }
 
