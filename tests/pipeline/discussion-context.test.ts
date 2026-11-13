@@ -433,22 +433,39 @@ describe("boundDiscussion — §7.8 model context", () => {
     expect(bounded.items[0]!.ownAuthor).toBe(true);
   });
 
-  test("thread items keep their provenance and are never excluded by the issue-only rule", () => {
-    // A thread reply this App wrote: the exclusion is ISSUE-scoped, so the
-    // thread lane keeps it, and its provenance survives the bounding pass.
-    const ownThread = item(
-      1,
-      "<!-- mstar-inspector:thread:v1 publication=11111111-2222-4333-8444-555555555555 association=66666666-7777-4888-8999-aaaaaaaaaaaa -->\nthread reply",
-      "thread",
-      "assoc-1",
-    );
-    ownThread.ownAuthor = true;
-    const bounded = boundDiscussion(discussionWith([ownThread], threadSnapshot("assoc-1")));
+  test("an own THREAD report is excluded before the caps, so its thread stays complete", () => {
+    // The published finding report is a line-comment ROOT: 2133 chars against
+    // a 1200-char item cap. Counting it as lost context marked its own thread
+    // truncated, which blocks the resolve that closes that very thread.
+    const marker = "<!-- mstar-inspector:thread:v1 publication=11111111-2222-4333-8444-555555555555 association=66666666-7777-4888-8999-aaaaaaaaaaaa -->";
+    const root = item(1, `${"r".repeat(2120)}\n\n${marker}`, "thread", "assoc-1");
+    root.ownAuthor = true;
+    const threads = threadSnapshot("assoc-1");
+    const bounded = boundDiscussion(discussionWith([root, item(2, "human reply", "thread", "assoc-1")], threads));
+    expect(bounded.items.map((i) => i.body)).toEqual(["human reply"]);
+    expect(threads[0]!.modelCoverage).toBe("complete");
+  });
+
+  test("an own thread item without the Inspector marker is not excluded", () => {
+    const plain = item(1, "my own reply", "thread", "assoc-1");
+    plain.ownAuthor = true;
+    const bounded = boundDiscussion(discussionWith([plain], threadSnapshot("assoc-1")));
     expect(bounded.items).toHaveLength(1);
     expect(bounded.items[0]!.ownAuthor).toBe(true);
-    // The realistic marker run is stripped and the human text survives.
+  });
+
+  test("a long HUMAN thread item still clamps and still truncates its thread", () => {
+    // A human can copy the marker; authorship is the half that keeps the body
+    // visible, so it still spends the caps and still blocks a resolve.
+    const marker = "<!-- mstar-inspector:thread:v1 publication=11111111-2222-4333-8444-555555555555 association=66666666-7777-4888-8999-aaaaaaaaaaaa -->";
+    const threads = threadSnapshot("assoc-1");
+    const bounded = boundDiscussion(
+      discussionWith([item(1, `${"h".repeat(2100)}\n\n${marker}`, "thread", "assoc-1")], threads),
+    );
+    expect(bounded.items).toHaveLength(1);
+    expect(bounded.items[0]!.body).toContain("[... body truncated ...]");
     expect(bounded.items[0]!.body).not.toContain("mstar-inspector:");
-    expect(bounded.items[0]!.body).toContain("thread reply");
+    expect(threads[0]!.modelCoverage).toBe("truncated");
   });
 
   test("a HUMAN body copying the bot marker is kept and still truncates the view", () => {

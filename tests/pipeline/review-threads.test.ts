@@ -664,6 +664,22 @@ describe("discoverThread — ownership proof precedes adoption", () => {
     expect(result).toEqual({ kind: "found", reviewId: 555, commentId: ROOT_COMMENT_ID, threadId: THREAD_GQL_ID });
   });
 
+  test("a NOT-outdated thread GitHub re-anchored to a shifted line stays discoverable via originalLine", async () => {
+    const db = await createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    // Code above the comment shifted, so the live line drifted while the
+    // anchor GitHub recorded at publication time still names our intent.
+    const { octokit } = fakeOctokit({
+      reviews: [batchReview(PUB_ID)],
+      reviewThreadsPages: [
+        { threads: [discoveryThread(intent, { line: LINE + 12, originalLine: LINE, isOutdated: false })], hasNextPage: false },
+      ],
+    });
+    expect(
+      await createReviewThreads(makeDeps(db, octokit)).discoverThread({ scope: SCOPE, intent, reviewId: 555 }),
+    ).toEqual({ kind: "found", reviewId: 555, commentId: ROOT_COMMENT_ID, threadId: THREAD_GQL_ID });
+  });
+
   test("P67-QC-002: the original anchor NEVER widens ownership to another thread", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
@@ -674,8 +690,11 @@ describe("discoverThread — ownership proof precedes adoption", () => {
       ["null line without isOutdated", { line: null, originalLine: LINE, isOutdated: false }],
       // Outdated with no surviving anchor at all.
       ["null line and null originalLine", { line: null, originalLine: null, isOutdated: true }],
-      // A LIVE line is authoritative: it must match, whatever originalLine says.
-      ["re-anchored live line", { line: LINE + 1, originalLine: LINE, isOutdated: true }],
+      // A re-anchored live line only matches through `originalLine`.
+      ["re-anchored live line", { line: LINE + 1, originalLine: LINE + 2, isOutdated: false }],
+      ["re-anchored live line, outdated", { line: LINE + 1, originalLine: LINE, isOutdated: true }],
+      // Not outdated, live line differs, but no original anchor recorded.
+      ["shifted live line without originalLine", { line: LINE + 12, originalLine: null, isOutdated: false }],
       // Exact path fence is untouched by the anchor rule.
       ["other path", { path: "src/other.ts", line: null, originalLine: LINE, isOutdated: true }],
     ];

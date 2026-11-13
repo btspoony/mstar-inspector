@@ -34,8 +34,10 @@
  *     payload and reject scope mismatch / unknown association BEFORE any API
  *     call; require the confirmed original primary publication, the expected
  *     line-review batch marker, the original review commit SHA, App-author
- *     identity, root comment marker, exact path/range (an OWNED `outdated`
- *     thread whose live line is null matches on its `originalLine` anchor) and
+ *     identity, root comment marker, exact path/range (a live line equals the
+ *     intent, otherwise an OWNED thread matches on its `originalLine` anchor —
+ *     an `outdated` one whose live line is null, or a still-valid one GitHub
+ *     re-anchored to a shifted line) and
  *     generated-body digest. A known `reviewId` must match exactly; after response loss the
  *     PR's bounded review batches are inspected and only a unique complete
  *     match to the prepared batch intent is accepted. A copied marker at
@@ -939,22 +941,28 @@ function isBotIdentity(authorType: string | null, authorLogin: string | null, bo
 
 /**
  * The §7.5 "exact original path/range" anchor fence, shared by discovery's
- * candidate scan and the resolve re-check (P67-QC-002). A thread with a live
- * `line` must match it exactly. Once the commented line leaves the diff the
- * thread becomes `outdated`, GitHub drops the live `line` to null, and the
- * only surviving anchor is `originalLine` — so an OUTDATED thread whose live
- * line is null may match on that original anchor. Every other shape fails
- * closed (different path, a re-anchored live line, a mismatched original
- * anchor, or a null live line on a thread GitHub did not mark outdated):
- * ownership never widens to arbitrary threads.
+ * candidate scan and the resolve re-check (P67-QC-002). Path always matches
+ * exactly, and a live `line` equal to the intent is the strongest proof. Two
+ * shapes fall back to the anchor GitHub recorded at publication time:
+ *
+ * - an `outdated` thread whose live `line` is null — the commented line left
+ *   the diff, so `originalLine` is the only surviving anchor;
+ * - a still-valid thread GitHub RE-ANCHORED to a shifted line (code above it
+ *   moved) — `line` drifted while `originalLine` still names our intent.
+ *
+ * Every other shape fails closed (a different path, an `outdated` thread whose
+ * live line disagrees, a null live line on a thread GitHub did not mark
+ * outdated, or a mismatched/absent original anchor): ownership never widens to
+ * arbitrary threads.
  */
 function matchesOriginalAnchor(
   thread: { path: string; line: number | null; originalLine: number | null; isOutdated: boolean },
   intent: LineIntent,
 ): boolean {
   if (thread.path !== intent.path) return false;
-  if (thread.line !== null) return thread.line === intent.line;
-  return thread.isOutdated && thread.originalLine === intent.line;
+  if (thread.line === intent.line) return true;
+  if (thread.line === null) return thread.isOutdated && thread.originalLine === intent.line;
+  return !thread.isOutdated && thread.originalLine === intent.line;
 }
 
 /**
