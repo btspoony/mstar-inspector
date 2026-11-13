@@ -87,6 +87,22 @@ export function LoadingNotice({ locale }: { locale: Locale }) {
   return <p className={styles.status}>{t(locale, "common.loading")}</p>;
 }
 
+/**
+ * The in-flight face of a status-driving save button. While the button shows
+ * its spinner the glyph is aria-hidden and the accessible name is unchanged,
+ * so without this region the write would be silent between submit and
+ * outcome — the success and error faces keep their own announcements.
+ * Renders nothing in every other face.
+ */
+export function SaveInFlight({ show, locale }: { show: boolean; locale: Locale }) {
+  if (!show) return null;
+  return (
+    <span role="status" className="sr-only">
+      {t(locale, "common.saving")}
+    </span>
+  );
+}
+
 export function LoadFailedNotice({ locale }: { locale: Locale }) {
   return <PageNotice kind="error" message={t(locale, "common.loadFailed")} />;
 }

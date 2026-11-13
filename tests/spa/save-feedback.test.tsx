@@ -607,3 +607,206 @@ describe("runtime page save face", () => {
     }
   });
 });
+
+const savingRegions = (container: Element, copy: string): Element[] =>
+  [...container.querySelectorAll('[role="status"]')].filter(
+    (node) => node.textContent?.trim() === copy,
+  );
+
+describe("in-flight save announcement", () => {
+  test("the workspace-name card in flight mounts exactly one polite live region with the Saving copy; success replaces it with no stale copy", async () => {
+    jest.useFakeTimers();
+    const { win, cleanup } = installDom("http://localhost/dashboard/ws_acme/settings");
+    let resolveNamePut: ((response: Response) => void) | null = null;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "PUT" && url.endsWith("/api/settings/name")) {
+        return new Promise<Response>((resolve) => {
+          resolveNamePut = resolve;
+        });
+      }
+      if (url.endsWith("/api/settings/concurrency")) {
+        return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/settings/check-min-score")) {
+        return new Response(JSON.stringify({ min_score: 60, min: 3, max: 100, degraded: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ grants: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      const { container, root } = mount(win);
+      await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
+      const savingCopy = t("en", "common.saving");
+
+      // In flight: the spinner is aria-hidden and the label is unchanged, so
+      // one polite live region carries the Saving copy — exactly one.
+      await submitName(win, container as unknown as Element, "Acme Labs");
+      expect(resolveNamePut).not.toBeNull();
+      expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(1);
+
+      // Success: the in-flight region is replaced by the success copy as
+      // assistive text — no stale Saving text survives the outcome.
+      await act(async () => {
+        resolveNamePut?.(
+          new Response(JSON.stringify({ name: "Acme Labs" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      });
+      expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(0);
+      const successRegions = [...container.querySelectorAll('[role="status"]')].filter(
+        (node) => node.textContent?.trim() === t("en", "workspace.nameSaved"),
+      );
+      expect(successRegions).toHaveLength(1);
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      jest.useRealTimers();
+      cleanup();
+    }
+  });
+
+  test("a NumberSettingCard in flight mounts exactly one polite live region with the Saving copy; a refusal keeps the error announcement instead", async () => {
+    jest.useFakeTimers();
+    const { win, cleanup } = installDom("http://localhost/dashboard/ws_acme/settings");
+    let resolveConcurrencyPut: ((response: Response) => void) | null = null;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "PUT" && url.endsWith("/api/settings/concurrency")) {
+        return new Promise<Response>((resolve) => {
+          resolveConcurrencyPut = resolve;
+        });
+      }
+      if (url.endsWith("/api/settings/concurrency")) {
+        return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/settings/check-min-score")) {
+        return new Response(JSON.stringify({ min_score: 60, min: 3, max: 100, degraded: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ grants: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      const { container, root } = mount(win);
+      await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
+      const savingCopy = t("en", "common.saving");
+      const form = (
+        container.querySelector("#workspace-concurrency") as unknown as HTMLInputElement
+      ).closest("form") as unknown as HTMLFormElement;
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(form.querySelector("#workspace-concurrency"), "12");
+        form
+          .querySelector("#workspace-concurrency")
+          ?.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+      });
+      await act(async () => {
+        form.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+      expect(resolveConcurrencyPut).not.toBeNull();
+      expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(1);
+
+      // Refusal: the error notice is unchanged and no Saving copy, no stale
+      // success text survives on the card.
+      await act(async () => {
+        resolveConcurrencyPut?.(
+          new Response(JSON.stringify({ message: "outside the accepted range" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      });
+      expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(0);
+      const alerts = [...container.querySelectorAll('p[role="alert"]')].map((node) => node.textContent ?? "");
+      expect(alerts.some((text) => text.includes("outside the accepted range"))).toBe(true);
+      expect(container.textContent).not.toContain(t("en", "workspace.concurrencySaved"));
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      jest.useRealTimers();
+      cleanup();
+    }
+  });
+
+  test("a runtime card in flight mounts exactly one polite live region with the Saving copy; the success face replaces it", async () => {
+    jest.useFakeTimers();
+    const { win, cleanup } = installDom("http://localhost/_internal_admin/runtime");
+    let resolvePatch: ((response: Response) => void) | null = null;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "PATCH") {
+        return new Promise<Response>((resolve) => {
+          resolvePatch = resolve;
+        });
+      }
+      return new Response(JSON.stringify(RUNTIME_MINIMAL), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      const { container, root } = mount(win);
+      await act(async () => root.render(createElement(RuntimePage, { locale: "en" })));
+      const savingCopy = t("en", "common.saving");
+      const input = win.document.querySelector("#system-concurrency") as unknown as HTMLInputElement;
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(input, "40");
+        input.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+      });
+      await act(async () => {
+        input
+          .closest("form")
+          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+      expect(resolvePatch).not.toBeNull();
+      expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(1);
+
+      // Success: the card's live region carries the success copy instead —
+      // the in-flight announcement is gone, nothing stale survives.
+      await act(async () => {
+        resolvePatch?.(
+          new Response(JSON.stringify({ concurrency: 40 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      });
+      expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(0);
+      const successRegions = [...container.querySelectorAll('[role="status"]')].filter(
+        (node) => node.textContent?.trim() === t("en", "admin.runtime.concurrencySaved"),
+      );
+      expect(successRegions).toHaveLength(1);
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      jest.useRealTimers();
+      cleanup();
+    }
+  });
+});
