@@ -602,11 +602,42 @@ describe("apps-store (createAppsStore)", () => {
     await s.reconcileInstallations(app.id, [1, 2]);
     const restored = await s.listInstallations(app.id);
     expect(restored.map((row) => row.installation_id).sort()).toEqual([1, 2]);
+  });
 
-    // An EMPTY authoritative list means no installation is present.
+  test("reconcileInstallations: an empty authoritative list stamps every active row and clears none", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "still-there" });
+    await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: "gone" });
+
     await s.reconcileInstallations(app.id, []);
+
     expect(await s.listInstallations(app.id)).toHaveLength(0);
-    expect((db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number }).n).toBe(3);
+    const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
+    expect(n.n).toBe(2); // stamped, never deleted
+  });
+
+  test("reconcileInstallations: a full page of live ids (150) binds two parameters and still classifies every row", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    // Three local rows inside the 1..150 live set (150 already stamped removed,
+    // so it must come back) and two outside it (151, 999).
+    await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "in-1" });
+    await s.upsertInstallation({ appId: app.id, installationId: 100, accountLogin: "in-100" });
+    await s.upsertInstallation({ appId: app.id, installationId: 150, accountLogin: "in-150" });
+    await s.markInstallationRemoved(app.id, 150);
+    await s.upsertInstallation({ appId: app.id, installationId: 151, accountLogin: "out-151" });
+    await s.upsertInstallation({ appId: app.id, installationId: 999, accountLogin: "out-999" });
+    const live = Array.from({ length: 150 }, (_, index) => index + 1);
+
+    await s.reconcileInstallations(app.id, live);
+
+    const rows = await s.listInstallations(app.id);
+    expect(rows.map((row) => row.installation_id).sort((a, b) => a - b)).toEqual([1, 100, 150]);
+    const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
+    expect(n.n).toBe(5); // nothing deleted
   });
 
   test("upsertInstallation: distinct installation ids are distinct rows; unknown app fails FK", async () => {

@@ -1452,26 +1452,33 @@ export function createAppsStore(db: AppsStoreD1) {
      * contain. This is what repairs rows whose `installation.deleted` delivery
      * was missed. Rows are never deleted (see markInstallationRemoved); a null
      * `removed_at` is the only "present" state.
+     *
+     * The live set is bound ONCE as a JSON array and tested with `json_each`,
+     * so each statement carries exactly TWO bounds (appId + the array) however
+     * many installations GitHub lists: D1 refuses a statement binding more than
+     * 100 parameters, and one placeholder per id would cross that at the first
+     * full page (`per_page=100`). Chunking is not an alternative — a chunked
+     * `NOT IN` would stamp ids that live in another chunk. An empty array is
+     * `json_each('[]')`, an empty set: the `NOT IN` stamps every active row and
+     * the `IN` clears none, so no special case is needed.
      */
     async reconcileInstallations(appId: string, liveInstallationIds: readonly number[]): Promise<void> {
-      const placeholders = liveInstallationIds.map(() => "?").join(", ");
-      // An empty authoritative list (the App has no installations at all) has
-      // no IN-clause to build; every active row is then absent by definition.
+      const live = JSON.stringify(liveInstallationIds);
       await db
         .prepare(
           `UPDATE app_installations SET removed_at = datetime('now')
-           WHERE app_id = ? AND removed_at IS NULL` +
-            (liveInstallationIds.length > 0 ? ` AND installation_id NOT IN (${placeholders})` : ""),
+           WHERE app_id = ? AND removed_at IS NULL
+             AND installation_id NOT IN (SELECT value FROM json_each(?))`,
         )
-        .bind(appId, ...liveInstallationIds)
+        .bind(appId, live)
         .run();
-      if (liveInstallationIds.length === 0) return;
       await db
         .prepare(
           `UPDATE app_installations SET removed_at = NULL
-           WHERE app_id = ? AND removed_at IS NOT NULL AND installation_id IN (${placeholders})`,
+           WHERE app_id = ? AND removed_at IS NOT NULL
+             AND installation_id IN (SELECT value FROM json_each(?))`,
         )
-        .bind(appId, ...liveInstallationIds)
+        .bind(appId, live)
         .run();
     },
 
