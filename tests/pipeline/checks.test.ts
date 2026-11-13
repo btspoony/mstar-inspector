@@ -3250,3 +3250,52 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
     }
   });
 });
+
+describe("markQueuedBehindInflight — the held-check relabel is bounded", () => {
+  const relabel = (adapter: ReturnType<typeof adapterFor>, warns: string[], updateBudgetMs = 1_000) =>
+    adapter.markQueuedBehindInflight!({
+      scope: SCOPE,
+      checkRunId: 4242,
+      summary: "Queued behind the review in flight for this pull request.",
+      updateBudgetMs,
+      warn: (detail) => warns.push(detail),
+    });
+
+  test("a rejected send is ONE warn and false — it never reaches the caller as a throw", async () => {
+    const db = await seededDb();
+    const fake = fakeChecks({
+      update: () => {
+        throw Object.assign(new Error("boom"), { status: 500 });
+      },
+    });
+    const warns: string[] = [];
+
+    expect(await relabel(adapterFor(db, fake.octokit), warns)).toBe(false);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("held check relabel failed: boom");
+    // The one request WAS sent — nothing here claims otherwise.
+    expect(fake.updates).toHaveLength(1);
+  });
+
+  test("a send that never answers returns false inside the budget, so the retry is never held", async () => {
+    const db = await seededDb();
+    // GitHub accepts the request and never answers it: only the budget ends it.
+    const fake = fakeChecks({ update: () => new Promise<CheckRunPayload>(() => {}) });
+    const warns: string[] = [];
+    const started = Date.now();
+
+    expect(await relabel(adapterFor(db, fake.octokit), warns, 25)).toBe(false);
+
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("exceeded 25ms");
+  });
+
+  test("no Checks surface is a silent false: nothing to send, nothing to warn about", async () => {
+    const db = await seededDb();
+    const warns: string[] = [];
+
+    expect(await relabel(adapterFor(db, null), warns)).toBe(false);
+    expect(warns).toHaveLength(0);
+  });
+});

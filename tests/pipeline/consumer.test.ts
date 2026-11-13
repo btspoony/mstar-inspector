@@ -2964,14 +2964,19 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const heldHeadSha = "abcdef0123456789abcdef0123456789abcdef01";
     await seedInflight(db, { headSha: heldHeadSha });
-    const queued: Array<{ summary: string; headSha: string; attachDeliveryId?: string }> = [];
+    const queued: Array<{ summary: string; headSha: string; attachDeliveryId?: string; updateBudgetMs: number }> = [];
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
       checks: {
         begin: async () => null,
         terminalize: async () => {},
         markQueuedBehindInflight: async (input) => {
-          queued.push({ summary: input.summary, headSha: input.headSha, attachDeliveryId: input.attachDeliveryId });
+          queued.push({
+            summary: input.summary,
+            headSha: input.headSha,
+            attachDeliveryId: input.attachDeliveryId,
+            updateBudgetMs: input.updateBudgetMs,
+          });
           return true;
         },
       },
@@ -2988,9 +2993,36 @@ describe("createReviewConsumer", () => {
     // attached — and this delivery's own attach identity.
     expect(queued[0]!.headSha).toBe(SHA);
     expect(queued[0]!.attachDeliveryId).toBe("delivery-1");
+    // The send is bounded by the operator budget the path read (absent row →
+    // the documented default), so a slow GitHub can never hold the retry.
+    expect(queued[0]!.updateBudgetMs).toBe(CHECK_UPDATE_DEFAULT);
     // The relabel never changes the guard outcome: the delayed retry still runs.
     expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     expect(messageAckCalls).toHaveLength(0);
+  });
+
+  test("a relabel fault is one warn and never holds the delayed retry", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    await seedInflight(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        markQueuedBehindInflight: async () => {
+          throw new Error("checks down");
+        },
+      },
+    });
+
+    await consumer(makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
+
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(messageAckCalls).toHaveLength(0);
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("held check relabel failed"));
+    expect(warn).toBeDefined();
+    expect(warn!.msg).toContain("checks down");
   });
 
   test("the TERMINAL refusal settles the run and does not relabel it as queued", async () => {

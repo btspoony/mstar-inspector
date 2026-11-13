@@ -953,6 +953,12 @@ async function markQueuedBehindInflightRow(
   if (attachedHeadSha === null || attachedHeadSha === undefined || attachedHeadSha === "") return;
   if (heldHeadSha === null || heldHeadSha === undefined || heldHeadSha === "") return;
   try {
+    // ONE budget read, the same value the terminalize hook uses: the relabel
+    // runs BEFORE this path's delayed retry, so it is bounded and can never
+    // hold the retry hostage. A degraded read answers the documented defaults.
+    const budgets = await readCheckBudgets(deps.env.DB, {
+      warn: (readerFields, msg) => deps.log.warn({ ...payloadIdentityFields(payload), ...readerFields }, msg),
+    });
     await deps.checks.markQueuedBehindInflight({
       scope: {
         appId: payload.appRef.appId,
@@ -966,6 +972,9 @@ async function markQueuedBehindInflightRow(
       action: payload.action,
       attachDeliveryId: payload.attachDeliveryId,
       summary: `Queued — the review in flight for this pull request (head ${heldHeadSha.slice(0, 7)}) holds the slot; this commit starts when it finishes.`,
+      updateBudgetMs: budgets.updateMs,
+      warn: (detail) =>
+        deps.log.warn({ ...payloadIdentityFields(payload), event: "check_queued_relabel_failed" }, detail),
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -1226,6 +1235,10 @@ export type CheckLifecycleHooks = {
     action: string;
     attachDeliveryId?: string;
     summary: string;
+    /** `review.check.update_timeout_ms` — the relabel sits before this path's retry. */
+    updateBudgetMs: number;
+    /** One warn when the best-effort send failed or ran out of budget. */
+    warn: (detail: string) => void;
   }): Promise<boolean>;
 };
 

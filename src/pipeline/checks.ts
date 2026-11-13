@@ -288,6 +288,10 @@ export type ChecksAdapter = {
     scope: Scope;
     checkRunId: number;
     summary: string;
+    /** The operator-configured bound; omitted → the adapter, then the store's default. */
+    updateBudgetMs?: number;
+    /** One warn when the send failed or ran out of budget — never a throw. */
+    warn: (detail: string) => void;
   }): Promise<boolean>;
   /** Read-only GET + identity proof: the recovery lane's confirmation path (§7.11.2 step 3). */
   fetchCheckRun(input: {
@@ -671,22 +675,43 @@ async function completeCheckWith(
  * already proved this delivery's own attach row, so the send addresses a run
  * this delivery created; the PATCH carries the output pair only, which leaves
  * status and conclusion untouched.
+ *
+ * BOUNDED, and it never rejects: this send sits in the guard's held path BEFORE
+ * the delayed retry is scheduled, so a hanging PATCH would cost the whole
+ * delivery — the retry would never be arranged before the invocation is killed.
+ * Client resolution AND the update share one `review.check.update_timeout_ms`
+ * budget; past it the caller gets `false` and one warn.
  */
 async function markQueuedBehindInflightWith(
   deps: ChecksDeps,
-  input: { scope: Scope; checkRunId: number; summary: string },
+  input: {
+    scope: Scope;
+    checkRunId: number;
+    summary: string;
+    updateBudgetMs?: number;
+    warn: (detail: string) => void;
+  },
 ): Promise<boolean> {
-  const resolvedClient = await clientFor(deps, input.scope);
-  if ("reason" in resolvedClient) return false;
-  const client = resolvedClient.client;
-  if (!hasChecksMethod(client, "update")) return false;
-  await client.rest.checks.update({
-    owner: input.scope.owner,
-    repo: input.scope.repo,
-    check_run_id: input.checkRunId,
-    output: { title: CHECK_NAME, summary: input.summary },
-  });
-  return true;
+  const budgetMs = input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT;
+  const send = (async (): Promise<boolean> => {
+    const resolvedClient = await clientFor(deps, input.scope);
+    if ("reason" in resolvedClient) return false;
+    const client = resolvedClient.client;
+    if (!hasChecksMethod(client, "update")) return false;
+    await client.rest.checks.update({
+      owner: input.scope.owner,
+      repo: input.scope.repo,
+      check_run_id: input.checkRunId,
+      output: { title: CHECK_NAME, summary: input.summary },
+    });
+    return true;
+  })();
+  const outcome = (await sendRequestsWithin(send, budgetMs, "held check relabel")).outcome;
+  if (typeof outcome !== "boolean") {
+    input.warn(surfaceFailure(outcome.failure, "held check relabel"));
+    return false;
+  }
+  return outcome;
 }
 
 /**
@@ -1365,6 +1390,15 @@ export type CheckLifecycle = {
     attachDeliveryId?: string;
     /** The queue reason the Check summary carries. */
     summary: string;
+    /**
+     * The operator-configured bound on the one `checks.update`
+     * (`review.check.update_timeout_ms`). Required here, unlike the terminal
+     * seam: the caller sits in the guard's held path, so it always has the
+     * budget it read and must never let a hanging PATCH delay its retry.
+     */
+    updateBudgetMs: number;
+    /** One warn when the send failed or ran out of budget — never a throw. */
+    warn: (detail: string) => void;
   }): Promise<boolean>;
   /**
    * The consumer gave up on `terminalize` (its bounded wait elapsed, or the
@@ -1903,7 +1937,13 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       if (checkRunId === null) return false;
       const adapter = deps.getAdapter(input.scope);
       if (adapter === null) return false;
-      const sent = await adapter.markQueuedBehindInflight?.({ scope: input.scope, checkRunId, summary: input.summary });
+      const sent = await adapter.markQueuedBehindInflight?.({
+        scope: input.scope,
+        checkRunId,
+        summary: input.summary,
+        updateBudgetMs: input.updateBudgetMs,
+        warn: input.warn,
+      });
       return sent ?? false;
     },
 
