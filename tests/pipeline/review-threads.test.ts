@@ -173,6 +173,8 @@ type ThreadCommentSpec = {
   authorLogin?: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Authenticated provenance the fake transport reports for issue comments. */
+  viewerDidAuthor?: boolean;
 };
 
 type GraphqlCall = { kind: string; variables: Record<string, unknown> };
@@ -254,6 +256,7 @@ function fakeOctokit(routes: GraphqlRoutes): { octokit: GraphqlOctokit; calls: G
                   createdAt: c.createdAt,
                   updatedAt: c.updatedAt,
                   author: { __typename: c.authorType ?? "User", login: c.authorLogin ?? "human-reviewer" },
+                  viewerDidAuthor: c.viewerDidAuthor ?? false,
                 })),
               },
             },
@@ -1619,6 +1622,52 @@ describe("post-pagination stability recheck (§7.5/§7.8)", () => {
     });
     const { octokit } = countingOctokit([page(1), page(1)]);
     const capture = await fetchIssueComments(octokit, { owner: SCOPE.owner, repo: SCOPE.repo, prNumber: SCOPE.prNumber });
+    expect(capture.complete).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-call capture switch: App publications for the discovery lane
+// ---------------------------------------------------------------------------
+
+describe("fetchIssueComments — includeOwnPublications", () => {
+  const ownPublication: ThreadCommentSpec = {
+    id: "i-own",
+    fullDatabaseId: "8002",
+    body: "<!-- mstar-inspector:review:v1 round=1 -->\n\n## 📋 Review",
+    authorType: "Bot",
+    authorLogin: BOT_LOGIN,
+    createdAt: "2026-09-02T09:00:00Z",
+    updatedAt: "2026-09-02T09:00:00Z",
+    viewerDidAuthor: true,
+  };
+  const humanComment: ThreadCommentSpec = {
+    id: "i-human",
+    fullDatabaseId: "8003",
+    body: "a human comment",
+    createdAt: "2026-09-01T09:00:00Z",
+    updatedAt: "2026-09-01T09:00:00Z",
+  };
+
+  test("the default capture still excludes the Inspector's own publication comment", async () => {
+    const { octokit } = fakeOctokit({ issueComments: { comments: [humanComment, ownPublication] } });
+    const capture = await fetchIssueComments(octokit, { owner: SCOPE.owner, repo: SCOPE.repo, prNumber: SCOPE.prNumber });
+    expect(capture.comments.map((c) => c.id)).toEqual(["i-human"]);
+    // The raw connection is unchanged by the filter.
+    expect(capture.totalCount).toBe(2);
+  });
+
+  test("includeOwnPublications: true returns it with authenticated provenance intact", async () => {
+    const { octokit } = fakeOctokit({ issueComments: { comments: [humanComment, ownPublication] } });
+    const capture = await fetchIssueComments(
+      octokit,
+      { owner: SCOPE.owner, repo: SCOPE.repo, prNumber: SCOPE.prNumber },
+      { includeOwnPublications: true },
+    );
+    expect(capture.comments.map((c) => c.id)).toEqual(["i-human", "i-own"]);
+    expect(capture.comments[1]!.viewerDidAuthor).toBe(true);
+    // The switch moves the returned set only, never coverage.
+    expect(capture.totalCount).toBe(2);
     expect(capture.complete).toBe(true);
   });
 });

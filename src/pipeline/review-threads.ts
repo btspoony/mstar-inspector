@@ -496,7 +496,7 @@ export type IssueCapture = {
  * enforcing authorship would need the probed App identity inside the capture
  * layer, which this layer does not have.
  */
-function isOwnPublicationComment(entry: ThreadCommentEntry): boolean {
+export function isOwnPublicationComment(entry: ThreadCommentEntry): boolean {
   return (
     entry.authorType === "Bot" &&
     (entry.body.startsWith(REVIEW_MARKER_PREFIX) || entry.body.startsWith(DEGRADED_MARKER_PREFIX))
@@ -513,12 +513,15 @@ function isOwnPublicationComment(entry: ThreadCommentEntry): boolean {
  *
  * `totalCount` and pagination completeness describe the RAW GitHub
  * connection; the returned `comments` exclude the Inspector's own publication
- * comments (the digest/context domain), so the truncation bound is applied to
- * the returned entries by the caller.
+ * comments (the digest/context domain) unless `includeOwnPublications` is set,
+ * so the truncation bound is applied to the returned entries by the caller.
+ * That opt-in exists for ONE consumer: the `sending`/`unknown` publication
+ * discovery, which must be able to find the very comment it may have posted.
  */
 export async function fetchIssueComments(
   octokit: GraphqlOctokit,
   input: { owner: string; repo: string; prNumber: number },
+  options: { includeOwnPublications?: boolean } = {},
 ): Promise<IssueCapture> {
   type PrNode = {
     headRefOid?: string | null;
@@ -569,7 +572,12 @@ export async function fetchIssueComments(
       complete = false;
     }
   }
-  return { headRefOid, comments: comments.filter((entry) => !isOwnPublicationComment(entry)), totalCount, complete };
+  return {
+    headRefOid,
+    comments: options.includeOwnPublications === true ? comments : comments.filter((entry) => !isOwnPublicationComment(entry)),
+    totalCount,
+    complete,
+  };
 }
 
 const REVIEW_THREADS_QUERY = `

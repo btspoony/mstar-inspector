@@ -40,6 +40,7 @@ import {
 import {
   fetchIssueComments,
   fetchThreadConversation,
+  isOwnPublicationComment,
   issueDigestOf,
   stripInspectorMarkerSyntax,
   threadDigestOf,
@@ -69,6 +70,13 @@ export type ListDiscussionInput = {
   threads: { associationId: string; threadId: string }[];
   /** Captured-at clock (integer Unix ms; one supplied clock per capture). */
   nowMs?: number;
+  /**
+   * Capture the Inspector's own publication comments too. Off for every
+   * model-context consumer (they are not discussion); the publication
+   * discovery lane turns it on to find the comment it may have posted. The
+   * digest and `boundDiscussion` keep their filtered domain either way.
+   */
+  includeOwnPublications?: boolean;
 };
 
 function entryToItem(
@@ -122,7 +130,11 @@ export async function listDiscussionWithOctokit(octokit: GraphqlOctokit, input: 
   // API failure is `unavailable`, never empty/complete (spec §7.8).
   let issue: Awaited<ReturnType<typeof fetchIssueComments>> | null = null;
   try {
-    issue = await fetchIssueComments(octokit, { owner: input.owner, repo: input.repo, prNumber: input.prNumber });
+    issue = await fetchIssueComments(
+      octokit,
+      { owner: input.owner, repo: input.repo, prNumber: input.prNumber },
+      { includeOwnPublications: input.includeOwnPublications === true },
+    );
   } catch {
     issue = null;
   }
@@ -130,10 +142,18 @@ export async function listDiscussionWithOctokit(octokit: GraphqlOctokit, input: 
   // walk is capped at two 100-node pages, so `fetchIssueComments` cannot
   // return more than 200 entries. The Inspector's own publication comments
   // are excluded from the digest/context domain afterwards, so they never
-  // change this verdict either (spec §7.8).
+  // change this verdict either (spec §7.8). A capture asked to include them
+  // (publication discovery only) filters the digest domain here — the same
+  // predicate the default capture applies.
   const issueCoverage: Coverage =
     issue === null ? "unavailable" : issue.complete ? "complete" : "truncated";
-  const issueDigest = issue !== null && issue.complete ? await issueDigestOf({ headSha: issue.headRefOid, comments: issue.comments }) : "";
+  const issueDigest =
+    issue !== null && issue.complete
+      ? await issueDigestOf({
+          headSha: issue.headRefOid,
+          comments: issue.comments.filter((entry) => !isOwnPublicationComment(entry)),
+        })
+      : "";
   if (issue !== null) {
     for (const entry of issue.comments) {
       items.push(entryToItem(entry, "issue", null));

@@ -1,6 +1,7 @@
 ---
 module: review-lifecycle
 date: 2026-11-12
+last_updated: 2026-11-13
 problem_type: best_practice
 category: best-practices
 severity: high
@@ -11,6 +12,7 @@ applies_when:
   - "a durable state column (bound remote ids) can stay NULL on every row forever while the chain keeps 'working'"
   - "a fail-closed rejection path can be observationally identical to a healthy gate"
   - "fixtures are written from the implementation's assumption instead of a captured real response"
+  - "one capture or normalization layer serves two consumers whose needs are opposite — a filter correct for one consumer deletes the rows the other must find"
 tags:
   - github-api
   - rest-vs-graphql
@@ -39,6 +41,8 @@ The lifecycle reconcile (`discoverUncertainPublication` in `src/worker/lifecycle
 
 The fix introduced one predicate, `sameAppBotLogin(login, botLogin)` in `src/pipeline/review-threads.ts`, true for both the canonical `<slug>[bot]` and its suffix-stripped GraphQL form (false for `null`, for a bare slug when the canonical form was expected, and for any other login); switched the comment read-back in `postLineCommentsWithOctokit` to key on the trusted per-comment thread marker (association id) with `path + (line ?? original_line)` only as a fallback for marker-less rows; and pinned both login shapes plus a marker-keyed capture test in the suite.
 
+4. **The layer upstream had already deleted the row.** `fetchIssueComments` (`src/pipeline/review-threads.ts`) returns the PR conversation with the Inspector's own publication comments removed — `isOwnPublicationComment` is true for `authorType === "Bot"` plus a body that opens with `<!-- mstar-inspector:review:v1` or `<!-- mstar-inspector:review-degraded:v1`, and both prepared bodies are built with that marker first. The trim is correct for the digest/model-context consumers, which must not read the Inspector's own past reviews back as if a human had written them. The `sending`/`unknown` recovery lane reads the same capture for the opposite purpose: `discoverUncertainPublication` re-drives a publication whose send response was lost, so proving our own comment landed requires exactly the rows the trim deletes. Its match (`source === "issue" && ownAuthor === true && body === payload.body`) therefore found the empty set on every run — each attempt settled as a read-only miss with backoff, and at the cap as a terminal local-error, while the digest domain stayed correct the whole time. The fix threads a per-call `includeOwnPublications` opt-in through `listDiscussion` into the capture and leaves the default return filtered.
+
 ## Guidance
 
 1. **Measure the real response shape before writing the comparison.** Capture one real response per endpoint (or verify against the provider's live behaviour) and record which surface each field comes from. Never derive the expected value from the other endpoint's convention: REST `user.login` and GraphQL `author.login` are different fields with different formats for the same identity, and either side can change independently.
@@ -47,6 +51,7 @@ The fix introduced one predicate, `sameAppBotLogin(login, botLogin)` in `src/pip
 4. **Pin fixtures to the measured shape, per endpoint.** A GraphQL-shaped fixture author must carry the GraphQL login shape (`<slug>`), a REST-shaped stub the REST shape (`<slug>[bot]`); the constant the production code derives is the *canonical* form, and the predicate under test is what bridges them. A fixture that reuses the production constant tests the assumption, not the integration.
 5. **Assert the terminal observable, not the per-gate outcome.** Each gate returning a typed `unknown`/`foreign`/`found` proves nothing about the chain; the test that matters asserts the id is actually written or the state actually advanced (the association row ends with `review_id`/`comment_id`/`thread_id` bound, or a live read-back finds the posted comment). When a durable column can remain NULL on every row forever, "every gate returned a typed outcome" and "the chain works" are indistinguishable without that assertion.
 6. **Instrument the NULL-steady state.** A column the chain exists to fill that never changes value across thousands of runs is a signal, not a stable steady state — alert on or periodically audit "fail-closed gate has never once passed", because that is precisely what a shape-mismatched gate looks like.
+7. **Treat every trim in a shared capture layer as a consumer contract, and widen it only through an explicit per-call opt-in.** A filter is invisible to the consumer it starves: hiding the Inspector's own publications is correct for the digest the model reads and fatal for the recovery lane proving our own comment exists, with no type change, no error and a lookup domain that can never contain its target. Name the consumers in the capture's doc comment, keep the filtered shape the default, and let the consumer that needs the raw rows pass its own flag — widening the shared default silently changes what every existing consumer reads.
 
 ## Why This Matters
 
@@ -64,3 +69,4 @@ A fail-closed gate that rejects everything is observationally identical to a gat
 - Identity predicate matrix: `sameAppBotLogin("<slug>[bot]", "<slug>[bot]") → true`, `sameAppBotLogin("<slug>", "<slug>[bot]") → true` (GraphQL shape), `sameAppBotLogin(null, …) → false`, `sameAppBotLogin("other-app[bot]", …) → false`, `sameAppBotLogin("<slug>", "<slug>") → false` (bare slug is never its own canonical form).
 - Endpoint anchor trap: the same created comment id reads back with `line: null, original_line: null, side: null` from `GET /pulls/{n}/reviews/{id}/comments` but with real anchors from `GET /pulls/{n}/comments` — so a `path + line` match against the review-scoped list returns zero candidates for every intent, forever.
 - Terminal assertion: after discovery runs on a lost-response publication, assert the association row's `review_id`/`comment_id`/`thread_id` are non-NULL — not that `lookupThreadForIntent` returned `{ kind: "found" }` against a fixture whose author login the test itself set.
+- Consumer-domain trim: `fetchIssueComments` dropped every `authorType === "Bot"` comment whose body opened with the review or review-degraded marker, and `discoverUncertainPublication` searched the same capture for `ownAuthor === true && body === payload.body` — a publication body that itself opens with that marker. The predicate matched zero rows on every run, so each attempt settled as a miss with 1/2/4/8/16-minute backoff and then a terminal local-error, while for the digest consumer the identical filter was the correctness requirement rather than the bug.
