@@ -26,8 +26,10 @@
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
  * structurally. Declared locally instead of importing `store/types` because
  * dashboard modules must not import store/pipeline/review code (architect
- * decision Q2), and this store never uses D1 batch() — multi-row reads go
- * through IN-list queries (deliverySummaries) — so it needs a narrower face.
+ * decision Q2). The narrow face carries the operations this store needs:
+ * multi-row reads go through IN-list queries (deliverySummaries) and the
+ * writes that must commit together — App creation, the allowlist replace,
+ * the installation reconcile — go through `batch()`.
  *
  * Semantics (route call sites rely on these):
  *   - getAppForWebhook / getAppByGithubId / getAppById return the row
@@ -101,8 +103,9 @@
  *     the metadata refresh's anonymous probe — machine-triggered, so like
  *     saveGithubMetadata it never writes updated_at.
  *   - listInstallations is the install-health read face for the settings
- *     panel: this App's installations, most recently seen
- *     first.
+ *     panel: this App's PRESENT installations (`removed_at IS NULL`), most
+ *     recently seen first. markInstallationRemoved / reconcileInstallations
+ *     stamp the rows GitHub no longer has — never delete them.
  *   - softDeleteApp is idempotent — the FIRST deleted_at wins; returns
  *     whether THIS call performed the delete.
  *   - recordDelivery / deliverySummary / listRecentDeliveries (migration
@@ -743,16 +746,21 @@ export const APP_READ_SQL = {
  * review traffic.
  */
 const UPSERT_INSTALLATION_SQL = {
+  // An AUTHORITATIVE delivery is the installation's own statement, so it also
+  // clears a removal stamp: a reinstall (`installation.created`) makes the row
+  // visible again. An INFERRED login is ordinary review traffic and says
+  // nothing about install state, so it never clears the stamp.
   authoritative: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
-    VALUES (?, ?, ?, ?, datetime('now'))
+    VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
     ON CONFLICT (app_id, installation_id) DO UPDATE SET
       account_login = COALESCE(excluded.account_login, account_login),
-      seen_at = datetime('now')`,
+      seen_at = strftime('%Y-%m-%d %H:%M:%f','now'),
+      removed_at = NULL`,
   inferred: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
-    VALUES (?, ?, ?, ?, datetime('now'))
+    VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
     ON CONFLICT (app_id, installation_id) DO UPDATE SET
       account_login = COALESCE(account_login, excluded.account_login),
-      seen_at = datetime('now')`,
+      seen_at = strftime('%Y-%m-%d %H:%M:%f','now')`,
 } as const;
 
 /** Create the github_apps / app_installations store over one D1 handle. */
@@ -1415,11 +1423,130 @@ export function createAppsStore(db: AppsStoreD1) {
       const res = await db
         .prepare(
           `SELECT installation_id, account_login, seen_at FROM app_installations
-           WHERE app_id = ? ORDER BY seen_at DESC, installation_id`,
+           WHERE app_id = ? AND removed_at IS NULL ORDER BY seen_at DESC, installation_id`,
         )
         .bind(appId)
         .all<AppInstallationRow>();
       return res.results;
+    },
+
+    /**
+     * The database's own UTC clock in the sub-second `YYYY-MM-DD HH:MM:SS.SSS`
+     * form (`strftime('%Y-%m-%d %H:%M:%f','now')`). A caller captures this
+     * BEFORE an upstream read so `reconcileInstallations` can tell which rows
+     * predate the snapshot.
+     *
+     * Sub-second on purpose: a plain `datetime('now')` marker makes every
+     * same-second comparison a tie, and the reconcile's two guards need strict
+     * order (`reconcileInstallations`). Lexicographic comparison stays valid
+     * because every writer of a compared column uses the same form, and a
+     * legacy second-resolution value is a prefix of — and therefore sorts
+     * before — any fractional value of the same second.
+     */
+    async currentTimestamp(): Promise<string> {
+      const row = await db
+        .prepare(`SELECT strftime('%Y-%m-%d %H:%M:%f','now') AS now`)
+        .first<{ now: string }>();
+      if (!row) throw new Error("D1 returned no clock row");
+      return row.now;
+    },
+
+    /**
+     * Stamp one installation row as removed (`installation.deleted`). The row
+     * SURVIVES — the credential-routing and failure-attribution joins read
+     * `app_installations`, and the installation's historical reviews still
+     * reference it. An unknown pair is a silent no-op: the delivery may
+     * predate any local row, and refusing it would change the webhook answer.
+     *
+     * Writes the sub-second form (`strftime('%Y-%m-%d %H:%M:%f','now')`) so a
+     * reconcile snapshot taken later in the same second still orders after it.
+     *
+     * No order guard: a REPLAYED `installation.deleted` processed after a
+     * reinstall's `installation.created` still stamps the row, because the
+     * payload carries no reliable delivery order to compare. That window is
+     * bounded by the next metadata refresh, whose live set contains the
+     * installation and clears the stamp.
+     */
+    async markInstallationRemoved(appId: string, installationId: number): Promise<void> {
+      await db
+        .prepare(
+          `UPDATE app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
+           WHERE app_id = ? AND installation_id = ?`,
+        )
+        .bind(appId, installationId)
+        .run();
+    },
+
+    /**
+     * Reconcile this App's installation rows against GitHub's authoritative
+     * list (`GET /app/installations`): stamp the active rows the list does not
+     * contain and clear the stamp of a stored-removed row the list DOES
+     * contain. This is what repairs rows whose `installation.deleted` delivery
+     * was missed. Rows are never deleted (see markInstallationRemoved); a null
+     * `removed_at` is the only "present" state.
+     *
+     * `observedAt` is the store clock captured BEFORE the listing was fetched,
+     * in the sub-second `strftime('%Y-%m-%d %H:%M:%f','now')` form that every
+     * writer of a compared column also uses (`seen_at` in both upserts,
+     * `removed_at` from the webhook stamp and from this leg). The list is a
+     * snapshot and the table is not, so both statements are gated on it:
+     * stamp only `seen_at <= observedAt` (a row written after the snapshot
+     * carries a strictly greater fractional stamp and stays present) and clear
+     * only `removed_at < observedAt` (a removal delivered after the snapshot is
+     * newer news and survives).
+     *
+     * Same-second ties resolve the SAFE way on both legs because the marker is
+     * fractional: a new fractional value in the observation's second sorts
+     * after the observation, while a LEGACY second-resolution value
+     * (`datetime('now')`, a prefix of its fractional successor) sorts before
+     * it. So an old-style removal observed in the same second is still
+     * cleared, and a same-second row created after the snapshot is not
+     * stamped. Both UPDATEs run in ONE batch, so the stamp and the clear
+     * commit together.
+     *
+     * The snapshot (live ids + observation stamp) travels as ONE JSON value,
+     * tested with `json_each`: each statement binds exactly TWO values
+     * (appId + the snapshot) however many installations GitHub lists. D1
+     * refuses a statement binding more than 100 parameters, and one placeholder
+     * per id would cross that at the first full page (`per_page=100`).
+     * Chunking is not an alternative — a chunked `NOT IN` would stamp ids that
+     * live in another chunk. `json_each('[]')` is an empty set, so an empty
+     * list stamps every active row and clears none.
+     */
+    async reconcileInstallations(
+      appId: string,
+      liveInstallationIds: readonly number[],
+      observedAt: string,
+    ): Promise<void> {
+      // One binding per statement: the `WITH` CTE keeps `json_each` (ids) and
+      // `json_extract` (the stamp) reading the same bound value.
+      const snapshot = JSON.stringify({ ids: liveInstallationIds, observedAt });
+      await db.batch([
+        db
+          .prepare(
+            `WITH snapshot(body) AS (SELECT ?)
+             UPDATE app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
+             WHERE app_id = ?
+               AND removed_at IS NULL
+               AND seen_at <= (SELECT json_extract(body, '$.observedAt') FROM snapshot)
+               AND installation_id NOT IN (
+                 SELECT value FROM json_each((SELECT body FROM snapshot), '$.ids')
+               )`,
+          )
+          .bind(snapshot, appId),
+        db
+          .prepare(
+            `WITH snapshot(body) AS (SELECT ?)
+             UPDATE app_installations SET removed_at = NULL
+             WHERE app_id = ?
+               AND removed_at IS NOT NULL
+               AND removed_at < (SELECT json_extract(body, '$.observedAt') FROM snapshot)
+               AND installation_id IN (
+                 SELECT value FROM json_each((SELECT body FROM snapshot), '$.ids')
+               )`,
+          )
+          .bind(snapshot, appId),
+      ]);
     },
 
     /**

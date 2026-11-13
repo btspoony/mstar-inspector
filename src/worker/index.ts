@@ -92,7 +92,7 @@ export function deliveryOutcomeFromWebhook(
 ): DeliveryOutcome {
   if (outcome.kind === "reject") return "rejected";
   if (outcome.kind === "ignore") return "ignored";
-  if (outcome.kind === "installation") return "ignored";
+  if (outcome.kind === "installation" || outcome.kind === "installation_removed") return "ignored";
   return reviewEnabled === 0 || !reviewGlobal ? "paused" : "ok";
 }
 
@@ -734,6 +734,27 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       outcome.accountLogin,
       outcome.accountAuthoritative,
     );
+    return c.text("accepted", 200);
+  }
+
+  // Uninstall (installation.deleted): stamp the local row, never delete it —
+  // the credential-routing and failure-attribution joins keep resolving, and
+  // the install-health read face stops listing it. No account_login is
+  // written: the payload states a removal, not a login. Best-effort like every
+  // sibling bookkeeping write: a store failure logs and the webhook still
+  // answers 200 (GitHub retries non-2xx, and a row we cannot stamp is fixed by
+  // the next metadata refresh's reconcile).
+  if (outcome.kind === "installation_removed") {
+    try {
+      await appsStore.markInstallationRemoved(row.id, outcome.installationId);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      webhookWarn(
+        "installation_remove_failed",
+        detail,
+        "installation removal stamp failed — webhook response and enqueue unaffected",
+      );
+    }
     return c.text("accepted", 200);
   }
 

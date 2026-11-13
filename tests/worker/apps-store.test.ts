@@ -484,7 +484,7 @@ describe("apps-store (createAppsStore)", () => {
     expect(rows[0]!.app_id).toBe(app.id);
     expect(rows[0]!.installation_id).toBe(777);
     expect(rows[0]!.account_login).toBe("octocat");
-    expect(rows[0]!.seen_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(rows[0]!.seen_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{3})?$/);
 
     // Simulate time passing, then touch: same pair → still ONE row, seen_at
     // refreshed, login replaced because the writer is authoritative.
@@ -548,6 +548,189 @@ describe("apps-store (createAppsStore)", () => {
     await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: null, authoritative: true });
     expect(await loginOf()).toBe("inferred-owner");
     expect(await s.listInstallations(app.id)).toHaveLength(1);
+  });
+
+  test("markInstallationRemoved: the row survives, leaves listInstallations, and only an AUTHORITATIVE upsert restores it", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    await s.upsertInstallation({ appId: app.id, installationId: 9, accountLogin: "old-org" });
+
+    await s.markInstallationRemoved(app.id, 9);
+    expect(await s.listInstallations(app.id)).toHaveLength(0);
+    // The row itself survives — the credential-routing / attribution joins
+    // read app_installations, so an uninstall may never delete it.
+    const rows = db.raw
+      .query("SELECT account_login, removed_at FROM app_installations")
+      .all() as Array<{ account_login: string | null; removed_at: string | null }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.account_login).toBe("old-org");
+    expect(rows[0]!.removed_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{3})?$/);
+
+    // Ordinary review traffic (INFERRED) says nothing about install state…
+    await s.upsertInstallation({ appId: app.id, installationId: 9, accountLogin: "inferred-owner" });
+    expect(await s.listInstallations(app.id)).toHaveLength(0);
+    // …an installation event (AUTHORITATIVE) is a reinstall: the row returns.
+    await s.upsertInstallation({ appId: app.id, installationId: 9, accountLogin: "new-org", authoritative: true });
+    expect(await s.listInstallations(app.id)).toEqual([
+      expect.objectContaining({ installation_id: 9, account_login: "new-org" }),
+    ]);
+  });
+
+  test("reconcileInstallations: stamps absent rows, clears present ones, never deletes a row", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const sibling = await seedApp(db, { githubAppId: 654321 });
+    const s = store(db);
+    // Two rows for this App (1 = still installed, 2 = uninstalled while no
+    // delivery arrived) and one row of a SIBLING App that must stay untouched.
+    await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "still-there" });
+    await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: "gone" });
+    await s.upsertInstallation({ appId: sibling.id, installationId: 3, accountLogin: "other-app" });
+    const observedAt = await s.currentTimestamp();
+
+    await s.reconcileInstallations(app.id, [1], observedAt);
+
+    expect(await s.listInstallations(app.id)).toEqual([
+      expect.objectContaining({ installation_id: 1 }),
+    ]);
+    const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
+    expect(n.n).toBe(3); // nothing deleted, the sibling untouched
+    const siblingRows = await s.listInstallations(sibling.id);
+    expect(siblingRows).toEqual([expect.objectContaining({ installation_id: 3 })]);
+
+    // GitHub lists 2 again (a reinstall): the stored stamp is cleared. The
+    // stamp was written moments ago; let the store clock pass it by one
+    // millisecond so the clear is a strict later observation (a same-ms
+    // observation is the safe no-clear case, pinned separately below).
+    await Bun.sleep(2);
+    await s.reconcileInstallations(app.id, [1, 2], await s.currentTimestamp());
+    const restored = await s.listInstallations(app.id);
+    expect(restored.map((row) => row.installation_id).sort()).toEqual([1, 2]);
+  });
+
+  test("reconcileInstallations: an empty authoritative list stamps every active row and clears none", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "still-there" });
+    await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: "gone" });
+
+    await s.reconcileInstallations(app.id, [], await s.currentTimestamp());
+
+    expect(await s.listInstallations(app.id)).toHaveLength(0);
+    const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
+    expect(n.n).toBe(2); // stamped, never deleted
+  });
+
+  test("reconcileInstallations: a full page of live ids (150) binds two parameters and still classifies every row", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    // Three local rows inside the 1..150 live set (150 already stamped removed,
+    // so it must come back) and two outside it (151, 999).
+    await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "in-1" });
+    await s.upsertInstallation({ appId: app.id, installationId: 100, accountLogin: "in-100" });
+    await s.upsertInstallation({ appId: app.id, installationId: 150, accountLogin: "in-150" });
+    await s.markInstallationRemoved(app.id, 150);
+    await s.upsertInstallation({ appId: app.id, installationId: 151, accountLogin: "out-151" });
+    await s.upsertInstallation({ appId: app.id, installationId: 999, accountLogin: "out-999" });
+    const live = Array.from({ length: 150 }, (_, index) => index + 1);
+
+    // The removal was stamped above; the observation must be strictly later.
+    await Bun.sleep(2);
+    await s.reconcileInstallations(app.id, live, await s.currentTimestamp());
+
+    // The binding shape the test is named after: each statement binds one
+    // value pair (appId + the JSON snapshot), NOT one placeholder per id. A
+    // revert to per-id placeholders binds 151 values per statement here and
+    // fails this line.
+    expect(db.boundValueCounts!.slice(-2)).toEqual([2, 2]);
+    const rows = await s.listInstallations(app.id);
+    expect(rows.map((row) => row.installation_id).sort((a, b) => a - b)).toEqual([1, 100, 150]);
+    const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
+    expect(n.n).toBe(5); // nothing deleted
+  });
+
+  test("reconcileInstallations: a LEGACY second-resolution removal in the observation second is still cleared", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    // A removal written before the fractional marker existed: `datetime('now')`
+    // has no sub-second part, so it must sort BEFORE an observation taken in
+    // the same second — otherwise the row stays hidden until the next TTL.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at, removed_at) VALUES ('legacy', ?, 7, 'legacy-org', datetime('now'), datetime('now'))",
+      )
+      .run(app.id);
+    const observedAt = await s.currentTimestamp();
+
+    await s.reconcileInstallations(app.id, [7], observedAt);
+
+    expect(await s.listInstallations(app.id)).toEqual([
+      expect.objectContaining({ installation_id: 7 }),
+    ]);
+  });
+
+  test("reconcileInstallations: a row created with a fractional seen_at after the observation is not stamped", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    const observedAt = await s.currentTimestamp();
+    // An in-flight `installation.created`: written AFTER the snapshot, so its
+    // fractional seen_at is strictly greater and the stamp leg must skip it
+    // even though the fetched live set cannot contain it yet.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('in-flight', ?, 11, 'new-org', strftime('%Y-%m-%d %H:%M:%f','now','+0.010 seconds'))",
+      )
+      .run(app.id);
+
+    await s.reconcileInstallations(app.id, [], observedAt);
+
+    expect(await s.listInstallations(app.id)).toEqual([
+      expect.objectContaining({ installation_id: 11 }),
+    ]);
+  });
+
+  test("reconcileInstallations: rows newer than the observation stamp are neither stamped nor cleared", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    const observedAt = await s.currentTimestamp();
+    // Created AFTER the snapshot (seen_at is later than it): absent from the
+    // live set only because it did not exist yet — it must stay present.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('late', ?, 10, 'late-org', datetime('now', '+10 seconds'))",
+      )
+      .run(app.id);
+    // A removal observed AFTER the snapshot is newer news than the live set,
+    // so the clear leg must leave it stamped even though 20 is present.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at, removed_at) VALUES ('fresh-removal', ?, 20, 'gone-org', datetime('now'), datetime('now', '+10 seconds'))",
+      )
+      .run(app.id);
+    // …while a row older than the snapshot and absent from the live set is
+    // exactly what the stamping leg exists for.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('old', ?, 30, 'old-org', '2020-01-01 00:00:00')",
+      )
+      .run(app.id);
+
+    await s.reconcileInstallations(app.id, [20], observedAt);
+
+    const rows = db.raw
+      .query("SELECT installation_id, removed_at IS NOT NULL AS removed FROM app_installations ORDER BY installation_id")
+      .all() as Array<{ installation_id: number; removed: number }>;
+    expect(rows).toEqual([
+      { installation_id: 10, removed: 0 },
+      { installation_id: 20, removed: 1 },
+      { installation_id: 30, removed: 1 },
+    ]);
   });
 
   test("upsertInstallation: distinct installation ids are distinct rows; unknown app fails FK", async () => {

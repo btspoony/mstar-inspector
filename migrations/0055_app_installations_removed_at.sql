@@ -1,0 +1,13 @@
+-- 0055_app_installations_removed_at.sql — an installation GitHub no longer
+-- has, kept as a row.
+--
+-- GitHub sends `installation.deleted` when an installation is uninstalled, and
+-- the same fact is missing from local rows whose delivery was missed. The row
+-- is NEVER deleted: the credential-routing and failure-attribution joins read
+-- `app_installations`, and an uninstalled installation's historical reviews
+-- still point at it. `removed_at` is the only new state — NULL means the
+-- installation is (still) present, a timestamp means it was observed absent.
+--
+-- A later `installation.created` for the same pair clears the stamp, so a
+-- reinstall becomes visible again.
+ALTER TABLE app_installations ADD COLUMN removed_at TEXT;

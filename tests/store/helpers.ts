@@ -106,11 +106,16 @@ function counter(db: Database, sql: string): number {
  * takes bound parameters directly on get/all/run (no separate bind step), so
  * the wrapper buffers values from `bind()` and forwards them on execution.
  */
-function wrapStatement(db: Database, stmt: Statement): D1StatementLike {
+function wrapStatement(
+  db: Database,
+  stmt: Statement,
+  recordBindCount: (count: number) => void,
+): D1StatementLike {
   let bound: unknown[] = [];
   return {
     bind(...values: unknown[]): D1StatementLike {
       bound = values;
+      recordBindCount(values.length);
       return this;
     },
     async first<T = Record<string, unknown>>(): Promise<T | null> {
@@ -153,11 +158,19 @@ function wrapStatement(db: Database, stmt: Statement): D1StatementLike {
 }
 
 /** Wrap a bun:sqlite handle in the narrow D1 face (shared by both shapes). */
-function wrapDb(db: Database): D1Like & { raw: Database } {
-  return {
+function wrapDb(db: Database): TestD1 {
+  // Every `bind()`'s value count, in call order. bun:sqlite enforces no
+  // bound-parameter ceiling (D1's is 100), so a case that must fail when a
+  // statement starts binding one value per row asserts this history instead of
+  // waiting for a rejection the local engine will never produce.
+  const boundValueCounts: number[] = [];
+  const handle: TestD1 = {
     raw: db,
+    boundValueCounts,
     prepare(query: string): D1StatementLike {
-      return wrapStatement(db, db.prepare(query));
+      return wrapStatement(db, db.prepare(query), (count) => {
+        boundValueCounts.push(count);
+      });
     },
     /**
      * D1 `batch()` runs the statements sequentially as ONE transaction —
@@ -184,14 +197,19 @@ function wrapDb(db: Database): D1Like & { raw: Database } {
       }
     },
   };
+  return handle;
 }
 
 /**
  * The test D1 double handle: the narrow D1 face plus the raw bun:sqlite
  * handle for direct assertions. Named type so consumers do not reach
  * through `ReturnType<typeof createMigratedTestD1>`.
+ *
+ * `boundValueCounts` records every `bind()`'s value count in call order — the
+ * observable stand-in for D1's 100-bound-parameter ceiling, which bun:sqlite
+ * does not enforce.
  */
-export type TestD1 = D1Like & { raw: Database };
+export type TestD1 = D1Like & { raw: Database; readonly boundValueCounts?: readonly number[] };
 
 /**
  * Create a fresh in-memory D1-like database with the earliest

@@ -1476,7 +1476,45 @@ describe("installation event path", () => {
     expect(deliveryRows(db, appRow.id)[0]!.outcome).toBe("ignored");
   });
 
-  test("installation.deleted → 200 ignored, no installation row", async () => {
+  test("installation.deleted → 200 accepted, the (app, installation) row is stamped removed, zero enqueue", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // The installation existed locally before GitHub reported its removal.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('seed-1', ?, 555, 'octo-org', datetime('now'))",
+      )
+      .run(appRow.id);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({ ...INSTALL_PAYLOAD, action: "deleted" });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "installation"),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(0); // an uninstall is never review work
+    // The row SURVIVES (the historical joins keep resolving) and carries the
+    // stamp that hides it from the install-health read face.
+    const rows = db.raw
+      .query("SELECT installation_id, account_login, removed_at FROM app_installations")
+      .all() as Array<{ installation_id: number; account_login: string | null; removed_at: string | null }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.installation_id).toBe(555);
+    expect(rows[0]!.account_login).toBe("octo-org");
+    expect(rows[0]!.removed_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{3})?$/);
+    expect(await createAppsStore(db).listInstallations(appRow.id)).toHaveLength(0);
+    expect(deliveryRows(db, appRow.id)).toEqual([
+      { event_name: "installation", outcome: "ignored", status_code: null },
+    ]);
+  });
+
+  test("installation.deleted for an installation we never stored → 200 accepted, no row invented", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -1491,14 +1529,60 @@ describe("installation event path", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ignored");
+    expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
     expect(installationRows(db)).toHaveLength(0);
-    expect(deliveryRows(db, appRow.id)[0]).toEqual({
-      event_name: "installation",
-      outcome: "ignored",
-      status_code: null,
-    });
+  });
+
+  test.each(["suspended", "unsuspended", "added", "removed"])(
+    "installation.%s stays ignored — only created / new_permissions_accepted / deleted are classified",
+    async (action) => {
+      const db = createMigratedTestD1();
+      const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+      const { queue, sent } = makeQueue();
+      const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+      const body = JSON.stringify({ ...INSTALL_PAYLOAD, action });
+
+      const res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        await sigHeaders("secret-x", body, "installation"),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("ignored");
+      expect(sent).toHaveLength(0);
+      expect(installationRows(db)).toHaveLength(0);
+      expect(deliveryRows(db, appRow.id)[0]).toEqual({
+        event_name: "installation",
+        outcome: "ignored",
+        status_code: null,
+      });
+    },
+  );
+
+  test("installation.deleted without installation.id → 400 reject (the sibling malformed rule)", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({ action: "deleted", installation: { account: { login: "octo-org" } } });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "installation"),
+      env,
+    );
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe("installation payload missing required fields");
+    expect(sent).toHaveLength(0);
+    expect(installationRows(db)).toHaveLength(0);
+    expect(deliveryRows(db, appRow.id)).toEqual([
+      { event_name: "installation", outcome: "rejected", status_code: 400 },
+    ]);
   });
 
   test("malformed installation body (no installation.id) → 400, delivery rejected", async () => {

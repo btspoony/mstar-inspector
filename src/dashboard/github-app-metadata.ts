@@ -13,6 +13,9 @@
  * its first src consumer (PKCS#1 → PKCS#8 wrap happens here; PKCS#8 passes
  * through; OpenSSH throws and is swallowed by the catch-all below).
  *
+ * The same JWT answers the installation list (`GET /app/installations`) that
+ * reconciles `app_installations` against GitHub — see fetchAppInstallations.
+ *
  * Flow: normalizePrivateKey(decryptedPem) → importKey("pkcs8") → RS256-sign
  * `{alg:RS256,typ:JWT}` / `{iat,exp,iss:<githubAppId>}` →
  * GET https://api.github.com/app (Bearer) → extract ONLY the public profile
@@ -39,12 +42,16 @@
  * nothing. It shares this module because it shares the
  * refresh's failure discipline and bounds, not because it shares the JWT path.
  *
- * Failure discipline (AD-531): ZERO retries (the caller's 24h TTL bounds
- * the cost to ≤1 fetch per request; ≤1/App/day once a sync succeeds), a
- * 5s AbortSignal timeout, and a total
- * catch-all — every failure (OpenSSH key, garbage PEM, import/sign error,
- * network failure, timeout, non-200, unexpected payload) collapses to the
- * structured `{ ok: false }`. This function NEVER throws: the settings read
+ * Failure discipline (AD-531): ZERO retries, a per-request AbortSignal
+ * timeout, and a total catch-all — every failure (OpenSSH key, garbage PEM,
+ * import/sign error, network failure, timeout, non-200, unexpected payload)
+ * collapses to the structured `{ ok: false }`.
+ *
+ * Cost bound of ONE real refresh (the fresh-TTL and key-missing paths cost
+ * nothing): profile `GET /app` ≤5s, then the installation listing ≤5s for
+ * its WHOLE leg (1–10 sequential pages sharing one deadline, 100 ids each),
+ * then the visibility probe ≤3s. Worst case ≈13s serial; the TTL keeps that
+ * to ≤1/App/day once a sync succeeds. This function NEVER throws: the settings read
  * path wraps decrypt → this fetch → saveGithubMetadata in its own
  * catch-all (fail-open by structure), so a metadata refresh can never
  * surface as a route 5xx. The PEM itself is the caller's decryption result
@@ -57,6 +64,24 @@ import type { GithubAppMetadataInput } from "./apps-store";
 
 const GITHUB_APP_API_URL = "https://api.github.com/app";
 const GITHUB_APPS_PUBLIC_URL = "https://api.github.com/apps";
+const GITHUB_APP_INSTALLATIONS_URL = "https://api.github.com/app/installations";
+/**
+ * Pagination bound for the installation list: 100 per page, so ten pages is
+ * 1000 installations for ONE App — far past any real installation count and a
+ * hard stop for a `Link` header that never ends. Reaching it with a next page
+ * still pending is `{ ok: false }`: a truncated list must never reach the
+ * reconcile, whose `NOT IN` would hide every installation on the pages we did
+ * not read. This is the truncation guard only — an out-of-order observation is
+ * guarded in the store (`reconcileInstallations`).
+ */
+const MAX_INSTALLATION_PAGES = 10;
+/**
+ * ONE wall-clock budget for the whole listing leg, shared by its pages: each
+ * request's signal is what is left of it, so N pages cost at most this and not
+ * N times the profile call's 5s. Exhausting it is `{ ok: false }` — the leg
+ * must never hand back the subset it managed to collect.
+ */
+const LISTING_BUDGET_MS = 5_000;
 /** Upstream budget (AD-531 lock): 5 seconds, zero retries. */
 const FETCH_TIMEOUT_MS = 5_000;
 /**
@@ -265,6 +290,114 @@ export async function fetchAppMetadata(
   } catch {
     // Total catch-all (AD-531): normalizePrivateKey throw (OpenSSH format),
     // import/sign errors, network failure, abort timeout — one shape.
+    return { ok: false };
+  }
+}
+
+/**
+ * The authoritative installation list for this App, reduced to the ids the
+ * local `app_installations` rows are keyed by. `{ ok: false }` = the whole
+ * answer is unusable (bad key, network/timeout, non-200, a payload that is not
+ * an id array); the caller then changes NO row and keeps its own result.
+ */
+export type FetchAppInstallationsResult =
+  | { ok: true; installationIds: number[] }
+  | { ok: false };
+
+/**
+ * What a `Link` header says about the next page. Three states, because
+ * "no next page" and "a next page we refuse to follow" must not collapse:
+ * `unusable` is an answer the caller cannot reconcile against, while `none`
+ * means the list is complete.
+ */
+type NextInstallationsPage = { kind: "none" } | { kind: "next"; url: string } | { kind: "unusable" };
+
+/**
+ * Parse the `Link: <…>; rel="next"` target. Only an
+ * `https://api.github.com/app/installations` URL is followed: the header comes
+ * from GitHub over TLS, but a reconcile must never be steered at another host,
+ * and a rejected target makes the collected list untrustworthy rather than
+ * complete (it may be missing every later page).
+ */
+function nextInstallationsPage(linkHeader: string | null): NextInstallationsPage {
+  if (!linkHeader) return { kind: "none" };
+  for (const segment of linkHeader.split(",")) {
+    const match = /<([^>]+)>\s*;\s*rel="next"/.exec(segment.trim());
+    if (match) {
+      return match[1]!.startsWith(`${GITHUB_APP_INSTALLATIONS_URL}?`)
+        ? { kind: "next", url: match[1]! }
+        : { kind: "unusable" };
+    }
+  }
+  return { kind: "none" };
+}
+
+/**
+ * Fetch this App's installation ids — `GET /app/installations?per_page=100`
+ * with a freshly minted App JWT, following `Link rel="next"` up to
+ * {@link MAX_INSTALLATION_PAGES} pages.
+ *
+ * All-or-nothing: the result is the COMPLETE list or `{ ok: false }`. A
+ * truncated list would reach `reconcileInstallations`, which stamps every
+ * active row absent from the set as removed — so hitting the page cap while a
+ * next page still exists, or a next link we refuse to follow, is a failure
+ * rather than a partial success.
+ *
+ * Same failure discipline as {@link fetchAppMetadata}: zero retries and a
+ * total catch-all, so a reconcile can never turn the settings read into a 5xx
+ * or a failed refresh.
+ * Only each entry's numeric `id` leaves this module.
+ */
+export async function fetchAppInstallations(
+  githubAppId: number,
+  decryptedPem: string,
+): Promise<FetchAppInstallationsResult> {
+  try {
+    const jwt = await mintAppJwt(githubAppId, decryptedPem);
+    const headers = {
+      Authorization: `Bearer ${jwt}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "mstar-inspector",
+    };
+    const installationIds: number[] = [];
+    let url: string | null = `${GITHUB_APP_INSTALLATIONS_URL}?per_page=100`;
+    const deadline = Date.now() + LISTING_BUDGET_MS;
+    for (let page = 0; url !== null; page++) {
+      // A next page we have no budget left to fetch: the collected ids are a
+      // strict subset of GitHub's, and a subset must never be treated as the
+      // authoritative set.
+      if (page >= MAX_INSTALLATION_PAGES) return { ok: false };
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return { ok: false };
+      const res = await fetch(url, {
+        method: "GET",
+        signal: AbortSignal.timeout(Math.min(FETCH_TIMEOUT_MS, remainingMs)),
+        headers,
+      });
+      if (!res.ok) {
+        // Release the failed body promptly (the fetchAppMetadata convention).
+        await res.body?.cancel();
+        return { ok: false };
+      }
+      const data = (await res.json().catch(() => null)) as unknown;
+      if (!Array.isArray(data)) return { ok: false };
+      for (const entry of data) {
+        const id = (entry as { id?: unknown } | null)?.id;
+        // An entry without a numeric id is not the GET /app/installations
+        // shape: the list would be untrustworthy, and an untrustworthy
+        // authoritative list could stamp rows GitHub still has.
+        if (typeof id !== "number") return { ok: false };
+        installationIds.push(id);
+      }
+      const next = nextInstallationsPage(res.headers.get("link"));
+      if (next.kind === "unusable") return { ok: false };
+      url = next.kind === "next" ? next.url : null;
+    }
+    return { ok: true, installationIds };
+  } catch {
+    // Total catch-all (the fetchAppMetadata rule): key/import/sign errors,
+    // network failure, abort timeout — one shape, caller writes nothing.
     return { ok: false };
   }
 }

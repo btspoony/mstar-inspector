@@ -30,6 +30,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  fetchAppInstallations,
   fetchAppMetadata,
   fetchAppVisibility,
   githubAppSlugFromHtmlUrl,
@@ -184,9 +185,11 @@ async function decodeAndVerifyJwt(
 
 const origFetch = globalThis.fetch;
 const origAbortTimeout = AbortSignal.timeout;
+const origNow = Date.now;
 afterEach(() => {
   globalThis.fetch = origFetch;
   AbortSignal.timeout = origAbortTimeout;
+  Date.now = origNow;
 });
 
 describe("fetchAppMetadata (AD-531)", () => {
@@ -533,5 +536,131 @@ describe("fetchAppVisibility (anonymous GET /apps/{slug})", () => {
       throw new TypeError("network down");
     });
     expect(await fetchAppVisibility("acme-inspector")).toBeNull();
+  });
+});
+
+describe("fetchAppInstallations (the reconcile face)", () => {
+  const INSTALLATIONS_URL = "https://api.github.com/app/installations?per_page=100";
+
+  test("one 200 page → its installation ids, one Bearer-authenticated GET with the 5s budget", async () => {
+    const { pem, publicKey } = await pkcs8Fixture();
+    const { calls } = stubFetch(() =>
+      jsonResponse([
+        { id: 500, account: { login: "octo-org" }, target_type: "Organization" },
+        { id: 501, account: { login: "octocat" }, target_type: "User" },
+      ]),
+    );
+
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: true, installationIds: [500, 501] });
+    expect(calls).toHaveLength(1); // zero retries
+    const call = calls[0]!;
+    expect(call.url).toBe(INSTALLATIONS_URL);
+    expect(call.init!.method).toBe("GET");
+    expect(call.init!.signal).toBeInstanceOf(AbortSignal);
+    const headers = new Headers(call.init!.headers);
+    expect(headers.get("accept")).toBe("application/vnd.github+json");
+    expect(headers.get("x-github-api-version")).toBe("2022-11-28");
+    expect(headers.get("user-agent")).toBe("mstar-inspector");
+    const auth = headers.get("authorization")!;
+    expect(auth.startsWith("Bearer ")).toBe(true);
+    const { valid } = await decodeAndVerifyJwt(auth.slice("Bearer ".length), publicKey);
+    expect(valid).toBe(true);
+  });
+
+  test("follows ONE Link rel=next page and merges both pages' ids", async () => {
+    const { pem } = await pkcs8Fixture();
+    const page2 = "https://api.github.com/app/installations?per_page=100&page=2";
+    const { calls } = stubFetch((url) => {
+      if (url === INSTALLATIONS_URL) {
+        return new Response(JSON.stringify([{ id: 1 }, { id: 2 }]), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            link: `<${page2}>; rel="next", <${page2}>; rel="last"`,
+          },
+        });
+      }
+      if (url === page2) return jsonResponse([{ id: 3 }]);
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: true, installationIds: [1, 2, 3] });
+    expect(calls.map((call) => call.url)).toEqual([INSTALLATIONS_URL, page2]);
+  });
+
+  test("a next link on another host makes the whole answer unusable — never a partial success", async () => {
+    const { pem } = await pkcs8Fixture();
+    // The rejected target may be hiding every later page, so the ids collected
+    // so far are a subset — and a subset must never reach the reconcile.
+    const { calls } = stubFetch(() =>
+      new Response(JSON.stringify([{ id: 7 }]), {
+        status: 200,
+        headers: { "content-type": "application/json", link: '<https://evil.example/steal>; rel="next"' },
+      }),
+    );
+
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+    expect(calls).toHaveLength(1); // the rejected target is never fetched
+  });
+
+  test("ten pages each still carrying a next link → {ok:false}: the cap is a hard stop, never a truncated list", async () => {
+    const { pem } = await pkcs8Fixture();
+    const { calls } = stubFetch((url) => {
+      const page = Number(new URL(url).searchParams.get("page") ?? "1");
+      const nextUrl = `${url.split("?")[0]}?per_page=100&page=${page + 1}`;
+      return new Response(JSON.stringify([{ id: page }]), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          link: `<${nextUrl}>; rel="next"`,
+        },
+      });
+    });
+
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+    expect(calls).toHaveLength(10); // no 11th request, and no ids escaped
+  });
+
+  test("one overall listing budget: a page past it is {ok:false}, never the ids collected so far", async () => {
+    const { pem } = await pkcs8Fixture();
+    const page2 = "https://api.github.com/app/installations?per_page=100&page=2";
+    // The clock is the budget: the first page burns all of it, so the second
+    // page has none left and the leg must fail rather than return page one.
+    let clock = Date.now();
+    Date.now = () => clock;
+    const { calls } = stubFetch(() => {
+      clock += 5_000;
+      return new Response(JSON.stringify([{ id: 1 }]), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          link: `<${page2}>; rel="next"`,
+        },
+      });
+    });
+
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+    expect(calls).toHaveLength(1); // the deadline stopped it, not the page cap
+  });
+
+  test("non-200, malformed payload and an abort all collapse to {ok:false} — never a throw", async () => {
+    const { pem } = await pkcs8Fixture();
+    const notOk = stubFetch(() => jsonResponse({ message: "Bad credentials" }, 401));
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+    expect(notOk.calls).toHaveLength(1);
+
+    stubFetch(() => jsonResponse({ id: 1 })); // an object, not the id array
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+
+    stubFetch(() => jsonResponse([{ account: { login: "octo-org" } }])); // no numeric id
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+
+    stubFetch(() => new Response("<html>gateway error</html>", { status: 200 }));
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
+
+    stubFetch(() => {
+      throw new DOMException("The operation was aborted.", "TimeoutError");
+    });
+    expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
   });
 });

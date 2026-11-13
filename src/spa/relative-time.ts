@@ -1,8 +1,11 @@
 /**
  * i18n relative time for the two UTC stamp formats the dashboard stores
  * write, bucketed identically:
- * - SQLite `YYYY-MM-DD HH:MM:SS` (datetime('now')) — review-store faces:
- *   AppsPage latest-delivery, SettingsPage webhook/seen/delivery/updated.
+ * - SQLite `YYYY-MM-DD HH:MM:SS[.SSS]` — review-store faces: AppsPage
+ *   latest-delivery, SettingsPage webhook/seen/delivery/updated. The suffix
+ *   is the sub-second form some writers use (`strftime('%Y-%m-%d %H:%M:%f',
+ *   'now')`, e.g. `app_installations.seen_at`); plain `datetime('now')`
+ *   stamps have none.
  * - ISO-8601 `YYYY-MM-DDTHH:MM:SS.sssZ` (Date#toISOString) — the users
  *   store's member `created_at`, rendered by MembersPage.
  */
@@ -11,7 +14,7 @@ import { t, type Locale } from "../i18n";
 export function formatRelativeTime(value: string | null, locale: Locale, nowMs = Date.now()): string {
   if (value === null) return t(locale, "common.time.never");
   const m =
-    /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(value) ??
+    /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.\d{3})?$/.exec(value) ??
     // users store stamps come from `toISOString()` — UTC, milliseconds, `Z`.
     /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.\d{3}Z$/.exec(value);
   if (!m) return t(locale, "common.time.unknown");
