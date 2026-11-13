@@ -9,10 +9,15 @@
  *   next `## [` — header line excluded (the release title carries the
  *   version), and the `- <date>` suffix must NOT leak into the body as a
  *   bullet (a quirk the sibling port fixes: the full header line is consumed);
- * - absent or empty sections fail loudly (exit-1 paths for the workflow).
+ * - absent or empty sections fail loudly (exit-1 paths for the workflow);
+ * - `--max-chars` bounds the body on an entry boundary, because GitHub refuses
+ *   a PR body over 65536 characters and a Release body over 125000 — a first
+ *   release carries every accumulated fragment and would otherwise break the
+ *   cut instead of publishing it.
  */
 import { describe, expect, test } from "bun:test";
 import {
+  clampSection,
   extractFromFile,
   extractSection,
   parseArgs,
@@ -115,5 +120,41 @@ describe("parseArgs", () => {
     expect(() => parseArgs(argv("1.0.0", "--lang", "fr"))).toThrow("Unknown --lang value: fr");
     expect(() => parseArgs(argv("--lang"))).toThrow("Unknown --lang value: <none>");
     expect(() => parseArgs(argv("--bogus"))).toThrow("Unknown argument: --bogus");
+  });
+});
+
+describe("clampSection (bounded bodies)", () => {
+  const body = ["### Added", "", "- one bullet", "- two bullet", "- three bullet", "- four bullet"].join("\n");
+
+  test("a body inside the cap is returned unchanged", () => {
+    expect(clampSection(body, body.length, "en")).toBe(body);
+  });
+
+  test("over the cap cuts on an entry boundary and counts the omitted entries", () => {
+    const bounded = clampSection(body, 40, "en");
+    // never splits a bullet: every retained line is a whole entry
+    expect(bounded.split("\n").filter((l) => l.startsWith("- "))).toEqual(["- one bullet", "- two bullet"]);
+    expect(bounded).toContain("2 more entries — the full list is in [CHANGELOG.md](CHANGELOG.md).");
+  });
+
+  test("cn bodies point at the Chinese changelog", () => {
+    expect(clampSection(body, 40, "cn")).toContain(
+      "另有 2 条，完整列表见 [CHANGELOG_CN.md](CHANGELOG_CN.md)。",
+    );
+  });
+});
+
+describe("parseArgs --max-chars", () => {
+  const argv = (...args: string[]) => ["bun", "script", ...args];
+
+  test("both forms parse to a positive integer", () => {
+    expect(parseArgs(argv("1.0.0", "--max-chars", "58000")).maxChars).toBe(58000);
+    expect(parseArgs(argv("1.0.0", "--max-chars=58000")).maxChars).toBe(58000);
+  });
+
+  test("a non-positive or non-integer value throws", () => {
+    expect(() => parseArgs(argv("--max-chars", "0"))).toThrow("Bad --max-chars value: 0");
+    expect(() => parseArgs(argv("--max-chars", "1.5"))).toThrow("Bad --max-chars value: 1.5");
+    expect(() => parseArgs(argv("--max-chars"))).toThrow("Bad --max-chars value: <none>");
   });
 });
