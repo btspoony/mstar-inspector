@@ -319,7 +319,8 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
 
 /**
  * Total deliveries a message gets before the queue DLQs it: wrangler.jsonc's
- * `queues.consumers[].max_retries` is 3, so 1 initial delivery + 3 retries.
+ * `queues.consumers[].max_retries` is 5, so 1 initial delivery + 5 retries —
+ * one per guard rung (`guardRetryDelaysSeconds`) plus the delivery that acks.
  * The FINAL delivery stamps its idempotency key `failed` (processMessage's
  * catch) because that commit was never reviewed.
  *
@@ -327,7 +328,7 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
  * `tests/pipeline/queue-config-contract.test.ts` reads wrangler.jsonc and
  * fails when the two numbers drift.
  */
-export const QUEUE_MAX_ATTEMPTS = 4;
+export const QUEUE_MAX_ATTEMPTS = 6;
 
 /**
  * Runner exec timeout for the job's review level (spec d5-budget L4 — the
@@ -786,25 +787,32 @@ export const ROUND_BUDGET_MS = 900_000;
 
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
- * — the first delivery is attempt 1). quick/default: 60s → 300s → 2100s; deep: 90s → 480s → 2100s.
+ * — the first delivery is attempt 1). quick/default: 60s → 300s → 300s → 900s →
+ * 900s; deep: 90s → 480s → 300s → 900s → 900s.
  *
- * The schedule must COVER the level's guard TTL, and its last entry must be
- * able to reclaim it: every entry stays BELOW the level's guard TTL
- * (2412s / 2652s) so no single delay outlives the lock, while the CUMULATIVE
- * sum (2460s / 2670s) EXCEEDS it — so by the final delayed attempt the
- * in-flight row has expired and the admission's expired-reclaim branch lets
- * this message take the lock instead of being dropped. Without that sum, a
- * legal review (600s+ runner) could hold the PR past the whole backoff and a
- * `synchronize` for a NEW commit would never be reviewed.
+ * The schedule must COVER the level's guard TTL, and no rung may outlive the
+ * lock it waits on: every entry stays BELOW the level's guard TTL
+ * (2412s / 2652s), while the CUMULATIVE sum (2460s / 2670s) EXCEEDS it — so by
+ * the final delayed attempt the in-flight row has expired and the admission's
+ * expired-reclaim branch lets this message take the lock instead of being
+ * dropped. Without that sum, a legal review (600s+ runner) could hold the PR
+ * past the whole backoff and a `synchronize` for a NEW commit would never be
+ * reviewed.
  *
- * Attempts past the schedule's end have consumed the queue's max_retries and
- * must be acked, not retried (a further retry() would land the job on the
- * DLQ).
+ * The rungs after the first two are deliberately SHORT (300-900s, never the
+ * 2100s tail this table used to end on): the live review releases the guard
+ * when it finishes, so an unlucky attempt pays one rung of waiting rather than
+ * half an hour — a staging delivery that arrived 6s before the release ate 35
+ * minutes on the old tail.
+ *
+ * Attempts past the schedule's end have consumed the queue's max_retries
+ * (`wrangler.jsonc`: one per rung, plus the terminal delivery) and must be
+ * acked, not retried (a further retry() would land the job on the DLQ).
  */
-const GUARD_RETRY_DELAYS_SECONDS: Record<ReviewLevel, readonly [number, number, number]> = {
-  quick: [60, 300, 2100],
-  default: [60, 300, 2100],
-  deep: [90, 480, 2100],
+const GUARD_RETRY_DELAYS_SECONDS: Record<ReviewLevel, readonly number[]> = {
+  quick: [60, 300, 300, 900, 900],
+  default: [60, 300, 300, 900, 900],
+  deep: [90, 480, 300, 900, 900],
 };
 
 /** Guard-held backoff schedule for the job's review level (spec d5-budget L4). */
@@ -983,7 +991,7 @@ async function markQueuedBehindInflightRow(
  *
  * `heldHeadSha` is the live row's sha: a `pr-held` drop is only benign while
  * that review covers THIS message's commit. The cumulative backoff
- * (2400s quick/default, 2610s deep) now EXCEEDS the level's guard TTL
+ * (2460s quick/default, 2670s deep) now EXCEEDS the level's guard TTL
  * (2412s / 2652s), so the final delayed attempt can reclaim the expired row
  * and review the new commit. A drop that still happens — a cap/storage
  * refusal, or a row that outlived the schedule — must leave a trace, so the
@@ -1093,7 +1101,7 @@ async function handleGuardHeld(
       ? ` — the in-flight review holds head_sha ${heldSha}, so this commit was never reviewed`
       : "";
   // §7.9: the TERMINAL refusal is the only guard outcome that settles this
-  // delivery's attached run. The retried refusals (60/300/2100 s) settle
+  // delivery's attached run. The retried refusals (the rungs above) settle
   // nothing — a duplicate delivery shares this attempt_key, and the live
   // review's row must never be closed `neutral` by another message's refusal.
   // This is the real drop: the run attached for this message will never
@@ -4449,8 +4457,8 @@ async function processMessage(
     // ONE conditional D1 insert is both the per-PR lock and the capacity
     // reservation, so a duplicate for this PR or a reached cap returns the
     // DISTINCT guard-held outcome — NOT a throw. The consumer schedules a
-    // per-message delayed retry (per level: 60/300/2040s quick/default,
-    // 90/480/2040s deep); after the final delayed attempt the job is acked
+    // per-message delayed retry (per level: 60/300/300/900/900s quick/default,
+    // 90/480/300/900/900s deep); after the final delayed attempt the job is acked
     // with a warning — guard-held is not an error state and never goes to the
     // DLQ. Admission precedes EVERY sandbox step, so a refused message costs
     // no container.

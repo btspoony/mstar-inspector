@@ -49,7 +49,11 @@
         // UNSET would let the platform auto-scale by backlog with no bound
         // at all (wrangler config schema), which is why this is explicit.
         "max_concurrency": 250,
-        "max_retries": 3,
+        // One retry per guard rung (src/pipeline/consumer.ts
+        // guardRetryDelaysSeconds: five rungs), plus the delivery that acks. A
+        // lower value would put the fifth rung's retry on the DLQ instead of
+        // letting the schedule finish, and the terminal ack is the clean drop.
+        "max_retries": 5,
         "dead_letter_queue": "review-dlq"
       }
     ]
@@ -207,7 +211,7 @@
             "queue": "review-queue-prod",
             "max_batch_size": 1,
             "max_concurrency": 250,
-            "max_retries": 3,
+            "max_retries": 5,
             "dead_letter_queue": "review-dlq-prod"
           }
         ]
