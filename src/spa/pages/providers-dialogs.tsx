@@ -331,7 +331,7 @@ export function AddKeyDialog({
         >
           {busy ? t(locale, "settings.providers.verifying") : t(locale, "settings.addKey")}
         </Button>
-        <SaveInFlight show={busy} locale={locale} />
+        <SaveInFlight show={busy} locale={locale} message={t(locale, "settings.providers.verifying")} />
       </form>
     </StepDialog>
   );
@@ -492,7 +492,6 @@ export function CustomProviderDialog({
         >
           {busy ? t(locale, "settings.providers.saving") : t(locale, "settings.addCustomProvider")}
         </Button>
-        <SaveInFlight show={busy} locale={locale} />
       </form>
     </StepDialog>
   );
@@ -670,7 +669,7 @@ export function ProviderConfigForm({
             ? t(locale, "settings.providers.verifying")
             : t(locale, "settings.addTemplate", { label: provider.label })}
         </Button>
-        <SaveInFlight show={busy} locale={locale} />
+        <SaveInFlight show={busy} locale={locale} message={t(locale, "settings.providers.verifying")} />
       </form>
     );
   }
@@ -724,7 +723,7 @@ export function ProviderConfigForm({
       <Button type="submit" disabled={busy} status={busy ? "loading" : undefined}>
         {busy ? t(locale, "settings.providers.verifying") : t(locale, "settings.addKey")}
       </Button>
-      <SaveInFlight show={busy} locale={locale} />
+      <SaveInFlight show={busy} locale={locale} message={t(locale, "settings.providers.verifying")} />
     </form>
   );
 }

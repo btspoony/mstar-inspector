@@ -89,16 +89,29 @@ export function LoadingNotice({ locale }: { locale: Locale }) {
 
 /**
  * The in-flight face of a status-driving save button. While the button shows
- * its spinner the glyph is aria-hidden and the accessible name is unchanged,
- * so without this region the write would be silent between submit and
- * outcome — the success and error faces keep their own announcements.
+ * its spinner the glyph is aria-hidden, so without this region the write
+ * would be silent between submit and outcome — the success and error faces
+ * keep their own announcements. The region narrates the action the button
+ * NAMES, never a fixed string: a caller whose button face says "Verify"
+ * passes that copy via `message`; a caller whose button swaps its own
+ * accessible name to the in-flight copy needs no region at all (that name
+ * change is the channel — mounting one would just repeat the same words).
  * Renders nothing in every other face.
  */
-export function SaveInFlight({ show, locale }: { show: boolean; locale: Locale }) {
+export function SaveInFlight({
+  show,
+  locale,
+  message,
+}: {
+  show: boolean;
+  locale: Locale;
+  /** Defaults to the generic Saving copy for buttons whose face says "Save". */
+  message?: string;
+}) {
   if (!show) return null;
   return (
     <span role="status" className="sr-only">
-      {t(locale, "common.saving")}
+      {message ?? t(locale, "common.saving")}
     </span>
   );
 }

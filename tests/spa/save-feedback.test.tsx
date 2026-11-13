@@ -26,6 +26,7 @@ import { Button } from "../../src/design-system/primitives/button";
 import { useSaveSignal } from "../../src/spa/components/save-signal";
 import { NoticeRegion, type OpNotice } from "../../src/spa/pages/PageNotice";
 import { RuntimePage } from "../../src/spa/admin/RuntimePage";
+import { AddKeyDialog } from "../../src/spa/pages/providers-dialogs";
 import { WorkspaceSettingsPage } from "../../src/spa/pages/WorkspaceSettingsPage";
 import type { SpaBoot } from "../../src/spa/boot";
 import { installDom } from "./dom";
@@ -805,6 +806,61 @@ describe("in-flight save announcement", () => {
       await act(async () => root.unmount());
     } finally {
       globalThis.fetch = realFetch;
+      jest.useRealTimers();
+      cleanup();
+    }
+  });
+
+  test("a provider verify flow announces the copy its button names (Verifying…), never the generic Saving copy", async () => {
+    jest.useFakeTimers();
+    const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps");
+    let resolveVerify: ((notice: OpNotice) => void) | null = null;
+    try {
+      const { root } = mount(win);
+      await act(async () =>
+        root.render(
+          createElement(AddKeyDialog, {
+            locale: "en",
+            open: true,
+            onOpenChange: () => {},
+            provider: "openai",
+            label: "OpenAI",
+            keyCount: 0,
+            onVerify: () =>
+              new Promise<OpNotice>((resolve) => {
+                resolveVerify = resolve;
+              }),
+            onOutcome: () => {},
+          }),
+        ),
+      );
+      const input = win.document.querySelector('input[type="password"]') as unknown as HTMLInputElement;
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(input, "sk-test");
+        input.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+      });
+      await act(async () => {
+        input
+          .closest("form")
+          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+      // In flight: the region repeats the action the button's face names —
+      // the verifying copy — and never the generic Saving copy. (The dialog
+      // renders through a portal, so the regions live on the document.)
+      const verifyingCopy = t("en", "settings.providers.verifying");
+      const doc = win.document as unknown as Element;
+      expect(savingRegions(doc, verifyingCopy)).toHaveLength(1);
+      expect(savingRegions(doc, t("en", "common.saving"))).toHaveLength(0);
+
+      // The outcome clears the region — no stale in-flight copy survives.
+      await act(async () => {
+        resolveVerify?.({ kind: "success", message: "added" });
+      });
+      expect(savingRegions(doc, verifyingCopy)).toHaveLength(0);
+
+      await act(async () => root.unmount());
+    } finally {
       jest.useRealTimers();
       cleanup();
     }
