@@ -134,10 +134,12 @@ jobs:
           NOTES_FILE="${RUNNER_TEMP}/release-notes-${VERSION}.md"
           # extract emits the trimmed body with no trailing newline, so the
           # separator needs \n\n to produce: EN, blank line, ---, blank line, CN.
+          # 58000 per language keeps EN + separator + CN under GitHub's 125000
+          # Release-body limit, with room for the evidence section appended later.
           {
-            bun run scripts/extract-changelog-section.ts "${VERSION}" --lang en
+            bun run scripts/extract-changelog-section.ts "${VERSION}" --lang en --max-chars 58000
             printf '\n\n---\n\n'
-            bun run scripts/extract-changelog-section.ts "${VERSION}" --lang cn
+            bun run scripts/extract-changelog-section.ts "${VERSION}" --lang cn --max-chars 58000
           } > "$NOTES_FILE"
           echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
 

@@ -119,7 +119,9 @@ jobs:
       - name: Extract release notes (EN)
         env:
           VERSION: ${{ steps.ver.outputs.version }}
-        run: bun run scripts/extract-changelog-section.ts "${VERSION}" > "${RUNNER_TEMP}/notes-en.md"
+        # 58000 keeps the assembled PR body under GitHub's 65536 limit; a first
+        # release carries every accumulated fragment and overflows unbounded.
+        run: bun run scripts/extract-changelog-section.ts "${VERSION}" --max-chars 58000 > "${RUNNER_TEMP}/notes-en.md"
 
       - name: Commit prepared release
         env:

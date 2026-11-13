@@ -71,6 +71,11 @@ their repo.
    `VERSION_SURFACES` list), validates (`release:validate`), typechecks and
    builds the SPA, pushes the `release/vX.Y.Z` branch, and opens (or updates
    the) `release vX.Y.Z` PR with the EN changelog section in its body.
+   Both bodies are bounded (`extract-changelog-section.ts --max-chars`): GitHub
+   rejects a PR body over 65536 characters and a Release body over 125000, and a
+   first release carries every accumulated fragment at once. A bounded body ends
+   on an entry boundary with a count of the omitted entries and a link to the
+   full `CHANGELOG.md` / `CHANGELOG_CN.md`.
 3. **Review the PR — this is the versioning review face.** The diff should
    contain exactly: the two changelog sections, the version bump, and the
    fragment moves into `.changes/archive/<X.Y.Z>/`. **A release PR has no
