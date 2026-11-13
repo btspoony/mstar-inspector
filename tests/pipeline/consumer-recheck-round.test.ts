@@ -2,7 +2,7 @@
  * Prior-findings recheck on an increment round: which rows are targeted, and
  * how their revalidated disposition is rendered once in the prepared body.
  */
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 
 import {
   SHA,
@@ -22,18 +22,15 @@ import {
   seedPriorPublication,
 } from "../helpers/consumer-fixtures";
 import { issueViewCommand } from "../../src/pipeline/gitops";
-import {
-  commenterCalls,
-  createReviewConsumer,
-  makeBatch,
-  makeEnv,
-  makePayload,
-  reset,
-  sandbox,
-  testLog,
-  testOverrides,
-} from "../helpers/consumer-harness";
+import { createConsumerHarness, loadConsumer, makePayload } from "../helpers/consumer-harness";
 import type { TestD1 } from "../store/helpers";
+
+const { createReviewConsumer } = await loadConsumer();
+
+let h = createConsumerHarness();
+beforeEach(() => {
+  h = createConsumerHarness();
+});
 
 const PREVIOUS_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -92,7 +89,7 @@ function seedReview(
 
 /** The written runner input JSON (the one `base64 -d >` write of the round). */
 function runnerInput(): Record<string, unknown> {
-  return JSON.parse(sandbox.writtenInputJson!) as Record<string, unknown>;
+  return JSON.parse(h.sandbox.writtenInputJson!) as Record<string, unknown>;
 }
 
 /**
@@ -101,22 +98,51 @@ function runnerInput(): Record<string, unknown> {
  * body assertion in this suite.
  */
 function preparedBody(): string {
-  const prepared = commenterCalls.filter((call) => call.op === "post-prepared");
+  const prepared = h.commenterCalls.filter((call) => call.op === "post-prepared");
   expect(prepared).toHaveLength(1);
   // The harness records `args` as `unknown`; this double is its only writer.
   const call = prepared[0]!.args as { body: string };
   return call.body;
 }
 
+/**
+ * The harness contract this suite is the reference consumer of: every recorder
+ * belongs to ONE instance. Covered set — the ack record and the commenter op
+ * log, i.e. the two recorders a second suite previously cleared under the
+ * shared singletons.
+ */
+describe("consumer harness isolation", () => {
+  test("a call recorded on one instance is invisible to another", async () => {
+    const first = createConsumerHarness();
+    const second = createConsumerHarness();
+
+    first.makeBatch(makePayload()).messages[0]!.ack();
+    await first.fakeCommenter.getInstallationToken({
+      scope: {
+        appId: TEST_APP_ID,
+        installationId: TEST_INSTALLATION_ID,
+        owner: TEST_OWNER,
+        repo: TEST_REPO,
+        prNumber: TEST_PR_NUMBER,
+      },
+      purpose: "sandbox-read",
+    });
+
+    expect(second.messageAckCalls).toHaveLength(0);
+    expect(second.commenterCalls).toHaveLength(0);
+    expect(first.messageAckCalls).toHaveLength(1);
+    expect(first.commenterCalls).toHaveLength(1);
+  });
+});
+
 describe("prior-findings recheck", () => {
   test("the recheck catalog is still built from the FULL diff on an increment round", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.compareStatus = "ahead";
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.compareStatus = "ahead";
     // The full diff proves the prior finding's file; the increment touches a
     // DIFFERENT file, so a catalog built from the increment would exclude it.
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.incrementDiffStdout = [
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.incrementDiffStdout = [
       "diff --git a/docs/readme.md b/docs/readme.md",
       "index 1111111..2222222 100644",
       "--- a/docs/readme.md",
@@ -131,23 +157,22 @@ describe("prior-findings recheck", () => {
     await seedPriorPublication(db);
     await seedOpenTarget(db);
     await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
     const input = runnerInput() as { recheck?: { targets: Array<{ rowId: string }> } };
     expect(input.recheck?.targets.map((t) => t.rowId)).toEqual([TARGET_ROW_ID]);
   });
 
   test("report sections and the revalidated table land in the prepared body", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.prBodyExitCode = 0;
-    sandbox.prBodyContent = "Closes #7\n\nAdds the expiry check.";
-    sandbox.issueBodies.set(7, { title: "Expiry guard", body: "- must reject expired tokens" });
-    sandbox.recheckFileContent = recheckDocWith({});
-    sandbox.reportFileContent = JSON.stringify({
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.prBodyExitCode = 0;
+    h.sandbox.prBodyContent = "Closes #7\n\nAdds the expiry check.";
+    h.sandbox.issueBodies.set(7, { title: "Expiry guard", body: "- must reject expired tokens" });
+    h.sandbox.recheckFileContent = recheckDocWith({});
+    h.sandbox.reportFileContent = JSON.stringify({
       schema: "mstar.report/v1",
       headSha: SHA,
       overview: "Adds an expiry guard to the auth path.",
@@ -162,13 +187,13 @@ describe("prior-findings recheck", () => {
     await seedPriorPublication(db);
     await seedOpenTarget(db);
     await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
     const body = preparedBody();
     // The linked issue was read (the issue number came from the PR body).
-    expect(sandbox.calls.some((c) => c.cmd === issueView(7))).toBe(true);
+    expect(h.sandbox.calls.some((c) => c.cmd === issueView(7))).toBe(true);
     expect(body).toContain("**What this PR does**: Adds an expiry guard to the auth path.");
     expect(body).toContain("<summary>Revalidated findings</summary>");
     // ONE prior-findings rendering: the §7.10 coverage line + the row land
