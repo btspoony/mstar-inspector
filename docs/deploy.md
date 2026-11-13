@@ -2273,10 +2273,15 @@ nullable for historical rows, AL-24-4).
 
 Upgrade step (the image no longer declares the `ark-plan` provider): an App
 whose model chain still reads `ark-plan/…` fails with "the ark-plan provider
-was removed — set the model chain to `ark/...`". Rewrite the default chain and
-every per-role selector through the settings face — the App's key already lives
-under `ark`, and its verified-model evidence (written under the old alias) is
-still read back under that id. No SQL is required.
+was removed — point the chain at a provider the runtime serves". Rewrite the
+default chain and every per-role selector through the settings face so each
+prefix names a provider the runtime can resolve: a built-in catalog provider
+(openai, anthropic, deepseek, …) with that provider's key configured on the App,
+or a custom provider declaration. The retired prefix has no runtime provider
+block, and its old `ark` id alone does not resolve either — `ark` is a built-in
+BYOK id but has no row in the runtime's own catalog. Verified-model evidence
+written under the alias still reads back under `ark`, so that App's settings
+list does not empty. No SQL is required.
 
 Deployed image record (DOCS-01 baseline):
 

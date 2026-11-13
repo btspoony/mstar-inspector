@@ -3293,10 +3293,10 @@ function assertAppConfigComplete(
       if (!availableProviders.has(provider)) {
         const where = role === null ? "" : `role override \`${role}\` `;
         // A retired alias is not a missing key: the image declares no provider
-        // anymore, so the chain must name the provider whose key it uses.
+        // anymore, so the chain must name a provider the runtime can serve.
         throw new Error(
           provider === "ark-plan"
-            ? `per-App config incomplete: app ${appId}: ${where}the ark-plan provider was removed — set the model chain to ark/... (the App's ark key)`
+            ? `per-App config incomplete: app ${appId}: ${where}the ark-plan provider was removed — point the chain at a provider the runtime serves (a built-in catalog provider with its key configured, or your own declaration)`
             : `per-App config incomplete: app ${appId}: ${where}provider ${provider} has no configured key`,
         );
       }

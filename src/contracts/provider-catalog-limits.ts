@@ -13,15 +13,13 @@
  */
 import { PROVIDER_CATALOG } from "./provider-catalog.generated";
 import { MODEL_LIMITS, type ModelLimit } from "./provider-model-limits.generated";
-
-/** Trailing-slash-insensitive base-URL comparison. */
-function normalizeBaseUrl(url: string): string {
-  return url.trim().replace(/\/+$/, "");
-}
+import { catalogBaseUrlMatches } from "./provider-model-limits";
 
 /**
  * The catalog's per-model sizes for one declaration, or undefined when the
- * declaration is not the catalog's own provider row.
+ * declaration is not the catalog's own provider row (see
+ * `catalogBaseUrlMatches`: placeholders match one segment, trailing slashes are
+ * insignificant).
  */
 export function catalogLimitsFor(
   providerId: string,
@@ -29,6 +27,6 @@ export function catalogLimitsFor(
 ): Readonly<Record<string, ModelLimit>> | undefined {
   const entry = PROVIDER_CATALOG[providerId];
   if (entry === undefined || entry.baseUrl === null) return undefined;
-  if (normalizeBaseUrl(entry.baseUrl) !== normalizeBaseUrl(baseUrl)) return undefined;
+  if (!catalogBaseUrlMatches(entry.baseUrl, baseUrl)) return undefined;
   return MODEL_LIMITS[providerId];
 }

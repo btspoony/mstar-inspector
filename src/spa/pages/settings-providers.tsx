@@ -11,6 +11,7 @@ import { NoticeRegion, type OpNotice } from "./PageNotice";
 import { AddKeyDialog, AddProviderDialog } from "./providers-dialogs";
 import { ProviderModelsDialog } from "./provider-models-dialog";
 import { providerGroups, type ProviderGroup } from "./providers-groups";
+import { catalogBaseUrlMatches } from "../../contracts/provider-model-limits";
 import type { PendingAction } from "./SettingsPage";
 import { UsagePanel } from "./usage-panel";
 
@@ -426,7 +427,14 @@ function ProviderGroupCard({
           storedModelIds={group.declaration.model_ids}
           storedModelsMeta={group.declaration.models_meta}
           catalogModelIds={catalog?.models ?? []}
-          catalogLimits={catalog?.model_limits ?? {}}
+          catalogLimits={
+            // The Worker only trusts the vendor table when the declaration's
+            // endpoint IS the catalog row's; the dialog must not pre-fill
+            // numbers a save would then refuse.
+            catalogBaseUrlMatches(catalog?.catalog_base_url, group.declaration.base_url)
+              ? (catalog?.model_limits ?? {})
+              : {}
+          }
           limitsSnapshot={limitsSnapshot}
           onSettings={onSettings}
           onOutcome={onOutcome}

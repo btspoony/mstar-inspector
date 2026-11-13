@@ -1412,7 +1412,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
 
     await expect(
       consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
-    ).rejects.toThrow(/the ark-plan provider was removed — set the model chain to ark\//);
+    ).rejects.toThrow(/the ark-plan provider was removed — point the chain at a provider the runtime serves/);
   });
 
   test("app with NO custom providers: input JSON + payload carry no custom-provider surface (byte-identical to a no-declaration run)", async () => {
