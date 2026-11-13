@@ -801,9 +801,9 @@ export const ROUND_BUDGET_MS = 900_000;
  *
  * The rungs after the first two are deliberately SHORT (300-900s, never the
  * 2100s tail this table used to end on): the live review releases the guard
- * when it finishes, so an unlucky attempt pays one rung of waiting rather than
- * half an hour — a staging delivery that arrived 6s before the release ate 35
- * minutes on the old tail.
+ * when it finishes, so an unlucky attempt waits at most one rung (900s) rather
+ * than half an hour — a staging delivery that arrived 6s before the release ate
+ * 35 minutes on the old tail, and the worst case is now 15.
  *
  * Attempts past the schedule's end have consumed the queue's max_retries
  * (`wrangler.jsonc`: one per rung, plus the terminal delivery) and must be

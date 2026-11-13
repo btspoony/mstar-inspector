@@ -1361,11 +1361,14 @@ export async function setCheckFallbackDesired(
  * reason `setCheckDesired` bounds it — a Check summary is public — and a later
  * terminalize overwrites both fields with its own conclusion.
  *
- * Fenced on the delivery's OWN attach identity (`attempt_key` +
- * `attach_delivery_id`, the §7.9 skip-settlement identity): a duplicate delivery
- * shares the attempt key and must never relabel the live review's run. The
- * UPDATE repeats every predicate, so a row that went terminal, was never
- * created, or whose intent another lane froze between the read and the write is
+ * Fenced on the delivery's OWN attach identity AND its ownership of the row: the
+ * `attempt_key` + `attach_delivery_id` pair names the delivery that CREATED this
+ * row, and the holder arm below proves nobody else is using it. A duplicate
+ * delivery shares the attempt key, and a second delivery may have ADOPTED this
+ * row and be running the review (adoption never clears the creator column) — in
+ * both cases the live review's run must not be relabelled. The UPDATE repeats
+ * every predicate, so a row that went terminal, was never created, changed
+ * hands, or whose intent another lane froze between the read and the write is
  * left alone.
  *
  * Returns the attached run id — the caller then sends exactly one
@@ -1398,17 +1401,27 @@ export async function markCheckQueuedBehindInflight(
   });
   // The relabelable row: still running, attached, wanting in_progress and not
   // suspended. Identical in both statements — the SELECT only learns the run id.
+  //
+  // The HOLDER arm is what keeps this honest: `attach_delivery_id` names the
+  // delivery that CREATED the row, not the one now using it. A second delivery
+  // for the same head can ADOPT this row (`adoptReleasedCheckAttempt` does not
+  // clear the creator column) and start the review — then the creator's next
+  // `pr-held` retry would relabel a run it does not own as "Queued". Only a
+  // RELEASED row, or one still under this delivery's OWN attach holder, may be
+  // relabelled; a `consumer:*` holder and `delivery:<other>` are refused by the
+  // same predicate, exactly as `claimAttachedCheckForSettlement` refuses them.
   const relabelable = `terminal_ms IS NULL
           AND create_state = 'known' AND check_run_id IS NOT NULL
           AND desired = 'in_progress'
-          AND recovery_state IN ('pending','remote-unconfirmed')`;
+          AND recovery_state IN ('pending','remote-unconfirmed')
+          AND (holder IS NULL OR holder = 'delivery:' || ?)`;
   const candidate = await db
     .prepare(
       `SELECT check_run_id FROM review_checks
          WHERE attempt_key = ? AND attach_delivery_id = ? AND ${relabelable}
          ORDER BY generation DESC LIMIT 1`,
     )
-    .bind(key, input.attachDeliveryId)
+    .bind(key, input.attachDeliveryId, input.attachDeliveryId)
     .first<{ check_run_id: number }>();
   if (candidate === null) return null;
   const relabeled = await db
@@ -1421,6 +1434,7 @@ export async function markCheckQueuedBehindInflight(
       boundText(input.summary, CHECK_SUMMARY_MAX_CHARS),
       input.nowMs,
       key,
+      input.attachDeliveryId,
       input.attachDeliveryId,
     )
     .run();

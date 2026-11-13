@@ -37,6 +37,7 @@ import {
   stagePublication,
 } from "../../src/store/finding-lifecycle";
 import {
+  adoptReleasedCheckAttempt,
   attemptKey,
   attachCheckRunId,
   CHECK_ATTACH_GRACE_MS,
@@ -1293,6 +1294,63 @@ describe("markCheckQueuedBehindInflight (spec §7.9 held-Check text)", () => {
 
     expect(await queuedAs(db, "mine")).toBeNull();
     expect(await queuedAs(db, undefined)).toBeNull();
+    expect((await rawRow(db, id)).desired_summary).toBeNull();
+  });
+
+  test("a row another lane is USING is never relabelled — the creator column is history, not ownership", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:mine",
+      attachDeliveryId: "mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
+    // A second delivery for the SAME head adopted the released row and is
+    // running the review — adoption never clears the creator column, so the
+    // creator alone would still match.
+    expect(
+      await adoptReleasedCheckAttempt(db, {
+        attemptId: id,
+        githubAppId: APP_NUMERIC_ID,
+        holder: "consumer:other",
+        executionDeadlineMs: T0 + CHECK_LEASE_MS,
+        nowMs: T0 + 1,
+      }),
+    ).not.toBeNull();
+
+    expect(await queuedAs(db, "mine")).toBeNull();
+    const row = await rawRow(db, id);
+    expect(row.desired_title).toBeNull();
+    expect(row.desired_summary).toBeNull();
+    // The live holder's lease and intent are untouched.
+    expect(row.holder).toBe("consumer:other");
+    expect(row.desired).toBe("in_progress");
+  });
+
+  test("a row an adopting delivery lane holds is refused the same way", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:mine",
+      attachDeliveryId: "mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
+    // Another delivery's attach lane took the row (holder = delivery:<other>).
+    expect(
+      await adoptReleasedCheckAttempt(db, {
+        attemptId: id,
+        githubAppId: APP_NUMERIC_ID,
+        holder: "delivery:other",
+        executionDeadlineMs: T0 + CHECK_LEASE_MS,
+        nowMs: T0 + 1,
+      }),
+    ).not.toBeNull();
+
+    expect(await queuedAs(db, "mine")).toBeNull();
     expect((await rawRow(db, id)).desired_summary).toBeNull();
   });
 
