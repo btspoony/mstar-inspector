@@ -2943,6 +2943,102 @@ describe("createReviewConsumer", () => {
     expect(sandbox.calls).toHaveLength(0);
   });
 
+  test("a pr-held refusal relabels the attached Check as queued, naming the holder's head", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const heldHeadSha = "abcdef0123456789abcdef0123456789abcdef01";
+    await seedInflight(db, { headSha: heldHeadSha });
+    const queued: Array<{ summary: string; headSha: string; attachDeliveryId?: string }> = [];
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        markQueuedBehindInflight: async (input) => {
+          queued.push({ summary: input.summary, headSha: input.headSha, attachDeliveryId: input.attachDeliveryId });
+          return true;
+        },
+      },
+    });
+
+    await consumer(makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
+
+    // The run stays wherever it is; only its text says why nothing started, and
+    // it names the review holding the slot instead of the commit waiting.
+    expect(queued).toHaveLength(1);
+    expect(queued[0]!.summary).toContain("Queued");
+    expect(queued[0]!.summary).toContain(`head ${heldHeadSha.slice(0, 7)}`);
+    // The row lookup follows the PAYLOAD's commit — the one this delivery
+    // attached — and this delivery's own attach identity.
+    expect(queued[0]!.headSha).toBe(SHA);
+    expect(queued[0]!.attachDeliveryId).toBe("delivery-1");
+    // The relabel never changes the guard outcome: the delayed retry still runs.
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(messageAckCalls).toHaveLength(0);
+  });
+
+  test("the TERMINAL refusal settles the run and does not relabel it as queued", async () => {
+    reset();
+    queueState.attempts = guardRetryDelaysSeconds("default").length + 1;
+    const db = await createSeededTestD1();
+    // A DIFFERENT commit holds the PR: this delivery is a real drop, not the
+    // benign same-sha duplicate that returns before any settlement.
+    await seedInflight(db, { headSha: "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef" });
+    const queued: unknown[] = [];
+    const settled: unknown[] = [];
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        settleSkipped: async (input) => {
+          settled.push(input);
+          return true;
+        },
+        markQueuedBehindInflight: async (input) => {
+          queued.push(input);
+          return true;
+        },
+      },
+    });
+
+    await consumer(makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
+
+    // Past the schedule the delivery is dropped: "queued" would be a lie, so the
+    // terminal branch keeps its own settlement and never relabels.
+    expect(messageAckCalls).toHaveLength(1);
+    expect(queued).toHaveLength(0);
+    expect(settled).toHaveLength(1);
+    expect((settled[0] as { reason: string }).reason).toContain("pr-held");
+  });
+
+  test("a cap refusal has no live review to name, so the Check is not relabelled", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    // The WORKSPACE cap holds this message while the PR itself is free: no live
+    // review exists, so "queued behind the review in flight" would send an
+    // operator looking for a review that was never started.
+    db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
+    await seedInflight(db, { pr_number: 7 });
+    const queued: unknown[] = [];
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        markQueuedBehindInflight: async (input) => {
+          queued.push(input);
+          return true;
+        },
+      },
+    });
+
+    await consumer(makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
+
+    expect(queued).toHaveLength(0);
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+  });
+
   test("guard still held after the 3 delayed retries → ack with a warning, no DLQ (BB-3)", async () => {
     reset();
     queueState.attempts = 4; // final delivery before the queue would DLQ
@@ -5946,7 +6042,7 @@ function scriptedChecks(): ChecksOctokit {
           if (respond !== undefined) return { data: await respond(params) };
           const run = checkRuns.get(params.check_run_id);
           if (run === undefined) throw Object.assign(new Error(`no scripted run ${params.check_run_id}`), { status: 404 });
-          const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
+          const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion ?? null };
           checkRuns.set(params.check_run_id, completed);
           return { data: completed };
         },
@@ -7172,7 +7268,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             },
             async update(params) {
               const run = checkRuns.get(params.check_run_id)!;
-              const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
+              const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion ?? null };
               checkRuns.set(params.check_run_id, completed);
               return { data: completed };
             },
@@ -7381,7 +7477,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             },
             async update(params) {
               const run = checkRuns.get(params.check_run_id)!;
-              const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
+              const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion ?? null };
               checkRuns.set(params.check_run_id, completed);
               return { data: completed };
             },
@@ -7769,7 +7865,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         return Promise.withResolvers<CheckRunPayload>().promise;
       }
       const run = checkRuns.get(params.check_run_id)!;
-      const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
+      const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion ?? null };
       checkRuns.set(params.check_run_id, completed);
       return completed;
     };

@@ -441,7 +441,7 @@ export type ConsumerLogFields = {
    * hand-off has no event of its own; its only line is the info above it
    * ("publication journal hit"), printed before the link.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -923,6 +923,52 @@ async function settleSkippedRow(
 }
 
 /**
+ * §7.10 held-Check visibility: a delivery the in-flight guard refused still owns
+ * the Check its attach created, and that run would otherwise read
+ * `in_progress` for the whole backoff with nothing saying why (measured on
+ * staging 2026-11-13: 41 of one run's 49 minutes were queue time). Relabel it
+ * with the HOLDER's head, so the PR page names the review this commit waits for.
+ *
+ * Best-effort by contract, exactly like the skip settlement: one warn on a
+ * fault, and the delayed retry the caller is about to schedule never changes.
+ * The row lookup keys on the PAYLOAD's head sha — the commit this delivery
+ * attached with — never the holder's: the holder's commit belongs to another
+ * attempt and another delivery.
+ */
+async function markQueuedBehindInflightRow(
+  deps: ProcessDeps,
+  payload: ReviewJobPayload,
+  heldHeadSha: string | null | undefined,
+): Promise<void> {
+  if (deps.checks?.markQueuedBehindInflight === undefined) return;
+  const attachedHeadSha = payload.head_sha;
+  if (attachedHeadSha === null || attachedHeadSha === undefined || attachedHeadSha === "") return;
+  if (heldHeadSha === null || heldHeadSha === undefined || heldHeadSha === "") return;
+  try {
+    await deps.checks.markQueuedBehindInflight({
+      scope: {
+        appId: payload.appRef.appId,
+        installationId: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+      },
+      headSha: attachedHeadSha,
+      triggeredBy: payload.triggered_by,
+      action: payload.action,
+      attachDeliveryId: payload.attachDeliveryId,
+      summary: `Queued — the review in flight for this pull request (head ${heldHeadSha.slice(0, 7)}) holds the slot; this commit starts when it finishes.`,
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(
+      { ...payloadIdentityFields(payload), event: "check_queued_relabel_failed" },
+      `held check relabel failed (the run stays as it was; the retry is unaffected): ${detail}`,
+    );
+  }
+}
+
+/**
  * Handle a guard-held message (bugbot BB-3). The guard is not an error
  * state: instead of throwing (which burns the queue's three immediate
  * retries and DLQs the job — including later synchronize events for the same
@@ -969,6 +1015,13 @@ async function handleGuardHeld(
   const delays = guardRetryDelaysSeconds(level);
   const delaySeconds = delays[message.attempts - 1];
   if (delaySeconds !== undefined) {
+    // Say WHY nothing has started: the attach already put a run on this commit,
+    // so a refused delivery would otherwise leave it reading `in_progress` for
+    // the whole backoff. Only a `pr-held` refusal names a live review to wait
+    // for — a cap/storage refusal has no holder and must not claim one.
+    if (admission.reason === "pr-held") {
+      await markQueuedBehindInflightRow(deps, message.body, heldHeadSha);
+    }
     deps.log.info(
       fields,
       `${what} — scheduling delayed retry in ${delaySeconds}s (attempt ${message.attempts}; ${heldBecause})`,
@@ -1149,6 +1202,22 @@ export type CheckLifecycleHooks = {
     attachDeliveryId?: string;
     reason: string;
     updateBudgetMs?: number;
+  }): Promise<boolean>;
+  /**
+   * §7.10 held-Check visibility (optional, additive): the in-flight guard
+   * refused this delivery while its Check was already attached, so the run is
+   * relabelled "queued behind the live review" — it keeps running and only its
+   * text moves, because a Check that reads `in_progress` for the whole backoff
+   * with no reason reads as a stuck review. Best-effort: `false` means there was
+   * nothing to label, a fault rejects, and neither changes the retry outcome.
+   */
+  markQueuedBehindInflight?(input: {
+    scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    attachDeliveryId?: string;
+    summary: string;
   }): Promise<boolean>;
 };
 

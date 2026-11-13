@@ -2482,7 +2482,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
         head_sha: SHA,
         external_id: externalId,
         status: "completed",
-        conclusion: params.conclusion,
+        conclusion: params.conclusion ?? null,
         app: { id: GITHUB_APP_ID },
       }),
     });
@@ -2809,7 +2809,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
         head_sha: SHA,
         external_id: externalId,
         status: "completed",
-        conclusion: params.conclusion,
+        conclusion: params.conclusion ?? null,
         app: { id: GITHUB_APP_ID },
       }),
     });
@@ -2909,7 +2909,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
         head_sha: SHA,
         external_id: externalByRun.get(params.check_run_id) ?? "",
         status: "completed",
-        conclusion: params.conclusion,
+        conclusion: params.conclusion ?? null,
         app: { id: GITHUB_APP_ID },
       }),
     });

@@ -79,6 +79,7 @@ import {
   type Scope,
   getCheckAttempt,
   getCheckOwnership,
+  markCheckQueuedBehindInflight,
   recordTerminalizeOutcome,
 } from "../store/review-checks";
 import { redactSecrets } from "./redact";
@@ -112,8 +113,14 @@ export type ChecksUpdateParams = {
   owner: string;
   repo: string;
   check_run_id: number;
-  status: "completed";
-  conclusion: CheckConclusion["desired"];
+  /**
+   * The TERMINAL half of the pair. Optional because PATCH /check-runs accepts a
+   * partial body, which is exactly how a non-terminal relabel
+   * (`markQueuedBehindInflight`) sends text without moving the run; a terminal
+   * update always supplies both.
+   */
+  status?: "completed";
+  conclusion?: CheckConclusion["desired"];
   /**
    * GitHub's only carrier for the human-facing text. A top-level
    * `title`/`summary` pair is not part of `PATCH /check-runs/{id}` — the API
@@ -270,6 +277,18 @@ export type ChecksAdapter = {
     | { kind: "completed"; remote: CheckRemote }
     | { kind: "unavailable"; reason: string; requests: number }
   >;
+  /**
+   * Relabel an owned run WITHOUT moving it: the text says this delivery is
+   * QUEUED behind the PR's live review (the in-flight guard held it). No status,
+   * no conclusion — a run that reported one could not be reopened. Resolves
+   * false when the App has no Checks surface; a send fault rejects, so the
+   * caller logs one warn and its retry outcome is unaffected.
+   */
+  markQueuedBehindInflight?(input: {
+    scope: Scope;
+    checkRunId: number;
+    summary: string;
+  }): Promise<boolean>;
   /** Read-only GET + identity proof: the recovery lane's confirmation path (§7.11.2 step 3). */
   fetchCheckRun(input: {
     identity: CheckIdentity;
@@ -378,6 +397,7 @@ export function createChecksAdapter(deps: ChecksDeps): ChecksAdapter {
     beginCheck: (input) => beginCheckWith(deps, input),
     adoptCheckRun: (input) => adoptCheckRunWith(deps, input),
     completeCheck: (input) => completeCheckWith(deps, input),
+    markQueuedBehindInflight: (input) => markQueuedBehindInflightWith(deps, input),
     fetchCheckRun: (input) => fetchCheckRunWith(deps, input),
   };
 }
@@ -643,6 +663,30 @@ async function completeCheckWith(
     return { kind: "unavailable", requests: attempted.sent, reason: "check update response is not the intended terminal state" };
   }
   return { kind: "completed", remote };
+}
+
+/**
+ * The one NON-TERMINAL send of the §7.9 surface: say the delivery is queued
+ * behind the PR's live review. The run id comes from the fenced store write that
+ * already proved this delivery's own attach row, so the send addresses a run
+ * this delivery created; the PATCH carries the output pair only, which leaves
+ * status and conclusion untouched.
+ */
+async function markQueuedBehindInflightWith(
+  deps: ChecksDeps,
+  input: { scope: Scope; checkRunId: number; summary: string },
+): Promise<boolean> {
+  const resolvedClient = await clientFor(deps, input.scope);
+  if ("reason" in resolvedClient) return false;
+  const client = resolvedClient.client;
+  if (!hasChecksMethod(client, "update")) return false;
+  await client.rest.checks.update({
+    owner: input.scope.owner,
+    repo: input.scope.repo,
+    check_run_id: input.checkRunId,
+    output: { title: CHECK_NAME, summary: input.summary },
+  });
+  return true;
 }
 
 /**
@@ -1301,6 +1345,28 @@ export type CheckLifecycle = {
     updateBudgetMs?: number;
   }): Promise<boolean>;
   /**
+   * §7.10 held-Check visibility: the in-flight guard refused a message whose
+   * Check was already attached, so the run must SAY it is queued behind the PR's
+   * live review — otherwise the public surface reads `in_progress` for the whole
+   * backoff with nothing explaining it. Writes the frozen text only (never the
+   * status, never the intent) on THIS delivery's own attach row.
+   *
+   * Resolves true only when the relabel was sent; false means there was nothing
+   * to label (no own attach row, no remote run) or no Checks surface to send
+   * with. A store/transport fault rejects, and the caller logs it as one warn —
+   * the retry it is about to schedule is never affected.
+   */
+  markQueuedBehindInflight(input: {
+    scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    /** THIS delivery's attach identity — absent means it created no row. */
+    attachDeliveryId?: string;
+    /** The queue reason the Check summary carries. */
+    summary: string;
+  }): Promise<boolean>;
+  /**
    * The consumer gave up on `terminalize` (its bounded wait elapsed, or the
    * hook threw): hand the attempt to recovery NOW with `remote-unconfirmed`,
    * so the minute Check reconciler closes the run instead of waiting out the
@@ -1818,6 +1884,27 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       }
       const observedFence = fenceFor(claimed.lease);
       return recordCheckObservation(deps.db, identity.attemptId, observedFence.lease, completed.remote, observedFence.nowMs);
+    },
+
+    async markQueuedBehindInflight(input) {
+      const nowMs = deps.nowMs();
+      const checkRunId = await markCheckQueuedBehindInflight(deps.db, {
+        scope: input.scope,
+        headSha: input.headSha,
+        triggeredBy: input.triggeredBy,
+        action: input.action,
+        attachDeliveryId: input.attachDeliveryId,
+        title: CHECK_NAME,
+        summary: input.summary,
+        nowMs,
+      });
+      // No own attach row (another delivery owns the key), a row that is no
+      // longer running, or no remote run: nothing to label.
+      if (checkRunId === null) return false;
+      const adapter = deps.getAdapter(input.scope);
+      if (adapter === null) return false;
+      const sent = await adapter.markQueuedBehindInflight?.({ scope: input.scope, checkRunId, summary: input.summary });
+      return sent ?? false;
     },
 
     async terminalize(input) {
