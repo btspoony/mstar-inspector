@@ -431,42 +431,71 @@ describe("workspace name card end to end", () => {
 });
 
 describe("stale error replacement", () => {
-  test("a failed save followed by a successful retry clears the stale error and touches no other cluster", async () => {
+  test("a failed save followed by a successful retry clears the stale error and leaves a sibling cluster's notice untouched", async () => {
     jest.useFakeTimers();
     const { win, cleanup } = installDom("http://localhost/dashboard/ws_acme/settings");
-    let refuse = true;
-    const realFetch = stubWorkspaceSettingsFetch(() =>
-      refuse
-        ? new Response(JSON.stringify({ message: "name taken" }), {
-            status: 409,
+    let refuseName = true;
+    const realFetch = stubWorkspaceSettingsFetch((body) =>
+      body.includes("min_score")
+        ? new Response(JSON.stringify({ message: "floor too high" }), {
+            status: 400,
             headers: { "Content-Type": "application/json" },
           })
-        : new Response(JSON.stringify({ name: "Acme Labs" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
+        : refuseName
+          ? new Response(JSON.stringify({ message: "name taken" }), {
+              status: 409,
+              headers: { "Content-Type": "application/json" },
+            })
+          : new Response(JSON.stringify({ name: "Acme Labs" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
     );
     try {
       const { container, root } = mount(win);
       await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
 
-      await submitName(win, container as unknown as Element, "Taken Name");
-      // The failure is the persistent face: alert notice + button error.
-      expect(container.textContent).toContain("name taken");
-      const button = container.querySelector("form button[type=\"submit\"]") as unknown as HTMLButtonElement;
-      expect(button.getAttribute("data-status")).toBe("error");
+      // 1. The SIBLING cluster (the review-gate floor card) fails FIRST,
+      //    through its own form — a real UI path, so its persistent error
+      //    notice exists on the page before the name card ever submits.
+      const floor = win.document.querySelector(
+        "#workspace-check-min-score",
+      ) as unknown as HTMLInputElement;
+      const setFloor = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setFloor?.call(floor, "45");
+        floor.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+      });
+      await act(async () => {
+        floor
+          .closest("form")
+          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+      expect(container.textContent).toContain("floor too high");
 
-      // The retry lands: the stale error of THIS cluster is gone, the check
-      // is on the button, and the success copy is the assistive text.
-      refuse = false;
+      // 2. The name card fails too: two persistent alert boxes coexist.
+      await submitName(win, container as unknown as Element, "Taken Name");
+      expect(container.textContent).toContain("name taken");
+      expect(container.querySelectorAll("p[role=\"alert\"]")).toHaveLength(2);
+
+      // 3. The name card's retry lands: its OWN stale error is replaced by
+      //    the check plus the success copy as assistive text.
+      refuseName = false;
       await submitName(win, container as unknown as Element, "Acme Labs");
       expect(container.textContent).not.toContain("name taken");
       expect(container.textContent).toContain(t("en", "workspace.nameSaved"));
       const retried = container.querySelector("form button[type=\"submit\"]") as unknown as HTMLButtonElement;
       expect(retried.getAttribute("data-status")).toBe("success");
-      // The sibling clusters never errored and the retry cleared none of
-      // their regions — no alert box remains anywhere on the page.
-      expect(container.querySelector("p[role=\"alert\"]")).toBeNull();
+
+      // 4. Isolation measured, not annotated: the sibling's notice survives
+      //    the name card's retry. Each workspace card owns its notice state
+      //    and there is no shared region a widened clear could hide in — a
+      //    clear that reached the sibling would remove this very node.
+      const alerts = [...container.querySelectorAll("p[role=\"alert\"]")].map(
+        (node) => node.textContent ?? "",
+      );
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toContain("floor too high");
 
       await act(async () => root.unmount());
     } finally {
