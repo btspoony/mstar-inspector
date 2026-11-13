@@ -183,6 +183,35 @@ function expectSameSet(kind: string, values: (block: Json) => string[]): void {
   ).toEqual(new Set(values(staging)));
 }
 
+/**
+ * Cloudflare route patterns are literal text with `*` standing for any
+ * character run — not a segment glob. The `/` before a `*` is part of the
+ * literal, so `host/x/*` never matches `host/x` itself. Match the way the edge
+ * does: a pattern that only looks like it covers a path must fail here.
+ */
+function routePatternMatches(pattern: string, hostAndPath: string): boolean {
+  const literal = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${literal}$`).test(hostAndPath);
+}
+
+/**
+ * URLs this Worker answers on its own: what the shell links to (the operator
+ * entry carries no trailing slash), where the login redirect and the OAuth
+ * round-trip land, and the prefixes the bundle and the webhook face own. Each
+ * must be matched by a production route — an unmatched one is served by the
+ * marketing Worker instead, with no error on this side.
+ */
+const WORKER_ENTRY_PATHS = [
+  "/dashboard",
+  "/dashboard/login",
+  "/dashboard/oauth/callback",
+  "/_internal_admin",
+  "/_internal_admin/api/runtime",
+  "/healthz",
+  "/app-assets/main-abc.js",
+  "/webhook/ws-id/app-id",
+] as const;
+
 describe("wrangler env.production parity (PR #63 should-fix)", () => {
   test("env.production exists and every restatable top-level resource key is restated", () => {
     expect(Object.keys(production).length, `wrangler.jsonc: env.production is missing`).toBeGreaterThan(0);
@@ -307,7 +336,7 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
   /** The prod-only resources `wrangler deploy --env production` resolves to.
    * Pinned here (once) so a copy-paste staging value fails loudly; the smoke
    * workflow's own literal grep is a different artifact. */
-  test("env.production resolves to the prod-only resources and route", () => {
+  test("env.production resolves to the prod-only resources and routes", () => {
     const d1 = asArray(production.d1_databases)[0] ?? {};
     expect(d1.database_name, `wrangler.jsonc: prod D1 database name`).toBe(
       "mstar-inspector-prod-db",
@@ -330,22 +359,28 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
 
     const routes = asArray(production.routes);
     expect(
-      routes.map((entry) => String(entry.pattern)),
-      `wrangler.jsonc: prod route patterns`,
-    ).toEqual([
-      "inspector.mstar.page/dashboard*",
-      "inspector.mstar.page/_internal_admin/*",
-      "inspector.mstar.page/webhook/*",
-      "inspector.mstar.page/healthz",
-      "inspector.mstar.page/app-assets/*",
-    ]);
+      routes.filter((entry) => entry.zone_name !== "mstar.page" || "custom_domain" in entry),
+      `wrangler.jsonc: prod routes are Workers Routes on the mstar.page zone — a Custom Domain ` +
+        `would claim the whole hostname the marketing Worker needs`,
+    ).toEqual([]);
+  });
+
+  /**
+   * The durable half of the routing contract: whichever patterns the config
+   * carries, every URL this Worker emits must match one. A frozen pattern list
+   * only proves the config was copied, and it happily freezes the very gap it
+   * should catch — `/x/*` does not match `/x`, so a bare console path fell to
+   * the marketing Worker while the list stayed green.
+   */
+  test("every entry URL this Worker serves is matched by a production route", () => {
+    const patterns = asArray(production.routes).map((entry) => String(entry.pattern));
+    expect(patterns.length, `wrangler.jsonc: prod declares no routes`).toBeGreaterThan(0);
     expect(
-      routes.map((entry) => String(entry.zone_name)),
-      `wrangler.jsonc: prod routes ride the mstar.page zone as Workers Routes`,
-    ).toEqual(routes.map(() => "mstar.page"));
-    expect(
-      routes.filter((entry) => "custom_domain" in entry),
-      `wrangler.jsonc: a Custom Domain would claim the whole hostname the marketing Worker needs`,
+      WORKER_ENTRY_PATHS.filter(
+        (path) =>
+          !patterns.some((pattern) => routePatternMatches(pattern, `inspector.mstar.page${path}`)),
+      ),
+      `wrangler.jsonc: these entry URLs match no production route, so the marketing Worker answers them`,
     ).toEqual([]);
   });
 

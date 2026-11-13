@@ -296,7 +296,10 @@
           "zone_name": "mstar.page"
         },
         {
-          "pattern": "inspector.mstar.page/_internal_admin/*",
+          // No `/` before the `*`: the console document is served at the bare
+          // `/_internal_admin` (the shell's operator link has no trailing
+          // slash), and a `/x/*` pattern never matches `/x`.
+          "pattern": "inspector.mstar.page/_internal_admin*",
           "zone_name": "mstar.page"
         },
         {

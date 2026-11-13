@@ -25,7 +25,7 @@ source: design language v2
 
 ## Guidance
 
-- **资产管线**：vite `publicDir: false` → 字体必须走**模块图**：woff2 落 `src/spa/assets/fonts/`，`src/spa/styles/fonts.css` 写 `@font-face`，`url()` 由 vite 处理成 hashed `dist/spa/assets/*.woff2`（wrangler `directory: dist/spa` 伺服）。**不要**试图用 `public/`。
+- **资产管线**：vite `publicDir: false` → 字体必须走**模块图**：woff2 落 `src/spa/assets/fonts/`，`src/spa/styles/fonts.css` 写 `@font-face`，`url()` 由 vite 处理成 hashed `dist/spa/app-assets/*.woff2`（wrangler `directory: dist/spa` 伺服）。**不要**试图用 `public/`。
 - **字重经济**：只 vendored 声明过的字重（400/500/600）；700 被显式排除（+46KB 会破预算且无消费者）。
 - **zh 排除**：`@font-face` 的 `unicode-range` 只覆盖 latin/latin-ext 区段（U+0000-024F 等）——纯中文页面**一个字体字节都不下载**；测试按解码后的 range 区间逐码点探针（U+3000/U+4E00/U+FF0C 必须不在覆盖内）。
 - **`font-display: swap`** 三个 face 全量；SSR 面（views.ts）只带 font-family 栈不带 @font-face（无 chrome 的 auth 面，系统栈回退是 documented 意图）。
