@@ -154,7 +154,7 @@
     }
   },
   // Vite SPA assets. run_worker_first keeps the Worker as the
-  // routing face (SPA_PAGES GET+HTML → index.html; /assets/ files;
+  // routing face (SPA_PAGES GET+HTML → index.html; /app-assets/ files;
   // everything else → legacy Hono). Do NOT set not_found_handling to
   // single-page-application — that would swallow legacy 404s.
   "assets": {
@@ -283,13 +283,33 @@
         "binding": "ASSETS",
         "run_worker_first": true
       },
-      // Custom Domain: the prod Worker owns the apex of its own hostname, so
-      // no `zone_name`/`workers_dev` juggling is needed. The zone must live in
-      // the deploy account.
+      // Workers Routes, not a Custom Domain: the marketing Worker owns
+      // `inspector.mstar.page/*` (the landing page), and a Custom Domain would
+      // claim that whole hostname so the second Worker could not exist. These
+      // five patterns are every path this Worker answers; Cloudflare resolves
+      // the longest match, so each one wins over the marketing route. The
+      // `mstar.page` zone must be active here, and a proxied DNS record for
+      // `inspector.mstar.page` must exist — `zone_name` routes never create one.
       "routes": [
         {
-          "pattern": "inspector.mstar.page",
-          "custom_domain": true
+          "pattern": "inspector.mstar.page/dashboard*",
+          "zone_name": "mstar.page"
+        },
+        {
+          "pattern": "inspector.mstar.page/_internal_admin/*",
+          "zone_name": "mstar.page"
+        },
+        {
+          "pattern": "inspector.mstar.page/webhook/*",
+          "zone_name": "mstar.page"
+        },
+        {
+          "pattern": "inspector.mstar.page/healthz",
+          "zone_name": "mstar.page"
+        },
+        {
+          "pattern": "inspector.mstar.page/app-assets/*",
+          "zone_name": "mstar.page"
         }
       ],
       // DEPLOYMENT_MODE is the deployment shape: `self-hosted` or `saas`, with

@@ -134,5 +134,5 @@ export function wantsHtml(acceptHeader: string | null): boolean {
 }
 
 export function isSpaAssetPath(pathname: string): boolean {
-  return pathname === "/index.html" || pathname.startsWith("/assets/");
+  return pathname.startsWith("/app-assets/");
 }

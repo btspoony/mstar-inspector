@@ -17,7 +17,7 @@ export type Env = {
    * `dist/spa`. Optional on the type so Bun fetch-path tests that omit it
    * fall through to the legacy Hono app; production wrangler.jsonc always
    * binds it. `run_worker_first` means the Worker must `ASSETS.fetch()`
-   * enumerated SPA pages and `/assets/*` itself.
+   * enumerated SPA pages and `/app-assets/*` itself.
    */
   ASSETS?: Fetcher;
   /**

@@ -606,8 +606,8 @@ async function revokeGrant(c: AdminContext): Promise<Response> {
 
 /**
  * The console document (`src/spa/admin.html`). `ASSETS` holds it and no other
- * route serves it: spa-dispatch matches only `/index.html` and `/assets/*`, so
- * this gated handler is the document's single entry point.
+ * route serves it: spa-dispatch matches only `/index.html` and `/app-assets/*`,
+ * so this gated handler is the document's single entry point.
  */
 async function serveDocument(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);

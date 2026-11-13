@@ -331,12 +331,22 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     const routes = asArray(production.routes);
     expect(
       routes.map((entry) => String(entry.pattern)),
-      `wrangler.jsonc: prod route host`,
-    ).toEqual(["inspector.mstar.page"]);
+      `wrangler.jsonc: prod route patterns`,
+    ).toEqual([
+      "inspector.mstar.page/dashboard*",
+      "inspector.mstar.page/_internal_admin/*",
+      "inspector.mstar.page/webhook/*",
+      "inspector.mstar.page/healthz",
+      "inspector.mstar.page/app-assets/*",
+    ]);
     expect(
-      routes.map((entry) => entry.custom_domain),
-      `wrangler.jsonc: prod route must be a Custom Domain`,
-    ).toEqual([true]);
+      routes.map((entry) => String(entry.zone_name)),
+      `wrangler.jsonc: prod routes ride the mstar.page zone as Workers Routes`,
+    ).toEqual(routes.map(() => "mstar.page"));
+    expect(
+      routes.filter((entry) => "custom_domain" in entry),
+      `wrangler.jsonc: a Custom Domain would claim the whole hostname the marketing Worker needs`,
+    ).toEqual([]);
   });
 
   /**

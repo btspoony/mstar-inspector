@@ -80,7 +80,7 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
       get: async () => null,
       put: async () => {},
     } as unknown as Env["IDEMPOTENCY_KV"],
-    ASSETS: stubAssets({ "/index.html": SPA_INDEX_HTML, "/assets/app.js": "js" }, calls),
+    ASSETS: stubAssets({ "/index.html": SPA_INDEX_HTML, "/app-assets/app.js": "js" }, calls),
     DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     ...overrides,
@@ -234,12 +234,12 @@ describe("SPA dispatch", () => {
     expect(calls).toEqual([]);
   });
 
-  test("GET /assets/* is served from ASSETS", async () => {
+  test("GET /app-assets/* is served from ASSETS", async () => {
     const { env, calls } = makeEnv();
-    const res = await worker.fetch(new Request("https://worker.local/assets/app.js"), env);
+    const res = await worker.fetch(new Request("https://worker.local/app-assets/app.js"), env);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("js");
-    expect(calls).toEqual([{ method: "GET", pathname: "/assets/app.js" }]);
+    expect(calls).toEqual([{ method: "GET", pathname: "/app-assets/app.js" }]);
   });
 
   test("GET /index.html injects window.__BOOT__", async () => {
