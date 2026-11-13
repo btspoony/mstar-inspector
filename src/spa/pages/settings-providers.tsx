@@ -11,6 +11,7 @@ import { NoticeRegion, type OpNotice } from "./PageNotice";
 import { AddKeyDialog, AddProviderDialog } from "./providers-dialogs";
 import { ProviderModelsDialog } from "./provider-models-dialog";
 import { providerGroups, type ProviderGroup } from "./providers-groups";
+import { catalogBaseUrlMatches } from "../../contracts/provider-model-limits";
 import type { PendingAction } from "./SettingsPage";
 import { UsagePanel } from "./usage-panel";
 
@@ -130,6 +131,7 @@ export function ProvidersSection({
               appId={payload.app.github_app_id}
               group={group}
               catalog={catalogById[group.providerId]}
+              limitsSnapshot={payload.model_limits_snapshot}
               removeNotice={
                 removeOutcome !== null && removedProviderId === group.providerId ? removeOutcome.notice : null
               }
@@ -198,6 +200,7 @@ function ProviderGroupCard({
   appId,
   group,
   catalog,
+  limitsSnapshot,
   removeNotice,
   onPending,
   onAddKey,
@@ -210,6 +213,8 @@ function ProviderGroupCard({
   group: ProviderGroup;
   /** The catalog entry of this id, when the catalog knows it. */
   catalog: CatalogProvider | undefined;
+  /** The vendor snapshot the catalog sizes came from. */
+  limitsSnapshot: string;
   /** The remove outcome this group owns, or null. */
   removeNotice: OpNotice | null;
   onPending: (action: PendingAction) => void;
@@ -422,6 +427,15 @@ function ProviderGroupCard({
           storedModelIds={group.declaration.model_ids}
           storedModelsMeta={group.declaration.models_meta}
           catalogModelIds={catalog?.models ?? []}
+          catalogLimits={
+            // The Worker only trusts the vendor table when the declaration's
+            // endpoint IS the catalog row's; the dialog must not pre-fill
+            // numbers a save would then refuse.
+            catalogBaseUrlMatches(catalog?.catalog_base_url, group.declaration.base_url)
+              ? (catalog?.model_limits ?? {})
+              : {}
+          }
+          limitsSnapshot={limitsSnapshot}
           onSettings={onSettings}
           onOutcome={onOutcome}
         />

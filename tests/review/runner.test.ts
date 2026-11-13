@@ -14,26 +14,30 @@
  *   - usage errors (missing flags, unknown level) → exit 2, stdout empty;
  *   - unreadable/malformed input file → exit 1, stdout empty;
  *   - runtime failure → exit 1, stdout empty, stderr diagnostic;
- * - `capabilityHosts` is REQUIRED and shape-guarded — the
- *     runner ALWAYS synthesizes a COMPLETE per-review models.yml
- *     (/tmp/omp-agent-<uuid>/models.yml) from the capability hosts (there is
- *     no baked in-image base to fall back to) and rides that directory as the
- *     REQUIRED `agentDir` in the runtime input on EVERY run;
+ * - `capabilityHosts` is REQUIRED and shape-guarded, and an EMPTY array is a
+ *     valid run: the product declares no image provider, and built-in
+ *     providers resolve from the runtime's own catalog. The runner ALWAYS
+ *     synthesizes a per-review models.yml (/tmp/omp-agent-<uuid>/models.yml)
+ *     and rides that directory as the REQUIRED `agentDir` in the runtime
+ *     input on EVERY run — with no declaration it is a bare `providers:`
+ *     header;
  *   - `worktreePath` defaults to the process cwd; `reconFacts` defaults to [];
  *   - the OMP_REVIEW_MODEL chain flows into the runtime input;
  * - the optional `modelOverrides` map is shape-guarded and
  *     rides into the runtime input verbatim; absent = the legacy shape.
- * - the optional `customProviders` list (AL-23-1) is
- *     shape-guarded; merged INTO the capability-host base. The synthesized
- *     blocks pin NO scalar `apiKey` (a models.yml apiKey is a tier-2 config
- *     override that would suppress the stored pool) and authenticate via
- *     `auth: oauth`; absent or empty = the capability base alone
- *     (byte-identical zero-custom path).
+ * - the optional `customProviders` list is shape-guarded and is the ONLY
+ *     source of a provider block in the synthesized file: the declarations
+ *     merge under `providers:` (a declaration duplicating the base is
+ *     skipped and reported — the base wins). The blocks pin NO scalar
+ *     `apiKey` (a models.yml apiKey is a tier-2 config override that would
+ *     suppress the stored pool) and authenticate via `auth: oauth`; absent
+ *     or empty = the base alone (byte-identical zero-custom path).
  * - the credential payload (the ONLY credential channel): the runner reads a
  *     versioned JSON payload from STDIN and loads its pools into an IN-MEMORY
  *     credential store as `{type:"api_key", source:"login"}` rows before
- *     the runtime starts, under the MODELS.YML provider id (a capability host
- *     id — resolved through its catalogProviderId — or the provider id itself),
+ *     the runtime starts, under the MODELS.YML provider id the pool key names
+ *     (a declaration id, or the App's own built-in provider id — no image-side
+ *     mapping exists),
  *     and fails the run closed (exit 1, no session, nothing written) when the
  *     payload does not decode, carries an empty pool array, or carries a
  *     non-string/empty entry. The store is never a file: `<agentDir>` holds only
@@ -58,7 +62,7 @@ import type { MstarReviewV1 } from "@mstar-harness/engine";
 import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
 import { FAILURE_BLOCK_BUDGET_CHARS } from "../../packages/runner/src/seat-failover-probe";
 import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../packages/shared/src/runtime";
-import { getSandboxImage } from "../../src/contracts/sandbox-images";
+import type { CapabilityHost } from "../../packages/shared/src/runtime";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { RecheckStatus } from "../../packages/shared/src/recheck-wire";
 import { readRecheckStatusCommand } from "../../src/pipeline/gitops";
@@ -147,8 +151,8 @@ const ENVELOPE = {
   findings: [],
 };
 
-/** The omp capability hosts, exactly as the consumer resolves them. */
-const OMP_HOSTS = getSandboxImage("omp")!.hosts;
+/** No image-declared provider: the product registry carries build inputs only. */
+const OMP_HOSTS: CapabilityHost[] = [];
 
 /**
  * Child-process probe for the SHARED store definition: build a store through
@@ -397,7 +401,7 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
   test("defaults: worktreePath = cwd, reconFacts = [], model chain from env parsing", async () => {
     // Real parseModelSelectors wiring: the env chain flows verbatim into the
     // runtime input (comma-separated, trimmed).
-    process.env.OMP_REVIEW_MODEL = "ark-plan/deepseek-v4-flash, ark-plan/backup";
+    process.env.OMP_REVIEW_MODEL = "acme/fast-model, acme/backup-model";
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
     const { code } = await runCli(["--level", "default", "--input", inputPath]);
 
@@ -406,7 +410,7 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(input.level).toBe("default");
     expect(input.worktreePath).toBe(process.cwd());
     expect(input.reconFacts).toEqual([]);
-    expect(input.modelSelectors).toEqual(["ark-plan/deepseek-v4-flash", "ark-plan/backup"]);
+    expect(input.modelSelectors).toEqual(["acme/fast-model", "acme/backup-model"]);
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
   });
 
@@ -468,11 +472,11 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
   test("input shape violations → exit 1", async () => {
     for (const bad of [
       [1, 2, 3],
-      // capabilityHosts is REQUIRED and shape-guarded (QC fix wave 1:
-      // a non-empty base — there is no baked in-image models.yml to fall back to).
+      // capabilityHosts stays REQUIRED and shape-guarded; an empty array is a
+      // valid run (the product declares no image provider), a malformed entry
+      // is not.
       {},
       { capabilityHosts: "not-an-array" },
-      { capabilityHosts: [] },
       { capabilityHosts: [42] },
       { capabilityHosts: [{}] },
       { capabilityHosts: [{ id: 42, catalogProviderId: "ark", apiKeyEnv: "ARK_API_KEY", baseUrl: "u", api: "a", auth: "apiKey" }] },
@@ -579,7 +583,7 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     // Shape-only validation: unknown agent names and `:thinking` suffixes are
     // NOT the runner's business — they pass through untouched (L3).
     const overrides = {
-      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+      "mstar-review-seat": "acme/fast-model:high",
       "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
       "unknown-agent": "whatever/provider",
     };
@@ -790,7 +794,7 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(stderr).toContain("provider boom");
   });
 
-  test("ALWAYS synthesizes: a zero-custom run rides an agentDir whose models.yml is the capability base alone", async () => {
+  test("ALWAYS synthesizes: a zero-custom run rides an agentDir whose models.yml is a bare providers header", async () => {
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
     const { code, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
 
@@ -799,16 +803,14 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(runInputs).toHaveLength(1);
     const input = runInputs[0]!;
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
-    // The file carries the capability base (ark-plan included). Its exact
-    // bytes are pinned against a literal in models-synthesis.test.ts; asserting
-    // this file against a fresh generator call would only compare the generator
-    // with itself.
+    // No image-declared provider and no App declaration: the file exists so the
+    // session reads THIS file instead of a baked in-image one, and it declares
+    // nothing — a built-in provider resolves from the SDK's own catalog.
     const yaml = readFileSync(join(preservedAgentDir(), "models.yml"), "utf8");
-    expect(yaml).toContain("ark-plan:");
-    expect(yaml).toMatch(/^providers:\n/);
+    expect(yaml).toBe("providers:\n");
   });
 
-  test("customProviders: merge into the capability base and ride agentDir into the runtime input", async () => {
+  test("customProviders: the declarations are the whole models.yml and ride agentDir into the runtime input", async () => {
     fakeEnvelope = ENVELOPE;
     const decls: CustomProviderDeclaration[] = [
       {
@@ -835,8 +837,8 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
     expect(input.worktreePath).toBe("/workspace/clone");
     const yaml = readFileSync(join(preservedAgentDir(), "models.yml"), "utf8");
-    // Capability base + custom merge, zero apiKey pins, zero key literals.
-    expect(yaml).toContain("ark-plan:");
+    // The declared block is the whole file, zero apiKey pins, zero key literals.
+    expect(yaml).toMatch(/^providers:\n/);
     expect(yaml).not.toMatch(/^\s*apiKey:/m);
     expect(yaml).toContain('"my-provider":');
     expect(yaml).toContain("auth: oauth");
@@ -884,43 +886,6 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     // Absent stays absent — an empty object would be the claim "the owner
     // stated nothing about any model", which is a different statement.
     expect(Object.keys(input.customProviders![1]!)).toEqual(["provider_id", "base_url", "api", "model_ids"]);
-  });
-
-  test("customProviders colliding with a capability host id: skipped with a structured stderr warn (id + count, no keys)", async () => {
-    fakeEnvelope = ENVELOPE;
-    const decls: CustomProviderDeclaration[] = [
-      {
-        provider_id: "ark-plan", // collides with the omp capability host
-        base_url: "https://evil.example.com/",
-        api: "openai-completions",
-        model_ids: ["m1"],
-      },
-      {
-        provider_id: "my-provider",
-        base_url: "https://my-provider.example.com/v1",
-        api: "openai-completions",
-        model_ids: ["my-model-1"],
-      },
-    ];
-    const inputPath = writeInput({
-      capabilityHosts: OMP_HOSTS,
-      worktreePath: "/workspace/clone",
-      customProviders: decls,
-    });
-    const { code, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
-
-    expect(code).toBe(0);
-    // Structured warn on stderr: event + id + count; zero key material.
-    const warn = JSON.parse(stderr) as { event: string; provider_id: string; count: number };
-    expect(warn).toEqual({ event: "custom_provider_collision", provider_id: "ark-plan", count: 1 });
-    expect(stderr).not.toContain("sk-");
-    // The synthesized file keeps the CAPABILITY ark-plan block (capability/base
-    // wins) and appends the non-colliding custom provider.
-    const input = runInputs[0]!;
-    const yaml = readFileSync(join(preservedAgentDir(), "models.yml"), "utf8");
-    expect(yaml).toContain("baseUrl: https://ark.cn-beijing.volces.com/api/plan");
-    expect(yaml).not.toContain("https://evil.example.com/");
-    expect(yaml).toContain('"my-provider":');
   });
 });
 
@@ -1313,10 +1278,9 @@ describe("runner entry — transported credential pool", () => {
     return storage.credentials.list(provider).map((row) => row.credential);
   }
 
-  test("the payload's app-provider pool lands as login api_key rows under the capability host id", async () => {
-    // The consumer keys the payload by the App's provider id (`ark`); the
-    // capability host serving it is `ark-plan`, which is the models.yml
-    // provider id the session resolves credentials under.
+  test("the payload's app-provider pool lands as login api_key rows under the provider id the key names", async () => {
+    // A pool key IS the models.yml provider id: the image declares no provider,
+    // so there is no catalog-id mapping left and `ark` resolves under `ark`.
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
     const { code, stdout, stderr } = await runCli(
       ["--level", "quick", "--input", inputPath],
@@ -1327,19 +1291,19 @@ describe("runner entry — transported credential pool", () => {
     expect(JSON.parse(stdout)).toEqual(ENVELOPE);
     const input = runInputs[0]!;
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
-    const rows = storedPool("ark-plan");
+    const rows = storedPool("ark");
     expect(rows).toEqual([
       { type: "api_key", key: sk("pool-one"), source: "login" },
       { type: "api_key", key: sk("pool-two"), source: "login" },
     ]);
     // The log line carries provider + pool_size only — never a key value.
     const log = JSON.parse(stderr) as { event: string; provider: string; pool_size: number };
-    expect(log).toEqual({ event: "credential_pool", provider: "ark-plan", pool_size: 2 });
+    expect(log).toEqual({ event: "credential_pool", provider: "ark", pool_size: 2 });
     expect(stderr).not.toContain(sk("pool-one"));
     expect(stderr).not.toContain(sk("pool-two"));
     // The rows are live on the very instance the session received, resolvable
     // through the SDK's own read path — no file involved.
-    expect(await (runStores.at(-1) as AuthStorage).getApiKey("ark-plan")).toBe(sk("pool-one"));
+    expect(await (runStores.at(-1) as AuthStorage).getApiKey("ark")).toBe(sk("pool-one"));
   });
 
   test("custom providers pool under their own id, in payload order", async () => {
@@ -1503,9 +1467,9 @@ describe("runner entry — transported credential pool", () => {
   });
 
   test("a built-in catalog provider pool resolves under its own provider id — no declared identity needed", async () => {
-    // `openai` is an allowlisted built-in: neither a capability host nor a
-    // custom declaration covers it, so the payload key IS the models.yml
-    // provider id the session resolves credentials under.
+    // `openai` is a built-in: no declaration covers it, so the payload key IS
+    // the models.yml provider id the session resolves credentials under — and
+    // the file declares no block for it (the catalog's definition wins).
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
     const { code, stdout, stderr } = await runCli(
       ["--level", "quick", "--input", inputPath],
@@ -1522,9 +1486,11 @@ describe("runner entry — transported credential pool", () => {
     expect(log).toEqual({ event: "credential_pool", provider: "openai", pool_size: 1 });
     expect(stderr).not.toContain(sk("builtin-one"));
     expect(await (runStores.at(-1) as AuthStorage).getApiKey("openai")).toBe(sk("builtin-one"));
+    // A built-in needs no block: the synthesized file is the bare base.
+    expect(readFileSync(join(preservedAgentDir(), "models.yml"), "utf8")).toBe("providers:\n");
   });
 
-  test("a hyphenated built-in provider keeps its id verbatim (no prefix inversion) beside a capability host pool", async () => {
+  test("a hyphenated provider id keeps its id verbatim (no prefix inversion) beside another pool", async () => {
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
     const { code } = await runCli(
       ["--level", "quick", "--input", inputPath],
@@ -1535,12 +1501,13 @@ describe("runner entry — transported credential pool", () => {
     );
 
     expect(code).toBe(0);
-    const input = runInputs[0]!;
+    // Two pools, two provider ids: neither id is rewritten and neither pool
+    // leaks into the other.
     expect(storedPool("azure-openai")).toEqual([
       { type: "api_key", key: sk("builtin-one"), source: "login" },
       { type: "api_key", key: sk("builtin-two"), source: "login" },
     ]);
-    expect(storedPool("ark-plan")).toEqual([
+    expect(storedPool("ark")).toEqual([
       { type: "api_key", key: sk("ark-one"), source: "login" },
     ]);
   });
@@ -1717,10 +1684,17 @@ describe("runner entry — transported credential pool", () => {
     // regression above would stay green. Only the argument proves it, so
     // observe it: a spy that records every path the static factory receives and
     // then delegates to the real implementation (the store it returns must
-    // still work, or the assertion would be watching a fake).
-    const realCreate = AuthStorage.create;
+    // still work, or the assertion would be watching a fake). The spy must
+    // reach the SAME module copy the runner imports: a nested
+    // packages/runner/node_modules install resolves the SDK to its own
+    // instance, so a spy on this file's import would watch a class the helper
+    // never calls. Resolve the specifier from the runner's own source dir.
+    const runnerSdk = (await import(
+      Bun.resolveSync("@oh-my-pi/pi-coding-agent", join(import.meta.dir, "..", "..", "packages", "runner", "src"))
+    )) as typeof import("@oh-my-pi/pi-coding-agent");
+    const realCreate = runnerSdk.AuthStorage.create;
     const paths: string[] = [];
-    AuthStorage.create = async (dbPath: string) => {
+    runnerSdk.AuthStorage.create = async (dbPath: string) => {
       paths.push(dbPath);
       return realCreate(dbPath);
     };
@@ -1744,7 +1718,7 @@ describe("runner entry — transported credential pool", () => {
         storage.close();
       }
     } finally {
-      AuthStorage.create = realCreate;
+      runnerSdk.AuthStorage.create = realCreate;
       process.chdir(origin);
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1764,10 +1738,10 @@ describe("runner entry — transported credential pool", () => {
 
     // (a) usable: the rows are live on the exact store handed to the runtime.
     const storage = runStores.at(-1) as AuthStorage;
-    expect(storage.credentials.list("ark-plan").map((row) => row.credential)).toEqual([
+    expect(storage.credentials.list("ark").map((row) => row.credential)).toEqual([
       { type: "api_key", key: sk("mem-only-key"), source: "login" },
     ]);
-    expect(await storage.getApiKey("ark-plan")).toBe(sk("mem-only-key"));
+    expect(await storage.getApiKey("ark")).toBe(sk("mem-only-key"));
     // ...and the credential never leaked into the only diagnostic channel.
     expect(stderr).not.toContain(sk("mem-only-key"));
 
@@ -1792,34 +1766,5 @@ describe("runner entry — transported credential pool", () => {
     // is what a session running inside the review would have been able to scan.
     expect(inFlight?.hadStore).toBe(false);
     expect(agentDirs().filter((dir) => existsSync(join(dir, "agent.db")))).toEqual([]);
-  });
-
-  test("a custom id colliding with a capability host pools only once (base wins, same rule as the synthesis)", async () => {
-    // `ark-plan` is a capability host id; the consumer keys the capability
-    // host's pool by catalog id `ark`. A custom declaration reusing the same id
-    // is skipped by the synthesis, so its pool must not be loaded either — the
-    // provider id would otherwise resolve credentials the file never declares.
-    const inputPath = writeInput({
-      capabilityHosts: OMP_HOSTS,
-      worktreePath: "/workspace/clone",
-      customProviders: [
-        {
-          provider_id: "ark-plan",
-          base_url: "https://evil.example.com/",
-          api: "openai-completions",
-          model_ids: ["m1"],
-        },
-      ],
-    });
-    const { code } = await runCli(
-      ["--level", "quick", "--input", inputPath],
-      encodeCredentialPayload({ ark: [sk("base-key")], "ark-plan": [sk("shadow-key")] }),
-    );
-
-    expect(code).toBe(0);
-    const input = runInputs[0]!;
-    expect(storedPool("ark-plan")).toEqual([
-      { type: "api_key", key: sk("base-key"), source: "login" },
-    ]);
   });
 });

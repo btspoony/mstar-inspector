@@ -12,7 +12,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   PROVIDER_CATALOG,
@@ -22,6 +22,7 @@ import {
   providerEnvName,
 } from "../../src/pipeline/provider-catalog";
 import { PROVIDER_IDS_BUILTIN, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
+import { MODEL_LIMITS, MODEL_LIMITS_SNAPSHOT } from "../../src/contracts/provider-model-limits.generated";
 import { CUSTOM_PROVIDER_API_IDS, CUSTOM_PROVIDER_ID_PATTERN } from "../../src/dashboard/app-config-store";
 import { PROVIDER_VERIFY_ENDPOINTS } from "../../src/dashboard/provider-verify";
 import { buildCatalog } from "../../scripts/generate-provider-catalog";
@@ -51,8 +52,14 @@ const OMP_SNAPSHOT = JSON.parse(
   };
 };
 
-/** The pinned models.dev snapshot the generator reads (the provenance pin). */
-const SNAPSHOT_PATH = join(REPO_ROOT, "scripts/provider-catalog/models.dev-2026-11-06.json");
+/** The pinned models.dev snapshot the generator reads (the provenance pin).
+ *  The date is derived, never restated: exactly one snapshot lives beside the
+ *  generator input and the generator must name that same date. */
+const CATALOG_DIR = join(REPO_ROOT, "scripts/provider-catalog");
+const SNAPSHOT_FILE = readdirSync(CATALOG_DIR)
+  .filter((name) => /^models\.dev-\d{4}-\d{2}-\d{2}\.json$/.test(name))
+  .sort()[0]!;
+const SNAPSHOT_PATH = join(CATALOG_DIR, SNAPSHOT_FILE);
 const GENERATOR_SOURCE = readFileSync(join(REPO_ROOT, "scripts/generate-provider-catalog.ts"), "utf8");
 /** The builtin sourceKeys, extracted from the generator's BUILTIN_ORDER
  *  table (the SSOT — a sourceKey change must update this lock in the same commit). */
@@ -86,7 +93,7 @@ describe("shared provider mapping", () => {
     expect(providerEnvName("not-a-provider")).toBeUndefined();
   });
 
-  test("ark maps to ARK_API_KEY — the in-image ark-plan base provider's key env (AL-24-5)", () => {
+  test("ark maps to ARK_API_KEY — the in-image ark base provider's key env (AL-24-5)", () => {
     expect(PROVIDERS["ark"]).toEqual({ envName: "ARK_API_KEY", label: "Ark" });
     expect(providerEnvName("ark")).toBe("ARK_API_KEY");
     // The provider set is the SSOT the dashboard PROVIDER_IDS mirror locks
@@ -285,8 +292,12 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
     expect(Object.keys(snapshot).length).toBeGreaterThan(0);
     const generator = readFileSync(generatorPath, "utf8");
     // The pin is the committed snapshot file — provenance is the vendored
-    // JSON, never a network source.
-    expect(generator).toContain("models.dev-2026-11-06.json");
+    // JSON, never a network source. The generator's date constant and the one
+    // committed snapshot must agree (no second, stale snapshot).
+    const pinnedDate = generator.match(/const SNAPSHOT_DATE = "(\d{4}-\d{2}-\d{2})"/)?.[1];
+    expect(pinnedDate).toBeDefined();
+    expect(SNAPSHOT_FILE).toBe(`models.dev-${pinnedDate}.json`);
+    expect(readdirSync(CATALOG_DIR).filter((name) => /^models\.dev-\d{4}-\d{2}-\d{2}\.json$/.test(name))).toHaveLength(1);
     // Zero authoring-time network: the generator reads only the snapshot.
     expect(generator).not.toMatch(/\bfetch\s*\(/);
   });
@@ -299,7 +310,7 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
     expect(source).not.toMatch(/^import\s/m);
     expect(source).not.toMatch(/from\s+"[.][.]?\//);
     // The provenance header names the pinned snapshot and the authoring path.
-    expect(source).toContain("models.dev-2026-11-06.json");
+    expect(source).toContain(SNAPSHOT_FILE);
     expect(source).toContain("DO NOT EDIT BY");
   });
 
@@ -328,7 +339,9 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
   });
 
   test("regeneration from the committed snapshot is byte-identical — deterministic generation, no hand edits", () => {
+    const limitsPath = join(repoRoot, "src/contracts/provider-model-limits.generated.ts");
     const before = readFileSync(contractPath, "utf8");
+    const beforeLimits = readFileSync(limitsPath, "utf8");
     for (let run = 0; run < 2; run++) {
       const proc = Bun.spawnSync(["bun", "scripts/generate-provider-catalog.ts"], {
         cwd: repoRoot,
@@ -338,16 +351,19 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
       expect(proc.exitCode, proc.stderr.toString()).toBe(0);
     }
     const after = readFileSync(contractPath, "utf8");
+    const afterLimits = readFileSync(limitsPath, "utf8");
     try {
-      // Both runs reproduce the committed artifact exactly — the committed
-      // module stays the single source, generated, never hand-edited. (The
+      // Both runs reproduce both committed artifacts exactly — the committed
+      // modules stay the single source, generated, never hand-edited. (The
       // hand-written pipeline face is NOT part of this compare.)
       expect(after).toBe(before);
+      expect(afterLimits).toBe(beforeLimits);
     } finally {
       // Keep the worktree clean even on a drift failure: restore the
       // committed bytes so the diff a reviewer sees is the test's report,
       // not a silently regenerated module.
       if (after !== before) writeFileSync(contractPath, before);
+      if (afterLimits !== beforeLimits) writeFileSync(limitsPath, beforeLimits);
     }
   });
 });
@@ -558,5 +574,68 @@ describe("omp provider union (third generator input)", () => {
     });
     expect(Object.hasOwn(catalog, "moonshot")).toBe(false);
     expect(audit.ompAliasSkips).toEqual(["moonshot → moonshotai"]);
+  });
+});
+
+describe("per-model size table (provider-model-limits.generated)", () => {
+  const repoRoot = join(import.meta.dir, "../..");
+  const limitsPath = join(repoRoot, "src/contracts/provider-model-limits.generated.ts");
+
+  test("the table is non-empty, frozen, and every entry carries two positive integer token counts", () => {
+    expect(Object.isFrozen(MODEL_LIMITS)).toBe(true);
+    const providerIds = Object.keys(MODEL_LIMITS);
+    expect(providerIds.length).toBeGreaterThan(0);
+    let entries = 0;
+    for (const [providerId, row] of Object.entries(MODEL_LIMITS)) {
+      expect(Object.keys(row).length, providerId).toBeGreaterThan(0);
+      for (const [modelId, size] of Object.entries(row)) {
+        entries += 1;
+        expect(Number.isInteger(size.contextWindow), `${providerId}/${modelId} contextWindow`).toBe(true);
+        expect(Number.isInteger(size.maxTokens), `${providerId}/${modelId} maxTokens`).toBe(true);
+        expect(size.contextWindow, `${providerId}/${modelId}`).toBeGreaterThan(0);
+        expect(size.maxTokens, `${providerId}/${modelId}`).toBeGreaterThan(0);
+      }
+    }
+    expect(entries).toBeGreaterThan(0);
+  });
+
+  test("the snapshot constant is a date and names the committed snapshot file", () => {
+    expect(MODEL_LIMITS_SNAPSHOT).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(SNAPSHOT_FILE).toBe(`models.dev-${MODEL_LIMITS_SNAPSHOT}.json`);
+  });
+
+  test("every catalog provider id resolves in the table or is named in the explicit skip list", () => {
+    // Skipped by rule, not by accident: the omp provider union ships its own
+    // model vocabulary (the directory carries no row for those ids) and
+    // `cursor` is local-only metadata — the table states no size for
+    // either rather than inventing one.
+    const SKIPPED_PROVIDERS = new Set(["cursor", ...OMP_SNAPSHOT.providers.map((record) => record.id)]);
+    const missing = Object.keys(PROVIDER_CATALOG)
+      .filter((id) => !Object.hasOwn(MODEL_LIMITS, id))
+      .sort();
+    expect(missing).toEqual([...SKIPPED_PROVIDERS].sort());
+    for (const id of Object.keys(PROVIDER_CATALOG)) {
+      expect(Object.hasOwn(MODEL_LIMITS, id) || SKIPPED_PROVIDERS.has(id), id).toBe(true);
+    }
+    const skipHits = Object.keys(MODEL_LIMITS).filter((id) => SKIPPED_PROVIDERS.has(id));
+    expect(skipHits).toEqual([]);
+  });
+
+  test("the table carries no model id its catalog entry does not list", () => {
+    for (const [providerId, row] of Object.entries(MODEL_LIMITS)) {
+      expect(PROVIDER_CATALOG[providerId], providerId).toBeDefined();
+      const models = PROVIDER_CATALOG[providerId]!.models as readonly string[];
+      for (const modelId of Object.keys(row)) {
+        expect(models, `${providerId}/${modelId}`).toContain(modelId);
+      }
+    }
+  });
+
+  test("the generated table is static pure data naming its snapshot and authoring path", () => {
+    const source = readFileSync(limitsPath, "utf8");
+    expect(source).not.toMatch(/\bfetch\s*\(/);
+    expect(source).not.toMatch(/^import\s/m);
+    expect(source).toContain(SNAPSHOT_FILE);
+    expect(source).toContain("DO NOT EDIT BY");
   });
 });

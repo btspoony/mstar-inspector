@@ -158,14 +158,14 @@ describe("selector membership helpers (spec §6.3)", () => {
       [
         { provider: "anthropic", models: ["claude-sonnet-4-6", "claude-opus-4-7"], fetched_at: "now" },
         { provider: "copilot", models: [], fetched_at: "now" },
-        { provider: "ark-plan", models: ["doubao-seed-2-1-pro"], fetched_at: "now" },
+        { provider: "ark", models: ["doubao-seed-2-1-pro"], fetched_at: "now" },
       ],
       [{ provider_id: "my-custom", model_ids: ["local-7b"], has_keys: true }],
     );
     expect(groups).toEqual([
       { provider: "anthropic", source: "verified", selectors: ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-7"] },
       { provider: "copilot", source: "probe", selectors: [] },
-      { provider: "ark-plan", source: "verified", selectors: ["ark-plan/doubao-seed-2-1-pro"] },
+      { provider: "ark", source: "verified", selectors: ["ark/doubao-seed-2-1-pro"] },
       { provider: "my-custom", source: "custom", selectors: ["my-custom/local-7b"] },
     ]);
   });
@@ -346,7 +346,7 @@ describe("GET /dashboard/api/apps/:appId/models", () => {
     const body = (await res.json()) as { groups: Array<{ provider: string; source: string; selectors: string[] }> };
     expect(body.groups).toEqual([
       { provider: "anthropic", source: "verified", selectors: ["anthropic/claude-sonnet-4-6"] },
-      { provider: "ark-plan", source: "verified", selectors: ["ark-plan/doubao-seed-2-1-pro"] },
+      { provider: "ark", source: "verified", selectors: ["ark/doubao-seed-2-1-pro"] },
       { provider: "copilot", source: "probe", selectors: [] },
       { provider: "my-custom", source: "custom", selectors: ["my-custom/local-7b"] },
     ]);
@@ -542,7 +542,7 @@ describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
   test("unknown or disabled id → 400, nothing stored", async () => {
     const { db, app } = await seededWorld();
     const env = makeEnv(db);
-    for (const imageId of ["no-such-image", "", "ark-plan"]) {
+    for (const imageId of ["no-such-image", "", "ark"]) {
       const res = await postForm(SETTINGS, "mallory", env, { op: "save-sandbox-image", sandbox_image_id: imageId });
       expect(res.status).toBe(400);
       expect(await res.text()).toContain("Unknown or disabled runtime harness");

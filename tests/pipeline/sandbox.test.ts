@@ -460,7 +460,7 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
 
     const result = await sandbox.runCommand(shellCommand("bun run runner.ts"), {
       cwd: "/workspace/repo",
-      env: { OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash" },
+      env: { OMP_REVIEW_MODEL: "ark/deepseek-v4-flash" },
       stdin: PAYLOAD,
     });
 
@@ -468,7 +468,7 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
     expect(execCalls).toEqual([
       {
         cmd: ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "bun run runner.ts"],
-        opts: { cwd: "/workspace/repo", env: { OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash" }, stdin: "pipe" },
+        opts: { cwd: "/workspace/repo", env: { OMP_REVIEW_MODEL: "ark/deepseek-v4-flash" }, stdin: "pipe" },
       },
     ]);
     expect(execStdinBytes).toBe(PAYLOAD);

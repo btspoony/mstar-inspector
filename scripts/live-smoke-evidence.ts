@@ -16,42 +16,38 @@ import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateMstarReviewV1 } from "@mstar-harness/engine";
-import { getSandboxImage } from "../src/contracts/sandbox-images";
 import { writePerReviewModelsYaml } from "../packages/runner/src/models-synthesis";
 import { createInMemoryAuthStorage } from "../packages/runner/src/runner";
 import { ompAgentRuntime, parseModelSelectors } from "../packages/runner/src/runtime-omp";
 
 const worktreePath = process.argv[2] ?? process.cwd();
-const hosts = getSandboxImage("omp")?.hosts ?? [];
-// The operator's key is read from the capability host's env var and stored as
-// an explicit `login` row under the models.yml provider id — the same shape the
-// runner's transported pool takes. Never an implicit lookup: an EMPTY store
-// fails loud here rather than letting the SDK discover a credential file.
-const keys = hosts.flatMap((host) => {
-  const key = Bun.env[host.apiKeyEnv];
-  return key ? [{ host, key }] : [];
-});
-if (keys.length === 0) {
-  console.error(
-    `live-smoke-evidence: no provider key set (expected ${hosts.map((h) => h.apiKeyEnv).join(", ")})`,
-  );
+// The smoke runs an App's own selector: the provider comes from the selector
+// prefix and its key from the conventional `<PROVIDER>_API_KEY` env var. The
+// per-review models.yml carries no image-declared provider — a built-in one
+// resolves from the SDK's catalog, a custom one would be declared here.
+const modelSelectors = parseModelSelectors(Bun.env.OMP_REVIEW_MODEL);
+const provider = modelSelectors[0]?.split("/")[0]?.trim() ?? "";
+const keyEnvName = `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+const providerKey = Bun.env[keyEnvName];
+if (provider === "" || providerKey === undefined || providerKey.trim() === "") {
+  console.error(`live-smoke-evidence: set OMP_REVIEW_MODEL (e.g. openai/gpt-5) and ${keyEnvName || "<PROVIDER>_API_KEY"}`);
   process.exit(2);
 }
-const agentDir = await writePerReviewModelsYaml(hosts);
+const agentDir = await writePerReviewModelsYaml([]);
 const authStorage = await createInMemoryAuthStorage();
 try {
-  for (const { host, key } of keys) {
-    await authStorage.credentials.set(host.id, [
-      { type: "api_key" as const, key, source: "login" as const },
-    ]);
-  }
+  // An explicit `login` row — never an implicit lookup: an EMPTY store fails
+  // loud here rather than letting the SDK discover a credential file.
+  await authStorage.credentials.set(provider, [
+    { type: "api_key" as const, key: providerKey, source: "login" as const },
+  ]);
   // runReview resolves { envelope, recheck } — the smoke captures
   // the envelope only (the optional recheck document rides its own file).
   const { envelope } = await ompAgentRuntime.runReview({
     level: "quick",
     worktreePath,
     reconFacts: [],
-    modelSelectors: parseModelSelectors(Bun.env.OMP_REVIEW_MODEL),
+    modelSelectors,
     agentDir,
     authStorage,
   });

@@ -1597,9 +1597,10 @@ smoke → record the digest.
 The image ships `/opt/verify-synthesis.sh` (repo `packages/runner/verify-synthesis.sh`,
 COPY'd into the digest — AL-25-3). It replays the U-001 evidence on
 ANY image build: per-review models.yml synthesis through the runner's
-real `writePerReviewModelsYaml` (the omp capability hosts — `ark-plan`
-synthesized without any baked file — plus the keyless custom
-declaration `u001-verify` / `https://example.invalid/v1` / `verify-model`),
+real `writePerReviewModelsYaml` (a test-fixture base provider — the script
+declares `ark-plan` inline, it is NOT a product registry entry — plus the
+keyless custom declaration `u001-verify` / `https://example.invalid/v1` /
+`verify-model`),
 omp SDK `ModelRegistry`
 resolution of the synthesized file, and a minimal `createAgentSession` on the
 synthesized `agentDir`. Load-level only — no provider call, no network, zero
@@ -1900,8 +1901,9 @@ completed review + `wrangler tail --env production` runner evidence, not the
 column.
 
 1. **Configure the chain** — on the App's settings page, set **Model chain**
-   to a distinctive chain, e.g. `ark-plan/deepseek-v4-flash, openai/gpt-5:thinking`
-   and save. The head (the first selector) is what the column must show.
+   to a distinctive chain, e.g. `openai/gpt-5, anthropic/claude-sonnet-4-5:thinking`
+   and save. The head (the first selector) is what the column must show. Every
+   provider named here needs a key in the App's own config.
 2. **Real PR** — with both review controls open (that App's `review_enabled`
    and the `review_global` flag, § Secrets and vars inventory), open or update
    a PR on an installed
@@ -1915,10 +1917,9 @@ column.
    wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT model, skill_version, reviewed_at FROM reviews WHERE app_id = '<app-id>' ORDER BY reviewed_at DESC LIMIT 1"
    ```
-   `model` must equal the configured chain head (`ark-plan/deepseek-v4-flash`
-   in the example); NULL means the in-image default ran — the chain was not
-   picked up (check the settings save and the precedence in
-   `effectiveModelChain`). The triggering delivery is visible in the same
+   `model` must equal the configured chain head (`openai/gpt-5` in the
+   example); NULL means no chain was picked up (check the settings save and the
+   precedence in `effectiveModelChain`). The triggering delivery is visible in the same
    window:
    ```bash
    wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
@@ -2260,18 +2261,27 @@ sink: its severity enum and mandatory synthesized fields do not map onto
 review findings, and the publication journal, leases, recurrence queries, and
 dashboard reads stay in D1. No finding-store migration is planned.
 
-**In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
-`packages/runner/src/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` + the omp registry entry's
-`ark-plan` capability host in `src/contracts/sandbox-images.ts`, synthesized
-into every per-review models.yml — the baked file was removed). This line
-is the record for architect
-verdict AL-2: with the zero-global-fallback cutover (AL-24-5)
-the App's `modelChain` is the only chain source — a chain-less App is
-fail-closed by the consumer and the runner's default is reachable only via a
-direct/manual in-image runner call (the in-image scaffold, not the Worker
-path). On the production path the Worker never records NULL (the column
-stays nullable for historical rows, AL-24-4); local manual runs resolve the
-in-image default against THIS line.
+**There is NO in-image default model selector.** The App's `modelChain` is
+the only chain source (AL-24-5 zero global fallback): a chain-less App is
+fail-closed by the consumer, and a manual in-image runner call must pass
+`OMP_REVIEW_MODEL` — the runner throws rather than inventing a provider. The
+sandbox image declares no provider and no model
+(`src/contracts/sandbox-images.ts` is build inputs only); a built-in provider
+resolves from the omp SDK catalog, a custom one from the App's declaration.
+On the production path the Worker never records NULL (the column stays
+nullable for historical rows, AL-24-4).
+
+Upgrade step (the image no longer declares the `ark-plan` provider): an App
+whose model chain still reads `ark-plan/…` fails with "the ark-plan provider
+was removed — point the chain at a provider the runtime serves". Rewrite the
+default chain and every per-role selector through the settings face so each
+prefix names a provider the runtime can resolve: a built-in catalog provider
+(openai, anthropic, deepseek, …) with that provider's key configured on the App,
+or a custom provider declaration. The retired prefix has no runtime provider
+block, and its old `ark` id alone does not resolve either — `ark` is a built-in
+BYOK id but has no row in the runtime's own catalog. Verified-model evidence
+written under the alias still reads back under `ark`, so that App's settings
+list does not empty. No SQL is required.
 
 Deployed image record (DOCS-01 baseline):
 

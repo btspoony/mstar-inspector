@@ -258,7 +258,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
           Cookie: `${SESSION_COOKIE}=${await cookie("hubot")}`,
           "content-type": "application/x-www-form-urlencoded",
         },
-        body: "op=save-chain&model_chain=ark-plan%2Fdeepseek-v4-flash",
+        body: "op=save-chain&model_chain=ark%2Fdeepseek-v4-flash",
       }),
       env,
     );

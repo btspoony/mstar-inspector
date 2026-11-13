@@ -47,7 +47,7 @@ export type CustomDeclarationView = {
 
 /**
  * Settings dropdown source (the Interfaces face): verified entries (whose
- * `provider` IS the selector prefix, including `ark-plan`) first, then custom
+ * `provider` IS the selector prefix) first, then custom
  * declarations that still hold a key. Probe-only entries (empty models) yield
  * no options — the UI shows the no-discovery hint instead of a free-text box.
  * A KEYLESS custom declaration is omitted entirely: every run against its

@@ -421,7 +421,7 @@ describe("migrations/0009_app_model_roles.sql", () => {
     const db = createMigratedTestD1();
     insertApp(db, "app-1");
     db.raw
-      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'mstar-review-seat', 'ark-plan/deepseek-v4-flash:high')`)
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'mstar-review-seat', 'ark/deepseek-v4-flash:high')`)
       .run();
     expect(() => db.raw.prepare("DELETE FROM github_apps WHERE id = 'app-1'").run()).toThrow(
       /FOREIGN KEY constraint failed/,
@@ -1017,7 +1017,7 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
     const db = createPreChainsDb();
     insertApp(db, "app-1");
     db.raw
-      .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-1', 'ark-plan/deepseek-v4-flash', datetime('now'))`)
+      .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-1', 'ark/deepseek-v4-flash', datetime('now'))`)
       .run();
     db.raw
       .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'code-reviewer', 'openai/gpt-5')`)
@@ -1035,7 +1035,7 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
     insertApp(db, "app-2", 1002);
     // app-1 has a chain; app-2 has a NULL chain row; app-3 has no row at all.
     db.raw
-      .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-1', 'ark-plan/deepseek-v4-flash, openai/gpt-5:thinking', datetime('now'))`)
+      .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-1', 'ark/deepseek-v4-flash, openai/gpt-5:thinking', datetime('now'))`)
       .run();
     db.raw
       .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-2', NULL, datetime('now'))`)
@@ -1046,7 +1046,7 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
       .all() as Array<{ app_id: string; name: string; chain: string; is_default: number }>;
     // Exactly one default row, holding the verbatim chain (byte-identical).
     expect(rows).toEqual([
-      { app_id: "app-1", name: "default", chain: "ark-plan/deepseek-v4-flash, openai/gpt-5:thinking", is_default: 1 },
+      { app_id: "app-1", name: "default", chain: "ark/deepseek-v4-flash, openai/gpt-5:thinking", is_default: 1 },
     ]);
   });
 
@@ -1054,10 +1054,10 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
     const db = createPreChainsDb();
     insertApp(db, "app-1");
     db.raw
-      .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-1', 'ark-plan/deepseek-v4-flash', datetime('now'))`)
+      .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-1', 'ark/deepseek-v4-flash', datetime('now'))`)
       .run();
     db.raw
-      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'mstar-review-seat', 'ark-plan/deepseek-v4-flash:high')`)
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'mstar-review-seat', 'ark/deepseek-v4-flash:high')`)
       .run();
     db.raw
       .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'code-reviewer', 'openai/gpt-5:thinking, anthropic/claude-x')`)
@@ -1067,9 +1067,9 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
       .query("SELECT name, chain, is_default FROM app_model_chains WHERE app_id = 'app-1' ORDER BY name")
       .all() as Array<{ name: string; chain: string; is_default: number }>;
     expect(chains).toEqual([
-      { name: "default", chain: "ark-plan/deepseek-v4-flash", is_default: 1 },
+      { name: "default", chain: "ark/deepseek-v4-flash", is_default: 1 },
       { name: "seat-code-reviewer", chain: "openai/gpt-5:thinking, anthropic/claude-x", is_default: 0 },
-      { name: "seat-mstar-review-seat", chain: "ark-plan/deepseek-v4-flash:high", is_default: 0 },
+      { name: "seat-mstar-review-seat", chain: "ark/deepseek-v4-flash:high", is_default: 0 },
     ]);
     const seats = db.raw
       .query("SELECT role, chain_name FROM app_model_chain_seats WHERE app_id = 'app-1' ORDER BY role")

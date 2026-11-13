@@ -143,8 +143,18 @@ export function resolveHarnessRoot(): string {
 /** Read-only tool whitelist (Global Constraints — parent + seat). */
 export const REVIEW_TOOL_NAMES = ["read", "grep", "glob"] as const;
 
-/** Default model selector; used when the caller passes an empty modelSelectors chain (the runner parses OMP_REVIEW_MODEL into modelSelectors). */
-const DEFAULT_MODEL_PATTERN = "ark-plan/deepseek-v4-flash";
+/**
+ * The caller's first selector. The consumer fails closed on a chain-less App,
+ * so this is always present; an empty chain here is a caller bug and fails
+ * loud rather than inventing a provider.
+ */
+function primaryModelSelector(input: AgentRuntimeRunInput): string {
+  const first = input.modelSelectors[0];
+  if (first === undefined) {
+    throw new Error("runner input carries no model selector — the App's model chain must name one");
+  }
+  return first;
+}
 
 /**
  * Parse the OMP_REVIEW_MODEL value into model selectors: comma-separated,
@@ -1165,14 +1175,15 @@ async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): 
  *     chain remains only the session-level retry fallback configured by
  *     buildSessionOptions. Blank value or no map → the caller's chain
  *     verbatim.
- *   - An empty selector chain falls back to the same DEFAULT_MODEL_PATTERN
- *     the parent gets — seats must never see `model: []` (an empty array is
- *     truthy, not "inherit from parent"; PR #4 Bugbot).
+ *   - An empty selector chain cannot reach this point: `primaryModelSelector`
+ *     fails loud before any session is created, so a seat never sees
+ *     `model: []` (an empty array is truthy, not "inherit from parent";
+ *     PR #4 Bugbot).
  */
 function seatModelChain(input: AgentRuntimeRunInput): string[] {
   const seatOverride = input.modelOverrides?.["mstar-review-seat"];
   if (seatOverride !== undefined && seatOverride.trim() !== "") return [seatOverride];
-  return input.modelSelectors.length > 0 ? [...input.modelSelectors] : [DEFAULT_MODEL_PATTERN];
+  return [...input.modelSelectors];
 }
 
 /**
@@ -1279,7 +1290,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           cwd,
           pluginRoot,
           skills,
-          modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
+          modelPattern: primaryModelSelector(input),
           fallbackChain: [...input.modelSelectors],
           agentModelOverrides: input.modelOverrides,
           // The synthesized per-review models.yml directory —
@@ -1304,7 +1315,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
               cwd,
               pluginRoot,
               skills,
-              modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
+              modelPattern: primaryModelSelector(input),
               fallbackChain: [...input.modelSelectors],
               agentDir: input.agentDir,
               authStorage: input.authStorage,
@@ -1702,7 +1713,7 @@ export const ompAgentRuntime: AgentRuntime = {
           cwd,
           pluginRoot,
           skills,
-          modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
+          modelPattern: primaryModelSelector(input),
           fallbackChain: [...input.modelSelectors],
           // The synthesized per-review models.yml directory —
           // present on EVERY run (no baked in-image base remains).

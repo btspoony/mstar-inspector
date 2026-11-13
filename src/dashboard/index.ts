@@ -157,8 +157,10 @@ import {
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
 import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { isFindingSeverity } from "../contracts/finding-severity";
-import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../contracts/provider-models";
-import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../contracts/sandbox-images";
+import { MAX_CUSTOM_PROVIDER_MODEL_IDS, resolveModelSize } from "../contracts/provider-models";
+import { MODEL_LIMITS, MODEL_LIMITS_SNAPSHOT } from "../contracts/provider-model-limits.generated";
+import { catalogLimitsFor } from "../contracts/provider-catalog-limits";
+import { enabledSandboxImages, getSandboxImage } from "../contracts/sandbox-images";
 import { isCommandConfigKey } from "../../packages/shared/src/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
 import {
@@ -3038,37 +3040,35 @@ const MODEL_SIZE_FIELDS = [
 
 /**
  * The per-model facts an `update-provider-models` form states (compass D10).
- * An ABSENT field is the plain id-list save: no metadata claim, so the stored
- * overlay is carried over (an id-only declaration stays saved-but-not-usable,
- * never backfilled). A PRESENT field must state BOTH sizes for every selected
- * model id — a missing one names the model and the fact, an out-of-shape one
- * names the field, and both write nothing. Optional facts stay optional and
- * stay unstated when blank.
+ * A blank/absent size is resolved from the provider's catalog entry
+ * (`MODEL_LIMITS`): when the catalog supplies the fact the stored override
+ * OMITS it — a catalog number is never written as if the operator stated it.
+ * Only a size neither side supplies is refused (the model and the fact are
+ * named, nothing is written); an out-of-shape one names the field. Optional
+ * facts stay optional and stay unstated when blank.
  */
 function parseCustomProviderModelsMeta(
   raw: string,
   modelIds: readonly string[],
-): { meta: CustomProviderModelsMeta | undefined } | { error: DictionaryKey; params: Record<string, string> } {
-  // An omitted or blank overlay is NOT "no statement": the same save would
-  // otherwise change the id set while omitting the sizes the product requires
-  // for every selected model. It is refused as the first model's missing fact
-  // (the caller has already proven the list is non-empty).
-  if (raw.trim() === "") {
-    return {
-      error: SETTINGS_400_KEYS.modelContextWindowRequired,
-      params: { model: modelIds[0] ?? "" },
-    };
+  catalogLimits: Readonly<Record<string, { contextWindow?: number; maxTokens?: number }>> = {},
+): { meta: CustomProviderModelsMeta } | { error: DictionaryKey; params: Record<string, string> } {
+  // A blank overlay is the same EMPTY statement, not a refusal by itself: each
+  // selected model resolves from its own entry (present or not) plus the
+  // catalog, so a catalog-covered model saves while one with no size on either
+  // side is refused below.
+  let entries: Record<string, unknown> = {};
+  if (raw.trim() !== "") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { error: SETTINGS_400_KEYS.modelMetaMalformed, params: {} };
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { error: SETTINGS_400_KEYS.modelMetaMalformed, params: {} };
+    }
+    entries = parsed as Record<string, unknown>;
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { error: SETTINGS_400_KEYS.modelMetaMalformed, params: {} };
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { error: SETTINGS_400_KEYS.modelMetaMalformed, params: {} };
-  }
-  const entries = parsed as Record<string, unknown>;
   const invalid = (model: string, field: string) => ({
     error: SETTINGS_400_KEYS.modelMetaInvalid,
     params: { model, field },
@@ -3076,26 +3076,31 @@ function parseCustomProviderModelsMeta(
   const meta: CustomProviderModelsMeta = {};
   for (const modelId of modelIds) {
     const entry = entries[modelId];
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-      return { error: SETTINGS_400_KEYS.modelContextWindowRequired, params: { model: modelId } };
+    // An absent entry is a blank statement, not a second shape: the catalog
+    // may still supply every size the model needs.
+    if (entry !== undefined && entry !== null && (typeof entry !== "object" || Array.isArray(entry))) {
+      return invalid(modelId, "model metadata");
     }
-    const record = entry as Record<string, unknown>;
+    const record = (entry ?? {}) as Record<string, unknown>;
     const statement: CustomProviderModelMeta = {};
     for (const [field, label] of MODEL_SIZE_FIELDS) {
       const value = record[field];
-      if (value === undefined || value === null) {
-        return {
-          error:
-            field === "contextWindow"
-              ? SETTINGS_400_KEYS.modelContextWindowRequired
-              : SETTINGS_400_KEYS.modelMaxTokensRequired,
-          params: { model: modelId },
-        };
-      }
+      // A blank size is resolved against the catalog below; only a stated one
+      // is shape-checked and kept on the override.
+      if (value === undefined || value === null) continue;
       if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
         return invalid(modelId, label);
       }
       statement[field] = value;
+    }
+    // The one completeness rule: the statement OR the catalog must supply each
+    // size. The catalog's number is never copied into the stored override.
+    const resolved = resolveModelSize(statement, catalogLimits[modelId]);
+    if (resolved.contextWindow === undefined) {
+      return { error: SETTINGS_400_KEYS.modelContextWindowRequired, params: { model: modelId } };
+    }
+    if (resolved.maxTokens === undefined) {
+      return { error: SETTINGS_400_KEYS.modelMaxTokensRequired, params: { model: modelId } };
     }
     if (record.name !== undefined) {
       if (typeof record.name !== "string") return invalid(modelId, "display name");
@@ -3116,7 +3121,10 @@ function parseCustomProviderModelsMeta(
         return invalid(modelId, key);
       }
     }
-    meta[modelId] = statement;
+    // Only a stated fact makes an override entry; a model whose sizes all came
+    // from the catalog stores NOTHING (the store reads that as unstated, and
+    // the next read re-resolves from the same catalog).
+    if (Object.keys(statement).length > 0) meta[modelId] = statement;
   }
   // An entry for an id the form did not select is unreachable data: the row's
   // own read gate would reject it, so it is refused here instead.
@@ -3645,6 +3653,13 @@ const appSettingsRoute = async (c: DashboardContext) => {
             base_url: meta.baseUrl,
             api: meta.api,
             models: [...meta.models],
+            // The row's own endpoint: the SPA applies the same base-URL
+            // predicate the Worker does before it trusts `model_limits`.
+            catalog_base_url: meta.baseUrl,
+            // The per-model sizes the vendor directory states, keyed by model
+            // id. The model dialog pre-fills its blank fields from here and
+            // posts no override for a value the operator leaves untouched.
+            model_limits: MODEL_LIMITS[id] ?? {},
             verifiable: PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported",
             usage_probe: hasUsageProbe(id),
             eligibility: ompRuntime ? meta.tier : "unavailable",
@@ -3660,12 +3675,18 @@ const appSettingsRoute = async (c: DashboardContext) => {
             base_url: meta.baseUrl,
             api: meta.api,
             models: [...meta.models],
+            catalog_base_url: meta.baseUrl,
+            model_limits: MODEL_LIMITS[id] ?? {},
             verifiable: true,
             usage_probe: hasUsageProbe(id),
             eligibility: ompRuntime ? meta.tier : "unavailable",
             display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
           })),
       ],
+      // The vendor snapshot the per-model sizes came from: the model dialog
+      // names it beside a catalog-supplied value so the operator can judge
+      // how fresh it is.
+      model_limits_snapshot: MODEL_LIMITS_SNAPSHOT,
       model_role_ids: MODEL_ROLE_IDS,
       custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
       // (spec § Technical interfaces): the manage face's selector
@@ -4247,8 +4268,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // AL-23-1/AL-23-2 bound is checked here (400, zero writes —
     // the store re-validates as the backstop): provider id grammar
     // `[a-z0-9][a-z0-9-]{0,63}` (uppercased into the consumer's pool env
-    // prefix), no collision with a built-in OR in-image base provider id
-    // (QC wave-1 W-1 — ark-plan would be silently dead at synthesis), at
+    // prefix), no collision with a built-in provider id, at
     // most MAX_CUSTOM_PROVIDER_COUNT declarations per App (QC wave-1 W-2,
     // growth-only — updating an existing id always proceeds), baseUrl
     // https-only ≤2048, api one of the three-form enum, model_ids 1..128
@@ -4267,14 +4287,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     }
     if (PROVIDER_IDS.includes(providerId)) {
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerIdBuiltin, { provider: providerId });
-    }
-    // save-sandbox-image (QC wave-1 W-1's successor): an id the App's SELECTED sandbox
-    // image already declares as a capability host (omp: ark-plan) would be
-    // skipped by the base-wins synthesis merge on every review while its key
-    // still got injected, so the declaration is refused up front (the store's
-    // upsertCustomProvider re-checks against the same registry host ids).
-    if (sandboxImageHostIds(gate.app.sandbox_image_id).includes(providerId)) {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerIdBaseConfig, { provider: providerId });
     }
     // QC wave-1 W-2: declarations per App are capped (growth-only — an
     // update of an already-declared id never counts against the cap). The
@@ -4482,15 +4494,11 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.accountIdInvalid);
       }
     }
-    // The template id must not collide with a built-in or with a capability
-    // host of the App's selected sandbox image (defensive — the catalog's
-    // template tier is disjoint from both today, but a future template must
-    // not silently shadow one).
+    // The template id must not collide with a built-in provider id
+    // (defensive — the catalog's template tier is disjoint from it today, but a
+    // future template must not silently shadow one).
     if (PROVIDER_IDS.includes(templateId)) {
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateIdBuiltin, { template: templateId });
-    }
-    if (sandboxImageHostIds(gate.app.sandbox_image_id).includes(templateId)) {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateIdBaseConfig, { template: templateId });
     }
     const baseUrl = baseUrlTemplate.replace("{account_id}", accountId);
     if (!isValidCustomProviderBaseUrl(baseUrl)) {
@@ -4630,10 +4638,18 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       });
     }
     // Per-model facts (compass D10): checked BEFORE the store so a save that
-    // omits a required size writes nothing at all (ids included).
+    // omits a required size writes nothing at all (ids included). A size the
+    // operator left blank is resolved from the provider's catalog entry — but
+    // only when this declaration IS that catalog row (same base URL): a private
+    // endpoint reusing a catalog id must not inherit the vendor's numbers. Only
+    // a model with no size on either side is refused.
+    const declarationBaseUrl = (await store.listCustomProviders(gate.app.id)).find(
+      (row) => row.provider_id === providerId,
+    )?.base_url;
     const stated = parseCustomProviderModelsMeta(
       typeof form.models_meta === "string" ? form.models_meta : "",
       modelIds,
+      declarationBaseUrl === undefined ? {} : (catalogLimitsFor(providerId, declarationBaseUrl) ?? {}),
     );
     if ("error" in stated) {
       return settings400Response(c, gate.app.github_app_id, stated.error, stated.params);
@@ -4885,7 +4901,7 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
     // The pool owner picks the table: a declared custom/template provider's
     // rows live in the custom pool, every other provider id in the built-in
     // one. The two id spaces are disjoint by construction (a declaration
-    // colliding with a built-in id or an in-image capability host is refused),
+    // colliding with a built-in id is refused),
     // so the declaration is an exact discriminator, never a guess.
     const declaredCustom = (await store.listCustomProviders(gate.app.id)).some(
       (row) => row.provider_id === provider,
