@@ -210,7 +210,7 @@ jobs:
         run: bun run typecheck
 
       - name: Test
-        run: bun test
+        run: bun test --isolate
 
       - name: Build SPA
         run: bun run build:spa
