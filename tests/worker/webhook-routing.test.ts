@@ -1507,7 +1507,7 @@ describe("installation event path", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.installation_id).toBe(555);
     expect(rows[0]!.account_login).toBe("octo-org");
-    expect(rows[0]!.removed_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(rows[0]!.removed_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{3})?$/);
     expect(await createAppsStore(db).listInstallations(appRow.id)).toHaveLength(0);
     expect(deliveryRows(db, appRow.id)).toEqual([
       { event_name: "installation", outcome: "ignored", status_code: null },

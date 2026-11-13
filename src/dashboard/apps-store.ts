@@ -751,16 +751,16 @@ const UPSERT_INSTALLATION_SQL = {
   // visible again. An INFERRED login is ordinary review traffic and says
   // nothing about install state, so it never clears the stamp.
   authoritative: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
-    VALUES (?, ?, ?, ?, datetime('now'))
+    VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
     ON CONFLICT (app_id, installation_id) DO UPDATE SET
       account_login = COALESCE(excluded.account_login, account_login),
-      seen_at = datetime('now'),
+      seen_at = strftime('%Y-%m-%d %H:%M:%f','now'),
       removed_at = NULL`,
   inferred: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
-    VALUES (?, ?, ?, ?, datetime('now'))
+    VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
     ON CONFLICT (app_id, installation_id) DO UPDATE SET
       account_login = COALESCE(account_login, excluded.account_login),
-      seen_at = datetime('now')`,
+      seen_at = strftime('%Y-%m-%d %H:%M:%f','now')`,
 } as const;
 
 /** Create the github_apps / app_installations store over one D1 handle. */
@@ -1431,12 +1431,22 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The database's own UTC clock, in the `YYYY-MM-DD HH:MM:SS` text form every
-     * timestamp column uses. A caller captures this BEFORE an upstream read so
-     * `reconcileInstallations` can tell which rows predate the snapshot.
+     * The database's own UTC clock in the sub-second `YYYY-MM-DD HH:MM:SS.SSS`
+     * form (`strftime('%Y-%m-%d %H:%M:%f','now')`). A caller captures this
+     * BEFORE an upstream read so `reconcileInstallations` can tell which rows
+     * predate the snapshot.
+     *
+     * Sub-second on purpose: a plain `datetime('now')` marker makes every
+     * same-second comparison a tie, and the reconcile's two guards need strict
+     * order (`reconcileInstallations`). Lexicographic comparison stays valid
+     * because every writer of a compared column uses the same form, and a
+     * legacy second-resolution value is a prefix of — and therefore sorts
+     * before — any fractional value of the same second.
      */
     async currentTimestamp(): Promise<string> {
-      const row = await db.prepare("SELECT datetime('now') AS now").first<{ now: string }>();
+      const row = await db
+        .prepare(`SELECT strftime('%Y-%m-%d %H:%M:%f','now') AS now`)
+        .first<{ now: string }>();
       if (!row) throw new Error("D1 returned no clock row");
       return row.now;
     },
@@ -1448,6 +1458,9 @@ export function createAppsStore(db: AppsStoreD1) {
      * reference it. An unknown pair is a silent no-op: the delivery may
      * predate any local row, and refusing it would change the webhook answer.
      *
+     * Writes the sub-second form (`strftime('%Y-%m-%d %H:%M:%f','now')`) so a
+     * reconcile snapshot taken later in the same second still orders after it.
+     *
      * No order guard: a REPLAYED `installation.deleted` processed after a
      * reinstall's `installation.created` still stamps the row, because the
      * payload carries no reliable delivery order to compare. That window is
@@ -1457,7 +1470,7 @@ export function createAppsStore(db: AppsStoreD1) {
     async markInstallationRemoved(appId: string, installationId: number): Promise<void> {
       await db
         .prepare(
-          `UPDATE app_installations SET removed_at = datetime('now')
+          `UPDATE app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
            WHERE app_id = ? AND installation_id = ?`,
         )
         .bind(appId, installationId)
@@ -1472,13 +1485,24 @@ export function createAppsStore(db: AppsStoreD1) {
      * was missed. Rows are never deleted (see markInstallationRemoved); a null
      * `removed_at` is the only "present" state.
      *
-     * `observedAt` is the store clock captured BEFORE the listing was fetched.
-     * The list is a snapshot and the table is not, so both statements are
-     * gated on it: a row created after the snapshot (`seen_at > observedAt`) is
-     * absent from the list only because it did not exist yet, and a removal
-     * observed after it (`removed_at >= observedAt`) is newer news than the
-     * snapshot — neither may be rewritten. Both UPDATEs run in ONE batch, so
-     * the stamp and the clear commit together.
+     * `observedAt` is the store clock captured BEFORE the listing was fetched,
+     * in the sub-second `strftime('%Y-%m-%d %H:%M:%f','now')` form that every
+     * writer of a compared column also uses (`seen_at` in both upserts,
+     * `removed_at` from the webhook stamp and from this leg). The list is a
+     * snapshot and the table is not, so both statements are gated on it:
+     * stamp only `seen_at <= observedAt` (a row written after the snapshot
+     * carries a strictly greater fractional stamp and stays present) and clear
+     * only `removed_at < observedAt` (a removal delivered after the snapshot is
+     * newer news and survives).
+     *
+     * Same-second ties resolve the SAFE way on both legs because the marker is
+     * fractional: a new fractional value in the observation's second sorts
+     * after the observation, while a LEGACY second-resolution value
+     * (`datetime('now')`, a prefix of its fractional successor) sorts before
+     * it. So an old-style removal observed in the same second is still
+     * cleared, and a same-second row created after the snapshot is not
+     * stamped. Both UPDATEs run in ONE batch, so the stamp and the clear
+     * commit together.
      *
      * The snapshot (live ids + observation stamp) travels as ONE JSON value,
      * tested with `json_each`: each statement binds exactly TWO values
@@ -1501,7 +1525,7 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `WITH snapshot(body) AS (SELECT ?)
-             UPDATE app_installations SET removed_at = datetime('now')
+             UPDATE app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
              WHERE app_id = ?
                AND removed_at IS NULL
                AND seen_at <= (SELECT json_extract(body, '$.observedAt') FROM snapshot)

@@ -484,7 +484,7 @@ describe("apps-store (createAppsStore)", () => {
     expect(rows[0]!.app_id).toBe(app.id);
     expect(rows[0]!.installation_id).toBe(777);
     expect(rows[0]!.account_login).toBe("octocat");
-    expect(rows[0]!.seen_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(rows[0]!.seen_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{3})?$/);
 
     // Simulate time passing, then touch: same pair → still ONE row, seen_at
     // refreshed, login replaced because the writer is authoritative.
@@ -565,7 +565,7 @@ describe("apps-store (createAppsStore)", () => {
       .all() as Array<{ account_login: string | null; removed_at: string | null }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.account_login).toBe("old-org");
-    expect(rows[0]!.removed_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(rows[0]!.removed_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{3})?$/);
 
     // Ordinary review traffic (INFERRED) says nothing about install state…
     await s.upsertInstallation({ appId: app.id, installationId: 9, accountLogin: "inferred-owner" });
@@ -600,11 +600,10 @@ describe("apps-store (createAppsStore)", () => {
     expect(siblingRows).toEqual([expect.objectContaining({ installation_id: 3 })]);
 
     // GitHub lists 2 again (a reinstall): the stored stamp is cleared. The
-    // stamp is backdated so it is unambiguously OLDER than the next
-    // observation (the same-second case is the ordering test below).
-    db.raw
-      .prepare("UPDATE app_installations SET removed_at = '2020-01-01 00:00:00' WHERE installation_id = 2")
-      .run();
+    // stamp was written moments ago; let the store clock pass it by one
+    // millisecond so the clear is a strict later observation (a same-ms
+    // observation is the safe no-clear case, pinned separately below).
+    await Bun.sleep(2);
     await s.reconcileInstallations(app.id, [1, 2], await s.currentTimestamp());
     const restored = await s.listInstallations(app.id);
     expect(restored.map((row) => row.installation_id).sort()).toEqual([1, 2]);
@@ -634,13 +633,12 @@ describe("apps-store (createAppsStore)", () => {
     await s.upsertInstallation({ appId: app.id, installationId: 100, accountLogin: "in-100" });
     await s.upsertInstallation({ appId: app.id, installationId: 150, accountLogin: "in-150" });
     await s.markInstallationRemoved(app.id, 150);
-    db.raw
-      .prepare("UPDATE app_installations SET removed_at = '2020-01-01 00:00:00' WHERE installation_id = 150")
-      .run();
     await s.upsertInstallation({ appId: app.id, installationId: 151, accountLogin: "out-151" });
     await s.upsertInstallation({ appId: app.id, installationId: 999, accountLogin: "out-999" });
     const live = Array.from({ length: 150 }, (_, index) => index + 1);
 
+    // The removal was stamped above; the observation must be strictly later.
+    await Bun.sleep(2);
     await s.reconcileInstallations(app.id, live, await s.currentTimestamp());
 
     // The binding shape the test is named after: each statement binds one
@@ -652,6 +650,48 @@ describe("apps-store (createAppsStore)", () => {
     expect(rows.map((row) => row.installation_id).sort((a, b) => a - b)).toEqual([1, 100, 150]);
     const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
     expect(n.n).toBe(5); // nothing deleted
+  });
+
+  test("reconcileInstallations: a LEGACY second-resolution removal in the observation second is still cleared", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    // A removal written before the fractional marker existed: `datetime('now')`
+    // has no sub-second part, so it must sort BEFORE an observation taken in
+    // the same second — otherwise the row stays hidden until the next TTL.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at, removed_at) VALUES ('legacy', ?, 7, 'legacy-org', datetime('now'), datetime('now'))",
+      )
+      .run(app.id);
+    const observedAt = await s.currentTimestamp();
+
+    await s.reconcileInstallations(app.id, [7], observedAt);
+
+    expect(await s.listInstallations(app.id)).toEqual([
+      expect.objectContaining({ installation_id: 7 }),
+    ]);
+  });
+
+  test("reconcileInstallations: a row created with a fractional seen_at after the observation is not stamped", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    const observedAt = await s.currentTimestamp();
+    // An in-flight `installation.created`: written AFTER the snapshot, so its
+    // fractional seen_at is strictly greater and the stamp leg must skip it
+    // even though the fetched live set cannot contain it yet.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('in-flight', ?, 11, 'new-org', strftime('%Y-%m-%d %H:%M:%f','now','+0.010 seconds'))",
+      )
+      .run(app.id);
+
+    await s.reconcileInstallations(app.id, [], observedAt);
+
+    expect(await s.listInstallations(app.id)).toEqual([
+      expect.objectContaining({ installation_id: 11 }),
+    ]);
   });
 
   test("reconcileInstallations: rows newer than the observation stamp are neither stamped nor cleared", async () => {
