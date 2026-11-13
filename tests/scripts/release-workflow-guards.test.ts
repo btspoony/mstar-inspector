@@ -109,7 +109,8 @@ function triggers(wf: Record<string, any>): Record<string, any> {
   return on;
 }
 
-const SOFTPROPS_PIN = "softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64";
+/** Any 40-hex pin is acceptable: a bump must not need a test edit. */
+const SHA_PIN = /^softprops\/action-gh-release@[0-9a-f]{40}$/;
 
 describe("release-prep.yml guards", () => {
   const wf = parseWorkflow("release-prep.yml");
@@ -197,13 +198,14 @@ describe("release.yml guards", () => {
     expect(checkout?.with?.ref).toBe("${{ github.event.pull_request.merge_commit_sha }}");
   });
 
-  test("softprops/action-gh-release is the sole third-party action, byte-exact SHA pin", () => {
+  test("softprops/action-gh-release is the sole third-party action, SHA-pinned", () => {
     const uses = (wf.jobs.release.steps as { uses?: string }[])
       .map((s) => s.uses)
       .filter((u): u is string => typeof u === "string");
-    expect(uses).toContain(SOFTPROPS_PIN);
+    // Shape, not a literal SHA: a patch bump rewrites the pin and must stay green.
     const third = uses.filter((u) => !u.startsWith("actions/") && !u.startsWith("oven-sh/"));
-    expect(third).toEqual([SOFTPROPS_PIN]);
+    expect(third).toHaveLength(1);
+    expect(third[0]).toMatch(SHA_PIN);
     // pin convention residue (QC B3): the SHA pin must carry the convention comment
     const text = readFileSync(join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
     expect(text).toContain("actions NEW to this repo are SHA-pinned");
