@@ -673,23 +673,15 @@ describe("ompAgentRuntime.runReview — parent session", () => {
     });
   });
 
-  test("empty modelSelectors falls back to the default model pattern", async () => {
+  test("empty modelSelectors fails loud instead of inventing a provider", async () => {
     seatResults = [{ data: seatPayload() }];
-    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", modelSelectors: [] });
-
-    const options = createdOptions[0]!;
-    expect(options.modelPattern).toBe("ark/deepseek-v4-flash");
-    expect(options.settings).toEqual({
-      kind: "isolated",
-      overrides: {
-        "fetch.enabled": false,
-        "retry.modelFallback": true,
-        "retry.fallbackChains": { default: [] },
-      },
-    });
-    // The seat receives the same default the parent gets — never an empty
-    // (truthy) model list (PR #4 Bugbot High: `model: []` reaches the SDK).
-    expect(subagentRequests[0]!.model).toEqual(["ark/deepseek-v4-flash"]);
+    // There is no in-image default selector anymore: an empty chain is a
+    // caller bug, not a reason to run a provider the product never declared.
+    await expect(
+      ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", modelSelectors: [] }),
+    ).rejects.toThrow(/no model selector/);
+    expect(createdOptions).toHaveLength(0);
+    expect(subagentRequests).toHaveLength(0);
   });
 
   test("installs seat-agent.md into the PR clone at .omp/agents/ and removes it afterwards", async () => {
@@ -1390,16 +1382,19 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
     ]).toEqual({ default: [...BASE_INPUT.modelSelectors] });
   });
 
-  test("quick/default: the seat override wins even when the global chain falls back to the default pattern", async () => {
+  test("quick/default: a seat override cannot stand in for a missing global chain", async () => {
     seatResults = [{ data: seatPayload() }];
-    await ompAgentRuntime.runReview({
-      ...BASE_INPUT,
-      level: "quick",
-      modelSelectors: [],
-      modelOverrides: { "mstar-review-seat": "ark/override-model" },
-    });
-
-    expect(subagentRequests[0]!.model).toEqual(["ark/override-model"]);
+    // The parent session needs a model too; an override only replaces one
+    // seat's model, so an empty chain still fails before any session exists.
+    await expect(
+      ompAgentRuntime.runReview({
+        ...BASE_INPUT,
+        level: "quick",
+        modelSelectors: [],
+        modelOverrides: { "mstar-review-seat": "ark/override-model" },
+      }),
+    ).rejects.toThrow(/no model selector/);
+    expect(createdOptions).toHaveLength(0);
   });
 
   test("quick/default: overrides for other seats and blank values leave today's synthesis untouched", async () => {
