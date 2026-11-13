@@ -85,6 +85,7 @@ const detailPayload = (): SettingsManagePayload => ({
   allowlist: { enabled: false, owners: [] },
   keys: [],
   model_chain: null,
+  model_limits_snapshot: "2026-01-01",
   model_roles: {},
   model_chains: [],
   custom_providers: [],
@@ -164,12 +165,12 @@ describe("settings dropdowns", () => {
     expect(source).not.toContain("<select name={`role_${role}`}");
   });
 
-  test("composeModelOptions prefixes the cache provider (including ark-plan) and custom ids", () => {
+  test("composeModelOptions prefixes the cache provider (including ark) and custom ids", () => {
     const groups = composeModelOptions(
-      [{ provider: "ark-plan", models: ["doubao"], fetched_at: "t" }],
+      [{ provider: "ark", models: ["doubao"], fetched_at: "t" }],
       [{ provider_id: "acme", model_ids: ["fast"], has_keys: true }],
     );
-    expect(groups.map((g) => g.selectors).flat()).toEqual(["ark-plan/doubao", "acme/fast"]);
+    expect(groups.map((g) => g.selectors).flat()).toEqual(["ark/doubao", "acme/fast"]);
   });
 
   test("parseModels accepts grouped selector grammar and rejects a bad source", () => {

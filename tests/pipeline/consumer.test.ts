@@ -535,12 +535,12 @@ describe("createReviewConsumer", () => {
     ]);
     // The runner input JSON carries the reconFacts the runtime folds into
     // the envelope target (owner/repo#pr + the AUTHORITATIVE checkout sha),
-    // the numstat seat-partition universe, and the App's resolved
-    // sandbox image's capability hosts — the in-image synthesis base.
+    // the numstat seat-partition universe, and an EMPTY capability-host base —
+    // the image declares no provider; the App's own declarations are the surface.
     expect(JSON.parse(sandbox.writtenInputJson!)).toEqual({
       worktreePath: "/workspace/repo",
       reconFacts: ["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"],
-      capabilityHosts: getSandboxImage("omp")!.hosts,
+      capabilityHosts: [],
       // The input names the ABSOLUTE instant the exec is killed at, so the
       // runner anchors its own review deadline there (a duration would be
       // re-added onto its late start).
@@ -581,7 +581,7 @@ describe("createReviewConsumer", () => {
       env: {
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
-        OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash",
+        OMP_REVIEW_MODEL: "ark/deepseek-v4-flash",
       },
       stdin: encodeCredentialPayload({ ark: ["ark-key"] }),
       timeout: expect.any(Number),
@@ -654,7 +654,7 @@ describe("createReviewConsumer", () => {
     // Version records (AL-24-5): the seed App's own chain is
     // the only chain source — `model` records its head selector (never NULL
     // on a new row); `provider` is NULL on BOTH paths (architect AL-2).
-    expect(row.model).toBe("ark-plan/deepseek-v4-flash");
+    expect(row.model).toBe("ark/deepseek-v4-flash");
     expect(row.provider).toBeNull();
     const findings = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(findings.n).toBe(1);
@@ -2494,7 +2494,7 @@ describe("createReviewConsumer", () => {
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // The chain's openrouter provider needs its per-App key (fail-closed gate).
-    await seedAppConfig(db, TEST_APP_ID, "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4", {
+    await seedAppConfig(db, TEST_APP_ID, "ark/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4", {
       openrouter: sk("or-app"),
     });
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
@@ -2512,7 +2512,7 @@ describe("createReviewConsumer", () => {
       env: {
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
-        OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
+        OMP_REVIEW_MODEL: "ark/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
       },
       timeout: 600_000,
     });
@@ -2526,7 +2526,7 @@ describe("createReviewConsumer", () => {
       model: string | null;
       provider: string | null;
     };
-    expect(versionRow.model).toBe("ark-plan/deepseek-v4-flash");
+    expect(versionRow.model).toBe("ark/deepseek-v4-flash");
     expect(versionRow.provider).toBeNull();
   });
 
@@ -2740,9 +2740,9 @@ describe("createReviewConsumer", () => {
         await box.encryptSecret(TEST_APP_PEM, `github_apps.private_key_enc:${appId}`),
         await box.encryptSecret("whsec-legacy-app", `github_apps.webhook_secret_enc:${appId}`),
       );
-    const preChain = "ark-plan/deepseek-v4-flash";
+    const preChain = "ark/deepseek-v4-flash";
     const preOverrides = {
-      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+      "mstar-review-seat": "ark/deepseek-v4-flash:high",
       "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
     };
     db.raw

@@ -293,7 +293,7 @@ describe("createArtifactStore().put", () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
-    await store.put(reviewDoc({ model: "ark-plan/deepseek-v4-flash", provider: null }));
+    await store.put(reviewDoc({ model: "ark/deepseek-v4-flash", provider: null }));
     await store.put(
       reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "f".repeat(40) }), model: null }),
     );
@@ -310,7 +310,7 @@ describe("createArtifactStore().put", () => {
       model: string | null;
       provider: string | null;
     };
-    expect(withModel.model).toBe("ark-plan/deepseek-v4-flash");
+    expect(withModel.model).toBe("ark/deepseek-v4-flash");
     expect(withModel.provider).toBeNull();
     const explicitNull = db.raw
       .query("SELECT model, provider FROM reviews WHERE head_sha = ?")

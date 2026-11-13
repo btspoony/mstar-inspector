@@ -14,13 +14,14 @@
  * packages/{shared,runner}/src).
  *
  * Inputs (three pinned):
- *   1. `scripts/provider-catalog/models.dev-2026-11-06.json` — a trimmed
+ *   1. `scripts/provider-catalog/models.dev-2026-11-13.json` — a trimmed
  *      snapshot of the ai-sdk ecosystem directory dataset (models.dev,
- *      fetched 2026-11-06 from https://models.dev/api.json; trimmed to the
+ *      fetched 2026-11-13 from https://models.dev/api.json; trimmed to the
  *      fields this generator consumes: id / name / env / api / doc /
- *      model_ids). The snapshot date is the pin — regeneration against a
- *      newer snapshot is a deliberate, reviewed act. In this snapshot the
- *      `api` field carries the provider's default base URL.
+ *      model_ids / limits). The snapshot date is the pin — regeneration
+ *      against a newer snapshot is a deliberate, reviewed act. In this
+ *      snapshot the `api` field carries the provider's default base URL and
+ *      `limits` carries every model's `{context, output}` token sizes.
  *   2. The omp-facing override table below — the SSOT for the runner
  *      contract: the 19 builtin ids in mapping order, their labels (the
  *      existing picker labels) and their env-name injection names (omp's
@@ -51,6 +52,13 @@
  *       a custom-provider declaration, so it must satisfy the same grammar;
  *       counted separately in the header.
  *
+ * Outputs (one run, two artifacts):
+ *   1. `src/contracts/provider-catalog.generated.ts` — the catalog.
+ *   2. `src/contracts/provider-model-limits.generated.ts` — the per-model
+ *      size table (context window / max output), restricted to the provider
+ *      and model ids artifact 1 lists, so an operator's blank size field can
+ *      be filled from the directory instead of retyped.
+ *
  * Generation-time dependencies: NONE beyond Node builtins + the two vendored
  * snapshots (the "exact-pin" requirement is satisfied by the dated snapshot;
  * no npm package is installed for generation).
@@ -58,9 +66,14 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const SNAPSHOT_PATH = path.resolve("scripts/provider-catalog/models.dev-2026-11-06.json");
+const SNAPSHOT_DATE = "2026-11-13";
+const SNAPSHOT_PATH = path.resolve(`scripts/provider-catalog/models.dev-${SNAPSHOT_DATE}.json`);
 const OMP_SNAPSHOT_PATH = path.resolve("scripts/provider-catalog/omp-api-key-providers.json");
 const OUT_PATH = path.resolve("src/contracts/provider-catalog.generated.ts");
+const OUT_LIMITS_PATH = path.resolve("src/contracts/provider-model-limits.generated.ts");
+
+/** The size fields this generator consumes from each model's `limit` row. */
+type SnapshotLimit = { context?: number; output?: number };
 
 type SnapshotProvider = {
   id: string;
@@ -69,7 +82,11 @@ type SnapshotProvider = {
   api: string | null;
   doc: string | null;
   model_ids: string[];
+  limits?: Record<string, SnapshotLimit>;
 };
+
+/** One model's sizes in the generated table, in tokens. */
+type ModelLimit = { contextWindow: number; maxTokens: number };
 
 /** The vendored omp provider union input (`omp-api-key-providers.json`). */
 type OmpSnapshot = {
@@ -264,13 +281,18 @@ const ALLOWED_URL_PLACEHOLDERS: Record<string, true> = { account_id: true };
 export function buildCatalog(
   snapshot: Record<string, SnapshotProvider>,
   omp?: OmpSnapshot,
-): { catalog: Record<string, unknown>; audit: BreadthAudit } {
+): { catalog: Record<string, unknown>; audit: BreadthAudit; sources: Record<string, string> } {
   const catalog: Record<string, unknown> = {};
+  // catalog provider id → the models.dev snapshot key carrying its model
+  // vocabulary. Only source-backed rows can contribute model sizes; the omp
+  // union rows (own vocabulary) and local-only rows (cursor) have none.
+  const sources: Record<string, string> = {};
   for (const spec of BUILTIN_ORDER) {
     const source = spec.sourceKey === undefined ? undefined : snapshot[spec.sourceKey];
     if (spec.sourceKey !== undefined && source === undefined) {
       throw new Error(`snapshot is missing source key ${JSON.stringify(spec.sourceKey)} — stale snapshot?`);
     }
+    if (spec.sourceKey !== undefined) sources[spec.id] = spec.sourceKey;
     const sourceModels = source?.model_ids ?? [];
     const models = spec.modelCount === undefined ? sourceModels : sourceModels.slice(0, spec.modelCount);
     catalog[spec.id] = {
@@ -293,6 +315,14 @@ export function buildCatalog(
       models: tpl.models,
       doc: tpl.doc,
     };
+  }
+  // A deduped curated template still draws its model vocabulary from the
+  // snapshot row it replaces (the workers-ai models are the directory's @cf
+  // ids), so sizes are resolvable for it.
+  for (const [snapshotKey, catalogId] of Object.entries(TEMPLATE_DEDUPE_SNAPSHOT_KEYS)) {
+    if (Object.hasOwn(catalog, catalogId) && !Object.hasOwn(sources, catalogId) && Object.hasOwn(snapshot, snapshotKey)) {
+      sources[catalogId] = snapshotKey;
+    }
   }
   const builtinSourceKeys = new Set(
     BUILTIN_ORDER.filter((spec) => spec.sourceKey !== undefined).map((spec) => spec.sourceKey!),
@@ -344,6 +374,7 @@ export function buildCatalog(
         `snapshot key ${JSON.stringify(key)} would overwrite the existing ${shadowed.tier} entry ${JSON.stringify(shadowed.label)} — extend the exclusion/dedupe tables in this generator or fix the snapshot`,
       );
     }
+    sources[key] = key;
     catalog[key] = {
       label: source.name,
       tier: "template",
@@ -485,15 +516,63 @@ export function buildCatalog(
       }
     }
   }
-  return { catalog, audit };
+  return { catalog, audit, sources };
+}
+
+/** Keep a snapshot model's sizes only when both are usable token counts —
+ *  a missing or non-positive half would silently become a zero in the table. */
+function modelLimitOf(raw: SnapshotLimit | undefined): ModelLimit | undefined {
+  const context = raw?.context;
+  const output = raw?.output;
+  if (typeof context !== "number" || typeof output !== "number") return undefined;
+  if (!Number.isInteger(context) || !Number.isInteger(output)) return undefined;
+  if (context <= 0 || output <= 0) return undefined;
+  return { contextWindow: context, maxTokens: output };
+}
+
+/** Per-model sizes for exactly the providers/models the catalog lists. A
+ *  source-backed row with no resolvable size is a data defect (the snapshot
+ *  dropped a model the catalog still carries), not a silent omission — only
+ *  rows that draw their vocabulary from somewhere else (the omp union, the
+ *  local-only cursor row) stay out, and they are named in the generated
+ *  header. */
+function buildModelLimits(
+  catalog: Record<string, unknown>,
+  sources: Record<string, string>,
+  snapshot: Record<string, SnapshotProvider>,
+): { limits: Record<string, Record<string, ModelLimit>>; skipped: string[] } {
+  const limits: Record<string, Record<string, ModelLimit>> = {};
+  const skipped: string[] = [];
+  for (const [providerId, entry] of Object.entries(catalog)) {
+    const sourceKey = sources[providerId];
+    const source = sourceKey === undefined ? undefined : snapshot[sourceKey];
+    const row: Record<string, ModelLimit> = {};
+    for (const modelId of (entry as { models: string[] }).models) {
+      const size = modelLimitOf(source?.limits?.[modelId]);
+      if (size !== undefined) row[modelId] = size;
+    }
+    if (Object.keys(row).length === 0) {
+      if (sourceKey !== undefined) {
+        throw new Error(
+          `catalog provider ${JSON.stringify(providerId)} draws its models from snapshot key ${JSON.stringify(sourceKey)} but none of them carries a usable limit — fix the snapshot or the curated model vocabulary`,
+        );
+      }
+      skipped.push(providerId);
+      continue;
+    }
+    limits[providerId] = row;
+  }
+  return { limits, skipped };
 }
 
 async function main(): Promise<void> {
   const snapshot = JSON.parse(await readFile(SNAPSHOT_PATH, "utf8")) as Record<string, SnapshotProvider>;
   const omp = JSON.parse(await readFile(OMP_SNAPSHOT_PATH, "utf8")) as OmpSnapshot;
-  const { catalog, audit } = buildCatalog(snapshot, omp);
+  const { catalog, audit, sources } = buildCatalog(snapshot, omp);
+  const { limits, skipped } = buildModelLimits(catalog, sources, snapshot);
 
   const catalogLiteral = JSON.stringify(catalog, null, 2);
+  const limitsLiteral = JSON.stringify(limits, null, 2);
   const builtinIdsLiteral = JSON.stringify(BUILTIN_ORDER.map((spec) => spec.id), null, 2);
   const commonIdsLiteral = JSON.stringify(COMMON_PROVIDER_IDS, null, 2);
   const wrapList = (items: string[]): string => (items.length === 0 ? "(none)" : items.join(", "));
@@ -532,7 +611,7 @@ async function main(): Promise<void> {
  * an explicit, reviewable regeneration commit.
  *
  * Source: pinned models.dev snapshot
- * \`scripts/provider-catalog/models.dev-2026-11-06.json\` (fetched 2026-11-06
+ * \`scripts/provider-catalog/models.dev-${SNAPSHOT_DATE}.json\` (fetched ${SNAPSHOT_DATE}
  * from https://models.dev/api.json; the \`api\` field carries the base URL)
  * + the omp-facing override table in the generator (labels / env-name
  * contract / workers-ai template) + the vendored omp provider snapshot
@@ -640,12 +719,51 @@ export const TEMPLATE_PROVIDERS: Record<string, ProviderCatalogEntry> = Object.f
   // mirror is now a direct re-export of this module, so the lock
   // guards the re-export instead of a hand-maintained copy.
   await writeFile(OUT_PATH, moduleSource, "utf8");
+
+  const modelCount = Object.values(limits).reduce((total, row) => total + Object.keys(row).length, 0);
+  const limitsModuleSource = `/**
+ * GENERATED FILE — per-model size table (context window / max output) for the
+ * provider catalog. DO NOT EDIT BY HAND — regenerate with
+ * \`bun run scripts/generate-provider-catalog.ts\`.
+ *
+ * Source: \`scripts/provider-catalog/models.dev-${SNAPSHOT_DATE}.json\` (fetched
+ * ${SNAPSHOT_DATE} from https://models.dev/api.json; each model carries
+ * \`limit: { context, output }\`). Only providers and model ids that the
+ * generated provider catalog lists are carried here — the table exists to fill
+ * an operator's blank size fields, not to mirror the whole directory.
+ *
+ * Coverage: ${Object.keys(limits).length} of ${Object.keys(catalog).length} catalog providers, ${modelCount} model entries. The omitted
+ * ${skipped.length} providers carry no models.dev model row at all (their
+ * vocabulary comes from the vendored omp provider snapshot, or the row is
+ * local-only metadata), so the table states no number for them instead of
+ * inventing one:
+ *   ${wrapList(skipped)}
+ *
+ * Static data, zero imports, zero network: the Worker, the dashboard and the
+ * sandbox image only ever import this module.
+ */
+
+/** One model's sizes, in tokens. */
+export type ModelLimit = { contextWindow: number; maxTokens: number };
+
+/** The snapshot date the table was generated from (shown as the value's source). */
+export const MODEL_LIMITS_SNAPSHOT = ${JSON.stringify(SNAPSHOT_DATE)};
+
+/** provider id → model id → sizes. */
+export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, ModelLimit>>>> = Object.freeze(${limitsLiteral});
+`;
+  await writeFile(OUT_LIMITS_PATH, limitsModuleSource, "utf8");
   console.log(
     `wrote ${OUT_PATH} (${moduleSource.length} bytes): ` +
       `${BUILTIN_ORDER.length} builtin + ${Object.keys(TEMPLATES).length} curated template + ${audit.breadthCount} breadth templates; ` +
       `skips: ${audit.excludedSourceKeys.length} sourceKey / ${audit.dedupedKeys.length} dedupe / ${audit.idPatternFails.length} id-pattern; ` +
       `omp union: ${audit.ompRowCount} rows / ${audit.ompAlreadyPresent.length} present / ${audit.ompAliasSkips.length} alias / ` +
       `${audit.ompNonModel.length} non-model / ${audit.ompNotMaterializable.length} not-materializable`,
+  );
+  console.log(
+    `wrote ${OUT_LIMITS_PATH} (${limitsModuleSource.length} bytes): ` +
+      `${Object.keys(limits).length}/${Object.keys(catalog).length} catalog providers, ${modelCount} model entries, ` +
+      `${skipped.length} providers without a models.dev model row`,
   );
 }
 

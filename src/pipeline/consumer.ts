@@ -10,8 +10,7 @@
  * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
  * universe) → write the runner `--input` JSON (reconFacts, plus the per-App
  * `modelOverrides` role map; no-map App = byte-identical
- * payload; plus the resolved image's capability hosts (the
- * in-image synthesis base) → exec the
+ * payload) → exec the
  * in-image runner `--level <quick|default|deep>` (exec env =
  * provider credential pools + PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT +
  * OMP_REVIEW_MODEL; all key material and the model chain come ONLY from
@@ -214,7 +213,11 @@ import { getRecheckAssignmentMaxBytes, readDefaultReviewLevel } from "../dashboa
 import {
   createAppConfigStore,
   type CustomProviderConsumerConfig,
+  type CustomProviderModelMeta,
+  type CustomProviderModelsMeta,
 } from "../dashboard/app-config-store";
+import { resolveModelSize } from "../contracts/provider-models";
+import { catalogLimitsFor } from "../contracts/provider-catalog-limits";
 import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandbox-images";
 // §7.10 Check seam implementation: `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
@@ -3094,9 +3097,8 @@ async function resolveCustomProviders(
  * appear via a direct DB write or a registry contraction, and it must never
  * start a sandbox. Runs BEFORE the in-flight guard / sandbox (zero side
  * effects on failure, F-001 structured channel via the caller's catch) and
- * BEFORE `assertAppConfigComplete`, which resolves host ids to catalog
- * provider ids; the definition's hosts also ride the runner input as the
- * synthesis base (`capabilityHosts`). Re-read per message (no cache)
+ * BEFORE `assertAppConfigComplete`. The definition is used later, when the
+ * sandbox is created; it declares no provider and no model. Re-read per message (no cache)
  * so a dashboard image update applies to the very next review.
  */
 async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<SandboxImageDefinition> {
@@ -3124,6 +3126,12 @@ async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps)
  * The runner-input projection of one consumer config: the declaration with
  * the API keys stripped. Provider keys ride only the runner's stdin credential
  * payload (under the declaration's own provider id).
+ *
+ * Sizes are resolved HERE, not stored: the operator's statement wins per field
+ * and the provider catalog fills a blank one. The runner has no catalog of its
+ * own (the image copies package sources only), so a size left unresolved would
+ * reach the synthesized models.yml as absent. A model with a fact on neither
+ * side keeps the bare id entry it has always had.
  */
 function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomProviderDeclaration {
   const declaration: CustomProviderDeclaration = {
@@ -3132,18 +3140,24 @@ function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomP
     api: provider.api,
     model_ids: [...provider.model_ids],
   };
-  // Absent stays absent: a declaration that states nothing must reach the
-  // runner WITHOUT the field. An empty object would be the different claim
-  // "the owner stated nothing about any model", which the synthesis would then
-  // have to disambiguate from an absence. Values are copied, never invented.
-  if (provider.models_meta !== undefined) {
-    declaration.models_meta = Object.fromEntries(
-      Object.entries(provider.models_meta).map(([modelId, meta]) => [
-        modelId,
-        { ...meta, ...(meta.input === undefined ? {} : { input: [...meta.input] }) },
-      ]),
-    );
+  // The vendor's numbers describe the vendor's endpoint; a private endpoint
+  // reusing a catalog id must not inherit them.
+  const catalog = catalogLimitsFor(provider.provider_id, provider.base_url);
+  const meta: CustomProviderModelsMeta = {};
+  for (const modelId of provider.model_ids) {
+    const declared = provider.models_meta?.[modelId];
+    const resolved = resolveModelSize(declared, catalog?.[modelId]);
+    const entry: CustomProviderModelMeta = {};
+    if (resolved.contextWindow !== undefined) entry.contextWindow = resolved.contextWindow;
+    if (resolved.maxTokens !== undefined) entry.maxTokens = resolved.maxTokens;
+    if (declared?.name !== undefined) entry.name = declared.name;
+    if (declared?.reasoning !== undefined) entry.reasoning = declared.reasoning;
+    if (declared?.input !== undefined) entry.input = [...declared.input];
+    if (Object.keys(entry).length > 0) meta[modelId] = entry;
   }
+  // Absent when neither the declaration nor the catalog states anything: the
+  // synthesis then emits the bare `- id:` entry it has always emitted.
+  if (Object.keys(meta).length > 0) declaration.models_meta = meta;
   return declaration;
 }
 
@@ -3209,17 +3223,12 @@ function chainHeadSelector(chain: string | undefined): string | null {
  * resolution and BEFORE the in-flight guard/sandbox, so a misconfigured App
  * fails with zero side effects.
  *
- * `sandboxImage` is the App's resolved registry entry
- * (resolveSandboxImage): a chain provider id that is one of its capability
- * hosts (e.g. omp's `ark-plan`) maps to that host's catalog provider id.
- * Capability hosts are runtime capabilities of the selected image, not App
  */
 function assertAppConfigComplete(
   appCfg: RunnerAppConfig,
   customProviders: readonly CustomProviderConsumerConfig[] | undefined,
   modelOverrides: Record<string, string> | undefined,
   appId: string,
-  sandboxImage: SandboxImageDefinition,
 ): void {
   const chain = appCfg.modelChain === null ? "" : appCfg.modelChain.trim();
   // AL-24-5 fail-closed: a chain must contain at least one non-empty
@@ -3243,8 +3252,6 @@ function assertAppConfigComplete(
   for (const decl of customProviders ?? []) {
     if (decl.api_keys.some((key) => key.trim() !== "")) availableProviders.add(decl.provider_id);
   }
-  const hostProviders = new Map(sandboxImage.hosts.map((host) => [host.id, host.catalogProviderId]));
-  const neededProvider = (provider: string): string => hostProviders.get(provider) ?? provider;
   // Every chain that must resolve to configured keys: the App's modelChain
   // plus each per-role override's selector chain (Bugbot 7aaf18f4 — the
   // app_model_roles selectors reach the runner as the `modelOverrides`
@@ -3283,10 +3290,14 @@ function assertAppConfigComplete(
       const selector = segment.trim();
       if (selector === "") continue; // the runner drops empty segments too
       const provider = selector.split("/")[0]!.trim();
-      if (!availableProviders.has(neededProvider(provider))) {
+      if (!availableProviders.has(provider)) {
         const where = role === null ? "" : `role override \`${role}\` `;
+        // A retired alias is not a missing key: the image declares no provider
+        // anymore, so the chain must name a provider the runtime can serve.
         throw new Error(
-          `per-App config incomplete: app ${appId}: ${where}provider ${provider} has no configured key`,
+          provider === "ark-plan"
+            ? `per-App config incomplete: app ${appId}: ${where}the ark-plan provider was removed — point the chain at a provider the runtime serves (a built-in catalog provider with its key configured, or your own declaration)`
+            : `per-App config incomplete: app ${appId}: ${where}provider ${provider} has no configured key`,
         );
       }
     }
@@ -4347,22 +4358,20 @@ async function processMessage(
     // github_apps.sandbox_image_id through the CLOSED registry and fails
     // closed (structured, non-secret error) on unknown/disabled ids —
     // BEFORE the in-flight guard and sandbox creation, so an invalid id
-    // never starts a container. The resolved definition feeds the
-    // config gate below (capability-host env-name mapping) and the runner
-    // input (the synthesis base's capability hosts).
-    const sandboxImage = await resolveSandboxImage(payload, deps);
+    // never starts a container. The definition itself is used later, at
+    // sandbox creation; resolution happens here for the fail-closed order.
+    await resolveSandboxImage(payload, deps);
     // AL-24-5 fail-closed gate: after App resolution,
     // BEFORE the in-flight guard / sandbox. The App's modelChain is the ONLY
     // chain source and every chain provider must have a key in the App's OWN
-    // config (BYOK allowlist key — incl. `ark` for the ark-plan base
-    // provider — or a custom declaration); the SAME requirement now covers
+    // config (a BYOK allowlist key or a custom declaration); the SAME requirement now covers
     // every per-role override selector chain (Bugbot 7aaf18f4). A
     // misconfigured App throws here
     // and flows through the F-001 structured channel (error log +
     // review_failures stage="pipeline" row + rethrow → retry×3 → DLQ) with
     // ZERO side effects — no webhook-face reject, no pause state, no runtime
     // guard beyond this channel (AL-24-5 verdict 3).
-    assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.appRef.appId, sandboxImage);
+    assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.appRef.appId);
     // 0. Review admission (WF-002 / bugbot BB-3 + review-concurrency §1.2):
     // ONE conditional D1 insert is both the per-PR lock and the capacity
     // reservation, so a duplicate for this PR or a reached cap returns the
@@ -5249,10 +5258,9 @@ async function processMessage(
     // when declarations resolved above. No-declaration messages serialize
     // byte-identically to the pre-declarations payload (the runner-side guard +
     // synthesis ride alongside).
-    // The resolved image's capability hosts ride ALWAYS (keyless
-    // registry data) — the in-image synthesizer's base (it cannot import the
-    // contract: the runner module graph stays inside packages/runner/src +
-    // packages/shared/src, tests/review/runtime-boundary).
+    // The capability-host base rides ALWAYS as an EMPTY array: the image
+    // declares no provider, so the per-review models.yml is the App's own
+    // declarations (a built-in provider resolves from the SDK catalog).
     // PR context for the report seat (best-effort): the description plus the
     // issues it closes/references, read through gh with the same exec env the
     // diff uses. Bounded by the DERIVED runner deadline (each read gets what
@@ -5282,7 +5290,10 @@ async function processMessage(
     const runnerInput = {
       worktreePath: CLONE_DIR,
       reconFacts,
-      capabilityHosts: sandboxImage.hosts,
+      // No image-declared base provider: the per-review models.yml is the
+      // App's own declarations, and built-in providers resolve from the
+      // runtime's own catalog.
+      capabilityHosts: [],
       // The absolute instant the exec below is killed at: the runner anchors
       // its own review deadline there, so a shortened round plans synthesis
       // inside the exec it runs under instead of the level's whole tier cap.

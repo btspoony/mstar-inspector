@@ -10,15 +10,13 @@
  *   - `--level` is the review tier (quick | default | deep); anything else is a
  *     usage error (the runtime itself rejects unknown levels as well);
  *   - `--input <json-file>` carries the review job as JSON:
- *       - `capabilityHosts` — REQUIRED array of the App's
- *         selected sandbox image's capability hosts (the consumer resolves
- *         them from the source-controlled registry and passes them verbatim;
- *         keyless — `apiKeyEnv`/`auth` are retained registry metadata, not
- *         active key-resolution inputs). The runner ALWAYS
+ *       - `capabilityHosts` — REQUIRED array, EMPTY on every production
+ *         run: the image declares no provider and no model. The runner ALWAYS
  *         synthesizes a COMPLETE per-review models.yml
- *         (/tmp/omp-agent-<uuid>/models.yml) with the capability hosts as the
- *         base — the baked in-image models.yml was removed — and rides
- *         that directory as the runtime `agentDir` (required for every run);
+ *         (/tmp/omp-agent-<uuid>/models.yml) — the App's own declarations plus
+ *         this (empty) base — and rides that directory as the runtime
+ *         `agentDir` (required for every run). A non-empty entry is still
+ *         accepted for a runtime that ships its own base providers;
  *       - `worktreePath` (string) — the in-container PR clone path; defaults
  *         to the process cwd;
  *       - `reconFacts` (string[]) — per-seat recon facts (owner/repo#pr, head
@@ -33,9 +31,9 @@
  *         apiKey pin, `auth: oauth`); each provider's key pool rides the STDIN
  *         credential payload under its own provider id and is loaded into the
  *         run's in-memory credential store; a
- *         declaration whose id collides with a capability host is skipped
- *         (capability/base wins, AL-23-1) with a structured stderr warn
- *         (id + count, no keys); absent/empty = the capability base alone.
+ *         declaration whose id collides with a base provider is skipped
+ *         (base wins, AL-23-1) with a structured stderr warn
+ *         (id + count, no keys); absent/empty = the (empty) base alone.
  *   - stdout carries ONLY the mstar.review/v1 envelope JSON (validated by
  *     validateMstarReviewV1 inside the runtime); all diagnostics to stderr;
  *   - optional `--recheck-out <path>` (spec review-lifecycle
@@ -281,18 +279,17 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
   }
   const record = parsed as Record<string, unknown>;
   const input = {} as RunnerInputJson;
-  // The capability hosts are the base of the synthesized
-  // models.yml — REQUIRED (there is no baked in-image base to fall back to).
-  // Shape validation ONLY: the values are consumer-resolved registry data
-  // (source-controlled, keyless); the generator emits them verbatim.
+  // The capability hosts are the base of the synthesized models.yml —
+  // REQUIRED as a field (there is no baked in-image base), EMPTY on production
+  // runs. Shape validation ONLY: a runtime-supplied base is registry data
+  // (keyless); the generator emits it verbatim.
   if (!Array.isArray(record.capabilityHosts)) {
     throw new Error("input JSON field `capabilityHosts` must be an array of capability hosts");
   }
-  // There is no baked in-image base: an empty array would synthesize a
-  // header-only models.yml (qc2 S2 / qc3 S-2) — reject it as a shape violation.
-  if (record.capabilityHosts.length === 0) {
-    throw new Error("input JSON field `capabilityHosts` must be a non-empty array of capability hosts");
-  }
+  // An empty array is the normal run: the per-review models.yml is the App's
+  // own provider declarations alone, and built-in providers resolve from the
+  // SDK's catalog. The array stays REQUIRED so the input shape is explicit.
+
   input.capabilityHosts = record.capabilityHosts.map((entry, index) => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
       throw new Error(`input JSON field \`capabilityHosts\`[${index}] must be an object`);
@@ -493,13 +490,12 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
  * the session resolves credentials under. Two identity sources, in order:
  *
  *   1. DECLARED identity (what the synthesis itself puts in models.yml) —
- *      capability-host blocks pool under their catalog provider id (omp's
- *      `ark-plan` ↔ the payload's `ark` entry: the consumer's key space is the
- *      App-config provider id), custom declarations under their own id. A
- *      custom id colliding with a capability host is skipped here too
- *      (capability/base wins, same rule as the synthesis).
+ *      a base-provider block pools under its catalog provider id, custom
+ *      declarations under their own id. A custom id colliding with a base
+ *      provider is skipped here too (base wins, same rule as the synthesis).
+ *      Production runs carry no base provider, so this is the custom path.
  *   2. THE PAYLOAD'S OWN ENTRIES — a BUILT-IN catalog provider (`openai`,
- *      `azure-openai`, …) is neither a capability host nor a custom
+ *      `azure-openai`, …) is neither a base provider nor a custom
  *      declaration, so its transported pool carries no declared identity and
  *      resolves under its own provider id. A pool key or provider id already
  *      claimed above is never loaded twice.
@@ -811,18 +807,17 @@ export async function main(
       // deadline back. It runs after the input is parsed because only the input
       // carries that deadline, and still before the runtime starts.
       anchorRecheckDeadline(Date.now(), level, json.outerDeadlineEpochMs);
-      // (AL-23-1): EVERY run synthesizes the
-      // COMPLETE per-review models.yml (/tmp/omp-agent-<uuid>/) — the App's
-      // selected image's capability hosts are the base, the custom-provider
-      // declarations merge into it — and the directory rides as `agentDir` (the
-      // SDK reads <agentDir>/models.yml instead of the retired in-image file).
+      // (AL-23-1): EVERY run synthesizes the COMPLETE per-review models.yml
+      // (/tmp/omp-agent-<uuid>/) — the (empty) capability base plus the
+      // custom-provider declarations — and the directory rides as `agentDir`
+      // (the SDK reads <agentDir>/models.yml instead of the retired in-image file).
       const skippedCollisions: string[] = [];
       const dir = await writePerReviewModelsYaml(json.capabilityHosts, json.customProviders ?? [], (providerId) => {
         skippedCollisions.push(providerId);
       });
       agentDir = dir;
-      // A custom id colliding with a capability host is skipped (capability/base
-      // wins, AL-23-1) — never silent: one structured stderr warn per colliding
+      // A custom id colliding with a base provider is skipped (base wins,
+      // AL-23-1) — never silent: one structured stderr warn per colliding
       // id (id + total count; zero key material).
       for (const providerId of skippedCollisions) {
         console.error(

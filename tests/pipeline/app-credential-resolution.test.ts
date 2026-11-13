@@ -87,7 +87,7 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
   // fail-closed gate in the consumer passes on the success-path tests (this
   // file pins credential resolution, not config completeness).
   const configStore = createAppConfigStore(db, TEST_KEY);
-  await configStore.setModelChain(id, "ark-plan/deepseek-v4-flash");
+  await configStore.setModelChain(id, "ark/deepseek-v4-flash");
   await configStore.addProviderKey(id, "ark", "ark-key");
   return { id };
 }
@@ -723,7 +723,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     await mapAppToDefaultWorkspace(db, row.id);
     // Re-seed the per-App AI config so the fail-closed gate passes again.
     const configStore = createAppConfigStore(db, TEST_KEY);
-    await configStore.setModelChain(row.id, "ark-plan/deepseek-v4-flash");
+    await configStore.setModelChain(row.id, "ark/deepseek-v4-flash");
     await configStore.addProviderKey(row.id, "ark", "ark-key");
     await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(2);

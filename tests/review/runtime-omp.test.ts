@@ -563,7 +563,7 @@ const BASE_INPUT = {
   level: "default" as const,
   worktreePath: TEST_WORKTREE,
   reconFacts: TWO_CLUSTER_FACTS,
-  modelSelectors: ["ark-plan/deepseek-v4-flash", "ark-plan/backup-model"],
+  modelSelectors: ["ark/deepseek-v4-flash", "ark/backup-model"],
   agentDir: AGENT_DIR,
   authStorage: TEST_AUTH_STORAGE,
 };
@@ -655,7 +655,7 @@ describe("ompAgentRuntime.runReview — parent session", () => {
   });
 
   test("parent model + fallback chain come from input.modelSelectors, never re-parsed from env", async () => {
-    process.env.OMP_REVIEW_MODEL = "ark-plan/env-only-model";
+    process.env.OMP_REVIEW_MODEL = "ark/env-only-model";
     seatResults = [{ data: seatPayload() }];
     await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
 
@@ -673,23 +673,15 @@ describe("ompAgentRuntime.runReview — parent session", () => {
     });
   });
 
-  test("empty modelSelectors falls back to the default model pattern", async () => {
+  test("empty modelSelectors fails loud instead of inventing a provider", async () => {
     seatResults = [{ data: seatPayload() }];
-    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", modelSelectors: [] });
-
-    const options = createdOptions[0]!;
-    expect(options.modelPattern).toBe("ark-plan/deepseek-v4-flash");
-    expect(options.settings).toEqual({
-      kind: "isolated",
-      overrides: {
-        "fetch.enabled": false,
-        "retry.modelFallback": true,
-        "retry.fallbackChains": { default: [] },
-      },
-    });
-    // The seat receives the same default the parent gets — never an empty
-    // (truthy) model list (PR #4 Bugbot High: `model: []` reaches the SDK).
-    expect(subagentRequests[0]!.model).toEqual(["ark-plan/deepseek-v4-flash"]);
+    // There is no in-image default selector anymore: an empty chain is a
+    // caller bug, not a reason to run a provider the product never declared.
+    await expect(
+      ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", modelSelectors: [] }),
+    ).rejects.toThrow(/no model selector/);
+    expect(createdOptions).toHaveLength(0);
+    expect(subagentRequests).toHaveLength(0);
   });
 
   test("installs seat-agent.md into the PR clone at .omp/agents/ and removes it afterwards", async () => {
@@ -1351,7 +1343,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
     await ompAgentRuntime.runReview({
       ...BASE_INPUT,
-      modelOverrides: { "mstar-review-seat": "ark-plan/deepseek-v4-flash:high" },
+      modelOverrides: { "mstar-review-seat": "ark/deepseek-v4-flash:high" },
     });
 
     // L2: the override is applied at the seatModels synthesis — it REPLACES
@@ -1359,7 +1351,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
     // (no merge, `:thinking` suffix rides along).
     expect(subagentRequests).toHaveLength(2);
     for (const request of subagentRequests) {
-      expect(request.model).toEqual(["ark-plan/deepseek-v4-flash:high"]);
+      expect(request.model).toEqual(["ark/deepseek-v4-flash:high"]);
     }
     // The settings key is a DEAD surface for quick/default (an explicit
     // request model beats task.agentModelOverrides in the SDK resolution
@@ -1379,7 +1371,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
     await ompAgentRuntime.runReview({
       ...BASE_INPUT,
       level: "quick",
-      modelOverrides: { "mstar-review-seat": "ark-plan/override-model" },
+      modelOverrides: { "mstar-review-seat": "ark/override-model" },
     });
 
     // The parent keeps the global chain (primary model + retry fallback) —
@@ -1390,16 +1382,19 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
     ]).toEqual({ default: [...BASE_INPUT.modelSelectors] });
   });
 
-  test("quick/default: the seat override wins even when the global chain falls back to the default pattern", async () => {
+  test("quick/default: a seat override cannot stand in for a missing global chain", async () => {
     seatResults = [{ data: seatPayload() }];
-    await ompAgentRuntime.runReview({
-      ...BASE_INPUT,
-      level: "quick",
-      modelSelectors: [],
-      modelOverrides: { "mstar-review-seat": "ark-plan/override-model" },
-    });
-
-    expect(subagentRequests[0]!.model).toEqual(["ark-plan/override-model"]);
+    // The parent session needs a model too; an override only replaces one
+    // seat's model, so an empty chain still fails before any session exists.
+    await expect(
+      ompAgentRuntime.runReview({
+        ...BASE_INPUT,
+        level: "quick",
+        modelSelectors: [],
+        modelOverrides: { "mstar-review-seat": "ark/override-model" },
+      }),
+    ).rejects.toThrow(/no model selector/);
+    expect(createdOptions).toHaveLength(0);
   });
 
   test("quick/default: overrides for other seats and blank values leave today's synthesis untouched", async () => {
@@ -1408,7 +1403,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
       ...BASE_INPUT,
       // An unmapped-for-this-path agent name is inert; a blank
       // mstar-review-seat value ≡ no override (L2).
-      modelOverrides: { "code-reviewer": "ark-plan/other:high", "mstar-review-seat": "   " },
+      modelOverrides: { "code-reviewer": "ark/other:high", "mstar-review-seat": "   " },
     });
 
     for (const request of subagentRequests) {
@@ -1434,7 +1429,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
   test("deep: the overrides map lands in the isolated settings as task.agentModelOverrides (exact agent names)", async () => {
     parentYields = [deepEnvelope()];
     const overrides = {
-      "code-reviewer": "ark-plan/deepseek-v4-flash:high",
+      "code-reviewer": "ark/deepseek-v4-flash:high",
       "fullstack-dev": "openai/gpt-5",
       "frontend-dev": "anthropic/claude-x:low",
     };
@@ -1485,7 +1480,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
 
     createdOptions.length = 0;
     parentYields = [deepEnvelope()];
-    const overrides = { "code-reviewer": "ark-plan/deepseek-v4-flash:high", "frontend-dev": "openai/gpt-5" };
+    const overrides = { "code-reviewer": "ark/deepseek-v4-flash:high", "frontend-dev": "openai/gpt-5" };
     await ompAgentRuntime.runReview({ ...DEEP_INPUT, modelOverrides: overrides });
     const mappedOverrides = (createdOptions[0]!.settings as { overrides: Record<string, unknown> })
       .overrides;
