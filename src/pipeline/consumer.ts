@@ -154,7 +154,7 @@ import {
   BOUNDED_READ_ABSENT_FLAG,
   buildGitOpsCommands,
   CLONE_DIR,
-  compareStatusCommand,
+  compareGateCommand,
   DIFF_PATH,
   fetchDepthOneCommand,
   gitTransportEnv,
@@ -164,6 +164,7 @@ import {
   issueViewCommand,
   localDiffCommand,
   mergeBaseCommand,
+  parseCompareGate,
   prBodyCommand,
   pullRequestBaseRefCommand,
   readRecheckCommand,
@@ -610,9 +611,12 @@ export type ConsumerLogFields = {
   diff_fallback?: DiffCaptureDeclineReason;
   diff_fallback_step?: string;
   /**
-   * Increment-round diagnostics: the compare verdict (`ahead` is the only one
-   * that starts an increment round) when the round reviewed the full diff, and
-   * the base sha on the increment capture-failure line.
+   * Increment-round diagnostics: the compare gate's answer when the round
+   * reviewed the full diff — the verdict (`ahead` is the only one that CAN
+   * start an increment round), `unusable` (exit 0 without a readable gate
+   * answer) or `ahead-merge` (an ahead range carrying a merge commit or a
+   * truncated commit list). The base sha rides the increment capture-failure
+   * line.
    */
   increment_status?: string;
   increment_since?: string;
@@ -4810,12 +4814,13 @@ async function processMessage(
     }
 
     // Incremental round selection: when this PR has a previously REVIEWED head,
-    // ask GitHub whether it is an ancestor of this one. Only `ahead` is an
-    // honest increment (base...head is then exactly the work since the last
-    // review); `behind`/`diverged`/`identical`/a 404 after a force-push or any
-    // non-zero exit keep the FULL diff. A failed base read degrades the same
-    // way, but it is warned: a silent fallback would disable incremental
-    // rounds forever with no trace.
+    // ask GitHub whether it is an ancestor of this one AND whether the range is
+    // this branch's own work. Only that combination is an honest increment
+    // (base...head is then exactly the work since the last review);
+    // `behind`/`diverged`/`identical`/a 404 after a force-push, any non-zero
+    // exit, a merge commit or a truncated commit list keep the FULL diff. A
+    // failed base read degrades the same way, but it is warned: a silent
+    // fallback would disable incremental rounds forever with no trace.
     let incrementBase: string | null = null;
     try {
       incrementBase = await deps.findIncrementBase(deps.env.DB, lifecycleScope);
@@ -4830,17 +4835,36 @@ async function processMessage(
     if (incrementBase !== null && incrementBase !== headSha) {
       try {
         const compare = await sandbox.runCommand(
-          compareStatusCommand(payload.owner, payload.repo, incrementBase, headSha),
+          compareGateCommand(payload.owner, payload.repo, incrementBase, headSha),
           { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS },
         );
-        const status = compare.stdout.trim();
-        if (compare.exitCode === 0 && status === "ahead") {
-          sinceSha = incrementBase;
-        } else {
+        if (compare.exitCode !== 0) {
           deps.log.info(
-            { ...fields, increment_status: compare.exitCode === 0 ? status : `exit ${compare.exitCode}` },
+            { ...fields, increment_status: `exit ${compare.exitCode}` },
             "incremental base not an ancestor of this head — reviewing the full diff",
           );
+        } else {
+          const gate = parseCompareGate(compare.stdout);
+          // shortcut: any merge commit in the increment forces a full-diff round,
+          // upgrade when merge-heavy PR branches make re-reviews common.
+          if (gate === null) {
+            deps.log.info(
+              { ...fields, increment_status: "unusable" },
+              "compare answer unusable — reviewing the full diff",
+            );
+          } else if (gate.branchWork) {
+            sinceSha = incrementBase;
+          } else if (gate.status === "ahead") {
+            deps.log.info(
+              { ...fields, increment_status: "ahead-merge" },
+              "increment cannot be proven to be this branch's own work — reviewing the full PR diff",
+            );
+          } else {
+            deps.log.info(
+              { ...fields, increment_status: gate.status },
+              "incremental base not an ancestor of this head — reviewing the full diff",
+            );
+          }
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);

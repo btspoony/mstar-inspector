@@ -20,7 +20,7 @@ import {
   buildGitOpsCommands,
   checkedOutShaCommand,
   cloneCommand,
-  compareStatusCommand,
+  compareGateCommand,
   DIFF_PATH,
   DIFF_PREFETCH_MAX_BYTES,
   diffCommand,
@@ -32,6 +32,7 @@ import {
   localDiffCommand,
   mergeBaseCommand,
   numstatCommand,
+  parseCompareGate,
   prBodyCommand,
   pullRequestBaseRefCommand,
   readRecheckCommand,
@@ -204,10 +205,30 @@ describe("gitops command builders", () => {
     }
   });
 
-  test("compareStatusCommand reads the compare verdict through gh's --jq surface", () => {
-    expect(compareStatusCommand("acme", "widgets", "a".repeat(40), "b".repeat(40))).toBe(
-      shellCommand(`gh api 'repos/acme/widgets/compare/${"a".repeat(40)}...${"b".repeat(40)}' --jq '.status'`),
+  test("compareGateCommand reads the verdict AND the merge/truncation facts through gh's --jq surface", () => {
+    expect(compareGateCommand("acme", "widgets", "a".repeat(40), "b".repeat(40))).toBe(
+      shellCommand(
+        `gh api 'repos/acme/widgets/compare/${"a".repeat(40)}...${"b".repeat(40)}' --jq '{status: .status, merges: ([.commits[] | select((.parents | length) > 1)] | length), listed: (.commits | length), total: .total_commits}'`,
+      ),
     );
+  });
+
+  test("parseCompareGate: only an ahead range with no merge and a complete commit list is branch work", () => {
+    const cases: Array<[string, { status: string; branchWork: boolean } | null]> = [
+      ['{"status":"ahead","merges":0,"listed":2,"total":2}', { status: "ahead", branchWork: true }],
+      ['{"status":"ahead","merges":1,"listed":2,"total":2}', { status: "ahead", branchWork: false }],
+      ['{"status":"ahead","merges":0,"listed":1,"total":2}', { status: "ahead", branchWork: false }],
+      ['{"status":"behind","merges":0,"listed":2,"total":2}', { status: "behind", branchWork: false }],
+      ['{"status":"diverged","merges":0,"listed":2,"total":2}', { status: "diverged", branchWork: false }],
+      ['{"status":"identical","merges":0,"listed":2,"total":2}', { status: "identical", branchWork: false }],
+      ['{"status":"ahead","merges":0,"listed":2,"total":null}', { status: "ahead", branchWork: false }],
+      ["not json", null],
+      ["{}", null],
+      ['{"status":7}', null],
+    ];
+    for (const [stdout, expected] of cases) {
+      expect(parseCompareGate(stdout)).toEqual(expected);
+    }
   });
 
   test("incrementDiffCommand replaces the diff file only after a delivered capture, and flags an increment over the prefetch bound", async () => {
@@ -357,10 +378,10 @@ describe("gitops command builders", () => {
     });
   });
 
-  test("compareStatusCommand / incrementDiffCommand reject a non-hex sha before any shell string", () => {
+  test("compareGateCommand / incrementDiffCommand reject a non-hex sha before any shell string", () => {
     for (const evil of ["", "ABC", "../../etc", "a".repeat(40) + ";rm -rf /", "zzzzzzz", "a".repeat(65)]) {
-      expect(() => compareStatusCommand("acme", "widgets", evil, "b".repeat(40))).toThrow(/unsafe base sha/);
-      expect(() => compareStatusCommand("acme", "widgets", "a".repeat(40), evil)).toThrow(/unsafe head sha/);
+      expect(() => compareGateCommand("acme", "widgets", evil, "b".repeat(40))).toThrow(/unsafe base sha/);
+      expect(() => compareGateCommand("acme", "widgets", "a".repeat(40), evil)).toThrow(/unsafe head sha/);
       expect(() => incrementDiffCommand("acme", "widgets", evil, "b".repeat(40), DIFF_PATH)).toThrow(/unsafe base sha/);
       expect(() => incrementDiffCommand("acme", "widgets", "a".repeat(40), evil, DIFF_PATH)).toThrow(/unsafe head sha/);
     }

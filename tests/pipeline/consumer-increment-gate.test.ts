@@ -7,7 +7,7 @@
  * incremental round keeps the FULL diff for the prior-finding evidence catalog
  * while the numstat partition — and the seats' universe — becomes the delta.
  * Everything else (`behind`, `diverged`, a 404 after a force-push, any non-zero
- * exit) keeps the full-diff round.
+ * exit, or an `ahead` range carrying a merge commit) keeps the full-diff round.
  */
 import { describe, expect, test } from "bun:test";
 
@@ -25,7 +25,7 @@ import {
   seedOtherApp,
 } from "../helpers/consumer-fixtures";
 import {
-  compareStatusCommand,
+  compareGateCommand,
   diffCommand,
   incrementDiffCommand,
   numstatCommand,
@@ -54,7 +54,7 @@ const PREVIOUS_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
  * per-round shas, so its fixed compare PATH answers "was a compare issued at
  * all" without counting the round's other repo-root `gh api` reads.
  */
-const compareCommand = (baseSha: string) => compareStatusCommand(TEST_OWNER, TEST_REPO, baseSha, SHA);
+const compareCommand = (baseSha: string) => compareGateCommand(TEST_OWNER, TEST_REPO, baseSha, SHA);
 const COMPARE_PATH = `${compareCommand(SHA).split("/compare/")[0]!}/compare/`;
 const compareIssued = (): boolean => sandbox.calls.some((call) => call.cmd.startsWith(COMPARE_PATH));
 
@@ -216,6 +216,33 @@ describe("incremental review rounds: the compare gate", () => {
       expect(logLines.filter((l) => l.fields.increment_status === (exitCode === 0 ? status : `exit ${exitCode}`))).toHaveLength(1);
     });
   }
+
+  test("ahead, but the increment carries a merge commit — full-diff round", async () => {
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.compareStatus = "ahead";
+    sandbox.compareMerges = 1;
+    const db = await createSeededTestD1();
+    seedReview(db, PREVIOUS_SHA);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The gate ran, and its answer was rejected: the range merges a base
+    // branch, so the delta is another PR's changeset, not this branch's work.
+    expect(sandbox.calls.some((c) => c.cmd === compareCommand(PREVIOUS_SHA))).toBe(true);
+    expect(
+      sandbox.calls.some(
+        (c) => c.cmd === incrementDiffCommand(TEST_OWNER, TEST_REPO, PREVIOUS_SHA, SHA, DIFF_PATH),
+      ),
+    ).toBe(false);
+    const facts = runnerInput().reconFacts as string[];
+    expect(facts).toEqual(["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"]);
+    expect(facts).not.toContain(`since ${PREVIOUS_SHA}`);
+    expect(preparedBody()).not.toContain(" · since ");
+    expect(logLines.filter((line) => line.level === "info" && line.fields.increment_status === "ahead-merge")).toHaveLength(1);
+  });
 
   test("the last reviewed head must not be an incomplete round", async () => {
     reset();

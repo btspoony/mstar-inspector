@@ -316,18 +316,51 @@ export function numstatCommand(diffPath: string): ShellCommand {
 
 /**
  * GitHub's verdict on a base...head comparison (`ahead` | `behind` |
- * `diverged` | `identical`). Only `ahead` makes an incremental round honest:
- * the previous head is then an ancestor of this one, so base...head is exactly
- * the work done since the last review. Any other status (or a non-zero exit —
- * a 404 after a force-push) keeps the full-diff path.
+ * `diverged` | `identical`), plus whether that range is THIS branch's own
+ * work. Only `ahead` makes an incremental round honest: the previous head is
+ * then an ancestor of this one, so base...head is exactly the work done since
+ * the last review. Any other status (or a non-zero exit — a 404 after a
+ * force-push) keeps the full-diff path.
+ *
+ * The verdict alone is not enough: a merge commit in `base...head` is a
+ * base-branch update whose whole changeset would ride the increment as this
+ * PR's "work since the last review". GitHub caps `.commits` at 250, so
+ * `listed < total` cannot prove the absence of one — a truncated list proves
+ * nothing either way.
  */
-export function compareStatusCommand(owner: string, repo: string, baseSha: string, headSha: string): ShellCommand {
+export function compareGateCommand(owner: string, repo: string, baseSha: string, headSha: string): ShellCommand {
   assertOwnerRepo(owner, repo);
   assertSha(baseSha, "base sha");
   assertSha(headSha, "head sha");
   return shellCommand(
-    `gh api 'repos/${owner}/${repo}/compare/${baseSha}...${headSha}' --jq '.status'`,
+    `gh api 'repos/${owner}/${repo}/compare/${baseSha}...${headSha}' --jq '{status: .status, merges: ([.commits[] | select((.parents | length) > 1)] | length), listed: (.commits | length), total: .total_commits}'`,
   );
+}
+
+/**
+ * The compare gate's answer, or `null` when stdout is not the JSON object the
+ * command asks for. `branchWork` is true only when the range is this branch's
+ * own work: `ahead`, no merge commit, and a COMPLETE commit list
+ * (`listed === total`, both numbers — an absent `total` proves nothing).
+ */
+export function parseCompareGate(stdout: string): { status: string; branchWork: boolean } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { status, merges, listed, total } = parsed as Record<string, unknown>;
+  if (typeof status !== "string") return null;
+  const branchWork =
+    status === "ahead" &&
+    typeof merges === "number" &&
+    typeof listed === "number" &&
+    typeof total === "number" &&
+    merges === 0 &&
+    listed === total;
+  return { status, branchWork };
 }
 
 /**

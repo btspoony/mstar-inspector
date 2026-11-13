@@ -21,7 +21,7 @@ import {
   boundedFileReadCommand,
   buildGitOpsCommands,
   CLONE_DIR,
-  compareStatusCommand,
+  compareGateCommand,
   DIFF_PATH,
   DIFF_PREFETCH_MAX_BYTES,
   fetchDepthOneCommand,
@@ -322,7 +322,7 @@ function aroundSha(command: string): { head: string; tail: string } {
     tail: command.slice(command.lastIndexOf(SHA_PROBE) + SHA_PROBE.length),
   };
 }
-const COMPARE = aroundSha(compareStatusCommand(TEST_OWNER, TEST_REPO, SHA_PROBE, SHA_PROBE));
+const COMPARE = aroundSha(compareGateCommand(TEST_OWNER, TEST_REPO, SHA_PROBE, SHA_PROBE));
 const INCREMENT_DIFF = aroundSha(
   incrementDiffCommand(TEST_OWNER, TEST_REPO, SHA_PROBE, SHA_PROBE, DIFF_PATH),
 );
@@ -380,8 +380,9 @@ export type FakeSandboxState = {
   numstatExitCode: number;
   /** stderr a failing numstat exec answers with (the redaction cases live here). */
   numstatStderr: string;
-  /** The `gh api .../compare/base...head` verdict (`ahead` starts an increment round). */
+  /** The `gh api .../compare/base...head` gate: its verdict and merge-commit count. */
   compareStatus: string;
+  compareMerges: number;
   compareExitCode: number;
   /** The increment round's base...head diff FILE content + its command's exit. */
   incrementDiffStdout: string;
@@ -450,6 +451,7 @@ export function initialFakeSandboxState(): FakeSandboxState {
     // NON-increment by default: a case that seeds a prior review stays a
     // full-diff round unless it opts in with `ahead`.
     compareStatus: "identical",
+    compareMerges: 0,
     compareExitCode: 0,
     incrementDiffStdout: "",
     incrementDiffExitCode: 0,
@@ -576,7 +578,17 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
   // the per-round shas, so the double stays payload-agnostic exactly like the
   // diff read.
   if (cmd.startsWith(COMPARE.head) && cmd.endsWith(COMPARE.tail)) {
-    return { stdout: `${state.compareStatus}\n`, stderr: "", exitCode: state.compareExitCode };
+    if (state.compareExitCode !== 0) return { stdout: "", stderr: "gh failed", exitCode: state.compareExitCode };
+    return {
+      stdout: JSON.stringify({
+        status: state.compareStatus,
+        merges: state.compareMerges,
+        listed: 1,
+        total: 1,
+      }),
+      stderr: "",
+      exitCode: 0,
+    };
   }
   if (cmd.startsWith(INCREMENT_DIFF.head) && cmd.endsWith(INCREMENT_DIFF.tail)) {
     // The compare read is the same `&&` chain as the diff capture: a non-zero
