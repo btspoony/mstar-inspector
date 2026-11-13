@@ -61,10 +61,11 @@ import {
   type AppConfigStatement,
   type AppCustomProvider,
 } from "../../src/dashboard/app-config-store";
-import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../../src/contracts/sandbox-images";
+import { enabledSandboxImages, getSandboxImage } from "../../src/contracts/sandbox-images";
 import { composeModelOptions, findFailingSelector } from "../../src/dashboard/model-membership";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../src/contracts/provider-models";
+import { MODEL_LIMITS } from "../../src/contracts/provider-model-limits.generated";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { t } from "../../src/i18n";
 import { CHECK_MIN_SCORE_MAX, CHECK_MIN_SCORE_MIN } from "../../src/contracts/review-gate";
@@ -82,7 +83,7 @@ import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const PLAIN_ANTHROPIC_KEY = sk("ant-mallory-verysecret-9988");
-const PLAIN_CHAIN = "ark-plan/deepseek-v4-flash, openai/gpt-5:thinking";
+const PLAIN_CHAIN = "ark/deepseek-v4-flash, openai/gpt-5:thinking";
 /** SQLite datetime('now') format the store writes (UTC "YYYY-MM-DD HH:MM:SS"). */
 const SQLITE_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
@@ -470,7 +471,7 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    await configStore(db).setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    await configStore(db).setModelChain(app.id, "ark/deepseek-v4-flash");
     expect(() => rawRun(db, "DELETE FROM github_apps WHERE id = ?", app.id)).toThrow(
       /FOREIGN KEY constraint failed/,
     );
@@ -483,7 +484,7 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
     rawRun(
       db,
       `INSERT INTO app_model_config (app_id, model_chain, updated_at)
-       VALUES (?, 'ark-plan/deepseek-v4-flash', '2026-01-01 00:00:00')`,
+       VALUES (?, 'ark/deepseek-v4-flash', '2026-01-01 00:00:00')`,
       app.id,
     );
     expect(() =>
@@ -1481,12 +1482,12 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "  ark-plan/deepseek-v4-flash:high ");
-    expect(await store.getModelChain(app.id)).toBe("  ark-plan/deepseek-v4-flash:high ");
+    await store.setModelChain(app.id, "  ark/deepseek-v4-flash:high ");
+    expect(await store.getModelChain(app.id)).toBe("  ark/deepseek-v4-flash:high ");
     const row = db.raw
       .query("SELECT app_id, name, chain, is_default FROM app_model_chains WHERE name = 'default'")
       .get() as { app_id: string; name: string; chain: string; is_default: number };
-    expect(row.chain).toBe("  ark-plan/deepseek-v4-flash:high "); // plaintext by design — not a secret
+    expect(row.chain).toBe("  ark/deepseek-v4-flash:high "); // plaintext by design — not a secret
     expect(row.is_default).toBe(1);
     expect(row.app_id).toBe(app.id);
   });
@@ -1549,13 +1550,13 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
     await store.upsertModelChain(app.id, "fast", "openai/gpt-5:thinking");
     await store.upsertModelChain(app.id, "cheap", "groq/llama-3-3");
     const chains = await store.getModelChains(app.id);
     expect(chains.map((c) => ({ name: c.name, chain: c.chain, is_default: c.is_default }))).toEqual([
       { name: "cheap", chain: "groq/llama-3-3", is_default: false },
-      { name: "default", chain: "ark-plan/deepseek-v4-flash", is_default: true },
+      { name: "default", chain: "ark/deepseek-v4-flash", is_default: true },
       { name: "fast", chain: "openai/gpt-5:thinking", is_default: false },
     ]);
   });
@@ -1586,7 +1587,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
     await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
     await store.setModelChainSeat(app.id, "code-reviewer", "fast");
     await store.setModelChainSeat(app.id, "frontend-dev", "fast");
@@ -1733,7 +1734,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
     await store.upsertModelChain(app.id, "fast", "openai/gpt-5:thinking, anthropic/claude-x");
     await store.upsertModelChain(app.id, "cheap", "groq/llama-3-3");
     // code-reviewer → named chain (in the map); mstar-review-seat → default
@@ -1787,7 +1788,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
 describe("app-config store (createAppConfigStore) — custom providers", () => {
   const CUSTOM: AppCustomProvider = {
     // NOT a built-in: "ark" is a PROVIDER_IDS member from the
-    // AL-24-5 ark-plan entry, so a custom declaration must use a free id.
+    // AL-24-5 ark entry, so a custom declaration must use a free id.
     provider_id: "my-custom",
     base_url: "https://ark.cn-beijing.volces.com/api/v3",
     api: "openai-completions",
@@ -2362,15 +2363,15 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
 
   // QC wave-1 (seat3 W-1) rewording: the runner's base-wins merge
   // skips a custom id colliding with a capability host of the App's SELECTED
-  // sandbox image (omp declares ark-plan) while the consumer STILL injects
+  // sandbox image (omp declares ark) while the consumer STILL injects
   // its key — the declaration is silently dead on every review, so the
   // backstop refuses it (the App defaults to omp via migration 0018).
-  test("store backstop: a selected-image capability host id (ark-plan) throws InvalidCustomProviderError before any write", async () => {
+  test("store backstop: a selected-image capability host id (ark) throws InvalidCustomProviderError before any write", async () => {
     const { db, app } = await seededWorld();
     await expect(
       configStore(db).upsertCustomProvider(
         app.id,
-        { ...CUSTOM, provider_id: "ark-plan", base_url: "https://evil.example.com/" },
+        { ...CUSTOM, provider_id: "ark", base_url: "https://evil.example.com/" },
         PLAIN_CUSTOM_KEY,
       ),
     ).rejects.toThrow(InvalidCustomProviderError);
@@ -2461,7 +2462,7 @@ describe("duplication locks", () => {
     expect([...PROVIDER_IDS]).toEqual(Object.keys(PROVIDERS));
     expect([...PROVIDER_IDS]).toEqual([...PROVIDER_IDS_BUILTIN]);
     // 19 ids: the 18 built-in omp providers + `ark` (the
-    // AL-24-5 entry — the in-image ark-plan base provider's keys ride the
+    // AL-24-5 entry — the in-image ark base provider's keys ride the
     // per-App BYOK pool under this id in the credential payload).
     expect(PROVIDER_IDS).toHaveLength(19);
   });
@@ -2495,7 +2496,7 @@ describe("duplication locks", () => {
       "a,b",
       " a , b ",
       "a,,b",
-      "ark-plan/deepseek-v4-flash",
+      "ark/deepseek-v4-flash",
       "openai/gpt-5:thinking, anthropic/claude-x",
       "x, ,y",
     ];
@@ -2522,23 +2523,11 @@ describe("duplication locks", () => {
     expect(MODEL_ROLE_IDS).toHaveLength(4); // spec § B6 语义锁: exactly the 4 audit seats
   });
 
-  test("the custom-id collision vocabulary is the selected image's registry host ids (QC W-1 successor)", () => {
-    // The dashboard keeps NO local base-provider mirror: the refusal set is
-    // sandboxImageHostIds(app.sandbox_image_id) straight from the
-    // src/contracts/sandbox-images.ts registry. Lock the registry shape the
-    // refusal (and the consumer's neededEnvName mapping) rides on: omp is
-    // the single enabled entry, and its capability host `ark-plan` resolves
-    // its keys from catalog id `ark`'s provider pool (the `apiKeyEnv`
-    // registry field is retained metadata, no longer a resolution input) —
-    // the same semantics the synthesizer materializes into every per-review
-    // models.yml.
+  test("the registry carries build inputs only — no provider surface to collide with", () => {
+    // The image declares no provider and no model, so the custom-id collision
+    // vocabulary is the built-in id list alone.
     expect(enabledSandboxImages().map((image) => image.id)).toEqual(["omp"]);
-    expect(sandboxImageHostIds("omp")).toEqual(["ark-plan"]);
-    expect(sandboxImageHostIds("no-such-image")).toEqual([]);
-    const arkHost = getSandboxImage("omp")!.hosts[0]!;
-    expect(arkHost).toMatchObject({ id: "ark-plan", catalogProviderId: "ark", apiKeyEnv: "ARK_API_KEY" });
-    expect(arkHost.baseUrl).toBe("https://ark.cn-beijing.volces.com/api/plan");
-    expect(arkHost.models.map((m) => m.id)).toEqual(["deepseek-v4-flash"]);
+    expect("hosts" in getSandboxImage("omp")!).toBe(false);
   });
 });
 
@@ -3310,7 +3299,7 @@ describe("POST /dashboard/default/apps/:appId/settings — save-chain (op=save-c
     const { db } = await seededWorld();
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
       op: "save-chain",
-      model_chain: "ark-plan/deepseek-v4-flash",
+      model_chain: "ark/deepseek-v4-flash",
     });
     expect(res.status).toBe(403);
     expect(rawCount(db, "app_model_chains")).toBe(0);
@@ -3349,7 +3338,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
   test("owner saves the map: chain references stored, plain-text 200", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "ark-plan/deepseek-v4-flash:high");
+    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "ark/deepseek-v4-flash:high");
     await store.upsertModelChain(app.id, "seat-code-reviewer", "  openai/gpt-5 , anthropic/claude-x  ");
     const res = await postForm(
       SETTINGS,
@@ -3593,14 +3582,14 @@ describe("POST /dashboard/default/apps/:appId/settings — named chains (op=add-
   test("add-chain replaces an existing named chain (upsert); the default row is untouched", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const env = makeEnv(db);
     await postForm(SETTINGS, cookie, env, { op: "add-chain", name: "fast", chain: "first/model" });
     await postForm(SETTINGS, cookie, env, { op: "add-chain", name: "fast", chain: "second/model" });
     const chains = await store.getModelChains(app.id);
     expect(chains.find((c) => c.name === "fast")!.chain).toBe("second/model");
-    expect(chains.find((c) => c.name === "default")!.chain).toBe("ark-plan/deepseek-v4-flash");
+    expect(chains.find((c) => c.name === "default")!.chain).toBe("ark/deepseek-v4-flash");
     expect(chains.find((c) => c.name === "default")!.is_default).toBe(true);
   });
 
@@ -3637,7 +3626,7 @@ describe("POST /dashboard/default/apps/:appId/settings — named chains (op=add-
   test("remove-chain deletes the named chain AND its seat references (seats fall back to default)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
     await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
     await store.setModelChainSeat(app.id, "code-reviewer", "fast");
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
@@ -3653,7 +3642,7 @@ describe("POST /dashboard/default/apps/:appId/settings — named chains (op=add-
   test("remove-chain rejects the reserved 'default' name → 400, zero rows written", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    await store.setModelChain(app.id, "ark/deepseek-v4-flash");
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       op: "remove-chain",
       name: "default",
@@ -3661,7 +3650,7 @@ describe("POST /dashboard/default/apps/:appId/settings — named chains (op=add-
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("cannot be removed");
     expect(rawCount(db, "app_model_chains")).toBe(1);
-    expect(await store.getModelChain(app.id)).toBe("ark-plan/deepseek-v4-flash");
+    expect(await store.getModelChain(app.id)).toBe("ark/deepseek-v4-flash");
   });
 
   test("non-owner member → 403, zero mutation (add-chain)", async () => {
@@ -4019,6 +4008,22 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
   };
   const mallory = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
+  /**
+   * The first catalog-declared provider+model the vendor table covers. Chosen
+   * at runtime, never a literal: this suite pins shape, not a vendor's numbers.
+   */
+  const coveredCatalogModel = (): { provider: string; model: string } | null => {
+    for (const [provider, models] of Object.entries(MODEL_LIMITS)) {
+      const meta = PROVIDER_CATALOG[provider];
+      if (!meta || meta.tier !== "template" || meta.baseUrl === null || meta.baseUrl.includes("{")) continue;
+      if (meta.api === null || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(provider)) continue;
+      if (PROVIDER_IDS_BUILTIN.includes(provider)) continue;
+      const model = Object.keys(models)[0];
+      if (model !== undefined) return { provider, model };
+    }
+    return null;
+  };
+
   test("add stores the declaration (key encrypted at rest), plain-text 200", async () => {
     const { db, app } = await seededWorld();
     const res = await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
@@ -4060,7 +4065,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       { patch: { provider_id: "-lead" }, label: "leading hyphen" },
       { patch: { provider_id: "x".repeat(65) }, label: "id over 64 chars" },
       { patch: { provider_id: "anthropic" }, label: "built-in provider id collision" },
-      { patch: { provider_id: "ark-plan" }, label: "in-image base provider id collision (QC W-1)" },
+      { patch: { provider_id: "ark" }, label: "in-image base provider id collision (QC W-1)" },
       { patch: { base_url: "http://insecure.example.com" }, label: "http baseUrl" },
       { patch: { base_url: "https://" }, label: "https baseUrl with no host (PR #10 review)" },
       { patch: { base_url: `https://example.com/${"x".repeat(2049)}` }, label: "baseUrl over 2048 chars" },
@@ -4568,6 +4573,94 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     });
     // Nothing moved: the stored ids AND the (unstated) overlay are untouched.
     expect(await store.listCustomProviders(app.id)).toEqual(before);
+  });
+
+  test.skipIf(coveredCatalogModel() === null)(
+    "a save whose sizes all come from the catalog succeeds and stores no override field",
+    async () => {
+      const covered = coveredCatalogModel();
+      if (covered === null) return;
+      const meta = PROVIDER_CATALOG[covered.provider]!;
+      const { db, app } = await seededWorld();
+      // A catalog id is declarable (it is a template tier id, not a built-in
+      // env-name provider), so the save under test is a real update.
+      const declared = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+        op: "add-custom-provider",
+        provider_id: covered.provider,
+        base_url: meta.baseUrl!,
+        api: meta.api!,
+        model_ids: covered.model,
+        key: sk("catalog-covered-key"),
+      });
+      expect(declared.status).toBe(200);
+      // The operator states NOTHING for the model: the catalog supplies both
+      // sizes, so the save is accepted and the overlay stays empty.
+      const saved = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+        op: "update-provider-models",
+        provider: covered.provider,
+        model_ids: covered.model,
+        models_meta: JSON.stringify({ [covered.model]: {} }),
+      });
+      expect(saved.status).toBe(200);
+      const [decl] = await configStore(db).listCustomProviders(app.id);
+      expect(decl!.model_ids).toEqual([covered.model]);
+      // No override field was invented from the vendor number.
+      expect(decl!.models_meta).toBeUndefined();
+      // The settings face still knows the model's sizes — via the catalog.
+      const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+      const body = (await payload.json()) as {
+        provider_catalog: Array<{ id: string; model_limits: Record<string, { contextWindow: number; maxTokens: number }> }>;
+        model_limits_snapshot: string;
+      };
+      expect(typeof body.model_limits_snapshot).toBe("string");
+      expect(body.model_limits_snapshot.length).toBeGreaterThan(0);
+      const row = body.provider_catalog.find((entry) => entry.id === covered.provider);
+      expect(row?.model_limits[covered.model]).toMatchObject({
+        contextWindow: expect.any(Number),
+        maxTokens: expect.any(Number),
+      });
+    },
+  );
+
+  test("a catalog-less model with no stated size keeps the keyed 400", async () => {
+    const { db, app } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const before = await configStore(db).listCustomProviders(app.id);
+    // `my-custom` is not in the vendor table; nothing supplies the sizes.
+    const refused = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "deepseek-v4-flash",
+      models_meta: JSON.stringify({ "deepseek-v4-flash": {} }),
+    });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toMatchObject({
+      key: "settings.error.modelContextWindowRequired",
+      params: { model: "deepseek-v4-flash" },
+    });
+    expect(await configStore(db).listCustomProviders(app.id)).toEqual(before);
+  });
+
+  test("the settings payload stamps a per-model size table on every catalog row, plus its snapshot", async () => {
+    const { db } = await seededWorld();
+    const res = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const body = (await res.json()) as {
+      provider_catalog: Array<{ id: string; model_limits: Record<string, { contextWindow: number; maxTokens: number }> }>;
+      model_limits_snapshot: string;
+    };
+    expect(typeof body.model_limits_snapshot).toBe("string");
+    expect(body.model_limits_snapshot.length).toBeGreaterThan(0);
+    // Shape only: every row carries the table, every carried size is a
+    // positive whole token count. No vendor number is pinned.
+    for (const row of body.provider_catalog) {
+      expect(typeof row.model_limits).toBe("object");
+      for (const limit of Object.values(row.model_limits)) {
+        expect(Number.isInteger(limit.contextWindow)).toBe(true);
+        expect(limit.contextWindow).toBeGreaterThan(0);
+        expect(Number.isInteger(limit.maxTokens)).toBe(true);
+        expect(limit.maxTokens).toBeGreaterThan(0);
+      }
+    }
   });
 
   test("update-provider-models refuses an undeclared provider with the keyed 400, zero writes", async () => {

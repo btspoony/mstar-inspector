@@ -29,10 +29,8 @@ import {
   PROVIDER_IDS,
   ProviderKeyTooLongError,
   createAppConfigStore,
-  modelCacheProviderKey,
   type AppConfigD1,
 } from "../../src/dashboard/app-config-store";
-import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import {
   KEY_REJECTING_MODELS_PROBE_URLS,
   PROVIDER_VERIFY_ENDPOINTS,
@@ -298,17 +296,7 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
     }
   });
 
-  test("modelCacheProviderKey maps ark → ark-plan (spec §6.1) and leaves others unchanged", () => {
-    expect(modelCacheProviderKey("ark")).toBe("ark-plan");
-    expect(modelCacheProviderKey("anthropic")).toBe("anthropic");
-    // The selector-facing id is the omp registry entry's capability host id —
-    // resolved through the host's catalogProviderId `ark` (the host
-    // list lives in src/contracts/sandbox-images.ts and is synthesized into
-    // every per-review models.yml).
-    const arkHost = getSandboxImage("omp")!.hosts.find((host) => host.catalogProviderId === "ark");
-    expect(arkHost).toBeDefined();
-    expect(modelCacheProviderKey("ark")).toBe(arkHost!.id);
-  });
+
 });
 
 // --- omp alignment: the vendored validate data and the no-inference invariant ---
@@ -1040,7 +1028,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     ]);
   });
 
-  test("ark key verifies under BYOK id but caches under the selector-facing ark-plan row (spec §6.1)", async () => {
+  test("ark key verifies under BYOK id but caches under the selector-facing ark row (spec §6.1)", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "ark-app");
     const store = configStore(db);
@@ -1053,7 +1041,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const cacheRow = db.raw
       .query("SELECT provider, models_json FROM app_provider_models WHERE app_id = ?")
       .all(app.id) as Array<{ provider: string; models_json: string }>;
-    expect(cacheRow).toEqual([{ provider: "ark-plan", models_json: JSON.stringify(["doubao-seed-2-1-pro"]) }]);
+    expect(cacheRow).toEqual([{ provider: "ark", models_json: JSON.stringify(["doubao-seed-2-1-pro"]) }]);
   });
 
   test("addProviderKey overwriting a verified row resets verified_* to NULL (verification belongs to the (provider, key) pair)", async () => {
@@ -1147,7 +1135,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
     await store.saveVerifiedKey(app.id, "ark", PLAIN_KEY, ["doubao"]);
     const cached = await store.getVerifiedModels(app.id);
-    expect(cached.map((c) => c.provider)).toEqual(["ark-plan", "mistral", "openai"]);
+    expect(cached.map((c) => c.provider)).toEqual(["ark", "mistral", "openai"]);
   });
 
   test("addProviderKey writes unverified rows (NULL verified columns)", async () => {

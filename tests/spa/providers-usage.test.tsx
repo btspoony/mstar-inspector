@@ -93,6 +93,7 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
     allowlist: { enabled: false, owners: [] },
     keys: [],
     model_chain: null,
+    model_limits_snapshot: "2026-01-01",
     model_roles: {},
     model_chains: [],
     custom_providers: [],

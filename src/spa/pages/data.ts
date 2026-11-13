@@ -147,6 +147,9 @@ export type AppsPayload = {
  */
 export type ProviderEligibility = "builtin" | "template" | "unavailable";
 
+/** One model's catalog-supplied sizes, in tokens. */
+export type CatalogModelLimit = { contextWindow: number; maxTokens: number };
+
 export type CatalogProvider = {
   id: string;
   label: string;
@@ -154,6 +157,12 @@ export type CatalogProvider = {
   base_url: string | null;
   api: string | null;
   models: string[];
+  /**
+   * Per-model sizes from the vendor directory, keyed by model id (server
+   * `model_limits`). The model dialog pre-fills a blank size from here and
+   * posts no override for a value the operator leaves untouched.
+   */
+  model_limits?: Record<string, CatalogModelLimit>;
   verifiable: boolean;
   /** The provider answers a per-key usage probe (`/keys/usage`). */
   usage_probe: boolean;
@@ -581,6 +590,8 @@ export type SettingsManagePayload = {
   configured_providers: ConfiguredProvider[];
   /** Discovery metadata + eligibility — never configured state. */
   provider_catalog: CatalogProvider[];
+  /** The vendor snapshot the catalog sizes came from — named beside a pre-filled size. */
+  model_limits_snapshot: string;
   model_role_ids: readonly string[];
   custom_provider_api_ids: readonly string[];
   /** The selector's choices — enabled registry entries only (never yaml/secrets). */
@@ -1637,6 +1648,24 @@ function isProviderKeyRowList(value: unknown): value is ProviderKeyRow[] {
   );
 }
 
+/** One catalog size pair: two positive whole token counts, never a guess. */
+function isCatalogModelLimit(value: unknown): value is CatalogModelLimit {
+  return (
+    isRecord(value) &&
+    typeof value.contextWindow === "number" &&
+    Number.isInteger(value.contextWindow) &&
+    value.contextWindow > 0 &&
+    typeof value.maxTokens === "number" &&
+    Number.isInteger(value.maxTokens) &&
+    value.maxTokens > 0
+  );
+}
+
+/** The provider's per-model size table (an absent model id = the catalog says nothing). */
+function isCatalogModelLimits(value: unknown): value is Record<string, CatalogModelLimit> {
+  return isRecord(value) && Object.values(value).every(isCatalogModelLimit);
+}
+
 /**
  * Row-level guard for the catalog: tier + eligibility are the
  * load-bearing discriminators, and the Add Provider UI renders/branches on
@@ -1661,6 +1690,7 @@ function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
         (row.display_group === "common" || row.display_group === "catalog") &&
         (row.base_url === null || typeof row.base_url === "string") &&
         (row.api === null || typeof row.api === "string") &&
+        isCatalogModelLimits(row.model_limits) &&
         typeof row.verifiable === "boolean" &&
         typeof row.usage_probe === "boolean" &&
         isStringArray(row.models),
@@ -1871,6 +1901,9 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // fails the parse instead of silently passing.
   if (!isConfiguredProviderList(data.configured_providers)) return null;
   if (!isCatalogProviderList(data.provider_catalog)) return null;
+  // The vendor snapshot the catalog sizes came from: the model dialog names it
+  // beside a pre-filled value, so an absent one fails the parse.
+  if (typeof data.model_limits_snapshot !== "string" || data.model_limits_snapshot.length === 0) return null;
   // The manage face: the selector choices — { id, enabled } rows only.
   if (!isSandboxImageList(data.sandbox_images)) return null;
   return data as SettingsPayload;

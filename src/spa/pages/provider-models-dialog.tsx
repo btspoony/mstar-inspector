@@ -14,17 +14,19 @@
 import { useEffect, useRef, useState } from "react";
 import { Button, Input } from "@design-system";
 import { t } from "../../i18n";
-import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../contracts/provider-models";
+import { MAX_CUSTOM_PROVIDER_MODEL_IDS, resolveModelSize } from "../../contracts/provider-models";
+import type { ModelSize, ModelSizeSource } from "../../contracts/provider-models";
 import type { SpaBoot } from "../boot";
 import { StepDialog } from "../components/StepDialog";
 import type { CustomProviderModelMeta, CustomProviderModelsMeta } from "./data";
 import { NoticeRegion, type OpNotice } from "./PageNotice";
 
 /**
- * What the owner typed for ONE selected model. Strings, never numbers: a blank
- * field is the absent fact (we do not guess), and a value that is not a whole
- * number is sent as typed so the server names the field instead of silently
- * dropping it.
+ * What ONE selected model shows. Sizes are strings, never numbers: a value that
+ * is not a whole number is sent as typed so the server names the field instead
+ * of the dialog silently dropping it. `fromCatalog` marks a size the catalog
+ * supplied and the operator has not touched — it is shown, but never posted
+ * back as if the operator had stated it.
  */
 type FieldState = {
   contextWindow: string;
@@ -33,25 +35,38 @@ type FieldState = {
   /** "" = not stated (distinct from an explicit no), "true" / "false" = stated. */
   reasoning: "" | "true" | "false";
   input: string;
+  fromCatalog: { contextWindow: boolean; maxTokens: boolean };
 };
 
-function fieldStateOf(meta: CustomProviderModelMeta | undefined): FieldState {
+function fieldStateOf(meta: CustomProviderModelMeta | undefined, catalog: ModelSize | undefined): FieldState {
   // Canonical "unset" is an ABSENT field (the store's read boundary normalizes
   // any legacy null away). The null checks stay as the last line of defence at
   // THIS boundary: a null must render blank, never as "No reasoning".
   const size = (value: number | null | undefined): string => (value === undefined || value === null ? "" : String(value));
+  // The contract resolves the pair: the operator's statement wins per field,
+  // the catalog fills the blank, and neither side invents one.
+  const resolved = resolveModelSize(meta, catalog);
+  const unstated = (value: unknown): boolean => value === undefined || value === null;
   return {
-    contextWindow: size(meta?.contextWindow),
-    maxTokens: size(meta?.maxTokens),
+    contextWindow: size(resolved.contextWindow),
+    maxTokens: size(resolved.maxTokens),
     name: meta?.name ?? "",
     reasoning: meta?.reasoning === undefined || meta.reasoning === null ? "" : meta.reasoning ? "true" : "false",
     input: meta?.input?.join(", ") ?? "",
+    fromCatalog: {
+      contextWindow: unstated(meta?.contextWindow) && catalog?.contextWindow !== undefined,
+      maxTokens: unstated(meta?.maxTokens) && catalog?.maxTokens !== undefined,
+    },
   };
 }
 
-function seedFields(ids: readonly string[], meta: CustomProviderModelsMeta | undefined): Record<string, FieldState> {
+function seedFields(
+  ids: readonly string[],
+  meta: CustomProviderModelsMeta | undefined,
+  catalogLimits: Record<string, ModelSize>,
+): Record<string, FieldState> {
   const fields: Record<string, FieldState> = {};
-  for (const id of ids) fields[id] = fieldStateOf(meta?.[id]);
+  for (const id of ids) fields[id] = fieldStateOf(meta?.[id], catalogLimits[id]);
   return fields;
 }
 
@@ -64,6 +79,8 @@ export function ProviderModelsDialog({
   storedModelIds,
   storedModelsMeta,
   catalogModelIds,
+  catalogLimits,
+  limitsSnapshot,
   onSettings,
   onOutcome,
 }: {
@@ -80,6 +97,10 @@ export function ProviderModelsDialog({
   storedModelsMeta?: CustomProviderModelsMeta;
   /** The catalog vocabulary for the provider. */
   catalogModelIds: readonly string[];
+  /** The catalog's per-model sizes (payload `model_limits`) — the blank-field seed. */
+  catalogLimits: Record<string, ModelSize>;
+  /** The snapshot those sizes came from (payload `model_limits_snapshot`). */
+  limitsSnapshot: string;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome: (notice: OpNotice) => void;
 }) {
@@ -89,7 +110,7 @@ export function ProviderModelsDialog({
   const allIds = [...new Set([...catalogModelIds, ...storedModelIds])];
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set(storedModelIds));
   const [fields, setFields] = useState<Record<string, FieldState>>(() =>
-    seedFields(storedModelIds, storedModelsMeta),
+    seedFields(storedModelIds, storedModelsMeta, catalogLimits),
   );
   const [query, setQuery] = useState("");
   // The detail editor is folded away by default: the selection list is the
@@ -114,7 +135,7 @@ export function ProviderModelsDialog({
     if (wasOpenRef.current) return;
     wasOpenRef.current = true;
     setSelected(new Set(storedModelIds));
-    setFields(seedFields(storedModelIds, storedModelsMeta));
+    setFields(seedFields(storedModelIds, storedModelsMeta, catalogLimits));
     setQuery("");
     setDetailsOpen(false);
     setDetailsFor(null);
@@ -124,12 +145,6 @@ export function ProviderModelsDialog({
   const needle = query.trim().toLowerCase();
   const filtered = needle === "" ? allIds : allIds.filter((id) => id.toLowerCase().includes(needle));
   const atCap = selected.size >= MAX_CUSTOM_PROVIDER_MODEL_IDS;
-  // Any selected model whose statement lacks a required size: the row is
-  // usable only when the owner stated both, and we never guess them.
-  const incomplete = [...selected].some((id) => {
-    const state = stateOf(id);
-    return state.contextWindow.trim() === "" || state.maxTokens.trim() === "";
-  });
   // Select-all acts on the rendered list, so it has nothing to do once every
   // visible id is checked — the cap alone never disables it.
   const allFilteredSelected = filtered.every((id) => selected.has(id));
@@ -138,6 +153,7 @@ export function ProviderModelsDialog({
   const selectedIds = [...selected];
   const detailId = detailsFor !== null && selected.has(detailsFor) ? detailsFor : (selectedIds[0] ?? "");
   const detailState = stateOf(detailId);
+  const detailSource = sourceOf(detailId);
 
   function toggle(id: string): void {
     setSelected((current) => {
@@ -151,24 +167,48 @@ export function ProviderModelsDialog({
     });
   }
 
-  /** The typed state of one selected model (a never-touched id seeds from store). */
+  /** The typed state of one selected model (a never-touched id seeds from store + catalog). */
   function stateOf(id: string): FieldState {
-    return fields[id] ?? fieldStateOf(storedModelsMeta?.[id]);
+    return fields[id] ?? fieldStateOf(storedModelsMeta?.[id], catalogLimits[id]);
   }
 
   function setField(id: string, key: keyof FieldState, value: string): void {
-    setFields((current) => ({
-      ...current,
-      [id]: { ...(current[id] ?? fieldStateOf(storedModelsMeta?.[id])), [key]: value },
-    }));
+    setFields((current) => {
+      const base = current[id] ?? fieldStateOf(storedModelsMeta?.[id], catalogLimits[id]);
+      const next = { ...base, [key]: value };
+      // Typing into a size makes it the operator's own statement: the catalog
+      // value is now an override to post, not a seed to omit.
+      if (key === "contextWindow" || key === "maxTokens") {
+        next.fromCatalog = { ...base.fromCatalog, [key]: false };
+      }
+      return { ...current, [id]: next };
+    });
   }
 
   /**
-   * The metadata statement this form carries. ALWAYS posted, one entry per
-   * selected id, blanks simply absent from their entry: an omitted field would
-   * read as "no statement" and let a save change the id set while never
-   * stating the sizes the product requires. The server refuses the first
-   * selected model that lacks one, naming it.
+   * Where the shown sizes come from — the label beside the fields. A size the
+   * operator typed makes the pair "declared"; a blank pair is "absent" (the
+   * declaration is incomplete); otherwise the catalog supplied what is shown.
+   */
+  function sourceOf(id: string): ModelSizeSource {
+    const state = stateOf(id);
+    const filled = (field: "contextWindow" | "maxTokens"): boolean => state[field].trim() !== "";
+    if (!filled("contextWindow") && !filled("maxTokens")) return "absent";
+    if (
+      (filled("contextWindow") && state.fromCatalog.contextWindow) ||
+      (filled("maxTokens") && state.fromCatalog.maxTokens)
+    ) {
+      return "catalog";
+    }
+    return "declared";
+  }
+
+  /**
+   * The metadata statement this form carries: ONLY what the operator stated.
+   * A size pre-filled from the catalog and left untouched is not posted back —
+   * the server resolves it from the same catalog — and a model whose entry
+   * states nothing carries no entry at all. The server still refuses the first
+   * selected model that has no stated AND no catalog size, naming it.
    */
   function overlayStatement(): string {
     const meta: CustomProviderModelsMeta = {};
@@ -178,6 +218,7 @@ export function ProviderModelsDialog({
       for (const key of ["contextWindow", "maxTokens"] as const) {
         const text = state[key].trim();
         if (text === "") continue;
+        if (state.fromCatalog[key]) continue;
         const value = Number(text);
         // A non-numeric entry travels as typed so the server names the field
         // rather than the dialog dropping it silently.
@@ -191,7 +232,7 @@ export function ProviderModelsDialog({
           .map((part) => part.trim())
           .filter((part) => part !== "");
       }
-      meta[id] = entry as CustomProviderModelMeta;
+      if (Object.keys(entry).length > 0) meta[id] = entry as CustomProviderModelMeta;
     }
     return JSON.stringify(meta);
   }
@@ -330,7 +371,9 @@ export function ProviderModelsDialog({
                 <p className="text-sm text-muted-foreground">
                   {t(locale, "settings.providers.models.requirements")}
                 </p>
-                {incomplete ? (
+                {/* The warning is for a model NOTHING supplies; a catalog
+                    value is labelled with its snapshot instead. */}
+                {detailSource === "absent" ? (
                   <p className="text-sm text-muted-foreground">
                     {t(locale, "settings.providers.models.sizesUnstated")}
                   </p>
@@ -364,6 +407,17 @@ export function ProviderModelsDialog({
                     value={detailState.maxTokens}
                     onChange={(event) => setField(detailId, "maxTokens", event.target.value)}
                   />
+                </div>
+                {detailSource === "catalog" ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t(locale, "settings.providers.models.sizesFromCatalog", { snapshot: limitsSnapshot })}
+                  </p>
+                ) : detailSource === "declared" ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t(locale, "settings.providers.models.sizesFromDeclaration")}
+                  </p>
+                ) : null}
+                <div className="grid gap-2 sm:grid-cols-2">
                   <Input
                     type="text"
                     aria-label={t(locale, "settings.providers.models.fields.name", { model: detailId })}

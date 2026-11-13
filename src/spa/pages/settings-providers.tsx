@@ -130,6 +130,7 @@ export function ProvidersSection({
               appId={payload.app.github_app_id}
               group={group}
               catalog={catalogById[group.providerId]}
+              limitsSnapshot={payload.model_limits_snapshot}
               removeNotice={
                 removeOutcome !== null && removedProviderId === group.providerId ? removeOutcome.notice : null
               }
@@ -198,6 +199,7 @@ function ProviderGroupCard({
   appId,
   group,
   catalog,
+  limitsSnapshot,
   removeNotice,
   onPending,
   onAddKey,
@@ -210,6 +212,8 @@ function ProviderGroupCard({
   group: ProviderGroup;
   /** The catalog entry of this id, when the catalog knows it. */
   catalog: CatalogProvider | undefined;
+  /** The vendor snapshot the catalog sizes came from. */
+  limitsSnapshot: string;
   /** The remove outcome this group owns, or null. */
   removeNotice: OpNotice | null;
   onPending: (action: PendingAction) => void;
@@ -422,6 +426,8 @@ function ProviderGroupCard({
           storedModelIds={group.declaration.model_ids}
           storedModelsMeta={group.declaration.models_meta}
           catalogModelIds={catalog?.models ?? []}
+          catalogLimits={catalog?.model_limits ?? {}}
+          limitsSnapshot={limitsSnapshot}
           onSettings={onSettings}
           onOutcome={onOutcome}
         />

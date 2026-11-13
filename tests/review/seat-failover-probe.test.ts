@@ -15,7 +15,7 @@ import { probeSeatFailover } from "../../packages/runner/src/seat-failover-probe
 /** The capability host a defaulted App's synthesized models.yml carries. */
 const HOSTS = [
   {
-    id: "ark-plan",
+    id: "ark",
     catalogProviderId: "ark",
     apiKeyEnv: "ARK_API_KEY",
     baseUrl: "https://ark.cn-beijing.volces.com/api/plan",

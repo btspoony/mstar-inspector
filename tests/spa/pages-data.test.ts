@@ -277,6 +277,7 @@ describe("members/apps/settings parsers", () => {
       allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
+      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
@@ -327,6 +328,7 @@ describe("members/apps/settings parsers", () => {
       allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
+      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
@@ -375,6 +377,7 @@ describe("members/apps/settings parsers", () => {
       allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
+      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
@@ -440,6 +443,7 @@ describe("members/apps/settings parsers", () => {
       allowlist: { enabled: true, owners: ["acme"] },
       keys: [],
       model_chain: null,
+      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
@@ -549,6 +553,7 @@ describe("members/apps/settings parsers", () => {
       allowlist: { enabled: false, owners: [] },
       keys: [],
       model_chain: null,
+      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
@@ -567,6 +572,7 @@ describe("members/apps/settings parsers", () => {
       base_url: null,
       api: null,
       models: ["claude-fable-5"],
+      model_limits: {},
       verifiable: true,
       usage_probe: false,
       eligibility: "builtin",
@@ -786,6 +792,7 @@ describe("provider catalog rows + add selection", () => {
     allowlist: { enabled: false, owners: [] },
     keys: [],
     model_chain: null,
+    model_limits_snapshot: "2026-01-01",
     model_roles: {},
     model_chains: [],
     custom_providers: [],
@@ -804,6 +811,7 @@ describe("provider catalog rows + add selection", () => {
     base_url: null,
     api: null,
     models: ["claude-fable-5"],
+    model_limits: {},
     verifiable: true,
     usage_probe: false,
     eligibility: "builtin",
@@ -834,6 +842,20 @@ describe("provider catalog rows + add selection", () => {
     const { display_group: _droppedDisplayGroup, ...withoutDisplayGroup } = catalogRow;
     expect(parseSettings({ ...manageBase, provider_catalog: [withoutDisplayGroup] })).toBeNull();
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, display_group: "builtin" }] })).toBeNull();
+    // The per-model size table (payload `model_limits`) and the snapshot it
+    // came from are required: the model dialog pre-fills from them, so a row
+    // without the table — or with a non-positive/non-integer size — fails.
+    const { model_limits: _droppedLimits, ...withoutLimits } = catalogRow;
+    expect(parseSettings({ ...manageBase, provider_catalog: [withoutLimits] })).toBeNull();
+    expect(
+      parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, model_limits: { m: { contextWindow: 0, maxTokens: 1 } } }] }),
+    ).toBeNull();
+    expect(
+      parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, model_limits: { m: { contextWindow: 10 } } }] }),
+    ).toBeNull();
+    const { model_limits_snapshot: _droppedSnapshot, ...withoutSnapshot } = manageBase;
+    expect(parseSettings(withoutSnapshot)).toBeNull();
+    expect(parseSettings({ ...manageBase, model_limits_snapshot: "" })).toBeNull();
   });
 
   test("add selection maps the picked catalog id to its configuration form kind", () => {

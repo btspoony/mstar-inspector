@@ -95,26 +95,19 @@ export type CapabilityHostModel = {
 };
 
 /**
- * One capability host of the App's selected sandbox image, as the runner input
- * JSON carries it: the runner materializes these into the
- * base of every synthesized per-review models.yml. KEYLESS static data; host
- * ids are runtime capabilities, NOT Providers catalog ids (omp's `ark-plan`
- * resolves its key through catalogProviderId `ark`, whose transported pool
- * arrives under that id in the credential payload). `apiKeyEnv` and `auth`
- * are RETAINED wire/registry metadata — the locked host shape carries them;
- * neither determines the payload pool key (derived from the provider id) nor
- * the active credential resolution (the stored pool does).
+ * One optional base provider in the runner input JSON: the runner
+ * materializes these into the base of every synthesized per-review models.yml.
+ * KEYLESS static data. Production runs send an EMPTY array — an image declares
+ * no provider, and a built-in one resolves from the SDK catalog — so this
+ * shape exists for a runtime that ships its own base providers.
  *
- * Structurally mirrors the registry's `SandboxImageHost` (src/contracts/
- * sandbox-images.ts): the consumer passes the resolved registry entry's hosts
- * verbatim into the runner input. The mirror lives HERE (not an import)
- * because the in-image runner graph is only `packages/runner/src` plus this
- * package's src (the sandbox image COPYs exactly those two trees —
- * tests/review/runtime-boundary derives the admitted set from the Dockerfile);
- * the consumer-side contract import keeps the data single-sourced.
+ * The type lives HERE (not imported from the dashboard contract) because the
+ * in-image runner graph is only `packages/runner/src` plus this package's src
+ * (the sandbox image COPYs exactly those two trees —
+ * tests/review/runtime-boundary derives the admitted set from the Dockerfile).
  */
 export type CapabilityHost = {
-  /** Host id — the selector prefix (e.g. `ark-plan/deepseek-v4-flash`). */
+  /** Host id — the selector prefix (e.g. `acme/fast-model`). */
   id: string;
   /** Providers/BYOK catalog id whose transported pool this host resolves from. */
   catalogProviderId: string;
@@ -149,9 +142,9 @@ export type AgentRuntimeRunInput = {
   /**
    * Directory holding the synthesized COMPLETE per-review models.yml
    * (AL-23-1): the runner ALWAYS synthesizes
-   * /tmp/omp-agent-<uuid>/models.yml — capability hosts of the App's selected
-   * image as the base, custom-provider declarations merged in (capability ids
-   * win on collision) — and rides the directory here REQUIRED for every omp
+   * /tmp/omp-agent-<uuid>/models.yml — the (empty) capability base plus the
+   * custom-provider declarations (a base id wins on collision) — and rides
+   * the directory here REQUIRED for every omp
    * run; runtime-omp passes it to createAgentSession({ agentDir }). There is
    * no baked in-image models.yml to fall back to (deleted): a run
    * without a synthesized directory has no models.yml at all.

@@ -42,7 +42,7 @@ const PI_CATALOG_DIR = path.dirname(
   createRequire(import.meta.url).resolve("@oh-my-pi/pi-catalog/package.json"),
 );
 const RULES_PATH = path.join(PI_CATALOG_DIR, "src/compat/rules.json");
-const MODELS_DEV_PATH = path.resolve("scripts/provider-catalog/models.dev-2026-11-06.json");
+const MODELS_DEV_PATH = path.resolve("scripts/provider-catalog/models.dev-2026-11-13.json");
 const OUT_PROVIDERS_PATH = path.resolve("scripts/provider-catalog/omp-api-key-providers.json");
 const OUT_VERIFY_PATH = path.resolve("scripts/provider-catalog/omp-provider-verify.json");
 

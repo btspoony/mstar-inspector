@@ -39,6 +39,8 @@ async function mount(overrides: {
   storedModelIds?: string[];
   catalogModelIds?: string[];
   storedModelsMeta?: Record<string, { contextWindow?: number; maxTokens?: number; name?: string; reasoning?: boolean; input?: string[] }>;
+  catalogLimits?: Record<string, { contextWindow: number; maxTokens: number }>;
+  limitsSnapshot?: string;
   onSettings?: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome?: (outcome: OpNotice) => void;
 }) {
@@ -66,6 +68,8 @@ async function mount(overrides: {
           storedModelIds,
           storedModelsMeta: overrides.storedModelsMeta,
           catalogModelIds: overrides.catalogModelIds ?? [],
+          catalogLimits: overrides.catalogLimits ?? {},
+          limitsSnapshot: overrides.limitsSnapshot ?? "2026-01-01",
           onSettings,
           onOutcome: (outcome) => {
             outcomes.push(outcome);
@@ -185,15 +189,15 @@ describe("ProviderModelsDialog", () => {
       expect(legacy?.checked).toBe(true);
       // Saving keeps the orphan id in the POST body.
       await view.click(view.saveButton());
-      // The overlay is ALWAYS posted (one entry per selected id, blanks
-      // absent) so the server can refuse an incomplete statement instead of
-      // reading an omitted field as "no statement".
+      // The overlay carries only stated facts: neither model states one, so
+      // the map is empty — and the server still refuses the first one that
+      // has no stated AND no catalog size, naming it.
       expect(view.calls).toEqual([
         {
           op: "update-provider-models",
           provider: "my-gateway",
           model_ids: "m-1,legacy-model",
-          models_meta: JSON.stringify({ "m-1": {}, "legacy-model": {} }),
+          models_meta: JSON.stringify({}),
         },
       ]);
     } finally {
@@ -242,6 +246,86 @@ describe("ProviderModelsDialog", () => {
           provider: "my-gateway",
           model_ids: "m-1",
           models_meta: JSON.stringify(stored),
+        },
+      ]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a catalog-supplied size is pre-filled, labelled with its snapshot, and NOT posted back", async () => {
+    const view = await mount({
+      catalogModelIds: CATALOG,
+      storedModelIds: ["m-1"],
+      catalogLimits: { "m-1": { contextWindow: 111, maxTokens: 22 } },
+      limitsSnapshot: "2026-11-13",
+    });
+    try {
+      await view.click(view.detailsToggle());
+      expect(view.field("m-1", "contextWindow")?.value).toBe("111");
+      expect(view.field("m-1", "maxTokens")?.value).toBe("22");
+      // The label names the source (and its snapshot), not a disclaimer.
+      expect(view.dialog()?.textContent).toContain(
+        t(locale, "settings.providers.models.sizesFromCatalog", { snapshot: "2026-11-13" }),
+      );
+      expect(view.dialog()?.textContent).not.toContain(t(locale, "settings.providers.models.sizesUnstated"));
+      // Untouched: no override entry travels — the catalog still supplies both.
+      await view.click(view.saveButton());
+      expect(view.calls).toEqual([
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1",
+          models_meta: JSON.stringify({}),
+        },
+      ]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("editing a catalog-supplied size posts only that override; the untouched one stays out", async () => {
+    const view = await mount({
+      catalogModelIds: CATALOG,
+      storedModelIds: ["m-1"],
+      catalogLimits: { "m-1": { contextWindow: 111, maxTokens: 22 } },
+    });
+    try {
+      await view.click(view.detailsToggle());
+      await view.type(view.field("m-1", "contextWindow"), "999");
+      await view.click(view.saveButton());
+      expect(view.calls).toEqual([
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1",
+          models_meta: JSON.stringify({ "m-1": { contextWindow: 999 } }),
+        },
+      ]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("only a part of the catalog value stated still sends just the stated side", async () => {
+    const view = await mount({
+      catalogModelIds: CATALOG,
+      storedModelIds: ["m-1"],
+      storedModelsMeta: { "m-1": { contextWindow: 111 } },
+      catalogLimits: { "m-1": { contextWindow: 111, maxTokens: 22 } },
+    });
+    try {
+      await view.click(view.detailsToggle());
+      expect(view.field("m-1", "contextWindow")?.value).toBe("111");
+      expect(view.field("m-1", "maxTokens")?.value).toBe("22");
+      await view.click(view.saveButton());
+      // The stated context window is re-sent; the catalog's max token count is not.
+      expect(view.calls).toEqual([
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1",
+          models_meta: JSON.stringify({ "m-1": { contextWindow: 111 } }),
         },
       ]);
     } finally {
@@ -444,7 +528,7 @@ describe("ProviderModelsDialog", () => {
           op: "update-provider-models",
           provider: "my-gateway",
           model_ids: "m-1,m-4",
-          models_meta: JSON.stringify({ "m-1": {}, "m-4": {} }),
+          models_meta: JSON.stringify({}),
         },
       ]);
       expect(view.outcomes).toEqual([notice("success", "stored")]);
@@ -483,6 +567,34 @@ describe("ProviderModelsDialog", () => {
     } finally {
       await view.cleanup();
     }
+  });
+
+  test("the copy states the fact and the next step — never a policy disclaimer", () => {
+    // The old wording read as a policy disclaimer; both locales now name
+    // what the fact does (or what the save left out).
+    for (const loc of ["en", "zh_CN"] as const) {
+      for (const key of [
+        "settings.error.modelContextWindowRequired",
+        "settings.error.modelMaxTokensRequired",
+        "settings.providers.models.requirements",
+        "settings.providers.models.sizesUnstated",
+        "settings.providers.models.sizesFromCatalog",
+      ] as const) {
+        const copy = t(loc, key, { model: "m-1", snapshot: "2026-11-13" });
+        expect(copy.toLowerCase()).not.toContain("guess");
+        expect(copy).not.toContain("猜测");
+      }
+    }
+    // The required-sizes line says what the numbers do, not just that they are required.
+    expect(t(locale, "settings.providers.models.requirements")).toMatch(/compacted/);
+    expect(t(locale, "settings.providers.models.requirements")).toMatch(/reply/);
+    // The incomplete note keeps the data statement and adds no blame.
+    const unstated = t(locale, "settings.providers.models.sizesUnstated");
+    expect(unstated).toContain("unstated");
+    expect(unstated).toContain("incomplete");
+    expect(unstated).not.toMatch(/not usable|failover/i);
+    // The catalog label names the snapshot the values came from.
+    expect(t(locale, "settings.providers.models.sizesFromCatalog", { snapshot: "2026-11-13" })).toContain("2026-11-13");
   });
 
   test("reopening re-seeds from the stored list — a cancelled edit leaves no trace", async () => {

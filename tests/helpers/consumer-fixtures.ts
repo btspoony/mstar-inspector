@@ -112,7 +112,7 @@ export function seedOtherApp(db: TestD1): void {
  * per-App credential resolution needs a real active row on every message
  * (appRef is required, the env-App branch is retired).
  * AL-24-5: the App is also given its AI-config health
- * baseline — a model chain (`ark-plan/deepseek-v4-flash`, the in-image
+ * baseline — a model chain (`ark/deepseek-v4-flash`, the in-image
  * base provider) + the `ark` BYOK key carried in the provider's credential
  * payload pool the chain's provider reads — so a zero-extra-env
  * message passes the fail-closed gate and every success-path test sees the
@@ -146,14 +146,14 @@ export async function createSeededTestD1(): Promise<TestD1> {
 
 /**
  * Seed one App's per-App AI config through the REAL store (composite-PK AAD
- * path): model chain + provider keys. Default = the ark-plan base chain with
+ * path): model chain + provider keys. Default = the ark base chain with
  * the `ark` BYOK key; `extraKeys` adds per-App keys for chains that need
  * more providers.
  */
 export async function seedAppConfig(
   db: TestD1,
   appId: string,
-  modelChain = "ark-plan/deepseek-v4-flash",
+  modelChain = "ark/deepseek-v4-flash",
   extraKeys: Record<string, string> = {},
 ): Promise<void> {
   const store = createAppConfigStore(db, TEST_KEY);

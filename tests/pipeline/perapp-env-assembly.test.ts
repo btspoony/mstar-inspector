@@ -8,7 +8,7 @@
  *   - the App's OWN keys ride the credential payload as one pool per provider
  *     under that provider id (empty/whitespace keys and unknown provider ids
  *     never transport); the `ark` entry feeds the in-image
- *     ark-plan base provider's pool, so that key rides
+ *     ark base provider's pool, so that key rides
  *     the same per-App pool (AL-24-5);
  *   - an App model chain becomes the runner's OMP_REVIEW_MODEL verbatim;
  *     null/""/whitespace-only = unset → the App's reviews FAIL CLOSED
@@ -48,6 +48,8 @@ import { createMigratedTestD1, mapAppToDefaultWorkspace } from "../store/helpers
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
+import { MODEL_LIMITS } from "../../src/contracts/provider-model-limits.generated";
+import { PROVIDER_CATALOG } from "../../src/contracts/provider-catalog.generated";
 import { sk, fakePem } from "../helpers/fake-secrets";
 import { withFrozenClock } from "../helpers/clock";
 import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
@@ -57,7 +59,7 @@ import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipe
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 const PEM_X = fakePem("FAKE-APP-X-PEM");
 const SHA = "0123456789abcdef0123456789abcdef01234567";
-/** The seeded `ark` BYOK key — the payload's `ark` pool for the in-image ark-plan provider (AL-24-5). */
+/** The seeded `ark` BYOK key — the payload's `ark` pool for the in-image ark provider (AL-24-5). */
 const ARK_KEY = "ark-key";
 
 const VALID_OUTPUT: ReviewOutput = {
@@ -104,7 +106,7 @@ async function seedApp(
 
 /**
  * Seed the per-App AI-config health baseline (AL-24-5): a model chain
- * (`ark-plan/deepseek-v4-flash` — the in-image base provider) plus the `ark`
+ * (`ark/deepseek-v4-flash` — the in-image base provider) plus the `ark`
  * BYOK key (the payload's `ark` pool) its chain needs. `extraKeys` adds further
  * per-App keys (e.g. a chain that also references openai/anthropic). Uses
  * the REAL store so encrypt/decrypt exercise the composite-PK AAD path.
@@ -112,7 +114,7 @@ async function seedApp(
 async function configureApp(
   db: ReturnType<typeof createMigratedTestD1>,
   appId: string,
-  chain = "ark-plan/deepseek-v4-flash",
+  chain = "ark/deepseek-v4-flash",
   extraKeys: Record<string, string> = {},
 ): Promise<void> {
   const store = createAppConfigStore(db, TEST_KEY);
@@ -413,7 +415,7 @@ function keySourceLines(): Array<{ fields: ConsumerLogFields; msg: string }> {
 }
 
 describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
-  test("app-key: the App's own keys ride the credential payload (per-App BYOK, incl. ark → the ark-plan pool)", async () => {
+  test("app-key: the App's own keys ride the credential payload (per-App BYOK, incl. ark → the ark pool)", async () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
@@ -642,7 +644,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     const appX = await seedApp(db, "app-x");
     const appY = await seedApp(db, "app-y");
     await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app", { openai: sk("x-o"), anthropic: sk("x-a") });
-    await configureApp(db, appY.id, "ark-plan/deepseek-v4-flash,groq/backup", { groq: sk("y-g") });
+    await configureApp(db, appY.id, "ark/deepseek-v4-flash,groq/backup", { groq: sk("y-g") });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(
@@ -658,7 +660,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     expect(rows).toEqual([
       // The App's own chain wins — its HEAD selector is recorded (AL-2).
       { pr_number: 42, model: "openai/gpt-app", provider: null },
-      { pr_number: 43, model: "ark-plan/deepseek-v4-flash", provider: null },
+      { pr_number: 43, model: "ark/deepseek-v4-flash", provider: null },
     ]);
   });
 
@@ -818,7 +820,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     expect(runnerEnvs()[0]).toEqual({
       HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
       PI_CODING_AGENT_DIR: "/opt/omp-agent",
-      OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash",
+      OMP_REVIEW_MODEL: "ark/deepseek-v4-flash",
     });
     expect(runnerPools()[0]).toEqual({ ark: [ARK_KEY] });
     // log hygiene (硬化项 3): the rogue row's skip is a structured
@@ -907,12 +909,12 @@ describe("runner input modelOverrides threading", () => {
     // The override chains reference openai/anthropic (allowed-list providers)
     // — the Bugbot-7aaf18f4 gate requires a key for every override provider,
     // so configure them alongside the ark baseline.
-    await configureApp(db, appX.id, "ark-plan/deepseek-v4-flash", {
+    await configureApp(db, appX.id, "ark/deepseek-v4-flash", {
       openai: sk("x-openai"),
       anthropic: sk("x-anthropic"),
     });
     const store = createAppConfigStore(db, TEST_KEY);
-    await mapRole(db, appX.id, "mstar-review-seat", "ark-plan/deepseek-v4-flash:high");
+    await mapRole(db, appX.id, "mstar-review-seat", "ark/deepseek-v4-flash:high");
     await mapRole(db, appX.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -923,7 +925,7 @@ describe("runner input modelOverrides threading", () => {
 
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({
-      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+      "mstar-review-seat": "ark/deepseek-v4-flash:high",
       "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
     });
     // The declared instant is a RUN FACT, not a re-derivation: it is the
@@ -979,7 +981,7 @@ describe("runner input modelOverrides threading", () => {
     const appX = await seedApp(db, "app-x");
     // The override references the openai provider — its key must exist for
     // the fail-closed gate (Bugbot 7aaf18f4).
-    await configureApp(db, appX.id, "ark-plan/deepseek-v4-flash", { openai: sk("x-openai") });
+    await configureApp(db, appX.id, "ark/deepseek-v4-flash", { openai: sk("x-openai") });
     const store = createAppConfigStore(db, TEST_KEY);
     await mapRole(db, appX.id, "code-reviewer", "openai/v1");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -1495,7 +1497,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
 });
 
 describe("sandbox image resolution at review execution", () => {
-  test("defaulted omp App (zero-custom): the runner input carries the resolved image's capability hosts verbatim — ark-plan included", async () => {
+  test("defaulted omp App (zero-custom): the runner input carries an EMPTY capability-host base", async () => {
     reset();
     const db = createMigratedTestD1();
     // seedApp's raw insert omits sandbox_image_id → the 0018 DDL default
@@ -1507,15 +1509,11 @@ describe("sandbox image resolution at review execution", () => {
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const input = runnerInputs()[0]!;
-    expect(input.capabilityHosts).toEqual(getSandboxImage("omp")!.hosts);
-    const hosts = input.capabilityHosts as Array<{ id: string; apiKeyEnv: string; baseUrl: string }>;
-    expect(hosts).toHaveLength(1);
-    expect(hosts[0]!.id).toBe("ark-plan");
-    expect(hosts[0]!.apiKeyEnv).toBe("ARK_API_KEY");
-    expect(hosts[0]!.baseUrl).toBe("https://ark.cn-beijing.volces.com/api/plan");
-    // The review completes (the ark-plan chain passed the gate through the
-    // resolved image's catalogProviderId mapping) and the input stays
-    // keyless — zero secret material.
+    // The image declares no provider: the per-review models.yml is the App's
+    // own declarations, and a built-in provider resolves from the SDK catalog.
+    expect(input.capabilityHosts).toEqual([]);
+    // The review completes (the App's chain passed the gate) and the input
+    // stays keyless — zero secret material.
     expect(appCalls).toEqual(["token", "plan", "post"]);
     expect(JSON.stringify(input)).not.toContain(ARK_KEY);
   });
@@ -1576,4 +1574,53 @@ describe("sandbox image resolution at review execution", () => {
     expect(runnerInputs()).toHaveLength(1);
     expect(appCalls).toEqual(["token", "plan", "post"]);
   });
+});
+
+describe("custom provider sizes resolve from the catalog at the runner boundary", () => {
+  // Derived at runtime from the generated table — no vendor number is pinned.
+  const covered = (() => {
+    for (const [providerId, table] of Object.entries(MODEL_LIMITS)) {
+      if (PROVIDER_CATALOG[providerId]?.tier !== "template") continue;
+      const modelId = Object.keys(table).find((id) => id !== "" && !id.includes("/"));
+      if (modelId !== undefined) return { providerId, modelId, limit: table[modelId]! };
+    }
+    return null;
+  })();
+
+  test.skipIf(covered === null)(
+    "a declaration that states no size reaches the runner with the catalog's sizes",
+    async () => {
+      if (covered === null) return;
+      reset();
+      const db = createMigratedTestD1();
+      const appX = await seedApp(db, "app-x");
+      const store = createAppConfigStore(db, TEST_KEY);
+      await store.upsertCustomProvider(
+        appX.id,
+        {
+          provider_id: covered.providerId,
+          base_url: "https://example.invalid/v1",
+          api: "openai-completions",
+          model_ids: [covered.modelId],
+        },
+        sk("custom-fixture-CCC"),
+      );
+      await configureApp(db, appX.id, `${covered.providerId}/${covered.modelId}`);
+      const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await withFrozenClock(() => consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))));
+
+      // The operator stated nothing, so nothing is STORED — but the runner has
+      // no catalog of its own, so the projection resolves the blank from it.
+      const input = runnerInputs()[0]!;
+      const decl = (input.customProviders as Array<{
+        provider_id: string;
+        models_meta?: Record<string, { contextWindow?: number; maxTokens?: number } | undefined>;
+      }>).find((entry) => entry.provider_id === covered.providerId);
+      expect(decl?.models_meta?.[covered.modelId]).toEqual({
+        contextWindow: covered.limit.contextWindow,
+        maxTokens: covered.limit.maxTokens,
+      });
+    },
+  );
 });

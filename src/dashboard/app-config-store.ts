@@ -160,8 +160,6 @@
  *     app_id is a caller bug, never a silent no-op.
  */
 import { createSecretbox } from "./secretbox";
-import { createAppsStore } from "./apps-store";
-import { sandboxImageHostIds } from "../contracts/sandbox-images";
 import { builtinProbeCanRejectKey, customProbeCanRejectKey } from "./provider-verify";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-catalog.generated";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../contracts/provider-models";
@@ -365,9 +363,7 @@ type CustomProviderKeyJoinRow = {
 /**
  * A row of `app_provider_models` (migration 0025): the verified-model
  * EVIDENCE ONE KEY produced, for BUILT-IN providers. `provider` is the
- * SELECTOR-FACING key (spec §6.1) — `ark` BYOK keys verify under the BYOK id
- * "ark" but their evidence rows are written under "ark-plan" (the in-image
- * base provider id the chain references) — and `key_id` is the same
+ * BYOK provider id the key was stored under — and `key_id` is the same
  * plaintext-derived id `app_provider_keys` carries, so evidence is
  * attributable to exactly one credential. models_json is a TEXT JSON array of
  * verified model ids — configuration, not a secret (0006 model_chain
@@ -394,7 +390,7 @@ export type AppProviderModelsRow = {
  * AGREES on (getVerifiedModels recomputes it on read).
  */
 export type VerifiedModels = {
-  /** Selector-facing provider key ("ark-plan" for a verified `ark` BYOK key). */
+  /** The provider id the options are prefixed with. */
   provider: string;
   /**
    * The models EVERY credential the runtime may select can serve — the
@@ -407,23 +403,8 @@ export type VerifiedModels = {
 };
 
 /**
- * BYOK provider id → selector-facing `app_provider_models` cache key (spec
- * §6.1): an `ark` BYOK key verifies under the BYOK vocabulary id "ark", but
- * its cached model list must be written under "ark-plan" — the capability
- * host id that is the chain's selector prefix (the App's selected sandbox
- * image declares the same id as a registry capability host,
- * src/contracts/sandbox-images.ts). Every other provider uses its own id
- * unchanged.
- */
-export function modelCacheProviderKey(provider: string): string {
-  return provider === "ark" ? "ark-plan" : provider;
-}
-
-/**
  * The provider id allowlist — the builtin tier of the generated provider
- * catalog (19 builtin-tier provider ids incl. `ark`, same order — AL-24-5
- * added `ark` so the in-image ark-plan base provider's key rides the per-App
- * BYOK key pool like every other provider).
+ * catalog (19 builtin-tier provider ids incl. `ark`, same order).
  * Re-exported from the generated contract: the catalog SSOT
  * lives in src/contracts/provider-catalog.generated.ts — a
  * dashboard-importable pure-data module (Q2 forbids dashboard → pipeline
@@ -744,9 +725,7 @@ export class UnknownModelChainError extends Error {
 /**
  * Declaration-shape error: an upsertCustomProvider call named
  * an id outside the `[a-z0-9][a-z0-9-]{0,63}` grammar, an id colliding with
- * a built-in (PROVIDER_IDS) or with a capability host of the App's selected
- * sandbox image (sandboxImageHostIds — QC wave-1 W-1's successor),
- * a non-https or over-length base URL, an api outside the
+ * a built-in (PROVIDER_IDS), a non-https or over-length base URL, an api outside the
  * AL-23-1 three-form enum, an empty / over-long / over-count model_ids list,
  * an empty key, or a NEW declaration at the MAX_CUSTOM_PROVIDER_COUNT cap
  * (QC wave-1 W-2). The settings route re-renders 400 first; this typed throw
@@ -964,7 +943,7 @@ export function assertCustomProviderModelsMeta(
   }
 }
 
-function assertCustomProvider(decl: AppCustomProvider, plainKey: string, capabilityHostIds: readonly string[]): void {
+function assertCustomProvider(decl: AppCustomProvider, plainKey: string): void {
   if (!CUSTOM_PROVIDER_ID_PATTERN.test(decl.provider_id)) {
     throw new InvalidCustomProviderError(
       `invalid custom provider id ${JSON.stringify(decl.provider_id)} (expected [a-z0-9][a-z0-9-]{0,63})`,
@@ -973,15 +952,6 @@ function assertCustomProvider(decl: AppCustomProvider, plainKey: string, capabil
   if (PROVIDER_IDS.includes(decl.provider_id)) {
     throw new InvalidCustomProviderError(
       `custom provider id ${JSON.stringify(decl.provider_id)} collides with a built-in provider id`,
-    );
-  }
-  // (QC wave-1 W-1's successor): an id the App's SELECTED sandbox
-  // image already declares as a capability host (omp: ark-plan) would be
-  // skipped base-wins at synthesis — silently dead on every review — so it
-  // is rejected exactly like a built-in collision.
-  if (capabilityHostIds.includes(decl.provider_id)) {
-    throw new InvalidCustomProviderError(
-      `custom provider id ${JSON.stringify(decl.provider_id)} collides with a capability host of the App's sandbox image`,
     );
   }
   if (!isValidCustomProviderBaseUrl(decl.base_url)) {
@@ -1468,7 +1438,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         )
         .bind(
           appId,
-          modelCacheProviderKey(provider),
+          provider,
           keyId,
           JSON.stringify(opts.models),
           appId,
@@ -1626,9 +1596,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * key — builtinProbeCanRejectKey, the same allow-list the custom path
      * reads; a public model list answers 2xx for any bearer, so its 2xx proves
      * reachability only), and upserts THAT
-     * KEY's verified-model evidence row under the SELECTOR-FACING provider key
-     * (modelCacheProviderKey — an `ark` BYOK key records under "ark-plan",
-     * spec §6.1) as ONE atomic db.batch (D1 batch is transactional and the
+     * KEY's verified-model evidence row under the same provider id as ONE
+     * atomic db.batch (D1 batch is transactional and the
      * evidence statement only fires once the key row is there, so a verified
      * key with no evidence row — or an evidence row with no key — is
      * impossible). `models` may be [] (a provider that only got an auth-probe
@@ -1653,8 +1622,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * recomputes the offered set from the keys that remain — a model only the
      * removed credential could reach can no longer be offered, and one the
      * survivors still serve stays offered). The evidence row lives under the
-     * SELECTOR-FACING provider key — modelCacheProviderKey maps an `ark` BYOK
-     * key to its "ark-plan" evidence (spec §6.1). Returns whether THIS call
+     * same provider id the key does. Returns whether THIS call
      * removed the key row; an unknown key id — or any provider the allowlist
      * could never have stored — is a no-op returning false (the delete
      * statement's `changes() > 0` reads the row count of the DELETE that runs
@@ -1672,7 +1640,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           .prepare(
             `DELETE FROM app_provider_models WHERE app_id = ? AND provider = ? AND key_id = ? AND changes() > 0`,
           )
-          .bind(appId, modelCacheProviderKey(provider), keyId),
+          .bind(appId, provider, keyId),
       ]);
       return res[0]!.meta.changes > 0;
     },
@@ -1795,8 +1763,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * BUILT-IN provider whose pool holds at least one key, provider-ascending
      * — the settings loader's dropdown source (one entry = one verified
      * provider whose options render as selector literal grammar
-     * `provider/model`; the entry's `provider` IS the selector prefix,
-     * "ark-plan" for a verified `ark` BYOK key).
+     * `provider/model`; the entry's `provider` IS the selector prefix).
      *
      * The models are RECOMPUTED on every read as the INTERSECTION over the
      * CURRENT pool's keys' own evidence rows, never stored: the runtime loads
@@ -1827,7 +1794,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       const entries: VerifiedModels[] = [];
       for (const [provider, perKey] of byProvider) {
         const poolKeyIds = new Set(
-          rows.filter((row) => modelCacheProviderKey(row.provider) === provider).map((row) => row.key_id),
+          rows.filter((row) => row.provider === provider).map((row) => row.key_id),
         );
         if (poolKeyIds.size === 0) continue;
         let models: string[] | null = null;
@@ -2080,12 +2047,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * keeps created_at (the declaration's birth time).
      */
     async upsertCustomProvider(appId: string, decl: AppCustomProvider, plainKey: string): Promise<void> {
-      // The collision vocabulary is the App's SELECTED image's
-      // capability host ids (omp: ark-plan) — resolved here so the backstop
-      // stays self-contained for direct callers (one read per declaration
-      // write, the same posture as the cap-count SELECT below).
-      const imageId = await createAppsStore(db).getSandboxImageId(appId);
-      assertCustomProvider(decl, plainKey, sandboxImageHostIds(imageId ?? ""));
+      assertCustomProvider(decl, plainKey);
       // The declaration AS STORED plus its pool, read before the write decides
       // anything: the stored endpoint is what every retained credential was
       // verified against, and the promoted pool is what the endpoint lock, the

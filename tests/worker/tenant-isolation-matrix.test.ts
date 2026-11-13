@@ -342,7 +342,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
       db,
       "INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES (?, ?, datetime('now'))",
       "app-acme",
-      "ark-plan/deepseek-v4-flash",
+      "ark/deepseek-v4-flash",
     );
     // A REAL key row for the delete target: deleting a nonexistent key is a
     // tolerant 2xx no-op, which would prove nothing about authorization.
@@ -377,7 +377,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
       expect(res.status, route).toBe(403);
       expect(appSnapshot(db), route).toEqual(pristine);
     }
-    expect((pristine.config as { model_chain: string }).model_chain).toBe("ark-plan/deepseek-v4-flash");
+    expect((pristine.config as { model_chain: string }).model_chain).toBe("ark/deepseek-v4-flash");
 
     // Reachability wave: the workspace OWNER sends the same payloads and each
     // route answers its REAL success status — so every 403 above came from the

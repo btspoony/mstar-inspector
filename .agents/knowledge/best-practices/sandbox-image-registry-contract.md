@@ -26,15 +26,15 @@ tags:
 
 ## Guidance
 
-1. **Registry 形态**：`SandboxImageId` / `SandboxImageDefinition` / `DEFAULT_SANDBOX_IMAGE_ID="omp"` / `getSandboxImage(id)` / `enabledSandboxImages()` / `sandboxImageHostIds(id)`。closed lookup（未知/禁用 id 失败）、零 import（含 secrets、dashboard 数据）。omp entry 携带 Dockerfile/wrangler 路径 + capability hosts（如 `ark-plan`：catalogProviderId `ark`、baseUrl、models）。host 的 `apiKeyEnv`（`ARK_API_KEY`）/`auth` 为**保留 registry 元数据**，不再决定凭据解析：其 key 走 `catalogProviderId` 命名的载荷池（`ark-plan` ↔ 载荷中的 `ark` 项），合成的 models.yml 块一律 `auth: oauth`、不含标量 `apiKey`。
+1. **Registry 形态**：`SandboxImageId` / `SandboxImageDefinition` / `DEFAULT_SANDBOX_IMAGE_ID="omp"` / `getSandboxImage(id)` / `enabledSandboxImages()`。closed lookup（未知/禁用 id 失败）、零 import（含 secrets、dashboard 数据）。omp entry **只携带构建输入**（Dockerfile/wrangler 路径 + pins）；**不声明任何 provider 或模型**——models.yml 由 App 自己的声明合成，内置 provider 由 omp catalog 解析。
 2. **App 选择与校验**：`github_apps.sandbox_image_id TEXT NOT NULL DEFAULT 'omp'`（0018，无 CHECK，store-enforced；软删行一并 backfill）。保存仅限 `canManageApp` + enabled registry id（400 zero-write）。**Pipeline 在 `assertAppConfigComplete` 之前** `resolveSandboxImage`（结构化非 secret 错误、`stage=pipeline`），严格先于 `acquireReviewGuard` 与 `getSandbox`——未知/禁用 id 永不启动容器。
 3. **`getSandbox(binding, instanceId)` 不是 image picker**：它是 `namespace.getByName(id.toLowerCase())`——只按 id 拿一个 `SandboxV1` DO stub，不接收镜像参数。一个 Worker 一个 container class / 一个容器应用（`wrangler.jsonc` → `mstar-inspector-sandbox-v2`，`scheduling_policy: "durable_object"`），镜像由该 DO 自己的 `container.start({ image: container.images.sandbox, … })` 从 `containers[].images.sandbox`（`./sandbox-image/Dockerfile`）取。本仓校验持久化 id 后使用已部署 omp 镜像；第二 runtime 是后续 container-binding 变更（部署窗口 runner/input skew 契约见 `src/contracts/sandbox-images.ts` 头注：旧 worker/新镜像瞬态失败 self-heal via retry，启用第二个镜像或改容器目标必须重新验证该契约）。
-4. **镜像里只有运行时，没有 App 配置**：Dockerfile（`sandbox-image/Dockerfile`）零 App secret/provider/model/`models.yml` COPY；`/opt/omp-agent` 仅空目录 + `PI_CODING_AGENT_DIR`；models.yml 每 review 合成（见 `omp-per-review-models-synthesis`）。parity 锁：`tests/contracts/sandbox-images.test.ts`（registry 路径 ↔ wrangler.jsonc + wrangler.smoke.jsonc、`packages/runner/verify-synthesis.sh` 的 `ARK_PLAN_HOST` 字面量漂移锁、in-image 类型镜像 type-lock）。
-5. **加第二个 runtime 的清单**（每条都有部署窗口验证义务）：独立 Dockerfile（`sandbox-image/<runtime>/`）→ registry entry（stable id + capability contract + hosts）→ 该 runtime 的 configuration synthesizer → runner 支持 → wrangler 双配置 + credentialed smoke（`scripts/sandbox-smoke.ts` + in-image `packages/runner/verify-synthesis.sh`）→ enabled。**omp 不得出现在 Providers catalog**（runtime capability ≠ provider 目录 id；catalog id 是 `ark`）。
+4. **镜像里只有运行时，没有 App 配置**：Dockerfile（`sandbox-image/Dockerfile`）零 App secret/provider/model/`models.yml` COPY；`/opt/omp-agent` 仅空目录 + `PI_CODING_AGENT_DIR`；models.yml 每 review 合成（见 `omp-per-review-models-synthesis`）。parity 锁：`tests/contracts/sandbox-images.test.ts`（registry 路径 ↔ wrangler.jsonc + wrangler.smoke.jsonc；entry 形状 = 构建输入，无 provider 面）。
+5. **加第二个 runtime 的清单**（每条都有部署窗口验证义务）：独立 Dockerfile（`sandbox-image/<runtime>/`）→ registry entry（stable id + 构建输入）→ 该 runtime 的 configuration synthesizer → runner 支持 → wrangler 双配置 + credentialed smoke（`scripts/sandbox-smoke.ts` + in-image `packages/runner/verify-synthesis.sh`）→ enabled。**runtime 本身不得出现在 Providers catalog**（runtime ≠ provider 目录 id）。
 
 ## Why This Matters
 
-把「能跑」和「配了什么」分开后，App 配置（providers/models/keys）永不进入构建产物，镜像可以独立重建/部署；registry 的 closed lookup 让坏 id 在容器启动前 fail-closed。反例（registry 改造前的形态）：App 模型配置烤在镜像里 → 换 App 配置需要重建镜像、多 App 无法共存、capability host（`ark-plan`）与 App 配置边界模糊。
+把「能跑」和「配了什么」分开后，App 配置（providers/models/keys）永不进入构建产物，镜像可以独立重建/部署；registry 的 closed lookup 让坏 id 在容器启动前 fail-closed。反例（registry 改造前的形态）：App 模型配置烤在镜像里 → 换 App 配置需要重建镜像、多 App 无法共存。
 
 ## When to Apply
 
@@ -45,7 +45,7 @@ tags:
 
 - Registry + 迁移 + 存取：`src/contracts/sandbox-images.ts`、`migrations/0018_app_sandbox_images.sql`、`src/dashboard/apps-store.ts`（`setSandboxImage`）
 - 执行侧：`src/pipeline/consumer.ts`（`resolveSandboxImage`）、`packages/runner/src/models-synthesis.ts`
-- 测试：`tests/contracts/sandbox-images.test.ts`、`tests/pipeline/consumer.test.ts`（invalid id fail-closed、zero-custom ark-plan 等价）
+- 测试：`tests/contracts/sandbox-images.test.ts`、`tests/pipeline/consumer.test.ts`（invalid id fail-closed、zero-custom 空 base）
 - 已知 open 项：部署窗口 credentialed build + in-image `packages/runner/verify-synthesis.sh` replay + sandbox smoke 尚未在真实镜像上完成验证（deferred）
 
 ## Promoted to

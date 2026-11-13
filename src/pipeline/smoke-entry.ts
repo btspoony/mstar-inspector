@@ -18,10 +18,8 @@
  *                          `mstar-inspector-seed` branch, write the runner
  *                          --input JSON (reconFacts: PR fact
  *                          + checked-out head sha + numstat universe — the
- *                          same shape src/pipeline/consumer.ts writes, plus
- *                          the required capabilityHosts: the deployed omp
- *                          image's hosts resolved from the same source-
- *                          controlled registry the consumer uses), exec
+ *                          same shape src/pipeline/consumer.ts writes:
+ *                          an empty capabilityHosts base), exec
  *                          the in-image runner
  *                          (packages/runner/src/runner.ts) on its
  *                          current `--level quick --input <file>` CLI with
@@ -265,7 +263,7 @@ async function runReviewSmoke(env: SmokeEnv, repo: string): Promise<Response> {
  * Steps 2–4 of the review smoke: recon facts → runner input JSON → exec the
  * in-image review runner. The runner input is the same shape the production
  * consumer writes (src/pipeline/consumer.ts): PR fact + checked-out head sha
- * + the numstat universe + the required capabilityHosts, base64-transported
+ * + the numstat universe + an empty capabilityHosts base, base64-transported
  * so the JSON never touches shell interpolation. The model key rides the exec
  * STDIN credential payload (never baked into the image, never the exec env).
  */
@@ -275,10 +273,10 @@ async function execInImageReview(
   startedAt: number,
   repo: string,
 ): Promise<Record<string, unknown>> {
-  // The runner input REQUIRES the capability hosts (the in-image
-  // synthesizer base — there is no baked models.yml to fall back to). The
-  // smoke exercises the deployed omp image, resolved through the SAME
-  // source-controlled registry the production consumer resolves with.
+  // The runner input REQUIRES the capabilityHosts field (there is no baked
+  // models.yml); it carries an EMPTY base — the image declares no provider.
+  // The smoke exercises the deployed omp image, resolved through the SAME
+  // closed registry the production consumer resolves with.
   const sandboxImage = getSandboxImage(DEFAULT_SANDBOX_IMAGE_ID);
   if (!sandboxImage) {
     throw new Error(`sandbox image ${DEFAULT_SANDBOX_IMAGE_ID} is missing from the registry`);
@@ -303,7 +301,7 @@ async function execInImageReview(
     JSON.stringify({
       worktreePath: CLONE_DIR,
       reconFacts: [`${repo}#${GH_PR}`, `head ${headSha}`, ...numstat],
-      capabilityHosts: sandboxImage.hosts,
+      capabilityHosts: [],
     }),
     "utf8",
   ).toString("base64");

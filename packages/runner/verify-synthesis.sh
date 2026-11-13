@@ -70,14 +70,12 @@ import { ModelRegistry, discoverAuthStorage, createAgentSession } from "@oh-my-p
 import { join } from "node:path";
 import { readFileSync, rmSync } from "node:fs";
 
-// The omp capability host — the runner input `capabilityHosts` entry for the
-// deployed image. Declared inline (NOT imported from the sandbox-image
-// registry): the image copies only the package sources, so the in-image
-// module graph cannot see the registry; this literal mirrors the
-// source-controlled omp entry (ark-plan). `apiKeyEnv` and `auth` are retained
-// registry metadata — the pool env prefix derives from the provider id
-// (catalogProviderId), not from `apiKeyEnv` — and the synthesized block pins
-// no apiKey.
+// TEST FIXTURE — a runtime that ships its own base provider. The product
+// registry declares no provider and no model, so this literal exists only to
+// exercise the capability-host synthesis path; it is not read from anywhere.
+// `apiKeyEnv` and `auth` are carried metadata — the pool env prefix derives
+// from the provider id (catalogProviderId), and the synthesized block pins no
+// apiKey.
 const ARK_PLAN_HOST = {
   id: "ark-plan",
   catalogProviderId: "ark",
@@ -137,6 +135,28 @@ try {
   const zeroYaml = readFileSync(join(zeroCustomDir, "models.yml"), "utf8");
   assert(zeroYaml === capabilityHostsYaml([ARK_PLAN_HOST]), "U001_LAYER_A_ZERO_CUSTOM_BASE_BYTES");
   assert(!zeroYaml.includes("u001-verify"), "U001_LAYER_A_ZERO_CUSTOM_NO_CUSTOM");
+  // PRODUCTION SHAPE: an EMPTY capability base plus the App's declaration —
+  // the per-review file carries no image-declared provider at all.
+  const emptyBaseDir = await writePerReviewModelsYaml([], [DECL]);
+  try {
+    const emptyYaml = readFileSync(join(emptyBaseDir, "models.yml"), "utf8");
+    assert(emptyYaml.startsWith("providers:\n"), "U001_LAYER_A_EMPTY_BASE_HEADER");
+    assert(
+      (emptyYaml.match(/^providers:$/gm) ?? []).length === 1,
+      "U001_LAYER_A_EMPTY_BASE_SINGLE_PROVIDERS_MAP",
+    );
+    assert(!emptyYaml.includes("ark-plan"), "U001_LAYER_A_EMPTY_BASE_NO_BASE_PROVIDER");
+    assert(emptyYaml.includes('"u001-verify":'), "U001_LAYER_A_EMPTY_BASE_CUSTOM_ONLY");
+    const emptyRegistry = new ModelRegistry(
+      await discoverAuthStorage(emptyBaseDir),
+      join(emptyBaseDir, "models.yml"),
+    );
+    assert(emptyRegistry.hasProvider("u001-verify"), "U001_LAYER_B_EMPTY_BASE_CUSTOM_PROVIDER");
+    const emptyModel = emptyRegistry.find("u001-verify", "verify-model");
+    assert(emptyModel !== undefined, "U001_LAYER_B_EMPTY_BASE_FIND_MODEL");
+  } finally {
+    rmSync(emptyBaseDir, { recursive: true, force: true });
+  }
   console.log("U001_LAYER_A_MODELS_YAML=" + join(agentDir, "models.yml"));
 
   // Layer (b): ModelRegistry — the same eager loader createAgentSession uses.

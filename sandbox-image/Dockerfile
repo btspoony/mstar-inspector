@@ -220,6 +220,13 @@
 # `sandbox-image/cli-global/package.json` are image inputs, and the pinned ref
 # is the tree the skills are cloned from; a stale image would run the previous
 # engine and skills against this Worker).
+# rebuild: the per-review models.yml carries no image-declared provider anymore
+# (`packages/runner/src/models-synthesis.ts` and the runner input shape in
+# `packages/shared/src/runtime.ts` accept an EMPTY `capabilityHosts` array, and
+# `packages/runner/src/runtime-omp.ts` has no default model selector — an empty
+# chain throws). A stale image still resolves the retired `ark-plan` base
+# provider, so an App whose chain names only its own providers would run against
+# a provider the product no longer declares.
 #
 # Version pinning (compass contracts E): base digest, Bun (image tag + digest),
 # mstar-harness ref, the mstar-harness CLI, and the omp SDK (via

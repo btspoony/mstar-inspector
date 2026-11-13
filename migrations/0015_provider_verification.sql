@@ -20,10 +20,8 @@
 -- store (0006/0012 precedent).
 --
 -- SECTION 2: app_provider_models — the per-App verified
--- model cache for BUILT-IN providers (selector-facing provider keys only:
--- the `ark` BYOK key verifies under "ark" but its cached row is written
--- under "ark-plan", the in-image base provider id the chain actually
--- references — spec §6.1). models_json is a TEXT JSON array of verified
+-- model cache for BUILT-IN providers, keyed by the BYOK provider id the key
+-- was stored under. models_json is a TEXT JSON array of verified
 -- model ids — configuration, not a secret (0006 model_chain rationale; a
 -- model selector is configuration, not a secret). fetched_at is a TEXT
 -- timestamp written by the store. Custom providers write NO rows here —

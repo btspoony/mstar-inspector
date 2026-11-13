@@ -637,10 +637,8 @@ export const en = {
       modelIdsRequired: "Enter at least one model id for the custom provider.",
       modelIdsTooMany: "Too many model ids ({count}) — at most {limit}. Nothing was stored.",
       modelIdTooLong: "Model ids are limited to {limit} characters each. Nothing was stored.",
-      modelContextWindowRequired:
-        "{model} needs a context window — we do not guess. Nothing was stored.",
-      modelMaxTokensRequired:
-        "{model} needs a max token count — we do not guess. Nothing was stored.",
+      modelContextWindowRequired: "{model} needs a context window. Nothing was stored.",
+      modelMaxTokensRequired: "{model} needs a max token count. Nothing was stored.",
       modelMetaInvalid: "{model}'s {field} is not a valid value — nothing was stored.",
       modelMetaMalformed: "The per-model details could not be read — nothing was stored.",
       customProviderDeclRejected: "The custom provider was rejected — nothing was stored.",
@@ -778,7 +776,7 @@ export const en = {
         detailsToggle: "Edit model details",
         detailsSelectLabel: "Model to edit",
         requirements:
-          "Every selected model needs a context window and a max token count — we do not guess.",
+          "Every selected model needs a context window and a max token count — they set when context gets compacted and how long one reply can run.",
         /**
          * A DATA statement, not a runtime promise: the pinned omp registry
          * back-fills its own defaults for an id-only model, so the copy must
@@ -787,7 +785,11 @@ export const en = {
          * does not invent the numbers.
          */
         sizesUnstated:
-          "Saved, but its context window and max token count are unstated — the declaration is incomplete until you state both. We do not guess.",
+          "Saved. The context window and max token count are unstated — the declaration is incomplete until both are given.",
+        /** The provenance label under the two size fields (catalog names its snapshot). */
+        sizesFromCatalog:
+          "These sizes come from the model catalog snapshot {snapshot} — edit a value to override it.",
+        sizesFromDeclaration: "These sizes come from your saved declaration.",
         fields: {
           contextWindow: "{model} context window",
           maxTokens: "{model} max token count",
