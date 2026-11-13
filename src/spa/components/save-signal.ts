@@ -22,6 +22,11 @@ export function useSaveSignal(): {
 } {
   const [status, setStatus] = useState<SaveStatus>("idle");
   const revertTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Effect-managed lifetime: StrictMode's setup/cleanup/setup re-arms it,
+  // and a real unmount flips it off for good — an async completion that
+  // resolves after teardown retains its callbacks but can neither transition
+  // state nor arm a new timer.
+  const mounted = useRef(false);
 
   const clearRevert = useCallback(() => {
     if (revertTimer.current !== null) {
@@ -30,15 +35,24 @@ export function useSaveSignal(): {
     }
   }, []);
 
-  // Unmount is the last word: a pending revert must never fire afterwards.
-  useEffect(() => clearRevert, [clearRevert]);
+  // Unmount is the last word: the pending revert is disarmed and every
+  // retained callback becomes a no-op.
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      clearRevert();
+    };
+  }, [clearRevert]);
 
   const start = useCallback(() => {
+    if (!mounted.current) return;
     clearRevert();
     setStatus("loading");
   }, [clearRevert]);
 
   const succeed = useCallback(() => {
+    if (!mounted.current) return;
     clearRevert();
     setStatus("success");
     revertTimer.current = setTimeout(() => {
@@ -48,6 +62,7 @@ export function useSaveSignal(): {
   }, [clearRevert]);
 
   const fail = useCallback(() => {
+    if (!mounted.current) return;
     clearRevert();
     setStatus("error");
   }, [clearRevert]);

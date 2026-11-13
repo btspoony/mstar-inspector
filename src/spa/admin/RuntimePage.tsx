@@ -419,7 +419,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       onChange={(event) => setDraft(event.target.value)}
                     />
                   </div>
-                  <Button type="submit" disabled={busy}>
+                  <Button
+                    type="submit"
+                    disabled={busy}
+                    status={concurrencySignal.status === "idle" ? undefined : concurrencySignal.status}
+                  >
                     {t(locale, "admin.runtime.concurrencySave")}
                   </Button>
                   {data.degraded ? (
@@ -496,7 +500,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       onChange={(event) => setUpdateDraft(event.target.value)}
                     />
                   </div>
-                  <Button type="submit" disabled={busy}>
+                  <Button
+                    type="submit"
+                    disabled={busy}
+                    status={checkBudgetsSignal.status === "idle" ? undefined : checkBudgetsSignal.status}
+                  >
                     {t(locale, "admin.runtime.checkSave")}
                   </Button>
                   {budgets.degraded ? (
@@ -587,7 +595,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       onChange={(event) => setOutboxDraft(event.target.value)}
                     />
                   </div>
-                  <Button type="submit" disabled={busy}>
+                  <Button
+                    type="submit"
+                    disabled={busy}
+                    status={commentClaimSignal.status === "idle" ? undefined : commentClaimSignal.status}
+                  >
                     {t(locale, "admin.runtime.claimSave")}
                   </Button>
                   {claim.degraded ? (
@@ -658,7 +670,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       </Select>
                     </div>
                   </div>
-                  <Button type="submit" disabled={busy}>
+                  <Button
+                    type="submit"
+                    disabled={busy}
+                    status={reviewLevelSignal.status === "idle" ? undefined : reviewLevelSignal.status}
+                  >
                     {t(locale, "admin.runtime.reviewLevelSave")}
                   </Button>
                   {level.degraded ? (
@@ -710,7 +726,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       onChange={(event) => setRecheckDraft(event.target.value)}
                     />
                   </div>
-                  <Button type="submit" disabled={busy}>
+                  <Button
+                    type="submit"
+                    disabled={busy}
+                    status={recheckAssignmentSignal.status === "idle" ? undefined : recheckAssignmentSignal.status}
+                  >
                     {t(locale, "admin.runtime.recheckSave")}
                   </Button>
                   {recheck.degraded ? (

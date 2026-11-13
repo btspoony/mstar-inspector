@@ -25,6 +25,7 @@ import { t } from "../../src/i18n";
 import { Button } from "../../src/design-system/primitives/button";
 import { useSaveSignal } from "../../src/spa/components/save-signal";
 import { NoticeRegion, type OpNotice } from "../../src/spa/pages/PageNotice";
+import { RuntimePage } from "../../src/spa/admin/RuntimePage";
 import { WorkspaceSettingsPage } from "../../src/spa/pages/WorkspaceSettingsPage";
 import type { SpaBoot } from "../../src/spa/boot";
 import { installDom } from "./dom";
@@ -146,6 +147,41 @@ describe("useSaveSignal", () => {
       expect(signalProbe.status).toBe("loading");
 
       await act(async () => root.unmount());
+    } finally {
+      jest.useRealTimers();
+      cleanup();
+    }
+  });
+
+  test("a late completion after unmount is ignored: no transition, no new timer", async () => {
+    // The write is still in flight when the form unmounts (a navigation
+    // away); the retained succeed/fail callbacks must not transition state
+    // nor arm the revert timer once teardown has run.
+    jest.useFakeTimers();
+    const { win, cleanup } = installDom("http://localhost/dashboard/ws_acme/settings");
+    try {
+      const { root } = mount(win);
+      await act(async () => root.render(createElement(SignalProbeComponent)));
+      await act(async () => {
+        signalProbe.start();
+      });
+      expect(signalProbe.status).toBe("loading");
+      const armed = jest.getTimerCount(); // an in-flight save arms none
+      await act(async () => root.unmount());
+
+      await act(async () => {
+        signalProbe.succeed();
+      });
+      expect(signalProbe.status).toBe("loading");
+      expect(jest.getTimerCount()).toBe(armed);
+      await act(async () => {
+        jest.advanceTimersByTime(10_000);
+      });
+      await act(async () => {
+        signalProbe.fail();
+      });
+      expect(signalProbe.status).toBe("loading");
+      expect(jest.getTimerCount()).toBe(armed);
     } finally {
       jest.useRealTimers();
       cleanup();
@@ -384,6 +420,155 @@ describe("workspace name card end to end", () => {
         (node) => node.textContent ?? "",
       );
       expect(later.some((text) => text.includes("name taken"))).toBe(true);
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      jest.useRealTimers();
+      cleanup();
+    }
+  });
+});
+
+describe("stale error replacement", () => {
+  test("a failed save followed by a successful retry clears the stale error and touches no other cluster", async () => {
+    jest.useFakeTimers();
+    const { win, cleanup } = installDom("http://localhost/dashboard/ws_acme/settings");
+    let refuse = true;
+    const realFetch = stubWorkspaceSettingsFetch(() =>
+      refuse
+        ? new Response(JSON.stringify({ message: "name taken" }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          })
+        : new Response(JSON.stringify({ name: "Acme Labs" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+    );
+    try {
+      const { container, root } = mount(win);
+      await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
+
+      await submitName(win, container as unknown as Element, "Taken Name");
+      // The failure is the persistent face: alert notice + button error.
+      expect(container.textContent).toContain("name taken");
+      const button = container.querySelector("form button[type=\"submit\"]") as unknown as HTMLButtonElement;
+      expect(button.getAttribute("data-status")).toBe("error");
+
+      // The retry lands: the stale error of THIS cluster is gone, the check
+      // is on the button, and the success copy is the assistive text.
+      refuse = false;
+      await submitName(win, container as unknown as Element, "Acme Labs");
+      expect(container.textContent).not.toContain("name taken");
+      expect(container.textContent).toContain(t("en", "workspace.nameSaved"));
+      const retried = container.querySelector("form button[type=\"submit\"]") as unknown as HTMLButtonElement;
+      expect(retried.getAttribute("data-status")).toBe("success");
+      // The sibling clusters never errored and the retry cleared none of
+      // their regions — no alert box remains anywhere on the page.
+      expect(container.querySelector("p[role=\"alert\"]")).toBeNull();
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      jest.useRealTimers();
+      cleanup();
+    }
+  });
+});
+
+const RUNTIME_MINIMAL = { concurrency: 24, min: 1, max: 256, degraded: false };
+
+describe("runtime page save face", () => {
+  test("a runtime save shows the button faces through pending, success and failure", async () => {
+    jest.useFakeTimers();
+    const { win, cleanup } = installDom("http://localhost/_internal_admin/runtime");
+    let resolvePatch: ((response: Response) => void) | null = null;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "PATCH") {
+        return new Promise<Response>((resolve) => {
+          resolvePatch = resolve;
+        });
+      }
+      return new Response(JSON.stringify(RUNTIME_MINIMAL), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      const { container, root } = mount(win);
+      await act(async () => root.render(createElement(RuntimePage, { locale: "en" })));
+
+      const input = win.document.querySelector("#system-concurrency") as unknown as HTMLInputElement;
+      expect(input.value).toBe("24");
+      const button = () =>
+        container.querySelector("form button[type=\"submit\"]") as unknown as HTMLButtonElement;
+      const typeValue = async (value: string) => {
+        const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+        await act(async () => {
+          setValue?.call(input, value);
+          input.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+        });
+      };
+
+      // Pending: the spinner rides the button with aria-busy.
+      await typeValue("40");
+      await act(async () => {
+        button().dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+      expect(resolvePatch).not.toBeNull();
+      expect(button().getAttribute("data-status")).toBe("loading");
+      expect(button().getAttribute("aria-busy")).toBe("true");
+      expect(button().querySelector("svg.lucide-loader-circle")).not.toBeNull();
+
+      // Success: the check replaces the spinner, then the face reverts.
+      await act(async () => {
+        resolvePatch?.(
+          new Response(JSON.stringify({ concurrency: 40 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      });
+      expect(button().getAttribute("data-status")).toBe("success");
+      expect(button().querySelector("svg.lucide-circle-check")).not.toBeNull();
+      expect(button().getAttribute("aria-busy")).toBeNull();
+      await act(async () => {
+        jest.advanceTimersByTime(2000);
+      });
+      expect(button().getAttribute("data-status")).toBeNull();
+
+      // Failure: the alert face AND the persistent readable error notice.
+      resolvePatch = null;
+      await typeValue("20");
+      await act(async () => {
+        button().dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+      expect(button().getAttribute("data-status")).toBe("loading");
+      await act(async () => {
+        resolvePatch?.(
+          new Response(JSON.stringify({ error: "out of range" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      });
+      expect(button().getAttribute("data-status")).toBe("error");
+      expect(button().querySelector("svg.lucide-circle-alert")).not.toBeNull();
+      const alerts = [...container.querySelectorAll("p[role=\"alert\"]")].map(
+        (node) => node.textContent ?? "",
+      );
+      expect(alerts.some((text) => text.includes("out of range"))).toBe(true);
+      // The failure does not self-clear.
+      await act(async () => {
+        jest.advanceTimersByTime(10_000);
+      });
+      expect(button().getAttribute("data-status")).toBe("error");
+      const later = [...container.querySelectorAll("p[role=\"alert\"]")].map(
+        (node) => node.textContent ?? "",
+      );
+      expect(later.some((text) => text.includes("out of range"))).toBe(true);
 
       await act(async () => root.unmount());
     } finally {

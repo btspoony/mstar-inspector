@@ -952,6 +952,7 @@ export function AllowlistSection({
   async function save(): Promise<void> {
     setBusy(true);
     signal.start();
+    setNotice(null); // the retry clears this cluster's own stale outcome first
     try {
       const outcome = await postPinnedOutcome(
         `${apiBase()}/apps/${encodeURIComponent(appId)}/settings`,
@@ -1077,6 +1078,7 @@ function ReviewGateRecovery({
   async function reset(): Promise<void> {
     setBusy(true);
     signal.start();
+    setNotice(null); // the retry clears this cluster's own stale outcome first
     try {
       const outcome = await onSettings(
         checkGateSaveFields({
@@ -1154,6 +1156,7 @@ function ReviewGateEditor({
   async function save(): Promise<void> {
     setBusy(true);
     signal.start();
+    setNotice(null); // the retry clears this cluster's own stale outcome first
     try {
       const outcome = await onSettings(
         checkGateSaveFields({
@@ -1301,6 +1304,7 @@ function RuntimeHarnessEditor({
   async function save(): Promise<void> {
     setBusy(true);
     signal.start();
+    setNotice(null); // the retry clears this cluster's own stale outcome first
     try {
       const outcome = await onSettings({ op: "save-sandbox-image", sandbox_image_id: selected });
       if (outcome.kind === "success") {
@@ -1606,6 +1610,7 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
     }
     setBusy(true);
     signal.start();
+    setNameNotice(null); // the retry clears this cluster's own stale outcome first
     try {
       const outcome = await submitWorkspaceName(next, locale, renameMembership);
       if (outcome.kind === "success") {
@@ -1738,6 +1743,7 @@ function NumberSettingCard({
     // stored number is what the tenant set.
     setBusy(true);
     signal.start();
+    setCardNotice(null); // the retry clears this cluster's own stale outcome first
     const submitted = Number((draft ?? String(loaded.value)).trim());
     try {
       const { status, body } = await putJson(`${apiBase()}${putPath}`, {
@@ -2019,6 +2025,7 @@ export function ReviewTriggerControl({
     if (!isReviewTriggerMode(next) || next === selected) return;
     setBusy(true);
     signal.start();
+    setNotice(null); // the retry clears this cluster's own stale outcome first
     try {
       const outcome = await onTriggerMode(next);
       // Success-path echo: success means stored, so the controlled
@@ -2312,6 +2319,7 @@ function SeatsSection({
   async function submit(): Promise<void> {
     setBusy(true);
     signal.start();
+    setNotice(null); // the retry clears this cluster's own stale outcome first
     try {
       const fields: Record<string, string> = { op: "save-roles" };
       for (const role of payload.model_role_ids) {
@@ -2524,6 +2532,7 @@ function ChainEditor({
   async function save(): Promise<void> {
     setBusy(true);
     signal.start();
+    setNotice(null); // the retry clears this cluster's own stale outcome first
     try {
       const outcome = await onSave(chain.join(", "));
       if (outcome.kind === "success") {
