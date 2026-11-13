@@ -33,9 +33,8 @@ const TAIL_ANCHOR = "0038_webhook_path_drop.sql";
 
 /**
  * Migrations creating the below-anchor tables the derived tail reaches: 0048
- * indexes review_failures, 0047 indexes review_threads, 0052 alters
- * review_checks, and 0056 rewrites app_provider_models (created by 0015 and
- * rebuilt by 0025). A future tail migration that touches another below-anchor
+ * indexes review_failures, 0047 indexes review_threads, and 0052 alters
+ * review_checks. A future tail migration that touches another below-anchor
  * table adds its creating migration here — never to the individual shapes.
  */
 export const TAIL_PREREQUISITES = [
