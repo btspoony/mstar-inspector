@@ -9,7 +9,7 @@
  * Everything else (`behind`, `diverged`, a 404 after a force-push, any non-zero
  * exit, or an `ahead` range carrying a merge commit) keeps the full-diff round.
  */
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 
 import {
   SHA,
@@ -31,20 +31,16 @@ import {
   numstatCommand,
   DIFF_PATH,
 } from "../../src/pipeline/gitops";
-import {
-  commenterCalls,
-  createReviewConsumer,
-  logLines,
-  makeBatch,
-  makeEnv,
-  makePayload,
-  reset,
-  sandbox,
-  testLog,
-  testOverrides,
-} from "../helpers/consumer-harness";
+import { createConsumerHarness, loadConsumer, makePayload } from "../helpers/consumer-harness";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import type { TestD1 } from "../store/helpers";
+
+const { createReviewConsumer } = await loadConsumer();
+
+let h = createConsumerHarness();
+beforeEach(() => {
+  h = createConsumerHarness();
+});
 
 const PREVIOUS_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -56,7 +52,7 @@ const PREVIOUS_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
  */
 const compareCommand = (baseSha: string) => compareGateCommand(TEST_OWNER, TEST_REPO, baseSha, SHA);
 const COMPARE_PATH = `${compareCommand(SHA).split("/compare/")[0]!}/compare/`;
-const compareIssued = (): boolean => sandbox.calls.some((call) => call.cmd.startsWith(COMPARE_PATH));
+const compareIssued = (): boolean => h.sandbox.calls.some((call) => call.cmd.startsWith(COMPARE_PATH));
 
 /**
  * One reviewed row for this PR at `headSha` (the increment base candidate).
@@ -126,7 +122,7 @@ const ROUND_IDENTITY: {
 
 /** The written runner input JSON (the one `base64 -d >` write of the round). */
 function runnerInput(): Record<string, unknown> {
-  return JSON.parse(sandbox.writtenInputJson!) as Record<string, unknown>;
+  return JSON.parse(h.sandbox.writtenInputJson!) as Record<string, unknown>;
 }
 
 /**
@@ -135,7 +131,7 @@ function runnerInput(): Record<string, unknown> {
  * body assertion in this suite.
  */
 function preparedBody(): string {
-  const prepared = commenterCalls.filter((call) => call.op === "post-prepared");
+  const prepared = h.commenterCalls.filter((call) => call.op === "post-prepared");
   expect(prepared).toHaveLength(1);
   // The harness records `args` as `unknown`; this double is its only writer.
   const call = prepared[0]!.args as { body: string };
@@ -144,29 +140,28 @@ function preparedBody(): string {
 
 describe("incremental review rounds: the compare gate", () => {
   test("ahead: numstat reads the increment, a `since` fact rides the input, the header marks the round", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.compareStatus = "ahead";
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.incrementDiffStdout = VALID_DIFF;
-    sandbox.numstatStdout = "3\t1\tsrc/auth.ts\n";
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.compareStatus = "ahead";
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.incrementDiffStdout = VALID_DIFF;
+    h.sandbox.numstatStdout = "3\t1\tsrc/auth.ts\n";
     const db = await createSeededTestD1();
     seedReview(db, PREVIOUS_SHA);
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
     // The compare ran against the reviewed head, and the full diff STILL ran:
     // the prior findings' evidence catalog needs the whole PR diff.
-    expect(sandbox.calls.some((c) => c.cmd === compareCommand(PREVIOUS_SHA))).toBe(true);
+    expect(h.sandbox.calls.some((c) => c.cmd === compareCommand(PREVIOUS_SHA))).toBe(true);
     expect(
-      sandbox.calls.some((c) => c.cmd === diffCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER, DIFF_PATH)),
+      h.sandbox.calls.some((c) => c.cmd === diffCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER, DIFF_PATH)),
     ).toBe(true);
     // …and the increment capture replaced the file before numstat.
-    const incrementIndex = sandbox.calls.findIndex(
+    const incrementIndex = h.sandbox.calls.findIndex(
       (c) => c.cmd === incrementDiffCommand(TEST_OWNER, TEST_REPO, PREVIOUS_SHA, SHA, DIFF_PATH),
     );
-    const numstatIndex = sandbox.calls.findIndex((c) => c.cmd === numstatCommand(DIFF_PATH));
+    const numstatIndex = h.sandbox.calls.findIndex((c) => c.cmd === numstatCommand(DIFF_PATH));
     expect(incrementIndex).toBeGreaterThan(-1);
     expect(incrementIndex).toBeLessThan(numstatIndex);
 
@@ -186,20 +181,19 @@ describe("incremental review rounds: the compare gate", () => {
     ["Not Found", 1],
   ] as const) {
     test(`${status} (exit ${exitCode}): full-diff round, no since fact, no header marker`, async () => {
-      reset();
-      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-      sandbox.diffStdout = VALID_DIFF;
-      sandbox.compareStatus = status;
-      sandbox.compareExitCode = exitCode;
+      h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      h.sandbox.diffStdout = VALID_DIFF;
+      h.sandbox.compareStatus = status;
+      h.sandbox.compareExitCode = exitCode;
       const db = await createSeededTestD1();
       seedReview(db, PREVIOUS_SHA);
-      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-      await consumer(makeBatch(makePayload()));
+      await consumer(h.makeBatch(makePayload()));
 
       // No increment capture at all: the round reviewed the full diff.
       expect(
-        sandbox.calls.some(
+        h.sandbox.calls.some(
           (c) => c.cmd === incrementDiffCommand(TEST_OWNER, TEST_REPO, PREVIOUS_SHA, SHA, DIFF_PATH),
         ),
       ).toBe(false);
@@ -213,27 +207,26 @@ describe("incremental review rounds: the compare gate", () => {
       expect(preparedBody()).not.toContain(" · since ");
       // The choice is logged with the verdict, never silently — and the value
       // IS the verdict, not merely some status.
-      expect(logLines.filter((l) => l.fields.increment_status === (exitCode === 0 ? status : `exit ${exitCode}`))).toHaveLength(1);
+      expect(h.logLines.filter((l) => l.fields.increment_status === (exitCode === 0 ? status : `exit ${exitCode}`))).toHaveLength(1);
     });
   }
 
   test("ahead, but the increment carries a merge commit — full-diff round", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.compareStatus = "ahead";
-    sandbox.compareMerges = 1;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.compareStatus = "ahead";
+    h.sandbox.compareMerges = 1;
     const db = await createSeededTestD1();
     seedReview(db, PREVIOUS_SHA);
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
     // The gate ran, and its answer was rejected: the range merges a base
     // branch, so the delta is another PR's changeset, not this branch's work.
-    expect(sandbox.calls.some((c) => c.cmd === compareCommand(PREVIOUS_SHA))).toBe(true);
+    expect(h.sandbox.calls.some((c) => c.cmd === compareCommand(PREVIOUS_SHA))).toBe(true);
     expect(
-      sandbox.calls.some(
+      h.sandbox.calls.some(
         (c) => c.cmd === incrementDiffCommand(TEST_OWNER, TEST_REPO, PREVIOUS_SHA, SHA, DIFF_PATH),
       ),
     ).toBe(false);
@@ -241,31 +234,29 @@ describe("incremental review rounds: the compare gate", () => {
     expect(facts).toEqual(["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"]);
     expect(facts).not.toContain(`since ${PREVIOUS_SHA}`);
     expect(preparedBody()).not.toContain(" · since ");
-    expect(logLines.filter((line) => line.level === "info" && line.fields.increment_status === "ahead-merge")).toHaveLength(1);
+    expect(h.logLines.filter((line) => line.level === "info" && line.fields.increment_status === "ahead-merge")).toHaveLength(1);
   });
 
   test("the last reviewed head must not be an incomplete round", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.diffStdout = VALID_DIFF;
     const db = await createSeededTestD1();
     // A stopped round reviewed PREVIOUS_SHA; diffing against it would inherit
     // the scope it never scanned, so it is not a base at all.
     seedReview(db, PREVIOUS_SHA, { verdict: "incomplete" });
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
     expect(compareIssued()).toBe(false);
     expect(runnerInput().reconFacts).not.toContain(`since ${PREVIOUS_SHA}`);
   });
 
   test("the newest ELIGIBLE reviewed head is the base, never an older or ineligible row", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.compareStatus = "ahead";
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.incrementDiffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.compareStatus = "ahead";
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.incrementDiffStdout = VALID_DIFF;
     const older = "c".repeat(40);
     const newestEligible = "d".repeat(40);
     const stopped = "e".repeat(40);
@@ -276,23 +267,22 @@ describe("incremental review rounds: the compare gate", () => {
     // Newer still, but neither scanned its scope: never a base.
     seedReview(db, stopped, { reviewedAt: "2026-01-03 00:00:00", verdict: "incomplete" });
     seedReview(db, captureFailed, { reviewedAt: "2026-01-04 00:00:00", contextIncomplete: true });
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
-    expect(sandbox.calls.some((c) => c.cmd === compareCommand(newestEligible))).toBe(true);
+    expect(h.sandbox.calls.some((c) => c.cmd === compareCommand(newestEligible))).toBe(true);
     for (const sha of [older, stopped, captureFailed]) {
-      expect(sandbox.calls.some((c) => c.cmd === compareCommand(sha))).toBe(false);
+      expect(h.sandbox.calls.some((c) => c.cmd === compareCommand(sha))).toBe(false);
     }
     expect(runnerInput().reconFacts).toContain(`since ${newestEligible}`);
   });
 
   test("another App's newer head is never this App's base, even on one installation", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.compareStatus = "ahead";
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.incrementDiffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.compareStatus = "ahead";
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.incrementDiffStdout = VALID_DIFF;
     const otherAppHead = "a".repeat(40);
     const db = await createSeededTestD1();
     seedOtherApp(db);
@@ -301,9 +291,9 @@ describe("incremental review rounds: the compare gate", () => {
     // that App's head and skip the commits THIS App never reviewed.
     seedReview(db, PREVIOUS_SHA, { reviewedAt: "2026-01-01 00:00:00" });
     seedReview(db, otherAppHead, { appId: TEST_OTHER_APP_ID, reviewedAt: "2026-01-02 00:00:00" });
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
     // Non-vacuity: both rows carry the identity this round reviews for, so
     // `app_id` is the only field that can explain the exclusion.
@@ -328,8 +318,8 @@ describe("incremental review rounds: the compare gate", () => {
         pr_number: ROUND_IDENTITY.prNumber,
       },
     ]);
-    expect(sandbox.calls.some((c) => c.cmd === compareCommand(PREVIOUS_SHA))).toBe(true);
-    expect(sandbox.calls.some((c) => c.cmd === compareCommand(otherAppHead))).toBe(false);
+    expect(h.sandbox.calls.some((c) => c.cmd === compareCommand(PREVIOUS_SHA))).toBe(true);
+    expect(h.sandbox.calls.some((c) => c.cmd === compareCommand(otherAppHead))).toBe(false);
     expect(runnerInput().reconFacts).toContain(`since ${PREVIOUS_SHA}`);
   });
 
@@ -345,62 +335,59 @@ describe("incremental review rounds: the compare gate", () => {
   });
 
   test("no previous review (first round): no compare at all", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.diffStdout = VALID_DIFF;
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
     expect(compareIssued()).toBe(false);
   });
 
   test("a previous row at THIS head short-circuits before the compare", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.diffStdout = VALID_DIFF;
     const db = await createSeededTestD1();
     // The base read answers with the head being reviewed, so `base...head`
     // would be empty and the compare must not run. The same row would hit the
     // dedup read first, so that read is stubbed to miss — the guard is what
     // this case is about.
     seedReview(db, SHA);
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
-      ...testOverrides,
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
       store: { ...createArtifactStore(db), findByIdempotencyKey: async () => null },
     });
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
     expect(compareIssued()).toBe(false);
     expect(runnerInput().reconFacts).not.toContain(`since ${SHA}`);
   });
 
   test("an unreadable base read keeps the full-diff round and says why", async () => {
-    reset();
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.diffStdout = VALID_DIFF;
     const db = await createSeededTestD1();
     seedReview(db, PREVIOUS_SHA);
     // The lookup itself rejects — a D1 hiccup or a missing column. Injected
     // through its seam, so this never depends on the query text: a D1 hiccup
     // must degrade to "no increment", never fail a review over its bookkeeping.
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
-      ...testOverrides,
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
       findIncrementBase: async () => {
         throw new Error("base read boom");
       },
     });
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
     // The full-diff fallback: no compare, no `since` fact, the review published.
     expect(compareIssued()).toBe(false);
     expect(runnerInput().reconFacts).not.toContain(`since ${PREVIOUS_SHA}`);
-    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     // …and the failure is not silent: one named warning carries the cause.
-    const warn = logLines.filter((line) => line.level === "warn" && line.fields.increment_base === "lookup-failed");
+    const warn = h.logLines.filter((line) => line.level === "warn" && line.fields.increment_base === "lookup-failed");
     expect(warn).toHaveLength(1);
     expect(warn[0]!.msg).toContain("full diff");
     expect(warn[0]!.msg).toContain("base read boom");
