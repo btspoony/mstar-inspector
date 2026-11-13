@@ -1,6 +1,6 @@
 {
   "name": "mstar-inspector",
-  "version": "1.0.0-alpha.2",
+  "version": "1.0.0-rc.1",
   "private": true,
   "type": "module",
   "description": "GitHub App inspector gateway (Hono Worker on Cloudflare)",
