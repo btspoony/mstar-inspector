@@ -106,6 +106,19 @@ async function mount(overrides: {
 
   const search = () => dialog()?.querySelector('input[type="search"]') as unknown as HTMLInputElement | null;
 
+  /** The folded detail section's toggle, picker and picker-change helper. */
+  const detailsToggle = (): HTMLButtonElement | null =>
+    buttonByLabel("settings.providers.models.detailsToggle");
+  const detailSelect = (): HTMLSelectElement | null =>
+    (dialog()?.querySelector("#provider-models-details select") as unknown as HTMLSelectElement | null) ?? null;
+  const choose = async (target: Element | null | undefined, value: string) => {
+    const setValue = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, "value")?.set;
+    await act(async () => {
+      setValue?.call(target, value);
+      target?.dispatchEvent(new win.Event("change", { bubbles: true }) as unknown as Event);
+    });
+  };
+
   const FIELD_KEYS = {
     contextWindow: "settings.providers.models.fields.contextWindow",
     maxTokens: "settings.providers.models.fields.maxTokens",
@@ -130,6 +143,9 @@ async function mount(overrides: {
     type,
     search,
     field,
+    detailsToggle,
+    detailSelect,
+    choose,
     calls,
     outcomes,
     reload,
@@ -188,6 +204,7 @@ describe("ProviderModelsDialog", () => {
   test("a legacy id-only declaration shows the not-usable note and blank size fields", async () => {
     const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"] });
     try {
+      await view.click(view.detailsToggle());
       // The sentence is a DATA statement about the declaration, never a
       // runtime promise: the pinned registry back-fills its own defaults for
       // an id-only model, so claiming the file blocks failover would be false.
@@ -210,6 +227,7 @@ describe("ProviderModelsDialog", () => {
     };
     const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"], storedModelsMeta: stored });
     try {
+      await view.click(view.detailsToggle());
       // Round-trip: the stored values are the seed, so an untouched save
       // re-sends exactly what the owner stated.
       expect(view.field("m-1", "contextWindow")?.value).toBe("128000");
@@ -224,6 +242,71 @@ describe("ProviderModelsDialog", () => {
           provider: "my-gateway",
           model_ids: "m-1",
           models_meta: JSON.stringify(stored),
+        },
+      ]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("the detail editor is folded away by default — no detail field is in the markup", async () => {
+    const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1", "m-2"] });
+    try {
+      const toggle = view.detailsToggle();
+      expect(toggle).not.toBeNull();
+      expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+      expect(view.field("m-1", "contextWindow")).toBeNull();
+      expect(view.detailSelect()).toBeNull();
+      const closed = view.dialog()?.textContent ?? "";
+      expect(closed).not.toContain(t(locale, "settings.providers.models.requirements"));
+      expect(closed).not.toContain(t(locale, "settings.providers.models.sizesUnstated"));
+
+      // Opening reveals the required-sizes statement, one picker over the
+      // selected ids and exactly the picked model's fields.
+      await view.click(toggle);
+      expect(view.detailsToggle()?.getAttribute("aria-expanded")).toBe("true");
+      expect(view.detailSelect()?.value).toBe("m-1");
+      expect([...(view.detailSelect()?.options ?? [])].map((option) => option.value)).toEqual(["m-1", "m-2"]);
+      expect(view.dialog()?.textContent).toContain(t(locale, "settings.providers.models.requirements"));
+      expect(view.field("m-1", "contextWindow")).not.toBeNull();
+      expect(view.field("m-2", "contextWindow")).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("one picker swaps a single model's fields and keeps what was typed for the others", async () => {
+    const stored = {
+      "m-1": { contextWindow: 128000, maxTokens: 8192, name: "Model One" },
+      "m-2": { contextWindow: 4000, maxTokens: 512 },
+    };
+    const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1", "m-2"], storedModelsMeta: stored });
+    try {
+      await view.click(view.detailsToggle());
+      expect(view.field("m-1", "name")?.value).toBe("Model One");
+      await view.type(view.field("m-1", "name"), "Model One Edited");
+
+      await view.choose(view.detailSelect(), "m-2");
+      expect(view.field("m-2", "contextWindow")?.value).toBe("4000");
+      expect(view.field("m-1", "contextWindow")).toBeNull();
+      await view.type(view.field("m-2", "name"), "Model Two");
+
+      // Switching back shows what was typed, not the stored seed.
+      await view.choose(view.detailSelect(), "m-1");
+      expect(view.field("m-1", "name")?.value).toBe("Model One Edited");
+
+      // Unchecking a model drops its picker option and its save entry.
+      await view.click(view.checkboxes()[1]); // m-2
+      expect([...(view.detailSelect()?.options ?? [])].map((option) => option.value)).toEqual(["m-1"]);
+      await view.click(view.saveButton());
+      expect(view.calls).toEqual([
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1",
+          models_meta: JSON.stringify({
+            "m-1": { contextWindow: 128000, maxTokens: 8192, name: "Model One Edited" },
+          }),
         },
       ]);
     } finally {

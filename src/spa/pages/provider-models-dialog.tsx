@@ -13,7 +13,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Button, Input } from "@design-system";
-import { t, type DictionaryKey } from "../../i18n";
+import { t } from "../../i18n";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../contracts/provider-models";
 import type { SpaBoot } from "../boot";
 import { StepDialog } from "../components/StepDialog";
@@ -92,6 +92,10 @@ export function ProviderModelsDialog({
     seedFields(storedModelIds, storedModelsMeta),
   );
   const [query, setQuery] = useState("");
+  // The detail editor is folded away by default: the selection list is the
+  // dialog's business, and the per-model facts are an optional second step.
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [detailsFor, setDetailsFor] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const inFlight = useRef(false);
@@ -112,6 +116,8 @@ export function ProviderModelsDialog({
     setSelected(new Set(storedModelIds));
     setFields(seedFields(storedModelIds, storedModelsMeta));
     setQuery("");
+    setDetailsOpen(false);
+    setDetailsFor(null);
     setNotice(null);
   }, [open, storedModelIds, storedModelsMeta]);
 
@@ -127,6 +133,11 @@ export function ProviderModelsDialog({
   // Select-all acts on the rendered list, so it has nothing to do once every
   // visible id is checked — the cap alone never disables it.
   const allFilteredSelected = filtered.every((id) => selected.has(id));
+  // The detail editor always shows exactly one selected model; a stale choice
+  // (its id was just unchecked) falls back to the first selected id.
+  const selectedIds = [...selected];
+  const detailId = detailsFor !== null && selected.has(detailsFor) ? detailsFor : (selectedIds[0] ?? "");
+  const detailState = stateOf(detailId);
 
   function toggle(id: string): void {
     setSelected((current) => {
@@ -299,70 +310,88 @@ export function ProviderModelsDialog({
           </ul>
         )}
         {selected.size === 0 ? null : (
-          <fieldset className="flex flex-col gap-3">
-            <legend className="text-sm font-medium">
-              {t(locale, "settings.providers.models.requirements")}
-            </legend>
-            {incomplete ? (
-              <p className="text-sm text-muted-foreground">
-                {t(locale, "settings.providers.models.sizesUnstated")}
-              </p>
-            ) : null}
-            <ul className="flex flex-col gap-3">
-              {[...selected].map((id) => {
-                const state = stateOf(id);
-                const label = (key: DictionaryKey) => t(locale, key, { model: id });
-                return (
-                  <li
-                    key={id}
-                    className="rounded-(--radius-control) border border-(--border-default) bg-(--surface-inset) px-3 py-2"
+          <div className="flex flex-col gap-2">
+            <button
+              type="button"
+              className="self-start text-sm font-medium text-(--tone-accent-fg)"
+              aria-expanded={detailsOpen}
+              // The region mounts only while open, so the control never names a
+              // missing element (the combobox precedent).
+              aria-controls={detailsOpen ? "provider-models-details" : undefined}
+              onClick={() => setDetailsOpen(!detailsOpen)}
+            >
+              {t(locale, "settings.providers.models.detailsToggle")}
+            </button>
+            {detailsOpen ? (
+              <div
+                id="provider-models-details"
+                className="flex flex-col gap-3 rounded-(--radius-control) border border-(--border-default) bg-(--surface-inset) px-3 py-2"
+              >
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "settings.providers.models.requirements")}
+                </p>
+                {incomplete ? (
+                  <p className="text-sm text-muted-foreground">
+                    {t(locale, "settings.providers.models.sizesUnstated")}
+                  </p>
+                ) : null}
+                <label className="flex flex-col gap-1.5 text-sm font-medium">
+                  {t(locale, "settings.providers.models.detailsSelectLabel")}
+                  <select
+                    className="h-9 rounded-(--radius-control) border border-(--border-default) bg-(--surface-page) px-2 text-sm"
+                    value={detailId}
+                    onChange={(event) => setDetailsFor(event.target.value)}
                   >
-                    <p className="font-mono text-xs">{id}</p>
-                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                      <Input
-                        inputMode="numeric"
-                        aria-label={label("settings.providers.models.fields.contextWindow")}
-                        placeholder={t(locale, "settings.providers.models.fields.contextWindowHint")}
-                        value={state.contextWindow}
-                        onChange={(event) => setField(id, "contextWindow", event.target.value)}
-                      />
-                      <Input
-                        inputMode="numeric"
-                        aria-label={label("settings.providers.models.fields.maxTokens")}
-                        placeholder={t(locale, "settings.providers.models.fields.maxTokensHint")}
-                        value={state.maxTokens}
-                        onChange={(event) => setField(id, "maxTokens", event.target.value)}
-                      />
-                      <Input
-                        type="text"
-                        aria-label={label("settings.providers.models.fields.name")}
-                        placeholder={t(locale, "settings.providers.models.fields.nameHint")}
-                        value={state.name}
-                        onChange={(event) => setField(id, "name", event.target.value)}
-                      />
-                      <Input
-                        type="text"
-                        aria-label={label("settings.providers.models.fields.input")}
-                        placeholder={t(locale, "settings.providers.models.fields.inputHint")}
-                        value={state.input}
-                        onChange={(event) => setField(id, "input", event.target.value)}
-                      />
-                      <select
-                        aria-label={label("settings.providers.models.fields.reasoning")}
-                        className="h-9 rounded-(--radius-control) border border-(--border-default) bg-(--surface-page) px-2 text-sm"
-                        value={state.reasoning}
-                        onChange={(event) => setField(id, "reasoning", event.target.value)}
-                      >
-                        <option value="">{t(locale, "settings.providers.models.fields.reasoningUnset")}</option>
-                        <option value="true">{t(locale, "settings.providers.models.fields.reasoningYes")}</option>
-                        <option value="false">{t(locale, "settings.providers.models.fields.reasoningNo")}</option>
-                      </select>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </fieldset>
+                    {selectedIds.map((id) => (
+                      <option key={id} value={id}>
+                        {id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Input
+                    inputMode="numeric"
+                    aria-label={t(locale, "settings.providers.models.fields.contextWindow", { model: detailId })}
+                    placeholder={t(locale, "settings.providers.models.fields.contextWindowHint")}
+                    value={detailState.contextWindow}
+                    onChange={(event) => setField(detailId, "contextWindow", event.target.value)}
+                  />
+                  <Input
+                    inputMode="numeric"
+                    aria-label={t(locale, "settings.providers.models.fields.maxTokens", { model: detailId })}
+                    placeholder={t(locale, "settings.providers.models.fields.maxTokensHint")}
+                    value={detailState.maxTokens}
+                    onChange={(event) => setField(detailId, "maxTokens", event.target.value)}
+                  />
+                  <Input
+                    type="text"
+                    aria-label={t(locale, "settings.providers.models.fields.name", { model: detailId })}
+                    placeholder={t(locale, "settings.providers.models.fields.nameHint")}
+                    value={detailState.name}
+                    onChange={(event) => setField(detailId, "name", event.target.value)}
+                  />
+                  <Input
+                    type="text"
+                    aria-label={t(locale, "settings.providers.models.fields.input", { model: detailId })}
+                    placeholder={t(locale, "settings.providers.models.fields.inputHint")}
+                    value={detailState.input}
+                    onChange={(event) => setField(detailId, "input", event.target.value)}
+                  />
+                  <select
+                    aria-label={t(locale, "settings.providers.models.fields.reasoning", { model: detailId })}
+                    className="h-9 rounded-(--radius-control) border border-(--border-default) bg-(--surface-page) px-2 text-sm"
+                    value={detailState.reasoning}
+                    onChange={(event) => setField(detailId, "reasoning", event.target.value)}
+                  >
+                    <option value="">{t(locale, "settings.providers.models.fields.reasoningUnset")}</option>
+                    <option value="true">{t(locale, "settings.providers.models.fields.reasoningYes")}</option>
+                    <option value="false">{t(locale, "settings.providers.models.fields.reasoningNo")}</option>
+                  </select>
+                </div>
+              </div>
+            ) : null}
+          </div>
         )}
       </form>
     </StepDialog>

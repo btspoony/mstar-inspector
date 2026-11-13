@@ -434,30 +434,46 @@ export function buildCatalog(
         }
         continue;
       }
-      for (const record of records) {
-        if (Object.hasOwn(catalog, record.id)) {
-          audit.ompAlreadyPresent.push(record.id);
-          continue;
-        }
-        if (record.env.trim() === "") {
-          audit.ompNonModel.push(record.id);
-          continue;
-        }
+      // Classify every record of the provider BEFORE emitting: a mixed-protocol
+      // provider ships several rows, and only the ones that actually ship count
+      // toward the "more than one row" decision below.
+      const decisions = records.map((record) => {
+        if (Object.hasOwn(catalog, record.id)) return { record, skip: { kind: "already" as const } };
+        if (record.env.trim() === "") return { record, skip: { kind: "nonModel" as const } };
         if (!CUSTOM_PROVIDER_ID_PATTERN.test(record.id)) {
-          audit.ompNotMaterializable.push(`${record.id} (id grammar)`);
-          continue;
+          return { record, skip: { kind: "notMaterializable" as const, detail: "id grammar" } };
         }
         if (!MATERIALIZABLE_APIS.includes(record.api)) {
-          audit.ompNotMaterializable.push(`${record.id} (protocol ${record.api})`);
-          continue;
+          return { record, skip: { kind: "notMaterializable" as const, detail: `protocol ${record.api}` } };
         }
         const placeholders = [...(record.baseUrl ?? "").matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!);
         if (placeholders.some((name) => !Object.hasOwn(ALLOWED_URL_PLACEHOLDERS, name))) {
-          audit.ompNotMaterializable.push(`${record.id} (url placeholder ${placeholders.join(", ")})`);
+          return {
+            record,
+            skip: { kind: "notMaterializable" as const, detail: `url placeholder ${placeholders.join(", ")}` },
+          };
+        }
+        return { record, skip: null };
+      });
+      // Every row of a multi-row provider names its protocol, so the picker can
+      // tell e.g. the three OpenCode Go rows apart; a single-row provider keeps
+      // its snapshot label verbatim.
+      const protocolLabelled = decisions.filter((decision) => decision.skip === null).length > 1;
+      for (const { record, skip } of decisions) {
+        if (skip?.kind === "already") {
+          audit.ompAlreadyPresent.push(record.id);
+          continue;
+        }
+        if (skip?.kind === "nonModel") {
+          audit.ompNonModel.push(record.id);
+          continue;
+        }
+        if (skip?.kind === "notMaterializable") {
+          audit.ompNotMaterializable.push(`${record.id} (${skip.detail})`);
           continue;
         }
         catalog[record.id] = {
-          label: record.label,
+          label: protocolLabelled ? `${record.label} — ${record.api}` : record.label,
           tier: "template",
           envName: null,
           baseUrl: record.baseUrl,

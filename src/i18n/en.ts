@@ -769,11 +769,14 @@ export const en = {
         noMatch: 'No models match "{query}".',
         save: "Save models",
         /**
-         * The per-model facts group. Required sizes come first; the optional
-         * facts stay blank when the owner states nothing (we do not invent a
-         * name or a capability). Refusal wording direction: name the model,
-         * name the fact, then "Nothing was stored."
+         * The folded per-model facts group: its toggle, the single-model picker
+         * and the required-size statement. Required sizes come first; the
+         * optional facts stay blank when the owner states nothing (we do not
+         * invent a name or a capability). Refusal wording direction: name the
+         * model, name the fact, then "Nothing was stored."
          */
+        detailsToggle: "Edit model details",
+        detailsSelectLabel: "Model to edit",
         requirements:
           "Every selected model needs a context window and a max token count — we do not guess.",
         /**
@@ -785,8 +788,6 @@ export const en = {
          */
         sizesUnstated:
           "Saved, but its context window and max token count are unstated — the declaration is incomplete until you state both. We do not guess.",
-        requirementsRequired: "Required",
-        requirementsOptional: "Optional",
         fields: {
           contextWindow: "{model} context window",
           maxTokens: "{model} max token count",

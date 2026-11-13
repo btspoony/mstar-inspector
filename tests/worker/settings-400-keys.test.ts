@@ -338,6 +338,33 @@ describe("F1: a `!`-prefixed key is refused where the operator types it", () => 
   });
 });
 
+describe("verify route: a provider the App never declared", () => {
+  test("an undeclared non-builtin id → keyed 400 customProviderUndeclared, zero writes, no probe", async () => {
+    const { db } = await seededWorld();
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+      throw new Error("fetch must not be called without a declaration");
+    }) as unknown as typeof fetch);
+    try {
+      const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "opencode-go", key: sk("ant-123") });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        ok: false,
+        reason: "unexpected",
+        key: "settings.error.customProviderUndeclared",
+        message:
+          "opencode-go is not a declared custom provider for this App — declare it before adding keys. Nothing was stored.",
+        params: { provider: "opencode-go" },
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(rawCount(db, "app_custom_providers")).toBe(0);
+      expect(rawCount(db, "app_custom_provider_keys")).toBe(0);
+      expect(rawCount(db, "app_provider_keys")).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
 describe("CARRY-2: verify-route eligibility rejection gains the keyed face", () => {
   test("/keys/verify precheck → same key as the settings POST family, reason unchanged", async () => {
     const { db, app } = await seededWorld();

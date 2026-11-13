@@ -647,10 +647,10 @@ export const zhCN: Dictionary = {
         capReached: "已达 {max} 个模型上限 — 请先取消勾选再添加。",
         noMatch: "没有匹配「{query}」的模型。",
         save: "保存模型",
+        detailsToggle: "编辑模型详情",
+        detailsSelectLabel: "要编辑的模型",
         requirements: "每个被选中的模型都需要上下文窗口和最大 token 数 — 我们不会猜测。",
         sizesUnstated: "已保存，但其上下文窗口和最大 token 数尚未填写 — 在你填写这两项之前，该声明是不完整的。我们不会猜测。",
-        requirementsRequired: "必填",
-        requirementsOptional: "可选",
         fields: {
           contextWindow: "{model} 上下文窗口",
           maxTokens: "{model} 最大 token 数",
