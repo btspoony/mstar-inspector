@@ -20,7 +20,7 @@ import {
   VALID_OUTPUT,
   createSeededTestD1,
 } from "../helpers/consumer-fixtures";
-import { compareStatusCommand } from "../../src/pipeline/gitops";
+import { compareGateCommand } from "../../src/pipeline/gitops";
 import {
   commenterCalls,
   commenterState,
@@ -49,7 +49,7 @@ const PREVIOUS_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
  * per-round shas, so its fixed compare PATH answers "was a compare issued at
  * all" without counting the round's other repo-root `gh api` reads.
  */
-const compareCommand = (baseSha: string) => compareStatusCommand(TEST_OWNER, TEST_REPO, baseSha, SHA);
+const compareCommand = (baseSha: string) => compareGateCommand(TEST_OWNER, TEST_REPO, baseSha, SHA);
 const COMPARE_PATH = `${compareCommand(SHA).split("/compare/")[0]!}/compare/`;
 const compareIssued = (): boolean => sandbox.calls.some((call) => call.cmd.startsWith(COMPARE_PATH));
 
