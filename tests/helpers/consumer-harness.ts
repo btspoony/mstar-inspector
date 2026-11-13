@@ -55,6 +55,17 @@ export const testOverrides = {
 // --- consumer under test (dynamic import: mocks must be registered first) ---
 // The module handle lives here so every suite reaches the consumer through
 // this ONE loader (a static import would run before the workerd shim above).
+const consumerModule = await import("../../src/pipeline/consumer");
+// A namespace missing its entries means this load raced another file's and the
+// runner handed back a module that had not finished: without this check every
+// case in every suite fails later as "x is not a function", which names the
+// symptom and not the cause.
+if (typeof consumerModule.createReviewConsumer !== "function") {
+  throw new Error(
+    "consumer-harness: ../../src/pipeline/consumer loaded without its exports — " +
+      "the workerd shim must be registered before this import, and the module must not be shared with a concurrent loader",
+  );
+}
 export const {
   createReviewConsumer,
   extractIssueRefs,
@@ -71,7 +82,7 @@ export const {
   POST_RUNNER_READ_TIMEOUT_MS,
   POST_RUNNER_READ_BUDGET_MS,
   postRunnerReserveMs,
-} = await import("../../src/pipeline/consumer");
+} = consumerModule;
 
 // The diff bound lives with the command that enforces it (gitops), not on the
 // consumer — the double below reproduces that read, so it takes the same one.

@@ -58,7 +58,7 @@ jobs:
         run: bun run typecheck
 
       - name: Test
-        run: bun test
+        run: bun test --isolate
 
   deploy:
     needs: test

@@ -99,7 +99,7 @@ jobs:
       - name: Typecheck + test + build
         run: |
           bun run typecheck
-          bun test
+          bun test --isolate
           bun run build:spa
 
       - name: Configure git identity
