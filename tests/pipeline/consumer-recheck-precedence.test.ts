@@ -7,7 +7,7 @@
  * trusted evidence catalog (`consumer-recheck-catalog`); the doubles, D1
  * seeders and payload builders come from ../helpers/consumer-harness.
  */
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import {
   SHA,
@@ -21,41 +21,41 @@ import {
   seedPriorPublication,
 } from "../helpers/consumer-fixtures";
 import {
-  commenterCalls,
   coverageLine,
   coverageLineNumbers,
-  createReviewConsumer,
+  createConsumerHarness,
   failureRows,
-  makeBatch,
-  makeEnv,
+  loadConsumer,
   makePayload,
-  reset,
-  sandbox,
-  testLog,
-  testOverrides,
 } from "../helpers/consumer-harness";
+
+const { createReviewConsumer } = await loadConsumer();
+
+let h = createConsumerHarness();
+beforeEach(() => {
+  h = createConsumerHarness();
+});
 
 describe("recheck conservative precedence (§7.4)", () => {
   test("a related index the final envelope cannot resolve is fabrication: unverifiable/conflict, no resolution", async () => {
     // The seat cites finding #1 while the round's final envelope carries one
     // finding (#0): the index names nothing the consumer can verify, so the
     // closure claim is never trusted (§7.4 conservative precedence).
-    reset();
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.recheckFileContent = recheckDocWith({ relatedCurrentFindingIndexes: [1] });
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.recheckFileContent = recheckDocWith({ relatedCurrentFindingIndexes: [1] });
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     await seedOpenTarget(db);
     await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (conflict)");
     expect(prepared.body).not.toContain("addressed (verified-fix)");
-    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
+    expect(h.commenterCalls.some((c) => c.op === "resolve")).toBe(false);
     const round = db.raw
       .query(`SELECT assessment_json FROM review_finding_rounds WHERE finding_row_id = ?`)
       .get(TARGET_ROW_ID) as { assessment_json: string } | null;
@@ -65,22 +65,21 @@ describe("recheck conservative precedence (§7.4)", () => {
   test("an addressed row that names any in-range related concern is still a conflict, never a closure", async () => {
     // The related concern exists in the final envelope, so it is unresolved
     // by definition: closure loses to the surviving concern.
-    reset();
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.recheckFileContent = recheckDocWith({ relatedCurrentFindingIndexes: [0] });
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.recheckFileContent = recheckDocWith({ relatedCurrentFindingIndexes: [0] });
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     await seedOpenTarget(db);
     await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (conflict)");
     expect(prepared.body).not.toContain("addressed (verified-fix)");
-    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
+    expect(h.commenterCalls.some((c) => c.op === "resolve")).toBe(false);
     const row = db.raw.query("SELECT state FROM review_findings").get() as { state: string };
     expect(row.state).toBe("open");
   });
@@ -92,10 +91,12 @@ describe("recheck conservative precedence (§7.4)", () => {
       { disposition: "dismissed", reason: "non-fix-dismissal", expected: "dismissed (non-fix-dismissal)" },
       { disposition: "unverifiable", reason: "no-evidence", expected: "unverifiable (no-evidence)" },
     ] as const) {
-      reset();
-      sandbox.diffStdout = VALID_DIFF;
-      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-      sandbox.recheckFileContent = recheckDocWith({
+      // Each verdict gets its own recorders: the second iteration's body pin
+      // must read its own `post-prepared` call, not the first one's.
+      h = createConsumerHarness();
+      h.sandbox.diffStdout = VALID_DIFF;
+      h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      h.sandbox.recheckFileContent = recheckDocWith({
         disposition: verdict.disposition,
         reason: verdict.reason,
         evidence: null,
@@ -105,11 +106,11 @@ describe("recheck conservative precedence (§7.4)", () => {
       await seedPriorPublication(db);
       await seedOpenTarget(db);
       await seedAssociation(db, "PRRT_thread1");
-      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-      await consumer(makeBatch(makePayload()));
+      await consumer(h.makeBatch(makePayload()));
 
-      const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+      const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
       expect(prepared.body).toContain(verdict.expected);
       expect(prepared.body).not.toContain("unverifiable (conflict)");
       const round = db.raw
@@ -127,11 +128,10 @@ describe("recheck conservative precedence (§7.4)", () => {
     // arrives, so no row carries a claim the conservative guards must outvote.
     // The round must still be attributed per reason — and it must resolve
     // nothing, because there is no closure to verify.
-    reset();
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.recheckFileContent = "";
-    sandbox.recheckStatusContent = JSON.stringify({
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.recheckFileContent = "";
+    h.sandbox.recheckStatusContent = JSON.stringify({
       schema: "mstar.recheck-status/v1",
       headSha: SHA,
       outcome: "failed",
@@ -154,11 +154,11 @@ describe("recheck conservative precedence (§7.4)", () => {
       });
     }
     await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload()));
 
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     const expectedCoverage = { assessed: 0, selected: 25, invalidOutput: 25, omitted: 0 };
     expect(prepared.body).toContain(coverageLine(expectedCoverage));
     const coverage = coverageLineNumbers(prepared.body)!;
@@ -166,7 +166,7 @@ describe("recheck conservative precedence (§7.4)", () => {
     expect(coverage.assessed + coverage.invalidOutput + coverage.omitted).toBe(coverage.selected);
     // No closure was claimed, so none is published and no thread resolves.
     expect(prepared.body).not.toContain("addressed (verified-fix)");
-    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
+    expect(h.commenterCalls.some((c) => c.op === "resolve")).toBe(false);
     const thread = db.raw.query("SELECT resolution_state FROM review_threads").get() as {
       resolution_state: string;
     };
