@@ -4576,6 +4576,37 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
   });
 
   test.skipIf(coveredCatalogModel() === null)(
+    "a private endpoint reusing a catalog id does NOT inherit the catalog's sizes",
+    async () => {
+      const covered = coveredCatalogModel();
+      if (covered === null) return;
+      const { db } = await seededWorld();
+      // The catalog's ID, the App's own endpoint: the vendor's numbers
+      // describe the vendor, not this endpoint.
+      const declared = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+        op: "add-custom-provider",
+        provider_id: covered.provider,
+        base_url: "https://private.example.com/v1",
+        api: "openai-completions",
+        model_ids: covered.model,
+        key: sk("shadow-covered-key"),
+      });
+      expect(declared.status).toBe(200);
+      const refused = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+        op: "update-provider-models",
+        provider: covered.provider,
+        model_ids: covered.model,
+        models_meta: JSON.stringify({ [covered.model]: {} }),
+      });
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toMatchObject({
+        key: "settings.error.modelContextWindowRequired",
+        params: { model: covered.model },
+      });
+    },
+  );
+
+  test.skipIf(coveredCatalogModel() === null)(
     "a save whose sizes all come from the catalog succeeds and stores no override field",
     async () => {
       const covered = coveredCatalogModel();

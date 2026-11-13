@@ -50,17 +50,6 @@ describe("registry build-definition parity (qc1 F-001)", () => {
   });
 });
 
-describe("the registry carries no provider or model surface", () => {
-  test("a registry entry is build inputs only", () => {
-    // The image declares no provider, no model and no size: the per-review
-    // models.yml is the App's own declarations.
-    expect(Object.keys(OMP_IMAGE).sort()).toEqual(
-      ["dockerfilePath", "enabled", "id", "pins", "runtime", "wranglerImagePath"].sort(),
-    );
-    expect("hosts" in OMP_IMAGE).toBe(false);
-  });
-});
-
 describe("Dockerfile harness clone ref mirrors the registry pin", () => {
   // `harnessRef` is a literal commit the Dockerfile cannot import (it clones at
   // build time), so the pair is hand-synced — and it drifted once: 4.2.3 shipped

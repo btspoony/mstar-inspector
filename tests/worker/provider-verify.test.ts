@@ -1138,6 +1138,28 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     expect(cached.map((c) => c.provider)).toEqual(["ark", "mistral", "openai"]);
   });
 
+  test("a retired ark-plan evidence row reads as the ark pool's own", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "alias-evidence-app");
+    const store = configStore(db);
+    // The pool key lives under the real provider id; only the evidence row was
+    // written under the retired alias by the prior release.
+    await store.addProviderKey(app.id, "ark", PLAIN_KEY);
+    const keyId = (
+      db.raw.query("SELECT key_id FROM app_provider_keys WHERE app_id = ?").get(app.id) as { key_id: string }
+    ).key_id;
+    db.raw
+      .prepare(
+        `INSERT INTO app_provider_models (app_id, provider, key_id, models_json, fetched_at)
+         VALUES (?, 'ark-plan', ?, '["doubao"]', datetime('now'))`,
+      )
+      .run(app.id, keyId);
+
+    expect(await store.getVerifiedModels(app.id)).toEqual([
+      { provider: "ark", models: ["doubao"], fetched_at: expect.stringMatching(SQLITE_TS_RE) },
+    ]);
+  });
+
   test("addProviderKey writes unverified rows (NULL verified columns)", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "legacy-write-app");

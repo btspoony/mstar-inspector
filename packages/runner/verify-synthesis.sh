@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
 #
 # U-001 in-image models.yml synthesis verification
-# (AL-25-1/25-3 — capability-host base, NO baked file).
+# (AL-25-1/25-3 — no baked file).
 #
 # Proves, inside the review-runner image, that a COMPLETE models.yml reaches
 # the omp SDK through the runner's REAL synthesis path — with no baked
 # in-image models.yml (the image ships an EMPTY
 # /opt/omp-agent):
 #   (a) writePerReviewModelsYaml (packages/runner/src/models-synthesis.ts)
-#       synthesizes a COMPLETE per-review models.yml from the CAPABILITY HOSTS
-#       (the omp ark-plan host — the runner input `capabilityHosts`; declared
-#       inline below because the in-image module graph cannot import the
-#       sandbox-image registry: the image copies only the package sources)
-#       plus an OPTIONAL keyless custom declaration (provider id u001-verify,
-#       baseUrl https://example.invalid/v1, model id verify-model — reserved
-#       domains; the .invalid TLD structurally excludes egress). Asserted:
-#       ark-plan is present WITHOUT any baked file (registry-trusted scalars
-#       emitted bare), the custom block is merged under the base (quoted
-#       provider id / baseUrl, model ids present), a zero-custom call yields
-#       the byte-identical capability base, the file pins ZERO scalar
+#       synthesizes a COMPLETE per-review models.yml. Production runs pass an
+#       EMPTY capability base (the image declares no provider); this script
+#       passes a TEST FIXTURE base provider, declared inline below and read
+#       from nowhere else. Plus an OPTIONAL keyless custom declaration
+#       (provider id u001-verify, baseUrl https://example.invalid/v1, model id
+#       verify-model — reserved domains; the .invalid TLD structurally excludes
+#       egress). Asserted: the fixture provider is present WITHOUT any baked
+#       file (its scalars emitted bare), the custom block is merged under the
+#       base (quoted provider id / baseUrl, model ids present), a zero-custom
+#       call yields the byte-identical base, an EMPTY base yields a bare
+#       `providers:` header plus the custom block, the file pins ZERO scalar
 #       `apiKey` lines, and every provider block carries `auth: oauth` (a
 #       models.yml apiKey is a tier-2 config override that would suppress the
 #       stored credential pool the runtime rotates across);
 #   (b) the omp SDK ModelRegistry — the SAME eager loader createAgentSession
 #       constructs internally (new ModelRegistry(authStorage,
-#       <agentDir>/models.yml)) — resolves hasProvider for BOTH the
-#       capability host (ark-plan) and the custom declaration
-#       (u001-verify) to their declared baseUrls;
+#       <agentDir>/models.yml)) — resolves hasProvider for BOTH the fixture
+#       host and the custom declaration (u001-verify) to their baseUrls, and
+#       for the custom declaration alone on an empty base;
 #   (c) a minimal createAgentSession({ agentDir, modelRegistry }) accepts the
 #       synthesized agentDir (the session path loads <agentDir>/models.yml).
 #

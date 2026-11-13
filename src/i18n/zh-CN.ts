@@ -653,6 +653,7 @@ export const zhCN: Dictionary = {
         sizesUnstated: "已保存。上下文窗口和最大 token 数尚未填写 — 在两项都给出之前，该声明是不完整的。",
         sizesFromCatalog: "这些数值来自模型目录快照 {snapshot} — 修改数值即可覆盖。",
         sizesFromDeclaration: "这些数值来自你已保存的声明。",
+        sizesFromMixed: "你填的数值以你为准；另一项来自模型目录快照 {snapshot}。",
         fields: {
           contextWindow: "{model} 上下文窗口",
           maxTokens: "{model} 最大 token 数",

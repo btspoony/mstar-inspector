@@ -159,6 +159,7 @@ import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { isFindingSeverity } from "../contracts/finding-severity";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS, resolveModelSize } from "../contracts/provider-models";
 import { MODEL_LIMITS, MODEL_LIMITS_SNAPSHOT } from "../contracts/provider-model-limits.generated";
+import { catalogLimitsFor } from "../contracts/provider-catalog-limits";
 import { enabledSandboxImages, getSandboxImage } from "../contracts/sandbox-images";
 import { isCommandConfigKey } from "../../packages/shared/src/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
@@ -4634,12 +4635,17 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     }
     // Per-model facts (compass D10): checked BEFORE the store so a save that
     // omits a required size writes nothing at all (ids included). A size the
-    // operator left blank is resolved from the provider's catalog entry —
-    // only a model with no size on either side is refused.
+    // operator left blank is resolved from the provider's catalog entry — but
+    // only when this declaration IS that catalog row (same base URL): a private
+    // endpoint reusing a catalog id must not inherit the vendor's numbers. Only
+    // a model with no size on either side is refused.
+    const declarationBaseUrl = (await store.listCustomProviders(gate.app.id)).find(
+      (row) => row.provider_id === providerId,
+    )?.base_url;
     const stated = parseCustomProviderModelsMeta(
       typeof form.models_meta === "string" ? form.models_meta : "",
       modelIds,
-      MODEL_LIMITS[providerId] ?? {},
+      declarationBaseUrl === undefined ? {} : (catalogLimitsFor(providerId, declarationBaseUrl) ?? {}),
     );
     if ("error" in stated) {
       return settings400Response(c, gate.app.github_app_id, stated.error, stated.params);

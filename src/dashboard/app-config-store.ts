@@ -413,6 +413,14 @@ export type VerifiedModels = {
 export const PROVIDER_IDS: readonly string[] = PROVIDER_IDS_BUILTIN;
 
 /**
+ * Retired selector-prefix aliases still readable in OLD data. "ark-plan" was an
+ * image-declared provider whose keys came from the App's "ark" pool; the image
+ * declares no provider now. Reading folds the alias onto the real provider id;
+ * WRITING never produces it again (keys and evidence store under "ark").
+ */
+const RETIRED_PROVIDER_ALIASES: Readonly<Record<string, string>> = { "ark-plan": "ark" };
+
+/**
  * The dashboard's catalog mirror (spec §5) —
  * the FULL generated catalog (builtin AND template tier, ~214 rows) as
  * id → { label, tier, baseUrl, api, models, doc }, re-exported from
@@ -1787,9 +1795,14 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       const rows = await readKeyRows(PROVIDER_KEY_TABLE, appId);
       const byProvider = new Map<string, Map<string, string[]>>();
       for (const row of evidence.results) {
-        const perKey = byProvider.get(row.provider) ?? new Map<string, string[]>();
+        // Evidence written by the retired "ark-plan" alias belongs to the App's
+        // "ark" key pool — the alias was a selector prefix, never a separate
+        // credential. Folding it here keeps the verified-model list complete
+        // instead of silently dropping rows that no pool key matches.
+        const provider = RETIRED_PROVIDER_ALIASES[row.provider] ?? row.provider;
+        const perKey = byProvider.get(provider) ?? new Map<string, string[]>();
         perKey.set(row.key_id, parseModelIdsJson(row.models_json, "app_provider_models.models_json"));
-        byProvider.set(row.provider, perKey);
+        byProvider.set(provider, perKey);
       }
       const entries: VerifiedModels[] = [];
       for (const [provider, perKey] of byProvider) {
@@ -1807,7 +1820,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           models = models === null ? report : models.filter((model) => report.includes(model));
         }
         const fetchedAt = evidence.results
-          .filter((row) => row.provider === provider)
+          .filter((row) => (RETIRED_PROVIDER_ALIASES[row.provider] ?? row.provider) === provider)
           .reduce((latest, row) => (row.fetched_at > latest ? row.fetched_at : latest), "");
         entries.push({ provider, models: models ?? [], fetched_at: fetchedAt });
       }

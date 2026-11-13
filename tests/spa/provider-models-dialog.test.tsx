@@ -284,6 +284,32 @@ describe("ProviderModelsDialog", () => {
     }
   });
 
+  test("a typed size beside a catalog-seeded one is labelled mixed, not catalog", async () => {
+    const view = await mount({
+      catalogModelIds: CATALOG,
+      storedModelIds: ["m-1"],
+      catalogLimits: { "m-1": { contextWindow: 111, maxTokens: 22 } },
+      limitsSnapshot: "2026-11-13",
+    });
+    try {
+      await view.click(view.detailsToggle());
+      // One side becomes the operator's own statement; the other keeps the
+      // catalog seed. The label must not claim the typed value came from the
+      // vendor.
+      await view.type(view.field("m-1", "contextWindow"), "999");
+      const text = view.dialog()?.textContent ?? "";
+      expect(text).toContain(
+        t(locale, "settings.providers.models.sizesFromMixed", { snapshot: "2026-11-13" }),
+      );
+      expect(text).not.toContain(
+        t(locale, "settings.providers.models.sizesFromCatalog", { snapshot: "2026-11-13" }),
+      );
+      expect(text).not.toContain(t(locale, "settings.providers.models.sizesFromDeclaration"));
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   test("editing a catalog-supplied size posts only that override; the untouched one stays out", async () => {
     const view = await mount({
       catalogModelIds: CATALOG,

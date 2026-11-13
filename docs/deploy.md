@@ -2271,6 +2271,13 @@ resolves from the omp SDK catalog, a custom one from the App's declaration.
 On the production path the Worker never records NULL (the column stays
 nullable for historical rows, AL-24-4).
 
+Upgrade step (the image no longer declares the `ark-plan` provider): an App
+whose model chain still reads `ark-plan/…` fails with "the ark-plan provider
+was removed — set the model chain to `ark/...`". Rewrite the default chain and
+every per-role selector through the settings face — the App's key already lives
+under `ark`, and its verified-model evidence (written under the old alias) is
+still read back under that id. No SQL is required.
+
 Deployed image record (DOCS-01 baseline):
 
 > The live image digest is **operational state**, not documentation — the

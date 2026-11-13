@@ -1403,6 +1403,18 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     }
   });
 
+  test("a chain naming the retired ark-plan provider fails with the migration step", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    await configureApp(db, appX.id, "ark-plan/deepseek-v4-flash");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(
+      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
+    ).rejects.toThrow(/the ark-plan provider was removed — set the model chain to ark\//);
+  });
+
   test("app with NO custom providers: input JSON + payload carry no custom-provider surface (byte-identical to a no-declaration run)", async () => {
     reset();
     const appDb = createMigratedTestD1();
@@ -1580,9 +1592,10 @@ describe("custom provider sizes resolve from the catalog at the runner boundary"
   // Derived at runtime from the generated table — no vendor number is pinned.
   const covered = (() => {
     for (const [providerId, table] of Object.entries(MODEL_LIMITS)) {
-      if (PROVIDER_CATALOG[providerId]?.tier !== "template") continue;
+      const entry = PROVIDER_CATALOG[providerId];
+      if (entry?.tier !== "template" || entry.baseUrl === null || entry.baseUrl.includes("{")) continue;
       const modelId = Object.keys(table).find((id) => id !== "" && !id.includes("/"));
-      if (modelId !== undefined) return { providerId, modelId, limit: table[modelId]! };
+      if (modelId !== undefined) return { providerId, modelId, baseUrl: entry.baseUrl, limit: table[modelId]! };
     }
     return null;
   })();
@@ -1598,8 +1611,9 @@ describe("custom provider sizes resolve from the catalog at the runner boundary"
       await store.upsertCustomProvider(
         appX.id,
         {
+          // The catalog's own endpoint: only that row's sizes describe it.
           provider_id: covered.providerId,
-          base_url: "https://example.invalid/v1",
+          base_url: covered.baseUrl,
           api: "openai-completions",
           model_ids: [covered.modelId],
         },

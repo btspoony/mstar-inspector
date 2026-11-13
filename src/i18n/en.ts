@@ -790,6 +790,8 @@ export const en = {
         sizesFromCatalog:
           "These sizes come from the model catalog snapshot {snapshot} — edit a value to override it.",
         sizesFromDeclaration: "These sizes come from your saved declaration.",
+        sizesFromMixed:
+          "The value you typed is yours; the other one comes from the model catalog snapshot {snapshot}.",
         fields: {
           contextWindow: "{model} context window",
           maxTokens: "{model} max token count",

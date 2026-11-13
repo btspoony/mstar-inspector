@@ -16,6 +16,9 @@ import { Button, Input } from "@design-system";
 import { t } from "../../i18n";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS, resolveModelSize } from "../../contracts/provider-models";
 import type { ModelSize, ModelSizeSource } from "../../contracts/provider-models";
+
+/** The dialog's label vocabulary: the contract's source, plus the mixed pair. */
+type SizeProvenance = ModelSizeSource | "mixed";
 import type { SpaBoot } from "../boot";
 import { StepDialog } from "../components/StepDialog";
 import type { CustomProviderModelMeta, CustomProviderModelsMeta } from "./data";
@@ -186,21 +189,19 @@ export function ProviderModelsDialog({
   }
 
   /**
-   * Where the shown sizes come from — the label beside the fields. A size the
-   * operator typed makes the pair "declared"; a blank pair is "absent" (the
-   * declaration is incomplete); otherwise the catalog supplied what is shown.
+   * Where the shown sizes come from — the label beside the fields. A blank pair
+   * is "absent" (the declaration is incomplete); "catalog" only when EVERY
+   * shown number is a catalog seed; "declared" when none is; "mixed" when the
+   * operator typed one side and the catalog filled the other.
    */
-  function sourceOf(id: string): ModelSizeSource {
+  function sourceOf(id: string): SizeProvenance {
     const state = stateOf(id);
-    const filled = (field: "contextWindow" | "maxTokens"): boolean => state[field].trim() !== "";
-    if (!filled("contextWindow") && !filled("maxTokens")) return "absent";
-    if (
-      (filled("contextWindow") && state.fromCatalog.contextWindow) ||
-      (filled("maxTokens") && state.fromCatalog.maxTokens)
-    ) {
-      return "catalog";
-    }
-    return "declared";
+    const fields = ["contextWindow", "maxTokens"] as const;
+    const filled = fields.filter((field) => state[field].trim() !== "");
+    if (filled.length === 0) return "absent";
+    const fromCatalog = filled.filter((field) => state.fromCatalog[field]);
+    if (fromCatalog.length === 0) return "declared";
+    return fromCatalog.length === filled.length ? "catalog" : "mixed";
   }
 
   /**
@@ -415,6 +416,10 @@ export function ProviderModelsDialog({
                 ) : detailSource === "declared" ? (
                   <p className="text-xs text-muted-foreground">
                     {t(locale, "settings.providers.models.sizesFromDeclaration")}
+                  </p>
+                ) : detailSource === "mixed" ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t(locale, "settings.providers.models.sizesFromMixed", { snapshot: limitsSnapshot })}
                   </p>
                 ) : null}
                 <div className="grid gap-2 sm:grid-cols-2">

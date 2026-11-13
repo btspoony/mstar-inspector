@@ -217,7 +217,7 @@ import {
   type CustomProviderModelsMeta,
 } from "../dashboard/app-config-store";
 import { resolveModelSize } from "../contracts/provider-models";
-import { MODEL_LIMITS } from "../contracts/provider-model-limits.generated";
+import { catalogLimitsFor } from "../contracts/provider-catalog-limits";
 import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandbox-images";
 // §7.10 Check seam implementation: `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
@@ -3140,7 +3140,9 @@ function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomP
     api: provider.api,
     model_ids: [...provider.model_ids],
   };
-  const catalog = MODEL_LIMITS[provider.provider_id];
+  // The vendor's numbers describe the vendor's endpoint; a private endpoint
+  // reusing a catalog id must not inherit them.
+  const catalog = catalogLimitsFor(provider.provider_id, provider.base_url);
   const meta: CustomProviderModelsMeta = {};
   for (const modelId of provider.model_ids) {
     const declared = provider.models_meta?.[modelId];
@@ -3290,8 +3292,12 @@ function assertAppConfigComplete(
       const provider = selector.split("/")[0]!.trim();
       if (!availableProviders.has(provider)) {
         const where = role === null ? "" : `role override \`${role}\` `;
+        // A retired alias is not a missing key: the image declares no provider
+        // anymore, so the chain must name the provider whose key it uses.
         throw new Error(
-          `per-App config incomplete: app ${appId}: ${where}provider ${provider} has no configured key`,
+          provider === "ark-plan"
+            ? `per-App config incomplete: app ${appId}: ${where}the ark-plan provider was removed — set the model chain to ark/... (the App's ark key)`
+            : `per-App config incomplete: app ${appId}: ${where}provider ${provider} has no configured key`,
         );
       }
     }
