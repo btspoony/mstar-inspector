@@ -41,6 +41,7 @@ import {
   listCheckReconcileBatch,
   rollbackCheckCreateDispatch,
   readPublishedReview,
+  recordCheckObservation,
   recordTerminalizeOutcome,
   releaseAttachedCheck,
   releaseCheckClaim,
@@ -3325,7 +3326,10 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
     const warns: string[] = [];
 
-    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns)).toBe(true);
+    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns)).toEqual({
+      kind: "settled",
+      promoted: true,
+    });
 
     expect(warns).toHaveLength(0);
     expect(fake.updates).toHaveLength(1);
@@ -3347,7 +3351,10 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
     const warns: string[] = [];
 
-    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns)).toBe(false);
+    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns)).toEqual({
+      kind: "settled",
+      promoted: false,
+    });
 
     expect(fake.updates).toHaveLength(0);
     expect(warns).toHaveLength(0);
@@ -3360,7 +3367,10 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
     CLOCK = lease.untilMs + 1; // the holder expired before this promotion
 
-    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease)).toBe(false);
+    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease)).toEqual({
+      kind: "settled",
+      promoted: false,
+    });
     expect(fake.updates).toHaveLength(0);
   });
 
@@ -3375,7 +3385,10 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     });
     const warns: string[] = [];
 
-    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns)).toBe(false);
+    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns)).toEqual({
+      kind: "settled",
+      promoted: false,
+    });
 
     expect(warns).toHaveLength(1);
     expect(warns[0]).toContain("check in-progress failed: boom");
@@ -3390,11 +3403,50 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     const warns: string[] = [];
     const started = Date.now();
 
-    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns, 25)).toBe(false);
+    // Abandoned, not failed: the PATCH may still be in flight, which is what
+    // forbids a terminal write from the same invocation.
+    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns, 25)).toEqual({
+      kind: "abandoned",
+    });
 
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(warns).toHaveLength(1);
     expect(warns[0]).toContain("exceeded 25ms");
+  });
+
+  test("an attempt that already ended is never reopened: no send, no warn", async () => {
+    const db = await seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    // The run is finished: the terminal observation is what makes reopening it
+    // a lie, and the check reads that state from the attempt it already has.
+    expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
+    const completed = toCheckRemote(
+      runPayload(attempt.identity, { status: "completed", conclusion: "success" }),
+    );
+    if (completed === null) throw new Error("fixture: expected a narrowable run payload");
+    expect(await recordCheckObservation(db, attempt.identity.attemptId, lease, completed, T0)).toBe(true);
+    const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
+    const warns: string[] = [];
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const answer = await lifecycle.markInProgress({
+      handle: { attemptId: attempt.identity.attemptId, scope: SCOPE, githubAppId: GITHUB_APP_ID, headSha: SHA, lease },
+      summary: "Review started for 0123456 — this run reports the review of this commit.",
+      updateBudgetMs: 1_000,
+      warn: (detail) => warns.push(detail),
+    });
+
+    expect(answer).toEqual({ kind: "settled", promoted: false });
+    expect(fake.updates).toHaveLength(0);
+    expect(warns).toHaveLength(0);
+    // The finished run stays finished.
+    expect((await rowOf(db, attempt)).observed).toBe("success");
   });
 
   test("the lifecycle promotes the handle's owned run, and a handle with no run promotes nothing", async () => {
@@ -3418,11 +3470,17 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     const summary = "Review started for 0123456 — this run reports the review of this commit.";
 
     // Not attached yet: nothing to promote, and nothing is sent.
-    expect(await lifecycle.markInProgress({ handle, summary, updateBudgetMs: 1_000, warn: (d) => warns.push(d) })).toBe(false);
+    expect(await lifecycle.markInProgress({ handle, summary, updateBudgetMs: 1_000, warn: (d) => warns.push(d) })).toEqual({
+      kind: "settled",
+      promoted: false,
+    });
     expect(fake.updates).toHaveLength(0);
 
     await attachedRun(db, attempt, lease, 4242);
-    expect(await lifecycle.markInProgress({ handle, summary, updateBudgetMs: 1_000, warn: (d) => warns.push(d) })).toBe(true);
+    expect(await lifecycle.markInProgress({ handle, summary, updateBudgetMs: 1_000, warn: (d) => warns.push(d) })).toEqual({
+      kind: "settled",
+      promoted: true,
+    });
     expect(fake.updates).toHaveLength(1);
     expect(fake.updates[0]!.params.output).toEqual({ title: CHECK_NAME, summary });
     expect(warns).toHaveLength(0);

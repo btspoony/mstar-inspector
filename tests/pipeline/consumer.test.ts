@@ -6219,7 +6219,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(publicationRow(db).phase).toBe("applied");
   });
 
-  test("check lifecycle: a promotion that never answers is ONE warn — the adapter owns the failure report", async () => {
+  test("check lifecycle: an abandoned promotion sends NO terminal update and hands the run to recovery", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
     // The smallest legal update budget: the hung PATCH is ended by the bound
@@ -6227,8 +6227,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     seedCheckBudget(db, "review.check.update_timeout_ms", "1000");
     const hungPromotion = Promise.withResolvers<CheckRunPayload>();
     checkRequestOverrides.update = (params) => {
-      // Only the promotion (a status send with no conclusion) hangs; the
-      // terminal update still answers so the review closes normally.
+      // Only the promotion (a status send with no conclusion) hangs — it stays
+      // on the wire, which is exactly why this invocation must not close the
+      // run behind it.
       if ("status" in params && !("conclusion" in params)) return hungPromotion.promise;
       const run = checkRuns.get(params.check_run_id)!;
       const updated: CheckRunPayload =
@@ -6251,10 +6252,39 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const warns = h.logLines.filter((line) => line.fields.event === "check_in_progress_failed");
     expect(warns).toHaveLength(1);
     expect(warns[0]!.msg).toContain("exceeded 1000ms");
-    // The hung promotion never touches the review or its terminal conclusion.
+
+    // NO terminal update from this invocation: only the create and the
+    // abandoned promotion were sent.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    const released = checkRowFor(db, SHA);
+    expect(released.holder).toBeNull();
+    expect(released.lease_until_ms).toBeNull();
+    expect(released.recovery_state).toBe("remote-unconfirmed");
+    expect(released.terminal_ms).toBeNull();
+    // The give-up fallback is frozen the way the budget-exceeded terminalize
+    // leaves it; the cron corrects it from publication proof below.
+    expect(released.desired).toBe("failure");
+    expect(released.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    expect(h.logLines.filter((line) => line.fields.event === "check_abandon_released")).toHaveLength(1);
+    // The review itself is untouched.
     expect(publicationRow(db).phase).toBe("applied");
-    expect(checkRowFor(db, SHA).observed).toBe("success");
-  }, 10_000);
+
+    // The recovery lane owns the conclusion, minutes later: it reads the proof
+    // this attempt's publication persisted and completes the run with it.
+    seedAppInstallation(db);
+    const dueAt = released.next_attempt_ms!;
+    const summary = await reconcileReviewChecks({ DB: db as never } as never, {
+      now: () => dueAt,
+      credentials: async () => ({ kind: "ok" as const, paused: false, adapter: checksAdapterFor(db, () => dueAt) }),
+      log: { warn: () => {}, info: () => {} },
+    });
+    expect(summary.completed).toBe(1);
+    const terminal = checkRequests.filter((r) => r.op === "update").at(-1)!;
+    expect(terminal.params.conclusion).toBe("success");
+    const settled = checkRowFor(db, SHA);
+    expect(settled.observed).toBe("success");
+    expect(settled.terminal_ms).not.toBeNull();
+  }, 20_000);
 
   test("check lifecycle: duplicate delivery takes no second claim and no second remote run", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
@@ -7658,7 +7688,18 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // before it could ever reach this adapter.
     seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1600");
     seedCheckBudget(db, "review.check.update_timeout_ms", "1500");
-    checkRequestOverrides.update = () => Promise.withResolvers<CheckRunPayload>().promise;
+    // Only the TERMINAL send parks: the promotion must settle, otherwise this
+    // case would exercise the abandoned-promotion handoff instead of the
+    // terminalize budget this assertion is about.
+    checkRequestOverrides.update = (params) => {
+      if (!("conclusion" in params)) {
+        const run = checkRuns.get(params.check_run_id)!;
+        const promoted: CheckRunPayload = { ...run, status: "in_progress" };
+        checkRuns.set(params.check_run_id, promoted);
+        return promoted;
+      }
+      return Promise.withResolvers<CheckRunPayload>().promise;
+    };
     const adapter = checksAdapterFor(db);
     const handed: Promise<unknown>[] = [];
     const consumer = createReviewConsumer(

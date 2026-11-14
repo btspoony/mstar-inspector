@@ -149,6 +149,18 @@ export type ChecksInProgressParams = ChecksRelabelParams & {
   status: "in_progress";
 };
 
+/**
+ * What a promotion actually achieved (spec §7.9). `abandoned` is the load-
+ * bearing case: the budget ended the WAIT while the PATCH may still be on the
+ * wire, so a terminal write from the same invocation could be reordered after
+ * it and reopen a finished run. The caller must then leave the run to the
+ * recovery lane instead of updating it itself.
+ */
+export type CheckPromotion =
+  /** The send settled: `promoted` says the PATCH landed. */
+  | { kind: "settled"; promoted: boolean }
+  | { kind: "abandoned" };
+
 export type ChecksListParams = {
   owner: string;
   repo: string;
@@ -316,7 +328,7 @@ export type ChecksAdapter = {
     updateBudgetMs?: number;
     /** One warn when the send failed or ran out of budget — never a throw. */
     warn: (detail: string) => void;
-  }): Promise<boolean>;
+  }): Promise<CheckPromotion>;
   /**
    * Relabel an owned run WITHOUT moving it: the text says this delivery is
    * QUEUED behind the PR's live review (the in-flight guard held it). No status,
@@ -412,16 +424,31 @@ function sendRequests<T>(promise: Promise<T>): Promise<{ sent: number; outcome: 
  * `sendRequests` bounded by a wall-clock budget. A timed-out request may still
  * have reached GitHub, so it is reported as SENT (`requests: 1`) — recovery
  * must adopt/retry conservatively instead of assuming nothing landed.
+ *
+ * `settled: false` is the one thing a caller cannot otherwise observe: the
+ * budget won while the request may still be ON THE WIRE. A caller whose later
+ * write must not be overtaken by this one (the promotion before a terminal
+ * send) reads it; every other lane only reads `sent`/`outcome`.
  */
 async function sendRequestsWithin<T>(
   promise: Promise<T>,
   budgetMs: number,
   label: string,
-): Promise<{ sent: number; outcome: T | { failure: unknown } }> {
-  const { promise: budget, resolve } = Promise.withResolvers<{ sent: number; outcome: { failure: unknown } }>();
-  const timer = setTimeout(() => resolve({ sent: 1, outcome: { failure: new Error(`${label} exceeded ${budgetMs}ms`) } }), budgetMs);
+): Promise<
+  | { settled: true; sent: number; outcome: T | { failure: unknown } }
+  | { settled: false; sent: 1; outcome: { failure: unknown } }
+> {
+  const { promise: budget, resolve } = Promise.withResolvers<{
+    settled: false;
+    sent: 1;
+    outcome: { failure: unknown };
+  }>();
+  const timer = setTimeout(
+    () => resolve({ settled: false, sent: 1, outcome: { failure: new Error(`${label} exceeded ${budgetMs}ms`) } }),
+    budgetMs,
+  );
   try {
-    return await Promise.race([sendRequests(promise), budget]);
+    return await Promise.race([sendRequests(promise).then((result) => ({ ...result, settled: true as const })), budget]);
   } finally {
     clearTimeout(timer);
   }
@@ -736,12 +763,17 @@ async function markInProgressWith(
     updateBudgetMs?: number;
     warn: (detail: string) => void;
   },
-): Promise<boolean> {
+): Promise<CheckPromotion> {
   const owned = await guardOwnership(deps, input.identity, input.lease, deps.nowMs());
-  if (owned.kind === "unavailable") return false;
+  if (owned.kind === "unavailable") return { kind: "settled", promoted: false };
+  // Already decided: a frozen terminal intent means the review reached its
+  // conclusion (the close is imminent or recovery owns it), so promoting the
+  // status now would be a lie. The evidence is the persisted row's own field —
+  // no extra store read.
+  if (owned.data.desired !== "in_progress") return { kind: "settled", promoted: false };
   const runId = owned.data.checkRunId;
   // Nothing to promote: the run this attempt created is not attached here.
-  if (runId === null) return false;
+  if (runId === null) return { kind: "settled", promoted: false };
   const { scope } = owned.data.identity;
   const budgetMs = input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT;
   const send = (async (): Promise<boolean> => {
@@ -761,12 +793,18 @@ async function markInProgressWith(
     });
     return true;
   })();
-  const outcome = (await sendRequestsWithin(send, budgetMs, "check in-progress")).outcome;
-  if (typeof outcome !== "boolean") {
-    input.warn(surfaceFailure(outcome.failure, "check in-progress"));
-    return false;
+  const attempted = await sendRequestsWithin(send, budgetMs, "check in-progress");
+  if (!attempted.settled) {
+    // The PATCH may still be in flight: report that honestly so the caller
+    // does not write a terminal state it could be overtaken by.
+    input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
+    return { kind: "abandoned" };
   }
-  return outcome;
+  if (typeof attempted.outcome !== "boolean") {
+    input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
+    return { kind: "settled", promoted: false };
+  }
+  return { kind: "settled", promoted: attempted.outcome };
 }
 
 /**
@@ -1446,10 +1484,12 @@ export type CheckLifecycle = {
   /**
    * Promote the run this handle's attempt created to `in_progress`: the run is
    * created `queued` at delivery acceptance, so the review's own begin is what
-   * makes the public status truthful. Best-effort by contract — `false` when
-   * there is nothing to promote (no run, no Checks surface, a lease this
-   * invocation no longer holds) or the bounded send failed; one warn rides
-   * `warn`, and nothing here can block the review.
+   * makes the public status truthful. Best-effort by contract — a settled
+   * `false` means there was nothing to promote (no run, no Checks surface, a
+   * lease this invocation no longer holds, an already-terminal attempt) or the
+   * bounded send failed; one warn rides `warn`, and nothing here can block the
+   * review. `abandoned` means the budget ended the WAIT while the PATCH may
+   * still be in flight, so the caller must NOT write a terminal state itself.
    */
   markInProgress(input: {
     handle: CheckLifecycleHandle;
@@ -1459,7 +1499,7 @@ export type CheckLifecycle = {
     updateBudgetMs?: number;
     /** One warn when the best-effort send failed or ran out of budget. */
     warn: (detail: string) => void;
-  }): Promise<boolean>;
+  }): Promise<CheckPromotion>;
   /**
    * §7.9 skip settlement: the delivery was SKIPPED before execution (an
    * idempotency hit, a publication-journal hand-off, an in-flight guard
@@ -1977,7 +2017,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
 
     async markInProgress(input) {
       const adapter = deps.getAdapter(input.handle.scope);
-      if (adapter === null) return false;
+      if (adapter === null) return { kind: "settled", promoted: false };
       // The adapter proves ownership from the PERSISTED row and sends that
       // row's run id, so the identity it is handed is the row's — never one
       // rebuilt from the handle.
@@ -1985,9 +2025,11 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       try {
         attempt = await getCheckAttempt(deps.db, input.handle.attemptId);
       } catch {
-        return false;
+        return { kind: "settled", promoted: false };
       }
-      if (attempt === null) return false;
+      // This attempt already ended: never reopen a finished run. The attempt
+      // this lane already read is the terminal evidence — no second read.
+      if (attempt === null || attempt.terminalMs !== null) return { kind: "settled", promoted: false };
       return (
         (await adapter.markInProgress?.({
           identity: attempt.identity,
@@ -1995,7 +2037,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
           summary: input.summary,
           updateBudgetMs: input.updateBudgetMs,
           warn: input.warn,
-        })) ?? false
+        })) ?? { kind: "settled", promoted: false }
       );
     },
 

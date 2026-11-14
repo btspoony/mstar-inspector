@@ -227,6 +227,7 @@ import {
   createCheckBeginLatch,
   createCheckLifecycle,
   type CheckBeginLatch,
+  type CheckPromotion,
   type CheckTerminalOutcome,
 } from "./checks";
 // Review admission (review-concurrency §1.2): one `review_inflight` row is the
@@ -1232,9 +1233,11 @@ export type CheckLifecycleHooks = {
   /**
    * §7.9 status truthfulness (optional, additive): the run was created
    * `queued` at delivery acceptance, so the review's own begin is what makes
-   * the public status `in_progress`. Resolves `false` when there is nothing to
-   * promote or the bounded send failed; a hook that cannot reach a Checks
-   * surface simply omits this, and the review never waits on it.
+   * the public status `in_progress`. A settled answer means the send is over
+   * (landed or cleanly refused); `abandoned` means its budget ended the wait
+   * while the PATCH may still be in flight, so the terminalize below must hand
+   * the attempt to recovery instead of writing over a run it could still
+   * reopen. A hook that cannot reach a Checks surface simply omits this.
    */
   markInProgress?(input: {
     handle: CheckHandle;
@@ -1244,7 +1247,7 @@ export type CheckLifecycleHooks = {
     updateBudgetMs: number;
     /** One warn when the best-effort send failed or ran out of budget. */
     warn: (detail: string) => void;
-  }): Promise<boolean>;
+  }): Promise<CheckPromotion>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
     outcome: CheckTerminalOutcome;
     /**
@@ -4066,6 +4069,14 @@ async function processMessage(
   // isolated warns, and a hook timeout resolves without blocking the path.
   let checkHandle: CheckHandle | null = null;
   let checkTerminalized = false;
+  /**
+   * The attempt whose promotion was ABANDONED (its update budget ended the
+   * wait while the PATCH may still be in flight). This invocation must then
+   * not write the terminal state itself: the late promotion could land after
+   * it and reopen a finished run that is no longer due for recovery. Cleared
+   * by every new begin, so it always describes `checkHandle`.
+   */
+  let checkPromotionAbandoned: string | null = null;
   // Whether the ADMISSION-time claim ran. The post-`rev-parse` block is the
   // fallback for a message whose SHA was not knowable then, so it must not
   // claim a second time (a failed early claim included: the claim INSERT is the
@@ -4254,6 +4265,22 @@ async function processMessage(
   ): Promise<void> => {
     if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
     checkTerminalized = true;
+    if (checkPromotionAbandoned === checkHandle.attemptId) {
+      // The promotion's PATCH may still be on the wire. A terminal write from
+      // THIS invocation could be overtaken by it and the finished run reopened
+      // — and a reopened run is no longer due for recovery (`terminal_ms` is
+      // set), so it would read `in_progress` forever. Hand the attempt to the
+      // recovery lane exactly as a budget-exceeded terminalize does: the
+      // fallback intent is frozen where none is frozen and the lease is
+      // released, so the minute cron is the last writer — minutes behind any
+      // abandoned PATCH — and corrects the conclusion from publication proof.
+      const release = abandonCheck(
+        checkHandle,
+        "check promotion exceeded its update budget (the terminal send is left to recovery)",
+      );
+      if (deps.background === undefined) await release;
+      return;
+    }
     await runTerminalize(checkHandle, publicationId, outcome, inheritedHeadSha);
   };
 
@@ -4266,9 +4293,13 @@ async function processMessage(
    * names the real cause, so warning again here would log one hung PATCH
    * twice. Only an unexpected rejection (the adapter promises never to throw)
    * is reported at this layer, as the unhandled-rejection guard.
+   *
+   * The ANSWER is what matters to the caller: `abandoned` means the PATCH may
+   * still be on the wire, so the terminal write must not be issued from this
+   * invocation.
    */
-  const promoteCheckInProgress = async (handle: CheckHandle): Promise<void> => {
-    if (deps.checks?.markInProgress === undefined) return;
+  const promoteCheckInProgress = async (handle: CheckHandle): Promise<CheckPromotion["kind"]> => {
+    if (deps.checks?.markInProgress === undefined) return "settled";
     const budgetMs = checkBudgets?.updateMs ?? CHECK_UPDATE_DEFAULT;
     const warn = (detail: string) =>
       deps.log.warn(
@@ -4280,7 +4311,7 @@ async function processMessage(
         detail,
       );
     try {
-      await boundedBestEffort(
+      const waited = await boundedBestEffort(
         deps.checks
           .markInProgress({
             handle,
@@ -4288,17 +4319,22 @@ async function processMessage(
             updateBudgetMs: budgetMs,
             warn,
           })
-          .catch((err: unknown) => {
+          .catch((err: unknown): CheckPromotion => {
             // A rejection that lands after this layer stopped waiting still
             // gets its warn instead of becoming an unhandled rejection.
             warn(`check in-progress promotion failed (the review is unaffected): ${err instanceof Error ? err.message : String(err)}`);
-            return false;
+            return { kind: "settled", promoted: false };
           }),
         budgetMs,
       );
+      // This layer stopped waiting: the adapter may still be mid-send, so the
+      // only safe reading is "abandoned" (its own warn carries the cause).
+      if (waited === null) return "abandoned";
+      return waited.value.kind;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       warn(`check in-progress promotion failed (the review is unaffected): ${detail}`);
+      return "settled";
     }
   };
 
@@ -4309,6 +4345,8 @@ async function processMessage(
    */
   const beginCheck = async (scope: Scope, githubAppId: number, headSha: string): Promise<CheckHandle | null> => {
     if (deps.checks === undefined) return null;
+    // Every begin owns the flag: it must always describe the handle we return.
+    checkPromotionAbandoned = null;
     // One latch per `begin` call, created HERE and never stored anywhere: a
     // later message cannot clear or reuse it, so a detached begin from this
     // message stays abandoned for its whole lifetime (QC1-001 replacement
@@ -4346,8 +4384,12 @@ async function processMessage(
       );
       return null;
     }
-    // A handle means THIS review is starting, so the run may say so.
-    if (handle !== null) await promoteCheckInProgress(handle);
+    // A handle means THIS review is starting, so the run may say so — and if
+    // that send was abandoned rather than settled, this invocation must not
+    // terminalize the run itself (the promotion may still land).
+    if (handle !== null && (await promoteCheckInProgress(handle)) === "abandoned") {
+      checkPromotionAbandoned = handle.attemptId;
+    }
     return handle;
   };
 
