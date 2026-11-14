@@ -56,18 +56,30 @@
 #
 # rebuild: the ask-fitting rule (and the assignment's fixed prose it is measured
 # against) moved out of `packages/runner/src/recheck.ts` into
-# `packages/shared/src/recheck-wire.ts`, so the Worker fits the same rule the seat
-# validates against; both files are image inputs and no manifest, lockfile or CLI
-# pin moved. The rebuild is what moves the fitting from the seat to the Worker,
-# so the stale vintage decides the symptom: an image from just BEFORE this change
-# still carries the in-runner fit, which is all-or-nothing — it refuses the whole
-# round when targets + discussion overrun the budget (the `skipped: budget
-# (config)` shape the paragraph above records), so a long-lived PR keeps skipping.
-# An image older than THAT carries no fit at all and sends the unfitted up-to-512
-# KiB document, the context-pressure shape the paragraph above also describes.
-# Either way the Worker now hands over a fitted document, which the stale seat
-# re-fits under its own older rule — so the head rescue's bound is the Worker's,
-# and a stale image never applies it.
+# `packages/shared/src/recheck-wire.ts`, so the Worker now FITS the document it
+# hands over instead of the seat fitting what it was handed; both files are image
+# inputs and no manifest, lockfile or CLI pin moved. What a mismatched pair does
+# therefore depends on WHO fits, and there are four cells:
+#   - old Worker + old image: the seat fits the unfitted document with its
+#     all-or-nothing rule and refuses the whole round when targets + discussion
+#     overrun the budget. That refusal is the staging failure this change
+#     removes — `review_failures` records it as stage `recheck` with
+#     `skipped: budget (config): ... targets + discussion need at least N bytes,
+#     the budget is 65536`, no seat ran, and the PR repeated it every round.
+#   - new Worker + image from just BEFORE this change: the Worker fits, so the
+#     seat's older in-runner fit receives an already-fitting document and passes
+#     it through unchanged. The head rescue, the bounded body and the `budget`
+#     exclusions exist only Worker-side: the stale seat never applies a second
+#     bound, it simply has nothing to refuse.
+#   - new Worker + still-older image (no in-runner fit at all): the seat asks the
+#     fitted document exactly as handed over, i.e. the same ask a current image
+#     would make.
+#   - old Worker + new image: the unfitted up-to-512 KiB `mstar.recheck-input/v1`
+#     document reaches a seat that fits it — the pre-change behaviour, and the
+#     context-pressure shape the rebuild entry directly above describes
+#     (`failed`/`seat-failed`, status `unavailable`).
+# The rebuild is what moves the fitting rule to where the new documents are built;
+# it does not change the wire shape either way.
 #
 # rebuild: the runner's pinned engine moves to 4.2.0 (`packages/runner/package.json`
 # and its lockfile are image inputs, so the container must be rebuilt with them).
