@@ -435,6 +435,29 @@ describe("SPA dispatch", () => {
     expect(setCookie[0]).toContain("Max-Age=0");
     expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
   });
+  test("a zh_CN shell declares its own language and title on the document", async () => {
+    const { env } = makeEnv();
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard/login", { Cookie: `${LOCALE_COOKIE}=zh_CN` }),
+      env,
+    );
+    const body = await res.text();
+    expect(body.match(/<html[^>]*>/)?.[0]).toBe('<html lang="zh-CN">');
+    expect(body).toContain("<title>登录 — Morning Star Inspector</title>");
+    expect(body).not.toContain('lang="en"');
+  });
+
+  test("an en shell keeps lang=en and names the page it serves", async () => {
+    const { env } = makeEnv();
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard/login", { Cookie: `${LOCALE_COOKIE}=en` }),
+      env,
+    );
+    const body = await res.text();
+    expect(body.match(/<html[^>]*>/)?.[0]).toBe('<html lang="en">');
+    expect(body).toContain("<title>Sign in — Morning Star Inspector</title>");
+  });
+
   test("the two boot list reads share one round trip (neither waits for the other)", async () => {
     // L2: the pending-invite and membership lists both key on the login alone,
     // so they overlap. The stub only answers once BOTH are in flight.

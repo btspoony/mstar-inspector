@@ -6,6 +6,7 @@
  * duplicated the same INDEX_HTML / spaEnv / htmlGet trio — this module is
  * the single copy.
  */
+import { readFileSync } from "node:fs";
 import type { Fetcher } from "@cloudflare/workers-types";
 import { SPA_BOOT_MARKER } from "../../src/spa/boot";
 import type { Env } from "../../src/worker/env";
@@ -13,7 +14,13 @@ import worker from "../../src/worker/index";
 
 export { SPA_BOOT_MARKER };
 
-export const SPA_INDEX_HTML = `<!doctype html><html><head>${SPA_BOOT_MARKER}</head><body>spa</body></html>`;
+/**
+ * The REAL shell document, not a hand-written mirror: the Worker now rewrites
+ * its `<html lang>` and `<title>` anchors, so a stub without them would fail
+ * every HTML navigation for a reason the shipped document does not have. The
+ * boot marker it carries is the one the injection spends.
+ */
+export const SPA_INDEX_HTML = readFileSync(new URL("../../src/spa/index.html", import.meta.url), "utf8");
 
 export function spaAssets(indexHtml = SPA_INDEX_HTML): Fetcher {
   return {

@@ -19,6 +19,8 @@ export const zhCN: Dictionary = {
     platformOperations: "平台运营",
     /** 目标语言的标签 — 切换按钮显示要切换到的语言（中文界面显示 EN）。 */
     language: "EN",
+    /** 外壳中第一个可聚焦控件：跳过侧栏直达 `<main>`。 */
+    skipToContent: "跳到主要内容",
     /** 主题切换：仅图标的按钮；状态与动作在 aria 文案中表达。 */
     /** {mode} = 当前生效主题，{target} = 点击后切换到的主题。 */
     themeToggleAria: "当前显示模式：{mode}，点击切换为{target}",
@@ -112,6 +114,8 @@ export const zhCN: Dictionary = {
   },
   /** App 详情页（App detail IA）：标签页外壳。 */
   appDetail: {
+    /** 页面在文档标题中的名称（`common.pageTitle` 的 page 槽）。 */
+    documentPage: "应用",
     backToApps: "返回应用",
     tabSettings: "应用设置",
     tabInstallations: "已安装",

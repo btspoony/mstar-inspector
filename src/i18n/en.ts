@@ -29,6 +29,8 @@ export const en = {
     platformOperations: "Platform operations",
     /** Label of the OTHER locale — the toggle target (en shows 中文, zh_CN shows EN). */
     language: "中文",
+    /** First focusable control in the shell: skips the sidebar straight to `<main>`. */
+    skipToContent: "Skip to content",
     /** Theme toggle: icon-only button; state + action live in the aria copy. */
     /** {mode} = current effective theme, {target} = the theme clicking switches to. */
     themeToggleAria: "Display theme: {mode}. Activate to switch to {target}.",
@@ -132,6 +134,8 @@ export const en = {
   },
   /** App detail page (App detail IA): the tabbed shell. */
   appDetail: {
+    /** The page's name in the document title (`common.pageTitle` slot). */
+    documentPage: "App",
     backToApps: "Back to Apps",
     tabSettings: "Settings",
     tabInstallations: "Installed",

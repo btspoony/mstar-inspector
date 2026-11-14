@@ -46,6 +46,7 @@ import {
 import { REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { resolveLocale, t, type Locale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
+import { localizeDocument } from "../worker/document-locale";
 import { ADMIN_PAGES } from "../spa/admin/pages";
 import { RESERVED_WORKSPACE_SLUGS } from "../spa/routes";
 import { createFailureStore } from "../store/failure-store";
@@ -624,41 +625,9 @@ async function serveDocument(c: AdminContext): Promise<Response> {
       name: null,
     }),
     locale,
+    t(locale, "admin.documentTitle"),
   );
   return c.html(html, 200, { "cache-control": "private, no-store" });
-}
-
-/**
- * Server-side locale substitution on the console document (compass D15): the
- * handler already holds the document text and the resolved locale, so
- * `<html lang>` (BCP 47: `zh_CN` → `zh-CN`) and the `<title>` are replaced
- * here — no second document route, no client-side attribute write. The title
- * comes from `admin.documentTitle`; it is escaped even though dictionary
- * values are plain text by contract. Both anchors must be present: a silent
- * no-op would ship an English document to a zh_CN operator, so a template
- * drift throws into the serveDocument error path instead.
- *
- * Both anchors match the tag, not a fixed attribute string: the document root
- * carries attributes of its own (`data-surface="ops"` for the plain variant),
- * and an exact-substring anchor made every locale throw once one appeared.
- * Every attribute the template declares survives the substitution.
- */
-export function localizeDocument(html: string, locale: Locale): string {
-  const lang = locale === "zh_CN" ? "zh-CN" : "en";
-  const title = t(locale, "admin.documentTitle")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;");
-  const langAnchor = /(<html[^>]*\slang=")en(")/;
-  if (!langAnchor.test(html)) {
-    throw new Error("admin document is missing the `<html lang=\"en\">` locale anchor");
-  }
-  const titleAnchor = /(<title[^>]*>)([^<]*)(<\/title>)/;
-  if (!titleAnchor.test(html)) {
-    throw new Error("admin document is missing the `<title>` locale anchor");
-  }
-  return html
-    .replace(langAnchor, `$1${lang}$2`)
-    .replace(titleAnchor, (_match, open: string, _previous: string, close: string) => `${open}${title}${close}`);
 }
 
 const ADMIN_ROUTES: readonly AdminRoute[] = [
