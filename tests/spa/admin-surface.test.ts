@@ -185,6 +185,7 @@ describe("the release version lives on the console only", () => {
   const TENANT_PAYLOAD = {
     can_manage: false as const,
     workspace_id: "ws_0123456789abcdefghijkl",
+    target_id: 501,
     app: {
       github_app_id: 1,
       status: "active",

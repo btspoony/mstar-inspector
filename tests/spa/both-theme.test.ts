@@ -264,6 +264,7 @@ const APPS_PAYLOAD: AppsPayload = {
 const SETTINGS_PAYLOAD: SettingsManagePayload = {
   can_manage: true,
   workspace_id: "ws_0123456789abcdefghijkl",
+  target_id: 501,
   app: {
     github_slug: "acme-app",
     id: "app-acme",
