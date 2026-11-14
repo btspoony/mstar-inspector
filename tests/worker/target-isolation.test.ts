@@ -78,8 +78,8 @@ function seedReview(
 
 /**
  * Two workspaces, one bot, two targets, and one of each tenant row per target.
- * `octocat` manages both workspaces, so a 404 in `ws-b` is SCOPING, never
- * membership; `dana` is a plain member of both.
+ * `octocat` manages BOTH workspaces, so a 404 in `ws-b` is SCOPING, never
+ * membership: she could read the row if the workspace were the only gate.
  */
 function isolationFixture() {
   const db = createMigratedTestD1();
@@ -88,24 +88,16 @@ function isolationFixture() {
     "INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at) VALUES (?, 'b', 'b', NULL, datetime('now'), NULL)",
     WORKSPACE_B,
   );
-  for (const login of ["octocat", "dana"]) {
+  seed(
+    db,
+    "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES ('user-octocat', 'octocat', 'member', datetime('now'), NULL)",
+  );
+  for (const workspaceId of [WORKSPACE_A, WORKSPACE_B]) {
     seed(
       db,
-      "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, 'member', datetime('now'), NULL)",
-      `user-${login}`,
-      login,
+      "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, 'user-octocat', 'owner', datetime('now'))",
+      workspaceId,
     );
-  }
-  for (const workspaceId of [WORKSPACE_A, WORKSPACE_B]) {
-    for (const login of ["octocat", "dana"]) {
-      seed(
-        db,
-        "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, ?, ?, datetime('now'))",
-        workspaceId,
-        `user-${login}`,
-        login === "octocat" ? "owner" : "member",
-      );
-    }
   }
   seed(
     db,
@@ -187,6 +179,26 @@ describe("the pull-request ledger is tenant-scoped", () => {
     expect((await local.listPullRequests(SCOPE_B)).rows.map((row) => row.number)).toEqual([202]);
     expect((await local.listPullRequests(SCOPE_CROSSED)).rows).toEqual([]);
     expect((await local.listPullRequests(SCOPE_CROSSED)).repos).toEqual([]);
+  });
+
+  test("the record counts bind the tenant pair too", async () => {
+    const { db } = isolationFixture();
+    const store = createReviewBotsStore(db);
+    // The owning scope counts the target's one review…
+    expect(await store.countPullRequestRecords(SCOPE_B, "other", "lib", 202)).toEqual({
+      findings: 0,
+      reviews: 1,
+      failures: 0,
+      must_fix: 0,
+    });
+    // …and the crossed pair counts nothing at all, including the two counts
+    // that reach the target through the PR join (findings, failures).
+    expect(await store.countPullRequestRecords(SCOPE_CROSSED, "other", "lib", 202)).toEqual({
+      findings: 0,
+      reviews: 0,
+      failures: 0,
+      must_fix: 0,
+    });
   });
 
   test("a foreign target's PR is invisible on the detail faces (the route's 404)", async () => {

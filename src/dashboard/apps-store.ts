@@ -433,6 +433,9 @@ const PULL_REQUEST_EXISTS_SQL = `SELECT 1 AS found FROM pull_requests p
  * The join that reaches a bot-attributed ledger row's target. `review_findings`
  * and `review_failures` keep bot attribution only (execution ledgers), so the
  * target predicate reaches them through the PR row they belong to.
+ *
+ * Valid while a bot has exactly one live target; a second target needs
+ * `target_id` on those execution ledgers instead of this join.
  */
 function prOwnerJoin(alias: string, botExpression: string): string {
   return `JOIN pull_requests p ON p.bot_id = ${botExpression} AND p.owner = ${alias}.owner
