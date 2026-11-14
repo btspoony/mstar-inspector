@@ -13,8 +13,9 @@
  * - POST /webhook/:workspaceId/:appId → per-App webhook face (the ONLY HTTP review
  *   entry — the legacy bare `/webhook` face is
  *   retired): our webhook path → review_bots row (active, not deleted) → that App's
- *   decrypted webhook secret verifies the signature → classify → enqueue
- *   with `appRef: { appId }` (spec § Multi-App 契约, locks L3/L4); a
+ *   decrypted webhook secret verifies the signature → resolve the delivery's
+ *   review target → classify → enqueue with `botRef: { appId }` + `targetId`
+ *   (spec § Multi-App 契约, locks L3/L4); a
  *   classified review job records its installing account in
  *   `bot_installations` before the pause/flag gates (best-effort)
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
@@ -31,6 +32,7 @@ import type { PipelineEnv } from "../pipeline/consumer";
 import {
   classifyWebhook,
   MENTION_MISS_REASON,
+  NO_TARGET_REASON,
   payloadMentionsALogin,
   pullRequestRecord,
   WEBHOOK_BODY_LIMIT,
@@ -44,7 +46,7 @@ import {
   type DeliveryOutcome,
   type GithubAppTenantRow,
 } from "../dashboard/apps-store";
-import { createTargetsStore, type OwnerAllowlist } from "../dashboard/targets-store";
+import { createTargetsStore, type OwnerAllowlist, type ReviewTargetRow } from "../dashboard/targets-store";
 import { attachCheckAtAcceptance } from "../pipeline/checks";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
@@ -77,8 +79,9 @@ app.use("*", spaDispatch());
  * Extracted from the inline
  * ternary so a future outcome (e.g. AL-21's `hold`) extends one function
  * instead of every call site; unit-tested in
- * tests/worker/webhook-deliveries.test.ts. `reviewEnabled` is the App
- * row's review_enabled flag (0 = the producer-side pause gate); `reviewGlobal`
+ * tests/worker/webhook-deliveries.test.ts. `reviewEnabled` is the delivery's
+ * EFFECTIVE pause (0 = the route's `paused` derivation: the bot's operational
+ * flag or the target's business flag at 0); `reviewGlobal`
  * is the `review_global` server flag the route reads once per request (false =
  * the global kill switch closed the enqueue face for every App). Either switch
  * off makes a `job` read `paused`: `ok` means "job enqueued", so recording it
@@ -238,7 +241,7 @@ async function attachCheckOnAcceptance(input: {
   db: D1Database;
   env: Env;
   row: Pick<GithubAppTenantRow, "id" | "github_app_id" | "private_key_enc">;
-  payload: Omit<ReviewJobPayload, "appRef">;
+  payload: Omit<ReviewJobPayload, "botRef" | "targetId">;
   /** Generated BEFORE the attach starts, so the message always carries it. */
   deliveryId: string;
 }): Promise<void> {
@@ -318,11 +321,16 @@ app.route("/dashboard", dashboardApp);
  * URL segments locate the `review_bots` row (active, not deleted) in THAT
  * workspace, whose DECRYPTED webhook secret parameterizes the same
  * `classifyWebhook` classifier (secret-parameterized only — the classifier
- * never sees the App identity); the route handler attaches
- * `appRef: { appId }` after classification, before `REVIEW_QUEUE.send`
- * (lock L3). Both segments are immutable internal ids (the workspace's
- * `workspaces.id` and the App's `review_bots.id`) — GitHub's mutable App
- * slug is never part of the URL, so a rename cannot break deliveries.
+ * never sees the bot or target identity). Between signature verification and
+ * classification the route resolves the ONE `review_targets` row this delivery
+ * acts on, from `(bot_id, installation.id)`; the classifier cannot start
+ * before that, because the target's trigger mode parameterizes it. No target
+ * → 200 `ignored`, one `no_target_for_repo` line, zero enqueue, no PR ledger
+ * row. With a target, the route attaches `botRef: { appId }` and `targetId`
+ * before `REVIEW_QUEUE.send` (lock L3). Both segments are immutable internal
+ * ids (the workspace's `workspaces.id` and the bot's `review_bots.id`) —
+ * GitHub's mutable App slug is never part of the URL, so a rename cannot break
+ * deliveries.
  * Unknown / mismatched pair / disabled / soft-deleted → 404, zero enqueue. Any webhook
  * secret decrypt failure (missing DASHBOARD_ENCRYPTION_KEY, tampered
  * envelope) → 500 fail-closed (lock L1); GitHub retries, nothing enqueues.
@@ -334,7 +342,8 @@ app.route("/dashboard", dashboardApp);
  * queue-send failure below still leaves the touch committed), before the
  * pause check. Reject paths never touch, so the column reads "last verified
  * delivery" (NOT "last successful enqueue") and is decoupled from the review
- * switch. Then `review_enabled=0` answers 2xx with ZERO enqueue (the webhook
+ * switch. Then either pause flag at 0 — the bot's operational one or the
+ * target's business one — answers 2xx with ZERO enqueue (the webhook
  * stays healthy while reviews are paused); disabled/deleted keep their 404
  * above. The in-flight queue face ack-skips paused messages symmetrically
  * (consumer lock L4).
@@ -364,11 +373,15 @@ app.route("/dashboard", dashboardApp);
  * never affected). The retired legacy face recorded nothing (AL-20-1:
  * legacy 不落行 — it was the fallback path with no dashboard consumer).
  *
- * Order of the verified, non-reject path: classify → owner-allowlist admission
- * → delivery record → PR ledger (0039) → `last_webhook_at` touch → `ignore`
+ * Order of the verified, non-reject path: signature verify → target
+ * resolution (inside the classifier's seam) → classify → owner-allowlist
+ * admission → delivery record → PR ledger → `last_webhook_at` touch → `ignore`
  * return → install bookkeeping (the `installation` branch records and returns;
  * the job path records and proceeds) → pause gate → global flag gate → enqueue.
- * The reject return sits between the delivery record and the PR ledger.
+ * The reject return sits between the delivery record and the PR ledger. A
+ * delivery that resolved no target returns `ignored` at the `ignore` return:
+ * it writes its delivery row and touches `last_webhook_at`, and it writes no
+ * PR ledger row.
  *
  * Owner allowlist admission (migration 0045): an App with the switch on and an
  * owner set that excludes the delivery's `repository.owner.login` answers 200
@@ -451,22 +464,14 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
 
   // The review configuration a delivery reads lives on the bot's target, not
   // on the bot row: trigger mode, the owner allowlist and the business pause.
-  // The delivery's installation id is not available before the body is
-  // classified, so this read uses the single-target step (a bot has one target
-  // today); a classifier that gates on the delivery's own installation will
-  // pass it in here.
-  // shortcut: a bot with no resolvable target keeps the legacy defaults
-  // (`every_push`, allowlist off) instead of refusing the delivery; every
-  // created or migrated bot has exactly one target, so the branch is
-  // unreachable until a create path can leave a bot targetless — refuse the
-  // delivery then.
+  // The installation that selects a bound target exists only in the body, so
+  // resolution runs inside the classifier's seam — after signature
+  // verification, before classification (whose trigger mode it supplies).
   const targetsStore = createTargetsStore(db);
-  const target = await targetsStore.resolve(row.id, null);
-  // Effective pause: the bot's OPERATIONAL flag and the target's BUSINESS flag.
-  // Both suppress a review, and the settings switch users flip is the target's,
-  // so this webhook must consult both — one derivation, read at the delivery
-  // record and at the pause gate.
-  const paused = row.review_enabled === 0 || target?.review_enabled === 0;
+  const delivery: { target: ReviewTargetRow | null; installationId: number | null } = {
+    target: null,
+    installationId: null,
+  };
 
   // Decrypt this App's webhook secret (secretbox envelope, AAD pins the
   // row). Fail-closed 500 on any decrypt failure — the signature is never
@@ -493,11 +498,11 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // structurally bounded (≤ review_bots rows) with no eviction policy.
   // Trigger context (spec review-trigger-policy §2 read path): the resolved
   // target's review_trigger_mode gates the pull_request auto
-  // face and its GitHub slug keys the issue_comment bot mention — no second
-  // lookup, no App identity beyond that. The mention target is GitHub's own
-  // slug (`github_slug`), NOT our webhook path: a rename changes the login that
-  // can trigger a review. NULL (never synced) collapses to "" and matches
-  // nothing — the existing fail-safe.
+  // face and the bot's GitHub slug keys the issue_comment bot mention — no
+  // second lookup. The mention target is GitHub's own slug (`github_slug`),
+  // NOT our webhook path: a rename changes the login that can trigger a
+  // review. NULL (never synced) collapses to "" and matches nothing — the
+  // existing fail-safe.
   const appSlug = row.github_slug ?? "";
   // The classifier's ONE parse, kept for the delivery row's source repository
   // and the PR ledger below — recording either must not re-parse up-to-1 MB of
@@ -510,7 +515,12 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     eventName,
     defaultLog,
     row.id,
-    { mode: target?.review_trigger_mode ?? "every_push", appSlug },
+    async (installationId) => {
+      delivery.installationId = installationId;
+      delivery.target = await targetsStore.resolve(row.id, installationId);
+      const target = delivery.target;
+      return target === null ? null : { mode: target.review_trigger_mode, appSlug };
+    },
     (parsed) => {
       classified = parsed;
     },
@@ -538,6 +548,26 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
   }
 
+  // No target → this delivery has no review configuration to act on. It is an
+  // `ignore` (2xx, delivery row `ignored`, `last_webhook_at` touched), never a
+  // pause or a refusal: zero enqueue, no PR ledger row, and the allowlist is
+  // not consulted — nothing here can admit it. An `installation` delivery also
+  // resolves no target (it is bot-scoped bookkeeping with no review
+  // configuration); the classifier's own reason is what tells the two apart.
+  const target = delivery.target;
+  if (outcome.kind === "ignore" && outcome.reason === NO_TARGET_REASON) {
+    webhookWarn(
+      "no_target_for_repo",
+      `${webhookRef} row_id=${row.id} installation_id=${delivery.installationId ?? "unknown"}`,
+      "per-App webhook ignored with 200 — no review target resolves for this delivery (zero enqueue, no ledger row)",
+    );
+  }
+  // Effective pause: the bot's OPERATIONAL flag and the target's BUSINESS flag.
+  // Both suppress a review, and the settings switch users flip is the target's,
+  // so this webhook must consult both — one derivation, read at the delivery
+  // record and at the pause gate. A delivery with no target cannot be a job,
+  // so it carries no pause state.
+  const paused = target !== null && (row.review_enabled === 0 || target.review_enabled === 0);
   // Owner allowlist admission (migration 0045, AC5–AC7): after classification,
   // BEFORE any ledger write, and ONLY for the two review-triggering events
   // (`pull_request`, `issue_comment`) — the events this route can enqueue a
@@ -553,8 +583,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // owner cannot be judged, so such a delivery proceeds. The cached
   // `github_visibility` is NOT part of this decision: `private` only hides the
   // Settings control, and a stale cached `private` must never leave the gate
-  // inert. The switch and the owner set come from ONE `getAllowlist` snapshot —
-  // the row's own `allowlist_enabled` is never consulted for this decision. A
+  // inert. The switch and the owner set come from ONE `getAllowlist` snapshot
+  // of the RESOLVED TARGET — no bot column is consulted for this decision, and
+  // a delivery with no target never reaches here (nothing to admit). A
   // refusal is a 200 (GitHub must not retry) with no `webhook_deliveries` row,
   // no `pull_requests` row, no `last_webhook_at` touch and no enqueue. An
   // allowlist that cannot be read — a thrown read, or a null on a row that was
@@ -563,13 +594,10 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   const reviewTriggering =
     outcome.kind !== "reject" && (eventName === "pull_request" || eventName === "issue_comment");
   const ownerLogin = reviewTriggering ? webhookRepositoryOwnerLogin(classified) : null;
-  if (ownerLogin !== null) {
+  if (ownerLogin !== null && target !== null) {
     let allowlist: OwnerAllowlist | null;
     try {
-      allowlist =
-        target === null
-          ? { enabled: false, owners: [] }
-          : await targetsStore.getAllowlist(target.workspace_id, target.id);
+      allowlist = await targetsStore.getAllowlist(target.workspace_id, target.id);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       webhookWarn(
@@ -627,10 +655,11 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // contract in src/admin/flags.ts; a second read for the gate is forbidden.
   // Job-scoped: only a `job` can enqueue, so reject / ignore / installation
   // deliveries must not gain a flag dependency (a failed read would turn their
-  // 2xx into a 500 and cost them their delivery row). A `job` that the per-App
-  // switch already paused (review_enabled=0 → `paused`, zero enqueue) skips
-  // the read too: that switch decides the outcome before the flag can. For
-  // the SAME reason the read itself is best-effort: it sits before the
+  // 2xx into a 500 and cost them their delivery row). A `job` that `paused`
+  // already covers — the bot's operational flag OR the target's business flag
+  // at 0, either one answers `paused` with zero enqueue — skips the read too:
+  // that derivation decides the outcome before the flag can.
+  // For the SAME reason the read itself is best-effort: it sits before the
   // delivery row, the PR ledger and the last_webhook_at touch, so a D1
   // failure here would drop all three diagnostics of an already-verified job.
   // It logs one structured warn and falls back CLOSED — a failed read counts
@@ -640,7 +669,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // enqueued); the response and every diagnostic write stay exactly as on a
   // healthy read.
   let reviewGlobal = true;
-  if (outcome.kind === "job" && row.review_enabled !== 0) {
+  if (outcome.kind === "job" && !paused) {
     try {
       reviewGlobal = await isFlagEnabled(db, "review_global");
     } catch (err) {
@@ -678,9 +707,12 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // non-whitelisted action, a mode that does not auto-trigger, a paused App),
   // which is exactly the "the App received this PR but nothing ran" case the
   // dashboard must show. A reject records nothing (the payload did not
-  // validate). Best-effort like recordDelivery above: a store failure logs a
-  // structured warn and never changes the response.
-  if (eventName === "pull_request") {
+  // validate). A delivery with NO resolved target records nothing either: the
+  // ledger belongs to a review configuration, and this one has none (the
+  // delivery row above still says `ignored`). Best-effort like recordDelivery
+  // above: a store failure logs a structured warn and never changes the
+  // response.
+  if (eventName === "pull_request" && target !== null) {
     const record = pullRequestRecord(classified);
     if (record === null) {
       // Visible, not silent: this delivery ran (or was ignored) with no ledger
@@ -811,10 +843,12 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
     return c.text("ignored", 200);
   }
-  // Lock L3: the App identity is attached at the route handler — after
-  // classification, before the queue send. The queue message carries the
-  // appId reference only (lock L4: the PEM never leaves the consumer).
-  await handleReviewJob({ ...outcome.payload, appRef: { appId: row.id } }, {
+  // Lock L3: both ids are attached at the route handler — after the target
+  // resolved, before the queue send. The queue message carries the id
+  // references only (lock L4: the PEM never leaves the consumer). Every
+  // remaining outcome is a `job`, and a job is only produced once the resolver
+  // returned a target (the no-target path classifies `ignore`, returned above).
+  await handleReviewJob({ ...outcome.payload, botRef: { appId: row.id }, targetId: target!.id }, {
     // `db` is the route's already-narrowed binding (the unbound guard above
     // returned 500): the durable comment claim must never run against a
     // possibly-unbound DB.

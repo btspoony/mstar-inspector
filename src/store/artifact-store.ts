@@ -34,7 +34,7 @@
  * structurally.
  *
  * Per-bot attribution (migration 0005; REQUIRED):
- * the put doc carries the caller-supplied `appId` — the resolved `appRef`'s
+ * the put doc carries the caller-supplied `appId` — the resolved `botRef`'s
  * id — which is bound into `reviews.bot_id`. Every new write is attributed;
  * `bot_id` NULL survives only on legacy historical rows (the column
  * stays nullable, zero DDL — AL-24-4). The column's FK to `review_bots(id)`

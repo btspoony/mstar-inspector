@@ -921,7 +921,7 @@ async function reconcileCheckAttempt(
   // failure must still leave the row a persisted terminal conclusion, never a
   // throw that keeps re-selecting the same due attempt forever.
   const [gate, review] = await Promise.all([
-    readRecoveryGate(db, scope.appId),
+    readRecoveryGate(db, scope),
     readRecoveryReview(db, owned, proof?.publicationId ?? null),
   ]);
   const conclusion = terminalConclusion(
@@ -1406,15 +1406,16 @@ async function readProof(
 }
 
 /**
- * The target's gate for a bot, or `null` when it cannot be read (no target,
- * corrupt stored verdicts, or a failed read) — the same "unreadable" meaning
- * the consumer lane gets, so a review proof concludes `failure`. A read
+ * The target's gate for a Check row, or `null` when it cannot be read (no
+ * target, corrupt stored verdicts, or a failed read) — the same "unreadable"
+ * meaning the consumer lane gets, so a review proof concludes `failure`. A read
  * failure is never a reason to abandon the row: the conclusion below still
- * gets persisted.
+ * gets persisted. The row's own scope names the bot and the installation it was
+ * attached for, so the target bound to that installation answers first.
  */
-async function readRecoveryGate(db: D1Like, appId: string): Promise<ReviewGate | null> {
+async function readRecoveryGate(db: D1Like, scope: Scope): Promise<ReviewGate | null> {
   try {
-    const target = await createTargetsStore(db).resolve(appId, null);
+    const target = await createTargetsStore(db).resolve(scope.appId, scope.installationId);
     return target === null ? null : targetCheckGate(target);
   } catch {
     return null;

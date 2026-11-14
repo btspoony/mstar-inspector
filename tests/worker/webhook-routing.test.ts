@@ -4,8 +4,8 @@
  * `POST /webhook/:workspaceId/:appId` — the ONLY HTTP review entry
  * (the legacy bare `/webhook` face is retired):
  * body-size cap (413) → webhook-path lookup (active, not deleted) → signature verify →
- * per-App `review_enabled` pause gate. The route attaches `appRef: { appId }`
- * after classification (lock L3).
+ * target resolution → per-App pause gate. The route attaches
+ * `botRef: { appId }` + `targetId` after the target resolved (lock L3).
  *
  * Isolation (AC-B5-isolation): App X's route verifies ONLY X's secret — a
  * sibling App's signature is a 401 with zero enqueue. Unknown path /
@@ -33,6 +33,16 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
+/** One seeded review target — the review configuration a delivery reads. */
+type TargetSeed = {
+  /** The bound GitHub installation; omitted → unbound (NULL, the create path). */
+  installationId?: number;
+  /** OMITTED → the DDL DEFAULT 'every_push'. */
+  mode?: "open" | "every_push" | "manual";
+  /** OMITTED → the DDL DEFAULT 1 (the business pause off). */
+  reviewEnabled?: 0 | 1;
+};
+
 type SeedOptions = {
   slug: string;
   /** Plaintext webhook secret encrypted into the row (with the row-id AAD). */
@@ -46,17 +56,17 @@ type SeedOptions = {
    */
   githubSlug?: string | null;
   /**
-   * Per-App auto-trigger mode (migration 0022). OMITTED → the column is not
-   * written, so the row exercises the DDL DEFAULT 'every_push'.
+   * The bot's targets. OMITTED → ONE target with the DDL defaults (enabled,
+   * `every_push`, no installation binding) — the shape the create path writes.
    */
-  reviewTriggerMode?: "open" | "every_push" | "manual";
+  targets?: TargetSeed[];
 };
 
 /** Raw-insert an active, non-deleted review_bots row with real envelopes. */
 async function seedApp(
   db: TestD1,
   opts: SeedOptions,
-): Promise<{ id: string; slug: string }> {
+): Promise<{ id: string; slug: string; targetId: string; targetIds: string[] }> {
   // The row id is the webhook URL's app segment, so this fixture uses the
   // slug as the id (one value, two roles — the production shape's identity).
   const id = opts.slug;
@@ -65,32 +75,51 @@ async function seedApp(
   const webhookSecretEnc = await box.encryptSecret(opts.secret, aad);
   const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`);
   const appCount = (db.raw.query("SELECT COUNT(*) AS n FROM review_bots").get() as { n: number }).n;
-  const mode = opts.reviewTriggerMode;
   // `slug` is GitHub's own slug here (the bot mention target); the webhook
   // route keys on the row id + workspace instead.
-  const baseArgs = [
-    id,
-    opts.githubSlug === undefined ? opts.slug : opts.githubSlug,
-    opts.githubAppId ?? 1000 + appCount,
-    opts.slug,
-    privateKeyEnc,
-    webhookSecretEnc,
-  ] as const;
   db.raw
     .prepare(
       `INSERT INTO review_bots
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-          created_by, status, deleted_at, created_at, updated_at${mode !== undefined ? ", review_trigger_mode" : ""})
-       VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now')${mode !== undefined ? ", ?" : ""})`,
+          created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
-    .run(...(mode !== undefined ? [...baseArgs, mode] : [...baseArgs]));
+    .run(
+      id,
+      opts.githubSlug === undefined ? opts.slug : opts.githubSlug,
+      opts.githubAppId ?? 1000 + appCount,
+      opts.slug,
+      privateKeyEnc,
+      webhookSecretEnc,
+    );
   // Production shape: createApp writes the App and its workspace mapping in
   // one batch, so every execution-facing read (which joins bot_workspaces)
   // resolves it.
   db.raw
     .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')")
     .run(id);
-  return { id, slug: opts.slug };
+  // …and its targets: the webhook resolves ONE of these per delivery, and
+  // every review setting below the route reads comes from it.
+  const targetIds = (opts.targets ?? [{}]).map((target, index) => {
+    const targetId = `target-${id}-${index}`;
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, installation_id, review_enabled,
+            review_trigger_mode, created_by, created_at, updated_at)
+         VALUES (?, 'default', ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
+      )
+      .run(
+        targetId,
+        id,
+        opts.slug,
+        target.installationId ?? null,
+        target.reviewEnabled ?? 1,
+        target.mode ?? "every_push",
+      );
+    return targetId;
+  });
+  return { id, slug: opts.slug, targetId: targetIds[0]!, targetIds };
 }
 
 /** Queue stub capturing every enqueued payload. */
@@ -204,7 +233,7 @@ const PR_PAYLOAD = {
 };
 
 describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
-  test("valid signature with the App's own secret → 200 accepted, enqueued with appRef {appId}", async () => {
+  test("valid signature with the App's own secret → 200 accepted, enqueued with botRef + targetId", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -233,7 +262,8 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       head_sha: "abc123",
       action: "opened",
       triggered_by: "pull_request",
-      appRef: { appId: appRow.id },
+      botRef: { appId: appRow.id },
+      targetId: appRow.targetId,
     });
     expect(attachDeliveryId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     // The same delivery lands its PR-ledger row (migration 0039): the fixture
@@ -606,7 +636,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ pr_number: 42, appRef: { appId: appRow.id } });
+    expect(sent[0]).toMatchObject({ pr_number: 42, botRef: { appId: appRow.id }, targetId: appRow.targetId });
   });
 
   // At-limit pin with MULTI-BYTE content: `body.length` counts UTF-16
@@ -633,7 +663,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ pr_number: 42, appRef: { appId: appRow.id } });
+    expect(sent[0]).toMatchObject({ pr_number: 42, botRef: { appId: appRow.id }, targetId: appRow.targetId });
   });
 
   test("small valid webhook unchanged by the streamed cap → 200 accepted, enqueued", async () => {
@@ -717,7 +747,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(sent).toHaveLength(0);
   });
 
-  test("bot mention via the per-App route enqueues the issue_comment payload with the appRef", async () => {
+  test("bot mention via the per-App route enqueues the issue_comment payload with both ids", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -749,13 +779,14 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       comment_id: 900000001,
       action: "created",
       triggered_by: "issue_comment",
-      appRef: { appId: appRow.id },
+      botRef: { appId: appRow.id },
+      targetId: appRow.targetId,
     });
   });
 
   test("mode threading: a manual-mode App ignores pull_request.opened but a bot mention still enqueues", async () => {
     const db = createMigratedTestD1();
-    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", reviewTriggerMode: "manual" });
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ mode: "manual" }] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const prBody = JSON.stringify(PR_PAYLOAD);
@@ -792,7 +823,8 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       head_sha: null,
       comment_id: 900000002,
       triggered_by: "issue_comment",
-      appRef: { appId: appRow.id },
+      botRef: { appId: appRow.id },
+      targetId: appRow.targetId,
     });
   });
 
@@ -807,7 +839,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       slug: "app-x",
       secret: "secret-x",
       githubSlug: null,
-      reviewTriggerMode: "manual",
+      targets: [{ mode: "manual" }],
     });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1067,7 +1099,8 @@ describe("tenant attribution on the webhook read face", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    expect(sent[0]!.appRef).toEqual({ appId: appRow.id });
+    expect(sent[0]!.botRef).toEqual({ appId: appRow.id });
+    expect(sent[0]!.targetId).toBe(appRow.targetId);
   });
 });
 
@@ -2002,4 +2035,164 @@ describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
     expect(staleQueue.sent).toHaveLength(0);
   });
 
+});
+
+describe("target resolution (webhook → review_targets)", () => {
+  /** This bot's delivery rows, in insert order. */
+  function deliveries(db: TestD1, botId: string): Array<{ event_name: string | null; outcome: string }> {
+    return db.raw
+      .query("SELECT event_name, outcome FROM webhook_deliveries WHERE bot_id = ?")
+      .all(botId) as Array<{ event_name: string | null; outcome: string }>;
+  }
+
+  /** How many PR-ledger rows this bot owns. */
+  function ledgerCount(db: TestD1, botId: string): number {
+    return (db.raw.query("SELECT COUNT(*) AS n FROM pull_requests WHERE bot_id = ?").get(botId) as { n: number }).n;
+  }
+
+  /** The bot's `last_webhook_at` — a verified delivery touches it, a refusal does not. */
+  function lastWebhookAt(db: TestD1, botId: string): string | null {
+    return (db.raw.query("SELECT last_webhook_at FROM review_bots WHERE id = ?").get(botId) as {
+      last_webhook_at: string | null;
+    }).last_webhook_at;
+  }
+
+  test("a matching installation selects its own target's trigger mode", async () => {
+    const db = createMigratedTestD1();
+    // Two targets on one bot: the `open`-mode one is bound to installation 111,
+    // the `every_push` one to 222. The delivery's installation decides which
+    // row's mode gates the classification, so `synchronize` is refused by one
+    // and accepted by the other.
+    const appRow = await seedApp(db, {
+      slug: "app-x",
+      secret: "secret-x",
+      targets: [
+        { installationId: 111, mode: "open" },
+        { installationId: 222, mode: "every_push" },
+      ],
+    });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+
+    const openBody = JSON.stringify({ ...PR_PAYLOAD, action: "synchronize", installation: { id: 111 } });
+    const ignored = await postWebhook("/webhook/default/app-x", openBody, await sigHeaders("secret-x", openBody), env);
+    expect(ignored.status).toBe(200);
+    expect(await ignored.text()).toBe("ignored");
+    expect(sent).toHaveLength(0); // `open` mode never auto-reviews a push
+
+    const pushBody = JSON.stringify({ ...PR_PAYLOAD, action: "synchronize", installation: { id: 222 } });
+    const accepted = await postWebhook("/webhook/default/app-x", pushBody, await sigHeaders("secret-x", pushBody), env);
+    expect(accepted.status).toBe(200);
+    expect(await accepted.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.targetId).toBe(appRow.targetIds[1]!); // the 222-bound row
+  });
+
+  test("a bot with ONE target resolves it for a different installation", async () => {
+    const db = createMigratedTestD1();
+    // The contract's fallback: until a second target exists, one bot reviews
+    // every installation it receives — the delivery copies no binding onto it.
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ installationId: 111 }] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 999 } });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.targetId).toBe(appRow.targetId);
+    const stored = db.raw.query("SELECT installation_id FROM review_targets WHERE id = ?").get(appRow.targetId) as {
+      installation_id: number | null;
+    };
+    expect(stored.installation_id).toBe(111); // the delivery never rewrites the binding
+  });
+
+  test("two targets and no installation match → 200 ignored, `no_target_for_repo`, zero enqueue, no ledger row", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, {
+      slug: "app-x",
+      secret: "secret-x",
+      targets: [{ installationId: 111 }, { installationId: 222 }],
+    });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 999 } });
+
+    const { warn, stop } = captureWarn();
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    } finally {
+      stop();
+    }
+
+    expect(res.status).toBe(200); // GitHub must not retry an unconfigured delivery
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(deliveries(db, appRow.id)).toEqual([{ event_name: "pull_request", outcome: "ignored" }]);
+    expect(ledgerCount(db, appRow.id)).toBe(0); // the ledger belongs to a configuration
+    expect(lastWebhookAt(db, appRow.id)).not.toBeNull();
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("no_target_for_repo"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; detail: string };
+    expect(fields.event).toBe("no_target_for_repo");
+    expect(fields.detail).toContain("installation_id=999");
+  });
+
+  test("a bot with NO target ignores the delivery the same way", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const { warn, stop } = captureWarn();
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    } finally {
+      stop();
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(deliveries(db, appRow.id)).toEqual([{ event_name: "pull_request", outcome: "ignored" }]);
+    expect(ledgerCount(db, appRow.id)).toBe(0);
+    expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).toContain("no_target_for_repo");
+  });
+
+  test("the target's business pause suppresses the enqueue without reading the global flag", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewEnabled: 0 }] });
+    // `paused` already decides the outcome, so the job-scoped `review_global`
+    // read is skipped — the unreadable table proves it (a read here would log
+    // its own failure warn while the outcome stayed `paused`).
+    db.raw.exec("DROP TABLE server_flags");
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const { warn, stop } = captureWarn();
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    } finally {
+      stop();
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(deliveries(db, appRow.id)).toEqual([{ event_name: "pull_request", outcome: "paused" }]);
+    expect(lastWebhookAt(db, appRow.id)).not.toBeNull();
+    expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).not.toContain("review_global_read_failed");
+    // The bot's own operational pause is a separate flag and stays clear.
+    const bot = db.raw.query("SELECT review_enabled FROM review_bots WHERE id = ?").get(appRow.id) as {
+      review_enabled: number;
+    };
+    expect(bot.review_enabled).toBe(1);
+  });
 });

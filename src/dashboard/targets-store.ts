@@ -305,6 +305,19 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
+     * One target by id — the EXECUTION read a queue message makes. The job
+     * already names the target the webhook resolved, so there is nothing to
+     * re-decide and no workspace to bind: the queue is not a tenant face. A
+     * soft-deleted row reads absent, exactly like every other face.
+     */
+    async getForExecution(targetId: string): Promise<ReviewTargetRow | null> {
+      return db
+        .prepare(`SELECT * FROM review_targets WHERE id = ? AND deleted_at IS NULL`)
+        .bind(targetId)
+        .first<ReviewTargetRow>();
+    },
+
+    /**
      * The business pause: 1 = the workspace's reviews run, 0 = paused.
      * Writes review_enabled + updated_at (an operator mutation) and refuses a
      * soft-deleted or foreign target. Returns whether a row changed.

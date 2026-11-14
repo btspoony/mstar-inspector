@@ -1178,20 +1178,20 @@ describe("createReviewConsumer", () => {
     expect(h.logLines.some((l) => l.level === "warn" && l.msg.includes("failed-claim KV write failed"))).toBe(true);
   });
 
-  test("in-flight legacy-shape payload (absent appRef) → structured channel + healthy batch sibling completes (F-001)", async () => {
+  test("in-flight legacy-shape payload (no botRef) → structured channel + healthy batch sibling completes (F-001)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     // The in-flight legacy shape: a pre-deploy queue message whose payload
-    // carries NO appRef (impossible at the type layer post-24 — cast to
-    // simulate the stranded message AL-24-4 accepts). It sits AFTER a
-    // healthy sibling in the same batch: the sibling's review completes,
-    // then the legacy message throws INSIDE the try and flows through the
-    // structured channel (review failed: log + AL-6 row + rethrow) instead
-    // of leaving the batch with zero D1/log trace.
-    const legacyPayload = makePayload() as unknown as { appRef?: unknown };
-    delete legacyPayload.appRef;
+    // carries no `botRef` (impossible at the type layer — cast to simulate the
+    // stranded message AL-24-4 accepts). It sits AFTER a healthy sibling in the
+    // same batch: the sibling's review completes, then the legacy message
+    // throws INSIDE the try and flows through the structured channel (review
+    // failed: log + AL-6 row + rethrow) instead of leaving the batch with zero
+    // D1/log trace.
+    const legacyPayload = makePayload() as unknown as { botRef?: unknown };
+    delete legacyPayload.botRef;
     const batch = {
       queue: "review-queue",
       messages: [
@@ -2028,7 +2028,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
     await consumer(h.makeBatch(makePayload()));
-    await consumer(h.makeBatch(makePayload({ pr_number: 43, appRef: { appId: TEST_SECOND_APP_ID } })));
+    await consumer(h.makeBatch(makePayload({ pr_number: 43, botRef: { appId: TEST_SECOND_APP_ID }, targetId: `target-${TEST_SECOND_APP_ID}` })));
 
     // Same deployment, same consumer, two depths — no env var involved.
     const levels = h.sandbox.calls
@@ -2543,7 +2543,7 @@ describe("createReviewConsumer", () => {
           id: "m-comma",
           timestamp: new Date(),
           attempts: 1,
-          body: makePayload({ appRef: { appId: commaAppId } }),
+          body: makePayload({ botRef: { appId: commaAppId }, targetId: `target-${commaAppId}` }),
           retry: () => {},
           ack: () => {},
         },
@@ -2635,7 +2635,7 @@ describe("createReviewConsumer", () => {
           id: "m-override",
           timestamp: new Date(),
           attempts: 1,
-          body: makePayload({ appRef: { appId: overrideAppId } }),
+          body: makePayload({ botRef: { appId: overrideAppId }, targetId: `target-${overrideAppId}` }),
           retry: () => {},
           ack: () => {},
         },
@@ -2726,6 +2726,11 @@ describe("createReviewConsumer", () => {
     // pre-37 App under this deployment pair; the rest of the half completes
     // the current migration set (see CONSUMER_POST_CHAINS_MIGRATIONS).
     applyMigrations(db, CONSUMER_POST_CHAINS_MIGRATIONS);
+    // The target migration creates this App's one target with a random id;
+    // tests join on bot_id (the ids are never pinned).
+    const migratedTarget = db.raw.query("SELECT id FROM review_targets WHERE bot_id = ?").get(appId) as {
+      id: string;
+    };
     // Post-migration resolution is byte-identical: the default row holds
     // the chain verbatim; the seat-<role> chains + reference rows resolve
     // to the same overrides map; every carried key row was promoted to its
@@ -2745,7 +2750,7 @@ describe("createReviewConsumer", () => {
     // modelOverrides map and the exec env the SAME chain — byte-identical
     // runner input for the migrated App.
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
-    await consumer(h.makeBatch(makePayload({ appRef: { appId } })));
+    await consumer(h.makeBatch(makePayload({ botRef: { appId }, targetId: migratedTarget.id })));
     const input = JSON.parse(h.sandbox.writtenInputJson!);
     expect(input.modelOverrides).toEqual(preOverrides);
     expect(runnerExecEnv().OMP_REVIEW_MODEL).toBe(preChain);
@@ -6512,7 +6517,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // operator default: the job never runs with one row's credential and
     // another row's — or no — gate.
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
-      /has no resolvable review target/,
+      /has no review target/,
     );
     expect(h.messageAckCalls).toHaveLength(0);
   });
@@ -6530,7 +6535,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       { db: db as never, adapter, nowMs: () => Date.now() },
       {
         scope: {
-          appId: payload.appRef.appId,
+          appId: payload.botRef.appId,
           installationId: payload.installation_id,
           owner: payload.owner,
           repo: payload.repo,
@@ -6582,7 +6587,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       { db: db as never, adapter, nowMs: () => Date.now() },
       {
         scope: {
-          appId: payload.appRef.appId,
+          appId: payload.botRef.appId,
           installationId: payload.installation_id,
           owner: payload.owner,
           repo: payload.repo,
@@ -6695,7 +6700,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       { db: db as never, adapter, nowMs: () => Date.now() },
       {
         scope: {
-          appId: payload.appRef.appId,
+          appId: payload.botRef.appId,
           installationId: payload.installation_id,
           owner: payload.owner,
           repo: payload.repo,
@@ -8712,7 +8717,7 @@ describe("workspace attribution gate (one read face)", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await expect(
-      consumer(h.makeBatch(makePayload({ appRef: { appId: "no-such-app" } }))),
+      consumer(h.makeBatch(makePayload({ botRef: { appId: "no-such-app" }, targetId: "no-such-target" }))),
     ).rejects.toThrow(
       /per-App credential resolution failed: app no-such-app not found, has no workspace mapping, or its workspace is deleted$/,
     );
