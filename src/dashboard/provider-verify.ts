@@ -6,7 +6,7 @@
  * stored: built-in providers hit their list-models endpoint (or a documented
  * auth probe when no models endpoint exists), custom providers probe the
  * declared base URL, and only a successful probe returns `ok` with THAT KEY's
- * model list to record as evidence (app_provider_models). Verification is
+ * model list to record as evidence (bot_provider_models). Verification is
  * outbound-only with
  * the as-typed key (never stored, never logged); storage afterwards goes
  * through the existing secretbox envelope (src/dashboard/secretbox.ts).
@@ -601,7 +601,7 @@ export function builtinProbeCanRejectKey(providerId: string): boolean {
  * classifier (so a spent account is quota_exhausted, a throttled request
  * rate_limited — never unexpected_response);
  * transport failures AND an unparseable base URL → unreachable. Custom
- * providers never write app_provider_models rows — their
+ * providers never write bot_provider_models rows — their
  * dropdown source is the declared model_ids, returned here for callers to
  * display.
  *

@@ -31,11 +31,10 @@ import worker, { deliveryOutcomeFromWebhook } from "../../src/worker/index";
 import { webhookRepositoryFullName } from "../../src/worker/webhooks";
 import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
-import { createAppsStore, DELIVERY_OUTCOMES } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore, DELIVERY_OUTCOMES } from "../../src/dashboard/apps-store";
 import type { DeliveryOutcome } from "../../src/dashboard/apps-store";
 import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
 import {
-  WEBHOOK_DELIVERIES_FAILURE_ONLY,
   WEBHOOK_DELIVERIES_MIGRATIONS,
   WEBHOOK_DELIVERIES_TAIL,
   applyMigrations,
@@ -46,14 +45,23 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
 describe("migrations/0011_webhook_deliveries.sql", () => {
+  /** The parent/attribution names of THIS fixture's shape: 0056 renames both. */
+  function shape(db: ReturnType<typeof createTestD1>): { parent: string; attribution: string } {
+    const renamed = (db.raw
+      .query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'review_bots'")
+      .get() as { present?: number } | null)?.present === 1;
+    return renamed ? { parent: "review_bots", attribution: "bot_id" } : { parent: "github_apps", attribution: "app_id" };
+  }
+
   /**
-   * Raw-insert one github_apps row (dummy envelopes — no decryption here).
+   * Raw-insert one app row (dummy envelopes — no decryption here).
    * The local route key exists only on the pre-0038 shapes this describe
    * also builds, so the column list follows the fixture's shape.
    */
   function seedAppRow(db: ReturnType<typeof createTestD1>, id = "app-1"): void {
     const appNum = Number(id.replace(/\D/g, "")) || 1;
-    const hasPath = (db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>).some(
+    const parent = shape(db).parent;
+    const hasPath = (db.raw.query(`PRAGMA table_info(${parent})`).all() as Array<{ name: string }>).some(
       (column) => column.name === "webhook_path",
     );
     const pathColumn = hasPath ? "webhook_path, " : "";
@@ -61,7 +69,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
     const pathBind = hasPath ? [id] : [];
     db.raw
       .prepare(
-        `INSERT INTO github_apps
+        `INSERT INTO ${parent}
            (id, ${pathColumn}github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ${pathValue}?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -69,14 +77,14 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
       .run(id, ...pathBind, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
   }
 
-  /** Raw-insert one delivery row (full column control). */
+  /** Raw-insert one delivery row (full column control; the field is `bot_id`, bound positionally). */
   function insertDelivery(
     db: ReturnType<typeof createTestD1>,
     overrides: Partial<Record<string, unknown>> = {},
   ): void {
     const row = {
       id: "delivery-1",
-      app_id: "app-1",
+      bot_id: "app-1",
       event_name: "pull_request",
       outcome: "ok",
       status_code: null,
@@ -84,10 +92,10 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
     };
     db.raw
       .prepare(
-        `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code)
+        `INSERT INTO webhook_deliveries (id, ${shape(db).attribution}, event_name, outcome, status_code)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(row.id, row.app_id, row.event_name, row.outcome, row.status_code);
+      .run(row.id, row.bot_id, row.event_name, row.outcome, row.status_code);
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0010 with live rows); existing tables untouched", () => {
@@ -143,7 +151,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
     }>;
     const valid: Record<string, string | number | null> = {
       id: "d-null",
-      app_id: "app-1",
+      [shape(db).attribution]: "app-1",
       event_name: "pull_request",
       outcome: "ok",
       status_code: null,
@@ -176,10 +184,10 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
     expect(count.n).toBe(5);
   });
 
-  test("app_id is NOT NULL FK to github_apps — an unknown app is refused", () => {
+  test("bot_id is NOT NULL FK to review_bots — an unknown app is refused", () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
-    expect(() => insertDelivery(db, { id: "delivery-fk", app_id: "no-such-app" })).toThrow(
+    expect(() => insertDelivery(db, { id: "delivery-fk", bot_id: "no-such-app" })).toThrow(
       /FOREIGN KEY constraint failed/,
     );
   });
@@ -283,12 +291,12 @@ describe("webhookRepositoryFullName (delivery source repo, migration 0043)", () 
 });
 
 describe("apps-store delivery face (recordDelivery / deliverySummary / listRecentDeliveries)", () => {
-  /** Raw-insert one github_apps row (dummy envelopes — no decryption here). */
+  /** Raw-insert one review_bots row (dummy envelopes — no decryption here). */
   function seedAppRow(db: ReturnType<typeof createTestD1>, id = "app-1"): void {
     const appNum = Number(id.replace(/\D/g, "")) || 1;
     db.raw
       .prepare(
-        `INSERT INTO github_apps
+        `INSERT INTO review_bots
            (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -299,14 +307,14 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
   test("recordDelivery persists a full row: UUID id, caller fields, datetime('now') created_at", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
     await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "rejected", statusCode: 401, repositoryFullName: null });
 
     const rows = db.raw.query("SELECT * FROM webhook_deliveries ORDER BY rowid").all() as Array<{
       id: string;
-      app_id: string;
+      bot_id: string;
       event_name: string | null;
       outcome: string;
       status_code: number | null;
@@ -314,12 +322,12 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     }>;
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({
-      app_id: "app-1",
+      bot_id: "app-1",
       event_name: "pull_request",
       outcome: "ok",
       status_code: null,
     });
-    expect(rows[1]).toMatchObject({ app_id: "app-1", event_name: null, outcome: "rejected", status_code: 401 });
+    expect(rows[1]).toMatchObject({ bot_id: "app-1", event_name: null, outcome: "rejected", status_code: 401 });
     expect(rows[0]!.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
     expect(rows[0]!.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
@@ -327,7 +335,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
   test("off-vocabulary outcome throws BEFORE any row is written (producer-side enforcement)", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     await expect(
       // Deliberately off-vocabulary: the runtime gate is the contract under
@@ -352,7 +360,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
   test("deliverySummary returns the latest row + the 24h rejected count (ignored/paused/ok are healthy, not counted)", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     // Backdate every row but the newest so the order is observable
     // (datetime('now') has second resolution).
     await store.recordDelivery({ appId: "app-1", eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null });
@@ -375,7 +383,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
   test("deliverySummary counts ONLY rejected rows inside the 24h window", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null });
     await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
     await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 500, repositoryFullName: null });
@@ -395,7 +403,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
   test("deliverySummary for an app with no rows: latest null, rejected24h 0", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
-    const summary = await createAppsStore(db).deliverySummary("app-1");
+    const summary = await createReviewBotsStore(db).deliverySummary("app-1");
     expect(summary.latest).toBeNull();
     expect(summary.rejected24h).toBe(0);
   });
@@ -404,7 +412,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     const db = createMigratedTestD1();
     seedAppRow(db, "app-1");
     seedAppRow(db, "app-2");
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     for (let i = 1; i <= 7; i++) {
       await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
     }
@@ -420,7 +428,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     const recent = await store.listRecentDeliveries("app-1", 5);
 
     expect(recent).toHaveLength(5); // bounded by N
-    expect(recent.every((r) => r.app_id === "app-1")).toBe(true); // sibling App never included
+    expect(recent.every((r) => r.bot_id === "app-1")).toBe(true); // sibling bot never included
     expect(recent[0]!.created_at >= recent[4]!.created_at).toBe(true); // newest first
     expect(await store.listRecentDeliveries("no-such-app", 5)).toEqual([]);
   });
@@ -428,7 +436,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
   test("listRecentDeliveries defaults to 10 rows when the caller passes no limit", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     for (let i = 1; i <= 12; i++) {
       await store.recordDelivery({
         appId: "app-1",
@@ -445,7 +453,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
   test("recordDelivery caps event_name at 64 chars and repository_full_name at 160 at persist time", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     // The store bounds what it persists, whatever its caller passes: the
     // x-github-event header is attacker-influenced on the unauthenticated
@@ -493,12 +501,12 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       // directory, so a new one joins automatically.
       applyMigrations(db, WEBHOOK_DELIVERIES_TAIL);
     } else {
-      // ...but the owner allowlist read runs on every review-triggering
-      // delivery (pull_request / issue_comment) and is fail-closed, so without
-      // 0045's table this fixture would exercise the gate's 500 instead of the
-      // delivery recorder it is here to break. This branch carries the shared
-      // prefix's 0010/0020 but no tail — they are incidental here.
-      applyMigrations(db, WEBHOOK_DELIVERIES_FAILURE_ONLY);
+      // The recorder's failure path needs the ROUTING reads to work, so the
+      // world is the full chain (0045's allowlist table included) and the
+      // table the recorder writes is dropped: the INSERT hits "no such
+      // table", which is the failure these tests inject.
+      applyMigrations(db, WEBHOOK_DELIVERIES_TAIL);
+      db.raw.exec("DROP TABLE webhook_deliveries");
     }
     return db;
   }
@@ -510,7 +518,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     githubAppId?: number;
   };
 
-  /** Raw-insert an active, non-deleted github_apps row with real envelopes. */
+  /** Raw-insert an active, non-deleted app row with real envelopes (either shape). */
   async function seedApp(
     db: ReturnType<typeof createTestD1>,
     opts: SeedOptions,
@@ -520,19 +528,19 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const box = createSecretbox(TEST_KEY);
     const webhookSecretEnc = await box.encryptSecret(opts.secret, `github_apps.webhook_secret_enc:${id}`);
     const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`);
-    const appCountRow = db.raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number };
+    const appCountRow = db.raw.query(`SELECT COUNT(*) AS n FROM review_bots`).get() as { n: number };
     const appCount = appCountRow.n;
     db.raw
       .prepare(
-        `INSERT INTO github_apps
+        `INSERT INTO review_bots
            (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
       .run(id, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc);
-    // Production shape: the read face joins app_workspaces.
+    // Production shape: the read face joins the bot's workspace mapping.
     db.raw
-      .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
+      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')")
       .run(id);
     return { id, slug: opts.slug };
   }
@@ -601,7 +609,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     return db.raw
       .query(
         `SELECT event_name, outcome, status_code FROM webhook_deliveries
-         WHERE app_id = ? ORDER BY rowid`,
+         WHERE bot_id = ? ORDER BY rowid`,
       )
       .all(appId) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
   }
@@ -646,7 +654,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 
     expect(res.status).toBe(200);
     const rows = db.raw
-      .query("SELECT repository_full_name FROM webhook_deliveries WHERE app_id = ?")
+      .query("SELECT repository_full_name FROM webhook_deliveries WHERE bot_id = ?")
       .all(appRow.id) as Array<{ repository_full_name: string | null }>;
     expect(rows).toEqual([{ repository_full_name: "test-owner/test-repo" }]);
   });
@@ -673,7 +681,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 
     expect(await res.text()).toBe("ignored");
     const rows = db.raw
-      .query("SELECT repository_full_name FROM webhook_deliveries WHERE app_id = ?")
+      .query("SELECT repository_full_name FROM webhook_deliveries WHERE bot_id = ?")
       .all(appRow.id) as Array<{ repository_full_name: string | null }>;
     expect(rows).toEqual([{ repository_full_name: "test-owner/test-repo" }]);
   });
@@ -692,7 +700,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 
     expect(res.status).toBe(200);
     const rows = db.raw
-      .query("SELECT event_name, repository_full_name FROM webhook_deliveries WHERE app_id = ?")
+      .query("SELECT event_name, repository_full_name FROM webhook_deliveries WHERE bot_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; repository_full_name: string | null }>;
     expect(rows).toEqual([{ event_name: "ping", repository_full_name: null }]);
   });
@@ -700,7 +708,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   test("paused path: review_enabled=0 → 2xx ignored, zero enqueue + row outcome='paused'", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createAppsStore(db).setReviewEnabled(appRow.id, false);
+    await createReviewBotsStore(db).setReviewEnabled(appRow.id, false);
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -802,11 +810,11 @@ describe("per-App webhook face — best-effort delivery recording", () => {
           if (mutation === "soft-delete") {
             db.raw
               .prepare(
-                "UPDATE github_apps SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+                `UPDATE review_bots SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`,
               )
               .run(appId);
           } else {
-            db.raw.prepare("DELETE FROM github_apps WHERE id = ?").run(appId);
+            db.raw.prepare(`DELETE FROM review_bots WHERE id = ?`).run(appId);
           }
           return originalRun();
         }) as typeof stmt.run;
@@ -833,7 +841,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       { event_name: "pull_request", outcome: "ok", status_code: null },
     ]); // the historical row still lands
     const app = db.raw
-      .query("SELECT deleted_at FROM github_apps WHERE id = ?")
+      .query("SELECT deleted_at FROM review_bots WHERE id = ?")
       .get(appRow.id) as { deleted_at: string | null };
     expect(app.deleted_at).not.toBeNull(); // the race really happened
   });
@@ -925,13 +933,13 @@ describe("per-App webhook face — best-effort delivery recording", () => {
    */
   function ledgerState(db: TestD1, appId: string) {
     const deliveries = db.raw
-      .query("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE app_id = ?")
+      .query("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE bot_id = ?")
       .get(appId) as { n: number };
     const pullRequests = db.raw
-      .query("SELECT COUNT(*) AS n FROM pull_requests WHERE app_id = ?")
+      .query("SELECT COUNT(*) AS n FROM pull_requests WHERE bot_id = ?")
       .get(appId) as { n: number };
     const app = db.raw
-      .query("SELECT last_webhook_at FROM github_apps WHERE id = ?")
+      .query("SELECT last_webhook_at FROM review_bots WHERE id = ?")
       .get(appId) as { last_webhook_at: string | null };
     return { deliveries: deliveries.n, pullRequests: pullRequests.n, lastWebhookAt: app.last_webhook_at };
   }
@@ -939,7 +947,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   test("allowlist OFF: an unlisted owner behaves exactly as today — the delivery proceeds and writes all three", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: false, owners: ["someone-else"] });
+    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: false, owners: ["someone-else"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -959,7 +967,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   test("allowlist ON + listed owner: the delivery proceeds and writes all three", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
+    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -981,7 +989,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // which cannot prove private, so the stored list applies.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
+    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -1016,7 +1024,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // never turned into its own 200 `ignored`.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
+    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify({ ...PR_PAYLOAD, installation: null });
@@ -1037,7 +1045,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   test("allowlist ON + empty list: every owner is refused", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: [] });
+    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: [] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -1069,7 +1077,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // `private` cache must not leave the gate inert.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    const apps = createAppsStore(db);
+    const apps = createReviewBotsStore(db);
     await apps.saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
     await apps.saveGithubVisibility(appRow.id, "private");
     const { queue, sent } = makeQueue();
@@ -1088,7 +1096,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     // The payload's owner is `test-owner`; the operator typed `Test-Owner`.
-    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["Test-Owner"] });
+    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["Test-Owner"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -1103,7 +1111,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   test("an unreadable allowlist is fail-closed: 500 with zero writes and zero enqueue", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
+    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
     // The switch stays on, but the owner table disappears: the single gate
     // SELECT cannot run, so the gate's state is unknown — and an unknown gate
     // must not admit. 500 so GitHub retries once D1 is healthy again.
@@ -1141,7 +1149,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // exactly like the ON one.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: false, owners: [] });
+    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: false, owners: [] });
     db.raw.exec("DROP TABLE app_owner_allowlist");
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1161,7 +1169,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // The switch is on and the owner table is gone — an unreadable gate. Only
     // `pull_request` / `issue_comment` can enqueue a review, so admission never
     // consults it for an install event: the bookkeeping proceeds, no 500.
-    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
+    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
     db.raw.exec("DROP TABLE app_owner_allowlist");
     const body = JSON.stringify({ action: "created", installation: { id: 123 } });
 
@@ -1184,7 +1192,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // refusal, no delivery row, no PR ledger row, no enqueue.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    const apps = createAppsStore(db);
+    const apps = createReviewBotsStore(db);
     await apps.saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });

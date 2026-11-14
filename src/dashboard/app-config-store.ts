@@ -1,9 +1,9 @@
 /**
- * D1 store for per-App AI configuration: the `app_provider_keys` BYOK key
+ * D1 store for per-App AI configuration: the `bot_provider_keys` BYOK key
  * POOLS (one row per (App, provider, key_id) — migration 0024) and the
- * `app_custom_provider_keys` pools of the custom-provider declarations, plus
- * the model chains (`app_model_chains` default + named chains and the
- * `app_model_chain_seats` seat references, migration 0017). Spec
+ * `bot_custom_provider_keys` pools of the custom-provider declarations, plus
+ * the model chains (`bot_model_chains` default + named chains and the
+ * `bot_model_chain_seats` seat references, migration 0017). Spec
  * dashboard-multi-app-platform § Per-App BYOK + § Crypto envelope; migration
  * 0024 is the DDL single source for the pool tables.
  *
@@ -56,11 +56,11 @@
  * removeModelChain's seat-reference cascade — each is ONE atomic
  * `db.batch`, added for multi-write atomicity, never for throughput.
  *
- * Model chains (spec §4.4): `app_model_chains` (migration
+ * Model chains (spec §4.4): `bot_model_chains` (migration
  * 0017) holds one row per (App, chain name) — the default chain row keeps
  * the RESERVED name "default" (is_default = 1, at most one per App,
  * enforced by the store in one batch), named chains are user-named
- * selector chains (is_default = 0). `app_model_chain_seats` maps each of
+ * selector chains (is_default = 0). `bot_model_chain_seats` maps each of
  * the 4 audit-seat agent names to a chain name; ABSENT row = the seat uses
  * the default chain. The role vocabulary lives here as the MODEL_ROLE_IDS
  * mirror (importing the runner side via packages/runner is forbidden by the
@@ -70,7 +70,7 @@
  * configuration, not secrets) and are consumed by the pipeline consumer as
  * the runner input `modelOverrides` field (seats referencing the default
  * chain — or with no reference row — are omitted; empty map → undefined).
- * The pre-chains tables `app_model_config` / `app_model_roles` are
+ * The pre-chains tables `bot_model_config` / `bot_model_roles` are
  * write-retired / read-retired after migration 0017's backfill (rows
  * retained, code no longer references them; no DROP).
  *
@@ -142,7 +142,7 @@
  *     upsertCustomProvider / removeCustomProvider / listCustomProviders
  *     manage per-App declarations of NON-built-in model providers (base URL
  *     + AL-23-1 api enum + model ids); the declaration holds NO key material
- *     — the key lives in `app_custom_provider_keys` under the same per-key
+ *     — the key lives in `bot_custom_provider_keys` under the same per-key
  *     AAD form, written by upsertCustomProvider or
  *     addCustomProviderKey (both verify-first callers: each records the same
  *     ok/reachable state), listed by listCustomProviderKeys
@@ -157,7 +157,7 @@
  *     the backstop and by the settings route as 400.
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
  *     convention). UNIQUE / FK violations throw (fail-loud): an unknown
- *     app_id is a caller bug, never a silent no-op.
+ *     bot_id is a caller bug, never a silent no-op.
  */
 import { createSecretbox } from "./secretbox";
 import { builtinProbeCanRejectKey, customProbeCanRejectKey } from "./provider-verify";
@@ -179,13 +179,13 @@ import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../contracts/provider-models";
 export type VerifiedStatus = "ok" | "reachable" | "failed";
 
 /**
- * A row of `app_provider_keys` — and, byte-identical in shape, of
- * `app_custom_provider_keys` (migration 0024: both tables hold ONE row per
+ * A row of `bot_provider_keys` — and, byte-identical in shape, of
+ * `bot_custom_provider_keys` (migration 0024: both tables hold ONE row per
  * key, with the envelope and its bookkeeping belonging to the key rather
  * than to the provider).
  */
 export type AppProviderKeyRow = {
-  app_id: string;
+  bot_id: string;
   provider: string;
   /**
    * The key's identity inside the pool: the first 16 hex characters of
@@ -205,14 +205,14 @@ export type AppProviderKeyRow = {
 };
 
 /**
- * A row of `app_model_chains` (migration 0017, spec §4.4).
+ * A row of `bot_model_chains` (migration 0017, spec §4.4).
  * The default chain row keeps the RESERVED name "default" (is_default = 1);
  * named chains are user-named selector chains (is_default = 0). is_default
  * uniqueness per App is store-enforced in ONE atomic db.batch (no CHECK /
  * partial unique index — app-family convention).
  */
 export type AppModelChainRow = {
-  app_id: string;
+  bot_id: string;
   /** Chain name; "default" is the reserved default-row name. */
   name: string;
   /** Verbatim comma-separated selector chain — configuration, not a secret. */
@@ -223,9 +223,9 @@ export type AppModelChainRow = {
   updated_at: string;
 };
 
-/** A row of `app_model_chain_seats` (migration 0017, spec §4.4). Absent row = the seat uses the default chain. */
+/** A row of `bot_model_chain_seats` (migration 0017, spec §4.4). Absent row = the seat uses the default chain. */
 export type AppModelChainSeatRow = {
-  app_id: string;
+  bot_id: string;
   /** One of the MODEL_ROLE_IDS audit-seat agent names. */
   role: string;
   /** The referenced chain name; the reserved "default" name is never stored (blank = default = absent row). */
@@ -251,14 +251,14 @@ export const CUSTOM_PROVIDER_API_IDS = [
 export type CustomProviderApi = (typeof CUSTOM_PROVIDER_API_IDS)[number];
 
 /**
- * A row of `app_custom_providers` (migration 0012 — D1 column
+ * A row of `bot_custom_providers` (migration 0012 — D1 column
  * names, snake_case). model_ids is a TEXT JSON array (AL-23-1 DDL). The API
  * key does NOT live here: migration 0024 moved it into
- * `app_custom_provider_keys` (an AppProviderKeyRow), so the declaration is
+ * `bot_custom_provider_keys` (an AppProviderKeyRow), so the declaration is
  * decrypt-free and the key carries its own identity and bookkeeping.
  */
 export type AppCustomProviderRow = {
-  app_id: string;
+  bot_id: string;
   provider_id: string;
   base_url: string;
   api: string;
@@ -273,7 +273,7 @@ export type AppCustomProviderRow = {
  * consumer input): a NON-built-in model provider bound to a base URL, one
  * of the AL-23-1 protocol forms, and the model ids it serves. The API key
  * is NEVER part of this shape — since migration 0024 it lives in
- * app_custom_provider_keys (declaration-time input; the consumer decrypt
+ * bot_custom_provider_keys (declaration-time input; the consumer decrypt
  * face reads it there).
  */
 export type AppCustomProvider = {
@@ -319,12 +319,12 @@ export type CustomProviderModelsMeta = Record<string, CustomProviderModelMeta>;
  * AppCustomProvider: has_keys is derived from the pool, never submitted.
  */
 export type AppCustomProviderRead = AppCustomProvider & {
-  /** True while app_custom_provider_keys holds ≥1 row for (app, provider). */
+  /** True while bot_custom_provider_keys holds ≥1 row for (app, provider). */
   has_keys: boolean;
 };
 /**
  * One custom-provider declaration as the consumer sees it (the
- * getAppConfig analogue for app_custom_providers): the decrypt-free
+ * getAppConfig analogue for bot_custom_providers): the decrypt-free
  * declaration PLUS its DECRYPTED key pool, in pool order (created_at, then
  * key_id — the order the consumer's pool env indexes follow). The keys exist
  * ONLY on this face — the settings lists (listCustomProviders,
@@ -361,10 +361,10 @@ type CustomProviderKeyJoinRow = {
 };
 
 /**
- * A row of `app_provider_models` (migration 0025): the verified-model
+ * A row of `bot_provider_models` (migration 0025): the verified-model
  * EVIDENCE ONE KEY produced, for BUILT-IN providers. `provider` is the
  * BYOK provider id the key was stored under — and `key_id` is the same
- * plaintext-derived id `app_provider_keys` carries, so evidence is
+ * plaintext-derived id `bot_provider_keys` carries, so evidence is
  * attributable to exactly one credential. models_json is a TEXT JSON array of
  * verified model ids — configuration, not a secret (0006 model_chain
  * rationale). Custom providers write NO rows here (their vocabulary is the
@@ -375,7 +375,7 @@ type CustomProviderKeyJoinRow = {
  * (getVerifiedModels), so no write has to know what the other keys report.
  */
 export type AppProviderModelsRow = {
-  app_id: string;
+  bot_id: string;
   provider: string;
   key_id: string;
   models_json: string;
@@ -428,7 +428,7 @@ const RETIRED_PROVIDER_ALIASES: Readonly<Record<string, string>> = { "ark-plan":
  * structurally assignable to ProviderMirrorEntry (it additionally carries
  * `envName`, which the mirror type ignores). `tier: "template"` entries are
  * NOT runner-consumable env-name entries — the save flow materializes them
- * through the existing custom-provider machinery (app_custom_providers),
+ * through the existing custom-provider machinery (bot_custom_providers),
  * substituting a {account_id} base-URL placeholder when the entry's base
  * URL carries one.
  */
@@ -485,8 +485,8 @@ export function parseModelChain(raw: string | undefined): string[] {
 }
 /**
  * Parse a stored TEXT JSON array of model ids — either column that stores
- * one (app_custom_providers.model_ids, AL-23-1 DDL, or
- * app_provider_models.models_json, migration 0015) — fail-loud on anything
+ * one (bot_custom_providers.model_ids, AL-23-1 DDL, or
+ * bot_provider_models.models_json, migration 0015) — fail-loud on anything
  * that is not a JSON array of strings (the getAppConfig tamper convention):
  * a malformed row throws in the store, never deferring to a caller's
  * `.join` on a non-array. `source` names the exact table.column in the
@@ -573,7 +573,7 @@ function customProviderModelMetaProblem(modelId: string, value: unknown): string
 }
 
 /**
- * Parse a stored `app_custom_providers.models_meta` overlay, fail-loud on a
+ * Parse a stored `bot_custom_providers.models_meta` overlay, fail-loud on a
  * tampered row: a non-object, a key that is not one of THIS declaration's
  * model ids, or an entry that breaks the shape rule throws here rather than
  * reaching a caller. An entry of JSON null is unset and is dropped; an overlay
@@ -598,7 +598,7 @@ function parseModelsMetaJson(
   for (const [modelId, value] of Object.entries(parsed as Record<string, unknown>)) {
     if (!modelIds.includes(modelId)) {
       throw new Error(
-        `app-config-store: ${source} names model ${JSON.stringify(modelId)}, which is not in app_custom_providers.model_ids`,
+        `app-config-store: ${source} names model ${JSON.stringify(modelId)}, which is not in bot_custom_providers.model_ids`,
       );
     }
     if (value === null) continue;
@@ -836,7 +836,7 @@ function providerKeyAad(appId: string, provider: string, keyId: string): string 
   return `app_provider_keys.key_enc:${appId}:${provider}:${keyId}`;
 }
 /**
- * The same form for app_custom_provider_keys: the envelope is bound to the
+ * The same form for bot_custom_provider_keys: the envelope is bound to the
  * declaration's provider id and the per-key id, joined in DDL order —
  * `app_custom_provider_keys.key_enc:<app_id>:<provider>:<key_id>`. The
  * consumer decrypts with this exact string.
@@ -1119,7 +1119,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
    * them; `legacyAad` builds the PRE-0024 rowKey the promotion path needs.
    */
   type KeyTable = {
-    table: "app_provider_keys" | "app_custom_provider_keys";
+    table: "bot_provider_keys" | "bot_custom_provider_keys";
     aad: (appId: string, provider: string, keyId: string) => string;
     legacyAad: (appId: string, provider: string) => string;
     /**
@@ -1132,15 +1132,15 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     owner?: { table: string; column: string };
   };
   const PROVIDER_KEY_TABLE: KeyTable = {
-    table: "app_provider_keys",
+    table: "bot_provider_keys",
     aad: providerKeyAad,
     legacyAad: legacyProviderKeyAad,
   };
   const CUSTOM_KEY_TABLE: KeyTable = {
-    table: "app_custom_provider_keys",
+    table: "bot_custom_provider_keys",
     aad: customProviderKeyAad,
     legacyAad: legacyCustomProviderAad,
-    owner: { table: "app_custom_providers", column: "provider_id" },
+    owner: { table: "bot_custom_providers", column: "provider_id" },
   };
 
   /** Byte-order compare — SQLite's BINARY collation for these ASCII columns. */
@@ -1160,20 +1160,20 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
    * plaintext, same id — the newer row wins) and only then promotes.
    */
   async function promoteLegacyKeyRow(spec: KeyTable, row: AppProviderKeyRow): Promise<AppProviderKeyRow> {
-    const plain = await box.decryptSecret(row.key_enc, spec.legacyAad(row.app_id, row.provider));
+    const plain = await box.decryptSecret(row.key_enc, spec.legacyAad(row.bot_id, row.provider));
     const keyId = await providerKeyId(plain);
-    const keyEnc = await box.encryptSecret(plain, spec.aad(row.app_id, row.provider, keyId));
+    const keyEnc = await box.encryptSecret(plain, spec.aad(row.bot_id, row.provider, keyId));
     await db.batch([
       db
         .prepare(
-          `DELETE FROM ${spec.table} WHERE app_id = ? AND provider = ? AND key_id = ? AND EXISTS (
-             SELECT 1 FROM ${spec.table} WHERE app_id = ? AND provider = ? AND key_id = ?
+          `DELETE FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ? AND EXISTS (
+             SELECT 1 FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ?
            )`,
         )
-        .bind(row.app_id, row.provider, LEGACY_KEY_ID, row.app_id, row.provider, keyId),
+        .bind(row.bot_id, row.provider, LEGACY_KEY_ID, row.bot_id, row.provider, keyId),
       db
-        .prepare(`UPDATE ${spec.table} SET key_id = ?, key_enc = ? WHERE app_id = ? AND provider = ? AND key_id = ?`)
-        .bind(keyId, keyEnc, row.app_id, row.provider, LEGACY_KEY_ID),
+        .prepare(`UPDATE ${spec.table} SET key_id = ?, key_enc = ? WHERE bot_id = ? AND provider = ? AND key_id = ?`)
+        .bind(keyId, keyEnc, row.bot_id, row.provider, LEGACY_KEY_ID),
     ]);
     return { ...row, key_id: keyId, key_enc: keyEnc };
   }
@@ -1188,9 +1188,9 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   async function readKeyRows(spec: KeyTable, appId: string, provider?: string): Promise<AppProviderKeyRow[]> {
     const res =
       provider === undefined
-        ? await db.prepare(`SELECT * FROM ${spec.table} WHERE app_id = ?`).bind(appId).all<AppProviderKeyRow>()
+        ? await db.prepare(`SELECT * FROM ${spec.table} WHERE bot_id = ?`).bind(appId).all<AppProviderKeyRow>()
         : await db
-            .prepare(`SELECT * FROM ${spec.table} WHERE app_id = ? AND provider = ?`)
+            .prepare(`SELECT * FROM ${spec.table} WHERE bot_id = ? AND provider = ?`)
             .bind(appId, provider)
             .all<AppProviderKeyRow>();
     const rows: AppProviderKeyRow[] = [];
@@ -1215,8 +1215,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
    * refused key write refuses (and commits) neither.
    */
   function poolAdmission(spec: KeyTable): string {
-    return `((SELECT COUNT(*) FROM ${spec.table} WHERE app_id = ? AND provider = ?) < ${MAX_KEYS_PER_PROVIDER}
-             OR EXISTS (SELECT 1 FROM ${spec.table} WHERE app_id = ? AND provider = ? AND key_id = ?))`;
+    return `((SELECT COUNT(*) FROM ${spec.table} WHERE bot_id = ? AND provider = ?) < ${MAX_KEYS_PER_PROVIDER}
+             OR EXISTS (SELECT 1 FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ?))`;
   }
 
   /**
@@ -1234,8 +1234,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
    * declaring another endpoint.
    */
   function declarationGrowthAdmission(): string {
-    return `((SELECT COUNT(*) FROM app_custom_providers WHERE app_id = ?) < ${MAX_CUSTOM_PROVIDER_COUNT}
-             OR EXISTS (SELECT 1 FROM app_custom_providers WHERE app_id = ? AND provider_id = ?))`;
+    return `((SELECT COUNT(*) FROM bot_custom_providers WHERE bot_id = ?) < ${MAX_CUSTOM_PROVIDER_COUNT}
+             OR EXISTS (SELECT 1 FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?))`;
   }
 
   /**
@@ -1274,7 +1274,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     // stranding an orphan credential a re-declaration would revive.
     let ownership = "";
     if (spec.owner !== undefined) {
-      const declaration = `SELECT 1 FROM ${spec.owner.table} WHERE app_id = ? AND ${spec.owner.column} = ?`;
+      const declaration = `SELECT 1 FROM ${spec.owner.table} WHERE bot_id = ? AND ${spec.owner.column} = ?`;
       if (opts.endpoint === undefined) {
         // A key riding a declaration CREATED BY THE SAME BATCH has no row to
         // check yet (the declaration's own statement is gated on the same
@@ -1297,10 +1297,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     return db
       .prepare(
         `WITH now AS (SELECT datetime('now') AS ts)
-         INSERT INTO ${spec.table} (app_id, provider, key_id, key_enc, created_at, updated_at, verified_at, verified_status)
+         INSERT INTO ${spec.table} (bot_id, provider, key_id, key_enc, created_at, updated_at, verified_at, verified_status)
          SELECT ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), ${verifiedAt}, ${verifiedStatus}
          WHERE ${poolAdmission(spec)}${ownership}${growth}
-         ON CONFLICT (app_id, provider, key_id) DO UPDATE SET
+         ON CONFLICT (bot_id, provider, key_id) DO UPDATE SET
            key_enc = excluded.key_enc,
            updated_at = excluded.updated_at,
            verified_at = excluded.verified_at,
@@ -1325,7 +1325,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   ): Promise<never> {
     if (spec.owner !== undefined) {
       const decl = await db
-        .prepare(`SELECT base_url, api FROM ${spec.owner.table} WHERE app_id = ? AND ${spec.owner.column} = ?`)
+        .prepare(`SELECT base_url, api FROM ${spec.owner.table} WHERE bot_id = ? AND ${spec.owner.column} = ?`)
         .bind(appId, provider)
         .first<{ base_url: string; api: string }>();
       if (decl === null) {
@@ -1337,7 +1337,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       // throwCustomProviderRefusal — a full pool refuses the ninth key first.
       if (endpoint !== undefined && (decl.base_url !== endpoint.base_url || decl.api !== endpoint.api)) {
         const count = await db
-          .prepare(`SELECT COUNT(*) AS n FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?`)
+          .prepare(`SELECT COUNT(*) AS n FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?`)
           .bind(appId, provider)
           .first<{ n: number }>();
         if ((count?.n ?? 0) >= MAX_KEYS_PER_PROVIDER) throw new ProviderKeyLimitError(provider);
@@ -1363,7 +1363,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   ): Promise<never> {
     if (creating) {
       const countRow = await db
-        .prepare(`SELECT COUNT(*) AS n FROM app_custom_providers WHERE app_id = ?`)
+        .prepare(`SELECT COUNT(*) AS n FROM bot_custom_providers WHERE bot_id = ?`)
         .bind(appId)
         .first<{ n: number }>();
       if ((countRow?.n ?? 0) >= MAX_CUSTOM_PROVIDER_COUNT) {
@@ -1373,8 +1373,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     const pool = await db
       .prepare(
         `SELECT COUNT(*) AS n,
-                EXISTS (SELECT 1 FROM app_custom_provider_keys WHERE app_id = ? AND provider = ? AND key_id = ?) AS present
-           FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?`,
+                EXISTS (SELECT 1 FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ? AND key_id = ?) AS present
+           FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?`,
       )
       .bind(appId, decl.provider_id, keyId, appId, decl.provider_id)
       .first<{ n: number; present: number }>();
@@ -1382,7 +1382,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       throw new ProviderKeyLimitError(decl.provider_id);
     }
     const stored = await db
-      .prepare(`SELECT base_url, api FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+      .prepare(`SELECT base_url, api FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?`)
       .bind(appId, decl.provider_id)
       .first<{ base_url: string; api: string }>();
     if (stored === null) {
@@ -1437,10 +1437,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       db
         .prepare(
           `WITH now AS (SELECT datetime('now') AS ts)
-           INSERT INTO app_provider_models (app_id, provider, key_id, models_json, fetched_at)
+           INSERT INTO bot_provider_models (bot_id, provider, key_id, models_json, fetched_at)
            SELECT ?, ?, ?, ?, (SELECT ts FROM now)
-           WHERE EXISTS (SELECT 1 FROM ${spec.table} WHERE app_id = ? AND provider = ? AND key_id = ?)
-           ON CONFLICT (app_id, provider, key_id) DO UPDATE SET
+           WHERE EXISTS (SELECT 1 FROM ${spec.table} WHERE bot_id = ? AND provider = ? AND key_id = ?)
+           ON CONFLICT (bot_id, provider, key_id) DO UPDATE SET
              models_json = excluded.models_json,
              fetched_at = excluded.fetched_at`,
         )
@@ -1459,7 +1459,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
   /** Mask one stored key row for a settings list face: decrypt, keep ONLY the tail. */
   async function summarizeKeyRow(spec: KeyTable, row: AppProviderKeyRow): Promise<ProviderKeySummary> {
-    const plain = await box.decryptSecret(row.key_enc, spec.aad(row.app_id, row.provider, row.key_id));
+    const plain = await box.decryptSecret(row.key_enc, spec.aad(row.bot_id, row.provider, row.key_id));
     return {
       provider: row.provider,
       keyId: row.key_id,
@@ -1472,12 +1472,12 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
   /**
    * The App's default chain value (spec §4.4): the 'default' row of
-   * app_model_chains, or null when no default row exists (absent = unset =
+   * bot_model_chains, or null when no default row exists (absent = unset =
    * that App's reviews fail closed — AL-24-5).
    */
   async function readModelChain(appId: string): Promise<string | null> {
     const row = await db
-      .prepare(`SELECT chain FROM app_model_chains WHERE app_id = ? AND name = ?`)
+      .prepare(`SELECT chain FROM bot_model_chains WHERE bot_id = ? AND name = ?`)
       .bind(appId, DEFAULT_CHAIN_NAME)
       .first<Pick<AppModelChainRow, "chain">>();
     return row?.chain ?? null;
@@ -1490,7 +1490,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
    */
   async function readModelChainSeats(appId: string): Promise<Record<string, string>> {
     const res = await db
-      .prepare(`SELECT role, chain_name FROM app_model_chain_seats WHERE app_id = ? ORDER BY role ASC`)
+      .prepare(`SELECT role, chain_name FROM bot_model_chain_seats WHERE bot_id = ? ORDER BY role ASC`)
       .bind(appId)
       .all<Pick<AppModelChainSeatRow, "role" | "chain_name">>();
     const seats: Record<string, string> = {};
@@ -1506,19 +1506,19 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
    * mapping. Seats with NO reference row (absent = default) and seats
    * referencing the default chain are OMITTED — the runner input map only
    * carries seats whose chain differs from the App default (byte-identical
-   * to the pre-chains app_model_roles semantics for migrated Apps). A seat
+   * to the pre-chains bot_model_roles semantics for migrated Apps). A seat
    * referencing a chain with no row throws (fail-loud, the getAppConfig
    * tamper convention — removeModelChain cleans references in the same
    * batch, so a dangling reference is a direct-DB tamper).
    */
   async function readModelOverrides(appId: string): Promise<Record<string, string>> {
     const seats = await db
-      .prepare(`SELECT role, chain_name FROM app_model_chain_seats WHERE app_id = ? ORDER BY role ASC`)
+      .prepare(`SELECT role, chain_name FROM bot_model_chain_seats WHERE bot_id = ? ORDER BY role ASC`)
       .bind(appId)
       .all<Pick<AppModelChainSeatRow, "role" | "chain_name">>();
     if (seats.results.length === 0) return {};
     const chains = await db
-      .prepare(`SELECT name, chain FROM app_model_chains WHERE app_id = ?`)
+      .prepare(`SELECT name, chain FROM bot_model_chains WHERE bot_id = ?`)
       .bind(appId)
       .all<Pick<AppModelChainRow, "name" | "chain">>();
     const chainByName = new Map(chains.results.map((row) => [row.name, row.chain]));
@@ -1538,16 +1538,16 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
   /** Prepared DELETE for one seat's reference row (run() or ride in a batch). */
   function deleteModelChainSeatStatement(appId: string, role: string): AppConfigStatement {
-    return db.prepare(`DELETE FROM app_model_chain_seats WHERE app_id = ? AND role = ?`).bind(appId, role);
+    return db.prepare(`DELETE FROM bot_model_chain_seats WHERE bot_id = ? AND role = ?`).bind(appId, role);
   }
 
   /** Prepared upsert of one seat's chain reference (run() or ride in a batch). */
   function upsertModelChainSeatStatement(appId: string, role: string, chainName: string): AppConfigStatement {
     return db
       .prepare(
-        `INSERT INTO app_model_chain_seats (app_id, role, chain_name)
+        `INSERT INTO bot_model_chain_seats (bot_id, role, chain_name)
          VALUES (?, ?, ?)
-         ON CONFLICT (app_id, role) DO UPDATE SET
+         ON CONFLICT (bot_id, role) DO UPDATE SET
            chain_name = excluded.chain_name`,
       )
       .bind(appId, role, chainName);
@@ -1558,7 +1558,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     await deleteModelChainSeatStatement(appId, role).run();
   }
 
-  /** Upsert one seat's chain reference (one row per (app_id, role) composite PK). */
+  /** Upsert one seat's chain reference (one row per (bot_id, role) composite PK). */
   async function upsertModelChainSeat(appId: string, role: string, chainName: string): Promise<void> {
     await upsertModelChainSeatStatement(appId, role, chainName).run();
   }
@@ -1566,7 +1566,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   /** Fail-loud existence gate for a seat's chain reference (the route 400s first). */
   async function assertChainExists(appId: string, chainName: string): Promise<void> {
     const row = await db
-      .prepare(`SELECT name FROM app_model_chains WHERE app_id = ? AND name = ?`)
+      .prepare(`SELECT name FROM bot_model_chains WHERE bot_id = ? AND name = ?`)
       .bind(appId, chainName)
       .first<{ name: string }>();
     if (!row) throw new UnknownModelChainError(chainName);
@@ -1642,11 +1642,11 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       await readKeyRows(PROVIDER_KEY_TABLE, appId, provider);
       const res = await db.batch([
         db
-          .prepare(`DELETE FROM app_provider_keys WHERE app_id = ? AND provider = ? AND key_id = ?`)
+          .prepare(`DELETE FROM bot_provider_keys WHERE bot_id = ? AND provider = ? AND key_id = ?`)
           .bind(appId, provider, keyId),
         db
           .prepare(
-            `DELETE FROM app_provider_models WHERE app_id = ? AND provider = ? AND key_id = ? AND changes() > 0`,
+            `DELETE FROM bot_provider_models WHERE bot_id = ? AND provider = ? AND key_id = ? AND changes() > 0`,
           )
           .bind(appId, provider, keyId),
       ]);
@@ -1675,7 +1675,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     /**
      * ONE stored key's plaintext, for the per-key usage probe: the built-in
      * pool first, then the declaration pool (a template provider's keys live
-     * in `app_custom_provider_keys`). Each row decrypts with ITS OWN AAD, so
+     * in `bot_custom_provider_keys`). Each row decrypts with ITS OWN AAD, so
      * one slot's ciphertext can never answer for another. `null` when neither
      * pool holds that id for THIS App — an id of another App and a deleted id
      * are deliberately indistinguishable. The plaintext exists for the
@@ -1694,7 +1694,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         const row = (await readKeyRows(spec, appId, provider)).find((candidate) => candidate.key_id === keyId);
         if (row === undefined) continue;
         return {
-          plainKey: await box.decryptSecret(row.key_enc, spec.aad(row.app_id, row.provider, row.key_id)),
+          plainKey: await box.decryptSecret(row.key_enc, spec.aad(row.bot_id, row.provider, row.key_id)),
           custom,
         };
       }
@@ -1719,20 +1719,20 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     async setModelChain(appId: string, chain: string | null): Promise<void> {
       if (chain === null || chain.trim() === "") {
         await db
-          .prepare(`DELETE FROM app_model_chains WHERE app_id = ? AND name = ?`)
+          .prepare(`DELETE FROM bot_model_chains WHERE bot_id = ? AND name = ?`)
           .bind(appId, DEFAULT_CHAIN_NAME)
           .run();
         return;
       }
       await db.batch([
         db
-          .prepare(`UPDATE app_model_chains SET is_default = 0 WHERE app_id = ? AND is_default = 1`)
+          .prepare(`UPDATE bot_model_chains SET is_default = 0 WHERE bot_id = ? AND is_default = 1`)
           .bind(appId),
         db
           .prepare(
-            `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+            `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
              VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))
-             ON CONFLICT (app_id, name) DO UPDATE SET
+             ON CONFLICT (bot_id, name) DO UPDATE SET
                chain = excluded.chain,
                is_default = 1,
                updated_at = datetime('now')`,
@@ -1760,7 +1760,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       const rows = await readKeyRows(PROVIDER_KEY_TABLE, appId);
       const keys: Record<string, string[]> = {};
       for (const row of rows) {
-        const plain = await box.decryptSecret(row.key_enc, providerKeyAad(row.app_id, row.provider, row.key_id));
+        const plain = await box.decryptSecret(row.key_enc, providerKeyAad(row.bot_id, row.provider, row.key_id));
         (keys[row.provider] ??= []).push(plain);
       }
       return { appId, keys, modelChain: await readModelChain(appId) };
@@ -1789,7 +1789,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      */
     async getVerifiedModels(appId: string): Promise<VerifiedModels[]> {
       const evidence = await db
-        .prepare(`SELECT * FROM app_provider_models WHERE app_id = ? ORDER BY provider ASC, key_id ASC`)
+        .prepare(`SELECT * FROM bot_provider_models WHERE bot_id = ? ORDER BY provider ASC, key_id ASC`)
         .bind(appId)
         .all<AppProviderModelsRow>();
       const rows = await readKeyRows(PROVIDER_KEY_TABLE, appId);
@@ -1801,7 +1801,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         // instead of silently dropping rows that no pool key matches.
         const provider = RETIRED_PROVIDER_ALIASES[row.provider] ?? row.provider;
         const perKey = byProvider.get(provider) ?? new Map<string, string[]>();
-        perKey.set(row.key_id, parseModelIdsJson(row.models_json, "app_provider_models.models_json"));
+        perKey.set(row.key_id, parseModelIdsJson(row.models_json, "bot_provider_models.models_json"));
         byProvider.set(provider, perKey);
       }
       const entries: VerifiedModels[] = [];
@@ -1828,14 +1828,14 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The App's chains (settings face): every app_model_chains
+     * The App's chains (settings face): every bot_model_chains
      * row, name-ascending ("default" sorts first). is_default is exposed as
      * a boolean. Decrypt-free by design — a model selector is
      * configuration, not a secret (the 0006 model_chain rationale).
      */
     async getModelChains(appId: string): Promise<AppModelChain[]> {
       const res = await db
-        .prepare(`SELECT * FROM app_model_chains WHERE app_id = ? ORDER BY name ASC`)
+        .prepare(`SELECT * FROM bot_model_chains WHERE bot_id = ? ORDER BY name ASC`)
         .bind(appId)
         .all<AppModelChainRow>();
       return res.results.map((row) => ({
@@ -1866,9 +1866,9 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       }
       await db
         .prepare(
-          `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+          `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
            VALUES (?, ?, ?, 0, datetime('now'), datetime('now'))
-           ON CONFLICT (app_id, name) DO UPDATE SET
+           ON CONFLICT (bot_id, name) DO UPDATE SET
              chain = excluded.chain,
              is_default = excluded.is_default,
              updated_at = datetime('now')`,
@@ -1888,8 +1888,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     async removeModelChain(appId: string, name: string): Promise<boolean> {
       assertModelChainName(name);
       const res = await db.batch([
-        db.prepare(`DELETE FROM app_model_chain_seats WHERE app_id = ? AND chain_name = ?`).bind(appId, name),
-        db.prepare(`DELETE FROM app_model_chains WHERE app_id = ? AND name = ?`).bind(appId, name),
+        db.prepare(`DELETE FROM bot_model_chain_seats WHERE bot_id = ? AND chain_name = ?`).bind(appId, name),
+        db.prepare(`DELETE FROM bot_model_chains WHERE bot_id = ? AND name = ?`).bind(appId, name),
       ]);
       return res[1]!.meta.changes > 0;
     },
@@ -1917,7 +1917,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * Validation BEFORE any write: an off-vocabulary role throws
      * UnknownModelRoleError and a content-bearing chain_name that names no
      * stored chain throws UnknownModelChainError (the route re-renders 400
-     * first; these are the backstop for direct callers). An unknown app_id
+     * first; these are the backstop for direct callers). An unknown bot_id
      * fails the FK on insert (fail-loud, same as every write here);
      * clearing an unmapped seat is a quiet no-op.
      */
@@ -1969,7 +1969,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         .filter((name) => name !== "" && name !== DEFAULT_CHAIN_NAME);
       if (referenced.length > 0) {
         const chains = await db
-          .prepare(`SELECT name FROM app_model_chains WHERE app_id = ?`)
+          .prepare(`SELECT name FROM bot_model_chains WHERE bot_id = ?`)
           .bind(appId)
           .all<{ name: string }>();
         const known = new Set(chains.results.map((row) => row.name));
@@ -1994,7 +1994,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * chain mapping. Seats with NO reference row (absent = default) and
      * seats referencing the default chain are OMITTED — the runner input
      * map only carries seats whose chain differs from the App default
-     * (byte-identical to the pre-chains app_model_roles semantics for
+     * (byte-identical to the pre-chains bot_model_roles semantics for
      * migrated Apps). An App with no overrides yields `{}` (= today's
      * chain behavior; the consumer maps an empty map to `undefined`).
      * Decrypt-free by design — a model selector is configuration, not a
@@ -2008,9 +2008,9 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
     /**
      * Store (or replace) one custom-provider declaration for the App:
-     * validates the full AL-23-1/AL-23-2 shape, upserts the (app_id,
+     * validates the full AL-23-1/AL-23-2 shape, upserts the (bot_id,
      * provider_id) DECLARATION row (base_url / api / model_ids — migration
-     * 0024 moved the key material into app_custom_provider_keys), then stores
+     * 0024 moved the key material into bot_custom_provider_keys), then stores
      * the submitted key in that declaration's pool as a verified slot (the
      * declaration flow verifies before saving, so it lands
      * verified_at = now with verified_status 'ok' — or 'reachable' unless the
@@ -2034,7 +2034,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * The cap is enforced ATOMICALLY (PR #10 cap-race fix): the new-id write is
      * conditional (`WHERE count < cap`) and CONFLICT-SAFE (`ON CONFLICT … DO
      * UPDATE`), so two concurrent FIRST-TIME saves of the same id — which used
-     * to hit the (app_id, provider_id) primary key and 500 — merge into the
+     * to hit the (bot_id, provider_id) primary key and 500 — merge into the
      * declaration that won it (a different endpoint there refuses instead).
      * The pre-check below stays as the fast 400 path (defense in depth, both
      * layers).
@@ -2066,7 +2066,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       // verified against, and the promoted pool is what the endpoint lock, the
       // cap and the key identity below all measure.
       const stored = await db
-        .prepare(`SELECT provider_id, base_url, api FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+        .prepare(`SELECT provider_id, base_url, api FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?`)
         .bind(appId, decl.provider_id)
         .first<{ provider_id: string; base_url: string; api: string }>();
       const isNew = stored === null;
@@ -2092,8 +2092,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         const countRow = await db
           .prepare(
             `SELECT COUNT(*) AS n,
-                    EXISTS (SELECT 1 FROM app_custom_providers WHERE app_id = ? AND provider_id = ?) AS present
-               FROM app_custom_providers WHERE app_id = ?`,
+                    EXISTS (SELECT 1 FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?) AS present
+               FROM bot_custom_providers WHERE bot_id = ?`,
           )
           .bind(appId, decl.provider_id, appId)
           .first<{ n: number; present: number }>();
@@ -2118,13 +2118,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         ? db
             .prepare(
               `WITH now AS (SELECT datetime('now') AS ts)
-               INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, models_meta, created_at, updated_at)
+               INSERT INTO bot_custom_providers (bot_id, provider_id, base_url, api, model_ids, models_meta, created_at, updated_at)
                SELECT ?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now)
                WHERE ${declarationGrowthAdmission()}
                  AND ${poolAdmission(CUSTOM_KEY_TABLE)}
-                 AND NOT EXISTS (SELECT 1 FROM app_custom_providers
-                                  WHERE app_id = ? AND provider_id = ? AND (base_url <> ? OR api <> ?))
-               ON CONFLICT (app_id, provider_id) DO UPDATE SET
+                 AND NOT EXISTS (SELECT 1 FROM bot_custom_providers
+                                  WHERE bot_id = ? AND provider_id = ? AND (base_url <> ? OR api <> ?))
+               ON CONFLICT (bot_id, provider_id) DO UPDATE SET
                  base_url = excluded.base_url,
                  api = excluded.api,
                  model_ids = excluded.model_ids,
@@ -2155,11 +2155,11 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         : db
             .prepare(
               `WITH now AS (SELECT datetime('now') AS ts)
-               UPDATE app_custom_providers SET base_url = ?, api = ?, model_ids = ?, models_meta = ?, updated_at = (SELECT ts FROM now)
-               WHERE app_id = ? AND provider_id = ?
+               UPDATE bot_custom_providers SET base_url = ?, api = ?, model_ids = ?, models_meta = ?, updated_at = (SELECT ts FROM now)
+               WHERE bot_id = ? AND provider_id = ?
                  AND ${poolAdmission(CUSTOM_KEY_TABLE)}
                  AND (base_url = ? AND api = ?
-                      OR NOT EXISTS (SELECT 1 FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?))`,
+                      OR NOT EXISTS (SELECT 1 FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?))`,
             )
             .bind(
               decl.base_url,
@@ -2210,8 +2210,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      */
     async removeCustomProvider(appId: string, providerId: string): Promise<boolean> {
       const res = await db.batch([
-        db.prepare(`DELETE FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?`).bind(appId, providerId),
-        db.prepare(`DELETE FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`).bind(appId, providerId),
+        db.prepare(`DELETE FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?`).bind(appId, providerId),
+        db.prepare(`DELETE FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?`).bind(appId, providerId),
       ]);
       return res[1]!.meta.changes > 0;
     },
@@ -2263,19 +2263,19 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         modelsMeta === undefined
           ? db
               .prepare(
-                `UPDATE app_custom_providers
+                `UPDATE bot_custom_providers
                     SET model_ids = ?,
                         models_meta = (SELECT COALESCE(json_group_object(entry.key, entry.value), '{}')
-                                         FROM json_each(app_custom_providers.models_meta) AS entry
+                                         FROM json_each(bot_custom_providers.models_meta) AS entry
                                         WHERE entry.key IN (SELECT value FROM json_each(?))),
                         updated_at = datetime('now')
-                  WHERE app_id = ? AND provider_id = ?`,
+                  WHERE bot_id = ? AND provider_id = ?`,
               )
               .bind(idsJson, idsJson, appId, providerId)
           : db
               .prepare(
-                `UPDATE app_custom_providers SET model_ids = ?, models_meta = ?, updated_at = datetime('now')
-                  WHERE app_id = ? AND provider_id = ?`,
+                `UPDATE bot_custom_providers SET model_ids = ?, models_meta = ?, updated_at = datetime('now')
+                  WHERE bot_id = ? AND provider_id = ?`,
               )
               .bind(idsJson, JSON.stringify(modelsMeta), appId, providerId);
       const res = await statement.run();
@@ -2292,7 +2292,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      */
     async getCustomProviderBaseUrl(appId: string, providerId: string): Promise<string | null> {
       const row = await db
-        .prepare(`SELECT base_url FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+        .prepare(`SELECT base_url FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?`)
         .bind(appId, providerId)
         .first<{ base_url: string }>();
       return row?.base_url ?? null;
@@ -2313,15 +2313,15 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       const res = await db
         .prepare(
           `SELECT d.*,
-                  EXISTS (SELECT 1 FROM app_custom_provider_keys k
-                           WHERE k.app_id = d.app_id AND k.provider = d.provider_id) AS has_keys
-             FROM app_custom_providers d WHERE d.app_id = ? ORDER BY d.provider_id ASC`,
+                  EXISTS (SELECT 1 FROM bot_custom_provider_keys k
+                           WHERE k.bot_id = d.bot_id AND k.provider = d.provider_id) AS has_keys
+             FROM bot_custom_providers d WHERE d.bot_id = ? ORDER BY d.provider_id ASC`,
         )
         .bind(appId)
         .all<AppCustomProviderRow & { has_keys: number }>();
       return res.results.map((row) => {
-        const modelIds = parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids");
-        const modelsMeta = parseModelsMetaJson(row.models_meta, modelIds, "app_custom_providers.models_meta");
+        const modelIds = parseModelIdsJson(row.model_ids, "bot_custom_providers.model_ids");
+        const modelsMeta = parseModelsMetaJson(row.models_meta, modelIds, "bot_custom_providers.models_meta");
         return {
           provider_id: row.provider_id,
           base_url: row.base_url,
@@ -2362,7 +2362,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * first: an undeclared provider id throws
      * InvalidCustomProviderError, because a key row without its declaration is
      * unreachable data and a silent orphan is worse than a loud refusal (the
-     * "an unknown app_id is a caller bug" convention). Bounds/cap contract
+     * "an unknown bot_id is a caller bug" convention). Bounds/cap contract
      * identical to addProviderKey. The declaration is never rewritten.
      *
      * `endpoint` is the `{base_url, api}` the key was VERIFIED against: the
@@ -2379,7 +2379,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       endpoint: { base_url: string; api: string },
     ): Promise<void> {
       const declared = await db
-        .prepare(`SELECT provider_id FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+        .prepare(`SELECT provider_id FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?`)
         .bind(appId, providerId)
         .first<{ provider_id: string }>();
       if (declared === null) {
@@ -2401,7 +2401,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       // Promote the pool FIRST — same 0024 sentinel reason as deleteProviderKey.
       await readKeyRows(CUSTOM_KEY_TABLE, appId, providerId);
       const res = await db
-        .prepare(`DELETE FROM app_custom_provider_keys WHERE app_id = ? AND provider = ? AND key_id = ?`)
+        .prepare(`DELETE FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ? AND key_id = ?`)
         .bind(appId, providerId, keyId)
         .run();
       return res.meta.changes > 0;
@@ -2410,7 +2410,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     /**
      * Decrypt the App's custom-provider declarations for the consumer
      * (the models-synthesis face): the getAppConfig analogue for
-     * app_custom_providers — every declaration plus its DECRYPTED key pool,
+     * bot_custom_providers — every declaration plus its DECRYPTED key pool,
      * provider_id-ascending and each pool in pool order (created_at, key_id).
      * The declaration and its key rows come from ONE statement (ONE snapshot),
      * so a concurrent remove + re-declaration at another endpoint can never
@@ -2426,10 +2426,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           `SELECT d.provider_id, d.base_url, d.api, d.model_ids, d.models_meta,
                   k.key_id, k.key_enc, k.created_at AS key_created_at, k.updated_at AS key_updated_at,
                   k.verified_at AS key_verified_at, k.verified_status AS key_verified_status
-             FROM app_custom_providers d
-             LEFT JOIN app_custom_provider_keys k
-               ON k.app_id = d.app_id AND k.provider = d.provider_id
-            WHERE d.app_id = ?
+             FROM bot_custom_providers d
+             LEFT JOIN bot_custom_provider_keys k
+               ON k.bot_id = d.bot_id AND k.provider = d.provider_id
+            WHERE d.bot_id = ?
             ORDER BY d.provider_id ASC`,
         )
         .bind(appId)
@@ -2438,8 +2438,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       for (const row of res.results) {
         let entry = pools.get(row.provider_id);
         if (entry === undefined) {
-          const modelIds = parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids");
-          const modelsMeta = parseModelsMetaJson(row.models_meta, modelIds, "app_custom_providers.models_meta");
+          const modelIds = parseModelIdsJson(row.model_ids, "bot_custom_providers.model_ids");
+          const modelsMeta = parseModelsMetaJson(row.models_meta, modelIds, "bot_custom_providers.models_meta");
           entry = {
             decl: {
               provider_id: row.provider_id,
@@ -2455,7 +2455,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         // A declaration with an empty pool carries no key columns (LEFT JOIN).
         if (row.key_id === null) continue;
         entry.keys.push({
-          app_id: appId,
+          bot_id: appId,
           provider: row.provider_id,
           key_id: row.key_id,
           key_enc: row.key_enc ?? "",

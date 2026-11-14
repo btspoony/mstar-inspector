@@ -426,7 +426,7 @@ export function manifestStartPage(
 /**
  * App summary confirm gate (spec § Multi-App 契约 — the manifest
  * overwrite-confirm semantics are GONE: nothing shared is overwritten, the
- * commit writes a NEW github_apps row). Single column, read-only summary
+ * commit writes a NEW review_bots row). Single column, read-only summary
  * (name, numeric id, GitHub slug, webhook URL), amber note, primary submit.
  * PEM / webhook_secret NEVER appear here.
  */

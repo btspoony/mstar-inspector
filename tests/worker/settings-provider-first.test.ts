@@ -4,7 +4,7 @@
  */
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { createMigratedTestD1, seedDefaultMemberships } from "../store/helpers";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import {
   MAX_KEYS_PER_PROVIDER,
@@ -58,7 +58,7 @@ async function seededWorld() {
   seedDefaultMemberships(db, { octocat: "owner", mallory: "owner", hubot: "member" });
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
-  const app = await createAppsStore(db).createApp({
+  const app = await createReviewBotsStore(db).createApp({
     id,
     githubSlug: "mallorys-app",
     githubAppId: APP_ID,
@@ -211,8 +211,8 @@ describe("POST /dashboard/api/apps/:appId/keys/verify", () => {
     const body = await res.json();
     expect(body).toEqual({ ok: false, reason: "invalid_key" });
     expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_models").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_models").get() as { n: number }).toEqual({ n: 0 });
   });
 
   test("network reject → 400 unreachable, nothing stored", async () => {
@@ -223,7 +223,7 @@ describe("POST /dashboard/api/apps/:appId/keys/verify", () => {
     const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: PLAIN_KEY });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ ok: false, reason: "unreachable" });
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).toEqual({ n: 0 });
   });
 
   test("success stores via saveVerifiedKey and returns verified models, never the key", async () => {
@@ -254,7 +254,7 @@ describe("POST /dashboard/api/apps/:appId/keys/verify", () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ ok: false, reason: "unsupported_provider" });
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).toEqual({ n: 0 });
   });
 
   // A `template`-tier or custom id is not a builtin: its key is verified
@@ -291,7 +291,7 @@ describe("POST /dashboard/api/apps/:appId/keys/verify", () => {
       // The endpoint the declaration owns decides where the probe goes — and
       // the declaration paths never carried the omp-runtime precheck.
       db.raw
-        .prepare("UPDATE github_apps SET sandbox_image_id = 'legacy-runtime' WHERE id = ?")
+        .prepare("UPDATE review_bots SET sandbox_image_id = 'legacy-runtime' WHERE id = ?")
         .run(app.id);
       fetchSpy = mockStatus(200, {});
       const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: decl.provider_id, key: PLAIN_KEY });
@@ -300,8 +300,8 @@ describe("POST /dashboard/api/apps/:appId/keys/verify", () => {
       const probe = fetchSpy.mock.calls[0] as [string, RequestInit];
       expect(probe[0].startsWith(decl.base_url)).toBe(true);
       // Exactly one new row in the declaration's pool, none in the builtin pool.
-      expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_provider_keys").get() as { n: number }).toEqual({ n: 1 });
-      expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_provider_keys").get() as { n: number }).toEqual({ n: 1 });
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).toEqual({ n: 0 });
       // The declaration is only READ: base_url / api / model_ids are unchanged.
       expect(await store.listCustomProviders(app.id)).toEqual([{ ...decl, has_keys: true }]);
     });
@@ -313,7 +313,7 @@ describe("POST /dashboard/api/apps/:appId/keys/verify", () => {
     const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: CUSTOM_DECL.provider_id, key: PLAIN_KEY });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ ok: false, reason: "invalid_key" });
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_provider_keys").get() as { n: number }).toEqual({ n: 0 });
     expect((await store.listCustomProviders(app.id)).map((row) => row.has_keys)).toEqual([false]);
   });
 
@@ -460,7 +460,7 @@ describe("POST save-chain / save-roles membership", () => {
     expect(probe.status).toBe(200);
   });
 
-  test("custom provider membership uses declared model_ids, not app_provider_models", async () => {
+  test("custom provider membership uses declared model_ids, not bot_provider_models", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
     await store.upsertCustomProvider(
@@ -522,7 +522,7 @@ describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
     const ok = await postForm(SETTINGS, "mallory", env, { op: "save-sandbox-image", sandbox_image_id: "omp" });
     expect(ok.status).toBe(200);
     expect(await ok.text()).toContain("Saved the omp runtime harness");
-    expect(db.raw.query("SELECT sandbox_image_id FROM github_apps WHERE id = ?").get(app.id)).toEqual({
+    expect(db.raw.query("SELECT sandbox_image_id FROM review_bots WHERE id = ?").get(app.id)).toEqual({
       sandbox_image_id: "omp",
     });
     // The JSON face (not the SPA page path) reflects the saved selection.
@@ -548,7 +548,7 @@ describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
       expect(await res.text()).toContain("Unknown or disabled runtime harness");
     }
     // The refusals store nothing: the row keeps the migration default.
-    expect(db.raw.query("SELECT sandbox_image_id FROM github_apps WHERE id = ?").get(app.id)).toEqual({
+    expect(db.raw.query("SELECT sandbox_image_id FROM review_bots WHERE id = ?").get(app.id)).toEqual({
       sandbox_image_id: "omp",
     });
   });
@@ -560,7 +560,7 @@ describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
       sandbox_image_id: "omp",
     });
     expect(res.status).toBe(403);
-    expect(db.raw.query("SELECT sandbox_image_id FROM github_apps WHERE id = ?").get(app.id)).toEqual({
+    expect(db.raw.query("SELECT sandbox_image_id FROM review_bots WHERE id = ?").get(app.id)).toEqual({
       sandbox_image_id: "omp",
     });
   });
@@ -585,8 +585,8 @@ describe("POST /dashboard/apps/:appId/settings — pinned add-key / add-custom-p
     const body = await res.text();
     expect(body).toContain("rejected by the provider");
     expect(body).not.toContain(PLAIN_KEY);
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_models").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_models").get() as { n: number }).toEqual({ n: 0 });
   });
 
   test("add-key success still stores via saveVerifiedKey", async () => {
@@ -627,7 +627,7 @@ describe("POST /dashboard/apps/:appId/settings — pinned add-key / add-custom-p
       message: "This provider can't be verified here — manage the key in the provider console. Nothing was stored.",
     });
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).toEqual({ n: 0 });
   });
 
   test("add-custom-provider 401 from the provider → 400, zero rows stored", async () => {
@@ -645,7 +645,7 @@ describe("POST /dashboard/apps/:appId/settings — pinned add-key / add-custom-p
     const body = await res.text();
     expect(body).toContain("rejected by the provider");
     expect(body).not.toContain(PLAIN_KEY);
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
 });
 
@@ -670,7 +670,7 @@ describe("Server-side eligibility precheck (fail-closed)", () => {
     // No second registry entry exists today, so the only representable
     // non-omp state is a row pinned outside the registry — the fail-closed
     // unknown-id branch the precheck must cover (store-validated in prod).
-    rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_bots SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
       throw new Error("fetch must not be called for an ineligible App");
     }) as unknown as typeof fetch);
@@ -688,12 +688,12 @@ describe("Server-side eligibility precheck (fail-closed)", () => {
       params: { provider: "anthropic", image: "legacy-runtime" },
     });
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).toEqual({ n: 0 });
   });
 
   test("verify: omp selected image → precheck passes, existing verify-first flow stores the key", async () => {
     const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'omp' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_bots SET sandbox_image_id = 'omp' WHERE id = ?", app.id);
     fetchSpy = mockModelsOk(["claude-sonnet-4-6"]);
     const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: PLAIN_KEY });
     expect(res.status).toBe(200);
@@ -708,7 +708,7 @@ describe("Server-side eligibility precheck (fail-closed)", () => {
 
   test("add-key: non-omp selected image → 400 plain text naming provider + image, nothing stored", async () => {
     const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_bots SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
       throw new Error("fetch must not be called for an ineligible App");
     }) as unknown as typeof fetch);
@@ -724,12 +724,12 @@ describe("Server-side eligibility precheck (fail-closed)", () => {
     expect(body).toContain("nothing was stored");
     expect(body).not.toContain(PLAIN_KEY);
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).toEqual({ n: 0 });
   });
 
   test("add-key: omp selected image → precheck passes, existing flow stores the key", async () => {
     const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'omp' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_bots SET sandbox_image_id = 'omp' WHERE id = ?", app.id);
     fetchSpy = mockModelsOk(["claude-sonnet-4-6"]);
     const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
       op: "add-key",
@@ -796,7 +796,7 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
     const body = await res.text();
     expect(body).toContain("rejected by the provider");
     expect(body).not.toContain(PLAIN_KEY);
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
 
   test("malformed account id → 400 before any network call, zero rows stored", async () => {
@@ -813,7 +813,7 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("32 hex characters");
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
 
   test("unknown template id → 400, zero rows stored", async () => {
@@ -830,7 +830,7 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("Unknown provider template");
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
 
   test("non-creator member → 403 (creator-or-admin gate, spec §2)", async () => {
@@ -843,7 +843,7 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
       key: PLAIN_KEY,
     });
     expect(res.status).toBe(403);
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
 
   // --- breadth generalization (spec § Providers contract 1b) ---
@@ -913,7 +913,7 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("not a valid https URL");
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
 
   test("a template with a null catalog base URL and no override → 400 incomplete, zero rows stored", async () => {
@@ -932,7 +932,7 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("incomplete");
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
 
   test("an {account_id}-templated override demands the account id (conditional demand follows the effective base URL)", async () => {
@@ -949,7 +949,7 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("account id");
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
 });
 
@@ -1133,7 +1133,7 @@ describe("GET settings configured_providers vs provider_catalog", () => {
       verified_status: "reachable",
     });
     const keyRow = db.raw
-      .query("SELECT verified_status FROM app_custom_provider_keys WHERE provider = 'commandcode'")
+      .query("SELECT verified_status FROM bot_custom_provider_keys WHERE provider = 'commandcode'")
       .get() as { verified_status: string | null };
     expect(keyRow.verified_status).toBe("reachable");
   });
@@ -1459,7 +1459,7 @@ describe("multi-key provider pools (routes)", () => {
     // branch's promise ("nothing changed") must cover that evidence too.
     await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
     const cacheRows = () =>
-      (db.raw.query("SELECT COUNT(*) AS n FROM app_provider_models WHERE app_id = ?").get(app.id) as { n: number }).n;
+      (db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_models WHERE bot_id = ?").get(app.id) as { n: number }).n;
     expect(cacheRows()).toBe(1);
     const env = makeEnv(db);
     const unmatched = await postForm(SETTINGS + "/key/delete", "mallory", env, {
@@ -1588,7 +1588,7 @@ describe("multi-key provider pools (routes)", () => {
     const addedBody = (await added.json()) as { key: string; params: Record<string, string | number> };
     expect(addedBody.key).toBe("settings.error.providerKeyLimit");
     expect(addedBody.params).toEqual({ provider: "anthropic", limit: MAX_KEYS_PER_PROVIDER });
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).toEqual({
       n: MAX_KEYS_PER_PROVIDER,
     });
     // Neither refusal moved an existing row: the pool is byte-identical.

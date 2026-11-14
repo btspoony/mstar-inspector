@@ -1,5 +1,5 @@
 /**
- * D1 store for `github_apps` / `app_installations` — the
+ * D1 store for `review_bots` / `bot_installations` — the
  * ONE write authority for multi-App rows. Spec
  * dashboard-multi-app-platform § Data model; migrations 0004/0005 are the
  * DDL single sources.
@@ -133,7 +133,7 @@
  *     The manifest flow mints that id at start, so the webhook URL is known
  *     before GitHub creates the App.
  *   - UNIQUE / FK violations throw (fail-loud): duplicate github_app_id or
- *     (app_id, installation_id) pairs, and unknown app references are
+ *     (bot_id, installation_id) pairs, and unknown app references are
  *     caller-visible errors, never swallowed.
  */
 import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
@@ -144,7 +144,7 @@ import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-seve
 import { getSandboxImage } from "../contracts/sandbox-images";
 import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
 
-/** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
+/** A row of `review_bots` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
   /**
    * The local App UID — also the webhook URL's app segment
@@ -261,7 +261,7 @@ export type GithubAppRow = {
 export type GithubAppStatus = "active" | "disabled";
 
 /**
- * An execution-facing App row: the two resolutions INNER JOIN `app_workspaces`,
+ * An execution-facing App row: the two resolutions INNER JOIN `bot_workspaces`,
  * so `workspace_id` is present by construction. Typing it here (instead of at
  * the call sites with `!`) keeps the invariant where SQL enforces it — a future
  * LEFT JOIN breaks the read's type rather than binding `undefined`.
@@ -440,7 +440,7 @@ export type GithubAppMetadataInput = {
 };
 
 /**
- * An `app_installations` row as the settings health panel reads it
+ * A `bot_installations` row as the settings health panel reads it
  * (DDL = migration 0004). The `id` PK is deliberately not projected —
  * the panel keys installations by installation_id.
  */
@@ -547,7 +547,7 @@ const PULL_REQUEST_REPO_PREDICATE = " AND owner = ? AND repo = ?";
  */
 function pullRequestWindowSql(repoPredicate: string): string {
   return `SELECT owner, repo, pr_number FROM pull_requests
-  WHERE app_id = ?${repoPredicate}
+  WHERE bot_id = ?${repoPredicate}
   ORDER BY ${PULL_REQUEST_LEDGER_ORDER} LIMIT ?`;
 }
 
@@ -558,7 +558,7 @@ function pullRequestWindowSql(repoPredicate: string): string {
  * batch, and `null` (the route's 404) means "this App never received it".
  */
 const PULL_REQUEST_EXISTS_SQL = `SELECT 1 AS found FROM pull_requests
-  WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? LIMIT 1`;
+  WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? LIMIT 1`;
 
 /**
  * Slice to `max` UTF-16 units without leaving half a surrogate pair behind
@@ -596,7 +596,7 @@ export type RecordDeliveryInput = {
 /** A row of `webhook_deliveries` (D1 column names, snake_case; migration 0011). */
 export type WebhookDeliveryRow = {
   id: string;
-  app_id: string;
+  bot_id: string;
   event_name: string | null;
   outcome: DeliveryOutcome;
   status_code: number | null;
@@ -712,7 +712,7 @@ function countOf(result: AppsStoreBatchResult): number {
 
 /**
  * Tenant read face (migration 0026) — there is exactly one. Every
- * execution-facing App read INNER JOINs `app_workspaces`, so an App with no
+ * execution-facing App read INNER JOINs `bot_workspaces`, so an App with no
  * workspace mapping is invisible to every face; the two resolution reads also
  * require the workspace itself to be live, so a soft-deleted tenant is
  * unresolvable and can never start a review.
@@ -726,10 +726,10 @@ function countOf(result: AppsStoreBatchResult): number {
  * must not hide its Apps from operators.
  */
 export const APP_READ_SQL = {
-  getAppById: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
-  getAppForWebhook: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
-  getAppByGithubId: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
-  listApps: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
+  getAppById: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
+  getAppForWebhook: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
+  getAppByGithubId: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
+  listApps: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
 
 /**
@@ -750,21 +750,21 @@ const UPSERT_INSTALLATION_SQL = {
   // clears a removal stamp: a reinstall (`installation.created`) makes the row
   // visible again. An INFERRED login is ordinary review traffic and says
   // nothing about install state, so it never clears the stamp.
-  authoritative: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+  authoritative: `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
     VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
-    ON CONFLICT (app_id, installation_id) DO UPDATE SET
+    ON CONFLICT (bot_id, installation_id) DO UPDATE SET
       account_login = COALESCE(excluded.account_login, account_login),
       seen_at = strftime('%Y-%m-%d %H:%M:%f','now'),
       removed_at = NULL`,
-  inferred: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+  inferred: `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
     VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
-    ON CONFLICT (app_id, installation_id) DO UPDATE SET
+    ON CONFLICT (bot_id, installation_id) DO UPDATE SET
       account_login = COALESCE(account_login, excluded.account_login),
       seen_at = strftime('%Y-%m-%d %H:%M:%f','now')`,
 } as const;
 
-/** Create the github_apps / app_installations store over one D1 handle. */
-export function createAppsStore(db: AppsStoreD1) {
+/** Create the review_bots / bot_installations store over one D1 handle. */
+export function createReviewBotsStore(db: AppsStoreD1) {
   /**
    * Bounded ledger retention (migration 0039). Terminal rows only: an open PR
    * is still a review target however stale its clock, so `state` gates the
@@ -827,35 +827,35 @@ export function createAppsStore(db: AppsStoreD1) {
     const [latestRes, rejectedRes] = await Promise.all([
       db
         .prepare(
-          `SELECT app_id, id, event_name, outcome, status_code, repository_full_name, created_at FROM (
-             SELECT *, ROW_NUMBER() OVER (PARTITION BY app_id
+          `SELECT bot_id, id, event_name, outcome, status_code, repository_full_name, created_at FROM (
+             SELECT *, ROW_NUMBER() OVER (PARTITION BY bot_id
                ORDER BY ${DELIVERY_VERDICT_TIER_SQL},
                         created_at DESC, rowid DESC) AS rn
-             FROM webhook_deliveries WHERE app_id IN (${placeholders})
+             FROM webhook_deliveries WHERE bot_id IN (${placeholders})
            ) WHERE rn = 1`,
         )
         .bind(...appIds)
         .all<WebhookDeliveryRow>(),
       db
         .prepare(
-          `SELECT app_id, COUNT(*) AS n FROM webhook_deliveries
-           WHERE app_id IN (${placeholders}) AND outcome = 'rejected'
+          `SELECT bot_id, COUNT(*) AS n FROM webhook_deliveries
+           WHERE bot_id IN (${placeholders}) AND outcome = 'rejected'
              AND created_at > datetime('now', '-24 hours')
-           GROUP BY app_id`,
+           GROUP BY bot_id`,
         )
         .bind(...appIds)
-        .all<{ app_id: string; n: number }>(),
+        .all<{ bot_id: string; n: number }>(),
     ]);
     const byApp: Record<string, DeliverySummary> = {};
     for (const appId of appIds) {
       byApp[appId] = { latest: null, rejected24h: 0 };
     }
     for (const row of latestRes.results) {
-      const entry = byApp[row.app_id];
+      const entry = byApp[row.bot_id];
       if (entry) entry.latest = row;
     }
     for (const row of rejectedRes.results) {
-      const entry = byApp[row.app_id];
+      const entry = byApp[row.bot_id];
       if (entry) entry.rejected24h = row.n;
     }
     return byApp;
@@ -883,7 +883,7 @@ export function createAppsStore(db: AppsStoreD1) {
         .prepare(
           `SELECT r.owner, r.repo, r.pr_number, r.head_sha, r.acquired_at
            FROM review_inflight r
-           JOIN app_installations i ON i.installation_id = r.installation_id AND i.app_id = ?
+           JOIN bot_installations i ON i.installation_id = r.installation_id AND i.bot_id = ?
            WHERE r.expires_at > ?`,
         )
         .bind(appId, new Date().toISOString())
@@ -899,7 +899,7 @@ export function createAppsStore(db: AppsStoreD1) {
     /**
      * Insert a new active app row (status 'active', deleted_at NULL) with
      * the CALLER-SUPPLIED id as the row PK (review pin — the caller's
-     * secretbox AAD rowKey is this id), plus its `app_workspaces` mapping to
+     * secretbox AAD rowKey is this id), plus its `bot_workspaces` mapping to
      * the REQUIRED `input.workspaceId`. Ownership is never discovered: the
      * named workspace must still be live, and a dead target refuses the write
      * with zero rows. The two inserts are ONE batch transaction, so an App
@@ -929,7 +929,7 @@ export function createAppsStore(db: AppsStoreD1) {
       await db.batch([
         db
           .prepare(
-            `INSERT INTO github_apps
+            `INSERT INTO review_bots
                (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
                 check_min_score, created_by, status, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
@@ -947,10 +947,10 @@ export function createAppsStore(db: AppsStoreD1) {
             input.createdBy,
           ),
         db
-          .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)`)
+          .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)`)
           .bind(id, input.workspaceId),
       ]);
-      const row = await db.prepare(`SELECT * FROM github_apps WHERE id = ?`).bind(id).first<GithubAppRow>();
+      const row = await db.prepare(`SELECT * FROM review_bots WHERE id = ?`).bind(id).first<GithubAppRow>();
       if (!row) {
         throw new Error("apps-store: createApp row vanished on read-back");
       }
@@ -1004,7 +1004,7 @@ export function createAppsStore(db: AppsStoreD1) {
      */
     async getSandboxImageId(appId: string): Promise<string | null> {
       const row = await db
-        .prepare(`SELECT sandbox_image_id FROM github_apps WHERE id = ?`)
+        .prepare(`SELECT sandbox_image_id FROM review_bots WHERE id = ?`)
         .bind(appId)
         .first<{ sandbox_image_id: string }>();
       return row?.sandbox_image_id ?? null;
@@ -1027,7 +1027,7 @@ export function createAppsStore(db: AppsStoreD1) {
      */
     async getCheckGate(appId: string): Promise<CheckGate | null> {
       const row = await db
-        .prepare(`SELECT check_min_score, check_pass_verdicts FROM github_apps WHERE id = ?`)
+        .prepare(`SELECT check_min_score, check_pass_verdicts FROM review_bots WHERE id = ?`)
         .bind(appId)
         .first<{ check_min_score: number; check_pass_verdicts: string }>();
       if (!row) return null;
@@ -1049,7 +1049,7 @@ export function createAppsStore(db: AppsStoreD1) {
       const rows = await db
         .prepare(
           `SELECT g.allowlist_enabled AS enabled, a.owner_login
-             FROM github_apps g
+             FROM review_bots g
              LEFT JOIN app_owner_allowlist a ON a.app_id = g.id
             WHERE g.id = ?
             ORDER BY a.owner_login`,
@@ -1071,7 +1071,7 @@ export function createAppsStore(db: AppsStoreD1) {
      */
     async getGithubVisibility(appId: string): Promise<GithubVisibility | null> {
       const row = await db
-        .prepare(`SELECT github_visibility FROM github_apps WHERE id = ?`)
+        .prepare(`SELECT github_visibility FROM review_bots WHERE id = ?`)
         .bind(appId)
         .first<{ github_visibility: GithubVisibility | null }>();
       if (!row) return null;
@@ -1086,7 +1086,7 @@ export function createAppsStore(db: AppsStoreD1) {
     async setAppStatus(id: string, status: GithubAppStatus): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE github_apps SET status = ?, updated_at = datetime('now')
+          `UPDATE review_bots SET status = ?, updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(status, id)
@@ -1105,7 +1105,7 @@ export function createAppsStore(db: AppsStoreD1) {
     async setReviewEnabled(id: string, enabled: boolean): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE github_apps SET review_enabled = ?, updated_at = datetime('now')
+          `UPDATE review_bots SET review_enabled = ?, updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(enabled ? 1 : 0, id)
@@ -1132,7 +1132,7 @@ export function createAppsStore(db: AppsStoreD1) {
       }
       const res = await db
         .prepare(
-          `UPDATE github_apps SET review_trigger_mode = ?, updated_at = datetime('now')
+          `UPDATE review_bots SET review_trigger_mode = ?, updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(mode, id)
@@ -1159,7 +1159,7 @@ export function createAppsStore(db: AppsStoreD1) {
       }
       const res = await db
         .prepare(
-          `UPDATE github_apps SET review_level = ?, updated_at = datetime('now')
+          `UPDATE review_bots SET review_level = ?, updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(level, id)
@@ -1193,7 +1193,7 @@ export function createAppsStore(db: AppsStoreD1) {
       }
       const res = await db
         .prepare(
-          `UPDATE github_apps
+          `UPDATE review_bots
            SET check_min_score = ?, check_pass_verdicts = ?, updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
@@ -1231,7 +1231,7 @@ export function createAppsStore(db: AppsStoreD1) {
         );
       }
       const live = await db
-        .prepare(`SELECT id FROM github_apps WHERE id = ? AND deleted_at IS NULL`)
+        .prepare(`SELECT id FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
         .bind(id)
         .first<{ id: string }>();
       if (!live) return false;
@@ -1242,7 +1242,7 @@ export function createAppsStore(db: AppsStoreD1) {
       // replace is not atomic — a failed later chunk leaves a partial owner
       // set. The statement count (ALLOWLIST_MAX_OWNERS + 2) stays below any
       // observed D1 batch limit.
-      const liveApp = `EXISTS (SELECT 1 FROM github_apps g WHERE g.id = ? AND g.deleted_at IS NULL)`;
+      const liveApp = `EXISTS (SELECT 1 FROM review_bots g WHERE g.id = ? AND g.deleted_at IS NULL)`;
       const results = await db.batch([
         db.prepare(`DELETE FROM app_owner_allowlist WHERE app_id = ? AND ${liveApp}`).bind(id, id),
         ...owners.map((owner) =>
@@ -1255,7 +1255,7 @@ export function createAppsStore(db: AppsStoreD1) {
         ),
         db
           .prepare(
-            `UPDATE github_apps SET allowlist_enabled = ?, updated_at = datetime('now')
+            `UPDATE review_bots SET allowlist_enabled = ?, updated_at = datetime('now')
              WHERE id = ? AND deleted_at IS NULL`,
           )
           .bind(allowlist.enabled ? 1 : 0, id),
@@ -1275,7 +1275,7 @@ export function createAppsStore(db: AppsStoreD1) {
     async saveGithubVisibility(id: string, visibility: GithubVisibility): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE github_apps SET github_visibility = ?
+          `UPDATE review_bots SET github_visibility = ?
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(visibility, id)
@@ -1303,7 +1303,7 @@ export function createAppsStore(db: AppsStoreD1) {
       }
       const res = await db
         .prepare(
-          `UPDATE github_apps SET sandbox_image_id = ?, updated_at = datetime('now')
+          `UPDATE review_bots SET sandbox_image_id = ?, updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(image.id, id)
@@ -1319,7 +1319,7 @@ export function createAppsStore(db: AppsStoreD1) {
     async softDeleteApp(id: string): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE github_apps SET deleted_at = datetime('now'), updated_at = datetime('now')
+          `UPDATE review_bots SET deleted_at = datetime('now'), updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(id)
@@ -1337,7 +1337,7 @@ export function createAppsStore(db: AppsStoreD1) {
      */
     async touchLastWebhook(id: string): Promise<void> {
       await db
-        .prepare(`UPDATE github_apps SET last_webhook_at = datetime('now') WHERE id = ?`)
+        .prepare(`UPDATE review_bots SET last_webhook_at = datetime('now') WHERE id = ?`)
         .bind(id)
         .run();
     },
@@ -1361,7 +1361,7 @@ export function createAppsStore(db: AppsStoreD1) {
     async saveGithubMetadata(id: string, metadata: GithubAppMetadataInput): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE github_apps
+          `UPDATE review_bots
            SET github_name = ?, github_description = ?, github_html_url = ?,
                github_avatar_url = ?, github_slug = COALESCE(?, github_slug),
                github_metadata_synced_at = datetime('now')
@@ -1392,7 +1392,7 @@ export function createAppsStore(db: AppsStoreD1) {
     async touchGithubMetadataAttempt(id: string): Promise<void> {
       await db
         .prepare(
-          `UPDATE github_apps SET github_metadata_attempted_at = datetime('now')
+          `UPDATE review_bots SET github_metadata_attempted_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(id)
@@ -1422,8 +1422,8 @@ export function createAppsStore(db: AppsStoreD1) {
     async listInstallations(appId: string): Promise<AppInstallationRow[]> {
       const res = await db
         .prepare(
-          `SELECT installation_id, account_login, seen_at FROM app_installations
-           WHERE app_id = ? AND removed_at IS NULL ORDER BY seen_at DESC, installation_id`,
+          `SELECT installation_id, account_login, seen_at FROM bot_installations
+           WHERE bot_id = ? AND removed_at IS NULL ORDER BY seen_at DESC, installation_id`,
         )
         .bind(appId)
         .all<AppInstallationRow>();
@@ -1454,7 +1454,7 @@ export function createAppsStore(db: AppsStoreD1) {
     /**
      * Stamp one installation row as removed (`installation.deleted`). The row
      * SURVIVES — the credential-routing and failure-attribution joins read
-     * `app_installations`, and the installation's historical reviews still
+     * `bot_installations`, and the installation's historical reviews still
      * reference it. An unknown pair is a silent no-op: the delivery may
      * predate any local row, and refusing it would change the webhook answer.
      *
@@ -1470,8 +1470,8 @@ export function createAppsStore(db: AppsStoreD1) {
     async markInstallationRemoved(appId: string, installationId: number): Promise<void> {
       await db
         .prepare(
-          `UPDATE app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
-           WHERE app_id = ? AND installation_id = ?`,
+          `UPDATE bot_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
+           WHERE bot_id = ? AND installation_id = ?`,
         )
         .bind(appId, installationId)
         .run();
@@ -1525,8 +1525,8 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `WITH snapshot(body) AS (SELECT ?)
-             UPDATE app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
-             WHERE app_id = ?
+             UPDATE bot_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
+             WHERE bot_id = ?
                AND removed_at IS NULL
                AND seen_at <= (SELECT json_extract(body, '$.observedAt') FROM snapshot)
                AND installation_id NOT IN (
@@ -1537,8 +1537,8 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `WITH snapshot(body) AS (SELECT ?)
-             UPDATE app_installations SET removed_at = NULL
-             WHERE app_id = ?
+             UPDATE bot_installations SET removed_at = NULL
+             WHERE bot_id = ?
                AND removed_at IS NOT NULL
                AND removed_at < (SELECT json_extract(body, '$.observedAt') FROM snapshot)
                AND installation_id IN (
@@ -1576,7 +1576,7 @@ export function createAppsStore(db: AppsStoreD1) {
           : truncateBounded(input.repositoryFullName, REPOSITORY_FULL_NAME_MAX_LENGTH);
       await db
         .prepare(
-          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name)
+          `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name)
            VALUES (?, ?, ?, ?, ?, ?)`,
         )
         .bind(
@@ -1629,7 +1629,7 @@ export function createAppsStore(db: AppsStoreD1) {
       const res = await db
         .prepare(
           `SELECT * FROM webhook_deliveries
-           WHERE app_id = ?
+           WHERE bot_id = ?
            ORDER BY ${DELIVERY_VERDICT_TIER_SQL}, created_at DESC, rowid DESC
            LIMIT ?`,
         )
@@ -1640,7 +1640,7 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * Record one VERIFIED `pull_request` delivery (migration 0039) —
-     * idempotent on the UNIQUE (app_id, owner, repo, pr_number) tuple: a PR
+     * idempotent on the UNIQUE (bot_id, owner, repo, pr_number) tuple: a PR
      * that arrives several times (opened, synchronize, closed, …) keeps ONE
      * row and `title` / `state` / `head_sha` refresh only when the caller
      * supplies them (a payload that omits a field keeps the last known value
@@ -1696,9 +1696,9 @@ export function createAppsStore(db: AppsStoreD1) {
       await db
         .prepare(
           `INSERT INTO pull_requests
-             (id, app_id, owner, repo, pr_number, title, state, head_sha, head_at, last_seen_at)
+             (id, bot_id, owner, repo, pr_number, title, state, head_sha, head_at, last_seen_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?), datetime('now')))
-           ON CONFLICT (app_id, owner, repo, pr_number) DO UPDATE SET
+           ON CONFLICT (bot_id, owner, repo, pr_number) DO UPDATE SET
              title = COALESCE(excluded.title, title),
              state = CASE
                WHEN pull_requests.state = 'merged' THEN 'merged'
@@ -1753,7 +1753,7 @@ export function createAppsStore(db: AppsStoreD1) {
       const row = await db
         .prepare(
           `SELECT head_sha, head_at FROM pull_requests
-           WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+           WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
         )
         .bind(input.appId, input.owner, input.repo, input.prNumber)
         .first<{ head_sha: string | null; head_at: string | null }>();
@@ -1766,7 +1766,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * row's D11 reviewing projection. FIVE statements per call regardless of
      * N — the rows, the newest review per (owner, repo, pr_number) via a
      * ROW_NUMBER() window (the deliverySummaries shape), the failure count
-     * joined through `app_installations`, the option set, and the App's live
+     * joined through `bot_installations`, the option set, and the App's live
      * review locks (`liveReviewLocks`) — never one query per row, and never a
      * second round trip for any of them (the lock read is issued beside the
      * batch, not after it).
@@ -1796,7 +1796,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * rides the same batch — and binds only `appId` — so opening the list is
      * one round trip, not two.
      *
-     * Failure attribution assumes ONE installation per App. `app_installations`
+     * Failure attribution assumes ONE installation per App. `bot_installations`
      * permits the same installation id under two App rows, and in that case a
      * failure row would count toward both — accepted, because the alternative
      * (a constraint) would refuse a legitimate re-install shape, and a
@@ -1818,7 +1818,7 @@ export function createAppsStore(db: AppsStoreD1) {
     ): Promise<{ rows: PullRequestRow[]; repos: string[] }> {
       // One binding list per window scope: the App, then the repository when
       // the caller filtered. The row statement takes it once before the limit;
-      // each aggregate takes its own app_id first, then that same list for the
+      // each aggregate takes its own bot_id first, then that same list for the
       // window subquery, then the limit — the order each SQL splices its `?` in.
       const scope = filter === undefined ? [appId] : [appId, filter.owner, filter.repo];
       // ONE suffix feeds the row statement and the window, so a change to the
@@ -1833,7 +1833,7 @@ export function createAppsStore(db: AppsStoreD1) {
           db
             .prepare(
               `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-               FROM pull_requests WHERE app_id = ?${repoPredicate}
+               FROM pull_requests WHERE bot_id = ?${repoPredicate}
                ORDER BY ${PULL_REQUEST_LEDGER_ORDER}
                LIMIT ?`,
             )
@@ -1845,7 +1845,7 @@ export function createAppsStore(db: AppsStoreD1) {
                         ROW_NUMBER() OVER (PARTITION BY owner, repo, pr_number
                           ORDER BY reviewed_at DESC, rowid DESC) AS rn
                  FROM reviews
-                 WHERE app_id = ?
+                 WHERE bot_id = ?
                    AND (owner, repo, pr_number) IN (${window})
                ) WHERE rn = 1`,
             )
@@ -1854,7 +1854,7 @@ export function createAppsStore(db: AppsStoreD1) {
             .prepare(
               `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
                FROM review_failures f
-               JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+               JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
                WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                  AND (f.owner, f.repo, f.pr_number) IN (${window})
                GROUP BY f.owner, f.repo, f.pr_number`,
@@ -1862,7 +1862,7 @@ export function createAppsStore(db: AppsStoreD1) {
             .bind(appId, ...scope, PULL_REQUEST_LIST_LIMIT),
           db
             .prepare(
-              `SELECT DISTINCT owner, repo FROM pull_requests WHERE app_id = ?
+              `SELECT DISTINCT owner, repo FROM pull_requests WHERE bot_id = ?
                ORDER BY owner, repo`,
             )
             .bind(appId),
@@ -1884,7 +1884,7 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * ONE pull request's head row — the detail face's first read. The address
-     * is the ledger's OWN key (app_id, owner, repo, pr_number): one App can be
+     * is the ledger's OWN key (bot_id, owner, repo, pr_number): one bot can be
      * installed on several repos, and a number is only unique WITHIN a repo,
      * so a number-only lookup would answer with a different repo's PR. A miss
      * is `null` — never a same-number row from another repo.
@@ -1908,13 +1908,13 @@ export function createAppsStore(db: AppsStoreD1) {
           db
             .prepare(
               `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-               FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+               FROM pull_requests WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
             )
             .bind(appId, owner, repo, prNumber),
           db
             .prepare(
               `SELECT verdict, model, provider, reviewed_at, head_sha FROM reviews
-               WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+               WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ?
                ORDER BY reviewed_at DESC, rowid DESC LIMIT 1`,
             )
             .bind(appId, owner, repo, prNumber),
@@ -1960,19 +1960,19 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'`,
+             WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'`,
           )
           .bind(appId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM reviews
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+             WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
           )
           .bind(appId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_failures f
-             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
              WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
@@ -1980,7 +1980,7 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'
+             WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'
                AND json_extract(original_json, '$.mergeClass') = ?`,
           )
           .bind(appId, owner, repo, prNumber, MUST_FIX_SEVERITY),
@@ -2057,7 +2057,7 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings rf
-             WHERE rf.app_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}`,
+             WHERE rf.bot_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}`,
           )
           .bind(appId, owner, repo, prNumber, ...filterBinds),
         db
@@ -2070,7 +2070,7 @@ export function createAppsStore(db: AppsStoreD1) {
                     json_extract(rf.original_json, '$.body') AS body,
                     rf.first_seen_round AS review_round
              FROM review_findings rf
-             WHERE rf.app_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}
+             WHERE rf.bot_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}
              ORDER BY rf.rowid DESC
              LIMIT ? OFFSET ?`,
           )
@@ -2115,7 +2115,7 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM reviews
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+             WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
           )
           .bind(appId, owner, repo, prNumber),
         db
@@ -2132,7 +2132,7 @@ export function createAppsStore(db: AppsStoreD1) {
                             ROW_NUMBER() OVER (ORDER BY r.reviewed_at ASC, r.rowid ASC)
                           ) AS round
                    FROM reviews r
-                   WHERE r.app_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) x
+                   WHERE r.bot_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) x
              ORDER BY x.reviewed_at DESC, x.rid DESC
              LIMIT ? OFFSET ?`,
           )
@@ -2169,7 +2169,7 @@ export function createAppsStore(db: AppsStoreD1) {
           .prepare(
             `SELECT COUNT(*) AS n
              FROM review_failures f
-             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
              WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
@@ -2178,7 +2178,7 @@ export function createAppsStore(db: AppsStoreD1) {
           .prepare(
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
-             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
              WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC

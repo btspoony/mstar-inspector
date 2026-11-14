@@ -2,7 +2,7 @@
  * ArtifactStore adapter tests — `src/store/artifact-store.ts`
  * against the bun:sqlite test double running the real migration SQL
  * (0001 → 0005 via createMigratedTestD1 — the put INSERT binds
- * `reviews.app_id`, so the full production-shaped schema is required; DDL
+ * `reviews.bot_id`, so the full production-shaped schema is required; DDL
  * single sources).
  *
  * Acceptance points (brief T4 / spec mstar-review-v1-consumption):
@@ -10,7 +10,7 @@
  *     skill_version pinned, findings.severity = mergeClass (the single
  *     vocab-switch mapping point)
  * - per-App attribution (QC F-001; REQUIRED): the
- *     put doc's appId lands in reviews.app_id (FK-valid); an unknown appId
+ *     put doc's appId lands in reviews.bot_id (FK-valid); an unknown appId
  *     is FK-rejected with zero rows written; historical NULL rows (direct
  *     SQL) stay readable — the column stays nullable, zero DDL
  * - version records: a put carrying `model`/`provider`
@@ -83,7 +83,7 @@ function reviewDoc(overrides: Partial<ReviewArtifactDoc> = {}): ReviewArtifactDo
 function seedAppRow(db: ReturnType<typeof createMigratedTestD1>, id: string): void {
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, 1001, 'store-test-app', 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -263,30 +263,30 @@ describe("createArtifactStore().put", () => {
     expect(row.fingerprint).toBe(computeFindingFingerprint(finding));
   });
 
-  test("per-App put persists app_id; historical NULL rows stay NULL (appId required, zero DDL)", async () => {
+  test("per-App put persists bot_id; historical NULL rows stay NULL (appId required, zero DDL)", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     await store.put(reviewDoc());
 
-    const perApp = db.raw.query("SELECT app_id FROM reviews WHERE head_sha = ?").get(SHA) as {
-      app_id: string | null;
+    const perApp = db.raw.query("SELECT bot_id FROM reviews WHERE head_sha = ?").get(SHA) as {
+      bot_id: string | null;
     };
-    expect(perApp.app_id).toBe(TEST_APP_ID);
+    expect(perApp.bot_id).toBe(TEST_APP_ID);
     // Historical NULL semantics (pre-per-App rows) are preserved at the
     // column level: an unattributed put is now impossible at the type layer,
     // so the NULL row is asserted via a direct SQL insert (the column stays
     // nullable — zero DDL, AL-24-4).
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, bot_id)
          VALUES (?, 123, 'acme', 'widgets', 42, ?, 'needs fixes', 'historical', 'mstar.review/v1', NULL, NULL)`,
       )
       .run(crypto.randomUUID(), "f".repeat(40));
-    const legacy = db.raw.query("SELECT app_id FROM reviews WHERE head_sha = ?").get("f".repeat(40)) as {
-      app_id: string | null;
+    const legacy = db.raw.query("SELECT bot_id FROM reviews WHERE head_sha = ?").get("f".repeat(40)) as {
+      bot_id: string | null;
     };
-    expect(legacy.app_id).toBeNull();
+    expect(legacy.bot_id).toBeNull();
   });
 
   test("version records: a put carrying model/provider persists them; explicit nulls stay NULL", async () => {
@@ -376,11 +376,11 @@ describe("createArtifactStore().put", () => {
     expect(zeroed.duration_ms).toBe(0);
   });
 
-  test("an appId with no github_apps row is FK-rejected with zero rows written", async () => {
+  test("an appId with no review_bots row is FK-rejected with zero rows written", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
-    // The app_id FK (migration 0005) makes an unknown appId a loud batch
+    // The bot_id FK (migration 0005) makes an unknown appId a loud batch
     // failure — never a silently mis-attributed row (the batch rolls back).
     await expect(store.put(reviewDoc({ appId: "no-such-app" }))).rejects.toThrow(/FOREIGN KEY/);
 

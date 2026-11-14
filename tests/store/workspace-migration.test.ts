@@ -11,19 +11,23 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createMigratedTestD1, createTestD1 } from "./helpers";
+import { createMigratedTestD1, createTestD1, migrationsAfter } from "./helpers";
 import type { TestD1 } from "./helpers";
 import { deleteWorkspaceMember, signInDashboardUser } from "../../src/dashboard/users";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
-const APP_REPAIR = "0027_workspace_backfill.sql";
+const SCRIPTS_DIR = join(import.meta.dir, "../../scripts");
+/** The deploy replay: 0027's repair in the post-0056 names. */
+const APP_REPAIR = "workspace-backfill.sql";
+/** The historical form of the same repair, applied before the rename. */
+const HISTORICAL_APP_REPAIR = "0027_workspace_backfill.sql";
 const MEMBERSHIP_CUTOVER = "0030_workspace_membership_cutover.sql";
 /** The open-sign-in instant 0030 scopes on (see the migration header). */
 const CUTOVER = "2026-10-22T11:13:45.000Z";
 
-/** Apply a migration file as `wrangler d1 execute --file` would (verbatim). */
-function runFile(db: TestD1, name: string): void {
-  db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+/** Apply a SQL file as `wrangler d1 execute --file` would (verbatim). */
+function runFile(db: TestD1, name: string, dir = MIGRATIONS_DIR): void {
+  db.raw.exec(readFileSync(join(dir, name), "utf8"));
 }
 
 /**
@@ -65,10 +69,11 @@ function insertApp(
   slug: string,
   githubAppId: number,
   deletedAt: string | null = null,
+  parent = "review_bots",
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO github_apps (id, github_app_id, name, private_key_enc, webhook_secret_enc,
+      `INSERT INTO ${parent} (id, github_app_id, name, private_key_enc, webhook_secret_enc,
          created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'mallory', 'active', ?, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
     )
@@ -115,42 +120,54 @@ describe("migrations/0026_workspaces.sql", () => {
   });
 });
 
-describe("migrations/0027_workspace_backfill.sql (replayed every deploy)", () => {
+describe("scripts/workspace-backfill.sql (replayed every deploy)", () => {
   test("maps every App, including soft-deleted rows, with no orphans", () => {
     const db = createMigratedTestD1();
     insertApp(db, "app-live", "live-app", 1001);
     insertApp(db, "app-gone", "gone-app", 1002, "2026-02-01T00:00:00.000Z");
-    runFile(db, APP_REPAIR);
+    runFile(db, APP_REPAIR, SCRIPTS_DIR);
 
-    expect(countRows(db, "github_apps")).toBe(2);
-    expect(countRows(db, "app_workspaces")).toBe(countRows(db, "github_apps"));
-    expect(countRows(db, "app_workspaces")).toBe(2);
+    expect(countRows(db, "review_bots")).toBe(2);
+    expect(countRows(db, "bot_workspaces")).toBe(countRows(db, "review_bots"));
+    expect(countRows(db, "bot_workspaces")).toBe(2);
 
     const orphan = db.raw
       .query(
-        `SELECT count(*) AS n FROM github_apps g
-         LEFT JOIN app_workspaces w ON w.app_id = g.id
-         WHERE w.app_id IS NULL`,
+        `SELECT count(*) AS n FROM review_bots g
+         LEFT JOIN bot_workspaces w ON w.bot_id = g.id
+         WHERE w.bot_id IS NULL`,
       )
       .get() as { n: number };
     expect(orphan.n).toBe(0);
 
     const owners = db.raw
-      .query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id")
-      .all() as Array<{ app_id: string; workspace_id: string }>;
+      .query("SELECT bot_id, workspace_id FROM bot_workspaces ORDER BY bot_id")
+      .all() as Array<{ bot_id: string; workspace_id: string }>;
     expect(owners).toEqual([
-      { app_id: "app-gone", workspace_id: "default" },
-      { app_id: "app-live", workspace_id: "default" },
+      { bot_id: "app-gone", workspace_id: "default" },
+      { bot_id: "app-live", workspace_id: "default" },
     ]);
+  });
+
+  test("the historical 0027 still applies where it runs: before the rename", () => {
+    const db = createTestD1();
+    for (const name of migrationsAfter(2).filter((entry) => entry < "0056_review_bots_rename.sql")) {
+      runFile(db, name);
+    }
+    insertApp(db, "app-live", "live-app", 1001, null, "github_apps");
+    runFile(db, HISTORICAL_APP_REPAIR);
+
+    expect(countRows(db, "github_apps")).toBe(1);
+    expect(countRows(db, "app_workspaces")).toBe(1);
   });
 
   test("new Apps added after the first apply are picked up by a re-apply", () => {
     const db = createMigratedTestD1();
-    runFile(db, APP_REPAIR);
+    runFile(db, APP_REPAIR, SCRIPTS_DIR);
     insertApp(db, "app-late", "late-app", 1003);
-    runFile(db, APP_REPAIR);
+    runFile(db, APP_REPAIR, SCRIPTS_DIR);
 
-    expect(countRows(db, "app_workspaces")).toBe(1);
+    expect(countRows(db, "bot_workspaces")).toBe(1);
     expect(countRows(db, "workspace_members")).toBe(0);
   });
 
@@ -177,13 +194,13 @@ describe("migrations/0027_workspace_backfill.sql (replayed every deploy)", () =>
     expect(defaultMembers(db)).toEqual([]);
 
     // The deploy's repair step, verbatim from disk — twice (a run can retry).
-    runFile(db, APP_REPAIR);
-    runFile(db, APP_REPAIR);
+    runFile(db, APP_REPAIR, SCRIPTS_DIR);
+    runFile(db, APP_REPAIR, SCRIPTS_DIR);
 
     expect(defaultMembers(db)).toEqual([]);
     expect(countRows(db, "users")).toBe(2);
     // The App half still did its job in the same run.
-    expect(countRows(db, "app_workspaces")).toBe(1);
+    expect(countRows(db, "bot_workspaces")).toBe(1);
   });
 });
 

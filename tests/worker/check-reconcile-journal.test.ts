@@ -196,8 +196,8 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       db.raw
         .prepare(
           lifecycle === "disabled"
-            ? `UPDATE github_apps SET status = 'disabled' WHERE id = ?`
-            : `UPDATE github_apps SET deleted_at = datetime('now') WHERE id = ?`,
+            ? `UPDATE review_bots SET status = 'disabled' WHERE id = ?`
+            : `UPDATE review_bots SET deleted_at = datetime('now') WHERE id = ?`,
         )
         .run("11111111-2222-3333-4444-555555555555");
 
@@ -242,7 +242,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     // pair exactly as the credential path would, instead of leaving the row to
     // burn its window until the deadline.
     const { id } = await abandonedRow(db);
-    db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(SCOPE.appId);
+    db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(SCOPE.appId);
 
     const stub = stubFetch();
     let factoryCalls = 0;

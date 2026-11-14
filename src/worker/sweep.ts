@@ -48,7 +48,7 @@ import {
 } from "../pipeline/comment-claim-settings-reader";
 import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
-import { createAppsStore } from "../dashboard/apps-store";
+import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
 import { PAGING_EXCLUDED_STAGES, QUEUE_MAX_ATTEMPTS, sqlStageList } from "../store/failure-store";
 import type { D1Like } from "../store/types";
@@ -267,7 +267,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // never breaks the failure-sweep path, so a missing ledger table (an older
   // DB mid-deploy) is not an ops alarm.
   try {
-    const deleted = await createAppsStore(db).sweepTerminalPullRequests();
+    const deleted = await createReviewBotsStore(db).sweepTerminalPullRequests();
     if (deleted > 0) {
       log.warn({ event: "pull_request_retention_swept", deleted }, "pull_requests retention sweep");
     }

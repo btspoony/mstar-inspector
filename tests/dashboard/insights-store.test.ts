@@ -84,7 +84,7 @@ function insertReview(
     /** v1 rows carry the envelope; M1-era rows pass null (era-gate tests). */
     envelope?: string | null;
     /**
-     * `github_apps.id` row PK attribution. Omitted → `app_id` NULL, the
+     * `review_bots.id` row PK attribution. Omitted → `bot_id` NULL, the
      * legacy unattributed shape (pre-app rows / the appId-filter tests).
      */
     appId?: string;
@@ -92,7 +92,7 @@ function insertReview(
 ): void {
   db.raw
     .query(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, app_id)
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, bot_id)
        VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', ?, ?)`,
     )
     .run(opts.id, opts.owner, opts.repo, opts.pr_number, opts.reviewedAt, opts.verdict, opts.envelope === undefined ? "{}" : opts.envelope, opts.appId ?? null);
@@ -672,14 +672,14 @@ describe("createInsightsStore", () => {
 
   /**
    * App-scoped fixture: r-a attributed to app-a, r-b to app-b, r-c left
-   * `app_id` NULL (legacy unattributed row). Same three weeks as seedFixture.
+   * `bot_id` NULL (legacy unattributed row). Same three weeks as seedFixture.
    */
   function seedAppFixture(db: TestD1): void {
-    // github_apps rows for the FK — the ids are the appId option's values.
+    // review_bots rows for the FK — the ids are the appId option's values.
     for (const [id, ghId] of [["app-a", 1001], ["app-b", 1002]] as const) {
       db.raw
         .query(
-          `INSERT INTO github_apps
+          `INSERT INTO review_bots
              (id, github_app_id, name, private_key_enc, webhook_secret_enc,
               created_by, status, deleted_at, created_at, updated_at)
            VALUES (?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -713,12 +713,12 @@ describe("createInsightsStore", () => {
       pr_number: 3,
       reviewedAt: reviewedAt(15),
       verdict: "needs fixes",
-      // no appId → legacy app_id NULL row
+      // no appId → legacy bot_id NULL row
       findings: [{ id: "f-c1", severity: "should-fix", category: null, title: "Null deref risk", fingerprint: FP_X }],
     });
   }
 
-  test("appId restricts every aggregation to one app: other apps and legacy app_id NULL rows excluded", async () => {
+  test("appId restricts every aggregation to one app: other apps and legacy bot_id NULL rows excluded", async () => {
     const db = createMigratedTestD1();
     seedAppFixture(db);
 

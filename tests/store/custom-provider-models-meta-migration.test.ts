@@ -11,6 +11,8 @@ import { applyMigrations } from "../helpers/migration-shapes";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 
 const OVERLAY_MIGRATION = "0053_custom_provider_models_meta.sql";
+/** The store face below addresses the post-rename tables, so the fixture continues to 0056. */
+const RENAME_MIGRATION = "0056_review_bots_rename.sql";
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 
 /**
@@ -87,7 +89,7 @@ describe("migration: app_custom_providers.models_meta overlay", () => {
     applyMigrations(db, BEFORE_OVERLAY);
     seedApp(db, "app-legacy");
     seedDeclaration(db, "app-legacy");
-    applyMigrations(db, [OVERLAY_MIGRATION]);
+    applyMigrations(db, [OVERLAY_MIGRATION, RENAME_MIGRATION]);
 
     await expect(createAppConfigStore(db, TEST_KEY).listCustomProviders("app-legacy")).resolves.toEqual([
       {

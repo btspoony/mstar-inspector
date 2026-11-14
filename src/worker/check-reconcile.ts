@@ -89,7 +89,7 @@ import {
 } from "../pipeline/checks";
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
-import { createAppsStore } from "../dashboard/apps-store";
+import { createReviewBotsStore } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { getCheckBudgets } from "../dashboard/runtime-config-store";
 import { sha256Hex } from "../pipeline/review-threads";
@@ -166,7 +166,7 @@ export type CheckCredentialResolution =
       kind: "ok";
       adapter: ChecksAdapter;
       /**
-       * `github_apps.review_enabled = 0` (spec §7.6 pause / kill switch). A
+       * `review_bots.review_enabled = 0` (spec §7.6 pause / kill switch). A
        * paused App may still READ — adoption and terminalization of a run that
        * already exists — but must never create a Check that was never sent, so
        * the lane gates `beginCheck` on this flag rather than refusing
@@ -188,7 +188,7 @@ export type CheckCredentialResolution =
     };
 
 /**
- * Exact `(app_id, installation_id)` credential routing for the Check lane.
+ * Exact `(bot_id, installation_id)` credential routing for the Check lane.
  * The production implementation is the §7.6 chain — routing gates → decrypt →
  * the ONE `createReviewCommenter` construction point per pair per run (whose
  * `checks: "write"` mint and Checks client are the §7.9 adapter) → live
@@ -239,16 +239,16 @@ type CheckRoutingRow = {
 
 async function checkRoutingRow(db: D1Like, appId: string, installationId: number): Promise<CheckRoutingRow | null> {
   return db
-    // shortcut: tenant-bypass — check credential routing by exact (app_id,
+    // shortcut: tenant-bypass — check credential routing by exact (bot_id,
     // installation_id); returns no tenant-facing field. Upgrade: tenant-filter it
     // once check reconciliation becomes workspace-scoped.
     .prepare(
       `SELECT ga.id AS id, ga.github_app_id AS github_app_id, ga.status AS status,
               ga.deleted_at AS deleted_at, ga.review_enabled AS review_enabled,
               ga.private_key_enc AS private_key_enc
-       FROM app_installations ai
-       JOIN github_apps ga ON ga.id = ai.app_id
-       WHERE ai.app_id = ? AND ai.installation_id = ?`,
+       FROM bot_installations ai
+       JOIN review_bots ga ON ga.id = ai.bot_id
+       WHERE ai.bot_id = ? AND ai.installation_id = ?`,
     )
     .bind(appId, installationId)
     .first<CheckRoutingRow>();
@@ -549,7 +549,7 @@ export async function reconcileReviewChecks(
  *     over every App in the deployment.
  *  2. For each, the durable suspension kind and the encrypted-envelope digest
  *     are read from `review_checks.last_error` (the same grammar M8 writes), and
- *     the CURRENT digest is re-derived from `github_apps.private_key_enc`.
+ *     the CURRENT digest is re-derived from `review_bots.private_key_enc`.
  *  3. An unchanged digest is SKIPPED with no probe and no write. A changed
  *     digest — the operator's correction — is the one event that reopens the
  *     identity question, and it costs a real credential probe whose verdict
@@ -576,16 +576,16 @@ async function reenableHealthyAppChecks(
     // no tenant-facing field. Upgrade: tenant-filter it once check
     // reconciliation becomes workspace-scoped.
     .prepare(
-      `SELECT DISTINCT rc.app_id AS app_id, rc.installation_id AS installation_id
+      `SELECT DISTINCT rc.bot_id AS bot_id, rc.installation_id AS installation_id
          FROM review_checks rc
-         JOIN github_apps ga ON ga.id = rc.app_id
+         JOIN review_bots ga ON ga.id = rc.bot_id
         WHERE rc.recovery_state = 'suspended'
           AND ga.status = 'active' AND ga.deleted_at IS NULL
-        ORDER BY rc.installation_id, rc.app_id
+        ORDER BY rc.installation_id, rc.bot_id
         LIMIT ?`,
     )
     .bind(REENABLE_PAIR_LIMIT)
-    .all<{ app_id: string; installation_id: number }>();
+    .all<{ bot_id: string; installation_id: number }>();
   if (suspended.length === 0) return;
 
   // The current credential digest per pair, so an unchanged envelope is
@@ -593,10 +593,10 @@ async function reenableHealthyAppChecks(
   // yields a null the store's rule handles (F-005).
   const candidates: { appId: string; installationId: number; currentFingerprint: string | null }[] = [];
   for (const pair of suspended) {
-    const routing = await checkRoutingRow(db, pair.app_id, pair.installation_id);
+    const routing = await checkRoutingRow(db, pair.bot_id, pair.installation_id);
     const currentFingerprint = routing === null ? null : await sha256Hex(routing.private_key_enc);
     candidates.push({
-      appId: pair.app_id,
+      appId: pair.bot_id,
       installationId: pair.installation_id,
       currentFingerprint,
     });
@@ -699,8 +699,8 @@ async function reenableProbe(
     .prepare(
       `SELECT rc.last_error, ga.review_enabled
          FROM review_checks rc
-         JOIN github_apps ga ON ga.id = rc.app_id
-        WHERE rc.app_id = ? AND rc.installation_id = ? AND rc.recovery_state = 'suspended'`,
+         JOIN review_bots ga ON ga.id = rc.bot_id
+        WHERE rc.bot_id = ? AND rc.installation_id = ? AND rc.recovery_state = 'suspended'`,
     )
     .bind(pair.appId, pair.installationId)
     .all<{ last_error: string | null; review_enabled: number }>();
@@ -1413,7 +1413,7 @@ async function readProof(
  */
 async function readRecoveryGate(db: D1Like, appId: string): Promise<ReviewGate | null> {
   try {
-    return await createAppsStore(db).getCheckGate(appId);
+    return await createReviewBotsStore(db).getCheckGate(appId);
   } catch {
     return null;
   }

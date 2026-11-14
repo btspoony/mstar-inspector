@@ -198,7 +198,7 @@ if (
 
 /** Template-tier entries (spec §5): metadata + prefill only — NOT
  *  runner-consumable as env-name entries; the save flow materializes them
- *  through the existing custom-provider machinery (app_custom_providers).
+ *  through the existing custom-provider machinery (bot_custom_providers).
  *  `baseUrl` carries the `{account_id}` placeholder the save flow
  *  substitutes; `api` is the custom-provider protocol to materialize with;
  *  `models` is the prefill vocabulary (curated representative ids, all
@@ -623,7 +623,7 @@ async function main(): Promise<void> {
  *
  * Tiers: \`builtin\` = the per-App BYOK allowlist (AL-24-5); \`template\` =
  * metadata + prefill only, materialized through the existing custom-provider
- * machinery (app_custom_providers) at save time (spec §5). The hand-curated
+ * machinery (bot_custom_providers) at save time (spec §5). The hand-curated
  * \`workers-ai\` template carries the {account_id} base-URL placeholder the
  * save flow substitutes.
  *

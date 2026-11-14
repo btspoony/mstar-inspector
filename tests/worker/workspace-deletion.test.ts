@@ -109,7 +109,7 @@ function seedApp(db: TestD1, workspaceId: string): void {
   const now = new Date().toISOString();
   seed(
     db,
-    `INSERT INTO github_apps
+    `INSERT INTO review_bots
        (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
      VALUES ('app-acme', 'acme-app', 4711, 'acme-app', 'v1.primary.aXZpdi5wcmV0ZXh0',
@@ -117,7 +117,7 @@ function seedApp(db: TestD1, workspaceId: string): void {
     now,
     now,
   );
-  seed(db, "INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('app-acme', ?)", workspaceId);
+  seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('app-acme', ?)", workspaceId);
 }
 
 /** The live workspace 0026 seeds (`default`) plus the role matrix. */

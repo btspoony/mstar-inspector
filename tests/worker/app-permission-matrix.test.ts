@@ -22,7 +22,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
@@ -74,7 +74,7 @@ async function seededWorld(): Promise<TestD1> {
     .run();
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
-  await createAppsStore(db).createApp({
+  await createReviewBotsStore(db).createApp({
     id,
     githubSlug: "mallorys-app",
     githubAppId: APP_ID,
@@ -88,7 +88,7 @@ async function seededWorld(): Promise<TestD1> {
   });
   // One ledger row: the detail face's 200 side needs a real tuple, and every
   // deny path must still answer before the lookup.
-  await createAppsStore(db).upsertPullRequest({
+  await createReviewBotsStore(db).upsertPullRequest({
     appId: id,
     owner: "acme",
     repo: "widgets",
@@ -133,14 +133,14 @@ async function postForm(
 }
 
 function appStatus(db: TestD1, appId: number): string | null {
-  const row = db.raw.query("SELECT status FROM github_apps WHERE github_app_id = ?").get(appId) as {
+  const row = db.raw.query("SELECT status FROM review_bots WHERE github_app_id = ?").get(appId) as {
     status: string;
   } | null;
   return row?.status ?? null;
 }
 
 function reviewEnabled(db: TestD1, appId: number): number | null {
-  const row = db.raw.query("SELECT review_enabled FROM github_apps WHERE github_app_id = ?").get(appId) as {
+  const row = db.raw.query("SELECT review_enabled FROM review_bots WHERE github_app_id = ?").get(appId) as {
     review_enabled: number;
   } | null;
   return row?.review_enabled ?? null;
@@ -153,12 +153,12 @@ function rawCount(db: TestD1, table: string): number {
 
 /** The config tables the write-route sweep may never touch on a deny path. */
 const MUTABLE_APP_TABLES = [
-  "app_provider_keys",
-  "app_provider_models",
-  "app_model_config",
-  "app_model_chains",
-  "app_model_chain_seats",
-  "app_custom_providers",
+  "bot_provider_keys",
+  "bot_provider_models",
+  "bot_model_config",
+  "bot_model_chains",
+  "bot_model_chain_seats",
+  "bot_custom_providers",
 ] as const;
 
 /**
@@ -333,9 +333,9 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
         // the delete's 200 face did real work rather than matching nothing, and
         // only the row `keys/verify` stored (anthropic) is left in the pool.
         expect(
-          db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys WHERE provider = 'zai'").get(),
+          db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys WHERE provider = 'zai'").get(),
         ).toEqual({ n: 0 });
-        expect(rawCount(db, "app_provider_keys")).toBe(1);
+        expect(rawCount(db, "bot_provider_keys")).toBe(1);
       } else {
         // Zero mutation on every deny path: the app row is untouched and no
         // config table gained a row.

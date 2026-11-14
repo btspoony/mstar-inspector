@@ -2,7 +2,7 @@
  * Queue consumer — the review pipeline main flow.
  *
  * Flow (compass S7): message → resolve the App's sandbox
- * image (the stored github_apps.sandbox_image_id through the closed
+ * image (the stored review_bots.sandbox_image_id through the closed
  * registry — unknown/disabled ids fail closed BEFORE the guard/sandbox) →
  * getSandbox (unique id per attempt) → clone the PR head branch (git
  * transport auth via scoped extraheader env) → `git rev-parse HEAD` for the
@@ -201,16 +201,16 @@ import {
 } from "./comment";
 // Per-App credential resolution (lock L4): the consumer is a
 // sanctioned reader of the dashboard store leaves (apps-store reads the
-// github_apps row, secretbox decrypts the PEM) — the dashboard ↛
+// review_bots row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
-import { createAppsStore, parseAppReviewLevel } from "../dashboard/apps-store";
+import { createReviewBotsStore, parseAppReviewLevel } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 // The operator default review depth (migration 0047 pairing): read ONLY when
 // the App row's `review_level` is NULL, through the same runtime-config leaf
 // the admission settings use.
 import { getRecheckAssignmentMaxBytes, readDefaultReviewLevel } from "../dashboard/runtime-config-store";
 // Per-App AI-config resolution: the same sanctioned reader
-// edge — app-config-store reads app_provider_keys / app_model_config and
+// edge — app-config-store reads bot_provider_keys / bot_model_config and
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
 import {
   createAppConfigStore,
@@ -269,7 +269,7 @@ export type PipelineEnv = {
    * from the App's own per-App config (resolveAppConfig keys map +
    * modelChain, custom declarations); an App missing either fails closed
    * (assertAppConfigComplete → F-001 channel). The review depth is per App
-   * too (`github_apps.review_level`, falling back to the operator default in
+   * too (`review_bots.review_level`, falling back to the operator default in
    * `review_runtime_settings`) — this env carries no deployment-wide level.
    */
 };
@@ -461,7 +461,7 @@ export type ConsumerLogFields = {
   pr_number: number;
   head_sha: string | null;
   sandbox_id?: string;
-  /** github_apps.id the job resolves to (per-App jobs only). */
+  /** review_bots.id the job resolves to (per-bot jobs only). */
   app_id?: string;
   idempotency_key?: string;
   /**
@@ -1525,7 +1525,7 @@ async function applyPendingLifecycleJournals(
   const rows = await db
     .prepare(
       `SELECT id FROM review_publications
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+       WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND phase = 'confirmed' AND recovery_state = 'pending'
        ORDER BY created_ms, id LIMIT 10`,
     )
@@ -1693,11 +1693,11 @@ async function readReportDoc(
  * published a verdict without evidence. Diffing against either would silently
  * inherit that gap.
  *
- * `app_id` is part of the identity: two Apps can review one installation's PRs,
+ * `bot_id` is part of the identity: two bots can review one installation's PRs,
  * and `reviews` is keyed per (installation, owner, repo, pr) without it, so an
- * unfiltered read could hand App B the head App A reviewed and skip exactly the
- * commits B never saw. Legacy rows (`app_id` NULL) predate per-App attribution
- * and belong to the retired global App, so no current App can match them.
+ * unfiltered read could hand bot B the head bot A reviewed and skip exactly the
+ * commits B never saw. Legacy rows (`bot_id` NULL) predate per-bot attribution
+ * and belong to the retired global bot, so no current bot can match them.
  *
  * One row per reviewed sha, and `reviewed_at` is second-resolution, so `rowid`
  * breaks same-second ties in insertion order.
@@ -1706,7 +1706,7 @@ async function findIncrementBase(db: PipelineEnv["DB"], scope: Scope): Promise<s
   const row = await db
     .prepare(
       `SELECT head_sha FROM reviews
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+       WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND verdict <> 'incomplete'
          AND context_incomplete = 0
        ORDER BY reviewed_at DESC, rowid DESC
@@ -2957,7 +2957,7 @@ type ProcessDeps = {
    */
   background?: CheckBackgroundSink;
   /**
-   * The PR head watermark read (migration 0044) — `createAppsStore(env.DB)
+   * The PR head watermark read (migration 0044) — `createReviewBotsStore(env.DB)
    * .selectPrHead` in production, built ONCE per consumer (and injectable in
    * tests), never per message. The supersede decision needs one point read per
    * stamped delivery, so rebuilding the store for it would be pure overhead.
@@ -3043,7 +3043,7 @@ type CommenterResolution =
  * — consumer-side credential resolution; single path —
  * `appRef.appId` is required, the env-App legacy branch is retired):
  *
- * The `github_apps` row via D1 (re-read per message),
+ * The `review_bots` row via D1 (re-read per message),
  * gated in order: missing row / soft-deleted / disabled THROWS
  * (unchanged retry→DLQ semantics; the failed gate EVICTS the cached
  * instance) → PAUSED (`review_enabled = 0`, lock L4) returns the
@@ -3064,11 +3064,11 @@ type CommenterResolution =
  */
 async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<CommenterResolution> {
   const appRef = payload.appRef;
-  const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
+  const row = await createReviewBotsStore(deps.env.DB).getAppById(appRef.appId);
   if (row === null) {
     deps.appCommenters.delete(appRef.appId);
     // Two resolutions are indistinguishable from a missing one (the INNER
-    // JOINs yield null for all three): no `app_workspaces` mapping and a
+    // JOINs yield null for all three): no `bot_workspaces` mapping and a
     // soft-deleted workspace — the message names every cause.
     throw new Error(
       `per-App credential resolution failed: app ${appRef.appId} not found, has no workspace mapping, or its workspace is deleted`,
@@ -3195,7 +3195,7 @@ export type RunnerAppConfig = {
  * ONE `getAppConfig` read per message (all
  * provider keys + the model chain in a single store call — never per key),
  * decrypted in memory. Per spec §4.4, the model chain is the
- * App's DEFAULT chain row (app_model_chains name = 'default'); an App with
+ * App's DEFAULT chain row (bot_model_chains name = 'default'); an App with
  * no default row resolves modelChain = null (fail-closed, unchanged). The
  * read hangs off the same appRef resolution as
  * `resolveCommenter` (the App row is already proven present, active and
@@ -3233,7 +3233,7 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
  * resolves each referenced seat to its chain's value; seats with NO
  * reference row (absent = default) and seats referencing the default chain
  * are OMITTED, so the map only carries seats whose chain differs from the
- * App default — byte-identical to the pre-chains app_model_roles semantics
+ * App default — byte-identical to the pre-chains bot_model_roles semantics
  * for migrated Apps. An App with NO overrides → `undefined` — the runner
  * input JSON omits the field, byte-identical to a no-map run (the global
  * constraint: empty map = unchanged runner behavior). Hangs off the same
@@ -3264,7 +3264,7 @@ async function resolveModelOverrides(
  * Resolve the App's custom-provider declarations for one message (AL-23-1):
  * the DECRYPTING `getCustomProvidersForConsumer` read
  * (every declaration plus its key, provider_id-ascending) via
- * createAppConfigStore — the getAppConfig analogue for app_custom_providers.
+ * createAppConfigStore — the getAppConfig analogue for bot_custom_providers.
  * An App with NO declarations → `undefined` — the runner input JSON
  * serializes byte-identically to a no-declaration run (the global
  * constraint: empty = unchanged runner behavior). Hangs off the same
@@ -3302,7 +3302,7 @@ async function resolveCustomProviders(
 
 /**
  * Resolve the App's sandbox image for one message: the
- * `github_apps.sandbox_image_id` stored selection through the CLOSED
+ * `review_bots.sandbox_image_id` stored selection through the CLOSED
  * source-controlled registry (`getSandboxImage`) — the ONE deliberate
  * resolution interface between App storage and execution. Fails CLOSED with a
  * structured, non-secret error (an id + app id, never secrets) when the saved
@@ -3317,7 +3317,7 @@ async function resolveCustomProviders(
 async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<SandboxImageDefinition> {
   const appRef = payload.appRef;
   try {
-    const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
+    const row = await createReviewBotsStore(deps.env.DB).getAppById(appRef.appId);
     if (row === null) {
       throw new Error("app not found");
     }
@@ -3423,7 +3423,7 @@ function chainHeadSelector(chain: string | undefined): string | null {
  * Fail-closed per-App configuration gate (AL-24-5 — zero
  * global fallback): the App's modelChain is the ONLY chain source and every
  * provider on the chain must have a key source in the App's OWN config — a
- * BYOK allowlist pool (app_provider_keys, provider id) or a custom
+ * BYOK allowlist pool (bot_provider_keys, provider id) or a custom
  * declaration with a non-blank key pool. The SAME requirement applies to
  * selector of every per-role override chain (Bugbot 7aaf18f4): a role
  * override referencing a provider with no configured key must fail closed
@@ -3467,7 +3467,7 @@ function assertAppConfigComplete(
   }
   // Every chain that must resolve to configured keys: the App's modelChain
   // plus each per-role override's selector chain (Bugbot 7aaf18f4 — the
-  // app_model_roles selectors reach the runner as the `modelOverrides`
+  // bot_model_roles selectors reach the runner as the `modelOverrides`
   // input field, so they carry the same fail-closed requirement). Both use
   // the runner's parseModelSelectors grammar (comma-separated, trimmed,
   // empty segments dropped; provider = the segment before the first `/`;
@@ -3893,7 +3893,7 @@ export function createReviewConsumer(
   const appCommenters = new Map<string, { commenter: ReviewCommenter; fingerprint: string; githubAppId: number }>();
   // One App-ledger store per consumer: `selectPrHead` is the supersede
   // decision's point read and must not rebuild the store per message.
-  const appsStore = createAppsStore(env.DB);
+  const appsStore = createReviewBotsStore(env.DB);
   const deps: ProcessDeps = {
     env,
     store: overrides.store ?? createArtifactStore(env.DB),
@@ -4691,7 +4691,7 @@ async function processMessage(
     // throws here with zero side effects, never a silently-skipped provider.
     const customProviders = await resolveCustomProviders(payload, deps);
     // The App's sandbox image: resolves the stored
-    // github_apps.sandbox_image_id through the CLOSED registry and fails
+    // review_bots.sandbox_image_id through the CLOSED registry and fails
     // closed (structured, non-secret error) on unknown/disabled ids —
     // BEFORE the in-flight guard and sandbox creation, so an invalid id
     // never starts a container. The definition itself is used later, at
@@ -6174,7 +6174,7 @@ async function processMessage(
       const knownRows = await deps.env.DB
         .prepare(
           `SELECT id, finding_id FROM review_findings
-           WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+           WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
              AND finding_id IN (${findingIdPlaceholders})`,
         )
         .bind(

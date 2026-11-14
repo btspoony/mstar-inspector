@@ -22,8 +22,8 @@ export type Env = {
   ASSETS?: Fetcher;
   /**
    * D1 binding: the per-App webhook face (`POST
-   * /webhook/:workspaceId/:appId`) resolves the `github_apps` row by that
-   * pair and touches `app_installations` through
+   * /webhook/:workspaceId/:appId`) resolves the `review_bots` row by that
+   * pair and touches `bot_installations` through
    * src/dashboard/apps-store.ts (lock L1 leaf);
    * the dashboard reads it through its own optional local face, and the 06
    * queue face declares the same binding as the REQUIRED `PipelineEnv.DB`.
@@ -49,7 +49,7 @@ export type Env = {
    * Envelope master key for D1-stored dashboard secrets (spec
    * dashboard-multi-app-platform § Crypto envelope): base64 of exactly 32
    * random bytes (AES-256-GCM secretbox, src/dashboard/secretbox.ts) —
-   * encrypts github_apps credentials (PEM / webhook secret, plus
+   * encrypts review_bots credentials (PEM / webhook secret, plus
    * per-App provider keys). Missing / malformed → SecretboxKeyError and the
    * encryption-dependent dashboard routes fail closed with 5xx. Never
    * reuse DASHBOARD_SESSION_SECRET — rotation decoupled. wrangler secret /

@@ -23,8 +23,8 @@
  *     stability recheck — drift marks the capture incomplete, never falsely
  *     complete (spec §7.5 "Re-read the final page/count and PR HEAD after
  *     pagination; instability marks incomplete").
- *   - Credential routing: exact `(app_id, installation_id)` through
- *     `app_installations` into the matching `github_apps` row (never a
+ *   - Credential routing: exact `(bot_id, installation_id)` through
+ *     `bot_installations` into the matching `review_bots` row (never a
  *     repository-wide scan), deleted/disabled rows fail closed, and the
  *     JWT-authenticated `GET /app` identity must agree with the row's
  *     `github_app_id` + nonblank slug. The expected bot identity is the
@@ -754,7 +754,7 @@ type AssociationRow = {
   id: string;
   finding_row_id: string;
   publication_id: string;
-  app_id: string;
+  bot_id: string;
   installation_id: number;
   owner: string;
   repo: string;
@@ -859,10 +859,10 @@ export type ReviewThreadsDeps = {
 type AppContext = { octokit: GraphqlOctokit; botLogin: string; githubAppId: number; slug: string };
 
 /**
- * Credential routing by EXACT (app_id, installation_id) with fail-closed
+ * Credential routing by EXACT (bot_id, installation_id) with fail-closed
  * ambiguity (spec §7.5/§7.6): bind both durable ids through
- * `app_installations` into the matching `github_apps` row — never scan all
- * active Apps for a repository. Deleted/disabled rows, missing identity,
+ * `bot_installations` into the matching `review_bots` row — never scan all
+ * active bots for a repository. Deleted/disabled rows, missing identity,
  * identity disagreement with the row's `github_app_id`, or a blank slug all
  * fail closed (null). Routing-query, identity-proof and mint throws are
  * caught here — callers map null to their typed outcome, so a transport
@@ -871,14 +871,14 @@ type AppContext = { octokit: GraphqlOctokit; botLogin: string; githubAppId: numb
 async function resolveAppContext(deps: ReviewThreadsDeps, scope: Scope): Promise<AppContext | null> {
   try {
     const row = await deps.db
-      // shortcut: tenant-bypass — consumer App resolution by exact (app_id,
+      // shortcut: tenant-bypass — consumer bot resolution by exact (bot_id,
       // installation_id); no tenant-facing field. Upgrade: tenant-filter it once
       // the consumer becomes workspace-scoped.
       .prepare(
         `SELECT ga.github_app_id AS github_app_id, ga.status AS status, ga.deleted_at AS deleted_at
-         FROM app_installations ai
-         JOIN github_apps ga ON ga.id = ai.app_id
-         WHERE ai.app_id = ? AND ai.installation_id = ?`,
+         FROM bot_installations ai
+         JOIN review_bots ga ON ga.id = ai.bot_id
+         WHERE ai.bot_id = ? AND ai.installation_id = ?`,
       )
       .bind(scope.appId, scope.installationId)
       .first<{ github_app_id: number; status: string; deleted_at: string | null }>();
@@ -905,7 +905,7 @@ async function resolveAppContext(deps: ReviewThreadsDeps, scope: Scope): Promise
 
 function sameScope(row: AssociationRow, scope: Scope): boolean {
   return (
-    row.app_id === scope.appId &&
+    row.bot_id === scope.appId &&
     row.installation_id === scope.installationId &&
     row.owner === scope.owner &&
     row.repo === scope.repo &&

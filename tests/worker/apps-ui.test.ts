@@ -14,7 +14,7 @@
  * 0001/0002 + 0003–0009 + 0012 (production-shaped, filename order — 0006 backs the
  * per-App config tables the settings page reads; 0008 adds the per-App
  * ops columns behind the pause toggle and the install-health panel; 0009 is
- * app_model_roles, read on every settings render by the Role
+ * bot_model_roles, read on every settings render by the Role
  * models editor; 0022 is the per-App review trigger mode column).
  */
 import { describe, expect, test } from "bun:test";
@@ -22,7 +22,7 @@ import { t } from "../../src/i18n";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
-import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import { createTestD1 } from "../store/helpers";
@@ -73,7 +73,7 @@ async function seedApp(
   // route assertions below can name the App without re-reading the row.
   const id = `app-${opts.slug}`;
   const enc = await encryptedColumns(id);
-  return createAppsStore(db).createApp({
+  return createReviewBotsStore(db).createApp({
     id,
     githubSlug: opts.slug,
     githubAppId: opts.githubAppId,
@@ -161,7 +161,7 @@ async function postForm(
 }
 
 function appStatus(db: ReturnType<typeof createAppsUiD1>, appId: number): string | null {
-  const row = db.raw.query("SELECT status FROM github_apps WHERE github_app_id = ?").get(appId) as {
+  const row = db.raw.query("SELECT status FROM review_bots WHERE github_app_id = ?").get(appId) as {
     status: string;
   } | null;
   return row?.status ?? null;
@@ -169,7 +169,7 @@ function appStatus(db: ReturnType<typeof createAppsUiD1>, appId: number): string
 
 /** The per-App pause switch column (migration 0008) straight from the row. */
 function reviewEnabled(db: ReturnType<typeof createAppsUiD1>, appId: number): number | null {
-  const row = db.raw.query("SELECT review_enabled FROM github_apps WHERE github_app_id = ?").get(appId) as {
+  const row = db.raw.query("SELECT review_enabled FROM review_bots WHERE github_app_id = ?").get(appId) as {
     review_enabled: number;
   } | null;
   return row?.review_enabled ?? null;
@@ -177,7 +177,7 @@ function reviewEnabled(db: ReturnType<typeof createAppsUiD1>, appId: number): nu
 
 /** The per-App trigger-mode column (migration 0022) straight from the row. */
 function reviewTriggerMode(db: ReturnType<typeof createAppsUiD1>, appId: number): string | null {
-  const row = db.raw.query("SELECT review_trigger_mode FROM github_apps WHERE github_app_id = ?").get(appId) as {
+  const row = db.raw.query("SELECT review_trigger_mode FROM review_bots WHERE github_app_id = ?").get(appId) as {
     review_trigger_mode: string;
   } | null;
   return row?.review_trigger_mode ?? null;
@@ -233,7 +233,7 @@ describe("POST /dashboard/default/apps/:appId/disable|enable|delete (pinned acti
 
   test("creator re-enables → active again; the webhook route resolves the row (401 on bad signature, not 404)", async () => {
     const db = await seededWorld();
-    const apps = createAppsStore(db);
+    const apps = createReviewBotsStore(db);
     await apps.setAppStatus(
       (await apps.listApps()).find((a) => a.github_app_id === MALLORY_APP_ID)!.id,
       "disabled",
@@ -300,7 +300,7 @@ describe("POST /dashboard/default/apps/:appId/disable|enable|delete (pinned acti
     expect(await res.text()).toBe("ok");
     // Soft delete (Clarify #4): the row remains in D1 with deleted_at stamped.
     const row = db.raw
-      .query("SELECT deleted_at FROM github_apps WHERE github_app_id = 1001")
+      .query("SELECT deleted_at FROM review_bots WHERE github_app_id = 1001")
       .get() as { deleted_at: string | null };
     expect(row.deleted_at).not.toBeNull();
     // The brief's bridged AC: the deleted app's webhook route 404s (T2).
@@ -343,7 +343,7 @@ describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause
 
   test("creator resumes → 200, review_enabled=1", async () => {
     const db = await seededWorld();
-    const apps = createAppsStore(db);
+    const apps = createReviewBotsStore(db);
     await apps.setReviewEnabled(
       (await apps.listApps()).find((a) => a.github_app_id === MALLORY_APP_ID)!.id,
       false,
@@ -402,7 +402,7 @@ describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause
 
   test("unknown App id → 404; soft-deleted app → 404, zero side effects", async () => {
     const db = await seededWorld();
-    const apps = createAppsStore(db);
+    const apps = createReviewBotsStore(db);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
     for (const path of ["/dashboard/default/apps/9999/pause", "/dashboard/default/apps/9999/resume"]) {
       const res = await post(path, cookie, makeEnv(db));
@@ -472,7 +472,7 @@ describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App revie
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     db.raw
-      .prepare("UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE github_app_id = ?")
+      .prepare("UPDATE review_bots SET updated_at = '2026-01-01 00:00:00' WHERE github_app_id = ?")
       .run(MALLORY_APP_ID);
     const res = await postForm(`/dashboard/default/apps/${MALLORY_APP_ID}/review-trigger-mode`, cookie, makeEnv(db), {
       mode: "every_push",
@@ -480,7 +480,7 @@ describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App revie
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     const row = db.raw
-      .query("SELECT review_trigger_mode, updated_at FROM github_apps WHERE github_app_id = ?")
+      .query("SELECT review_trigger_mode, updated_at FROM review_bots WHERE github_app_id = ?")
       .get(MALLORY_APP_ID) as { review_trigger_mode: string; updated_at: string };
     expect(row.review_trigger_mode).toBe("every_push");
     expect(row.updated_at).toBe("2026-01-01 00:00:00");
@@ -516,7 +516,7 @@ describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App revie
 
   test("unknown App id → 404; soft-deleted app → 404, zero side effects", async () => {
     const db = await seededWorld();
-    const apps = createAppsStore(db);
+    const apps = createReviewBotsStore(db);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
     const unknown = await postForm("/dashboard/default/apps/9999/review-trigger-mode", cookie, makeEnv(db), {
       mode: "manual",

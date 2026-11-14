@@ -29,10 +29,10 @@
  *      1/2/4/8/16 min; at the 5-attempt cap a terminal, visible local-error
  *      — never deleted).
  *
- * Credential routing (spec §7.6): the EXACT `(app_id, installation_id)`
- * pair through `app_installations` into the matching `github_apps` row —
- * never a repository-wide App scan, never cross-App substitution. Missing
- * mapping, soft-deleted or disabled App → every pending row of the pair is
+ * Credential routing (spec §7.6): the EXACT `(bot_id, installation_id)`
+ * pair through `bot_installations` into the matching `review_bots` row —
+ * never a repository-wide bot scan, never cross-bot substitution. Missing
+ * mapping, soft-deleted or disabled bot → every pending row of the pair is
  * durably `suspended` (attempts untouched) and nothing calls GitHub;
  * `listSuspendedLifecycleApps` + the same exact-pair routing query re-check
  * suspension each run, and an App that re-enabled resumes with fresh
@@ -209,11 +209,11 @@ export type ReconcileTransport = {
 };
 
 /**
- * Exact `(app_id, installation_id)` credential routing (spec §7.6): the
- * routing query binds BOTH durable ids through `app_installations` into the
- * matching `github_apps` row. Missing mapping / soft-deleted / disabled →
+ * Exact `(bot_id, installation_id)` credential routing (spec §7.6): the
+ * routing query binds BOTH durable ids through `bot_installations` into the
+ * matching `review_bots` row. Missing mapping / soft-deleted / disabled →
  * `unavailable` (the reconciler suspends the pair durably); a decrypted PEM
- * builds THIS App's commenter — the only credential source, never another
+ * builds THIS bot's commenter — the only credential source, never another
  * App's. `paused` rides the ok resolution (review_enabled = 0): the frozen
  * pause policy is enforced by the lanes, not by refusing credentials.
  * `transport` carries the run's per-request bound; when supplied, the built
@@ -239,16 +239,16 @@ type RoutingRow = {
 /** The exact-pair routing query (also the re-enable probe — D1 only). */
 async function routingRow(db: D1Like, appId: string, installationId: number): Promise<RoutingRow | null> {
   return db
-    // shortcut: tenant-bypass — reconciler credential routing by exact (app_id,
+    // shortcut: tenant-bypass — reconciler credential routing by exact (bot_id,
     // installation_id); returns no tenant-facing field. Upgrade: tenant-filter it
     // once reconciliation itself becomes workspace-scoped.
     .prepare(
       `SELECT ga.id AS id, ga.github_app_id AS github_app_id, ga.status AS status,
               ga.deleted_at AS deleted_at, ga.review_enabled AS review_enabled,
               ga.private_key_enc AS private_key_enc
-       FROM app_installations ai
-       JOIN github_apps ga ON ga.id = ai.app_id
-       WHERE ai.app_id = ? AND ai.installation_id = ?`,
+       FROM bot_installations ai
+       JOIN review_bots ga ON ga.id = ai.bot_id
+       WHERE ai.bot_id = ? AND ai.installation_id = ?`,
     )
     .bind(appId, installationId)
     .first<RoutingRow>();

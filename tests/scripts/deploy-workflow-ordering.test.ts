@@ -156,7 +156,7 @@ const DEPLOYMENT_VAR = '--var "DEPLOYMENT_MODE:saas"';
 /** The retired tenant-mode var, assembled so this file does not match its own scan. */
 const RETIRED_VAR = ["WORKSPACE", "TENANT", "MODE"].join("_");
 const GATE = "Assert zero orphan Apps (pre-deploy gate)";
-const BACKFILL = "Re-run App attribution repair (0027, idempotent)";
+const BACKFILL = "Re-run App attribution repair (workspace-backfill.sql, idempotent)";
 
 /**
  * The version that serves a deploy is created by the LAST version-creating
@@ -226,13 +226,13 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       .map((s, i) => (DEPLOY_CAPABLE.test(s.run ?? "") ? i : -1))
       .filter((i) => i >= 0);
 
-    test("migrations → 0027 backfill → zero-orphan gate → every deploy-capable step", () => {
+    test("migrations → backfill replay → zero-orphan gate → every deploy-capable step", () => {
       const gate = steps.findIndex((s) => s.name === GATE);
       expect(gate, `${file}: zero-orphan gate step is missing`).toBeGreaterThan(-1);
       expect(gate, `${file}: gate must follow the D1 migration`).toBeGreaterThan(
         steps.findIndex((s) => s.name === migrations),
       );
-      expect(gate, `${file}: gate must follow the 0027 backfill`).toBeGreaterThan(
+      expect(gate, `${file}: gate must follow the attribution backfill`).toBeGreaterThan(
         steps.findIndex((s) => s.name === BACKFILL),
       );
       expect(deployCapable.length, `${file}: no deploy-capable step found`).toBeGreaterThan(0);
@@ -258,7 +258,7 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       );
       // It still carries the repair the gate depends on.
       expect(source, `${file}: ${path} must still map Apps`).toMatch(
-        /INSERT\s+INTO\s+app_workspaces\b/i,
+        /INSERT\s+INTO\s+bot_workspaces\b/i,
       );
     });
 

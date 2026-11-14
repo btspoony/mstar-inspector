@@ -23,7 +23,7 @@
  * and validates the persisted id before any sandbox is created).
  */
 
-/** A stored sandbox image selection (github_apps.sandbox_image_id, migration 0018). */
+/** A stored sandbox image selection (review_bots.sandbox_image_id, migration 0018). */
 export type SandboxImageId = string;
 
 /**
@@ -84,7 +84,7 @@ export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
 
 /** One selectable sandbox runtime image. */
 export type SandboxImageDefinition = {
-  /** Stable registry id — the value stored on github_apps.sandbox_image_id. */
+  /** Stable registry id — the value stored on review_bots.sandbox_image_id. */
   id: SandboxImageId;
   /** Only ENABLED entries are storable/selectable (store-enforced value domain). */
   enabled: boolean;

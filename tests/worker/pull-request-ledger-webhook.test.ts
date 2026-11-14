@@ -22,7 +22,7 @@ async function seedApp(db: TestD1, mode: "open" | "every_push" | "manual"): Prom
   const box = createSecretbox(TEST_KEY);
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at, review_trigger_mode)
        VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'), ?)`,
@@ -36,7 +36,7 @@ async function seedApp(db: TestD1, mode: "open" | "every_push" | "manual"): Prom
       await box.encryptSecret(SECRET, `github_apps.webhook_secret_enc:${id}`),
       mode,
     );
-  db.raw.prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')").run(id);
+  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')").run(id);
   return id;
 }
 
@@ -77,7 +77,7 @@ async function deliver(appId: string, payload: unknown, env: Env, event = "pull_
 }
 
 function ledger(db: TestD1, appId: string): Array<Record<string, unknown>> {
-  return db.raw.prepare("SELECT * FROM pull_requests WHERE app_id = ?").all(appId) as Array<Record<string, unknown>>;
+  return db.raw.prepare("SELECT * FROM pull_requests WHERE bot_id = ?").all(appId) as Array<Record<string, unknown>>;
 }
 
 describe("pull_request delivery → PR ledger", () => {

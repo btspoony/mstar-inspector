@@ -83,6 +83,14 @@ export const APPS_UI_MIGRATIONS = shape("apps-ui", [
   ...TAIL_PREREQUISITES,
   "0011_webhook_deliveries.sql",
   "0012_custom_providers_and_key_updated_at.sql",
+  // The bot family the derived tail renames: 0015 + 0017 create the provider
+  // model cache and the chain tables, 0024/0025 the per-key pools and their
+  // model evidence. A shape that skipped them would leave the rename with no
+  // table to rename.
+  "0015_provider_verification.sql",
+  "0017_app_model_chains.sql",
+  "0024_provider_multi_key.sql",
+  "0025_provider_model_evidence.sql",
   "0022_app_trigger_mode.sql",
   "0023_removed_logins.sql",
   // 0026: createApp also writes the App's workspace mapping.
@@ -124,7 +132,11 @@ export const PROVIDER_VERIFY_MIGRATIONS = shape("provider-verify", [
   "0022_app_trigger_mode.sql",
   "0037_github_metadata_attempt.sql",
   "0038_webhook_path_drop.sql",
-  ...DERIVED_TAIL,
+  // This world is deliberately pre-0015 (the suite applies 0015 itself), so it
+  // never carries `app_custom_provider_keys` or `app_provider_models` — two
+  // tables the 0056 rename touches. The tail stops below the rename; the worker
+  // fixtures move to the renamed shape in their own round.
+  ...DERIVED_TAIL.filter((name) => name < "0056_review_bots_rename.sql"),
 ]);
 
 /** `tests/worker/spa-page-apis.test.ts` — the SPA JSON faces' world. */
@@ -181,6 +193,8 @@ export const WEBHOOK_DELIVERIES_MIGRATIONS: readonly string[] = [
   // pause gate + touch read and write on every delivery.
   "0004_github_apps.sql",
   "0005_reviews_app_id.sql",
+  // 0005's attribution index: the rename drops and recreates this one.
+  "0007_reviews_app_id_index.sql",
   "0008_github_apps_ops.sql",
   ...TAIL_PREREQUISITES,
   // 0026: the webhook's slug lookup is the joined tenant read, so the fixture
@@ -208,19 +222,21 @@ export const WEBHOOK_DELIVERIES_MIGRATIONS: readonly string[] = [
  */
 export const WEBHOOK_DELIVERIES_TAIL: readonly string[] = [
   "0006_app_provider_config.sql",
+  "0009_app_model_roles.sql",
   "0011_webhook_deliveries.sql",
   "0012_custom_providers_and_key_updated_at.sql",
+  // The bot family the derived tail renames: the verification columns and the
+  // model cache (0015), the chains (0017), the per-key pools and their model
+  // evidence (0024/0025). Without them the rename has no table to rename.
+  "0015_provider_verification.sql",
+  "0017_app_model_chains.sql",
+  "0024_provider_multi_key.sql",
+  "0025_provider_model_evidence.sql",
   ...DERIVED_TAIL,
 ];
 
 // The delivery branch's full shape: the shared prefix, then 0011 + the tail.
 shape("webhook-deliveries", [...WEBHOOK_DELIVERIES_MIGRATIONS, ...WEBHOOK_DELIVERIES_TAIL]);
-
-/**
- * `tests/worker/webhook-deliveries.test.ts` failure branch: 0045's table backs
- * the fail-closed owner allowlist every review-triggering delivery reads.
- */
-export const WEBHOOK_DELIVERIES_FAILURE_ONLY: readonly string[] = ["0045_review_gate_and_owner_allowlist.sql"];
 
 /**
  * `tests/worker/app-config.test.ts` base: 0001/0002 + a seeded review row, then
@@ -235,6 +251,8 @@ export const APP_CONFIG_BASE_MIGRATIONS: readonly string[] = [
   // github_apps, so applying it early keeps the later files' order intact).
   "0036_app_identity.sql",
   "0005_reviews_app_id.sql",
+  // 0007: the review attribution index the rename drops and recreates.
+  "0007_reviews_app_id_index.sql",
   // 0026: createApp writes its app_workspaces mapping in the same batch, so
   // every fixture that seeds an App needs the workspace data plane. Applied
   // after 0004 (its FK parent); the file only creates new tables.
@@ -320,6 +338,8 @@ export const APP_CREDENTIAL_RESOLUTION_MIGRATIONS = shape("app-credential-resolu
   "0003_dashboard_users.sql",
   "0004_github_apps.sql",
   "0005_reviews_app_id.sql",
+  // 0007: the review attribution index the rename drops and recreates.
+  "0007_reviews_app_id_index.sql",
   // 0006: the per-App config tables the settings consumer now reads
   // on EVERY app-path message — the fixture must stay production-shaped.
   "0006_app_provider_config.sql",

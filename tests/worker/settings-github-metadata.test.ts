@@ -23,7 +23,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
@@ -141,7 +141,7 @@ async function seededWorld(privateKeyPem: string): Promise<{ db: TestD1; appId: 
   seedDefaultMemberships(db, { octocat: "owner", mallory: "owner", hubot: "member" });
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
-  await createAppsStore(db).createApp({
+  await createReviewBotsStore(db).createApp({
     id,
     githubSlug: "mallorys-app",
     githubAppId: APP_ID,
@@ -206,7 +206,7 @@ type CachedColumns = {
 const cachedColumns = (db: TestD1, appId: string): CachedColumns =>
   db.raw
     .query(
-      "SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at, github_metadata_attempted_at, github_visibility, github_slug, created_at, updated_at FROM github_apps WHERE id = ?",
+      "SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at, github_metadata_attempted_at, github_visibility, github_slug, created_at, updated_at FROM review_bots WHERE id = ?",
     )
     .get(appId) as CachedColumns;
 
@@ -214,7 +214,7 @@ const cachedColumns = (db: TestD1, appId: string): CachedColumns =>
 function seedCache(db: TestD1, appId: string, syncedAtSql: string): void {
   db.raw
     .query(
-      `UPDATE github_apps SET github_name = 'Cached App', github_description = 'cached description',
+      `UPDATE review_bots SET github_name = 'Cached App', github_description = 'cached description',
        github_html_url = 'https://github.com/apps/cached', github_avatar_url = 'https://avatars/u/2',
        github_metadata_synced_at = ${syncedAtSql} WHERE id = ?`,
     )
@@ -300,7 +300,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
     seedCache(db, appId, "datetime('now', '-1 hours')");
-    db.raw.query("UPDATE github_apps SET github_slug = NULL WHERE id = ?").run(appId);
+    db.raw.query("UPDATE review_bots SET github_slug = NULL WHERE id = ?").run(appId);
     const { calls } = stubFetch(githubStub(GITHUB_PROFILE));
 
     const res = await getSettings("mallory", makeEnv(db));
@@ -309,7 +309,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(appProfileCalls(calls)).toHaveLength(1);
     const body = (await res.json()) as { app: Record<string, unknown> };
     expect(body.app.github_slug).toBe("acme-inspector");
-    const row = db.raw.query("SELECT github_slug FROM github_apps WHERE id = ?").get(appId) as {
+    const row = db.raw.query("SELECT github_slug FROM review_bots WHERE id = ?").get(appId) as {
       github_slug: string | null;
     };
     expect(row.github_slug).toBe("acme-inspector");
@@ -335,7 +335,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
   test("an inconclusive visibility probe (503) keeps the stored github_visibility", async () => {
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
-    db.raw.query("UPDATE github_apps SET github_visibility = 'private' WHERE id = ?").run(appId);
+    db.raw.query("UPDATE review_bots SET github_visibility = 'private' WHERE id = ?").run(appId);
     const { calls } = stubFetch(githubStub(GITHUB_PROFILE, 503));
 
     const res = await getSettings("mallory", makeEnv(db));
@@ -398,7 +398,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     // one `/app` call plus up to the 5 s timeout per open, for every member.
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
-    db.raw.query("UPDATE github_apps SET github_slug = NULL WHERE id = ?").run(appId);
+    db.raw.query("UPDATE review_bots SET github_slug = NULL WHERE id = ?").run(appId);
     const { calls } = stubFetch(
       () => new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } }),
     );
@@ -419,7 +419,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const { db, appId } = await seededWorld(pem);
     db.raw
       .query(
-        `UPDATE github_apps SET github_slug = NULL,
+        `UPDATE review_bots SET github_slug = NULL,
            github_metadata_attempted_at = datetime('now', '-25 hours') WHERE id = ?`,
       )
       .run(appId);
@@ -438,7 +438,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     // marker every read would fetch again.
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
-    db.raw.query("UPDATE github_apps SET github_slug = NULL WHERE id = ?").run(appId);
+    db.raw.query("UPDATE review_bots SET github_slug = NULL WHERE id = ?").run(appId);
     // Neither `slug` nor a derivable html_url: both slug sources degrade.
     const { calls } = stubFetch(githubStub({ name: "Acme Inspector" }));
     const env = makeEnv(db);
@@ -461,7 +461,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const { db, appId } = await seededWorld(pem);
     db.raw
       .query(
-        `UPDATE github_apps SET github_slug = NULL,
+        `UPDATE review_bots SET github_slug = NULL,
            github_metadata_attempted_at = datetime('now') WHERE id = ?`,
       )
       .run(appId);
@@ -477,7 +477,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
   test("envelope-level decrypt failure (Task-1 review handoff) → swallowed, 200 with the manage face intact", async () => {
     const { db, appId } = await seededWorld("this plaintext is unreachable");
     // Corrupt the stored envelope AFTER seeding — decryptSecret throws on it.
-    db.raw.query("UPDATE github_apps SET private_key_enc = 'not-an-envelope' WHERE id = ?").run(appId);
+    db.raw.query("UPDATE review_bots SET private_key_enc = 'not-an-envelope' WHERE id = ?").run(appId);
     const { calls } = stubFetch(
       () => new Response(JSON.stringify(GITHUB_PROFILE), { status: 200, headers: { "content-type": "application/json" } }),
     );
@@ -560,12 +560,12 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     // GitHub lists it again: the same-second clear must still work.
     db.raw
       .prepare(
-        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('seed-gone', ?, 10, 'gone-org', datetime('now'))",
+        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('seed-gone', ?, 10, 'gone-org', datetime('now'))",
       )
       .run(appId);
     db.raw
       .prepare(
-        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at, removed_at) VALUES ('seed-back', ?, 20, 'back-org', datetime('now'), datetime('now'))",
+        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at) VALUES ('seed-back', ?, 20, 'back-org', datetime('now'), datetime('now'))",
       )
       .run(appId);
     stubFetch(githubStub(GITHUB_PROFILE, 404, [20]));
@@ -574,7 +574,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
 
     expect(res.status).toBe(200);
     const rows = db.raw
-      .query("SELECT installation_id, removed_at FROM app_installations ORDER BY installation_id")
+      .query("SELECT installation_id, removed_at FROM bot_installations ORDER BY installation_id")
       .all() as Array<{ installation_id: number; removed_at: string | null }>;
     expect(rows).toEqual([
       { installation_id: 10, removed_at: expect.any(String) },
@@ -587,7 +587,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const { db, appId } = await seededWorld(pem);
     db.raw
       .prepare(
-        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('seed-live', ?, 10, 'live-org', datetime('now'))",
+        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('seed-live', ?, 10, 'live-org', datetime('now'))",
       )
       .run(appId);
     const profileStub = githubStub(GITHUB_PROFILE);
@@ -604,7 +604,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(res.status).toBe(200);
     expect(cachedColumns(db, appId).github_name).toBe("Acme Inspector");
     const row = db.raw
-      .query("SELECT removed_at FROM app_installations WHERE installation_id = 10")
+      .query("SELECT removed_at FROM bot_installations WHERE installation_id = 10")
       .get() as { removed_at: string | null };
     expect(row.removed_at).toBeNull();
   });

@@ -4,7 +4,7 @@
  * The consumer resolves the commenter from `payload.appRef` BEFORE the
  * in-flight guard / sandbox (fail fast, zero side effects on failure):
  * - `{ appId }` (required — single shape) → D1
- *     `github_apps` row (re-read per message:
+ *     `review_bots` row (re-read per message:
  *     active, not soft-deleted) → PEM decrypted in memory (secretbox, AAD
  *     `github_apps.private_key_enc:<id>`) → `createAppCommenter(...)`
  *     cached per appId in a Map — token mint AND postReview come from the
@@ -30,7 +30,7 @@ import { idemKey } from "../../src/contracts/idem";
 import type { ReviewOutput } from "../../src/review/schema";
 import { createTestD1, mapAppToDefaultWorkspace } from "../store/helpers";
 import { APP_CREDENTIAL_RESOLUTION_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { sk, fakePem } from "../helpers/fake-secrets";
@@ -66,7 +66,7 @@ type SeedOptions = {
   wrongAad?: boolean;
 };
 
-/** Raw-insert an active, non-deleted github_apps row with a real PEM envelope. */
+/** Raw-insert an active, non-deleted review_bots row with a real PEM envelope. */
 async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): Promise<{ id: string }> {
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
@@ -75,7 +75,7 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
   const webhookSecretEnc = await box.encryptSecret(`whsec-${opts.slug}`, `github_apps.webhook_secret_enc:${id}`);
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -309,9 +309,9 @@ describe("consumer appRef resolution (lock L4)", () => {
     expect(errOrInfo.length).toBeGreaterThan(0);
     expect(errOrInfo.every((l) => l.fields.app_id === appX.id)).toBe(true);
     // The persisted review row carries the App identity (QC F-001: the
-    // resolved appRef's appId rides the put into reviews.app_id).
-    const row = db.raw.query("SELECT app_id FROM reviews").get() as { app_id: string | null };
-    expect(row.app_id).toBe(appX.id);
+    // resolved appRef's appId rides the put into reviews.bot_id).
+    const row = db.raw.query("SELECT bot_id FROM reviews").get() as { bot_id: string | null };
+    expect(row.bot_id).toBe(appX.id);
   });
 
   test("two messages for the same App in one batch → ONE instance (per-appId cache), both served by it", async () => {
@@ -336,7 +336,7 @@ describe("consumer appRef resolution (lock L4)", () => {
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
-    await createAppsStore(db).setAppStatus(appX.id, "disabled");
+    await createReviewBotsStore(db).setAppStatus(appX.id, "disabled");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })))).rejects.toThrow(
@@ -357,7 +357,7 @@ describe("consumer appRef resolution (lock L4)", () => {
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
-    await createAppsStore(db).softDeleteApp(appX.id);
+    await createReviewBotsStore(db).softDeleteApp(appX.id);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })))).rejects.toThrow(
@@ -469,7 +469,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     // re-save path (AES-GCM random IV → a fresh envelope string).
     const box = createSecretbox(TEST_KEY);
     db.raw
-      .prepare("UPDATE github_apps SET private_key_enc = ? WHERE id = ?")
+      .prepare("UPDATE review_bots SET private_key_enc = ? WHERE id = ?")
       .run(await box.encryptSecret(PEM_Y, keyAad(appX.id)), appX.id);
 
     await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
@@ -491,7 +491,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
 
     const box = createSecretbox(TEST_KEY);
     db.raw
-      .prepare("UPDATE github_apps SET private_key_enc = ? WHERE id = ?")
+      .prepare("UPDATE review_bots SET private_key_enc = ? WHERE id = ?")
       .run(await box.encryptSecret(PEM_X, keyAad(appX.id)), appX.id);
 
     await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
@@ -512,7 +512,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     expect(factoryCreds).toHaveLength(1);
 
     // Disable → the unchanged throw path (retry/DLQ) AND the eviction.
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     await store.setAppStatus(appX.id, "disabled");
     await expect(
       consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } }))),
@@ -537,7 +537,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(1);
 
-    await createAppsStore(db).softDeleteApp(appX.id);
+    await createReviewBotsStore(db).softDeleteApp(appX.id);
     await expect(
       consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } }))),
     ).rejects.toThrow(/per-App credential resolution failed: app .* is soft-deleted/);
@@ -545,7 +545,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     // Production never un-deletes; the probe restores the row via direct SQL
     // purely to make the eviction OBSERVABLE: the envelope is unchanged, so
     // a surviving entry would fingerprint-hit and reuse instance 1.
-    db.raw.prepare("UPDATE github_apps SET deleted_at = NULL, status = 'active' WHERE id = ?").run(appX.id);
+    db.raw.prepare("UPDATE review_bots SET deleted_at = NULL, status = 'active' WHERE id = ?").run(appX.id);
     await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(2);
     expect(appCalls.at(-1)!.instance).toBe(factoryCreds[1]!.instance);
@@ -578,7 +578,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
-    await createAppsStore(db).setReviewEnabled(appX.id, false);
+    await createReviewBotsStore(db).setReviewEnabled(appX.id, false);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
@@ -619,7 +619,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     await store.setReviewEnabled(appX.id, false); // paused too…
     await store.setAppStatus(appX.id, "disabled"); // …but disabled wins
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -640,7 +640,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
@@ -672,9 +672,9 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
 
     // Capture the row, then hard-delete it (the not-found gate also guards
     // a row that vanished outside the soft-delete path). The completed
-    // review row references the App (reviews.app_id FK, 0005) — clear it
+    // review row references the App (reviews.bot_id FK, 0005) — clear it
     // first so the DELETE can proceed.
-    const row = db.raw.query("SELECT * FROM github_apps WHERE id = ?").get(appX.id) as {
+    const row = db.raw.query("SELECT * FROM review_bots WHERE id = ?").get(appX.id) as {
       id: string;
       github_app_id: number;
       name: string;
@@ -688,23 +688,23 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     };
     // The seeded per-App config rows share the FK (0006: NO ACTION) — clear
     // them first so the hard DELETE can proceed; re-seed them on re-insert.
-    db.raw.prepare("DELETE FROM reviews WHERE app_id = ?").run(appX.id);
-    db.raw.prepare("DELETE FROM app_model_config WHERE app_id = ?").run(appX.id);
-    db.raw.prepare("DELETE FROM app_model_chain_seats WHERE app_id = ?").run(appX.id);
-    db.raw.prepare("DELETE FROM app_model_chains WHERE app_id = ?").run(appX.id);
-    db.raw.prepare("DELETE FROM app_provider_keys WHERE app_id = ?").run(appX.id);
-    // 0020/0021 add the same NO ACTION app_id FK to the
+    db.raw.prepare("DELETE FROM reviews WHERE bot_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM bot_model_config WHERE bot_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM bot_model_chain_seats WHERE bot_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM bot_model_chains WHERE bot_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM bot_provider_keys WHERE bot_id = ?").run(appX.id);
+    // 0020/0021 add the same NO ACTION bot_id FK to the
     // finding-lifecycle tables. The completed review above staged one
     // publication journal row; clear that family child-first (rounds →
     // threads → checks → findings → publications) so the hard DELETE can
     // proceed.
-    db.raw.prepare("DELETE FROM review_finding_rounds WHERE finding_row_id IN (SELECT id FROM review_findings WHERE app_id = ?)").run(appX.id);
-    db.raw.prepare("DELETE FROM review_threads WHERE app_id = ?").run(appX.id);
-    db.raw.prepare("DELETE FROM review_checks WHERE app_id = ?").run(appX.id);
-    db.raw.prepare("DELETE FROM review_findings WHERE app_id = ?").run(appX.id);
-    db.raw.prepare("DELETE FROM review_publications WHERE app_id = ?").run(appX.id);
-    db.raw.prepare("DELETE FROM app_workspaces WHERE app_id = ?").run(appX.id);
-    db.raw.prepare("DELETE FROM github_apps WHERE id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM review_finding_rounds WHERE finding_row_id IN (SELECT id FROM review_findings WHERE bot_id = ?)").run(appX.id);
+    db.raw.prepare("DELETE FROM review_threads WHERE bot_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM review_checks WHERE bot_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM review_findings WHERE bot_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM review_publications WHERE bot_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM bot_workspaces WHERE bot_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM review_bots WHERE id = ?").run(appX.id);
     await expect(
       consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } }))),
     ).rejects.toThrow(/per-App credential resolution failed: app .* not found/);
@@ -715,7 +715,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     // second factory call proves the not-found gate evicted the entry.
     db.raw
       .prepare(
-        `INSERT INTO github_apps (id, github_app_id, name, private_key_enc, webhook_secret_enc,
+        `INSERT INTO review_bots (id, github_app_id, name, private_key_enc, webhook_secret_enc,
            created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )

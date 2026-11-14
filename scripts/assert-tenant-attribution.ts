@@ -6,15 +6,15 @@
  * Usage:
  *   bun scripts/assert-tenant-attribution.ts [--db <name>] [--env <environment>]
  *
- * Every App must own exactly one `app_workspaces` row: every execution-facing
+ * Every App must own exactly one `bot_workspaces` row: every execution-facing
  * App read INNER JOINs that table, so an unmapped App silently disappears from
  * the pipeline — the failure is invisible, which is why an orphan count aborts
  * the deploy instead of warning.
  *
  * The query runs through the same `wrangler d1 execute` path the deploy
  * uses, against the remote database, and against the environment's config
- * block (`--env production`). `0027_workspace_backfill.sql` is idempotent;
- * run it first, then this gate.
+ * block (`--env production`). `scripts/workspace-backfill.sql` is idempotent;
+ * replay it first, then this gate.
  *
  * Exit codes: 0 = zero orphans; 1 = orphans found, wrangler failed, or the
  * output could not be read (an unreadable answer is never a pass).
@@ -22,7 +22,7 @@
 
 /** The zero-orphan question. `n > 0` = Apps with no workspace mapping. */
 export const ZERO_ORPHAN_SQL =
-  "SELECT COUNT(*) AS n FROM github_apps g LEFT JOIN app_workspaces w ON w.app_id = g.id WHERE w.app_id IS NULL";
+  "SELECT COUNT(*) AS n FROM review_bots g LEFT JOIN bot_workspaces w ON w.bot_id = g.id WHERE w.bot_id IS NULL";
 
 export type AttributionVerdict = {
   ok: boolean;
@@ -80,14 +80,14 @@ export function attributionVerdict(stdout: string): AttributionVerdict {
     return fail("wrangler d1 execute returned no non-negative integer COUNT(*) AS n");
   }
   if (count === 0) {
-    return { ok: true, count, message: "tenant attribution: 0 orphan Apps (every github_apps row has an app_workspaces row)" };
+    return { ok: true, count, message: "tenant attribution: 0 orphan Apps (every review_bots row has a bot_workspaces row)" };
   }
   return {
     ok: false,
     count,
     message:
-      `tenant attribution: ${count} App(s) have no app_workspaces row — every App read joins ` +
-      `that table, so they are invisible to the pipeline. Run migrations/0027_workspace_backfill.sql, then re-run this gate.`,
+      `tenant attribution: ${count} App(s) have no bot_workspaces row — every App read joins ` +
+      `that table, so they are invisible to the pipeline. Replay scripts/workspace-backfill.sql, then re-run this gate.`,
   };
 }
 

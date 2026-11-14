@@ -1,7 +1,7 @@
 /**
  * /dashboard Hono sub-app: GitHub OAuth login + signed-cookie session
  * + GitHub App Manifest start/callback/commit (the
- * commit writes the encrypted github_apps D1 row, the Cloudflare secrets-bulk
+ * commit writes the encrypted review_bots D1 row, the Cloudflare secrets-bulk
  * path is retired) + per-App management UI (/dashboard/apps list,
  * POST …/disable|enable|delete — workspace owner/admin) + per-App review
  * pause/resume (POST …/pause|/resume — the same action
@@ -63,7 +63,7 @@ import {
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";
 import {
   ALLOWLIST_MAX_OWNERS,
-  createAppsStore,
+  createReviewBotsStore,
   dedupeOwnerLogins,
   parseAppReviewLevel,
   REVIEW_TRIGGER_MODES,
@@ -718,9 +718,9 @@ function errorTypeName(err: unknown): string {
   return err instanceof Error ? err.name : String(err);
 }
 
-/** The sqlite UNIQUE violation for one github_apps column. */
+/** The sqlite UNIQUE violation for one review_bots column. */
 function isAppsUniqueViolation(err: unknown, column: "github_app_id"): boolean {
-  return err instanceof Error && err.message.includes(`github_apps.${column}`);
+  return err instanceof Error && err.message.includes(`review_bots.${column}`);
 }
 
 // --- Workspace (tenant) routing gate (migration 0026) ---
@@ -1404,7 +1404,7 @@ dashboardApp.post("/:workspaceRef/manifest/start", (c) => manifestStartRoute(c, 
 // success the code is exchanged and — AC4b — the App is committed
 // immediately (no second click): the shared commit path (commitManifestApp,
 // the same write the POST /manifest/commit recovery route uses) encrypts
-// the credentials with DASHBOARD_ENCRYPTION_KEY and writes one github_apps
+// the credentials with DASHBOARD_ENCRYPTION_KEY and writes one review_bots
 // row INTO THE WORKSPACE THE STATE NAMES (carried from start). Success → 302
 // to that workspace's onboarding page; non-retryable conflicts (409) burn the
 // hold like the commit route; retryable outcomes (500) park the hold cookie so
@@ -1613,7 +1613,7 @@ type ManifestCommitOutcome =
  * second click) and the POST /manifest/commit recovery route. The decrypted
  * hold payload + the acting session login are passed in; the hold's login
  * binding is re-checked here on EVERY call. Outcomes mirror the route's long-standing
- * semantics: success = ONE github_apps row (secretbox AAD rowKey = the row
+ * semantics: success = ONE review_bots row (secretbox AAD rowKey = the row
  * PK, which IS the start-minted app id — the same value the manifest's
  * webhook URL carries);
  * login_mismatch / already_connected = non-retryable (the caller burns the
@@ -1669,7 +1669,7 @@ async function commitManifestApp(args: {
   }
   // The remaining UNIQUE identity is github_app_id: the same GitHub App
   // cannot be connected twice, and a retry cannot help — the hold is burned.
-  const apps = createAppsStore(db);
+  const apps = createReviewBotsStore(db);
   // The floor a new App starts at: the workspace's own default, else the
   // platform default. A degraded read is refused above — it would otherwise
   // seed a wider floor than the tenant configured.
@@ -1765,7 +1765,7 @@ const appOnboardingRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
   const app = await resolveScopedApp(
-    createAppsStore(member.db),
+    createReviewBotsStore(member.db),
     c.req.param("appId") ?? "",
     member.scope,
   );
@@ -2479,7 +2479,7 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
 //
 // The floor a newly connected App of this workspace starts at. Existing Apps
 // keep their own stored floor (the per-App settings face writes that), so this
-// route never rewrites `github_apps`. Same role gate as the concurrency cap:
+// route never rewrites `review_bots`. Same role gate as the concurrency cap:
 // owner/admin read and write, a plain member gets the tenant 404.
 const workspaceCheckMinScoreReadRoute = async (c: DashboardContext) => {
   const gate = await workspaceConcurrencyGate(c);
@@ -2592,7 +2592,7 @@ function canManageApp(scope: WorkspaceScope): boolean {
  * are all equally invisible (404).
  */
 async function resolveScopedApp(
-  apps: ReturnType<typeof createAppsStore>,
+  apps: ReturnType<typeof createReviewBotsStore>,
   appIdParam: string,
   scope: WorkspaceScope,
 ): Promise<GithubAppRow | null> {
@@ -2624,7 +2624,7 @@ function appDisplayName(
  * carries its health summary (the App's newest review-verdict
  * webhook_deliveries row — outcome tier, see the store's deliverySummaries —
  * plus the 24h rejected count). The health column reads webhook_deliveries —
- * NOT the github_apps.last_webhook_at column, which stays the L5 "last
+ * NOT the review_bots.last_webhook_at column, which stays the L5 "last
  * verified delivery" stamp (display-only, no computed health).
  *
  * The summaries come from the store's BATCHED deliverySummaries face
@@ -2637,7 +2637,7 @@ function appDisplayName(
  * when a workspace can hold enough Apps for the scan to matter.
  */
 async function appsListWithHealth(
-  apps: ReturnType<typeof createAppsStore>,
+  apps: ReturnType<typeof createReviewBotsStore>,
   scope: WorkspaceScope,
 ): Promise<Array<GithubAppRow & { health: DeliverySummary }>> {
   const rows = (await apps.listApps()).filter((app) => app.workspace_id === scope.workspaceId);
@@ -2649,7 +2649,7 @@ async function appsListWithHealth(
 const appListRoute = async (c: DashboardContext) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const rows = await appsListWithHealth(createAppsStore(gate.db), gate.scope);
+  const rows = await appsListWithHealth(createReviewBotsStore(gate.db), gate.scope);
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
     apps: rows.map((app) => ({
@@ -2691,7 +2691,7 @@ async function appStatusAction(
 ): Promise<Response> {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
+  const apps = createReviewBotsStore(gate.db);
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
@@ -2751,7 +2751,7 @@ async function appReviewAction(
 ): Promise<Response> {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
+  const apps = createReviewBotsStore(gate.db);
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
@@ -2798,7 +2798,7 @@ function isReviewTriggerMode(value: string): value is ReviewTriggerMode {
 async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response> {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
+  const apps = createReviewBotsStore(gate.db);
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
@@ -2854,7 +2854,7 @@ async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> 
   const member = await requireMember(c);
   if (!member.ok) return member;
   const app = await resolveScopedApp(
-    createAppsStore(member.db),
+    createReviewBotsStore(member.db),
     c.req.param("appId") ?? "",
     member.scope,
   );
@@ -3288,7 +3288,7 @@ type GithubMetadataRefresh =
 
 async function refreshGithubMetadata(
   app: GithubAppRow,
-  apps: ReturnType<typeof createAppsStore>,
+  apps: ReturnType<typeof createReviewBotsStore>,
   encryptionKey: string | undefined,
   options: { force: boolean },
 ): Promise<GithubMetadataRefresh> {
@@ -3405,7 +3405,7 @@ async function refreshGithubMetadata(
  */
 async function refreshGithubMetadataForRead(
   app: GithubAppRow,
-  apps: ReturnType<typeof createAppsStore>,
+  apps: ReturnType<typeof createReviewBotsStore>,
   encryptionKey: string | undefined,
 ): Promise<GithubAppRow> {
   const refresh = await refreshGithubMetadata(app, apps, encryptionKey, { force: false });
@@ -3422,7 +3422,7 @@ async function refreshGithubMetadataForRead(
 const appSettingsRoute = async (c: DashboardContext) => {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
+  const apps = createReviewBotsStore(gate.db);
   // Outside the render try on purpose: the refresh leg carries its own
   // catch-all, so no metadata failure can reach this route's 500 face
   // (AD-531 fail-open by structure).
@@ -3721,7 +3721,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
 const appRefreshMetadataRoute = async (c: DashboardContext): Promise<Response> => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
+  const apps = createReviewBotsStore(gate.db);
   const refresh = await refreshGithubMetadata(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY, {
     force: true,
   });
@@ -4707,7 +4707,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.runtimeHarnessUnknown);
     }
     try {
-      await createAppsStore(gate.db).setSandboxImage(gate.app.id, image.id);
+      await createReviewBotsStore(gate.db).setSandboxImage(gate.app.id, image.id);
     } catch (err) {
       logSettingsFailure("save_sandbox_image", gate.app.id, err);
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
@@ -4730,7 +4730,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     try {
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
-      if (!(await createAppsStore(gate.db).setReviewLevel(gate.app.id, level))) {
+      if (!(await createReviewBotsStore(gate.db).setReviewLevel(gate.app.id, level))) {
         throw new Error(`app ${gate.app.id} vanished before its review level save`);
       }
     } catch (err) {
@@ -4776,7 +4776,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     try {
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
-      if (!(await createAppsStore(gate.db).saveCheckGate(gate.app.id, { minScore, passVerdicts }))) {
+      if (!(await createReviewBotsStore(gate.db).saveCheckGate(gate.app.id, { minScore, passVerdicts }))) {
         throw new Error(`app ${gate.app.id} vanished before its review gate save`);
       }
     } catch (err) {
@@ -4825,7 +4825,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         limit: ALLOWLIST_MAX_OWNERS,
       });
     }
-    const apps = createAppsStore(gate.db);
+    const apps = createReviewBotsStore(gate.db);
     try {
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
@@ -5071,12 +5071,12 @@ const appInsightsRoute = async (c: DashboardContext) => {
 async function requireAppManagerJson(
   c: DashboardContext,
 ): Promise<
-  | { ok: true; app: GithubAppRow; db: DashboardDb; store: ReturnType<typeof createAppsStore> }
+  | { ok: true; app: GithubAppRow; db: DashboardDb; store: ReturnType<typeof createReviewBotsStore> }
   | { ok: false; response: Response }
 > {
   const member = await requireMember(c);
   if (!member.ok) return member;
-  const store = createAppsStore(member.db);
+  const store = createReviewBotsStore(member.db);
   const app = await resolveScopedApp(store, c.req.param("appId") ?? "", member.scope);
   if (!app) return { ok: false, response: c.json({ error: "unknown app" }, 404) };
   if (!canManageApp(member.scope)) return { ok: false, response: c.json({ error: "forbidden" }, 403) };
