@@ -84,7 +84,7 @@ const TEST_APP_WEBHOOK_SECRET_ENC = await createSecretbox(TEST_KEY).encryptSecre
 );
 
 /**
- * A SECOND App row (`reviews.app_id`'s FK needs a real one) whose id no test
+ * A SECOND App row (`reviews.bot_id`'s FK needs a real one) whose id no test
  * payload carries: the cross-App increment-base cases attribute a review to it
  * and prove the read stays inside the reviewing App.
  */
@@ -99,7 +99,7 @@ export const TEST_SECOND_APP_ID = "22222222-3333-4444-5555-666666666666";
 export function seedOtherApp(db: TestD1): void {
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, 434343, 'consumer-test-other-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -123,21 +123,21 @@ export async function createSeededTestD1(): Promise<TestD1> {
   const db = createMigratedTestD1();
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           check_min_score, created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, 424242, 'consumer-test-app', ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(TEST_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC, DEFAULT_CHECK_MIN_SCORE);
   // Production shape (migration 0026): createApp writes the App row and its
-  // `app_workspaces` mapping in ONE batch, so no App exists unmapped — the
+  // `bot_workspaces` mapping in ONE batch, so no App exists unmapped — the
   // consumer's strict read face resolves a real App. A test that needs an
   // orphan deletes this row explicitly.
   db.raw
-    .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
+    .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
     .run(TEST_APP_ID);
   // The default App's per-App AI config (AL-24-5 health baseline). AWAITED
-  // so the seed completes before any caller re-seeds the same app_id with a
+  // so the seed completes before any caller re-seeds the same bot_id with a
   // different chain (Rev24T6 Important-2: the fire-and-forget seed raced
   // later awaited re-seeds — last-writer-wins could flake success paths).
   await seedAppConfig(db, TEST_APP_ID);
@@ -169,7 +169,7 @@ export async function seedAppConfig(
  * "follow the operator default" face; both faces are stored verbatim.
  */
 export function setAppReviewLevel(db: TestD1, appId: string, level: string | null): void {
-  db.raw.prepare("UPDATE github_apps SET review_level = ? WHERE id = ?").run(level, appId);
+  db.raw.prepare("UPDATE review_bots SET review_level = ? WHERE id = ?").run(level, appId);
 }
 
 /**
@@ -192,7 +192,7 @@ export async function seedReviewingApp(
   );
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, review_level,
           check_min_score, created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -207,7 +207,7 @@ export async function seedReviewingApp(
       DEFAULT_CHECK_MIN_SCORE,
     );
   db.raw
-    .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
+    .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
     .run(appId);
   await seedAppConfig(db, appId);
 }
@@ -716,7 +716,7 @@ export async function seedPriorPublication(db: TestD1, nowMs = 1_000): Promise<v
   db.raw
     .prepare(
       `INSERT INTO review_publications
-         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, created_ms, updated_ms, recovery_state)
        VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', 'applied', ?, ?, ?, 'done')`,
     )
@@ -747,7 +747,7 @@ export async function seedOpenTarget(
   db.raw
     .prepare(
       `INSERT INTO review_findings
-         (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+         (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
           first_seen_round, last_seen_round, state, created_ms, updated_ms)
        VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)`,
@@ -783,7 +783,7 @@ export async function seedAssociation(db: TestD1, threadId: string | null, nowMs
   db.raw
     .prepare(
       `INSERT INTO review_threads
-         (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+         (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
           original_sha, round, intent_json, resolution_state, thread_id, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, 'pending', ?, ?, ?)`,
     )

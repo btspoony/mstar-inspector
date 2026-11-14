@@ -265,13 +265,13 @@ async function seedApp(db: TestD1): Promise<void> {
   const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`);
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, 'app-x', 4242, 'app-x', ?, ?, 'fixture', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, privateKeyEnc, webhookSecretEnc);
-  db.raw.prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')").run(id);
+  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')").run(id);
 }
 
 function queueCapture(): { queue: Env["REVIEW_QUEUE"]; sent: ReviewJobPayload[] } {

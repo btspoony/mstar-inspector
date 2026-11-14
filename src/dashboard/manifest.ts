@@ -1,7 +1,7 @@
 /**
  * GitHub App Manifest flow (start → GitHub form POST →
  * callback → code conversion → encrypted hold cookie; the commit writes
- * the encrypted `github_apps` D1 row — the dashboard's
+ * the encrypted `review_bots` D1 row — the dashboard's
  * Cloudflare API dependency is retired, spec § Multi-App 契约).
  *
  * Architect locks (spec dashboard-b1-manifest.md § L6/L7/L8/L9 + L1):
@@ -146,7 +146,7 @@ export function buildManifestCreateUrl(state: string): string {
 
 export type ManifestStatePayload = {
   /**
-   * The future `github_apps.id`, minted at start so the webhook URL is known
+   * The future `review_bots.id`, minted at start so the webhook URL is known
    * before GitHub creates the App. It becomes the row PK at commit.
    */
   appId: string;

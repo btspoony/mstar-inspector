@@ -33,11 +33,11 @@ const META = {
   },
 };
 
-/** One github_apps row of the post-0038 shape (no crypto path needed here). */
+/** One review_bots row of the post-0038 shape (no crypto path needed here). */
 function seedApp(db: TestD1, id: string): void {
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
           status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -53,7 +53,7 @@ function world(): { db: TestD1; appId: string; store: ReturnType<typeof createAp
 
 function storedMeta(db: TestD1, appId: string): unknown {
   const row = db.raw
-    .query("SELECT models_meta FROM app_custom_providers WHERE app_id = ?")
+    .query("SELECT models_meta FROM bot_custom_providers WHERE bot_id = ?")
     .get(appId) as { models_meta?: string } | null;
   return row ? JSON.parse(row.models_meta ?? "null") : null;
 }
@@ -89,7 +89,7 @@ describe("app-config store — custom provider models_meta", () => {
     await expect(
       store.upsertCustomProvider(appId, { ...CUSTOM, models_meta: { "not-declared": META["deepseek-r1"] } }, PLAIN_KEY),
     ).rejects.toThrow(/not-declared/);
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers WHERE app_id = ?").get(appId)).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers WHERE bot_id = ?").get(appId)).toEqual({ n: 0 });
   });
 
   test("refuses a size that is not a positive integer, naming the field", async () => {
@@ -115,13 +115,13 @@ describe("app-config store — custom provider models_meta", () => {
     await store.upsertCustomProvider(appId, CUSTOM, PLAIN_KEY);
 
     db.raw
-      .prepare("UPDATE app_custom_providers SET models_meta = ? WHERE app_id = ?")
+      .prepare("UPDATE bot_custom_providers SET models_meta = ? WHERE bot_id = ?")
       .run('{"ghost-model":{"contextWindow":1,"maxTokens":1}}', appId);
     await expect(store.listCustomProviders(appId)).rejects.toThrow(/models_meta/);
     await expect(store.getCustomProvidersForConsumer(appId)).rejects.toThrow(/models_meta/);
 
     db.raw
-      .prepare("UPDATE app_custom_providers SET models_meta = ? WHERE app_id = ?")
+      .prepare("UPDATE bot_custom_providers SET models_meta = ? WHERE bot_id = ?")
       .run("[]", appId);
     await expect(store.listCustomProviders(appId)).rejects.toThrow(/models_meta/);
   });
@@ -134,7 +134,7 @@ describe("app-config store — custom provider models_meta", () => {
     // key — otherwise the dialog renders "No reasoning" and the consumer
     // spreads a null modality list.
     db.raw
-      .prepare("UPDATE app_custom_providers SET models_meta = ? WHERE app_id = ?")
+      .prepare("UPDATE bot_custom_providers SET models_meta = ? WHERE bot_id = ?")
       .run(
         JSON.stringify({
           "deepseek-r1": { contextWindow: 128000, maxTokens: 8192, name: null, reasoning: null, input: null },

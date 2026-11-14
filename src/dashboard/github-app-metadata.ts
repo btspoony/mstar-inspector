@@ -14,7 +14,7 @@
  * through; OpenSSH throws and is swallowed by the catch-all below).
  *
  * The same JWT answers the installation list (`GET /app/installations`) that
- * reconciles `app_installations` against GitHub — see fetchAppInstallations.
+ * reconciles `bot_installations` against GitHub — see fetchAppInstallations.
  *
  * Flow: normalizePrivateKey(decryptedPem) → importKey("pkcs8") → RS256-sign
  * `{alg:RS256,typ:JWT}` / `{iat,exp,iss:<githubAppId>}` →
@@ -222,7 +222,7 @@ export type FetchAppMetadataResult =
 /**
  * Fetch one App's public GitHub profile with a freshly minted App JWT.
  * `githubAppId` is the numeric GitHub App id
- * (`github_apps.github_app_id` — the JWT `iss` claim, NOT the row UUID);
+ * (`review_bots.github_app_id` — the JWT `iss` claim, NOT the row UUID);
  * `decryptedPem` is the already-secretbox-decrypted App private key
  * (decryption happens at the caller — the last responsible moment).
  *
@@ -296,7 +296,7 @@ export async function fetchAppMetadata(
 
 /**
  * The authoritative installation list for this App, reduced to the ids the
- * local `app_installations` rows are keyed by. `{ ok: false }` = the whole
+ * local `bot_installations` rows are keyed by. `{ ok: false }` = the whole
  * answer is unusable (bad key, network/timeout, non-200, a payload that is not
  * an id array); the caller then changes NO row and keeps its own result.
  */

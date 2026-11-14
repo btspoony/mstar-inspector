@@ -3,7 +3,7 @@
  *
  * One executable table of (scenario × mode) cells that crosses the layers
  * built in T2–T6: the routing gate, the membership gate, the scoped App
- * resolve, the strict `app_workspaces` read face, and the mode switch itself.
+ * resolve, the strict `bot_workspaces` read face, and the mode switch itself.
  * Each row names the layer it exercises and, where a task-level test already
  * pins the same statement, is annotated `covered by <file>` — those rows assert
  * only the cross-layer composition (what happens when two of those layers act
@@ -150,7 +150,7 @@ function seedApp(
   const now = new Date().toISOString();
   seed(
     db,
-    `INSERT INTO github_apps
+    `INSERT INTO review_bots
        (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
@@ -163,7 +163,7 @@ function seedApp(
     now,
   );
   if (workspaceId !== null) {
-    seed(db, "INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+    seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
   }
 }
 
@@ -217,12 +217,12 @@ function appSnapshot(db: TestD1, appId = "app-acme") {
     app: db.raw
       .query(
         `SELECT status, review_enabled, review_trigger_mode, sandbox_image_id, deleted_at, updated_at
-           FROM github_apps WHERE id = ?`,
+           FROM review_bots WHERE id = ?`,
       )
       .get(appId),
-    config: db.raw.query("SELECT model_chain FROM app_model_config WHERE app_id = ?").get(appId) ?? null,
-    keys: db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys WHERE app_id = ?").get(appId),
-    custom: db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers WHERE app_id = ?").get(appId),
+    config: db.raw.query("SELECT model_chain FROM bot_model_config WHERE bot_id = ?").get(appId) ?? null,
+    keys: db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys WHERE bot_id = ?").get(appId),
+    custom: db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers WHERE bot_id = ?").get(appId),
   };
 }
 
@@ -340,7 +340,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     // would CLEAR it with the same empty value.
     seed(
       db,
-      "INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES (?, ?, datetime('now'))",
+      "INSERT INTO bot_model_config (bot_id, model_chain, updated_at) VALUES (?, ?, datetime('now'))",
       "app-acme",
       "ark/deepseek-v4-flash",
     );
@@ -348,7 +348,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     // tolerant 2xx no-op, which would prove nothing about authorization.
     seed(
       db,
-      `INSERT INTO app_provider_keys (app_id, provider, key_id, key_enc, created_at)
+      `INSERT INTO bot_provider_keys (bot_id, provider, key_id, key_enc, created_at)
        VALUES (?, 'anthropic', 'seeded-key', 'v1.primary.aXZpdi.c2VlZA==', datetime('now'))`,
       "app-acme",
     );
@@ -443,7 +443,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     const live = db.raw
       .query(
         `SELECT (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = 'ws-gone') AS members,
-                (SELECT COUNT(*) FROM app_workspaces WHERE workspace_id = 'ws-gone') AS apps`,
+                (SELECT COUNT(*) FROM bot_workspaces WHERE workspace_id = 'ws-gone') AS apps`,
       )
       .get() as { members: number; apps: number };
     expect(live).toEqual({ members: 1, apps: 1 });

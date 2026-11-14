@@ -70,7 +70,7 @@ function seedReview(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, context_incomplete, reviewed_at)
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, context_incomplete, reviewed_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(

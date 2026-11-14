@@ -13,7 +13,7 @@
  * - `createMigratedTestD1()` — the full current shape: every `*.sql` in
  *   `migrations/` applied in filename order, i.e. what
  *   `wrangler d1 migrations apply` produces today. The store adapter's INSERT
- *   binds `reviews.app_id` (QC fix wave 1 F-001), so every test exercising the
+ *   binds `reviews.bot_id` (QC fix wave 1 F-001), so every test exercising the
  *   REAL store.put against production-shaped data runs on this one — and
  *   fixtures get the per-App config tables without re-applying migrations by
  *   hand.
@@ -228,12 +228,12 @@ export function createTestD1(): TestD1 {
  * Fully-migrated variant (the full migration list): the same double
  * with every `migrations/*.sql` applied in wrangler's numeric order — the
  * production shape, with no hand-picked subset.
- * Reviews carries the `app_id` column (FK to github_apps), so tests exercising
- * the REAL store.put — whose INSERT binds `app_id` — run against the
+ * Reviews carries the `bot_id` column (FK to review_bots), so tests exercising
+ * the REAL store.put — whose INSERT binds `bot_id` — run against the
  * production-shaped schema, the per-App config tables
- * (app_provider_keys / app_model_config) exist without extra fixture work,
- * github_apps carries the ops columns (review_enabled /
- * last_webhook_at), and the per-role table (app_model_roles) exists
+ * (bot_provider_keys / bot_model_config) exist without extra fixture work,
+ * review_bots carries the ops columns (review_enabled /
+ * last_webhook_at), and the per-role table (bot_model_roles) exists
  * for the consumer modelOverrides tests. Each call returns an independent
  * database.
  */
@@ -245,12 +245,12 @@ export function createMigratedTestD1(): TestD1 {
 
 /**
  * Attribute a raw-seeded App row to the `default` workspace. The one App read
- * face INNER JOINs `app_workspaces`, so a fixture that inserts `github_apps`
+ * face INNER JOINs `bot_workspaces`, so a fixture that inserts `review_bots`
  * directly (not through `createApp`) must map it or the row is invisible.
  */
 export async function mapAppToDefaultWorkspace(db: D1Like, appId: string): Promise<void> {
   await db
-    .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
+    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')")
     .bind(appId)
     .run();
 }

@@ -5,30 +5,30 @@
  *
  * The fixture is the full migration set (the store helper walks
  * `migrations/`), so 0039 is the real DDL. Rows for `reviews`,
- * `review_failures`, `app_installations` and `review_findings` are seeded raw:
+ * `review_failures`, `bot_installations` and `review_findings` are seeded raw:
  * this file pins the READ shape (latest review, failure count, findings
  * projection), not the pipeline that writes those tables.
  */
 import { describe, expect, spyOn, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
-import { createAppsStore, PULL_REQUEST_LIST_LIMIT } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore, PULL_REQUEST_LIST_LIMIT } from "../../src/dashboard/apps-store";
 import { releaseInflight } from "../../src/store/inflight-store";
 
 const APP_ID = "app-pr-ledger";
 
-/** An App row + its workspace mapping (both reads join `app_workspaces`). */
+/** An App row + its workspace mapping (both reads join `bot_workspaces`). */
 function seedApp(db: TestD1, id = APP_ID, githubAppId = 2001): string {
   const now = "2026-01-01T00:00:00.000Z";
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, created_at, updated_at)
        VALUES (?, NULL, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
                'octocat', 'active', ?, ?)`,
     )
     .run(id, githubAppId, id, now, now);
-  db.raw.prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')").run(id);
+  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')").run(id);
   return id;
 }
 
@@ -52,7 +52,7 @@ async function ledgerRead(
     },
     batch: db.batch.bind(db),
   };
-  const { rows } = await createAppsStore(counted as never).listPullRequests(APP_ID, filter);
+  const { rows } = await createReviewBotsStore(counted as never).listPullRequests(APP_ID, filter);
   return { rows: rows.length, prepares };
 }
 
@@ -63,13 +63,13 @@ describe("upsertPullRequest", () => {
     // Stamped deliveries order themselves; the point of this test is the
     // UNIQUE key and the advance. A stamp-less re-delivery cannot be ordered,
     // so it deliberately keeps the stored sha (migration 0044).
-    await createAppsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-01-01T00:00:00.000Z" });
-    await createAppsStore(db).upsertPullRequest({
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-01-01T00:00:00.000Z" });
+    await createReviewBotsStore(db).upsertPullRequest({
       ...PR,
       headSha: "sha-2",
       updatedAt: "2026-01-01T00:05:00.000Z",
     });
-    const rows = db.raw.prepare("SELECT * FROM pull_requests WHERE app_id = ?").all(APP_ID) as Array<{
+    const rows = db.raw.prepare("SELECT * FROM pull_requests WHERE bot_id = ?").all(APP_ID) as Array<{
       head_sha: string;
       title: string;
       state: string;
@@ -81,11 +81,11 @@ describe("upsertPullRequest", () => {
   test("a second delivery advances last_seen_at and leaves first_seen_at alone", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
     db.raw.prepare("UPDATE pull_requests SET first_seen_at = '2020-01-01 00:00:00', last_seen_at = '2020-01-01 00:00:00'").run();
-    await createAppsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
     const row = db.raw
-      .prepare("SELECT first_seen_at, last_seen_at FROM pull_requests WHERE app_id = ?")
+      .prepare("SELECT first_seen_at, last_seen_at FROM pull_requests WHERE bot_id = ?")
       .get(APP_ID) as { first_seen_at: string; last_seen_at: string };
     expect(row.first_seen_at).toBe("2020-01-01 00:00:00");
     // Strictly later than the stale pin: a NULL or garbage write is not an
@@ -98,10 +98,10 @@ describe("upsertPullRequest", () => {
   test("an omitted title / head_sha keeps the stored value; state overwrites while non-terminal", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(PR);
-    await createAppsStore(db).upsertPullRequest({ appId: APP_ID, owner: "acme", repo: "widgets", prNumber: 131, state: "merged" });
+    await createReviewBotsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest({ appId: APP_ID, owner: "acme", repo: "widgets", prNumber: 131, state: "merged" });
     const row = db.raw
-      .prepare("SELECT title, state, head_sha FROM pull_requests WHERE app_id = ?")
+      .prepare("SELECT title, state, head_sha FROM pull_requests WHERE bot_id = ?")
       .get(APP_ID) as { title: string; state: string; head_sha: string };
     expect(row.title).toBe("Add a thing");
     expect(row.head_sha).toBe("sha-1");
@@ -111,12 +111,12 @@ describe("upsertPullRequest", () => {
   test("a merged PR stays merged: a late `opened` delivery cannot reopen it", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest({ ...PR, state: "merged" });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "merged" });
     // Out-of-order / replayed `opened` for the same tuple, stamped OLDER than
     // the merge by GitHub's own clock.
-    await createAppsStore(db).upsertPullRequest({ ...PR, state: "open", updatedAt: "2020-01-01T00:00:00Z" });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "open", updatedAt: "2020-01-01T00:00:00Z" });
     const row = db.raw
-      .prepare("SELECT state FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?")
+      .prepare("SELECT state FROM pull_requests WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ?")
       .get(APP_ID, "acme", "widgets", 131) as { state: string };
     expect(row.state).toBe("merged");
   });
@@ -124,16 +124,16 @@ describe("upsertPullRequest", () => {
   test("last_seen_at follows the payload's updated_at and never moves backwards", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-03-04T05:06:07Z" });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-03-04T05:06:07Z" });
     const first = db.raw
-      .prepare("SELECT last_seen_at FROM pull_requests WHERE app_id = ?")
+      .prepare("SELECT last_seen_at FROM pull_requests WHERE bot_id = ?")
       .get(APP_ID) as { last_seen_at: string };
     // ISO 8601 is normalised into the column's own datetime form.
     expect(first.last_seen_at).toBe("2026-03-04 05:06:07");
 
-    await createAppsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-01-01T00:00:00Z" });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-01-01T00:00:00Z" });
     const after = db.raw
-      .prepare("SELECT last_seen_at FROM pull_requests WHERE app_id = ?")
+      .prepare("SELECT last_seen_at FROM pull_requests WHERE bot_id = ?")
       .get(APP_ID) as { last_seen_at: string };
     expect(after.last_seen_at).toBe("2026-03-04 05:06:07");
   });
@@ -143,14 +143,14 @@ describe("listPullRequests", () => {
   test("attaches the newest review, counts failures, and reads [] for a PR with neither", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(PR);
-    await createAppsStore(db).upsertPullRequest({ ...PR, prNumber: 132, title: "Second", headSha: "sha-b" });
+    await createReviewBotsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, prNumber: 132, title: "Second", headSha: "sha-b" });
     db.raw
-      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
       .run(APP_ID);
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, reviewed_at)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, reviewed_at)
          VALUES ('r-old', 77, 'acme', 'widgets', 131, 'sha-0', 'comment', ?, '2026-01-01 00:00:00'),
                 ('r-new', 77, 'acme', 'widgets', 131, 'sha-1', 'approve', ?, '2026-02-01 00:00:00')`,
       )
@@ -164,7 +164,7 @@ describe("listPullRequests", () => {
         .run(id);
     }
 
-    const { rows } = await createAppsStore(db).listPullRequests(APP_ID);
+    const { rows } = await createReviewBotsStore(db).listPullRequests(APP_ID);
     expect(rows.length).toBe(2);
     const byNumber = new Map(rows.map((row) => [row.number, row]));
     expect(byNumber.get(131)!.latest_review).toEqual({ verdict: "approve", reviewed_at: "2026-02-01 00:00:00" });
@@ -183,9 +183,9 @@ describe("listPullRequests", () => {
     test(`${stage} attribution rows are not review failures: counted 0 and paged 0`, async () => {
       const db = createMigratedTestD1();
       seedApp(db);
-      await createAppsStore(db).upsertPullRequest(PR);
+      await createReviewBotsStore(db).upsertPullRequest(PR);
       db.raw
-        .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+        .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
         .run(APP_ID);
       // The review itself continued; only this attribution row was written.
       db.raw
@@ -195,7 +195,7 @@ describe("listPullRequests", () => {
         )
         .run(stage, error);
 
-      const store = createAppsStore(db);
+      const store = createReviewBotsStore(db);
       expect((await store.listPullRequests(APP_ID)).rows[0]!.failure_count).toBe(0);
       expect((await store.countPullRequestRecords(APP_ID, "acme", "widgets", 131)).failures).toBe(0);
       const history = await store.listPullRequestFailures(APP_ID, "acme", "widgets", 131, {
@@ -214,9 +214,9 @@ describe("listPullRequests", () => {
     // out on BOTH sides, so the tab's number is the pager's denominator.
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
     db.raw
-      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
       .run(APP_ID);
     db.raw
       .prepare(
@@ -226,7 +226,7 @@ describe("listPullRequests", () => {
       )
       .run();
 
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     const counts = await store.countPullRequestRecords(APP_ID, "acme", "widgets", 131);
     const page = await store.listPullRequestFailures(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
     expect(counts.failures).toBe(1);
@@ -238,13 +238,13 @@ describe("listPullRequests", () => {
     const db = createMigratedTestD1();
     seedApp(db);
     seedApp(db, "other-app", 2002);
-    await createAppsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
     db.raw
-      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i2', 'other-app', 88, 'acme', datetime('now'))")
+      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i2', 'other-app', 88, 'acme', datetime('now'))")
       .run();
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id)
          VALUES ('r-other', 88, 'acme', 'widgets', 131, 'sha-x', 'request-changes', 'other-app')`,
       )
       .run();
@@ -255,7 +255,7 @@ describe("listPullRequests", () => {
       )
       .run();
 
-    const { rows } = await createAppsStore(db).listPullRequests(APP_ID);
+    const { rows } = await createReviewBotsStore(db).listPullRequests(APP_ID);
     expect(rows.length).toBe(1);
     expect(rows[0]!.latest_review).toBeNull();
     expect(rows[0]!.failure_count).toBe(0);
@@ -264,10 +264,10 @@ describe("listPullRequests", () => {
   test("is not N+1: a wider window costs the same statements, not one per row", async () => {
     const one = createMigratedTestD1();
     seedApp(one);
-    await createAppsStore(one).upsertPullRequest(PR);
+    await createReviewBotsStore(one).upsertPullRequest(PR);
     const three = createMigratedTestD1();
     seedApp(three);
-    for (const n of [1, 2, 3]) await createAppsStore(three).upsertPullRequest({ ...PR, prNumber: n });
+    for (const n of [1, 2, 3]) await createReviewBotsStore(three).upsertPullRequest({ ...PR, prNumber: n });
 
     const single = await ledgerRead(one);
     const triple = await ledgerRead(three);
@@ -281,7 +281,7 @@ describe("listPullRequests", () => {
   test("the aggregates are scoped to the window (mechanism, not just the payload)", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
 
     // Capture what the store PREPARES and how it binds: an unscoped aggregate
     // scans every review/failure for the App and binds one parameter (appId);
@@ -306,7 +306,7 @@ describe("listPullRequests", () => {
       },
       batch: db.batch.bind(db),
     };
-    await createAppsStore(recording as never).listPullRequests(APP_ID);
+    await createReviewBotsStore(recording as never).listPullRequests(APP_ID);
 
     // The App-wide live lock read (`review_inflight`) carries no window — it
     // is bounded by the concurrency caps, not by the row page — so only the
@@ -330,18 +330,18 @@ describe("listPullRequests", () => {
     seedApp(db);
     const total = PULL_REQUEST_LIST_LIMIT + 1;
     for (let n = 1; n <= total; n++) {
-      await createAppsStore(db).upsertPullRequest({
+      await createReviewBotsStore(db).upsertPullRequest({
         ...PR,
         prNumber: n,
         updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, n)).toISOString(),
       });
     }
     db.raw
-      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
       .run(APP_ID);
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id)
          VALUES ('r-in', 77, 'acme', 'widgets', ?, 'sha-1', 'approve', ?)`,
       )
       .run(total, APP_ID);
@@ -352,7 +352,7 @@ describe("listPullRequests", () => {
       )
       .run(total);
 
-    const { rows } = await createAppsStore(db).listPullRequests(APP_ID);
+    const { rows } = await createReviewBotsStore(db).listPullRequests(APP_ID);
     expect(rows.length).toBe(PULL_REQUEST_LIST_LIMIT);
     expect(rows[0]!.number).toBe(total);
     expect(rows[0]!.latest_review).toEqual({ verdict: "approve", reviewed_at: expect.any(String) });
@@ -366,13 +366,13 @@ describe("listPullRequests", () => {
     // One past the cap, each stamped a distinct second via the payload clock.
     const total = PULL_REQUEST_LIST_LIMIT + 1;
     for (let n = 1; n <= total; n++) {
-      await createAppsStore(db).upsertPullRequest({
+      await createReviewBotsStore(db).upsertPullRequest({
         ...PR,
         prNumber: n,
         updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, n)).toISOString(),
       });
     }
-    const { rows } = await createAppsStore(db).listPullRequests(APP_ID);
+    const { rows } = await createReviewBotsStore(db).listPullRequests(APP_ID);
     expect(rows.length).toBe(PULL_REQUEST_LIST_LIMIT);
     // The oldest (prNumber 1, second 1) is the one dropped.
     expect(rows[0]!.number).toBe(total);
@@ -397,7 +397,7 @@ describe("listPullRequests repository filter + option set", () => {
    */
   async function seedCappedLedger(db: TestD1) {
     seedApp(db);
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     for (let n = 1; n <= PULL_REQUEST_LIST_LIMIT; n++) {
       await store.upsertPullRequest({
         ...PR,
@@ -413,13 +413,13 @@ describe("listPullRequests repository filter + option set", () => {
       });
     }
     db.raw
-      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
       .run(APP_ID);
     // A review and a failure on the NEWEST behind-the-cap row: they can only
     // ride along if the aggregates are scoped to the FILTERED window.
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, reviewed_at)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, reviewed_at)
          VALUES ('r-behind', 77, 'acme', 'behind', 9002, 'sha-1', 'approve', ?, '2026-02-01 00:00:00')`,
       )
       .run(APP_ID);
@@ -461,7 +461,7 @@ describe("listPullRequests repository filter + option set", () => {
   test("a filtered read is still a fixed-size batch", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     for (const n of [1, 2, 3]) await store.upsertPullRequest({ ...PR, prNumber: n });
     await store.upsertPullRequest({ ...PR, repo: "other", prNumber: 901 });
 
@@ -480,9 +480,9 @@ describe("listPullRequests repository filter + option set", () => {
     const db = createMigratedTestD1();
     seedApp(db);
     seedApp(db, "other-app", 2002);
-    await createAppsStore(db).upsertPullRequest(PR);
-    await createAppsStore(db).upsertPullRequest({ ...PR, appId: "other-app", repo: "theirs" });
-    expect((await createAppsStore(db).listPullRequests(APP_ID)).repos).toEqual(["acme/widgets"]);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, appId: "other-app", repo: "theirs" });
+    expect((await createReviewBotsStore(db).listPullRequests(APP_ID)).repos).toEqual(["acme/widgets"]);
   });
 });
 
@@ -491,22 +491,22 @@ describe("sweepTerminalPullRequests", () => {
     const db = createMigratedTestD1();
     seedApp(db);
     // 1. The PR closes in 2020 → its stamp is 2020.
-    await createAppsStore(db).upsertPullRequest({ ...PR, state: "closed", updatedAt: "2020-01-01T00:00:00Z" });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "closed", updatedAt: "2020-01-01T00:00:00Z" });
     // 2. It reopens in 2026 → newer stamp, state open.
-    await createAppsStore(db).upsertPullRequest({ ...PR, state: "open", updatedAt: "2026-01-01T00:00:00Z" });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "open", updatedAt: "2026-01-01T00:00:00Z" });
     // 3. A replayed/out-of-order OLD `closed` arrives.
-    await createAppsStore(db).upsertPullRequest({ ...PR, state: "closed", updatedAt: "2020-06-01T00:00:00Z" });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "closed", updatedAt: "2020-06-01T00:00:00Z" });
 
     // The stale delivery must not have rewritten the state (the timestamp is
     // the single arbiter for both columns).
     const row = db.raw
-      .prepare("SELECT state, last_seen_at FROM pull_requests WHERE app_id = ?")
+      .prepare("SELECT state, last_seen_at FROM pull_requests WHERE bot_id = ?")
       .get(APP_ID) as { state: string; last_seen_at: string };
     expect(row.state).toBe("open");
     expect(row.last_seen_at).toBe("2026-01-01 00:00:00");
 
     // The predicate agrees with the write: an open row is never swept.
-    expect(await createAppsStore(db).sweepTerminalPullRequests()).toBe(0);
+    expect(await createReviewBotsStore(db).sweepTerminalPullRequests()).toBe(0);
   });
 
   test("a newer `closed` after `open` DOES close it (and is not swept inside the window)", async () => {
@@ -515,27 +515,27 @@ describe("sweepTerminalPullRequests", () => {
     // Relative to the real clock — a hard-coded date slides out of the 90-day
     // window and becomes a date bomb.
     const fresh = new Date(Date.now() - 60_000).toISOString();
-    await createAppsStore(db).upsertPullRequest({ ...PR, state: "open", updatedAt: "2020-01-01T00:00:00Z" });
-    await createAppsStore(db).upsertPullRequest({ ...PR, state: "closed", updatedAt: fresh });
-    const row = db.raw.prepare("SELECT state FROM pull_requests WHERE app_id = ?").get(APP_ID) as {
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "open", updatedAt: "2020-01-01T00:00:00Z" });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "closed", updatedAt: fresh });
+    const row = db.raw.prepare("SELECT state FROM pull_requests WHERE bot_id = ?").get(APP_ID) as {
       state: string;
     };
     expect(row.state).toBe("closed");
-    expect(await createAppsStore(db).sweepTerminalPullRequests()).toBe(0);
+    expect(await createReviewBotsStore(db).sweepTerminalPullRequests()).toBe(0);
   });
 
   test("drops terminal rows past the window and keeps open ones however old", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
     const old = "2020-01-01T00:00:00Z";
-    await createAppsStore(db).upsertPullRequest({ ...PR, prNumber: 1, state: "merged", updatedAt: old });
-    await createAppsStore(db).upsertPullRequest({ ...PR, prNumber: 2, state: "closed", updatedAt: old });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, prNumber: 1, state: "merged", updatedAt: old });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, prNumber: 2, state: "closed", updatedAt: old });
     // An OPEN row is a live review target however stale its clock.
-    await createAppsStore(db).upsertPullRequest({ ...PR, prNumber: 3, state: "open", updatedAt: old });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, prNumber: 3, state: "open", updatedAt: old });
     // A terminal row INSIDE the window stays.
-    await createAppsStore(db).upsertPullRequest({ ...PR, prNumber: 4, state: "closed" });
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, prNumber: 4, state: "closed" });
 
-    expect(await createAppsStore(db).sweepTerminalPullRequests()).toBe(2);
+    expect(await createReviewBotsStore(db).sweepTerminalPullRequests()).toBe(2);
     const remaining = db.raw
       .prepare("SELECT pr_number FROM pull_requests ORDER BY pr_number")
       .all() as Array<{ pr_number: number }>;
@@ -545,9 +545,9 @@ describe("sweepTerminalPullRequests", () => {
   test("is idempotent — a second run deletes nothing", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest({ ...PR, state: "merged", updatedAt: "2020-01-01T00:00:00Z" });
-    expect(await createAppsStore(db).sweepTerminalPullRequests()).toBe(1);
-    expect(await createAppsStore(db).sweepTerminalPullRequests()).toBe(0);
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "merged", updatedAt: "2020-01-01T00:00:00Z" });
+    expect(await createReviewBotsStore(db).sweepTerminalPullRequests()).toBe(1);
+    expect(await createReviewBotsStore(db).sweepTerminalPullRequests()).toBe(0);
   });
 });
 
@@ -556,7 +556,7 @@ describe("pull request detail reads", () => {
   function seedReview(db: TestD1, id: string, reviewedAt: string, verdict = "approve", round: number | null = null): void {
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, app_id, round)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, bot_id, round)
          VALUES (?, 99, 'acme', 'widgets', 131, ?, ?, 'looks good', 'm1', 'p1', ?, ?, ?)`,
       )
       .run(id, `sha-${id}`, verdict, reviewedAt, APP_ID, round);
@@ -565,9 +565,9 @@ describe("pull request detail reads", () => {
   async function detailFixture(): Promise<TestD1> {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
     db.raw
-      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i3', ?, 99, 'acme', datetime('now'))")
+      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i3', ?, 99, 'acme', datetime('now'))")
       .run(APP_ID);
     db.raw
       .prepare(
@@ -595,7 +595,7 @@ describe("pull request detail reads", () => {
       { findingId: "N-1", mergeClass: "nit", title: "n", filePath: "src/a.ts", lineStart: 1, body: "b" },
       "row-nit",
     );
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     expect(await store.countPullRequestRecords(APP_ID, "acme", "widgets", 131)).toEqual({
       findings: 13,
       reviews: 0,
@@ -619,7 +619,7 @@ describe("pull request detail reads", () => {
     const dismissed = { findingId: "F-3", mergeClass: "must-fix", title: "d", filePath: "src/a.ts", lineStart: 3, body: "b" };
     seedFinding(db, addressed, "row-2", "addressed");
     seedFinding(db, dismissed, "row-3", "dismissed");
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     // Only the one OPEN finding is counted — neither the tab count nor the dot
     // may be kept alive by a finding the pipeline already closed out.
@@ -648,7 +648,7 @@ describe("pull request detail reads", () => {
   test("the head, the counts and each record page read the same PR", async () => {
     const db = await detailFixture();
     seedReview(db, "r1", "2026-01-02 00:00:00");
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     const head = await store.getPullRequestHead(APP_ID, "acme", "widgets", 131);
     expect(head?.title).toBe("Add a thing");
@@ -702,7 +702,7 @@ describe("pull request detail reads", () => {
       { findingId: "F-2", mergeClass: "nit", title: "Rename a thing", filePath: "src/b.ts", lineStart: 3, body: "style" },
       "row-2",
     );
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     const page = { offset: 0, limit: 10 };
     expect((await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, page))!.total).toBe(2);
     const filtered = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
@@ -726,7 +726,7 @@ describe("pull request detail reads", () => {
       { findingId: "F-9", mergeClass: "blocker", title: "Unmapped class", filePath: "src/c.ts", lineStart: 1, body: "" },
       "row-9",
     );
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     const page = { offset: 0, limit: 10 };
     // The complement of the vocabulary: the row a `severity` filter can never
     // name, while the must-fix row the fixture seeds is excluded.
@@ -756,7 +756,7 @@ describe("pull request detail reads", () => {
       { findingId: "F-3", mergeClass: "nit", title: "t3", filePath: "src/a.ts", lineStart: 3, body: "b" },
       "row-3",
     );
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     const ids = async (offset: number) =>
       (await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, { offset, limit: 2 }))!.items.map(
         (finding) => finding.finding_id,
@@ -778,7 +778,7 @@ describe("pull request detail reads", () => {
     seedReview(db, "r1", "2026-01-02 00:00:00");
     seedReview(db, "r2", "2026-01-03 00:00:00");
     seedReview(db, "r3", "2026-01-04 00:00:00");
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     // Newest first: the first page holds the two newest reviews.
     const first = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 2 });
     expect(first!.total).toBe(3);
@@ -808,7 +808,7 @@ describe("pull request detail reads", () => {
     db.raw
       .prepare("UPDATE review_findings SET first_seen_sha = 'sha-r2', first_seen_round = 2 WHERE finding_id = 'F-1'")
       .run();
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     // Newest-first paging never renumbers: page 1 is rounds 3, 2; page 2 is
     // the oldest round alone.
@@ -857,7 +857,7 @@ describe("pull request detail reads", () => {
       3,
       5,
     );
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
     expect(findings!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([
       ["F-3", 3],
@@ -876,7 +876,7 @@ describe("pull request detail reads", () => {
     db.raw
       .prepare("UPDATE review_findings SET first_seen_sha = 'sha-r2', first_seen_round = 3 WHERE finding_id = 'F-1'")
       .run();
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
     expect(findings!.items.map((finding) => [finding.finding_id, finding.review_round])).toEqual([["F-1", 3]]);
@@ -893,15 +893,15 @@ describe("pull request detail reads", () => {
   test("unknown PR number → null head (the route's 404)", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    expect(await createAppsStore(db).getPullRequestHead(APP_ID, "acme", "widgets", 999)).toBeNull();
+    expect(await createReviewBotsStore(db).getPullRequestHead(APP_ID, "acme", "widgets", 999)).toBeNull();
   });
 
   test("a section read answers 'no such PR' inside its own batch (the routes' 404)", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(PR);
-    await createAppsStore(db).upsertPullRequest({ ...PR, repo: "gadgets", title: "Other repo's #131" });
-    const store = createAppsStore(db);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, repo: "gadgets", title: "Other repo's #131" });
+    const store = createReviewBotsStore(db);
     const page = { offset: 0, limit: 10 };
     // Present on the ledger's own key…
     expect(await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, page)).not.toBeNull();
@@ -921,12 +921,12 @@ describe("pull request detail reads", () => {
   test("the same number in another repo of the SAME App → null, never a fallback", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(PR);
-    await createAppsStore(db).upsertPullRequest({ ...PR, repo: "gadgets", title: "Other repo's #131" });
+    await createReviewBotsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, repo: "gadgets", title: "Other repo's #131" });
     // Both rows exist under #131; asking for a repo that has none must miss
     // rather than answer with either of them.
-    expect(await createAppsStore(db).getPullRequestHead(APP_ID, "acme", "sprockets", 131)).toBeNull();
-    expect((await createAppsStore(db).getPullRequestHead(APP_ID, "acme", "gadgets", 131))?.title).toBe(
+    expect(await createReviewBotsStore(db).getPullRequestHead(APP_ID, "acme", "sprockets", 131)).toBeNull();
+    expect((await createReviewBotsStore(db).getPullRequestHead(APP_ID, "acme", "gadgets", 131))?.title).toBe(
       "Other repo's #131",
     );
   });
@@ -935,8 +935,8 @@ describe("pull request detail reads", () => {
     const db = createMigratedTestD1();
     seedApp(db);
     seedApp(db, "other-app", 2002);
-    await createAppsStore(db).upsertPullRequest({ ...PR, appId: "other-app" });
-    expect(await createAppsStore(db).getPullRequestHead(APP_ID, "acme", "widgets", 131)).toBeNull();
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, appId: "other-app" });
+    expect(await createReviewBotsStore(db).getPullRequestHead(APP_ID, "acme", "widgets", 131)).toBeNull();
   });
 });
 
@@ -953,14 +953,14 @@ function seedFinding(
   db.raw
     .prepare(
       `INSERT OR IGNORE INTO review_publications
-         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
        VALUES ('p1', ?, 99, 'acme', 'widgets', 131, 'sha-1', 'review', 'applied', '{}', 1, 1)`,
     )
     .run(APP_ID);
   db.raw
     .prepare(
       `INSERT INTO review_findings
-         (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+         (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
           first_seen_round, last_seen_round, state, created_ms, updated_ms)
        VALUES (?, ?, 99, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', ?, ?, ?, 1, 1)`,
@@ -1006,7 +1006,7 @@ describe("reviewing-now projection (D11/D16)", () => {
   function seedInstallation(db: TestD1): void {
     db.raw
       .prepare(
-        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i-lock', ?, ?, 'acme', datetime('now'))",
+        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i-lock', ?, ?, 'acme', datetime('now'))",
       )
       .run(APP_ID, INSTALLATION_ID);
   }
@@ -1045,14 +1045,14 @@ describe("reviewing-now projection (D11/D16)", () => {
   async function seedLedger(db: TestD1): Promise<void> {
     seedApp(db);
     seedInstallation(db);
-    await createAppsStore(db).upsertPullRequest(PR);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
   }
 
   test("a still-held row is live on both faces, with its head sha and acquisition time", async () => {
     const db = createMigratedTestD1();
     await seedLedger(db);
     const { acquiredAt } = seedLock(db);
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     const live = { state: "live", head_sha: "sha-live", acquired_at: acquiredAt } as const;
 
     expect((await store.listPullRequests(APP_ID)).rows[0]!.reviewing).toEqual(live);
@@ -1065,7 +1065,7 @@ describe("reviewing-now projection (D11/D16)", () => {
     const db = createMigratedTestD1();
     await seedLedger(db);
     const { acquiredAt } = seedLock(db, { headSha: "" });
-    expect((await createAppsStore(db).listPullRequests(APP_ID)).rows[0]!.reviewing).toEqual({
+    expect((await createReviewBotsStore(db).listPullRequests(APP_ID)).rows[0]!.reviewing).toEqual({
       state: "live",
       head_sha: "",
       acquired_at: acquiredAt,
@@ -1078,10 +1078,10 @@ describe("reviewing-now projection (D11/D16)", () => {
     // `review_inflight` folds owner/repo to lower case; the ledger keeps the
     // delivery's spelling. The projection must join those two, not trust case.
     db.raw
-      .prepare("UPDATE pull_requests SET owner = 'Acme', repo = 'Widgets' WHERE app_id = ? AND pr_number = 131")
+      .prepare("UPDATE pull_requests SET owner = 'Acme', repo = 'Widgets' WHERE bot_id = ? AND pr_number = 131")
       .run(APP_ID);
     seedLock(db);
-    const rows = (await createAppsStore(db).listPullRequests(APP_ID)).rows;
+    const rows = (await createReviewBotsStore(db).listPullRequests(APP_ID)).rows;
     expect(rows[0]!.owner).toBe("Acme");
     expect(rows[0]!.reviewing.state).toBe("live");
   });
@@ -1119,7 +1119,7 @@ describe("reviewing-now projection (D11/D16)", () => {
         // Acked before the guard because the ledger already held a newer
         // commit: no lock and no failure row.
         db.raw
-          .prepare("UPDATE pull_requests SET head_sha = 'sha-new', head_at = ? WHERE app_id = ? AND pr_number = 131")
+          .prepare("UPDATE pull_requests SET head_sha = 'sha-new', head_at = ? WHERE bot_id = ? AND pr_number = 131")
           .run(new Date().toISOString(), APP_ID);
       },
     ],
@@ -1137,7 +1137,7 @@ describe("reviewing-now projection (D11/D16)", () => {
       const db = createMigratedTestD1();
       await seedLedger(db);
       await seed(db);
-      const store = createAppsStore(db);
+      const store = createReviewBotsStore(db);
       expect((await store.listPullRequests(APP_ID)).rows[0]!.reviewing).toEqual({ state: "none" });
       expect((await store.getPullRequestHead(APP_ID, "acme", "widgets", 131))!.reviewing).toEqual({
         state: "none",
@@ -1147,7 +1147,7 @@ describe("reviewing-now projection (D11/D16)", () => {
 
   /** The store with only the LOCK read faulting — the rest of the face answers. */
   function lockFaultStore(db: TestD1) {
-    return createAppsStore({
+    return createReviewBotsStore({
       prepare(sql: string) {
         if (sql.includes("review_inflight")) throw new Error("D1_ERROR: dead binding");
         return db.prepare(sql);
@@ -1175,7 +1175,7 @@ describe("reviewing-now projection (D11/D16)", () => {
     seedLock(db);
     const warn = spyOn(console, "warn").mockImplementation(() => {});
     try {
-      expect((await createAppsStore(db).listPullRequests(APP_ID)).rows[0]!.reviewing.state).toBe("live");
+      expect((await createReviewBotsStore(db).listPullRequests(APP_ID)).rows[0]!.reviewing.state).toBe("live");
       expect(warn).not.toHaveBeenCalled();
 
       expect((await lockFaultStore(db).listPullRequests(APP_ID)).rows[0]!.reviewing).toEqual({

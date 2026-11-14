@@ -346,7 +346,7 @@ function attemptOf(row: ReviewCheckRow): CheckAttempt {
       generation: row.generation,
       externalId: row.external_id,
       scope: {
-        appId: row.app_id,
+        appId: row.bot_id,
         installationId: row.installation_id,
         owner: row.owner,
         repo: row.repo,
@@ -620,7 +620,7 @@ export async function claimAttempt(
     SELECT COUNT(*) FROM review_checks p
       JOIN review_publications pub ON pub.id = p.publication_id
      WHERE p.attempt_key = ?
-       AND pub.app_id = p.app_id
+       AND pub.bot_id = p.bot_id
        AND pub.installation_id = p.installation_id
        AND pub.owner = p.owner AND pub.repo = p.repo
        AND pub.pr_number = p.pr_number AND pub.head_sha = p.head_sha
@@ -648,7 +648,7 @@ export async function claimAttempt(
        AND json_extract(pub.proof_json, '$.publicationId') = pub.id
        AND json_extract(pub.proof_json, '$.kind') = pub.kind
        AND json_extract(pub.proof_json, '$.headSha') = pub.head_sha
-       AND json_extract(pub.proof_json, '$.scope.appId') = pub.app_id
+       AND json_extract(pub.proof_json, '$.scope.appId') = pub.bot_id
        AND json_extract(pub.proof_json, '$.scope.installationId') = pub.installation_id
        AND json_extract(pub.proof_json, '$.scope.owner') = pub.owner
        AND json_extract(pub.proof_json, '$.scope.repo') = pub.repo
@@ -669,7 +669,7 @@ export async function claimAttempt(
   const insert = db
     .prepare(
       `INSERT INTO review_checks
-         (id, app_id, github_app_id, installation_id, owner, repo, pr_number,
+         (id, bot_id, github_app_id, installation_id, owner, repo, pr_number,
           head_sha, triggered_by, action, attempt_key, generation, external_id,
           check_run_id, create_state, holder, lease_epoch, lease_until_ms,
           execution_deadline_ms, desired, desired_title, desired_summary, observed,
@@ -1660,7 +1660,7 @@ export async function suspendCheckRecovery(
       `UPDATE review_checks
           SET recovery_state = 'suspended', holder = NULL, lease_until_ms = NULL,
               next_attempt_ms = NULL, last_error = ?, updated_ms = ?
-        WHERE app_id = ? AND installation_id = ? AND ${NONTERMINAL_WHERE}
+        WHERE bot_id = ? AND installation_id = ? AND ${NONTERMINAL_WHERE}
           AND recovery_state IN ('pending','remote-unconfirmed','suspended')
           AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
     )
@@ -1680,7 +1680,7 @@ export async function reenableChecksForApps(
       .prepare(
         `UPDATE review_checks
             SET recovery_state = 'pending', updated_ms = ?
-          WHERE app_id = ? AND installation_id = ? AND recovery_state = 'suspended'`,
+          WHERE bot_id = ? AND installation_id = ? AND recovery_state = 'suspended'`,
       )
       .bind(nowMs, pair.appId, pair.installationId)
       .run();
@@ -1746,8 +1746,8 @@ export async function listReenableableCheckPairs(
         `SELECT rc.holder, rc.last_error, ga.status AS app_status, ga.deleted_at AS app_deleted,
                 ga.review_enabled AS review_enabled
            FROM review_checks rc
-           JOIN github_apps ga ON ga.id = rc.app_id
-          WHERE rc.app_id = ? AND rc.installation_id = ? AND rc.recovery_state = 'suspended'`,
+           JOIN review_bots ga ON ga.id = rc.bot_id
+          WHERE rc.bot_id = ? AND rc.installation_id = ? AND rc.recovery_state = 'suspended'`,
       )
       .bind(candidate.appId, candidate.installationId)
       .all<{
@@ -1892,7 +1892,7 @@ export async function retryCheckRecovery(
           SET recovery_state = 'pending', attempts = 0, next_attempt_ms = NULL,
               last_error = NULL, holder = NULL, lease_until_ms = NULL,
               terminal_ms = NULL, updated_ms = ?
-        WHERE id = ? AND app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+        WHERE id = ? AND bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
           AND observed IN ('unknown','in_progress')
           AND recovery_state <> 'suspended'
           AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
@@ -1970,7 +1970,7 @@ export async function readInheritedReview(
   const row = await db
     .prepare(
       `SELECT envelope FROM reviews
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+       WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND head_sha = ?`,
     )
     .bind(
@@ -2000,7 +2000,7 @@ async function readPublicationReview(
   const row = await db
     .prepare(
       `SELECT payload_json FROM review_publications
-       WHERE id = ? AND app_id = ? AND installation_id = ? AND owner = ? AND repo = ?
+       WHERE id = ? AND bot_id = ? AND installation_id = ? AND owner = ? AND repo = ?
          AND pr_number = ? AND head_sha = ?`,
     )
     .bind(

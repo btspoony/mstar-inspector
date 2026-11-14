@@ -4,7 +4,7 @@
  * - SQLite `YYYY-MM-DD HH:MM:SS[.SSS]` — review-store faces: AppsPage
  *   latest-delivery, SettingsPage webhook/seen/delivery/updated. The suffix
  *   is the sub-second form some writers use (`strftime('%Y-%m-%d %H:%M:%f',
- *   'now')`, e.g. `app_installations.seen_at`); plain `datetime('now')`
+ *   'now')`, e.g. `bot_installations.seen_at`); plain `datetime('now')`
  *   stamps have none.
  * - ISO-8601 `YYYY-MM-DDTHH:MM:SS.sssZ` (Date#toISOString) — the users
  *   store's member `created_at`, rendered by MembersPage.

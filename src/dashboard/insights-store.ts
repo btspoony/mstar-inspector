@@ -77,8 +77,8 @@ export type InsightsWindow = {
   repo?: { owner: string; repo: string };
   /**
    * Restrict every aggregation (and the opt-in `repos` list) to one
-   * GitHub App — the `github_apps.id` row PK (string), not the numeric
-   * `github_app_id`. Rows with `app_id` NULL (legacy unattributed) are
+   * bot — the `review_bots.id` row PK (string), not the numeric
+   * `github_app_id`. Rows with `bot_id` NULL (legacy unattributed) are
    * excluded when set; without the option every output is unchanged.
    */
   appId?: string;
@@ -180,10 +180,10 @@ const WEEK_BUCKET_SQL = "date(r.reviewed_at, '-' || ((strftime('%w', r.reviewed_
  *
  * @param db   a D1 handle (real D1Database or the bun:sqlite test double)
  * @param opts windowDays (default 30, >90 clamped to 90) + optional
- *             owner/repo filter and optional `appId` (a `github_apps.id`
+ *             owner/repo filter and optional `appId` (a `review_bots.id`
  *             row PK string — not the numeric `github_app_id`), each
  *             applied to EVERY aggregation; `appId` also scopes the
- *             opt-in `repos` list and excludes legacy `app_id` NULL rows.
+ *             opt-in `repos` list and excludes legacy `bot_id` NULL rows.
  */
 export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow = {}): Promise<Insights> {
   const windowDays = clampWindow(opts.windowDays);
@@ -218,7 +218,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   if (appId !== undefined) {
     // Additive per-App predicate (the app-scoped filter): composed alongside — never
     // inside — windowEraWhere, so the era gate and window stay untouched.
-    where.push("r.app_id = ?");
+    where.push("r.bot_id = ?");
     binds.push(appId);
   }
   where.push(windowEraWhere);
@@ -234,7 +234,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   // per-App repo selector must never offer another App's repos. Shares
   // windowEraWhere so the window + era gate predicates cannot drift
   // from the other aggregations (F-003).
-  const repoAppWhere = appId !== undefined ? "r.app_id = ? AND " : "";
+  const repoAppWhere = appId !== undefined ? "r.bot_id = ? AND " : "";
   const repoBinds = appId !== undefined ? [appId, windowDays] : [windowDays];
   const repoQuery = includeRepos
     ? db

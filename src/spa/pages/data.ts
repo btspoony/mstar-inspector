@@ -181,7 +181,7 @@ export type CatalogProvider = {
 
 /**
  * The store-enforced verification vocabulary (mirrors
- * `app_provider_keys.verified_status`): `ok` = the probe proved the KEY,
+ * `bot_provider_keys.verified_status`): `ok` = the probe proved the KEY,
  * `reachable` = it only proved the ENDPOINT answered (the host is not known to
  * reject a bogus key), `failed` = a recorded failed verify, NULL = never
  * verified.
@@ -233,7 +233,7 @@ export function providerKeyRows(keys: readonly ProviderKeyRow[], provider: strin
 /**
  * The slot a dialog-confirmed key removal's outcome renders at: the configured
  * row the delete POST targets, matched on the SAME composite identity the
- * store's primary key `(app_id, provider, key_id)` and the POST body carry.
+ * store's primary key `(bot_id, provider, key_id)` and the POST body carry.
  * Key ids hash the plaintext alone, so one key stored under two providers
  * shares its id — the provider is part of the match. `-1` when the payload
  * holds no such row (the caller clamps the outcome to the list's end).
@@ -383,7 +383,7 @@ export function isReviewTriggerMode(value: unknown): value is ReviewTriggerMode 
 }
 
 /**
- * Per-App review levels (migration 0047) — the `github_apps.review_level`
+ * Per-App review levels (migration 0047) — the `review_bots.review_level`
  * closed vocabulary. Mirrors packages/shared/src/runtime `REVIEW_LEVELS`
  * across the bundle boundary (the REVIEW_TRIGGER_MODES convention: documented,
  * deliberately not imported). Values are wire-verbatim; only labels localize.

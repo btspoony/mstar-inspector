@@ -400,7 +400,7 @@ describe("runSweep", () => {
     const db = createMigratedTestD1();
     db.raw
       .query(
-        `INSERT INTO github_apps (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
+        `INSERT INTO review_bots (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
          VALUES ('app-1', 'retention-app', 9001, 'retention-app', 'enc', 'enc', 'tester', datetime('now'), datetime('now'))`,
       )
       .run();
@@ -409,7 +409,7 @@ describe("runSweep", () => {
     const insertDelivery = (id: string, ageDays: number): void => {
       db.raw
         .query(
-          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, created_at)
+          `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, created_at)
            VALUES (?, 'app-1', 'pull_request', 'ok', datetime('now', ?))`,
         )
         .run(id, `-${ageDays} days`);
@@ -433,14 +433,14 @@ describe("runSweep", () => {
     const db = createMigratedTestD1();
     db.raw
       .query(
-        `INSERT INTO github_apps (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
+        `INSERT INTO review_bots (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
          VALUES ('app-1', 'ledger-app', 9001, 'ledger-app', 'enc', 'enc', 'tester', datetime('now'), datetime('now'))`,
       )
       .run();
     const insertPr = (id: string, number: number, state: string, ageDays: number): void => {
       db.raw
         .query(
-          `INSERT INTO pull_requests (id, app_id, owner, repo, pr_number, state, last_seen_at)
+          `INSERT INTO pull_requests (id, bot_id, owner, repo, pr_number, state, last_seen_at)
            VALUES (?, 'app-1', 'acme', 'widgets', ?, ?, datetime('now', ?))`,
         )
         .run(id, number, state, `-${ageDays} days`);

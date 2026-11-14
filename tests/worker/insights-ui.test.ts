@@ -13,7 +13,7 @@ import type { Env } from "../../src/worker/env";
 import { createSessionValue, SESSION_COOKIE } from "../../src/dashboard/session";
 import { SPA_BOOT_MARKER, withSpaAssets } from "../helpers/spa";
 import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createUser } from "../../src/dashboard/users";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
@@ -107,7 +107,7 @@ async function insightsWorld(): Promise<{
   const appId = crypto.randomUUID();
   const otherAppId = crypto.randomUUID();
   const box = createSecretbox(API_TEST_KEY);
-  await createAppsStore(db).createApp({
+  await createReviewBotsStore(db).createApp({
     id: appId,
     githubSlug: "widgets-app",
     githubAppId: WIDGETS_APP_ID,
@@ -117,7 +117,7 @@ async function insightsWorld(): Promise<{
     createdBy: "mallory",
     workspaceId: "default",
   });
-  await createAppsStore(db).createApp({
+  await createReviewBotsStore(db).createApp({
     id: otherAppId,
     githubSlug: "other-app",
     githubAppId: OTHER_APP_ID,
@@ -130,7 +130,7 @@ async function insightsWorld(): Promise<{
 
   const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().replace("T", " ").slice(0, 19);
   const insertReview = db.raw.query(
-    `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, app_id)
+    `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, bot_id)
      VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', '{}', ?)`,
   );
   const insertFinding = db.raw.query(
@@ -308,7 +308,7 @@ describe("GET /dashboard/api/apps/:appId/insights/summary", () => {
     expect(unknown.status).toBe(404);
     expect(((await unknown.json()) as { error?: string }).error).toBeDefined();
 
-    db.raw.query("UPDATE github_apps SET deleted_at = datetime('now') WHERE github_app_id = ?").run(WIDGETS_APP_ID);
+    db.raw.query("UPDATE review_bots SET deleted_at = datetime('now') WHERE github_app_id = ?").run(WIDGETS_APP_ID);
     const deleted = await appsInsightsGet(env, WIDGETS_APP_ID, await apiCookie(SESSION_SECRET_API, "mallory"));
     expect(deleted.status).toBe(404);
   });

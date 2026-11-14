@@ -2,9 +2,9 @@
  * Task 3 — the App read face.
  *
  * Pins two things:
- *   - every read INNER JOINs `app_workspaces`, so an unmapped App is INVISIBLE
+ *   - every read INNER JOINs `bot_workspaces`, so an unmapped App is INVISIBLE
  *     and every returned row carries `workspace_id`;
- *   - no `src/**` file outside the allowlist reads `github_apps` directly.
+ *   - no `src/**` file outside the allowlist reads `review_bots` directly.
  *
  * The exact SQL text is deliberately NOT pinned: those literals proved nothing
  * a behaviour test does not (see the orphan-App and soft-deleted-tenant cases),
@@ -16,7 +16,7 @@ import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "./helpers";
 import {
   APP_READ_SQL,
-  createAppsStore,
+  createReviewBotsStore,
   type CreateAppInput,
   type GithubAppRow,
 } from "../../src/dashboard/apps-store";
@@ -36,7 +36,7 @@ const APP_INPUT: CreateAppInput = {
 };
 
 async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Promise<GithubAppRow> {
-  return createAppsStore(db).createApp({ ...APP_INPUT, id: crypto.randomUUID(), ...overrides });
+  return createReviewBotsStore(db).createApp({ ...APP_INPUT, id: crypto.randomUUID(), ...overrides });
 }
 
 /** One App mapped to the 'default' workspace, one orphan App with no mapping. */
@@ -44,21 +44,21 @@ async function seedMappedAndOrphan() {
   const db = createMigratedTestD1();
   const mapped = await seedApp(db, { githubAppId: 1 });
   const orphan = await seedApp(db, { githubAppId: 2 });
-  db.raw.prepare(`DELETE FROM app_workspaces WHERE app_id = ?`).run(orphan.id);
+  db.raw.prepare(`DELETE FROM bot_workspaces WHERE bot_id = ?`).run(orphan.id);
   return { db, mapped, orphan };
 }
 
 describe("apps-store tenant read face", () => {
   test("listApps returns only mapped Apps, each carrying workspace_id", async () => {
     const { db, mapped } = await seedMappedAndOrphan();
-    const rows = await createAppsStore(db).listApps();
+    const rows = await createReviewBotsStore(db).listApps();
     expect(rows.map((r) => r.id)).toEqual([mapped.id]);
     expect(rows[0]!.workspace_id).toBe("default");
   });
 
   test("an orphan App is null from getAppById, getAppForWebhook and getAppByGithubId", async () => {
     const { db, mapped, orphan } = await seedMappedAndOrphan();
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     expect((await store.getAppById(mapped.id))?.workspace_id).toBe("default");
     expect(await store.getAppById(orphan.id)).toBeNull();
     expect((await store.getAppForWebhook("default", mapped.id))?.workspace_id).toBe("default");
@@ -69,9 +69,9 @@ describe("apps-store tenant read face", () => {
 });
 
 describe("apps-store read SQL joins the tenant", () => {
-  test("APP_READ_SQL joins app_workspaces and selects workspace_id", () => {
+  test("APP_READ_SQL joins bot_workspaces and selects workspace_id", () => {
     for (const sql of Object.values(APP_READ_SQL)) {
-      expect(sql).toContain("INNER JOIN app_workspaces");
+      expect(sql).toContain("INNER JOIN bot_workspaces");
       expect(sql).toContain("w.workspace_id");
     }
   });
@@ -87,7 +87,7 @@ function srcFiles(dir = SRC_DIR, out: string[] = []): string[] {
   return out;
 }
 
-const DIRECT_READ = /(?:from|join)\s+github_apps\b/;
+const DIRECT_READ = /(?:from|join)\s+review_bots\b/;
 const TENANT_BYPASS = "shortcut: tenant-bypass";
 
 /**
@@ -148,7 +148,7 @@ function prepareStatements(src: string): { line: number; sql: string }[] {
   }
 }
 
-/** Every `.prepare(…)` statement that reads `github_apps`, with its start line. */
+/** Every `.prepare(…)` statement that reads `review_bots`, with its start line. */
 function readSites(src: string): { line: number }[] {
   return prepareStatements(src).filter((s) => DIRECT_READ.test(s.sql));
 }
@@ -174,7 +174,7 @@ function directReadFiles(): string[] {
     .sort();
 }
 
-/** The maintenance face: every direct `github_apps` read outside apps-store. */
+/** The maintenance face: every direct `review_bots` read outside apps-store. */
 const MAINTENANCE_SITES: Record<string, number> = {
   "worker/lifecycle-reconcile.ts": 1,
   "worker/check-reconcile.ts": 3,
@@ -183,14 +183,14 @@ const MAINTENANCE_SITES: Record<string, number> = {
 };
 
 describe("tenant read face allowlist", () => {
-  test("tenant-facing modules hold no direct github_apps read", () => {
+  test("tenant-facing modules hold no direct review_bots read", () => {
     for (const rel of ["dashboard/index.ts", "dashboard/views.ts", "pipeline/consumer.ts"]) {
       const src = readFileSync(join(SRC_DIR, rel), "utf8");
       expect({ file: rel, sites: readSites(src) }).toEqual({ file: rel, sites: [] });
     }
   });
 
-  test("only apps-store plus the four maintenance files read github_apps", () => {
+  test("only apps-store plus the four maintenance files read review_bots", () => {
     expect(directReadFiles()).toEqual([
       "dashboard/apps-store.ts",
       ...Object.keys(MAINTENANCE_SITES).sort(),

@@ -12,11 +12,11 @@
  *   from the generated src/version.ts, same shape as the smoke-entry face)
  * - POST /webhook/:workspaceId/:appId → per-App webhook face (the ONLY HTTP review
  *   entry — the legacy bare `/webhook` face is
- *   retired): our webhook path → github_apps row (active, not deleted) → that App's
+ *   retired): our webhook path → review_bots row (active, not deleted) → that App's
  *   decrypted webhook secret verifies the signature → classify → enqueue
  *   with `appRef: { appId }` (spec § Multi-App 契约, locks L3/L4); a
  *   classified review job records its installing account in
- *   `app_installations` before the pause/flag gates (best-effort)
+ *   `bot_installations` before the pause/flag gates (best-effort)
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
@@ -40,7 +40,7 @@ import {
 } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
 import {
-  createAppsStore,
+  createReviewBotsStore,
   type AppAllowlist,
   type DeliveryOutcome,
   type GithubAppTenantRow,
@@ -132,7 +132,7 @@ function webhookInfo(event: string, detail: string, msg: string): void {
  * empty column, never replaces a value).
  */
 async function recordInstallation(
-  appsStore: ReturnType<typeof createAppsStore>,
+  appsStore: ReturnType<typeof createReviewBotsStore>,
   appId: string,
   installationId: number,
   accountLogin: string | null,
@@ -315,13 +315,13 @@ app.route("/dashboard", dashboardApp);
  * retired). Pre-order: body-size cap (413) → DB-unbound guard (500
  * fail-closed — the dashboard-dependency convention) → workspace + app id
  * lookup → signature verify → per-App `review_enabled` pause gate. The two
- * URL segments locate the `github_apps` row (active, not deleted) in THAT
+ * URL segments locate the `review_bots` row (active, not deleted) in THAT
  * workspace, whose DECRYPTED webhook secret parameterizes the same
  * `classifyWebhook` classifier (secret-parameterized only — the classifier
  * never sees the App identity); the route handler attaches
  * `appRef: { appId }` after classification, before `REVIEW_QUEUE.send`
  * (lock L3). Both segments are immutable internal ids (the workspace's
- * `workspaces.id` and the App's `github_apps.id`) — GitHub's mutable App
+ * `workspaces.id` and the App's `review_bots.id`) — GitHub's mutable App
  * slug is never part of the URL, so a rename cannot break deliveries.
  * Unknown / mismatched pair / disabled / soft-deleted → 404, zero enqueue. Any webhook
  * secret decrypt failure (missing DASHBOARD_ENCRYPTION_KEY, tampered
@@ -340,7 +340,7 @@ app.route("/dashboard", dashboardApp);
  * (consumer lock L4).
  *
  * Install bookkeeping: a classified job payload always
- * carries `installation_id`, so the accepted path runs an `app_installations`
+ * carries `installation_id`, so the accepted path runs a `bot_installations`
  * seen_at upsert that also records `account_login` from
  * `outcome.installationAccount` — the installing account the delivery states,
  * with `repository.owner.login` only as the payload-missing fallback. A review
@@ -418,11 +418,11 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
     return c.text("db binding missing", 500);
   }
-  // The webhook path lookup is a tenant-facing `github_apps` read (AC2): the
-  // store's one read face joins `app_workspaces`, so an App with no workspace
+  // The webhook path lookup is a tenant-facing `review_bots` read (AC2): the
+  // store's one read face joins `bot_workspaces`, so an App with no workspace
   // mapping is unknown here too (404 with zero decrypt, zero delivery row and
   // zero enqueue).
-  const appsStore = createAppsStore(db);
+  const appsStore = createReviewBotsStore(db);
 
   // Workspace + App lookup: the pair must name an App that belongs to that
   // workspace. Unknown / mismatched / disabled / soft-deleted are all 404 with
@@ -471,7 +471,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // Architect lock L1: the verifier memoizes under the row id as
   // cacheKey — a rotated webhook secret (same id, new envelope → new
   // secret) is rebuilt + REPLACED on the next delivery; entries are
-  // structurally bounded (≤ github_apps rows) with no eviction policy.
+  // structurally bounded (≤ review_bots rows) with no eviction policy.
   // Trigger context (spec review-trigger-policy §2 read path): the
   // already-resolved row's review_trigger_mode gates the pull_request auto
   // face and its GitHub slug keys the issue_comment bot mention — no second

@@ -5,12 +5,12 @@
  *
  * `appRef.appId` — which GitHub App's credentials the consumer must resolve
  * for this job (required single shape,
- * AL-24-2). The `github_apps` row (D1) with that id — attached by the
+ * AL-24-2). The `review_bots` row (D1) with that id — attached by the
  * per-App `POST /webhook/:workspaceId/:appId` route after classification,
  * the ONLY
  * production attach point.
  *
- * `appId` is a reference (a `github_apps.id` UUID), never a credential —
+ * `appId` is a reference (a `review_bots.id` UUID), never a credential —
  * the queue carries the id only; the decrypted PEM exists solely in
  * consumer memory (lock L4, contracts D red line unchanged).
  *

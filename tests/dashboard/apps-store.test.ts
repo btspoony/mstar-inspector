@@ -27,7 +27,7 @@ import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
 import {
   ALLOWLIST_MAX_OWNERS,
-  createAppsStore,
+  createReviewBotsStore,
   parseAppReviewLevel,
 } from "../../src/dashboard/apps-store";
 import { getWorkspaceCheckMinScore } from "../../src/dashboard/runtime-config-store";
@@ -35,7 +35,7 @@ import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import type { D1Like } from "../../src/store/types";
 import type { TestD1 } from "../store/helpers";
 
-/** One github_apps row of the post-0038 shape, without the store's crypto path. */
+/** One review_bots row of the post-0038 shape, without the store's crypto path. */
 function seedApp(
   db: TestD1,
   id: string,
@@ -43,7 +43,7 @@ function seedApp(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
           status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active',
@@ -56,7 +56,7 @@ describe("review gate (migration 0045)", () => {
   test("reads the DDL defaults and round-trips a saved gate", async () => {
     const db = createMigratedTestD1();
     seedApp(db, "app-gate", { githubAppId: 5001 });
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     // `seedApp` is a raw INSERT, so this row carries 0045's column default
     // (80); the create-path default (`DEFAULT_CHECK_MIN_SCORE`, 60) is covered
@@ -81,7 +81,7 @@ describe("review gate (migration 0045)", () => {
   test("rejects an out-of-range score and an off-vocabulary verdict before writing", async () => {
     const db = createMigratedTestD1();
     seedApp(db, "app-invalid", { githubAppId: 5002 });
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     for (const minScore of [-1, 101, 80.5]) {
       await expect(store.saveCheckGate("app-invalid", { minScore, passVerdicts: ["ship it"] })).rejects.toThrow(
@@ -99,7 +99,7 @@ describe("review gate (migration 0045)", () => {
   test("a corrupt stored gate reads as null — unreadable configuration, never a default", async () => {
     const db = createMigratedTestD1();
     seedApp(db, "app-corrupt", { githubAppId: 5004 });
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     // JSON well-formedness is a DDL CHECK, so the unreadable values that can
     // still exist are well-formed JSON that is not a verdict array: a JSON
@@ -107,7 +107,7 @@ describe("review gate (migration 0045)", () => {
     // no gate is served at all, so every Check lane fails closed.
     for (const stored of ['"ship it"', '["lgtm"]']) {
       db.raw
-        .prepare(`UPDATE github_apps SET check_min_score = 55, check_pass_verdicts = ? WHERE id = 'app-corrupt'`)
+        .prepare(`UPDATE review_bots SET check_min_score = 55, check_pass_verdicts = ? WHERE id = 'app-corrupt'`)
         .run(stored);
       expect(await store.getCheckGate("app-corrupt")).toBeNull();
     }
@@ -115,7 +115,7 @@ describe("review gate (migration 0045)", () => {
     // Malformed JSON cannot even be stored: the column's CHECK rejects it.
     expect(() =>
       db.raw
-        .prepare(`UPDATE github_apps SET check_pass_verdicts = '{not json' WHERE id = 'app-corrupt'`)
+        .prepare(`UPDATE review_bots SET check_pass_verdicts = '{not json' WHERE id = 'app-corrupt'`)
         .run(),
     ).toThrow();
     expect(await store.getCheckGate("app-corrupt")).toBeNull();
@@ -130,7 +130,7 @@ describe("review gate (migration 0045)", () => {
   test("an empty verdict set is readable configuration that no review can pass", async () => {
     const db = createMigratedTestD1();
     seedApp(db, "app-empty", { githubAppId: 5005 });
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     // The settings route accepts an empty submission (every box unchecked), so
     // `[]` must round-trip as a gate — NOT the `null` an unreadable array reads
@@ -142,7 +142,7 @@ describe("review gate (migration 0045)", () => {
   test("refuses a soft-deleted App with no write", async () => {
     const db = createMigratedTestD1();
     seedApp(db, "app-deleted", { githubAppId: 5003, deleted: true });
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     expect(await store.saveCheckGate("app-deleted", { minScore: 10, passVerdicts: ["blocked"] })).toBe(false);
     expect(await store.getCheckGate("app-deleted")).toEqual({ minScore: 80, passVerdicts: ["ship it"] });
@@ -151,7 +151,7 @@ describe("review gate (migration 0045)", () => {
   test("a new App inherits the workspace default the caller resolved", async () => {
     const db = createMigratedTestD1();
     db.raw.prepare("UPDATE workspaces SET check_min_score = 45 WHERE id = 'default'").run();
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     // The route's shape: read the workspace default, then seed the App with it.
     const floor = await getWorkspaceCheckMinScore(db, "default");
     expect(floor).toEqual({ minScore: 45, degraded: false });
@@ -173,7 +173,7 @@ describe("review gate (migration 0045)", () => {
 
   test("a newly connected App starts at the product default floor (60)", async () => {
     const db = createMigratedTestD1();
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     await store.createApp({
       id: "app-created",
@@ -196,7 +196,7 @@ describe("owner allowlist (migration 0045)", () => {
   test("starts off and empty, and each save replaces the owner set", async () => {
     const db = createMigratedTestD1();
     seedApp(db, "app-allow", { githubAppId: 5101 });
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     expect(await store.getAllowlist("app-allow")).toEqual({ enabled: false, owners: [] });
 
@@ -223,7 +223,7 @@ describe("owner allowlist (migration 0045)", () => {
   test("refuses an unknown or soft-deleted App without writing owner rows", async () => {
     const db = createMigratedTestD1();
     seedApp(db, "app-allow-deleted", { githubAppId: 5102, deleted: true });
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     expect(await store.saveAllowlist("app-allow-deleted", { enabled: true, owners: ["acme"] })).toBe(false);
     expect(await store.saveAllowlist("unknown-app", { enabled: true, owners: ["acme"] })).toBe(false);
@@ -234,7 +234,7 @@ describe("owner allowlist (migration 0045)", () => {
   test("refuses an over-cap owner set before any read or write", async () => {
     const db = createMigratedTestD1();
     seedApp(db, "app-allow-cap", { githubAppId: 5104 });
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     const oversized = Array.from({ length: ALLOWLIST_MAX_OWNERS + 1 }, (_, index) => `owner-${index}`);
 
     // Thrown, not `false`: the caller asked for more than the method's
@@ -264,15 +264,15 @@ describe("owner allowlist (migration 0045)", () => {
     const racing: D1Like = {
       prepare: (query) => db.prepare(query),
       batch: async (statements) => {
-        db.raw.prepare(`UPDATE github_apps SET deleted_at = datetime('now') WHERE id = ?`).run("app-allow-race");
+        db.raw.prepare(`UPDATE review_bots SET deleted_at = datetime('now') WHERE id = ?`).run("app-allow-race");
         return db.batch(statements);
       },
     };
 
-    expect(await createAppsStore(racing).saveAllowlist("app-allow-race", { enabled: true, owners: ["acme"] })).toBe(
+    expect(await createReviewBotsStore(racing).saveAllowlist("app-allow-race", { enabled: true, owners: ["acme"] })).toBe(
       false,
     );
-    const row = db.raw.query("SELECT allowlist_enabled FROM github_apps WHERE id = ?").get("app-allow-race") as {
+    const row = db.raw.query("SELECT allowlist_enabled FROM review_bots WHERE id = ?").get("app-allow-race") as {
       allowlist_enabled: number;
     };
     expect(row.allowlist_enabled).toBe(0);
@@ -287,7 +287,7 @@ describe("GitHub App visibility (migration 0045)", () => {
   test("reads 'unknown' until probed and round-trips the stored value", async () => {
     const db = createMigratedTestD1();
     seedApp(db, "app-visibility", { githubAppId: 5201 });
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     expect(await store.getGithubVisibility("app-visibility")).toBe("unknown");
 
@@ -310,7 +310,7 @@ describe("review level (migration 0047)", () => {
    * misses those rows.
    */
   async function seedMappedApp(db: TestD1, id: string, githubAppId: number): Promise<void> {
-    await createAppsStore(db).createApp({
+    await createReviewBotsStore(db).createApp({
       id,
       githubAppId,
       githubSlug: null,
@@ -325,7 +325,7 @@ describe("review level (migration 0047)", () => {
   test("no backfill: an App reads NULL until it chooses, and NULL is a choice it can go back to", async () => {
     const db = createMigratedTestD1();
     await seedMappedApp(db, "app-level", 5401);
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     // The creation path omits the column and nothing backfills it, so an
     // untouched App has no level of its own: NULL means "follow the operator
@@ -345,11 +345,11 @@ describe("review level (migration 0047)", () => {
   test("an off-vocabulary value reads as absent, never an error", async () => {
     const db = createMigratedTestD1();
     await seedMappedApp(db, "app-level-invalid", 5402);
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
 
     // The written vocabulary is closed: the DDL refuses anything else...
     expect(() =>
-      db.raw.prepare(`UPDATE github_apps SET review_level = 'turbo' WHERE id = 'app-level-invalid'`).run(),
+      db.raw.prepare(`UPDATE review_bots SET review_level = 'turbo' WHERE id = 'app-level-invalid'`).run(),
     ).toThrow();
     await expect(store.setReviewLevel("app-level-invalid", "turbo" as never)).rejects.toThrow(/review level/);
 
@@ -368,8 +368,8 @@ describe("review level (migration 0047)", () => {
   test("refuses a soft-deleted App with no write", async () => {
     const db = createMigratedTestD1();
     await seedMappedApp(db, "app-level-deleted", 5403);
-    db.raw.prepare(`UPDATE github_apps SET deleted_at = datetime('now') WHERE id = 'app-level-deleted'`).run();
-    const store = createAppsStore(db);
+    db.raw.prepare(`UPDATE review_bots SET deleted_at = datetime('now') WHERE id = 'app-level-deleted'`).run();
+    const store = createReviewBotsStore(db);
 
     expect(await store.setReviewLevel("app-level-deleted", "quick")).toBe(false);
     expect((await store.getAppById("app-level-deleted"))?.review_level).toBeNull();

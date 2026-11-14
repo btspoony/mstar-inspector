@@ -93,7 +93,7 @@ import {
 } from "../../src/store/review-checks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { reconcileReviewChecks } from "../../src/worker/check-reconcile";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { GITHUB_PRIMARY_RATE_LIMIT_PREFIX, GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
@@ -359,7 +359,7 @@ async function seedPrHead(
   db: TestD1,
   head: { headSha: string; headAt: string | null },
 ): Promise<void> {
-  await createAppsStore(db).upsertPullRequest({
+  await createReviewBotsStore(db).upsertPullRequest({
     appId: TEST_APP_ID,
     owner: "acme",
     repo: "widgets",
@@ -456,7 +456,7 @@ function seedJournalRow(db: TestD1, headSha: string, phase = "prepared", payload
   db.raw
     .prepare(
       `INSERT INTO review_publications
-         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, created_ms, updated_ms)
        VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', ?, ?, 1000, 1000)`,
     )
@@ -467,7 +467,7 @@ function seedJournalRow(db: TestD1, headSha: string, phase = "prepared", payload
 function seedAppInstallation(db: TestD1): void {
   db.raw
     .prepare(
-      `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
        VALUES (?, ?, 123, 'acme', datetime('now'))`,
     )
     .run(`inst-${TEST_APP_ID}-123`, TEST_APP_ID);
@@ -643,16 +643,16 @@ describe("createReviewConsumer", () => {
     const row = db.raw.query("SELECT * FROM reviews").get() as {
       head_sha: string;
       verdict: string;
-      app_id: string | null;
+      bot_id: string | null;
       model: string | null;
       provider: string | null;
     };
     expect(row.head_sha).toBe(SHA);
     expect(row.verdict).toBe("needs fixes");
     // The review row carries the App attribution (appRef is
-    // required — every new row is attributed; app_id NULL survives only on
+    // required — every new row is attributed; bot_id NULL survives only on
     // pre-per-App historical rows).
-    expect(row.app_id).toBe(TEST_APP_ID);
+    expect(row.bot_id).toBe(TEST_APP_ID);
     // Version records (AL-24-5): the seed App's own chain is
     // the only chain source — `model` records its head selector (never NULL
     // on a new row); `provider` is NULL on BOTH paths (architect AL-2).
@@ -2502,7 +2502,7 @@ describe("createReviewConsumer", () => {
     const box = createSecretbox(TEST_KEY);
     db.raw
       .prepare(
-        `INSERT INTO github_apps
+        `INSERT INTO review_bots
            (id, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, 424243, 'comma-chain-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -2513,7 +2513,7 @@ describe("createReviewConsumer", () => {
         await box.encryptSecret("whsec-comma-app", `github_apps.webhook_secret_enc:${commaAppId}`),
       );
     db.raw
-      .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
+      .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
       .run(commaAppId);
     await seedAppConfig(db, commaAppId, ",");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -2562,7 +2562,7 @@ describe("createReviewConsumer", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // A second App with a HEALTHY base chain (passes the base gate) but a
-    // raw `,` override chain inserted DIRECTLY into app_model_chains with a
+    // raw `,` override chain inserted DIRECTLY into bot_model_chains with a
     // seat reference row (the shape). The dashboard store rejects
     // this chain value (upsertModelChain → InvalidModelSelectorError), so
     // only a direct-D1 write can land it; the consumer gate is the backstop
@@ -2575,7 +2575,7 @@ describe("createReviewConsumer", () => {
     const box = createSecretbox(TEST_KEY);
     db.raw
       .prepare(
-        `INSERT INTO github_apps
+        `INSERT INTO review_bots
            (id, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, 424244, 'comma-override-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -2589,17 +2589,17 @@ describe("createReviewConsumer", () => {
         ),
       );
     db.raw
-      .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
+      .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
       .run(overrideAppId);
     await seedAppConfig(db, overrideAppId); // healthy base chain + ark key
     db.raw
       .prepare(
-        `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+        `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
          VALUES (?, 'seat-code-reviewer', ',', 0, datetime('now'), datetime('now'))`,
       )
       .run(overrideAppId);
     db.raw
-      .prepare(`INSERT INTO app_model_chain_seats (app_id, role, chain_name) VALUES (?, 'code-reviewer', 'seat-code-reviewer')`)
+      .prepare(`INSERT INTO bot_model_chain_seats (bot_id, role, chain_name) VALUES (?, 'code-reviewer', 'seat-code-reviewer')`)
       .run(overrideAppId);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
@@ -4478,7 +4478,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_threads
-           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+           (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
             original_sha, round, intent_json, resolution_state, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, 1, '{}', 'pending', 3000, 3000)`,
       )
@@ -4798,7 +4798,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, created_ms, updated_ms, recovery_state)
          VALUES ('dddddddd-0000-4000-8000-000000000004', ?, 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1, 1, 'pending')`,
       )
@@ -4917,7 +4917,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_findings
-           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+           (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
             first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
             first_seen_round, last_seen_round, state, created_ms, updated_ms)
          VALUES ('eeeeeeee-0000-4000-8000-000000000005', ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'addressed', 1, 1)`,
@@ -5379,7 +5379,7 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
       db.raw
         .prepare(
           `INSERT INTO review_findings
-             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+             (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
               first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
               first_seen_round, last_seen_round, state, created_ms, updated_ms)
            VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
@@ -5403,7 +5403,7 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
       db.raw
         .prepare(
           `INSERT INTO review_threads
-             (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+             (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
               original_sha, round, intent_json, resolution_state, thread_id, created_ms, updated_ms)
            VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, 1, ?, 'pending', ?, ?, ?)`,
         )
@@ -5556,7 +5556,7 @@ describe("bind unbound review threads before the discussion capture (§7.5/§7.8
     db.raw
       .prepare(
         `INSERT INTO review_threads
-           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+           (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
             original_sha, round, intent_json, resolution_state, thread_id,
             superseded_by_publication_id, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, 1, ?, 'pending', ?, ?, ?, ?)`,
@@ -5810,7 +5810,7 @@ describe("degraded publication journal conflict guard (spec §7.7, P67-QC-012)",
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, created_ms, updated_ms)
          VALUES ('existing-deg', ?, 123, 'acme', 'widgets', 42, ?, 'degraded', 'failed', ?, 1, 1)`,
       )
@@ -5839,7 +5839,7 @@ describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, created_ms, updated_ms)
          VALUES ('deg-uncertain', ?, 123, 'acme', 'widgets', 42, 'oldsha', 'degraded', 'unknown', ?, 1, 1)`,
       )
@@ -5861,7 +5861,7 @@ describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, created_ms, updated_ms)
          VALUES ('deg-confirmed', ?, 123, 'acme', 'widgets', 42, 'oldsha', 'degraded', 'applied', ?, '{}', 1, 1)`,
       )
@@ -6073,7 +6073,7 @@ function lifecycleFor(db: TestD1, nowMs: () => number = () => Date.now()) {
     db,
     nowMs,
     getAdapter: () => adapter,
-    getCheckGate: (scope) => createAppsStore(db).getCheckGate(scope.appId),
+    getCheckGate: (scope) => createReviewBotsStore(db).getCheckGate(scope.appId),
   });
 }
 
@@ -6419,7 +6419,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, created_ms, updated_ms, recovery_state)
          VALUES ('dddddddd-0000-4000-8000-000000000004', ?, 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1, 1, 'pending')`,
       )
@@ -6465,7 +6465,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a paused App claims no attempt and runs no Check", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    db.raw.prepare("UPDATE github_apps SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
+    db.raw.prepare("UPDATE review_bots SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
@@ -6511,7 +6511,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // The delivery identity travels on the message: it is what lets the skip
     // settlement tell THIS delivery's row from another's (§7.9).
     payload.attachDeliveryId = attached.deliveryId;
-    db.raw.prepare("UPDATE github_apps SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
+    db.raw.prepare("UPDATE review_bots SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       createAppCommenter: () => commenterWithChecks(adapter),
@@ -7065,7 +7065,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = createCheckLifecycle({
       db,
       nowMs: checkClock,
-      getCheckGate: (scope) => createAppsStore(db).getCheckGate(scope.appId),
+      getCheckGate: (scope) => createReviewBotsStore(db).getCheckGate(scope.appId),
       getAdapter: () => checksAdapterFor(db, checkClock),
     });
 
@@ -7242,7 +7242,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = createCheckLifecycle({
       db,
       nowMs: checkClock,
-      getCheckGate: (scope) => createAppsStore(db).getCheckGate(scope.appId),
+      getCheckGate: (scope) => createReviewBotsStore(db).getCheckGate(scope.appId),
       getAdapter: () => ({
         beginCheck: async ({ identity, lease }) => {
           await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, checkState.clockMs);
@@ -7288,7 +7288,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = createCheckLifecycle({
       db,
       nowMs: checkClock,
-      getCheckGate: (scope) => createAppsStore(db).getCheckGate(scope.appId),
+      getCheckGate: (scope) => createReviewBotsStore(db).getCheckGate(scope.appId),
       getAdapter: () => ({
         beginCheck: async ({ identity, lease }) => {
           await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, checkState.clockMs);
@@ -7562,7 +7562,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // production route always carries; this suite seeds the App only.
     db.raw
       .prepare(
-        `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
          VALUES (?, ?, 123, 'acme', datetime('now'))`,
       )
       .run(`inst-${TEST_APP_ID}-123`, TEST_APP_ID);
@@ -8636,12 +8636,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
 describe("workspace attribution gate (one read face)", () => {
   /**
-   * The seeded App minus its `app_workspaces` row: what a pre-0026 row looks
+   * The seeded App minus its `bot_workspaces` row: what a pre-0026 row looks
    * like when the backfill never ran. The join read face cannot see it at all,
    * so the pipeline must fail closed rather than review an unattributed App.
    */
   function dropWorkspaceMapping(db: TestD1): void {
-    db.raw.prepare("DELETE FROM app_workspaces WHERE app_id = ?").run(TEST_APP_ID);
+    db.raw.prepare("DELETE FROM bot_workspaces WHERE bot_id = ?").run(TEST_APP_ID);
   }
 
   test("an unmapped App fails at the credential gate — zero sandbox/token/GitHub, same retry→DLQ path", async () => {
@@ -9041,7 +9041,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     // An unresolvable App throws AFTER the claim: the row must already be
     // `consumed`, because a failed comment-triggered run is re-run by posting a
     // new comment, never by replaying this one.
-    db.raw.prepare("UPDATE github_apps SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
+    db.raw.prepare("UPDATE review_bots SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
     const consumer = createReviewConsumer(
       await h.makeEnv({ DB: db as never }),
       h.testLog,
@@ -9066,7 +9066,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
 
   test("a job without comment_id never touches the claim table", async () => {
     const db = await createSeededTestD1();
-    db.raw.prepare("UPDATE github_apps SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
+    db.raw.prepare("UPDATE review_bots SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
     const consumer = createReviewConsumer(
       await h.makeEnv({ DB: db as never }),
       h.testLog,

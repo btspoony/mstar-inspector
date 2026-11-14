@@ -246,11 +246,11 @@ export const WEBHOOK_BODY_LIMIT = 1_000_000;
  * request only to call `verify`, which uses nothing but `options.secret`.
  * KEYED BY CACHEKEY, NOT the raw secret: each entry is `{ secret, webhooks }`
  * under the caller's cache key — each per-App
- * `POST /webhook/:workspaceId/:appId` route passes its `github_apps.id` — so per-App isolation holds AND a
+ * `POST /webhook/:workspaceId/:appId` route passes its `review_bots.id` — so per-App isolation holds AND a
  * cached entry whose `secret` differs from the caller's current secret
  * (credential rotation) is rebuilt and REPLACED: the rotated secret
  * verifies with the NEW secret only, and the old entry is evicted exactly
- * (no LRU wait). The bound is STRUCTURAL (≤ github_apps rows — keys are
+ * (no LRU wait). The bound is STRUCTURAL (≤ review_bots rows — keys are
  * drawn from the fixed universe of row ids), so no eviction policy is
  * tunable or needed; an entry outliving its row (soft-deleted App) is dead
  * weight only — that route 404s before classifyWebhook, so the entry can
@@ -324,7 +324,7 @@ export type WebhookOutcome =
    * receive an owner-derived login). It is carried OUTSIDE
    * `payload` so it never enters the queue message (the consumer contract
    * `ReviewJobPayload` must not grow an account field) while the route can
-   * still record it on `app_installations`.
+   * still record it on `bot_installations`.
    *
    * `accountAuthoritative` is always false here: a review payload is not an
    * install statement, so the store only lets this value FILL an empty login.
@@ -361,7 +361,7 @@ export type WebhookOutcome =
  * Minimal webhook payload shapes — only the fields the gateway consumes.
  *
  * `account.login` is the installation's own account — the authority for
- * `app_installations.account_login`. `repository.owner.login` is only a
+ * `bot_installations.account_login`. `repository.owner.login` is only a
  * fallback: an install covers repositories owned by the installing account,
  * but the payload's own `installation.account` is the value GitHub states,
  * and it must win so it is never overwritten by an inferred owner.
@@ -392,7 +392,7 @@ const repositorySchema = z
  * delivery without `installation.account` allows — shared by both review
  * classifiers so the authority order is stated once.
  *
- * Two sources, one rule (`app_installations.account_login` is either
+ * Two sources, one rule (`bot_installations.account_login` is either
  * AUTHORITATIVE or INFERRED):
  * - authoritative = `installation.account.login` on an `installation.*` event
  *   (the installation's own statement) — overwrites a stored login;
@@ -486,7 +486,7 @@ const issueCommentSchema = z.object({
  *
  * `cacheKey` (the hardening item / architect lock L1) is a
  * MEMOIZATION-ONLY parameter for the verifier cache — a per-App route
- * passes its `github_apps.id`; the classifier NEVER branches on it (same
+ * passes its `review_bots.id`; the classifier NEVER branches on it (same
  * secret + same payload classifies identically whichever key rides along).
  * Omitted → the verifier memoizes under the secret itself (the legacy
  * shape, for direct callers).
@@ -584,7 +584,7 @@ export function classifyEvent(
 /**
  * `installation.{created,new_permissions_accepted}` → the installing account's
  * login. This is the one path that observes a fresh install before any review
- * traffic exists, so it is the reason `app_installations.account_login` can be
+ * traffic exists, so it is the reason `bot_installations.account_login` can be
  * filled at all. `installation.deleted` names the installation being removed.
  *
  * Every malformed case is a 400 reject, exactly like the sibling classifiers:

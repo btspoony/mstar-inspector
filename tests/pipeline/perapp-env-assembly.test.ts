@@ -71,11 +71,11 @@ const VALID_OUTPUT: ReviewOutput = {
 
 // --- seeding helpers ---------------------------------------------------------
 
-/** Distinct github_app_id per seeded App (github_apps.github_app_id is UNIQUE). */
+/** Distinct github_app_id per seeded App (review_bots.github_app_id is UNIQUE). */
 let githubAppIdSeq = 100000;
 
 /**
- * Raw-insert an active, non-deleted github_apps row (the commenter face).
+ * Raw-insert an active, non-deleted review_bots row (the commenter face).
  * `configured: false` skips the AI-config health baseline (a chain + the ark
  * BYOK key) — the input for the AL-24-5 fail-closed tests.
  */
@@ -91,7 +91,7 @@ async function seedApp(
   const webhookSecretEnc = await box.encryptSecret(`whsec-${slug}`, `github_apps.webhook_secret_enc:${id}`);
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -128,7 +128,7 @@ async function configureApp(
 /**
  * Map one seat to a named chain holding the given selector
  * spec §4.4): the `seat-<role>` chain + the reference row — the same shape
- * migration 0017's backfill produces for legacy app_model_roles rows.
+ * migration 0017's backfill produces for legacy bot_model_roles rows.
  */
 async function mapRole(
   db: ReturnType<typeof createMigratedTestD1>,
@@ -157,7 +157,7 @@ async function seedTamperedKey(
   );
   db.raw
     .prepare(
-      `INSERT INTO app_provider_keys (app_id, provider, key_id, key_enc, created_at)
+      `INSERT INTO bot_provider_keys (bot_id, provider, key_id, key_enc, created_at)
        VALUES (?, ?, 'deadbeefdeadbeef', ?, datetime('now'))`,
     )
     .run(appId, provider, keyEnc);
@@ -522,7 +522,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
   test("App with no AI config at all → fail closed: missing model chain (zero-config is not a valid review state)", async () => {
     reset();
     const db = createMigratedTestD1();
-    const appX = await seedApp(db, "app-x", { configured: false }); // github_apps row, NO config rows
+    const appX = await seedApp(db, "app-x", { configured: false }); // review_bots row, NO config rows
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
@@ -590,14 +590,14 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     // the fail-closed + verbatim guards independent of store semantics.
     db.raw
       .prepare(
-        `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+        `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
          VALUES (?, 'default', '   ', 1, datetime('now'), datetime('now'))`,
       )
       .run(appX.id);
     const padded = "  openai/gpt-padded , anthropic/claude-padded  ";
     db.raw
       .prepare(
-        `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+        `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
          VALUES (?, 'default', ?, 1, datetime('now'), datetime('now'))`,
       )
       .run(appY.id, padded);
@@ -944,7 +944,7 @@ describe("runner input modelOverrides threading", () => {
     // helper's decode must be UTF-8 (atob would mangle it to latin1).
     numstatStdout = "1\t1\tdocs/中文.md\n";
     const appDb = createMigratedTestD1();
-    const appX = await seedApp(appDb, "app-x"); // github_apps row, NO role rows
+    const appX = await seedApp(appDb, "app-x"); // review_bots row, NO role rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
     await withFrozenClock(() =>
       appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } }))),
@@ -1005,7 +1005,7 @@ describe("runner input modelOverrides threading", () => {
       get(target, prop, receiver) {
         if (prop === "prepare") {
           return (query: string) => {
-            if (query.includes("FROM app_model_chain_seats")) throw new Error("roles read boom");
+            if (query.includes("FROM bot_model_chain_seats")) throw new Error("roles read boom");
             return (target as typeof db).prepare(query);
           };
         }
@@ -1418,7 +1418,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
   test("app with NO custom providers: input JSON + payload carry no custom-provider surface (byte-identical to a no-declaration run)", async () => {
     reset();
     const appDb = createMigratedTestD1();
-    const appX = await seedApp(appDb, "app-x"); // github_apps row, NO custom rows
+    const appX = await seedApp(appDb, "app-x"); // review_bots row, NO custom rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
     await withFrozenClock(() =>
       appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } }))),
@@ -1478,7 +1478,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     const appX = await seedApp(db, "app-x");
     db.raw
       .prepare(
-        `INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, created_at, updated_at)
+        `INSERT INTO bot_custom_providers (bot_id, provider_id, base_url, api, model_ids, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       )
       .run(appX.id, "my-provider", "https://my-provider.example.com/v1", "openai-completions", JSON.stringify(["m1"]));
@@ -1489,7 +1489,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     );
     db.raw
       .prepare(
-        `INSERT INTO app_custom_provider_keys (app_id, provider, key_id, key_enc, created_at)
+        `INSERT INTO bot_custom_provider_keys (bot_id, provider, key_id, key_enc, created_at)
          VALUES (?, ?, 'deadbeefdeadbeef', ?, datetime('now'))`,
       )
       .run(appX.id, "my-provider", enc);
@@ -1537,7 +1537,7 @@ describe("sandbox image resolution at review execution", () => {
     // Bypass the store (the threat model: a direct DB write or a
     // registry contraction can hold an id the current registry rejects).
     db.raw
-      .prepare(`UPDATE github_apps SET sandbox_image_id = 'retired-image' WHERE id = ?`)
+      .prepare(`UPDATE review_bots SET sandbox_image_id = 'retired-image' WHERE id = ?`)
       .run(appX.id);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1568,7 +1568,7 @@ describe("sandbox image resolution at review execution", () => {
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     db.raw
-      .prepare(`UPDATE github_apps SET sandbox_image_id = 'no-such-image' WHERE id = ?`)
+      .prepare(`UPDATE review_bots SET sandbox_image_id = 'no-such-image' WHERE id = ?`)
       .run(appX.id);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1578,7 +1578,7 @@ describe("sandbox image resolution at review execution", () => {
     expect(sandboxCalls).toHaveLength(0); // the bad-id message never started one
 
     db.raw
-      .prepare(`UPDATE github_apps SET sandbox_image_id = 'omp' WHERE id = ?`)
+      .prepare(`UPDATE review_bots SET sandbox_image_id = 'omp' WHERE id = ?`)
       .run(appX.id);
     await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
     // The valid-id message started exactly one sandbox and completed.

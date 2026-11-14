@@ -30,7 +30,7 @@
 
      r2 corrections from user feedback:
        * an App is one GitHub App serving MANY repos through
-         app_installations — the list row is an App, not a repo;
+         bot_installations — the list row is an App, not a repo;
        * upgrade intensity raised: bigger page title, wider rhythm,
          the metric band promoted to its own plane;
        * light theme is a first-class face, not a parity checkbox.
@@ -390,7 +390,7 @@
       <li><b>r1</b> — 首次呈现：三层 token、目录结构、列表页/详情页对比。</li>
       <li><b>r2</b>（当前）— 按你的反馈修正三处：
         <b>(1)</b> 列表页数据模型纠正 —— 一行是一个 <b>App（GitHub App）</b>，一个 App 通过
-        <code>app_installations</code> 服务<b>多个账号下的多个仓库</b>，仓库不是列表行的身份；
+        <code>bot_installations</code> 服务<b>多个账号下的多个仓库</b>，仓库不是列表行的身份；
         <b>(2)</b> 升级力度加大 —— 页头独立成带、指标带独立成型、标题 22px、行高 48；
         <b>(3)</b> 亮色主题升为一等公民，给出完整语义层映射与并排对照。</li>
       <li><b>r3</b>（当前）— <b>数据诚实性修正</b>：列表与安装表移除了载荷证明不了的数字。
@@ -492,7 +492,7 @@
 
   <div class="warn-note">
     <b>数据模型更正：</b>本系统的单位是 <b>App（GitHub App）</b>。
-    一个 App 通过 <code>app_installations</code> 被安装到多个账号，每个安装覆盖该账号下的多个仓库。
+    一个 App 通过 <code>bot_installations</code> 被安装到多个账号，每个安装覆盖该账号下的多个仓库。
     r1 把 <code>btspoony/mstar-inspector</code> 当成行身份，是错的。
     <br /><br />
     <b>但列表载荷证明不了数量：</b><code>AppsPayload</code> 只有 App 身份、状态、最近投递与

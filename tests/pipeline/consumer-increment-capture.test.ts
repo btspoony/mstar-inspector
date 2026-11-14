@@ -83,7 +83,7 @@ function seedReview(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, context_incomplete, reviewed_at)
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, context_incomplete, reviewed_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
@@ -233,7 +233,7 @@ describe("incremental review rounds: the increment capture", () => {
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, created_ms, updated_ms, recovery_state)
          VALUES ('aaaaaaaa-0000-4000-8000-000000000046', ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{}', 1, 1, 'pending')`,
       )
