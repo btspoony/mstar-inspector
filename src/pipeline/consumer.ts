@@ -101,7 +101,7 @@ import { providerEnvName } from "./provider-catalog";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
-import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
+import { createFailureStore, QUEUE_MAX_ATTEMPTS, type FailureStage, type FailureStore } from "../store/failure-store";
 import { hasUsageEventForExecutionToken, recordUsageEvent } from "../store/usage-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
 // The hand-off's two fenced writes live in the Check registry (§7.9/§7.11.2):
@@ -328,7 +328,7 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
  * `tests/pipeline/queue-config-contract.test.ts` reads wrangler.jsonc and
  * fails when the two numbers drift.
  */
-export const QUEUE_MAX_ATTEMPTS = 6;
+export { QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 
 /**
  * Runner exec timeout for the job's review level (spec d5-budget L4 — the
@@ -931,6 +931,22 @@ async function settleSkippedRow(
 }
 
 /**
+ * Run one best-effort step under a hard deadline. Resolves `null` when the
+ * deadline wins: the step keeps running (a fetch or a D1 statement cannot be
+ * cancelled from here) but the caller stops waiting for it. A rejection still
+ * propagates — the caller's single catch is what reports it.
+ */
+async function boundedBestEffort<T>(step: Promise<T>, budgetMs: number): Promise<{ value: T } | null> {
+  const { promise: deadline, resolve } = Promise.withResolvers<null>();
+  const timer = setTimeout(() => resolve(null), budgetMs);
+  try {
+    return await Promise.race([step.then((value) => ({ value })), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * §7.10 held-Check visibility: a delivery the in-flight guard refused still owns
  * the Check its attach created, and that run would otherwise read
  * `in_progress` for the whole backoff with nothing saying why (measured on
@@ -942,6 +958,12 @@ async function settleSkippedRow(
  * The row lookup keys on the PAYLOAD's head sha — the commit this delivery
  * attached with — never the holder's: the holder's commit belongs to another
  * attempt and another delivery.
+ *
+ * EVERY part is bounded, because all of it runs before that retry: the settings
+ * read by the knob's own documented default (a read must not eat the budget it
+ * exists to read), the store write plus the GitHub PATCH by the operator's
+ * `review.check.update_timeout_ms`. Only ONE settings read is paid — the value
+ * is reused for the send.
  */
 async function markQueuedBehindInflightRow(
   deps: ProcessDeps,
@@ -952,30 +974,50 @@ async function markQueuedBehindInflightRow(
   const attachedHeadSha = payload.head_sha;
   if (attachedHeadSha === null || attachedHeadSha === undefined || attachedHeadSha === "") return;
   if (heldHeadSha === null || heldHeadSha === undefined || heldHeadSha === "") return;
+  const warn = (detail: string) =>
+    deps.log.warn({ ...payloadIdentityFields(payload), event: "check_queued_relabel_failed" }, detail);
   try {
-    // ONE budget read, the same value the terminalize hook uses: the relabel
-    // runs BEFORE this path's delayed retry, so it is bounded and can never
-    // hold the retry hostage. A degraded read answers the documented defaults.
-    const budgets = await readCheckBudgets(deps.env.DB, {
-      warn: (readerFields, msg) => deps.log.warn({ ...payloadIdentityFields(payload), ...readerFields }, msg),
-    });
-    await deps.checks.markQueuedBehindInflight({
-      scope: {
-        appId: payload.appRef.appId,
-        installationId: payload.installation_id,
-        owner: payload.owner,
-        repo: payload.repo,
-        prNumber: payload.pr_number,
-      },
-      headSha: attachedHeadSha,
-      triggeredBy: payload.triggered_by,
-      action: payload.action,
-      attachDeliveryId: payload.attachDeliveryId,
-      summary: `Queued — the review in flight for this pull request (head ${heldHeadSha.slice(0, 7)}) holds the slot; this commit starts when it finishes.`,
-      updateBudgetMs: budgets.updateMs,
-      warn: (detail) =>
-        deps.log.warn({ ...payloadIdentityFields(payload), event: "check_queued_relabel_failed" }, detail),
-    });
+    // ONE budget read, the same value the terminalize hook uses. A degraded read
+    // answers the documented defaults and warns once through the reader itself.
+    const read = await boundedBestEffort(
+      readCheckBudgets(deps.env.DB, {
+        warn: (readerFields, msg) => deps.log.warn({ ...payloadIdentityFields(payload), ...readerFields }, msg),
+      }),
+      CHECK_UPDATE_DEFAULT,
+    );
+    if (read === null) {
+      warn(
+        `held check relabel skipped: the check-budget read exceeded ${CHECK_UPDATE_DEFAULT}ms (the delayed retry is unaffected)`,
+      );
+      return;
+    }
+    const budgets = read.value;
+    // The store write and the PATCH share the operator's update budget: the
+    // adapter applies the same value to the send it issues.
+    const relabeled = await boundedBestEffort(
+      deps.checks.markQueuedBehindInflight({
+        scope: {
+          appId: payload.appRef.appId,
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        },
+        headSha: attachedHeadSha,
+        triggeredBy: payload.triggered_by,
+        action: payload.action,
+        attachDeliveryId: payload.attachDeliveryId,
+        summary: `Queued — the review in flight for this pull request (head ${heldHeadSha.slice(0, 7)}) holds the slot; this commit starts when it finishes.`,
+        updateBudgetMs: budgets.updateMs,
+        warn,
+      }),
+      budgets.updateMs,
+    );
+    if (relabeled === null) {
+      warn(
+        `held check relabel skipped: the store write or the Check update exceeded ${budgets.updateMs}ms (the delayed retry is unaffected)`,
+      );
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.warn(
@@ -6274,8 +6316,9 @@ async function processMessage(
     // AL-6: best-effort review_failures row BEFORE the
     // rethrow — DLQ-bound infra failures otherwise leave zero D1 trace (the
     // audit blind spot). `stage` = the coarse phase in flight
-    // (failureStage); rows are per-attempt events (a DLQ'd message leaves
-    // up to 4: 1 initial delivery + max_retries = 3 retries). The insert
+    // (failureStage); rows are per-attempt events (a DLQ'd message leaves up
+    // to QUEUE_MAX_ATTEMPTS of them: 1 initial delivery + the queue's
+    // max_retries, one per guard rung). The insert
     // must never mask the rethrow: its own failure is a warn line only.
     // SEC-03: the error detail is redacted (shape + exact-value passes)
     // before the durable row — an infra error can interpolate a

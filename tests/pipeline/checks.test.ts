@@ -65,6 +65,7 @@ import {
   toCheckRemote,
   type CheckRunPayload,
   type ChecksCreateParams,
+  type ChecksRelabelParams,
   type ChecksListPage,
   type ChecksListParams,
   type ChecksOctokit,
@@ -138,7 +139,8 @@ function runPayload(identity: CheckIdentity, overrides: Partial<CheckRunPayload>
 }
 
 type CreateCall = { params: ChecksCreateParams; raw: Record<string, unknown> };
-type UpdateCall = { params: ChecksUpdateParams; raw: Record<string, unknown> };
+/** The request shape the adapter sends: a terminal update or a text-only relabel. */
+type UpdateCall = { params: ChecksRelabelParams; raw: Record<string, unknown> };
 
 /**
  * A scripted Checks surface. `respond` decides each call's answer; throws are
@@ -146,7 +148,7 @@ type UpdateCall = { params: ChecksUpdateParams; raw: Record<string, unknown> };
  */
 function fakeChecks(respond: Partial<{
   create: (params: ChecksCreateParams) => Promise<CheckRunPayload> | CheckRunPayload;
-  update: (params: ChecksUpdateParams) => Promise<CheckRunPayload> | CheckRunPayload;
+  update: (params: ChecksRelabelParams) => Promise<CheckRunPayload> | CheckRunPayload;
   get: (params: { owner: string; repo: string; check_run_id: number }) => CheckRunPayload;
   pages: (params: ChecksListParams, page: number) => ChecksListPage | null;
 }> = {}): {
@@ -2482,7 +2484,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
         head_sha: SHA,
         external_id: externalId,
         status: "completed",
-        conclusion: params.conclusion ?? null,
+        conclusion: (params as ChecksUpdateParams).conclusion,
         app: { id: GITHUB_APP_ID },
       }),
     });
@@ -2809,7 +2811,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
         head_sha: SHA,
         external_id: externalId,
         status: "completed",
-        conclusion: params.conclusion ?? null,
+        conclusion: (params as ChecksUpdateParams).conclusion,
         app: { id: GITHUB_APP_ID },
       }),
     });
@@ -2840,7 +2842,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     // ONE bounded update, carrying neutral and the skip reason — never a
     // proof-derived failure.
     expect(fake.updates).toHaveLength(1);
-    expect(fake.updates[0]!.params.conclusion).toBe("neutral");
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("neutral");
     expect(fake.updates[0]!.params.output.summary).toContain("already reviewed for this head");
     const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
       string,
@@ -2909,7 +2911,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
         head_sha: SHA,
         external_id: externalByRun.get(params.check_run_id) ?? "",
         status: "completed",
-        conclusion: params.conclusion ?? null,
+        conclusion: (params as ChecksUpdateParams).conclusion,
         app: { id: GITHUB_APP_ID },
       }),
     });

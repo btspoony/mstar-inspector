@@ -109,18 +109,16 @@ export type ChecksCreateParams = {
   status: "in_progress";
 };
 
-export type ChecksUpdateParams = {
+/**
+ * A NON-TERMINAL relabel of an owned run: the human-facing text and nothing
+ * else. `PATCH /check-runs/{id}` accepts a partial body, so status and
+ * conclusion are simply ABSENT — the run keeps running, which is what the
+ * held-check relabel needs (§7.9/§7.10).
+ */
+export type ChecksRelabelParams = {
   owner: string;
   repo: string;
   check_run_id: number;
-  /**
-   * The TERMINAL half of the pair. Optional because PATCH /check-runs accepts a
-   * partial body, which is exactly how a non-terminal relabel
-   * (`markQueuedBehindInflight`) sends text without moving the run; a terminal
-   * update always supplies both.
-   */
-  status?: "completed";
-  conclusion?: CheckConclusion["desired"];
   /**
    * GitHub's only carrier for the human-facing text. A top-level
    * `title`/`summary` pair is not part of `PATCH /check-runs/{id}` — the API
@@ -128,6 +126,16 @@ export type ChecksUpdateParams = {
    * conclusion while the frozen gate result stayed only in D1.
    */
   output: { title: string; summary: string };
+};
+
+/**
+ * The TERMINAL update: status and conclusion are REQUIRED and travel together,
+ * so a terminal send cannot be built without its conclusion. The relabel above
+ * is the separate, deliberately non-terminal shape.
+ */
+export type ChecksUpdateParams = ChecksRelabelParams & {
+  status: "completed";
+  conclusion: CheckConclusion["desired"];
 };
 
 export type ChecksListParams = {
@@ -158,7 +166,7 @@ export type ChecksOctokit = {
   rest: {
     checks: {
       create(params: ChecksCreateParams): Promise<{ data: CheckRunPayload }>;
-      update(params: ChecksUpdateParams): Promise<{ data: CheckRunPayload }>;
+      update(params: ChecksRelabelParams): Promise<{ data: CheckRunPayload }>;
       get(params: { owner: string; repo: string; check_run_id: number }): Promise<{ data: CheckRunPayload }>;
       listForRef(params: ChecksListParams): Promise<{ data: ChecksListPage }>;
     };
@@ -634,20 +642,23 @@ async function completeCheckWith(
     return refused("lease expired before the update request");
   }
   const { scope } = identity;
+  // Typed as the TERMINAL pair: status and conclusion are required together, so
+  // this send can never be built without the frozen conclusion it reports.
+  const terminal: ChecksUpdateParams = {
+    owner: scope.owner,
+    repo: scope.repo,
+    check_run_id: input.checkRunId,
+    status: "completed",
+    conclusion: frozen.desired,
+    // GitHub reads the human-facing text from `output`, never from a
+    // top-level title/summary: an un-nested pair is dropped silently, which
+    // left every run a bare name + conclusion while the frozen gate text
+    // stayed only in D1 (spec §7.9 requires the summary to say what bar was
+    // missed).
+    output: { title: frozen.title, summary: frozen.summary },
+  };
   const attempted = await sendRequestsWithin(
-    client.rest.checks.update({
-      owner: scope.owner,
-      repo: scope.repo,
-      check_run_id: input.checkRunId,
-      status: "completed",
-      conclusion: frozen.desired,
-      // GitHub reads the human-facing text from `output`, never from a
-      // top-level title/summary: an un-nested pair is dropped silently, which
-      // left every run a bare name + conclusion while the frozen gate text
-      // stayed only in D1 (spec §7.9 requires the summary to say what bar was
-      // missed).
-      output: { title: frozen.title, summary: frozen.summary },
-    }),
+    client.rest.checks.update(terminal),
     input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT,
     "check update",
   );

@@ -73,7 +73,7 @@ import {
 import { CHECK_SUMMARIES, CheckRequestNotDispatched, isRequestNotDispatched, createCheckBeginLatch, createCheckLifecycle, type ChecksAdapter } from "../../src/pipeline/checks";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { defaultReconcileLog } from "../../src/worker/lifecycle-reconcile";
-import { defaultSweepLog } from "../../src/worker/sweep";
+import { defaultSweepLog, SWEEP_FAILURE_THRESHOLD } from "../../src/worker/sweep";
 import worker from "../../src/worker/index";
 import { sha256Hex } from "../../src/pipeline/review-threads";
 import { CHECK_UPDATE_DEFAULT } from "../../src/dashboard/runtime-config-store";
@@ -1341,7 +1341,7 @@ describe("scheduled composition (spec §7.11)", () => {
     // A breached failure window makes the sweep stage emit its alert line; the
     // Check lane must leave no trace at all in this expression.
     const store = db.raw;
-    for (let i = 0; i < 6; i += 1) {
+    for (let i = 0; i < SWEEP_FAILURE_THRESHOLD + 1; i += 1) {
       store
         .prepare(
           `INSERT INTO review_failures (installation_id, owner, repo, pr_number, head_sha, stage, error, created_at)
@@ -1399,7 +1399,7 @@ describe("scheduled composition (spec §7.11)", () => {
     const db = seededDb();
     // A breached failure window (the sweep WOULD alert) plus a due Check row
     // (the minute lane must act on it): the two effects discriminate routing.
-    for (let i = 0; i < 6; i += 1) {
+    for (let i = 0; i < SWEEP_FAILURE_THRESHOLD + 1; i += 1) {
       db.raw
         .prepare(
           `INSERT INTO review_failures (installation_id, owner, repo, pr_number, head_sha, stage, error, created_at)

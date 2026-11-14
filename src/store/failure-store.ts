@@ -7,11 +7,18 @@
  * `reviews.envelope IS NOT NULL ⇔ v1 row` — a failure row is not a review
  * and must not pollute that table).
  *
+ * `QUEUE_MAX_ATTEMPTS` lives here because THIS module owns the per-delivery row
+ * arithmetic: one message can leave at most one row per delivery, and the two
+ * readers that must agree — the consumer's failed-claim stamp and the sweep's
+ * alert threshold — are both derived from it instead of restating "4" or "6".
+ * It is a queue fact, kept in a leaf so neither the worker's cron path nor the
+ * review pipeline has to load the other to read it.
+ *
  * Rows are APPEND-ONLY per-attempt events: the parse-fail degrade path
  * writes one row (stage="parse") before acking; the infra-failure catch
  * writes one best-effort row (stage="runner" | "sandbox" | "pipeline")
- * before each rethrow, so a DLQ'd message leaves up to 4 rows (one per
- * delivery: 1 initial + max_retries = 3 retries). There is no update/delete
+ * before each rethrow, so a DLQ'd message leaves up to QUEUE_MAX_ATTEMPTS rows
+ * (one per delivery: 1 initial + the queue's max_retries). There is no update/delete
  * face by design — audit-log semantics (the cron sweep
  * counts rows over a created_at window; it never mutates them).
  *
@@ -52,6 +59,17 @@ import type { D1Like } from "./types";
  * degraded-comment sweep was throttled by a GitHub secondary rate limit while
  * the review itself stood (the continuation event, never a review failure).
  */
+/**
+ * Deliveries a message gets before the queue DLQs it: 1 initial delivery + the
+ * queue's `max_retries` (wrangler.jsonc, one retry per guard rung today).
+ * `tests/pipeline/queue-config-contract.test.ts` locks it to that config, so the
+ * platform and this code cannot drift apart silently.
+ *
+ * The consumer imports it for its failed-claim stamp; the sweep derives its
+ * alert threshold from it. Kept in this leaf so neither has to load the other.
+ */
+export const QUEUE_MAX_ATTEMPTS = 6;
+
 export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "parse",
   "runner",

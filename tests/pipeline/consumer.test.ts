@@ -77,6 +77,7 @@ import {
   type ChecksAdapter,
   type ChecksCreateParams,
   type ChecksOctokit,
+  type ChecksRelabelParams,
   type ChecksUpdateParams,
 } from "../../src/pipeline/checks";
 import {
@@ -2939,6 +2940,34 @@ describe("createReviewConsumer", () => {
     const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("held check relabel failed"));
     expect(warn).toBeDefined();
     expect(warn!.msg).toContain("checks down");
+  });
+
+  test("a relabel that never answers is cut at the budget and the retry still ships", async () => {
+    const db = await createSeededTestD1();
+    await seedInflight(db);
+    // The smallest storable update budget: the relabel's store write + PATCH
+    // share it, and the whole step runs BEFORE the delayed retry.
+    seedCheckBudget(db, "review.check.update_timeout_ms", "500");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        markQueuedBehindInflight: () => Promise.withResolvers<boolean>().promise,
+      },
+    });
+    const started = Date.now();
+
+    await consumer(h.makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
+
+    // Never the platform's kill: the deadline ends the wait and the retry is
+    // still scheduled (a hung Check must not cost the delivery).
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(h.messageAckCalls).toHaveLength(0);
+    const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("exceeded 500ms"));
+    expect(warn).toBeDefined();
+    expect(warn!.fields.event).toBe("check_queued_relabel_failed");
   });
 
   test("the TERMINAL refusal settles the run and does not relabel it as queued", async () => {
@@ -5893,7 +5922,7 @@ const checkRuns = new Map<number, CheckRunPayload>();
 let checkRequestOverrides: {
   create?: (params: ChecksCreateParams) => CheckRunPayload;
   /** A promise is a SLOW request (never answered inside the consumer's budget). */
-  update?: (params: ChecksUpdateParams) => CheckRunPayload | Promise<CheckRunPayload>;
+  update?: (params: ChecksRelabelParams) => CheckRunPayload | Promise<CheckRunPayload>;
 } = {};
 let checkRunSeq = FIRST_CHECK_RUN_ID;
 /**
@@ -5942,9 +5971,16 @@ function scriptedChecks(): ChecksOctokit {
           if (respond !== undefined) return { data: await respond(params) };
           const run = checkRuns.get(params.check_run_id);
           if (run === undefined) throw Object.assign(new Error(`no scripted run ${params.check_run_id}`), { status: 404 });
-          const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion ?? null };
-          checkRuns.set(params.check_run_id, completed);
-          return { data: completed };
+          // A request WITHOUT status/conclusion is the held-check relabel: it
+          // moves the text only, so the run must stay exactly as it was —
+          // writing `completed` with a null conclusion would fabricate a state
+          // the API never produces.
+          const updated: CheckRunPayload =
+            "status" in params
+              ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+              : run;
+          checkRuns.set(params.check_run_id, updated);
+          return { data: updated };
         },
         async get(params) {
           record("get", params as unknown as Record<string, unknown>);
@@ -6353,6 +6389,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       expect(params.output).toMatchObject({ title: CHECK_NAME });
       expect((params.output as { summary: string }).summary).toContain("Queued");
     }
+    // …and the RUN the double holds is still non-terminal. A text-only PATCH
+    // recorded as `completed` with a null conclusion would fabricate a state
+    // GitHub never produces and hide a settlement behind the request log.
+    const run = checkRuns.get(FIRST_CHECK_RUN_ID + 1)!;
+    expect(run.status).toBe("in_progress");
+    expect(run.conclusion).toBeNull();
   });
 
   test("check lifecycle: the terminal guard refusal settles the released run neutral", async () => {
@@ -7155,9 +7197,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             },
             async update(params) {
               const run = checkRuns.get(params.check_run_id)!;
-              const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion ?? null };
-              checkRuns.set(params.check_run_id, completed);
-              return { data: completed };
+              // Partial PATCH (a relabel) moves no terminal state.
+              const updated: CheckRunPayload =
+                "status" in params
+                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+                  : run;
+              checkRuns.set(params.check_run_id, updated);
+              return { data: updated };
             },
             async get(params) {
               return { data: checkRuns.get(params.check_run_id)! };
@@ -7362,9 +7408,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             },
             async update(params) {
               const run = checkRuns.get(params.check_run_id)!;
-              const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion ?? null };
-              checkRuns.set(params.check_run_id, completed);
-              return { data: completed };
+              // Partial PATCH (a relabel) moves no terminal state.
+              const updated: CheckRunPayload =
+                "status" in params
+                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+                  : run;
+              checkRuns.set(params.check_run_id, updated);
+              return { data: updated };
             },
             async get(params) {
               return { data: checkRuns.get(params.check_run_id)! };
@@ -7740,9 +7790,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         return Promise.withResolvers<CheckRunPayload>().promise;
       }
       const run = checkRuns.get(params.check_run_id)!;
-      const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion ?? null };
-      checkRuns.set(params.check_run_id, completed);
-      return completed;
+      const updated: CheckRunPayload =
+        "status" in params
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          : run;
+      checkRuns.set(params.check_run_id, updated);
+      return updated;
     };
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {

@@ -28,11 +28,16 @@
  *   which is what makes "claim before send" survive an isolate dying between
  *   the two. It NEVER mutates KV keys.
  *
- * Threshold semantics: PER-ATTEMPT rows — a DLQ'd message leaves up to 4
- * rows (one per delivery: 1 initial + max_retries = 3 retries), so `> 5`
- * trips at roughly 2 fully-failed messages inside the window. The constants
- * below are the single source (unit-test pinned); making them
- * env-configurable is a future explicit decision.
+ * Threshold semantics: PER-ATTEMPT rows — a DLQ'd message leaves up to
+ * QUEUE_MAX_ATTEMPTS rows (one per delivery: 1 initial + the queue's
+ * max_retries), so the threshold is DERIVED from that number instead of being a
+ * second literal: `SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1` makes one
+ * fully-failed message insufficient to trip the sweep, and the next message's
+ * first attempts do — the same "roughly two messages" signal the constant had
+ * when the queue retried three times. Add a guard rung (or raise
+ * max_retries) and this moves with it. The constants below are the single
+ * source (unit-test pinned); making them env-configurable is a future explicit
+ * decision.
  */
 
 import type { Queue } from "@cloudflare/workers-types";
@@ -45,7 +50,7 @@ import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createAppsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
-import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../store/failure-store";
+import { PAGING_EXCLUDED_STAGES, QUEUE_MAX_ATTEMPTS, sqlStageList } from "../store/failure-store";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
 
@@ -61,8 +66,12 @@ export const COMMENT_CLAIM_OUTBOX_SQL = `SELECT installation_id, owner, repo, pr
             ORDER BY queued_ms
             LIMIT ?`;
 
-/** Breach when `failures_24h > SWEEP_FAILURE_THRESHOLD` (AL-6). */
-export const SWEEP_FAILURE_THRESHOLD = 5;
+/**
+ * Breach when `failures_24h > SWEEP_FAILURE_THRESHOLD` (AL-6): one row above a
+ * single fully-failed message, so one DLQ'd job never alerts and the second
+ * does (see the header).
+ */
+export const SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1;
 
 /** Trailing count window in hours (AL-6): `datetime('now', '-24 hours')`. */
 export const SWEEP_WINDOW_HOURS = 24;

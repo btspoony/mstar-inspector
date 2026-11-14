@@ -15,6 +15,7 @@ import { describe, expect, test } from "bun:test";
 import type { D1Database, ExecutionContext, ScheduledController } from "@cloudflare/workers-types";
 import "../helpers/cloudflare-workers-mock";
 import { createFailureStore } from "../../src/store/failure-store";
+import { SWEEP_FAILURE_THRESHOLD } from "../../src/worker/sweep";
 import { createMigratedTestD1 } from "../store/helpers";
 import { defaultSweepLog } from "../../src/worker/sweep";
 
@@ -85,7 +86,8 @@ describe("worker entry scheduled wiring", () => {
   test("scheduled runs the sweep over the bound DB and POSTs the alert to ALERT_WEBHOOK_URL on breach", async () => {
     const db = createMigratedTestD1();
     const store = createFailureStore(db);
-    for (let i = 0; i < 6; i++) {
+    // One row past the sweep's threshold: the breach is what this case pins.
+    for (let i = 0; i < SWEEP_FAILURE_THRESHOLD + 1; i++) {
       await store.record({
         installation_id: 1,
         owner: "acme",
@@ -115,7 +117,7 @@ describe("worker entry scheduled wiring", () => {
     expect(calls[0]!.url).toBe("https://ops.example/hook");
     expect(JSON.parse(String(calls[0]!.init?.body))).toMatchObject({
       event: "ops_sweep_alert",
-      failures_24h: 6,
+      failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
       dlq_check: "skipped",
     });
   });
