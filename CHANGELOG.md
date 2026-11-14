@@ -8,6 +8,22 @@ fragment format and the per-change commit flow.
 
 ## [Unreleased]
 
+## [1.0.0-rc.4] - 2026-11-14
+
+### Changed
+
+- **Harness 4.6.0 across root, runner and the review image**: the root manifest's `@mstar-harness/engine` range moves to `^4.6.0`, `packages/runner`'s exact pin to `4.6.0`, and the image's `@mstar-harness/cli` global install, `HARNESS_VERSION` / `harnessRef` pin (ref `109922bb7d4cae3b87956e7c14576500cdca25cf`, tag `v4.6.0`) and Dockerfile clone ref move with them; every lockfile regenerates and the image rebuild marker is touched in the same commit because those manifests and the pinned ref are image inputs. 4.6.0 adds Guard 13/14, the `skill-corpus-audit` variant, Depth and Spec-Fidelity lenses on QC1, one-round frontier `clarify`, skill completion-criteria guidance, Evidence / Merge-danger on the PR body, and mechanical/judgement audit-finding classification. This repo's declared corpus layout and consumed review/seat contract are unchanged by the pin bump.
+- **Harness 4.6.1 across root, runner and the review image**: the root manifest's `@mstar-harness/engine` range moves to `^4.6.1`, `packages/runner`'s exact pin to `4.6.1`, and the image's `@mstar-harness/cli` global install, `HARNESS_VERSION` / `harnessRef` pin (ref `8ff83b33141b67a353886d5ac18457ba08cc4dd5`, tag `v4.6.1`) and Dockerfile clone ref move with them; every lockfile regenerates and the image rebuild marker is touched in the same commit because those manifests and the pinned ref are image inputs. 4.6.1 is a harness-internal patch: the dashboard generated asset is a gitignored build output again, `--adopt` redacts pasted credentials, the Linear label-discovery recovery names the real repair, `plan.bind`'s caller-identity refusal is host-neutral, and the harness pins bun 1.4.4. This repo's declared corpus layout and consumed review/seat contract are unchanged by the pin bump.
+
+### Fixed
+
+- **A save in flight is announced, not just spun**: while a settings or operator card's save button is working, a live region tells a screen-reader user that the save is in progress. Success and failure announcements are unchanged.
+- **The consumer test suites no longer share one mutable harness**: each test file owns its own recorders, so one suite's cleanup can no longer clear another suite's evidence and a slow module load can no longer turn every assertion into `undefined is not a function`. Test-only change; no runtime behaviour moves.
+- **A queued Check says so, and a held delivery retries in minutes.** When another review is already running for the same pull request, a new commit's delivery is refused by the per-PR guard and retried; its Check was attached at webhook time, so it used to read a bare `in_progress` for the whole backoff (observed on staging: 41 of one run's 49 minutes were queue time). It now carries "Queued — the review in flight for this pull request (head <sha7>) holds the slot; this commit starts when it finishes", with the status untouched, and the retry schedule ends in short rungs — 60 s → 300 s → 300 s → 900 s → 900 s by default, 90 s → 480 s → 300 s → 900 s → 900 s for `deep` — whose cumulative sum still covers the in-flight lock. The worst-case queue wait drops from the 35 minutes a single long tail cost to at most 15 minutes, and typically five or less: the first rung after the live review releases the lock is the one that starts the review. The queue's retry budget grows with the schedule, so the last rung still ends in a clean ack rather than the DLQ.
+- **The dashboard document speaks the language it is written in**: a `zh_CN` workspace shell now declares `<html lang="zh-CN">` and a localized page `<title>` instead of shipping Chinese copy under `lang="en"`, so screen readers use the right speech engine and browser tabs distinguish pages (WCAG 3.1.1, 2.4.2).
+- **The sidebar is a navigation landmark, and the shell has a skip link**: the left navigation is now reachable as a named `navigation` region, and the first focusable control jumps straight to the page content.
+- **A client-side navigation announces itself**: moving between Apps, Members and Settings rewrites the document title and moves focus into the content region, so keyboard and screen-reader users learn that the page changed.
+
 ## [1.0.0-rc.3] - 2026-11-13
 
 ### Changed
