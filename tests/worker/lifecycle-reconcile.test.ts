@@ -66,7 +66,7 @@ import type { UpsertPlan } from "../../src/pipeline/comment";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { PreparedSendRejected } from "../../src/pipeline/comment";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { testAppPem } from "../helpers/rsa-key";
 
 const APP = "11111111-2222-3333-4444-555555555555";
@@ -126,6 +126,7 @@ function seedApp(db: TestD1, id: string, seed: AppSeed = {}): void {
        VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, ?, ?, datetime('now'), datetime('now'))`,
     )
     .run(id, `reconcile-${id}`, githubAppId, `reconcile-${id}`, status, deletedAt, reviewEnabled);
+  seedTarget(db, id, { id: `target-${id}` });
   if (install) {
     db.raw
       .prepare(
@@ -169,6 +170,7 @@ function artifactDoc(scope: Scope, headSha: string) {
     schema: "mstar.review/v1" as const,
     payload: enginePayload(),
     appId: scope.appId,
+    targetId: `target-${scope.appId}`,
   };
 }
 
@@ -283,6 +285,7 @@ async function seedRealApp(db: TestD1, id: string, githubAppId: number): Promise
        VALUES (?, ?, ?, 'acme', datetime('now'))`,
     )
     .run(`inst-${id}-${SCOPE.installationId}`, id, SCOPE.installationId);
+  seedTarget(db, id, { id: `target-${id}` });
 }
 
 function seedFindingRow(db: TestD1, id: string, publicationId: string, scope: Scope, state = "addressed"): void {

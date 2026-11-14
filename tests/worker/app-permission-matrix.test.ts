@@ -87,9 +87,14 @@ async function seededWorld(): Promise<TestD1> {
     workspaceId: "default",
   });
   // One ledger row: the detail face's 200 side needs a real tuple, and every
-  // deny path must still answer before the lookup.
+  // deny path must still answer before the lookup. `createApp` wrote the bot's
+  // one target in the same batch, so its id is what the row is attributed to.
+  const target = db.raw.prepare("SELECT id FROM review_targets WHERE bot_id = ?").get(id) as {
+    id: string;
+  };
   await createReviewBotsStore(db).upsertPullRequest({
     appId: id,
+    targetId: target.id,
     owner: "acme",
     repo: "widgets",
     prNumber: 131,
@@ -366,17 +371,26 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
   }
 
   test("non-manager (other member) → exactly the identity-only payload", async () => {
-    const res = await getFace("hubot", makeEnv(await seededWorld()));
+    const db = await seededWorld();
+    const res = await getFace("hubot", makeEnv(db));
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toContain("application/json");
     const body = (await res.json()) as {
       can_manage: unknown;
       workspace_id: unknown;
+      target_id: unknown;
       app: Record<string, unknown>;
     };
-    expect(Object.keys(body).sort()).toEqual(["app", "can_manage", "workspace_id"]);
+    expect(Object.keys(body).sort()).toEqual(["app", "can_manage", "target_id", "workspace_id"]);
     // The delivery URL's workspace segment: the server-resolved stable id.
     expect(body.workspace_id).toBe("default");
+    // The review configuration this App resolved to inside that workspace.
+    const target = db.raw
+      .prepare(
+        "SELECT t.id FROM review_targets t JOIN review_bots b ON b.id = t.bot_id WHERE b.github_app_id = ?",
+      )
+      .get(APP_ID) as { id: string };
+    expect(body.target_id).toBe(target.id);
     expect(body.can_manage).toBe(false);
     expect(Object.keys(body.app).sort()).toEqual([
       "created_at",

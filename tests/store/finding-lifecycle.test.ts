@@ -70,10 +70,12 @@ import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
 import { createArtifactStore, type ReviewArtifactDoc } from "../../src/store/artifact-store";
 import { idemKey } from "../../src/contracts/idem";
-import { createMigratedTestD1, type TestD1 } from "./helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "./helpers";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
 const OTHER_APP_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const TARGET_ID = "11111111-2222-3333-4444-777777777777";
+const OTHER_TARGET_ID = "aaaaaaaa-bbbb-cccc-dddd-ffffffffffff";
 const SCOPE: Scope = { appId: APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA2 = "ffffffffffffffffffffffffffffffffffffffff";
@@ -93,6 +95,8 @@ function createSeededTestD1(): TestD1 {
   const db = createMigratedTestD1();
   seedAppRow(db, APP_ID);
   seedAppRow(db, OTHER_APP_ID, 1002);
+  seedTarget(db, APP_ID, { id: TARGET_ID });
+  seedTarget(db, OTHER_APP_ID, { id: OTHER_TARGET_ID });
   return db;
 }
 
@@ -124,6 +128,7 @@ function artifactDoc(overrides: Partial<ReviewArtifactDoc> = {}): ReviewArtifact
     schema: "mstar.review/v1",
     payload: enginePayload(),
     appId: APP_ID,
+    targetId: TARGET_ID,
     ...overrides,
   };
 }

@@ -37,7 +37,7 @@ import {
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { REDACTED } from "../../src/pipeline/redact";
 import { idemKey } from "../../src/contracts/idem";
-import { createMigratedTestD1, type TestD1 } from "./helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "./helpers";
 import type { ReviewRow } from "../../src/store/types";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -46,6 +46,8 @@ const KEY = idemKey(KEY_TUPLE);
 
 /** Default attribution for the shared doc factory — every new-contract put carries an appId. */
 const TEST_APP_ID = "11111111-2222-3333-4444-555555555555";
+/** The target the review rows belong to (the tenant read faces bind it). */
+const TEST_TARGET_ID = "11111111-2222-3333-4444-666666666666";
 
 function payload(overrides: Partial<MstarReviewV1> = {}): MstarReviewV1 {
   return {
@@ -75,6 +77,7 @@ function reviewDoc(overrides: Partial<ReviewArtifactDoc> = {}): ReviewArtifactDo
     schema: "mstar.review/v1",
     payload: payload(),
     appId: TEST_APP_ID,
+    targetId: TEST_TARGET_ID,
     ...overrides,
   };
 }
@@ -91,10 +94,11 @@ function seedAppRow(db: ReturnType<typeof createMigratedTestD1>, id: string): vo
     .run(id);
 }
 
-/** Fully-migrated D1 with the default attribution's FK parent seeded. */
+/** Fully-migrated D1 with the default attribution's FK parents seeded. */
 function createSeededTestD1(): TestD1 {
   const db = createMigratedTestD1();
   seedAppRow(db, TEST_APP_ID);
+  seedTarget(db, TEST_APP_ID, { id: TEST_TARGET_ID });
   return db;
 }
 
@@ -263,16 +267,21 @@ describe("createArtifactStore().put", () => {
     expect(row.fingerprint).toBe(computeFindingFingerprint(finding));
   });
 
-  test("per-App put persists bot_id; historical NULL rows stay NULL (appId required, zero DDL)", async () => {
+  test("per-App put persists bot_id and target_id; historical NULL rows stay NULL (appId required, zero DDL)", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     await store.put(reviewDoc());
 
-    const perApp = db.raw.query("SELECT bot_id FROM reviews WHERE head_sha = ?").get(SHA) as {
+    const perApp = db.raw.query("SELECT bot_id, target_id FROM reviews WHERE head_sha = ?").get(SHA) as {
       bot_id: string | null;
+      target_id: string | null;
     };
+    // BOTH attribution ids: the tenant read faces bind target_id, so a row
+    // without it would be invisible to every workspace that could have paid
+    // for the review.
     expect(perApp.bot_id).toBe(TEST_APP_ID);
+    expect(perApp.target_id).toBe(TEST_TARGET_ID);
     // Historical NULL semantics (pre-per-App rows) are preserved at the
     // column level: an unattributed put is now impossible at the type layer,
     // so the NULL row is asserted via a direct SQL insert (the column stays
@@ -376,13 +385,15 @@ describe("createArtifactStore().put", () => {
     expect(zeroed.duration_ms).toBe(0);
   });
 
-  test("an appId with no review_bots row is FK-rejected with zero rows written", async () => {
+  test("an appId or targetId with no row is FK-rejected with zero rows written", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     // The bot_id FK (migration 0005) makes an unknown appId a loud batch
     // failure — never a silently mis-attributed row (the batch rolls back).
     await expect(store.put(reviewDoc({ appId: "no-such-app" }))).rejects.toThrow(/FOREIGN KEY/);
+    // The target_id FK does the same for the tenant half.
+    await expect(store.put(reviewDoc({ targetId: "no-such-target" }))).rejects.toThrow(/FOREIGN KEY/);
 
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 0 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 0 });
@@ -497,9 +508,9 @@ describe("createArtifactStore().put", () => {
     // tested for untyped callers that can still reach the adapter.
     const retiredKinds = ["status", "snapshot", "residuals"] as unknown as ArtifactKind[];
     for (const kind of [...retiredKinds, "json"] as ArtifactKind[]) {
-      await expect(store.put({ kind, key: "root", payload: {}, appId: TEST_APP_ID })).rejects.toThrow(
-        new RegExp(`"${kind}" is not persisted`),
-      );
+      await expect(
+        store.put({ kind, key: "root", payload: {}, appId: TEST_APP_ID, targetId: TEST_TARGET_ID }),
+      ).rejects.toThrow(new RegExp(`"${kind}" is not persisted`));
     }
 
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 0 });

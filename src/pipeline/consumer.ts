@@ -2976,7 +2976,7 @@ type ProcessDeps = {
    * stamped delivery, so rebuilding the store for it would be pure overhead.
    */
   selectPrHead: (input: {
-    appId: string;
+    targetId: string;
     owner: string;
     repo: string;
     prNumber: number;
@@ -3188,7 +3188,7 @@ async function readPrHead(
 ): Promise<{ headSha: string | null; headAt: string | null } | null> {
   try {
     return await deps.selectPrHead({
-      appId: payload.botRef.appId,
+      targetId: payload.targetId,
       owner: payload.owner,
       repo: payload.repo,
       prNumber: payload.pr_number,
@@ -6303,6 +6303,7 @@ async function processMessage(
         schema: "mstar.review/v1",
         payload: output,
         appId: payload.botRef.appId,
+        targetId: payload.targetId,
         model: chainHeadSelector(effectiveModelChain(appCfg).chain),
         provider: appliedProvider,
         // A stale-context round (its pending lifecycle journal failed to

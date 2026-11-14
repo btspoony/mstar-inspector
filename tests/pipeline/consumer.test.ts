@@ -362,6 +362,7 @@ async function seedPrHead(
 ): Promise<void> {
   await createReviewBotsStore(db).upsertPullRequest({
     appId: TEST_APP_ID,
+    targetId: `target-${TEST_APP_ID}`,
     owner: "acme",
     repo: "widgets",
     prNumber: 42,
@@ -491,6 +492,7 @@ describe("createReviewConsumer", () => {
       schema: "mstar.review/v1",
       payload: VALID_OUTPUT,
       appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
     });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
@@ -6341,6 +6343,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       schema: "mstar.review/v1",
       payload: GATED_OUTPUT,
       appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
     });
     seedCheckBudget(db, "review.check.update_timeout_ms", "1000");
     checkRequestOverrides.update = (params) => {
@@ -8242,6 +8245,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
           schema: "mstar.review/v1",
           payload: VALID_OUTPUT,
           appId: TEST_APP_ID,
+          targetId: `target-${TEST_APP_ID}`,
         });
       }
       const adapter = checksAdapterFor(db);
@@ -8288,6 +8292,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       schema: "mstar.review/v1",
       payload: GATED_OUTPUT,
       appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
     });
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
@@ -8762,6 +8767,7 @@ describe("usage ledger (migration 0031)", () => {
       schema: "mstar.review/v1",
       payload: VALID_OUTPUT,
       appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
     });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 

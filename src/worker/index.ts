@@ -726,7 +726,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       );
     } else {
       try {
-        await appsStore.upsertPullRequest({ appId: row.id, ...record });
+        await appsStore.upsertPullRequest({ appId: row.id, targetId: target.id, ...record });
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         webhookWarn("pull_request_record_failed", detail, "pull_request record failed — webhook response unaffected");

@@ -65,6 +65,7 @@ import {
   createReviewBotsStore,
   type DeliverySummary,
   type GithubAppRow,
+  type LedgerScope,
   type PullRequestReviewing,
 } from "./apps-store";
 import {
@@ -3485,6 +3486,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // it composes the webhook delivery URL. Server-resolved, never the
         // request's path segment (a ref may be a slug).
         workspace_id: gate.scope.workspaceId,
+        // The review configuration this App resolved to IN this workspace.
+        // The SPA parses it as required: the settings a manager edits belong to
+        // a target, and a payload that cannot name it is not a settings read.
+        target_id: gate.target.id,
         app: {
           github_app_id: app.github_app_id,
           status: app.status,
@@ -3533,6 +3538,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // never the request's path segment): with `app.id` it composes the
       // webhook delivery URL.
       workspace_id: gate.scope.workspaceId,
+      // The target every review-policy key below is read from — the App's
+      // single live target in this workspace.
+      target_id: gate.target.id,
       app: {
         github_app_id: app.github_app_id,
         status: app.status,
@@ -5084,9 +5092,11 @@ const appInsightsRoute = async (c: DashboardContext) => {
     windowDays: params.windowDays,
     repo: params.repoFilter,
     includeRepos: params.includeRepos,
-    // The App row PK (never empty — the GitHub App id resolved a real row),
-    // composed into every aggregation by the store's appId filter.
-    appId: gate.app.id,
+    // The target the App resolves to IN this workspace, and the workspace
+    // itself: the store binds both, so another tenant's reviews can never
+    // reach this payload.
+    targetId: gate.target.id,
+    workspaceId: gate.scope.workspaceId,
   });
   return c.json({
     window_days: clampWindow(params.windowDays),
@@ -5123,11 +5133,23 @@ const appInsightsRoute = async (c: DashboardContext) => {
  * The store is built ONCE and handed back: the ledger faces need exactly this
  * store, and rebuilding it per handler was a second construction of the same
  * narrow face.
+ *
+ * The gate also resolves the App's target IN the session workspace and hands
+ * it back with the ledger scope: these faces read review configuration and
+ * ledger rows that belong to a target, and a bot without one has no data to
+ * serve (404, the same answer an unknown App gets).
  */
 async function requireAppManagerJson(
   c: DashboardContext,
 ): Promise<
-  | { ok: true; app: GithubAppRow; db: DashboardDb; store: ReturnType<typeof createReviewBotsStore> }
+  | {
+      ok: true;
+      app: GithubAppRow;
+      target: ReviewTargetRow;
+      scope: WorkspaceScope;
+      db: DashboardDb;
+      store: ReturnType<typeof createReviewBotsStore>;
+    }
   | { ok: false; response: Response }
 > {
   const member = await requireMember(c);
@@ -5136,7 +5158,18 @@ async function requireAppManagerJson(
   const app = await resolveScopedApp(store, c.req.param("appId") ?? "", member.scope);
   if (!app) return { ok: false, response: c.json({ error: "unknown app" }, 404) };
   if (!canManageApp(member.scope)) return { ok: false, response: c.json({ error: "forbidden" }, 403) };
-  return { ok: true, app, db: member.db, store };
+  const target = await createTargetsStore(member.db).resolveInWorkspace(member.scope.workspaceId, app.id);
+  if (!target) return { ok: false, response: c.json({ error: "unknown app" }, 404) };
+  return { ok: true, app, target, scope: member.scope, db: member.db, store };
+}
+
+/** The ledger scope the PR faces bind: the resolved target, its workspace, its bot. */
+function ledgerScopeOf(gate: {
+  app: GithubAppRow;
+  target: ReviewTargetRow;
+  scope: WorkspaceScope;
+}): LedgerScope {
+  return { targetId: gate.target.id, workspaceId: gate.scope.workspaceId, botId: gate.app.id };
 }
 
 /**
@@ -5201,7 +5234,7 @@ const appPullRequestsRoute = async (c: DashboardContext) => {
   // The option set rides the same batch: the App's whole ledger, never a
   // window over it and never narrowed by the current selection — that is the
   // only way a repository behind the row cap can be picked at all.
-  const { rows, repos } = await gate.store.listPullRequests(gate.app.id, parsed.filter ?? undefined);
+  const { rows, repos } = await gate.store.listPullRequests(ledgerScopeOf(gate), parsed.filter ?? undefined);
   return c.json({
     pull_requests: rows.map((row) => ({ ...row, ...pullRequestWireColumns(row) })),
     repos,
@@ -5263,9 +5296,9 @@ const appPullRequestRoute = async (c: DashboardContext) => {
   // never a same-number row from another repo.
   const owner = c.req.param("owner") ?? "";
   const repo = c.req.param("repo") ?? "";
-  const head = await gate.store.getPullRequestHead(gate.app.id, owner, repo, number);
+  const head = await gate.store.getPullRequestHead(ledgerScopeOf(gate), owner, repo, number);
   if (head === null) return c.json({ error: "unknown pull request" }, 404);
-  const counts = await gate.store.countPullRequestRecords(gate.app.id, owner, repo, number);
+  const counts = await gate.store.countPullRequestRecords(ledgerScopeOf(gate), owner, repo, number);
   // Same total-shape rule as the list, from the same mapping: the store reports
   // the tables' actual columns, and this boundary is where a nullable column
   // becomes "". The record families are paged separately — the head carries
@@ -5350,12 +5383,12 @@ const appPullRequestRecordsRoute = async (
     // malformed filter on it — so the refusal keeps one head probe instead of
     // the family's batch.
     if (malformed) {
-      const head = await gate.store.getPullRequestHead(gate.app.id, owner, repo, number);
+      const head = await gate.store.getPullRequestHead(ledgerScopeOf(gate), owner, repo, number);
       if (head === null) return c.json({ error: "unknown pull request" }, 404);
       const outsideVocabulary = rawSeverity !== "" && !isFindingSeverity(rawSeverity);
       return c.json({ error: outsideVocabulary ? "invalid severity" : "invalid filter" }, 400);
     }
-    const page = await gate.store.listPullRequestFindings(gate.app.id, owner, repo, number, {
+    const page = await gate.store.listPullRequestFindings(ledgerScopeOf(gate), owner, repo, number, {
       offset,
       limit,
       severity: rawSeverity === "" ? null : rawSeverity,
@@ -5377,7 +5410,7 @@ const appPullRequestRecordsRoute = async (
     });
   }
   if (section === "reviews") {
-    const page = await gate.store.listPullRequestReviews(gate.app.id, owner, repo, number, { offset, limit });
+    const page = await gate.store.listPullRequestReviews(ledgerScopeOf(gate), owner, repo, number, { offset, limit });
     if (page === null) return c.json({ error: "unknown pull request" }, 404);
     return c.json({
       items: page.items.map((review) => ({
@@ -5394,7 +5427,7 @@ const appPullRequestRecordsRoute = async (
       limit,
     });
   }
-  const page = await gate.store.listPullRequestFailures(gate.app.id, owner, repo, number, { offset, limit });
+  const page = await gate.store.listPullRequestFailures(ledgerScopeOf(gate), owner, repo, number, { offset, limit });
   if (page === null) return c.json({ error: "unknown pull request" }, 404);
   return c.json({ items: page.items, total: page.total, limit });
 };
