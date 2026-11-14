@@ -32,6 +32,7 @@ import { webhookRepositoryFullName } from "../../src/worker/webhooks";
 import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createReviewBotsStore, DELIVERY_OUTCOMES } from "../../src/dashboard/apps-store";
+import { createTargetsStore } from "../../src/dashboard/targets-store";
 import type { DeliveryOutcome } from "../../src/dashboard/apps-store";
 import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
 import {
@@ -522,7 +523,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   async function seedApp(
     db: ReturnType<typeof createTestD1>,
     opts: SeedOptions,
-  ): Promise<{ id: string; slug: string }> {
+  ): Promise<{ id: string; slug: string; targetId: string }> {
     // The row id is the webhook URL's app segment, so the slug doubles as it.
     const id = opts.slug;
     const box = createSecretbox(TEST_KEY);
@@ -542,7 +543,15 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     db.raw
       .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')")
       .run(id);
-    return { id, slug: opts.slug };
+    // …and every bot owns one target, which is where its review configuration
+    // (trigger mode, allowlist, business pause) lives.
+    const target = await createTargetsStore(db).create({
+      workspaceId: "default",
+      botId: id,
+      name: opts.slug,
+      createdBy: "tester",
+    });
+    return { id, slug: opts.slug, targetId: target.id };
   }
 
   /** Queue stub capturing every enqueued payload. */
@@ -721,6 +730,30 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(deliveriesFor(db, appRow.id)).toEqual([
       { event_name: "pull_request", outcome: "paused", status_code: null },
     ]);
+  });
+
+  test("paused path: the target's business pause (the settings switch) → 2xx ignored, zero enqueue + row outcome='paused'", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // The switch users flip lives on the target; the bot's operational flag
+    // stays clear, so only the target pause can suppress this delivery.
+    expect(await createTargetsStore(db).setReviewEnabled("default", appRow.targetId, false)).toBe(true);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(deliveriesFor(db, appRow.id)).toEqual([
+      { event_name: "pull_request", outcome: "paused", status_code: null },
+    ]);
+    const bot = db.raw
+      .query("SELECT review_enabled FROM review_bots WHERE id = ?")
+      .get(appRow.id) as { review_enabled: number } | null;
+    expect(bot?.review_enabled).toBe(1); // the operational flag was never touched
   });
 
   test("ignored path: valid signature + non-whitelisted event → 2xx ignored + row outcome='ignored'", async () => {
@@ -947,7 +980,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   test("allowlist OFF: an unlisted owner behaves exactly as today — the delivery proceeds and writes all three", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: false, owners: ["someone-else"] });
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: false, owners: ["someone-else"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -967,7 +1000,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   test("allowlist ON + listed owner: the delivery proceeds and writes all three", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: true, owners: ["test-owner"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -989,7 +1022,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // which cannot prove private, so the stored list applies.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: true, owners: ["someone-else"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -1024,7 +1057,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // never turned into its own 200 `ignored`.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: true, owners: ["someone-else"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify({ ...PR_PAYLOAD, installation: null });
@@ -1045,7 +1078,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   test("allowlist ON + empty list: every owner is refused", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: [] });
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: true, owners: [] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -1078,7 +1111,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const apps = createReviewBotsStore(db);
-    await apps.saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: true, owners: ["someone-else"] });
     await apps.saveGithubVisibility(appRow.id, "private");
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1096,7 +1129,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     // The payload's owner is `test-owner`; the operator typed `Test-Owner`.
-    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["Test-Owner"] });
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: true, owners: ["Test-Owner"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -1111,11 +1144,11 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   test("an unreadable allowlist is fail-closed: 500 with zero writes and zero enqueue", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: true, owners: ["test-owner"] });
     // The switch stays on, but the owner table disappears: the single gate
     // SELECT cannot run, so the gate's state is unknown — and an unknown gate
     // must not admit. 500 so GitHub retries once D1 is healthy again.
-    db.raw.exec("DROP TABLE app_owner_allowlist");
+    db.raw.exec("DROP TABLE target_owner_allowlist");
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -1149,8 +1182,8 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // exactly like the ON one.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: false, owners: [] });
-    db.raw.exec("DROP TABLE app_owner_allowlist");
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: false, owners: [] });
+    db.raw.exec("DROP TABLE target_owner_allowlist");
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -1169,8 +1202,8 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // The switch is on and the owner table is gone — an unreadable gate. Only
     // `pull_request` / `issue_comment` can enqueue a review, so admission never
     // consults it for an install event: the bookkeeping proceeds, no 500.
-    await createReviewBotsStore(db).saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
-    db.raw.exec("DROP TABLE app_owner_allowlist");
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: true, owners: ["test-owner"] });
+    db.raw.exec("DROP TABLE target_owner_allowlist");
     const body = JSON.stringify({ action: "created", installation: { id: 123 } });
 
     const res = await postWebhook(
@@ -1193,7 +1226,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const apps = createReviewBotsStore(db);
-    await apps.saveAllowlist(appRow.id, { enabled: true, owners: ["someone-else"] });
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: true, owners: ["someone-else"] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify({
@@ -1236,7 +1269,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // Control: the same body IS a mention job — listing the owner enqueues it,
     // so the zeros above came from the refusal, not from a body that never
     // classified.
-    await apps.saveAllowlist(appRow.id, { enabled: true, owners: ["test-owner"] });
+    await createTargetsStore(db).saveAllowlist("default", appRow.targetId, { enabled: true, owners: ["test-owner"] });
     const admitted = await postWebhook(
       "/webhook/default/app-x",
       body,

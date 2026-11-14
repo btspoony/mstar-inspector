@@ -2218,7 +2218,11 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(committed.status).toBe(302);
     expect(appRowCount(env)).toBe(1);
     const seeded = db.raw
-      .query("SELECT check_min_score FROM review_bots WHERE github_app_id = ?")
+      .query(
+        `SELECT t.check_min_score FROM review_targets t
+           JOIN review_bots b ON b.id = t.bot_id
+          WHERE b.github_app_id = ?`,
+      )
       .get(CONVERSION.id) as { check_min_score: number };
     expect(seeded.check_min_score).toBe(90);
   });
@@ -2783,7 +2787,17 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0017_app_model_chains.sql",
   "0024_provider_multi_key.sql",
   "0025_provider_model_evidence.sql",
+  // 0057 needs the installation stamp (0055), the review depth column (0047)
+  // and the comment-claim table (0048) it rewrites — all before the rename
+  // 0056, which renames the tables they belong to.
+  "0055_app_installations_removed_at.sql",
+  "0047_review_level_per_app.sql",
+  "0048_comment_trigger_claims.sql",
   "0056_review_bots_rename.sql",
+  // The review configuration moves onto `review_targets`: createApp writes a
+  // bot, its workspace mapping and its one target in one batch, and the delete
+  // stamps both rows.
+  "0057_review_targets.sql",
 ] as const;
 
 function createDashboardTestD1(

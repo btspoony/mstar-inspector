@@ -3,7 +3,7 @@
  * (src/dashboard/insights-store.ts) — the review-health panel's read face.
  *
  * Locked surface (AL-22-1):
- *   - createInsightsStore(db, { windowDays, repo? }) resolves to
+ *   - createInsightsStore(db, { targetId, workspaceId, windowDays, repo? }) resolves to
  *     { reviewsTotal, findingsBySeverity, verdictDistribution, weeklyTrend,
  *       dailyTrend, findingsDistribution, repos }.
  *   - windowDays: integer days, default 30; >90 is CLAMPED to 90 at the
@@ -70,6 +70,37 @@ type SeedFinding = {
   fingerprint: string | null;
 };
 
+/** The workspace every fixture target lives in (0026 seeds it). */
+const WORKSPACE = "default";
+/** The tenant the plain fixtures belong to. */
+const FIXTURE_SCOPE = { targetId: "target-fixture", workspaceId: WORKSPACE };
+
+/**
+ * Idempotently seed one bot + its target. A review row carries `target_id`
+ * (FK), and every tenant read binds the target together with the workspace
+ * that owns it, so a fixture review needs a real target to sit under.
+ */
+function seedTenant(db: TestD1, targetId: string, botId: string): void {
+  const now = "2026-01-01T00:00:00.000Z";
+  // `github_app_id` is UNIQUE: derive a stable one from the bot id.
+  const githubAppId = [...botId].reduce((acc, ch) => (acc * 31 + ch.charCodeAt(0)) % 1_000_000, 7);
+  db.raw
+    .prepare(
+      `INSERT OR IGNORE INTO review_bots
+         (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, created_at, updated_at)
+       VALUES (?, NULL, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
+               'octocat', 'active', ?, ?)`,
+    )
+    .run(botId, githubAppId, botId, now, now);
+  db.raw
+    .prepare(
+      `INSERT OR IGNORE INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'fixture', ?, ?)`,
+    )
+    .run(targetId, WORKSPACE, botId, botId, now, now);
+}
+
 /** Raw-insert one review + its findings (explicit reviewed_at / verdict). */
 function insertReview(
   db: TestD1,
@@ -84,18 +115,31 @@ function insertReview(
     /** v1 rows carry the envelope; M1-era rows pass null (era-gate tests). */
     envelope?: string | null;
     /**
-     * `review_bots.id` row PK attribution. Omitted → `bot_id` NULL, the
-     * legacy unattributed shape (pre-app rows / the appId-filter tests).
+     * `review_targets.id` attribution. Omitted → the plain fixture's target;
+     * explicit `null` → the legacy unattributed shape (target_id NULL, which
+     * every tenant read excludes).
      */
-    appId?: string;
+    targetId?: string | null;
   },
 ): void {
+  const targetId = opts.targetId === undefined ? FIXTURE_SCOPE.targetId : opts.targetId;
+  seedTenant(db, targetId ?? "target-legacy", `app-${targetId ?? "legacy"}`);
   db.raw
     .query(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, bot_id)
-       VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', ?, ?)`,
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, bot_id, target_id)
+       VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', ?, ?, ?)`,
     )
-    .run(opts.id, opts.owner, opts.repo, opts.pr_number, opts.reviewedAt, opts.verdict, opts.envelope === undefined ? "{}" : opts.envelope, opts.appId ?? null);
+    .run(
+      opts.id,
+      opts.owner,
+      opts.repo,
+      opts.pr_number,
+      opts.reviewedAt,
+      opts.verdict,
+      opts.envelope === undefined ? "{}" : opts.envelope,
+      null,
+      targetId,
+    );
   for (const f of opts.findings) {
     db.raw
       .query(
@@ -174,7 +218,7 @@ describe("createInsightsStore", () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
-    const insights = await createInsightsStore(db);
+    const insights = await createInsightsStore(db, FIXTURE_SCOPE);
 
     expect(insights.reviewsTotal).toBe(3);
     // count DESC, then severity ASC (deterministic).
@@ -193,7 +237,7 @@ describe("createInsightsStore", () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
-    const insights = await createInsightsStore(db);
+    const insights = await createInsightsStore(db, FIXTURE_SCOPE);
 
     // Old-vocab severity/verdict never surface in any aggregate.
     expect(insights.findingsBySeverity.some((s) => s.severity === "critical")).toBe(false);
@@ -213,7 +257,7 @@ describe("createInsightsStore", () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
-    const insights = await createInsightsStore(db);
+    const insights = await createInsightsStore(db, FIXTURE_SCOPE);
 
     const weekA = mondayOf(reviewedAt(1));
     const weekB = mondayOf(reviewedAt(8));
@@ -232,7 +276,7 @@ describe("createInsightsStore", () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
-    const insights = await createInsightsStore(db, { repo: { owner: "acme", repo: "widgets" } });
+    const insights = await createInsightsStore(db, { ...FIXTURE_SCOPE, repo: { owner: "acme", repo: "widgets" } });
 
     expect(insights.reviewsTotal).toBe(2);
     expect(insights.findingsBySeverity).toEqual([
@@ -278,17 +322,17 @@ describe("createInsightsStore", () => {
     });
 
     // Default window (30): only the 1-day-old review is in.
-    const d30 = await createInsightsStore(db);
+    const d30 = await createInsightsStore(db, FIXTURE_SCOPE);
     expect(d30.reviewsTotal).toBe(1);
     expect(d30.findingsBySeverity).toEqual([{ severity: "must-fix", count: 1 }]);
 
     // windowDays=60: 1d + 50d in, 100d out → count 2.
-    const d60 = await createInsightsStore(db, { windowDays: 60 });
+    const d60 = await createInsightsStore(db, { ...FIXTURE_SCOPE, windowDays: 60 });
     expect(d60.reviewsTotal).toBe(2);
     expect(d60.findingsBySeverity).toEqual([{ severity: "must-fix", count: 2 }]);
 
     // windowDays=200 clamps to 90: 100d still out → identical to 60.
-    const clamped = await createInsightsStore(db, { windowDays: 200 });
+    const clamped = await createInsightsStore(db, { ...FIXTURE_SCOPE, windowDays: 200 });
     expect(clamped.reviewsTotal).toBe(2);
     expect(clamped.findingsBySeverity).toEqual(d60.findingsBySeverity);
   });
@@ -296,7 +340,7 @@ describe("createInsightsStore", () => {
   test("empty database → zero counts, empty arrays, zero-filled day grid (no division, no NULL rows)", async () => {
     const db = createMigratedTestD1();
 
-    const insights = await createInsightsStore(db);
+    const insights = await createInsightsStore(db, FIXTURE_SCOPE);
 
     expect(insights).toEqual({
       reviewsTotal: 0,
@@ -386,7 +430,7 @@ describe("createInsightsStore", () => {
       findings: [{ id: "f-mon", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
 
-    const insights = await createInsightsStore(db);
+    const insights = await createInsightsStore(db, FIXTURE_SCOPE);
     expect(insights.weeklyTrend).toEqual([
       { week_start: a.prevWeekStart, reviews: 1, findings: 1 },
       { week_start: a.nextWeekStart, reviews: 1, findings: 1 },
@@ -421,7 +465,7 @@ describe("createInsightsStore", () => {
       findings: [{ id: "f-dmon", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
 
-    const insights = await createInsightsStore(db);
+    const insights = await createInsightsStore(db, FIXTURE_SCOPE);
     expect(insights.dailyTrend.find((b) => b.day_start === a.prevDayStart)).toEqual({
       day_start: a.prevDayStart,
       reviews: 1,
@@ -440,7 +484,7 @@ describe("createInsightsStore", () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
-    const insights = await createInsightsStore(db, { windowDays: 7 });
+    const insights = await createInsightsStore(db, { ...FIXTURE_SCOPE, windowDays: 7 });
 
     // Day window → the full N+1 grid (today-7 .. today, both ends inclusive),
     // ascending — every day the window predicate can return, zero-filled.
@@ -472,7 +516,7 @@ describe("createInsightsStore", () => {
           return db.prepare(query);
         },
       },
-      { windowDays: 30 },
+      { ...FIXTURE_SCOPE, windowDays: 30 },
     );
     const weekQueries: string[] = [];
     const weekInsights = await createInsightsStore(
@@ -482,7 +526,7 @@ describe("createInsightsStore", () => {
           return db.prepare(query);
         },
       },
-      { windowDays: 90 },
+      { ...FIXTURE_SCOPE, windowDays: 90 },
     );
 
     // Week windows produce exactly [] — the 90d trend card reads the frozen
@@ -506,10 +550,10 @@ describe("createInsightsStore", () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
-    const without = await createInsightsStore(db);
+    const without = await createInsightsStore(db, FIXTURE_SCOPE);
     expect(without.repos).toEqual([]);
 
-    const withRepos = await createInsightsStore(db, { includeRepos: true });
+    const withRepos = await createInsightsStore(db, { ...FIXTURE_SCOPE, includeRepos: true });
     expect(withRepos.repos).toEqual(["acme/widgets", "other/lib"]);
   });
 
@@ -536,14 +580,14 @@ describe("createInsightsStore", () => {
       findings: [{ id: "f-m1-only", severity: "critical", category: "security", title: "Old era", fingerprint: null }],
     });
 
-    const all = await createInsightsStore(db, { includeRepos: true });
+    const all = await createInsightsStore(db, { ...FIXTURE_SCOPE, includeRepos: true });
     expect(all.repos).toEqual(["acme/widgets", "other/lib"]);
 
-    const filtered = await createInsightsStore(db, { repo: { owner: "acme", repo: "widgets" }, includeRepos: true });
+    const filtered = await createInsightsStore(db, { ...FIXTURE_SCOPE, repo: { owner: "acme", repo: "widgets" }, includeRepos: true });
     expect(filtered.reviewsTotal).toBe(2);
     expect(filtered.repos).toEqual(["acme/widgets", "other/lib"]);
 
-    const clamped = await createInsightsStore(db, { windowDays: 200, includeRepos: true });
+    const clamped = await createInsightsStore(db, { ...FIXTURE_SCOPE, windowDays: 200, includeRepos: true });
     expect(clamped.repos).toEqual(["acme/widgets", "other/lib"]);
   });
 
@@ -553,7 +597,7 @@ describe("createInsightsStore", () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
-    const insights = await createInsightsStore(db);
+    const insights = await createInsightsStore(db, FIXTURE_SCOPE);
 
     const grid = insights.findingsDistribution;
     // windowDays <= 30 → "day" on every bucket.
@@ -599,7 +643,7 @@ describe("createInsightsStore", () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
-    const insights = await createInsightsStore(db, { windowDays: 90 });
+    const insights = await createInsightsStore(db, { ...FIXTURE_SCOPE, windowDays: 90 });
 
     const grid = insights.findingsDistribution;
     // windowDays > 30 → "week" on every bucket.
@@ -637,7 +681,7 @@ describe("createInsightsStore", () => {
       [90, "week"],
       [200, "week"], // clamps to 90 at the store entry → week
     ] as const) {
-      const insights = await createInsightsStore(db, { windowDays });
+      const insights = await createInsightsStore(db, { ...FIXTURE_SCOPE, windowDays });
       expect(
         insights.findingsDistribution.every((b) => b.granularity === granularity),
         `window=${windowDays}`,
@@ -645,8 +689,8 @@ describe("createInsightsStore", () => {
     }
 
     // window=200 clamps to 90 → the grid is identical to an explicit 90.
-    const clamped = await createInsightsStore(db, { windowDays: 200 });
-    const explicit = await createInsightsStore(db, { windowDays: 90 });
+    const clamped = await createInsightsStore(db, { ...FIXTURE_SCOPE, windowDays: 200 });
+    const explicit = await createInsightsStore(db, { ...FIXTURE_SCOPE, windowDays: 90 });
     expect(clamped.findingsDistribution).toEqual(explicit.findingsDistribution);
   });
 
@@ -654,7 +698,7 @@ describe("createInsightsStore", () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
-    const insights = await createInsightsStore(db, { repo: { owner: "acme", repo: "widgets" } });
+    const insights = await createInsightsStore(db, { ...FIXTURE_SCOPE, repo: { owner: "acme", repo: "widgets" } });
 
     // r-c (other/lib, 15d ago) drops out, so the 15d bucket goes honestly
     // all-zero.
@@ -671,21 +715,11 @@ describe("createInsightsStore", () => {
   // --- appId filter (per-App insights data face) ----------------------
 
   /**
-   * App-scoped fixture: r-a attributed to app-a, r-b to app-b, r-c left
-   * `bot_id` NULL (legacy unattributed row). Same three weeks as seedFixture.
+   * Tenant-scoped fixture: r-a under target-a, r-b under target-b, r-c left
+   * `target_id` NULL (legacy unattributed row). Same three weeks as
+   * seedFixture.
    */
   function seedAppFixture(db: TestD1): void {
-    // review_bots rows for the FK — the ids are the appId option's values.
-    for (const [id, ghId] of [["app-a", 1001], ["app-b", 1002]] as const) {
-      db.raw
-        .query(
-          `INSERT INTO review_bots
-             (id, github_app_id, name, private_key_enc, webhook_secret_enc,
-              created_by, status, deleted_at, created_at, updated_at)
-           VALUES (?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
-        )
-        .run(id, ghId, id);
-    }
     insertReview(db, {
       id: "r-a",
       owner: "acme",
@@ -693,7 +727,7 @@ describe("createInsightsStore", () => {
       pr_number: 1,
       reviewedAt: reviewedAt(1),
       verdict: "needs fixes",
-      appId: "app-a",
+      targetId: "target-a",
       findings: [{ id: "f-a1", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
     insertReview(db, {
@@ -703,7 +737,7 @@ describe("createInsightsStore", () => {
       pr_number: 2,
       reviewedAt: reviewedAt(8),
       verdict: "approved",
-      appId: "app-b",
+      targetId: "target-b",
       findings: [{ id: "f-b1", severity: "nit", category: "style", title: "Trailing space", fingerprint: FP_Z }],
     });
     insertReview(db, {
@@ -713,25 +747,28 @@ describe("createInsightsStore", () => {
       pr_number: 3,
       reviewedAt: reviewedAt(15),
       verdict: "needs fixes",
-      // no appId → legacy bot_id NULL row
+      targetId: null,
       findings: [{ id: "f-c1", severity: "should-fix", category: null, title: "Null deref risk", fingerprint: FP_X }],
     });
   }
 
-  test("appId restricts every aggregation to one app: other apps and legacy bot_id NULL rows excluded", async () => {
+  /** target-a's scope; target-b and the legacy NULL row must never reach it. */
+  const SCOPE_A = { targetId: "target-a", workspaceId: WORKSPACE };
+
+  test("the target filter excludes every other target's rows and the legacy NULL rows", async () => {
     const db = createMigratedTestD1();
     seedAppFixture(db);
 
-    const insights = await createInsightsStore(db, { appId: "app-a" });
+    const insights = await createInsightsStore(db, SCOPE_A);
 
     expect(insights.reviewsTotal).toBe(1);
     expect(insights.findingsBySeverity).toEqual([{ severity: "must-fix", count: 1 }]);
     expect(insights.verdictDistribution).toEqual([{ verdict: "needs fixes", count: 1 }]);
-    // Only app-a's week survives the filter.
+    // Only target-a's week survives the filter.
     expect(insights.weeklyTrend).toEqual([
       { week_start: mondayOf(reviewedAt(1)), reviews: 1, findings: 1 },
     ]);
-    // Distribution: app-b (8d) and legacy (15d) buckets go honestly zero.
+    // Distribution: target-b (8d) and legacy (15d) buckets go honestly zero.
     const at = (daysAgo: number) =>
       insights.findingsDistribution.find((b) => b.bucket_start === reviewedAt(daysAgo).slice(0, 10))!;
     expect(at(1)).toMatchObject({
@@ -741,33 +778,29 @@ describe("createInsightsStore", () => {
     expect(at(15)).toMatchObject({ by_severity: { "must-fix": 0, "should-fix": 0 } });
   });
 
-  test("appId + includeRepos: repos lists only the app's own repos, never other apps'", async () => {
+  test("the repo list is scoped to the target too: other targets' repos never appear", async () => {
     const db = createMigratedTestD1();
     seedAppFixture(db);
 
-    const insights = await createInsightsStore(db, { appId: "app-a", includeRepos: true });
+    const insights = await createInsightsStore(db, { ...SCOPE_A, includeRepos: true });
 
     expect(insights.repos).toEqual(["acme/widgets"]);
   });
 
-  test("without appId, outputs match the pre-appId pinned expectations (zero-diff pin)", async () => {
+  test("a target id paired with a workspace that does not own it aggregates to nothing", async () => {
     const db = createMigratedTestD1();
     seedAppFixture(db);
 
-    const insights = await createInsightsStore(db, { includeRepos: true });
+    const insights = await createInsightsStore(db, {
+      targetId: "target-a",
+      workspaceId: "another-workspace",
+      includeRepos: true,
+    });
 
-    // All three rows count (app attribution is invisible without the filter).
-    expect(insights.reviewsTotal).toBe(3);
-    expect(insights.findingsBySeverity).toEqual([
-      { severity: "must-fix", count: 1 },
-      { severity: "nit", count: 1 },
-      { severity: "should-fix", count: 1 },
-    ]);
-    expect(insights.verdictDistribution).toEqual([
-      { verdict: "needs fixes", count: 2 },
-      { verdict: "approved", count: 1 },
-    ]);
-    expect(insights.weeklyTrend).toHaveLength(3);
-    expect(insights.repos).toEqual(["acme/portal", "acme/widgets", "other/lib"]);
+    expect(insights.reviewsTotal).toBe(0);
+    expect(insights.findingsBySeverity).toEqual([]);
+    expect(insights.verdictDistribution).toEqual([]);
+    expect(insights.weeklyTrend).toEqual([]);
+    expect(insights.repos).toEqual([]);
   });
 });

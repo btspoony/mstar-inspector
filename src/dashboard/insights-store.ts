@@ -76,12 +76,17 @@ export type InsightsWindow = {
   /** Restrict every aggregation to one owner/repo pair. */
   repo?: { owner: string; repo: string };
   /**
-   * Restrict every aggregation (and the opt-in `repos` list) to one
-   * bot — the `review_bots.id` row PK (string), not the numeric
-   * `github_app_id`. Rows with `bot_id` NULL (legacy unattributed) are
-   * excluded when set; without the option every output is unchanged.
+   * The review target whose reviews are aggregated — `review_targets.id`.
+   * REQUIRED: there is no unscoped tenant insights read. Rows with
+   * `target_id` NULL (legacy unattributed) stay excluded.
    */
-  appId?: string;
+  targetId: string;
+  /**
+   * The workspace that must own `targetId` — bound in the same statement as
+   * the target predicate, so a target id from another workspace aggregates
+   * to nothing instead of revealing that its reviews exist.
+   */
+  workspaceId: string;
   /**
    * Opt-in window-scoped distinct `repos` aggregation (QC F-001).
    * Skipped (resolves to []) unless requested — only the insights records
@@ -180,15 +185,14 @@ const WEEK_BUCKET_SQL = "date(r.reviewed_at, '-' || ((strftime('%w', r.reviewed_
  *
  * @param db   a D1 handle (real D1Database or the bun:sqlite test double)
  * @param opts windowDays (default 30, >90 clamped to 90) + optional
- *             owner/repo filter and optional `appId` (a `review_bots.id`
- *             row PK string — not the numeric `github_app_id`), each
- *             applied to EVERY aggregation; `appId` also scopes the
- *             opt-in `repos` list and excludes legacy `bot_id` NULL rows.
+ *             owner/repo filter + the REQUIRED tenant scope (`targetId` and
+ *             the `workspaceId` that must own it), each applied to EVERY
+ *             aggregation; the scope also narrows the opt-in `repos` list and
+ *             excludes legacy `target_id` NULL rows.
  */
-export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow = {}): Promise<Insights> {
+export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow): Promise<Insights> {
   const windowDays = clampWindow(opts.windowDays);
   const repo = opts.repo;
-  const appId = opts.appId;
   const includeRepos = opts.includeRepos ?? false;
 
   // (AD-652): the distribution granularity derives ONLY from the
@@ -209,42 +213,41 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   // (QC F-003).
   const windowEraWhere = "r.reviewed_at >= datetime('now', '-' || ? || ' days') AND r.envelope IS NOT NULL";
 
+  // The tenant predicate every face carries: the target AND the workspace that
+  // owns it, bound in the SAME statement. `target_id = ?` alone would trust the
+  // caller to have scoped the target; the EXISTS is what makes a foreign
+  // target id aggregate to nothing instead of revealing its reviews.
+  const tenantWhere =
+    "r.target_id = ? AND EXISTS (SELECT 1 FROM review_targets t WHERE t.id = r.target_id AND t.workspace_id = ?)";
+  const tenantBinds = [opts.targetId, opts.workspaceId];
+
   const where: string[] = [];
   const binds: unknown[] = [];
   if (repo !== undefined) {
     where.push("r.owner = ?", "r.repo = ?");
     binds.push(repo.owner, repo.repo);
   }
-  if (appId !== undefined) {
-    // Additive per-App predicate (the app-scoped filter): composed alongside — never
-    // inside — windowEraWhere, so the era gate and window stay untouched.
-    where.push("r.bot_id = ?");
-    binds.push(appId);
-  }
-  where.push(windowEraWhere);
-  binds.push(windowDays);
+  where.push(tenantWhere, windowEraWhere);
+  binds.push(...tenantBinds, windowDays);
   const whereSql = where.join(" AND ");
 
   // Window-scoped distinct repos for the records Select.
   // Opt-in (QC F-001) — skipped unless includeRepos, so the home
   // surface never pays the DISTINCT scan+sort. Deliberately ignores
   // opts.repo — the option set is the in-window universe, not the
-  // currently filtered subset — but HONORS opts.appId (the app-scoped
-  // filter): the
-  // per-App repo selector must never offer another App's repos. Shares
+  // currently filtered subset — but carries the SAME tenant predicate: the
+  // per-target repo selector must never offer another target's repos. Shares
   // windowEraWhere so the window + era gate predicates cannot drift
   // from the other aggregations (F-003).
-  const repoAppWhere = appId !== undefined ? "r.bot_id = ? AND " : "";
-  const repoBinds = appId !== undefined ? [appId, windowDays] : [windowDays];
   const repoQuery = includeRepos
     ? db
         .prepare(
           `SELECT DISTINCT r.owner || '/' || r.repo AS repo
            FROM reviews r
-           WHERE ${repoAppWhere}${windowEraWhere}
+           WHERE ${tenantWhere} AND ${windowEraWhere}
            ORDER BY repo ASC`,
         )
-        .bind(...repoBinds)
+        .bind(...tenantBinds, windowDays)
         .all<{ repo: string }>()
     : Promise.resolve({ results: [] as { repo: string }[] });
 

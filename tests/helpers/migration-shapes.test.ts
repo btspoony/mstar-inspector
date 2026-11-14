@@ -66,17 +66,19 @@ describe("fixture shapes (TAIL_PREREQUISITES)", () => {
 });
 
 /**
- * The App family is a review bot, and the derived tail renames it. A shape
- * either carries that tail — and must therefore end on the bot vocabulary — or
- * stops below it, which only the pre-0015 provider world does today. Either
- * way the world is pinned: a hand-listed shape that drifts between the two
- * states cannot serve a suite that reads one of the names.
+ * The App family is a review bot, and the derived tail renames it and then
+ * splits the review configuration onto a target. A shape either carries that
+ * tail — and must end on the bot vocabulary with a target table and no review
+ * configuration on the bot row — or it stops below it, which only the pre-0015
+ * provider world does today. Either way the world is pinned: a hand-listed
+ * shape that drifts between the states cannot serve a suite that reads one of
+ * the names.
  */
 describe("fixture shapes (review bot vocabulary)", () => {
   const RENAME = "0056_review_bots_rename.sql";
 
   for (const [shape, migrations] of Object.entries(FIXTURE_SHAPES)) {
-    test(`${shape}: matches the shape's rename state`, () => {
+    test(`${shape}: matches the shape's bot and target vocabulary`, () => {
       const renamed = migrations.includes(RENAME);
       const db = createTestD1();
       applyMigrations(db, migrations);
@@ -91,6 +93,18 @@ describe("fixture shapes (review bot vocabulary)", () => {
         db.raw.query("PRAGMA table_info(reviews)").all() as Array<{ name: string }>
       ).map((column) => column.name);
       expect(reviews, `${shape}: review attribution column`).toContain(renamed ? "bot_id" : "app_id");
+      // The split is the rename's tail: the target table exists exactly where
+      // the bot vocabulary does, and the bot row no longer carries the review
+      // configuration there, so no shape is left half-split.
+      expect(tables.has("review_targets"), `${shape}: target table`).toBe(renamed);
+      const botColumns = (
+        db.raw.query(`PRAGMA table_info(${renamed ? "review_bots" : "github_apps"})`).all() as Array<{
+          name: string;
+        }>
+      ).map((column) => column.name);
+      expect(botColumns.includes("review_trigger_mode"), `${shape}: review configuration on the bot row`).toBe(
+        !renamed,
+      );
     });
   }
 });

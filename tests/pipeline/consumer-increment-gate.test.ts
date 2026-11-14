@@ -326,7 +326,7 @@ describe("incremental review rounds: the compare gate", () => {
   test("the seeded identity IS the payload's identity (no negative case can pass vacuously)", () => {
     const payload = makePayload();
     expect(ROUND_IDENTITY).toEqual({
-      appId: payload.appRef.appId,
+      appId: payload.botRef.appId,
       installationId: payload.installation_id,
       owner: payload.owner,
       repo: payload.repo,

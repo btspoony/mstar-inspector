@@ -23,7 +23,7 @@ import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
 import { parsePullRequestDetail, parseRecordPage } from "../../src/spa/pages/data";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -61,6 +61,7 @@ async function seedApp(
   db.raw
     .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
     .run(opts.id, opts.workspaceId);
+  seedTarget(db, opts.id, { id: `target-${opts.id}`, workspaceId: opts.workspaceId });
 }
 
 /**
@@ -89,6 +90,7 @@ async function fixture(): Promise<TestD1> {
   await seedApp(db, { id: "app-other", githubAppId: OTHER_APP_ID, workspaceId: "ws-other", slug: "other-app" });
   await createReviewBotsStore(db).upsertPullRequest({
     appId: "app-acme",
+    targetId: "target-app-acme",
     owner: "acme",
     repo: "widgets",
     prNumber: 131,
@@ -115,6 +117,7 @@ describe("GET /api/apps/:appId/pull-requests", () => {
     // nullable). One such row must not blank the whole list.
     await createReviewBotsStore(db).upsertPullRequest({
       appId: "app-acme",
+      targetId: "target-app-acme",
       owner: "acme",
       repo: "widgets",
       prNumber: 132,
@@ -165,6 +168,7 @@ describe("GET /api/apps/:appId/pull-requests", () => {
     const db = await fixture();
     await createReviewBotsStore(db).upsertPullRequest({
       appId: "app-acme",
+      targetId: "target-app-acme",
       owner: "acme",
       repo: "gadgets",
       prNumber: 7,
@@ -234,8 +238,8 @@ function seedReviews(db: TestD1, count: number): void {
   for (let index = 0; index < count; index += 1) {
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, reviewed_at, bot_id)
-         VALUES (?, 77, 'acme', 'widgets', 131, ?, 'comment', ?, 'app-acme')`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, reviewed_at, bot_id, target_id)
+         VALUES (?, 77, 'acme', 'widgets', 131, ?, 'comment', ?, 'app-acme', 'target-app-acme')`,
       )
       .run(`r-${index}`, `sha-${index}`, `2026-01-${String(index + 1).padStart(2, "0")} 00:00:00`);
   }
@@ -307,8 +311,8 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     seedInstallation(db);
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, bot_id)
-         VALUES ('r-null', 77, 'acme', 'widgets', 131, 'sha-1', 'comment', NULL, NULL, NULL, 'app-acme')`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, bot_id, target_id)
+         VALUES ('r-null', 77, 'acme', 'widgets', 131, 'sha-1', 'comment', NULL, NULL, NULL, 'app-acme', 'target-app-acme')`,
       )
       .run();
 
@@ -454,8 +458,8 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     seedInstallation(db);
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, bot_id)
-         VALUES ('r-attributed', 77, 'acme', 'widgets', 131, 'sha-1', 'needs fixes', 'The race is reachable.', 'kimi-for-coding', 'openrouter', '2026-01-02 00:00:00', 'app-acme')`,
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, bot_id, target_id)
+         VALUES ('r-attributed', 77, 'acme', 'widgets', 131, 'sha-1', 'needs fixes', 'The race is reachable.', 'kimi-for-coding', 'openrouter', '2026-01-02 00:00:00', 'app-acme', 'target-app-acme')`,
       )
       .run();
     // The reviewed round reported two findings.

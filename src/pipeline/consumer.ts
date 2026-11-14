@@ -203,10 +203,15 @@ import {
 // sanctioned reader of the dashboard store leaves (apps-store reads the
 // review_bots row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
-import { createReviewBotsStore, parseAppReviewLevel } from "../dashboard/apps-store";
+import { createReviewBotsStore } from "../dashboard/apps-store";
+import {
+  createTargetsStore,
+  parseTargetReviewLevel,
+  targetCheckGate,
+} from "../dashboard/targets-store";
 import { createSecretbox } from "../dashboard/secretbox";
 // The operator default review depth (migration 0047 pairing): read ONLY when
-// the App row's `review_level` is NULL, through the same runtime-config leaf
+// the target row's `review_level` is NULL, through the same runtime-config leaf
 // the admission settings use.
 import { getRecheckAssignmentMaxBytes, readDefaultReviewLevel } from "../dashboard/runtime-config-store";
 // Per-App AI-config resolution: the same sanctioned reader
@@ -268,8 +273,8 @@ export type PipelineEnv = {
    * per-provider key fields were retired. Every key and the chain resolve
    * from the App's own per-App config (resolveAppConfig keys map +
    * modelChain, custom declarations); an App missing either fails closed
-   * (assertAppConfigComplete → F-001 channel). The review depth is per App
-   * too (`review_bots.review_level`, falling back to the operator default in
+   * (assertAppConfigComplete → F-001 channel). The review depth is per target
+   * too (`review_targets.review_level`, falling back to the operator default in
    * `review_runtime_settings`) — this env carries no deployment-wide level.
    */
 };
@@ -463,6 +468,8 @@ export type ConsumerLogFields = {
   sandbox_id?: string;
   /** review_bots.id the job resolves to (per-bot jobs only). */
   app_id?: string;
+  /** review_targets.id the job's configuration came from (per-bot jobs only). */
+  target_id?: string;
   idempotency_key?: string;
   /**
    * review_checks.id — the Check attempt row a line is about, and the only
@@ -931,7 +938,7 @@ async function settleSkippedRow(
   try {
     await deps.checks.settleSkipped({
       scope: {
-        appId: payload.appRef.appId,
+        appId: payload.botRef.appId,
         installationId: payload.installation_id,
         owner: payload.owner,
         repo: payload.repo,
@@ -1023,7 +1030,7 @@ async function markQueuedBehindInflightRow(
     const relabeled = await boundedBestEffort(
       deps.checks.markQueuedBehindInflight({
         scope: {
-          appId: payload.appRef.appId,
+          appId: payload.botRef.appId,
           installationId: payload.installation_id,
           owner: payload.owner,
           repo: payload.repo,
@@ -2904,6 +2911,12 @@ type ProcessDeps = {
   env: PipelineEnv;
   store: D1ArtifactStore;
   /**
+   * The `review_targets` store, built ONCE per consumer (and injectable in
+   * tests) like the bot store: every message resolves its target through it,
+   * and rebuilding the narrow face per message would be pure overhead.
+   */
+  targets: ReturnType<typeof createTargetsStore>;
+  /**
    * review_failures leaf (AL-1 + AL-6): the parse-fail
    * degrade branch and the infra-failure catch record through it. Both call
    * sites are best-effort (try/catch at the call site — an insert failure
@@ -2963,7 +2976,7 @@ type ProcessDeps = {
    * stamped delivery, so rebuilding the store for it would be pure overhead.
    */
   selectPrHead: (input: {
-    appId: string;
+    targetId: string;
     owner: string;
     repo: string;
     prNumber: number;
@@ -2985,8 +2998,8 @@ type ProcessDeps = {
 };
 
 /**
- * The job's PR identity, derivable WITHOUT appRef — the AL-24-4 in-flight
- * legacy message (absent appRef) throws in toBaseFields, but the structured
+ * The job's PR identity, derivable WITHOUT either id — the AL-24-4 in-flight
+ * legacy message (no `botRef`) throws in toBaseFields, but the structured
  * failure channel still carries these (only app_id needed the deref, and
  * ConsumerLogFields requires the base identity).
  */
@@ -3006,9 +3019,11 @@ function payloadIdentityFields(payload: ReviewJobPayload): ConsumerLogFields {
 function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
   return {
     ...payloadIdentityFields(payload),
-    // Every job carries the appId reference in every structured log line
-    // (an id, never a credential — lock L4; appRef is required).
-    app_id: payload.appRef.appId,
+    // Every job carries the bot id reference in every structured log line
+    // (an id, never a credential — lock L4; `botRef` is required).
+    app_id: payload.botRef.appId,
+    // …and the target, so a line that attributes a review names both rows.
+    target_id: payload.targetId,
   };
 }
 
@@ -3030,9 +3045,9 @@ type CommenterResolution =
       githubAppId: number;
       workspaceId: string;
       /**
-       * The App row's RAW `review_level` (migration 0047) — `null` = follow the
-       * operator default. Read through `parseAppReviewLevel`; carrying it here
-       * keeps the depth on the same per-message row read (never a second query).
+       * The target row's RAW `review_level` (migration 0047) — `null` = follow
+       * the operator default. Read through `parseTargetReviewLevel`; carrying
+       * it here keeps the depth on the per-message configuration read.
        */
       reviewLevel: string | null;
     }
@@ -3041,55 +3056,80 @@ type CommenterResolution =
 /**
  * Resolve the commenter for one message (architect lock L4
  * — consumer-side credential resolution; single path —
- * `appRef.appId` is required, the env-App legacy branch is retired):
+ * `payload.botRef.appId` is required, the env-App legacy branch is retired):
  *
  * The `review_bots` row via D1 (re-read per message),
  * gated in order: missing row / soft-deleted / disabled THROWS
  * (unchanged retry→DLQ semantics; the failed gate EVICTS the cached
- * instance) → PAUSED (`review_enabled = 0`, lock L4) returns the
- * DISTINCT `paused` outcome AFTER those gates, leaving any cached
+ * instance) → the job's target row (`payload.targetId`, read without a
+ * workspace predicate: execution, not a tenant face), which must exist and
+ * belong to this bot → PAUSED (either `review_enabled` at 0, lock L4) returns
+ * the DISTINCT `paused` outcome AFTER those gates, leaving any cached
  * instance in place (resume reuses the warm instance — the credential
  * fingerprint ignores review_enabled) → the row's PEM decrypted in memory
  * (secretbox, AAD `github_apps.private_key_enc:<id>`) →
  * `createAppCommenter({ APP_ID: String(github_app_id), PRIVATE_KEY })`,
- * cached per appId in `deps.appCommenters` with the row's credential
+ * cached per botId in `deps.appCommenters` with the row's credential
  * fingerprint (architect lock L1: `github_app_id` + `private_key_enc` envelope
  * exact-string match — reuse on match, rebuild + replace on rotation).
  *
- * Any unresolvable state — missing row, disabled, soft-deleted, missing
- * DASHBOARD_ENCRYPTION_KEY (SecretboxKeyError), tampered envelope — THROWS:
- * the structured error log + rethrow keep the existing retry/DLQ semantics
- * and no GitHub write ever happens. The decrypted PEM lives only in this
- * call's memory and the commenter instance; it is never logged.
+ * Any unresolvable state — missing row, disabled, soft-deleted, no target, a
+ * target naming another bot, missing DASHBOARD_ENCRYPTION_KEY
+ * (SecretboxKeyError), tampered envelope — THROWS: the structured error log +
+ * rethrow keep the existing retry/DLQ semantics and no GitHub write ever
+ * happens. The decrypted PEM lives only in this call's memory and the
+ * commenter instance; it is never logged.
  */
 async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<CommenterResolution> {
-  const appRef = payload.appRef;
-  const row = await createReviewBotsStore(deps.env.DB).getAppById(appRef.appId);
+  const botId = payload.botRef.appId;
+  const row = await createReviewBotsStore(deps.env.DB).getAppById(botId);
   if (row === null) {
-    deps.appCommenters.delete(appRef.appId);
+    deps.appCommenters.delete(botId);
     // Two resolutions are indistinguishable from a missing one (the INNER
     // JOINs yield null for all three): no `bot_workspaces` mapping and a
     // soft-deleted workspace — the message names every cause.
     throw new Error(
-      `per-App credential resolution failed: app ${appRef.appId} not found, has no workspace mapping, or its workspace is deleted`,
+      `per-App credential resolution failed: app ${botId} not found, has no workspace mapping, or its workspace is deleted`,
     );
   }
   if (row.deleted_at !== null) {
-    deps.appCommenters.delete(appRef.appId);
-    throw new Error(`per-App credential resolution failed: app ${appRef.appId} is soft-deleted`);
+    deps.appCommenters.delete(botId);
+    throw new Error(`per-App credential resolution failed: app ${botId} is soft-deleted`);
   }
   if (row.status !== "active") {
-    deps.appCommenters.delete(appRef.appId);
-    throw new Error(`per-App credential resolution failed: app ${appRef.appId} is ${row.status}`);
+    deps.appCommenters.delete(botId);
+    throw new Error(`per-App credential resolution failed: app ${botId} is ${row.status}`);
+  }
+  // The workspace-owned half of the configuration — review depth, the Check
+  // gate and the business pause — lives on the target the WEBHOOK resolved and
+  // the job named. The consumer never re-decides it; it only proves the row
+  // exists and belongs to this bot. A missing target, or one naming another
+  // bot, is UNKNOWN configuration, not an absence to default: reviewing with
+  // one row's credential and another's gate is exactly what the split forbids,
+  // and the queue is not a trust boundary. The structured failure channel
+  // (retry → DLQ) is the answer.
+  const target = await deps.targets.getForExecution(payload.targetId);
+  if (target === null) {
+    deps.appCommenters.delete(botId);
+    throw new Error(
+      `per-App credential resolution failed: app ${botId} has no review target ${payload.targetId}`,
+    );
+  }
+  if (target.bot_id !== botId) {
+    deps.appCommenters.delete(botId);
+    throw new Error(
+      `per-App credential resolution failed: target ${target.id} belongs to bot ${target.bot_id}, not ${botId}`,
+    );
   }
   // Architect lock L4: the PAUSED gate sits AFTER the status/
   // deleted gates (disabled is judged first — its throw→retry→DLQ semantics
   // stay byte-identical) and returns the DISTINCT typed outcome instead of
-  // throwing. The cached instance (if any) is deliberately LEFT in place —
-  // resuming the App must reuse the warm instance, and the credential
-  // fingerprint (`github_app_id` + `private_key_enc`) is immune to
-  // review_enabled writes.
-  if (row.review_enabled === 0) {
+  // throwing. Either pause flag suppresses the review: the bot's operational
+  // pause and the target's business pause. The cached instance (if any) is
+  // deliberately LEFT in place — resuming must reuse the warm instance, and
+  // the credential fingerprint (`github_app_id` + `private_key_enc`) is immune
+  // to review_enabled writes.
+  if (row.review_enabled === 0 || target.review_enabled === 0) {
     // Architect lock L4: the pause gate makes ZERO credential/GitHub calls —
     // no decrypt, no commenter, no token. A delivery attached BEFORE the pause
     // is settled by the STORE-only path (§7.9), which needs no commenter.
@@ -3102,14 +3142,14 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   // AES-GCM envelope → one harmless rebuild; a real rotation rebuilds with
   // the new credential on the very next message.
   const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
-  const cached = deps.appCommenters.get(appRef.appId);
+  const cached = deps.appCommenters.get(botId);
   if (cached !== undefined && cached.fingerprint === fingerprint) {
     return {
       kind: "ok",
       commenter: cached.commenter,
       githubAppId: cached.githubAppId,
       workspaceId: row.workspace_id,
-      reviewLevel: row.review_level,
+      reviewLevel: target.review_level,
     };
   }
   // Cache miss (first message for this App) or fingerprint mismatch
@@ -3122,13 +3162,13 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
     `github_apps.private_key_enc:${row.id}`,
   );
   const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
-  deps.appCommenters.set(appRef.appId, { commenter, fingerprint, githubAppId: row.github_app_id });
+  deps.appCommenters.set(botId, { commenter, fingerprint, githubAppId: row.github_app_id });
   return {
     kind: "ok",
     commenter,
     githubAppId: row.github_app_id,
     workspaceId: row.workspace_id,
-    reviewLevel: row.review_level,
+    reviewLevel: target.review_level,
   };
 }
 
@@ -3148,7 +3188,7 @@ async function readPrHead(
 ): Promise<{ headSha: string | null; headAt: string | null } | null> {
   try {
     return await deps.selectPrHead({
-      appId: payload.appRef.appId,
+      targetId: payload.targetId,
       owner: payload.owner,
       repo: payload.repo,
       prNumber: payload.pr_number,
@@ -3156,7 +3196,7 @@ async function readPrHead(
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.warn(
-      { ...payloadIdentityFields(payload), app_id: payload.appRef.appId },
+      { ...payloadIdentityFields(payload), app_id: payload.botRef.appId },
       `PR head watermark read failed (fail-open: reviewing normally): ${detail}`,
     );
     return null;
@@ -3191,13 +3231,13 @@ export type RunnerAppConfig = {
 
 /**
  * Resolve the per-App AI config for one message (single path —
- * `appRef.appId` is required).
+ * `botId` is required).
  * ONE `getAppConfig` read per message (all
  * provider keys + the model chain in a single store call — never per key),
  * decrypted in memory. Per spec §4.4, the model chain is the
  * App's DEFAULT chain row (bot_model_chains name = 'default'); an App with
  * no default row resolves modelChain = null (fail-closed, unchanged). The
- * read hangs off the same appRef resolution as
+ * read hangs off the same bot resolution as
  * `resolveCommenter` (the App row is already proven present, active and
  * non-deleted there) and runs BEFORE the in-flight guard so an unresolvable
  * config fails with zero side effects. Keys are re-read every message (no
@@ -3212,16 +3252,16 @@ export type RunnerAppConfig = {
  * logged, never in queue payloads or errors.
  */
 async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): Promise<RunnerAppConfig> {
-  const appRef = payload.appRef;
+  const botId = payload.botRef.appId;
   try {
     const cfg = await createAppConfigStore(
       deps.env.DB,
       deps.env.DASHBOARD_ENCRYPTION_KEY,
-    ).getAppConfig(appRef.appId);
+    ).getAppConfig(botId);
     return { keys: cfg.keys, modelChain: cfg.modelChain };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`per-App config resolution failed: app ${appRef.appId}: ${detail}`);
+    throw new Error(`per-App config resolution failed: app ${botId}: ${detail}`);
   }
 }
 
@@ -3237,7 +3277,7 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
  * for migrated Apps. An App with NO overrides → `undefined` — the runner
  * input JSON omits the field, byte-identical to a no-map run (the global
  * constraint: empty map = unchanged runner behavior). Hangs off the same
- * appRef resolution as `resolveAppConfig` (the App row is already proven
+ * bot resolution as `resolveAppConfig` (the App row is already proven
  * present, active and non-deleted there) and runs BEFORE the in-flight
  * guard so a resolution failure has zero side effects. The map is re-read
  * every message (no cache) so a dashboard seat update applies to the very
@@ -3248,16 +3288,16 @@ async function resolveModelOverrides(
   payload: ReviewJobPayload,
   deps: ProcessDeps,
 ): Promise<Record<string, string> | undefined> {
-  const appRef = payload.appRef;
+  const botId = payload.botRef.appId;
   try {
     const overrides = await createAppConfigStore(
       deps.env.DB,
       deps.env.DASHBOARD_ENCRYPTION_KEY,
-    ).getModelOverridesForConsumer(appRef.appId);
+    ).getModelOverridesForConsumer(botId);
     return Object.keys(overrides).length > 0 ? overrides : undefined;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`per-App model-role resolution failed: app ${appRef.appId}: ${detail}`);
+    throw new Error(`per-App model-role resolution failed: app ${botId}: ${detail}`);
   }
 }
 /**
@@ -3268,7 +3308,7 @@ async function resolveModelOverrides(
  * An App with NO declarations → `undefined` — the runner input JSON
  * serializes byte-identically to a no-declaration run (the global
  * constraint: empty = unchanged runner behavior). Hangs off the same
- * appRef resolution as `resolveAppConfig` (the App row is already proven
+ * bot resolution as `resolveAppConfig` (the App row is already proven
  * present, active and non-deleted there) and runs BEFORE the in-flight
  * guard so a resolution failure has zero side effects. The set is re-read
  * every message (no cache) so a dashboard declaration update applies to
@@ -3287,16 +3327,16 @@ async function resolveCustomProviders(
   payload: ReviewJobPayload,
   deps: ProcessDeps,
 ): Promise<CustomProviderConsumerConfig[] | undefined> {
-  const appRef = payload.appRef;
+  const botId = payload.botRef.appId;
   try {
     const providers = await createAppConfigStore(
       deps.env.DB,
       deps.env.DASHBOARD_ENCRYPTION_KEY,
-    ).getCustomProvidersForConsumer(appRef.appId);
+    ).getCustomProvidersForConsumer(botId);
     return providers.length > 0 ? providers : undefined;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`per-App custom-provider resolution failed: app ${appRef.appId}: ${detail}`);
+    throw new Error(`per-App custom-provider resolution failed: app ${botId}: ${detail}`);
   }
 }
 
@@ -3315,9 +3355,9 @@ async function resolveCustomProviders(
  * so a dashboard image update applies to the very next review.
  */
 async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<SandboxImageDefinition> {
-  const appRef = payload.appRef;
+  const botId = payload.botRef.appId;
   try {
-    const row = await createReviewBotsStore(deps.env.DB).getAppById(appRef.appId);
+    const row = await createReviewBotsStore(deps.env.DB).getAppById(botId);
     if (row === null) {
       throw new Error("app not found");
     }
@@ -3331,7 +3371,7 @@ async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps)
     return image;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`per-App sandbox image resolution failed: app ${appRef.appId}: ${detail}`);
+    throw new Error(`per-App sandbox image resolution failed: app ${botId}: ${detail}`);
   }
 }
 
@@ -3894,9 +3934,13 @@ export function createReviewConsumer(
   // One App-ledger store per consumer: `selectPrHead` is the supersede
   // decision's point read and must not rebuild the store per message.
   const appsStore = createReviewBotsStore(env.DB);
+  // One target store per consumer: the Check lane's gate read resolves the
+  // bot's target on every terminalization instead of rebuilding the store.
+  const targetsStore = createTargetsStore(env.DB);
   const deps: ProcessDeps = {
     env,
     store: overrides.store ?? createArtifactStore(env.DB),
+    targets: targetsStore,
     failureStore: overrides.failureStore ?? createFailureStore(env.DB),
     appCommenters,
     // Production factory (§7.5/§7.7 step 11): the commenter is bound
@@ -3922,9 +3966,14 @@ export function createReviewConsumer(
       db: env.DB,
       nowMs: () => Date.now(),
       getAdapter: (scope) => appCommenters.get(scope.appId)?.commenter.checks ?? null,
-      // The App gate is a stored configuration value, read through the same
-      // per-consumer store as the ledger reads (spec §7.9).
-      getCheckGate: (scope) => appsStore.getCheckGate(scope.appId),
+      // The Check gate is the target's configuration. The Check row's scope
+      // names the bot AND the installation it was attached for, so resolution
+      // reads the target BOUND to that installation before falling back to the
+      // bot's single one — the same rule the webhook applied to the message.
+      getCheckGate: async (scope) => {
+        const target = await targetsStore.resolve(scope.appId, scope.installationId);
+        return target === null ? null : targetCheckGate(target);
+      },
     });
   return async (batch) => {
     for (const message of batch.messages) {
@@ -4105,8 +4154,8 @@ async function processMessage(
   // assembled. Hoisted so the catch site's best-effort failure row can
   // exact-redact the error detail too (SEC-03).
   let secretValues: string[] = [];
-  // F-001 (QC wave-1): toBaseFields derefs payload.appRef.appId, so
-  // an in-flight pre-deploy message (absent appRef — AL-24-4 accepts the
+  // F-001 (QC wave-1): toBaseFields derefs payload.botRef.appId, so
+  // an in-flight pre-deploy message (no `botRef` — AL-24-4 accepts the
   // TypeError) must throw INSIDE the try: it then flows through the
   // established structured channel (review failed: log + AL-6
   // review_failures row + rethrow). Pure relocation — no runtime guard
@@ -4661,7 +4710,7 @@ async function processMessage(
     //
     // AFTER the supersede skip on purpose: a superseded delivery is not the
     // live review, so it must not pay — or degrade on — this read.
-    const appLevel = parseAppReviewLevel(resolution.reviewLevel);
+    const appLevel = parseTargetReviewLevel(resolution.reviewLevel);
     if (appLevel !== null) {
       level = appLevel;
     } else {
@@ -4674,17 +4723,17 @@ async function processMessage(
         );
       }
     }
-    // Per-App AI config: hangs off the SAME appRef resolution as
+    // Per-App AI config: hangs off the SAME bot resolution as
     // the commenter — one getAppConfig read per message, before the
     // guard/sandbox so an unresolvable config (undecryptable key envelope,
     // missing DASHBOARD_ENCRYPTION_KEY) fails closed with zero side effects.
     const appCfg = await resolveAppConfig(payload, deps);
-    // Per-role model overrides: rides the SAME appRef gate,
+    // Per-role model overrides: rides the SAME bot gate,
     // before the guard like the config above. undefined (empty map)
     // → the runner input JSON below stays byte-identical.
     const modelOverrides = await resolveModelOverrides(payload, deps);
     // Custom-provider declarations: hangs off the SAME
-    // appRef gate, before the guard like the config/overrides above —
+    // bot gate, before the guard like the config/overrides above —
     // undefined (no declarations) → the runner input JSON stays
     // byte-identical and no custom-provider pool env is injected. The
     // decrypt face is fail-loud (tamper never swallowed): a broken envelope
@@ -4707,7 +4756,7 @@ async function processMessage(
     // review_failures stage="pipeline" row + rethrow → retry×3 → DLQ) with
     // ZERO side effects — no webhook-face reject, no pause state, no runtime
     // guard beyond this channel (AL-24-5 verdict 3).
-    assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.appRef.appId);
+    assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.botRef.appId);
     // 0. Review admission (WF-002 / bugbot BB-3 + review-concurrency §1.2):
     // ONE conditional D1 insert is both the per-PR lock and the capacity
     // reservation, so a duplicate for this PR or a reached cap returns the
@@ -4729,7 +4778,7 @@ async function processMessage(
     // alone. Declared HERE because the admission-time Check claim needs it
     // before the container and the checkout.
     const lifecycleScope: Scope = {
-      appId: payload.appRef.appId,
+      appId: payload.botRef.appId,
       installationId: payload.installation_id,
       owner: payload.owner,
       repo: payload.repo,
@@ -4831,7 +4880,7 @@ async function processMessage(
     // proof of the response).
     const grant = await commenter.getInstallationToken({
       scope: {
-        appId: payload.appRef.appId,
+        appId: payload.botRef.appId,
         installationId: payload.installation_id,
         owner: payload.owner,
         repo: payload.repo,
@@ -6253,7 +6302,8 @@ async function processMessage(
         key: idemKey(key),
         schema: "mstar.review/v1",
         payload: output,
-        appId: payload.appRef.appId,
+        appId: payload.botRef.appId,
+        targetId: payload.targetId,
         model: chainHeadSelector(effectiveModelChain(appCfg).chain),
         provider: appliedProvider,
         // A stale-context round (its pending lifecycle journal failed to

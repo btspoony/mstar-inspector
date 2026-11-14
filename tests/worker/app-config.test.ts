@@ -69,7 +69,7 @@ import { MODEL_LIMITS } from "../../src/contracts/provider-model-limits.generate
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { t } from "../../src/i18n";
 import { CHECK_MIN_SCORE_MAX, CHECK_MIN_SCORE_MIN } from "../../src/contracts/review-gate";
-import { ALLOWLIST_MAX_OWNERS } from "../../src/dashboard/apps-store";
+import { ALLOWLIST_MAX_OWNERS } from "../../src/dashboard/targets-store";
 import { PROVIDERS } from "../../src/pipeline/provider-catalog";
 import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../packages/runner/src/runtime-omp";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -2696,7 +2696,10 @@ describe("review gate + owner allowlist (payload and ops)", () => {
   /** The gate/allowlist columns as one snapshot, so a zero-write case compares exactly. */
   const gateRow = (db: TestD1, appId: string) =>
     db.raw
-      .query("SELECT check_min_score, check_pass_verdicts, allowlist_enabled, updated_at FROM review_bots WHERE id = ?")
+      .query(
+        `SELECT t.check_min_score, t.check_pass_verdicts, t.allowlist_enabled, t.updated_at
+           FROM review_targets t WHERE t.bot_id = ?`,
+      )
       .get(appId) as {
       check_min_score: number;
       check_pass_verdicts: string;
@@ -2706,7 +2709,13 @@ describe("review gate + owner allowlist (payload and ops)", () => {
 
   const ownerLogins = (db: TestD1, appId: string): string[] =>
     (
-      db.raw.query("SELECT owner_login FROM app_owner_allowlist WHERE app_id = ? ORDER BY owner_login").all(appId) as Array<{
+      db.raw
+        .query(
+          `SELECT a.owner_login FROM target_owner_allowlist a
+             JOIN review_targets t ON t.id = a.target_id
+            WHERE t.bot_id = ? ORDER BY a.owner_login`,
+        )
+        .all(appId) as Array<{
         owner_login: string;
       }>
     ).map((row) => row.owner_login);
@@ -2751,7 +2760,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     // unreadable configuration to the store. The settings face must not 500 on
     // it: the gate arrives as null, the SPA renders a read-only notice, and
     // every other field stays readable.
-    rawRun(db, `UPDATE review_bots SET check_pass_verdicts = '["lgtm"]' WHERE id = ?`, app.id);
+    rawRun(db, `UPDATE review_targets SET check_pass_verdicts = '["lgtm"]' WHERE bot_id = ?`, app.id);
     const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -2837,7 +2846,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
 
   test("save-check-gate: out-of-range or non-integer score → keyed 400, zero writes", async () => {
     const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE review_bots SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ?", app.id);
     const before = gateRow(db, app.id);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     for (const minScore of ["101", "-1", "80.5", "eighty", ""]) {
@@ -2863,7 +2872,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
 
   test("save-check-gate: an off-vocabulary verdict → keyed 400, zero writes", async () => {
     const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE review_bots SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ?", app.id);
     const before = gateRow(db, app.id);
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       op: "save-check-gate",
@@ -2879,7 +2888,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
 
   test("save-check-gate: non-owner member → 403, zero mutation", async () => {
     const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE review_bots SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ?", app.id);
     const before = gateRow(db, app.id);
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
       op: "save-check-gate",
@@ -2926,7 +2935,11 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     // stored once under the first submitted spelling.
     expect(ownerLogins(db, app.id)).toEqual(["Acme", "ada"]);
     const acmeRows = db.raw
-      .query("SELECT COUNT(*) AS n FROM app_owner_allowlist WHERE app_id = ? AND lower(owner_login) = 'acme'")
+      .query(
+        `SELECT COUNT(*) AS n FROM target_owner_allowlist a
+           JOIN review_targets t ON t.id = a.target_id
+          WHERE t.bot_id = ? AND lower(a.owner_login) = 'acme'`,
+      )
       .get(app.id) as { n: number };
     expect(acmeRows.n).toBe(1);
   });
@@ -2937,7 +2950,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     // A stored list and a stale operator timestamp, so a write of ANY kind —
     // the owners, the switch, the probe's visibility cache — shows up below.
     await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "0", owners: "ada" });
-    rawRun(db, "UPDATE review_bots SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ?", app.id);
     const before = gateRow(db, app.id);
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
       op: "save-allowlist",

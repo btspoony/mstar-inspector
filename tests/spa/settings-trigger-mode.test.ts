@@ -14,7 +14,7 @@ import { createRoot } from "react-dom/client";
 import { type Element as DomElement } from "happy-dom";
 import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
-import { REVIEW_TRIGGER_MODES as STORE_REVIEW_TRIGGER_MODES } from "../../src/dashboard/apps-store";
+import { REVIEW_TRIGGER_MODES as STORE_REVIEW_TRIGGER_MODES } from "../../src/dashboard/targets-store";
 import { REVIEW_TRIGGER_MODES, isReviewTriggerMode, type ReviewTriggerMode } from "../../src/spa/pages/data";
 import {
   ReviewTriggerControl,

@@ -199,6 +199,20 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
     now,
   );
   seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+  // Every bot owns exactly one target: the review configuration the settings
+  // and pause routes read and write lives there.
+  seed(
+    db,
+    `INSERT INTO review_targets
+       (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'octocat', ?, ?)`,
+    `target-${id}`,
+    workspaceId,
+    id,
+    slug,
+    now,
+    now,
+  );
 }
 
 /** The numeric GitHub App id a fixture App was seeded with (the App's identity). */

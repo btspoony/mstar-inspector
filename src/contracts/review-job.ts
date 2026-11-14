@@ -3,21 +3,18 @@
  * Produced by the worker (04) and consumed by the pipeline (06).
  * MUST NOT contain tokens, secrets, or private keys (compass contracts D).
  *
- * `appRef.appId` — which GitHub App's credentials the consumer must resolve
- * for this job (required single shape,
- * AL-24-2). The `review_bots` row (D1) with that id — attached by the
- * per-App `POST /webhook/:workspaceId/:appId` route after classification,
- * the ONLY
- * production attach point.
+ * TWO ids, because the review configuration lives on two rows:
+ * `botRef.appId` names the `review_bots` row the job executes as — its
+ * credentials, model chain, sandbox image and operational pause (AL-24-2);
+ * `targetId` names the `review_targets` row that owns the review level, the
+ * Check gate and the business pause. Both are required on every enqueued job,
+ * and the consumer refuses a message whose target belongs to another bot.
  *
- * `appId` is a reference (a `review_bots.id` UUID), never a credential —
- * the queue carries the id only; the decrypted PEM exists solely in
- * consumer memory (lock L4, contracts D red line unchanged).
- *
- * Archaeology: the original `appRef` was an OPTIONAL union
- * (`{ kind: "app", appId } | { kind: "legacy" }`, absent = legacy — lock L3)
- * serving the retired env-App legacy face; the cutover retired that face and
- * collapsed the contract to the single required per-App shape.
+ * The ids are attached by the per-App `POST /webhook/:workspaceId/:appId`
+ * route — the ONLY production producer — after it resolves the target.
+ * Each is a reference (a row id), never a credential: the queue carries ids
+ * only; the decrypted PEM exists solely in consumer memory (lock L4,
+ * contracts D red line unchanged).
  */
 export type ReviewJobPayload = {
   installation_id: number;
@@ -49,7 +46,9 @@ export type ReviewJobPayload = {
   comment_id?: number;
   action: string;
   triggered_by: "pull_request" | "issue_comment";
-  appRef: { appId: string };
+  botRef: { appId: string };
+  /** The `review_targets` row this job's review configuration comes from. */
+  targetId: string;
   /**
    * The Check attach identity of the DELIVERY that created this job's Check run
    * (spec §7.9): the id the delivery path used as its holder

@@ -383,7 +383,7 @@ export function isReviewTriggerMode(value: unknown): value is ReviewTriggerMode 
 }
 
 /**
- * Per-App review levels (migration 0047) — the `review_bots.review_level`
+ * Per-App review levels (migration 0047) — the `review_targets.review_level`
  * closed vocabulary. Mirrors packages/shared/src/runtime `REVIEW_LEVELS`
  * across the bundle boundary (the REVIEW_TRIGGER_MODES convention: documented,
  * deliberately not imported). Values are wire-verbatim; only labels localize.
@@ -546,6 +546,12 @@ export type SettingsReadOnlyPayload = {
   can_manage: false;
   /** The App's stable workspace id — server-resolved, never a path segment. */
   workspace_id: string;
+  /**
+   * The review configuration's id in this workspace — the settings a manager
+   * edits belong to a target. Required on both faces: a payload that cannot
+   * name its target is not a settings read.
+   */
+  target_id: string;
   app: SettingsIdentityAppMeta;
 };
 
@@ -567,6 +573,8 @@ export type SettingsManagePayload = {
   can_manage: true;
   /** The App's stable workspace id — server-resolved, never a path segment. */
   workspace_id: string;
+  /** The review configuration's id every review-policy key below is read from. */
+  target_id: string;
   app: SettingsAppMeta;
   /**
    * The review gate (migration 0045) — the Check's pass condition. `null` =
@@ -1846,6 +1854,10 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // The delivery URL's workspace segment: the server-resolved id, required on
   // both faces (a path ref may be a slug and must never be printed).
   if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
+  // The review configuration this App resolved to in this workspace (the
+  // target every review-policy key belongs to). Required on both faces — a
+  // payload that cannot name its target is not a settings read.
+  if (typeof data.target_id !== "string" || data.target_id.length === 0) return null;
   if (typeof data.app.status !== "string") return null;
   if (typeof data.app.review_enabled !== "boolean") return null;
   if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;

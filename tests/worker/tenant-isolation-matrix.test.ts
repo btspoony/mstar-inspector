@@ -44,7 +44,7 @@ import { describe, expect, test } from "bun:test";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { insertSupportGrant } from "../../src/dashboard/operator-store";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 
 // Dynamic AFTER the shim: the static import order would resolve the workerd
 // builtin before mock.module had a chance to register it.
@@ -164,6 +164,9 @@ function seedApp(
   );
   if (workspaceId !== null) {
     seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+    // Every bot owns exactly one target; the settings/insights/ledger gates
+    // resolve it inside the session workspace before answering.
+    seedTarget(db, id, { id: `target-${id}`, workspaceId });
   }
 }
 
@@ -215,9 +218,14 @@ type ListBody = { viewer: { login: string }; apps: Array<{ github_app_id: number
 function appSnapshot(db: TestD1, appId = "app-acme") {
   return {
     app: db.raw
+      .query(`SELECT status, sandbox_image_id, deleted_at, updated_at FROM review_bots WHERE id = ?`)
+      .get(appId),
+    // The review-policy columns live on the target now: a management write that
+    // moved them must show here.
+    target: db.raw
       .query(
-        `SELECT status, review_enabled, review_trigger_mode, sandbox_image_id, deleted_at, updated_at
-           FROM review_bots WHERE id = ?`,
+        `SELECT review_enabled, review_trigger_mode, review_level, check_min_score, allowlist_enabled
+           FROM review_targets WHERE bot_id = ?`,
       )
       .get(appId),
     config: db.raw.query("SELECT model_chain FROM bot_model_config WHERE bot_id = ?").get(appId) ?? null,

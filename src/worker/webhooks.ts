@@ -28,7 +28,7 @@ import { Webhooks } from "@octokit/webhooks";
 import { z } from "zod";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import type { ReviewJobPayload } from "../contracts/review-job";
-import type { ReviewTriggerMode } from "../dashboard/apps-store";
+import type { ReviewTriggerMode } from "../dashboard/targets-store";
 import type { HandlerLog } from "./handlers";
 
 export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as const;
@@ -45,15 +45,33 @@ export const INSTALLATION_ACTIONS = ["created", "new_permissions_accepted"] as c
 
 /**
  * The per-App trigger inputs classification branches on (spec
- * review-trigger-policy §2/§3 read path): the resolved row's
- * `review_trigger_mode` and its GitHub slug (the mention target — one App's
- * mention never triggers another App). The mention login is GitHub's mutable
- * `github_slug`, never our local webhook path or the row id. The per-App
- * webhook route passes both from the already-resolved row — no second lookup.
- * An omitted context defaults to `every_push` with NO mention target (empty
- * slug never matches — fail-safe: no trigger rather than a spurious one).
+ * review-trigger-policy §2/§3 read path): the resolved target's
+ * `review_trigger_mode` and the bot's GitHub slug (the mention target — one
+ * App's mention never triggers another App). The mention login is GitHub's
+ * mutable `github_slug`, never our local webhook path or the row id. The
+ * per-App webhook route passes both from the rows it resolved — no second
+ * lookup. An omitted context defaults to `every_push` with NO mention target
+ * (empty slug never matches — fail-safe: no trigger rather than a spurious
+ * one).
  */
 export type ReviewTriggerContext = { mode: ReviewTriggerMode; appSlug: string };
+
+/** The one trigger context a delivery without a resolver is classified with. */
+const DEFAULT_TRIGGER: ReviewTriggerContext = { mode: "every_push", appSlug: "" };
+
+/**
+ * The delivery's install identity, read from the already-parsed body. This is
+ * GitHub's installation number, not our row id: the route resolves the target
+ * from it, and the classifier itself never learns the bot or target id.
+ */
+export type ReviewTriggerResolver = (installationId: number | null) => Promise<ReviewTriggerContext | null>;
+
+/**
+ * The classification of a delivery with no resolved review target. It is an
+ * `ignore` — the delivery is verified and correctly refused, not rejected —
+ * and the route logs it under this exact reason.
+ */
+export const NO_TARGET_REASON = "no review target resolves for this delivery";
 
 /**
  * The GitHub login continuation set (spec §3): `A-Z a-z 0-9 -`. A mention
@@ -307,11 +325,11 @@ export async function verifySignature(
 }
 
 /**
- * Classifier outcome. The `job` payload NEVER carries `appRef`
- * (AL-24-2/4): the classifier is secret-parameterized only and never sees
- * the App identity — the ONLY production attach point is the per-App
- * `POST /webhook/:workspaceId/:appId` route, which adds `appRef: { appId }`
- * after classification, before enqueue.
+ * Classifier outcome. The `job` payload NEVER carries `botRef` or `targetId`
+ * (AL-24-2/4): the classifier is secret-parameterized only and never sees the
+ * bot or target identity — the ONLY production attach point is the per-App
+ * `POST /webhook/:workspaceId/:appId` route, which adds both after
+ * classification, before enqueue.
  */
 export type WebhookOutcome =
   | { kind: "reject"; status: 400 | 401 | 500; reason: string }
@@ -331,7 +349,7 @@ export type WebhookOutcome =
    */
   | {
       kind: "job";
-      payload: Omit<ReviewJobPayload, "appRef">;
+      payload: Omit<ReviewJobPayload, "botRef" | "targetId">;
       installationAccount: string;
       accountAuthoritative: false;
     }
@@ -497,8 +515,15 @@ const issueCommentSchema = z.object({
  * never the literal "unknown", so log consumers can filter by event alone.
  *
  * `trigger` (spec review-trigger-policy §2 read path) is the resolved
- * App row's mode + slug, passed straight to classifyEvent — the classifier
- * branches on it but still never sees the App identity (no appId).
+ * target's mode + the bot's slug, passed straight to the classifier — the
+ * classifier branches on it but still never sees a bot or target id.
+ *
+ * …or a RESOLVER, for the route that can only know a delivery's installation
+ * after the body is parsed: it is called BETWEEN signature verification and
+ * classification, so a target is never selected from a body nobody has
+ * authenticated. `null` from it means no target resolves, and the delivery
+ * classifies as the `NO_TARGET_REASON` ignore — no trigger mode is invented
+ * for a delivery that has no review configuration.
  */
 export async function classifyWebhook(
   secret: string,
@@ -507,7 +532,7 @@ export async function classifyWebhook(
   eventName: string | null,
   log?: HandlerLog,
   cacheKey?: string,
-  trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
+  trigger: ReviewTriggerContext | ReviewTriggerResolver = DEFAULT_TRIGGER,
   onParsed?: (parsed: unknown) => void,
 ): Promise<WebhookOutcome> {
   if (!secret || secret === "development") {
@@ -538,7 +563,28 @@ export async function classifyWebhook(
     );
     return { kind: "reject", status: 401, reason: "signature verification failed" };
   }
-  return classifyEvent(eventName, rawBody, log, trigger, onParsed);
+  // ONE parse per delivery (see classifyEvent): verification has passed, so
+  // this document may be read, and `onParsed` hands it on without a second
+  // JSON.parse.
+  const parsed = parseBody(rawBody);
+  onParsed?.(parsed);
+  // A resolver asks the route for the delivery's target, so it is consulted
+  // only for the two events that can enqueue a review: an install delivery is
+  // bot-scoped bookkeeping with no review configuration to resolve.
+  if (typeof trigger === "function" && (eventName === "pull_request" || eventName === "issue_comment")) {
+    const resolved = await trigger(installationIdOf(parsed));
+    if (resolved === null) return { kind: "ignore", reason: NO_TARGET_REASON };
+    return classifyParsed(eventName, parsed, log, resolved);
+  }
+  return classifyParsed(eventName, parsed, log, typeof trigger === "function" ? DEFAULT_TRIGGER : trigger);
+}
+
+/** The body's `installation.id`, or null when the document names none. */
+function installationIdOf(parsed: unknown): number | null {
+  const installation =
+    typeof parsed === "object" && parsed !== null && "installation" in parsed ? parsed.installation : null;
+  if (typeof installation !== "object" || installation === null || !("id" in installation)) return null;
+  return typeof installation.id === "number" ? installation.id : null;
 }
 
 /**
@@ -551,14 +597,14 @@ export async function classifyWebhook(
  *
  * `trigger` is the per-App trigger context (spec review-trigger-policy §2):
  * `mode` gates the pull_request auto face (§2.1 matrix) and `appSlug` (the
- * row's GitHub slug) keys the issue_comment bot mention (§3). Defaults to
+ * bot's GitHub slug) keys the issue_comment bot mention (§3). Defaults to
  * `every_push` with no mention target.
  */
 export function classifyEvent(
   eventName: string | null,
   rawBody: string,
   log?: HandlerLog,
-  trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
+  trigger: ReviewTriggerContext = DEFAULT_TRIGGER,
   onParsed?: (parsed: unknown) => void,
 ): WebhookOutcome {
   // ONE parse per delivery: the classifiers read this document, and `onParsed`
@@ -566,6 +612,16 @@ export function classifyEvent(
   // from it), so no delivery is JSON.parse'd a second time.
   const parsed = parseBody(rawBody);
   onParsed?.(parsed);
+  return classifyParsed(eventName, parsed, log, trigger);
+}
+
+/** The dispatch over an already-parsed body — the shared tail of both entry points. */
+function classifyParsed(
+  eventName: string | null,
+  parsed: unknown,
+  log: HandlerLog | undefined,
+  trigger: ReviewTriggerContext,
+): WebhookOutcome {
   if (!eventName) {
     return { kind: "ignore", reason: "missing X-GitHub-Event header" };
   }

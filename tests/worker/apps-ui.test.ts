@@ -23,6 +23,7 @@ import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
 import { createReviewBotsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
+import { createTargetsStore } from "../../src/dashboard/targets-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import { createTestD1 } from "../store/helpers";
@@ -167,17 +168,29 @@ function appStatus(db: ReturnType<typeof createAppsUiD1>, appId: number): string
   return row?.status ?? null;
 }
 
-/** The per-App pause switch column (migration 0008) straight from the row. */
+/** The per-App pause switch (the target's business pause) straight from the row. */
 function reviewEnabled(db: ReturnType<typeof createAppsUiD1>, appId: number): number | null {
-  const row = db.raw.query("SELECT review_enabled FROM review_bots WHERE github_app_id = ?").get(appId) as {
+  const row = db.raw
+    .query(
+      `SELECT t.review_enabled FROM review_targets t
+         JOIN review_bots b ON b.id = t.bot_id
+        WHERE b.github_app_id = ? AND t.deleted_at IS NULL`,
+    )
+    .get(appId) as {
     review_enabled: number;
   } | null;
   return row?.review_enabled ?? null;
 }
 
-/** The per-App trigger-mode column (migration 0022) straight from the row. */
+/** The per-App trigger-mode column (the target's) straight from the row. */
 function reviewTriggerMode(db: ReturnType<typeof createAppsUiD1>, appId: number): string | null {
-  const row = db.raw.query("SELECT review_trigger_mode FROM review_bots WHERE github_app_id = ?").get(appId) as {
+  const row = db.raw
+    .query(
+      `SELECT t.review_trigger_mode FROM review_targets t
+         JOIN review_bots b ON b.id = t.bot_id
+        WHERE b.github_app_id = ? AND t.deleted_at IS NULL`,
+    )
+    .get(appId) as {
     review_trigger_mode: string;
   } | null;
   return row?.review_trigger_mode ?? null;
@@ -344,10 +357,10 @@ describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause
   test("creator resumes → 200, review_enabled=1", async () => {
     const db = await seededWorld();
     const apps = createReviewBotsStore(db);
-    await apps.setReviewEnabled(
-      (await apps.listApps()).find((a) => a.github_app_id === MALLORY_APP_ID)!.id,
-      false,
-    );
+    const bot = (await apps.listApps()).find((a) => a.github_app_id === MALLORY_APP_ID)!;
+    const targets = createTargetsStore(db);
+    const target = (await targets.resolve(bot.id, null))!;
+    await targets.setReviewEnabled(target.workspace_id, target.id, false);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const res = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/resume`, cookie, makeEnv(db));
     expect(res.status).toBe(200);
@@ -418,6 +431,52 @@ describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause
     }
   });
 
+  test("a target in another workspace is invisible: the detail face 404s and the action refuses with zero writes", async () => {
+    const db = await seededWorld();
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'Other', 'octocat', datetime('now'))`,
+      )
+      .run();
+    // The bot belongs to `default`; its configuration claims another tenant.
+    db.raw
+      .prepare(
+        `UPDATE review_targets SET workspace_id = 'ws-other'
+          WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)`,
+      )
+      .run(MALLORY_APP_ID);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+    const detail = await get(`/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`, cookie, makeEnv(db));
+    expect(detail.status).toBe(404);
+    const pause = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/pause`, cookie, makeEnv(db));
+    expect(pause.status).toBe(404);
+    // The refusal wrote nothing: the foreign target still reads reviewing.
+    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(1);
+  });
+
+  test("the list omits review_enabled for a bot with no live target (no fabricated pause state)", async () => {
+    const db = await seededWorld();
+    db.raw
+      .prepare(
+        `DELETE FROM review_targets
+          WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)`,
+      )
+      .run(MALLORY_APP_ID);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+    const res = await get("/dashboard/default/api/apps", cookie, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { apps: Array<Record<string, unknown>> };
+    const row = body.apps.find((app) => app.github_app_id === MALLORY_APP_ID)!;
+    // The row has no pause state to report, so the wire carries no key (not a
+    // default of "reviewing").
+    expect("review_enabled" in row).toBe(false);
+    const sibling = body.apps.find((app) => app.github_app_id === ADA_APP_ID)!;
+    expect(sibling.review_enabled).toBe(1);
+  });
+
 });
 
 describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App review trigger mode)", () => {
@@ -472,17 +531,25 @@ describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App revie
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     db.raw
-      .prepare("UPDATE review_bots SET updated_at = '2026-01-01 00:00:00' WHERE github_app_id = ?")
+      .prepare(
+        `UPDATE review_targets SET updated_at = '2026-01-01 00:00:00'
+          WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)`,
+      )
       .run(MALLORY_APP_ID);
     const res = await postForm(`/dashboard/default/apps/${MALLORY_APP_ID}/review-trigger-mode`, cookie, makeEnv(db), {
       mode: "every_push",
     });
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
+    expect(reviewTriggerMode(db, MALLORY_APP_ID)).toBe("every_push");
+    // A same-value selection never touches the row (an operator mutation).
     const row = db.raw
-      .query("SELECT review_trigger_mode, updated_at FROM review_bots WHERE github_app_id = ?")
-      .get(MALLORY_APP_ID) as { review_trigger_mode: string; updated_at: string };
-    expect(row.review_trigger_mode).toBe("every_push");
+      .query(
+        `SELECT t.updated_at FROM review_targets t
+           JOIN review_bots b ON b.id = t.bot_id
+          WHERE b.github_app_id = ?`,
+      )
+      .get(MALLORY_APP_ID) as { updated_at: string };
     expect(row.updated_at).toBe("2026-01-01 00:00:00");
   });
 

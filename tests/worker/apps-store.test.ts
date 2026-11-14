@@ -23,14 +23,13 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1 } from "../store/helpers";
-import { createReviewBotsStore, REVIEW_TRIGGER_MODES } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { D1Like } from "../../src/store/types";
 import type {
   CreateAppInput,
   GithubAppMetadataInput,
   GithubAppRow,
-  ReviewTriggerMode,
 } from "../../src/dashboard/apps-store";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -934,61 +933,6 @@ describe("apps-store sandbox image selection (migration 0018)", () => {
     const row = (await store(db).getAppById(app.id))!;
     expect(row.deleted_at).not.toBeNull();
     expect(row.updated_at).toBe(deleted.updated_at); // the refused write bumped nothing
-  });
-});
-
-describe("apps-store review trigger mode (migration 0022)", () => {
-  test("createApp omits the column: the 0022 DDL default seeds 'every_push'", async () => {
-    const db = createMigratedD1();
-    const app = await seedApp(db);
-    expect(app.review_trigger_mode).toBe("every_push");
-  });
-
-  test("setReviewTriggerMode round-trips every vocabulary mode, bumps updated_at, and reports the change", async () => {
-    const db = createMigratedD1();
-    const app = await seedApp(db);
-    for (const mode of REVIEW_TRIGGER_MODES) {
-      rawRun(db, "UPDATE review_bots SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
-      expect(await store(db).setReviewTriggerMode(app.id, mode)).toBe(true);
-      const row = (await store(db).getAppById(app.id))!;
-      expect(row.review_trigger_mode).toBe(mode);
-      expect(row.updated_at).not.toBe("2026-01-01 00:00:00"); // an operator mutation
-    }
-    // An unknown app id changed nothing (the setAppStatus convention).
-    expect(await store(db).setReviewTriggerMode("no-such-id", "manual")).toBe(false);
-  });
-
-  test("setReviewTriggerMode throws on an off-vocabulary mode BEFORE any write (the store-enforced value domain)", async () => {
-    const db = createMigratedD1();
-    const app = await seedApp(db);
-    rawRun(db, "UPDATE review_bots SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
-    for (const bogus of ["whenever", "", "EVERY_PUSH", "open "]) {
-      await expect(store(db).setReviewTriggerMode(app.id, bogus as ReviewTriggerMode)).rejects.toThrow(
-        /is not on the vocabulary/,
-      );
-    }
-    const row = (await store(db).getAppById(app.id))!;
-    expect(row.review_trigger_mode).toBe("every_push"); // untouched — zero rows written
-    expect(row.updated_at).toBe("2026-01-01 00:00:00"); // and updated_at did not churn
-  });
-
-  test("setReviewTriggerMode refuses soft-deleted apps (a deleted app is never mutated)", async () => {
-    const db = createMigratedD1();
-    const app = await seedApp(db);
-    await store(db).softDeleteApp(app.id);
-    const deleted = (await store(db).getAppById(app.id))!;
-    expect(await store(db).setReviewTriggerMode(app.id, "manual")).toBe(false);
-    const row = (await store(db).getAppById(app.id))!;
-    expect(row.review_trigger_mode).toBe("every_push");
-    expect(row.updated_at).toBe(deleted.updated_at); // the refused write bumped nothing
-  });
-
-  test("the 0022 CHECK is the last-line backstop: a raw off-vocabulary write is unrepresentable", async () => {
-    const db = createMigratedD1();
-    const app = await seedApp(db);
-    expect(() =>
-      rawRun(db, "UPDATE review_bots SET review_trigger_mode = 'whenever' WHERE id = ?", app.id),
-    ).toThrow(/CHECK constraint failed/);
   });
 });
 

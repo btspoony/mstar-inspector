@@ -2095,7 +2095,7 @@ export async function postLineCommentsWithOctokit(
  * Production commenter: createAppAuth (APP_ID + normalized PRIVATE_KEY) —
  * the ONLY createAppAuth construction point in the pipeline (architect lock
  * L4): every credential enters through the `CommenterEnv`
- * parameter — every per-App instance (consumer-side appRef resolution,
+ * parameter — every per-App instance (consumer-side bot resolution,
  * src/pipeline/consumer.ts) is built here, one instance per credential so
  * each App keeps its own installation-token cache. Octokit construction
  * stays inside this module; call sites never duplicate it.

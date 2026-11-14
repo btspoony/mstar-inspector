@@ -94,6 +94,7 @@ import {
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { reconcileReviewChecks } from "../../src/worker/check-reconcile";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
+import { createTargetsStore, targetCheckGate } from "../../src/dashboard/targets-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { GITHUB_PRIMARY_RATE_LIMIT_PREFIX, GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
@@ -361,6 +362,7 @@ async function seedPrHead(
 ): Promise<void> {
   await createReviewBotsStore(db).upsertPullRequest({
     appId: TEST_APP_ID,
+    targetId: `target-${TEST_APP_ID}`,
     owner: "acme",
     repo: "widgets",
     prNumber: 42,
@@ -490,6 +492,7 @@ describe("createReviewConsumer", () => {
       schema: "mstar.review/v1",
       payload: VALID_OUTPUT,
       appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
     });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
@@ -1177,20 +1180,20 @@ describe("createReviewConsumer", () => {
     expect(h.logLines.some((l) => l.level === "warn" && l.msg.includes("failed-claim KV write failed"))).toBe(true);
   });
 
-  test("in-flight legacy-shape payload (absent appRef) → structured channel + healthy batch sibling completes (F-001)", async () => {
+  test("in-flight legacy-shape payload (no botRef) → structured channel + healthy batch sibling completes (F-001)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     // The in-flight legacy shape: a pre-deploy queue message whose payload
-    // carries NO appRef (impossible at the type layer post-24 — cast to
-    // simulate the stranded message AL-24-4 accepts). It sits AFTER a
-    // healthy sibling in the same batch: the sibling's review completes,
-    // then the legacy message throws INSIDE the try and flows through the
-    // structured channel (review failed: log + AL-6 row + rethrow) instead
-    // of leaving the batch with zero D1/log trace.
-    const legacyPayload = makePayload() as unknown as { appRef?: unknown };
-    delete legacyPayload.appRef;
+    // carries no `botRef` (impossible at the type layer — cast to simulate the
+    // stranded message AL-24-4 accepts). It sits AFTER a healthy sibling in the
+    // same batch: the sibling's review completes, then the legacy message
+    // throws INSIDE the try and flows through the structured channel (review
+    // failed: log + AL-6 row + rethrow) instead of leaving the batch with zero
+    // D1/log trace.
+    const legacyPayload = makePayload() as unknown as { botRef?: unknown };
+    delete legacyPayload.botRef;
     const batch = {
       queue: "review-queue",
       messages: [
@@ -2027,7 +2030,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
     await consumer(h.makeBatch(makePayload()));
-    await consumer(h.makeBatch(makePayload({ pr_number: 43, appRef: { appId: TEST_SECOND_APP_ID } })));
+    await consumer(h.makeBatch(makePayload({ pr_number: 43, botRef: { appId: TEST_SECOND_APP_ID }, targetId: `target-${TEST_SECOND_APP_ID}` })));
 
     // Same deployment, same consumer, two depths — no env var involved.
     const levels = h.sandbox.calls
@@ -2515,6 +2518,13 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
       .run(commaAppId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES (?, 'default', ?, 'comma-chain-app', 'tester', datetime('now'), datetime('now'))`,
+      )
+      .run(`target-${commaAppId}`, commaAppId);
     await seedAppConfig(db, commaAppId, ",");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
@@ -2535,7 +2545,7 @@ describe("createReviewConsumer", () => {
           id: "m-comma",
           timestamp: new Date(),
           attempts: 1,
-          body: makePayload({ appRef: { appId: commaAppId } }),
+          body: makePayload({ botRef: { appId: commaAppId }, targetId: `target-${commaAppId}` }),
           retry: () => {},
           ack: () => {},
         },
@@ -2591,6 +2601,13 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
       .run(overrideAppId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES (?, 'default', ?, 'comma-override-app', 'tester', datetime('now'), datetime('now'))`,
+      )
+      .run(`target-${overrideAppId}`, overrideAppId);
     await seedAppConfig(db, overrideAppId); // healthy base chain + ark key
     db.raw
       .prepare(
@@ -2620,7 +2637,7 @@ describe("createReviewConsumer", () => {
           id: "m-override",
           timestamp: new Date(),
           attempts: 1,
-          body: makePayload({ appRef: { appId: overrideAppId } }),
+          body: makePayload({ botRef: { appId: overrideAppId }, targetId: `target-${overrideAppId}` }),
           retry: () => {},
           ack: () => {},
         },
@@ -2711,6 +2728,11 @@ describe("createReviewConsumer", () => {
     // pre-37 App under this deployment pair; the rest of the half completes
     // the current migration set (see CONSUMER_POST_CHAINS_MIGRATIONS).
     applyMigrations(db, CONSUMER_POST_CHAINS_MIGRATIONS);
+    // The target migration creates this App's one target with a random id;
+    // tests join on bot_id (the ids are never pinned).
+    const migratedTarget = db.raw.query("SELECT id FROM review_targets WHERE bot_id = ?").get(appId) as {
+      id: string;
+    };
     // Post-migration resolution is byte-identical: the default row holds
     // the chain verbatim; the seat-<role> chains + reference rows resolve
     // to the same overrides map; every carried key row was promoted to its
@@ -2730,7 +2752,7 @@ describe("createReviewConsumer", () => {
     // modelOverrides map and the exec env the SAME chain — byte-identical
     // runner input for the migrated App.
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
-    await consumer(h.makeBatch(makePayload({ appRef: { appId } })));
+    await consumer(h.makeBatch(makePayload({ botRef: { appId }, targetId: migratedTarget.id })));
     const input = JSON.parse(h.sandbox.writtenInputJson!);
     expect(input.modelOverrides).toEqual(preOverrides);
     expect(runnerExecEnv().OMP_REVIEW_MODEL).toBe(preChain);
@@ -6066,6 +6088,15 @@ function publicationRow(db: TestD1): { id: string; kind: string; phase: string; 
   };
 }
 
+/**
+ * The Check gate of the bot's target — the read the production Check lane
+ * makes (the scope names the bot, not the target).
+ */
+async function targetGate(db: TestD1, appId: string) {
+  const target = await createTargetsStore(db).resolve(appId, null);
+  return target === null ? null : targetCheckGate(target);
+}
+
 /** One production lifecycle over the registry double with the scripted transport. */
 function lifecycleFor(db: TestD1, nowMs: () => number = () => Date.now()) {
   const adapter = checksAdapterFor(db, nowMs);
@@ -6073,7 +6104,7 @@ function lifecycleFor(db: TestD1, nowMs: () => number = () => Date.now()) {
     db,
     nowMs,
     getAdapter: () => adapter,
-    getCheckGate: (scope) => createReviewBotsStore(db).getCheckGate(scope.appId),
+    getCheckGate: (scope) => targetGate(db, scope.appId),
   });
 }
 
@@ -6312,6 +6343,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       schema: "mstar.review/v1",
       payload: GATED_OUTPUT,
       appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
     });
     seedCheckBudget(db, "review.check.update_timeout_ms", "1000");
     checkRequestOverrides.update = (params) => {
@@ -6479,6 +6511,20 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRows(db)).toHaveLength(0);
   });
 
+  test("a bot with no review target is a DLQ failure, never a review on defaulted configuration", async () => {
+    const db = await createSeededTestD1();
+    db.raw.prepare("DELETE FROM review_targets WHERE bot_id = ?").run(TEST_APP_ID);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    // Unknown configuration is the failure channel (retry → DLQ), not the
+    // operator default: the job never runs with one row's credential and
+    // another row's — or no — gate.
+    await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
+      /has no review target/,
+    );
+    expect(h.messageAckCalls).toHaveLength(0);
+  });
+
   test("check lifecycle: a delivery skipped before execution settles its attached run neutral", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -6492,7 +6538,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       { db: db as never, adapter, nowMs: () => Date.now() },
       {
         scope: {
-          appId: payload.appRef.appId,
+          appId: payload.botRef.appId,
           installationId: payload.installation_id,
           owner: payload.owner,
           repo: payload.repo,
@@ -6544,7 +6590,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       { db: db as never, adapter, nowMs: () => Date.now() },
       {
         scope: {
-          appId: payload.appRef.appId,
+          appId: payload.botRef.appId,
           installationId: payload.installation_id,
           owner: payload.owner,
           repo: payload.repo,
@@ -6657,7 +6703,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       { db: db as never, adapter, nowMs: () => Date.now() },
       {
         scope: {
-          appId: payload.appRef.appId,
+          appId: payload.botRef.appId,
           installationId: payload.installation_id,
           owner: payload.owner,
           repo: payload.repo,
@@ -7065,7 +7111,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = createCheckLifecycle({
       db,
       nowMs: checkClock,
-      getCheckGate: (scope) => createReviewBotsStore(db).getCheckGate(scope.appId),
+      getCheckGate: (scope) => targetGate(db, scope.appId),
       getAdapter: () => checksAdapterFor(db, checkClock),
     });
 
@@ -7242,7 +7288,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = createCheckLifecycle({
       db,
       nowMs: checkClock,
-      getCheckGate: (scope) => createReviewBotsStore(db).getCheckGate(scope.appId),
+      getCheckGate: (scope) => targetGate(db, scope.appId),
       getAdapter: () => ({
         beginCheck: async ({ identity, lease }) => {
           await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, checkState.clockMs);
@@ -7288,7 +7334,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = createCheckLifecycle({
       db,
       nowMs: checkClock,
-      getCheckGate: (scope) => createReviewBotsStore(db).getCheckGate(scope.appId),
+      getCheckGate: (scope) => targetGate(db, scope.appId),
       getAdapter: () => ({
         beginCheck: async ({ identity, lease }) => {
           await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, checkState.clockMs);
@@ -8199,6 +8245,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
           schema: "mstar.review/v1",
           payload: VALID_OUTPUT,
           appId: TEST_APP_ID,
+          targetId: `target-${TEST_APP_ID}`,
         });
       }
       const adapter = checksAdapterFor(db);
@@ -8245,6 +8292,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       schema: "mstar.review/v1",
       payload: GATED_OUTPUT,
       appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
     });
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
@@ -8674,7 +8722,7 @@ describe("workspace attribution gate (one read face)", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await expect(
-      consumer(h.makeBatch(makePayload({ appRef: { appId: "no-such-app" } }))),
+      consumer(h.makeBatch(makePayload({ botRef: { appId: "no-such-app" }, targetId: "no-such-target" }))),
     ).rejects.toThrow(
       /per-App credential resolution failed: app no-such-app not found, has no workspace mapping, or its workspace is deleted$/,
     );
@@ -8719,6 +8767,7 @@ describe("usage ledger (migration 0031)", () => {
       schema: "mstar.review/v1",
       payload: VALID_OUTPUT,
       appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
     });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 

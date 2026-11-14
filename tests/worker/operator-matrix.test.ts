@@ -126,6 +126,19 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
     now,
   );
   seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+  // Every bot owns one target — the settings surface's review configuration.
+  seed(
+    db,
+    `INSERT INTO review_targets
+       (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'dana', ?, ?)`,
+    `target-${id}`,
+    workspaceId,
+    id,
+    slug,
+    now,
+    now,
+  );
 }
 
 /**

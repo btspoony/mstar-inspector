@@ -256,6 +256,29 @@ export async function mapAppToDefaultWorkspace(db: D1Like, appId: string): Promi
 }
 
 /**
+ * Insert one live `review_targets` row for a raw-seeded bot and return its id.
+ * Review and pull-request rows carry `target_id`, and the tenant reads bind it
+ * together with `review_targets.workspace_id`, so a fixture that seeds those
+ * rows itself needs the target that owns them. Defaults mirror the create
+ * path (the DDL defaults, no installation binding).
+ */
+export function seedTarget(
+  db: TestD1,
+  botId: string,
+  opts: { id?: string; workspaceId?: string; name?: string } = {},
+): string {
+  const id = opts.id ?? crypto.randomUUID();
+  const now = "2026-01-01T00:00:00.000Z";
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'fixture', ?, ?)`,
+    )
+    .run(id, opts.workspaceId ?? "default", botId, opts.name ?? botId, now, now);
+  return id;
+}
+
+/**
  * Join seeded users to the `default` workspace (0026 seeds it). Authority is
  * per workspace, so a suite driving a workspace route needs the membership row
  * — `users.role` grants nothing.

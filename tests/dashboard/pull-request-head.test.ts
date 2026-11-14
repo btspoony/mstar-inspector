@@ -16,10 +16,11 @@
  * case below pins with a numeric-offset input.
  */
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore, type UpsertPullRequestInput } from "../../src/dashboard/apps-store";
 
 const APP_ID = "app-pr-head";
+const TARGET_ID = "target-app-pr-head";
 
 function seedApp(db: TestD1, id = APP_ID, githubAppId = 3001): void {
   const now = "2026-01-01T00:00:00.000Z";
@@ -32,12 +33,13 @@ function seedApp(db: TestD1, id = APP_ID, githubAppId = 3001): void {
                'octocat', 'active', ?, ?)`,
     )
     .run(id, githubAppId, id, now, now);
+  seedTarget(db, id, { id: `target-${id}` });
 }
 
-const ADDRESS = { appId: APP_ID, owner: "acme", repo: "widgets", prNumber: 132 };
+const ADDRESS = { targetId: TARGET_ID, owner: "acme", repo: "widgets", prNumber: 132 };
 
 function delivery(over: Partial<UpsertPullRequestInput> = {}): UpsertPullRequestInput {
-  return { ...ADDRESS, title: "Add a thing", state: "open", headSha: "sha-1", ...over };
+  return { ...ADDRESS, appId: APP_ID, title: "Add a thing", state: "open", headSha: "sha-1", ...over };
 }
 
 describe("upsertPullRequest head watermark (0044)", () => {
@@ -97,7 +99,7 @@ describe("upsertPullRequest head watermark (0044)", () => {
   test("a delivery with no usable stamp still fills an unknown sha and leaves the watermark unknown", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createReviewBotsStore(db).upsertPullRequest({ ...ADDRESS, title: null, state: "open", headSha: null });
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ title: null, headSha: null }));
     await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: null }));
     expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-1",
@@ -110,7 +112,7 @@ describe("upsertPullRequest head watermark (0044)", () => {
     // only the `head_at IS NULL` disjunct of the write CASE can ever fill it.
     const db = createMigratedTestD1();
     seedApp(db);
-    await createReviewBotsStore(db).upsertPullRequest({ ...ADDRESS, title: null, state: "open", headSha: null });
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ title: null, headSha: null }));
     await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: null }));
     await createReviewBotsStore(db).upsertPullRequest(
       delivery({ headSha: "sha-2", updatedAt: "2026-03-01T10:00:00.000Z" }),
@@ -137,11 +139,9 @@ describe("upsertPullRequest head watermark (0044)", () => {
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
     // A later delivery that carries only a state change (no head sha).
-    await createReviewBotsStore(db).upsertPullRequest({
-      ...ADDRESS,
-      state: "open",
-      updatedAt: "2026-03-01T11:00:00.000Z",
-    });
+    await createReviewBotsStore(db).upsertPullRequest(
+      delivery({ headSha: undefined, updatedAt: "2026-03-01T11:00:00.000Z" }),
+    );
     expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-1",
       headAt: "2026-03-01T10:00:00.000Z",
@@ -164,24 +164,29 @@ describe("upsertPullRequest head watermark (0044)", () => {
     });
   });
 
-  test("selectPrHead is scoped to one App's rows", async () => {
+  test("selectPrHead is scoped to one target's rows", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
     const otherId = "app-pr-head-other";
     seedApp(db, otherId, 3002);
     await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
-    await createReviewBotsStore(db).upsertPullRequest({
-      ...delivery({ headSha: "sha-other", updatedAt: "2026-03-01T10:05:00.000Z" }),
-      appId: otherId,
-    });
+    await createReviewBotsStore(db).upsertPullRequest(
+      delivery({
+        appId: otherId,
+        targetId: `target-${otherId}`,
+        headSha: "sha-other",
+        updatedAt: "2026-03-01T10:05:00.000Z",
+      }),
+    );
 
     const store = createReviewBotsStore(db);
     expect(await store.selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-1",
       headAt: "2026-03-01T10:00:00.000Z",
     });
-    // An App with no ledger row is "unknown" — never another App's watermark.
-    expect(await store.selectPrHead({ ...ADDRESS, appId: "app-with-no-rows" })).toBeNull();
+    // A target with no ledger row is "unknown" — never another target's
+    // watermark.
+    expect(await store.selectPrHead({ ...ADDRESS, targetId: "target-with-no-rows" })).toBeNull();
   });
 
   test("a numeric-offset stamp is rewritten to UTC inside the write, not trusted from the caller", async () => {
