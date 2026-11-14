@@ -5,8 +5,16 @@
  * unchanged and a plain read changing nothing.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter } from "./helpers";
+import {
+  createMigratedTestD1,
+  createTestD1,
+  execMigrationScript,
+  migrationNumber,
+  migrationsAfter,
+  splitSqlStatements,
+} from "./helpers";
 
 const AT = "2026-10-27T00:00:00.000Z";
 /** Same shape as the operator store's guarded audit append. */
@@ -74,5 +82,54 @@ describe("migration order", () => {
     expect(live.readdirSync(join(import.meta.dir, "../../migrations"))).toContain(
       "0001_reviews.sql",
     );
+  });
+});
+
+describe("migration script execution", () => {
+  test("splits on statement boundaries only: quotes and comments stay whole", () => {
+    const script = [
+      "-- a comment with a ; in it",
+      "CREATE TABLE t (n INTEGER NOT NULL CONSTRAINT g CHECK (n = 0));",
+      "INSERT INTO t (n) SELECT ';' WHERE ';' <> ''; -- trailing ; comment",
+      "/* block ; comment */ DROP TABLE t;",
+    ].join("\n");
+    // Three statements: the `;` inside the string literal and the two inside
+    // comments never split, and each statement keeps its own leading comment.
+    expect(splitSqlStatements(script)).toHaveLength(3);
+    expect(splitSqlStatements(script)).toEqual([
+      expect.stringContaining("CREATE TABLE t"),
+      expect.stringContaining("INSERT INTO t (n) SELECT ';' WHERE ';' <> ''"),
+      expect.stringContaining("DROP TABLE t"),
+    ]);
+  });
+
+  test("a failing statement aborts the migration instead of being skipped", () => {
+    // `Database.exec` on bun 1.4.0 (CI's pinned version) silently skips the
+    // failing statement of a multi-statement script and runs the rest; D1
+    // aborts. This helper must abort on every runtime, or a guard that exists
+    // to fail a migration passes on CI alone.
+    const db = createTestD1();
+    expect(() =>
+      execMigrationScript(
+        db.raw,
+        `CREATE TABLE guard_probe (n INTEGER NOT NULL CONSTRAINT guard_probe CHECK (n = 0));
+         INSERT INTO guard_probe (n) VALUES (1);
+         CREATE TABLE after_guard (id TEXT);`,
+      ),
+    ).toThrow(/guard_probe/);
+    // The failing statement stopped the script: nothing after it ran.
+    expect(
+      (db.raw.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'after_guard'").get() ?? null),
+    ).toBeNull();
+  });
+
+  test("every shipped migration splits into statements that all execute", () => {
+    const db = createMigratedTestD1();
+    const empty = migrationsAfter(0).filter((name) => splitSqlStatements(
+      readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"),
+    ).length === 0);
+    expect(empty).toEqual([]);
+    // …and the fully-migrated schema is the proof the statements ran.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM workspaces").get()).toEqual({ n: 1 });
   });
 });

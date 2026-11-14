@@ -91,8 +91,82 @@ function applyMigration(db: Database, migrations: readonly string[]): void {
   // SQLite enforces foreign keys per-connection; D1 has them on by default.
   db.exec("PRAGMA foreign_keys = ON;");
   for (const name of migrations) {
-    db.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
+}
+
+/**
+ * Split a migration script into its statements, tracking `--` / `/* *\/`
+ * comments and single-, double- and back-quoted literals so a `;` inside any of
+ * them does not split. Comment-only and whitespace-only fragments are dropped
+ * (they carry no statement).
+ */
+export function splitSqlStatements(script: string): string[] {
+  const statements: string[] = [];
+  let current = "";
+  let hasCode = false;
+  let quote: string | null = null;
+  for (let index = 0; index < script.length; index += 1) {
+    const char = script[index]!;
+    const next = script[index + 1];
+    if (quote !== null) {
+      current += char;
+      if (char === quote) {
+        // A doubled quote is an escape, not the end of the literal.
+        if (script[index + 1] === quote) {
+          current += quote;
+          index += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if (char === "-" && next === "-") {
+      const end = script.indexOf("\n", index);
+      const stop = end === -1 ? script.length : end;
+      current += script.slice(index, stop);
+      index = stop - 1;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      const end = script.indexOf("*/", index + 2);
+      const stop = end === -1 ? script.length : end + 2;
+      current += script.slice(index, stop);
+      index = stop - 1;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      hasCode = true;
+      current += char;
+      continue;
+    }
+    if (char === ";") {
+      if (hasCode) statements.push(current.trim());
+      current = "";
+      hasCode = false;
+      continue;
+    }
+    if (!/\s/.test(char)) hasCode = true;
+    current += char;
+  }
+  if (hasCode) statements.push(current.trim());
+  return statements;
+}
+
+/**
+ * Apply one migration script the way D1 does: statement by statement, the
+ * first failure aborting the migration.
+ *
+ * `Database.exec` runs the whole string as one script, and on bun 1.4.0 —
+ * the version CI pins — a statement that fails inside a multi-statement string
+ * is silently SKIPPED while the rest of the script still runs (1.4.4 throws).
+ * A guard that exists to fail a migration would then pass on CI and fail
+ * everywhere else, and a fixture would silently come up half-migrated.
+ */
+export function execMigrationScript(db: Database, script: string): void {
+  for (const statement of splitSqlStatements(script)) db.exec(statement);
 }
 
 /** Read one INTEGER scalar on the connection (SQLite change counters). */

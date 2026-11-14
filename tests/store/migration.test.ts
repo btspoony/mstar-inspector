@@ -17,7 +17,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter } from "./helpers";
+import { createMigratedTestD1, createTestD1, execMigrationScript, migrationNumber, migrationsAfter } from "./helpers";
 import {
   WORKSPACE_CONCURRENCY_MAX,
   getEffectiveConcurrency,
@@ -147,7 +147,7 @@ const BEFORE_TARGET_SPLIT = migrationsAfter("0002_mstar_review_v1.sql").filter(
 /** A DB shaped like production immediately before the target split. */
 function createBeforeSplitD1(): TestD1 {
   const db = createTestD1();
-  for (const name of BEFORE_TARGET_SPLIT) db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  for (const name of BEFORE_TARGET_SPLIT) execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   return db;
 }
 
@@ -261,7 +261,7 @@ describe("migrations/0001_reviews.sql", () => {
 describe("migrations/0007_reviews_app_id_index.sql", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0006 with live rows)", () => {
@@ -318,7 +318,7 @@ describe("migrations/0007_reviews_app_id_index.sql", () => {
 describe("migrations/0008_github_apps_ops.sql", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   /** Raw-insert one pre-0008-shaped github_apps row (the 0004 column list). */
@@ -398,7 +398,7 @@ describe("migrations/0008_github_apps_ops.sql", () => {
 describe("migrations/0009_app_model_roles.sql", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
@@ -479,7 +479,7 @@ describe("migrations/0009_app_model_roles.sql", () => {
 describe("migrations/0010_review_failures.sql", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   /** Raw-insert one failure row (full column control). */
@@ -606,7 +606,7 @@ describe("migrations/0010_review_failures.sql", () => {
 describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
@@ -861,7 +861,7 @@ describe("migrations/0002_mstar_review_v1.sql", () => {
 describe("migrations/0013_findings_review_id_index.sql", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0010 with live rows)", () => {
@@ -920,7 +920,7 @@ describe("migrations/0013_findings_review_id_index.sql", () => {
 describe("migrations/0014_idx_reviews_reviewed_at.sql", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0013 with live rows)", () => {
@@ -978,7 +978,7 @@ describe("migrations/0014_idx_reviews_reviewed_at.sql", () => {
 describe("migrations/0016_users_login_nocase_unique.sql (QC W-1)", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   test("applies cleanly over a seeded production-shaped DB (0003 users with live rows)", () => {
@@ -1028,7 +1028,7 @@ describe("migrations/0016_users_login_nocase_unique.sql (QC W-1)", () => {
 describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
@@ -1186,7 +1186,7 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
 describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract)", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
@@ -1298,7 +1298,7 @@ describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract
 describe("migrations/0019_github_apps_metadata.sql (AD-531)", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
@@ -1533,7 +1533,7 @@ describe("migrations/0035_workspace_invite_expiry_index.sql (I-000096)", () => {
 describe("migrations/0036_app_identity.sql", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   /** The pre-0036 shape: the 0001–0035 chain, i.e. what production runs today. */
@@ -1672,7 +1672,7 @@ describe("migrations/0037_github_metadata_attempt.sql", () => {
 describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   /**
@@ -1911,7 +1911,7 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
       )
       .sort();
     for (const name of before) {
-      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
     }
     const insert = db.raw.prepare(
       `INSERT INTO workspaces (id, slug, name, created_at, max_concurrent_reviews)
@@ -1937,7 +1937,7 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
       )
       .run();
 
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0043_workspace_concurrency_bound.sql"), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, "0043_workspace_concurrency_bound.sql"), "utf8"));
 
     const rows = db.raw
       .query("SELECT id, max_concurrent_reviews AS cap FROM workspaces WHERE id LIKE 'ws\\_%' ESCAPE '\\' ORDER BY id")
@@ -1980,7 +1980,7 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
     ]);
 
     // Replaying the file on the clamped schema is a no-op.
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0043_workspace_concurrency_bound.sql"), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, "0043_workspace_concurrency_bound.sql"), "utf8"));
     const replay = db.raw
       .query("SELECT id, max_concurrent_reviews AS cap FROM workspaces WHERE id LIKE 'ws\\_%' ESCAPE '\\' ORDER BY id")
       .all() as Array<{ id: string; cap: number | null }>;
@@ -2002,7 +2002,7 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
       (migration) => migrationNumber(migration) < gate,
     )) {
-      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
     }
     return db;
   }
@@ -2011,7 +2011,7 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
     const db = preGateDb();
     // A row written before the migration carries no gate configuration.
     insertGithubAppRow(db, { id: "legacy-app", githubAppId: 9001, name: "legacy-app" });
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, GATE_MIGRATION), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, GATE_MIGRATION), "utf8"));
 
     const row = db.raw
       .query(
@@ -2117,7 +2117,7 @@ describe("migrations/0046_reviews_context_incomplete.sql", () => {
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
       (migration) => migrationNumber(migration) < 46,
     )) {
-      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
     }
     return db;
   }
@@ -2131,7 +2131,7 @@ describe("migrations/0046_reviews_context_incomplete.sql", () => {
       )
       .run("a".repeat(40));
 
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0046_reviews_context_incomplete.sql"), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, "0046_reviews_context_incomplete.sql"), "utf8"));
 
     const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE id = 'r1'").get() as {
       context_incomplete: number;
@@ -2152,7 +2152,7 @@ describe("migrations/0049_reviews_duration_ms.sql", () => {
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
       (migration) => migrationNumber(migration) < 49,
     )) {
-      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
     }
     return db;
   }
@@ -2166,7 +2166,7 @@ describe("migrations/0049_reviews_duration_ms.sql", () => {
       )
       .run("a".repeat(40));
 
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0049_reviews_duration_ms.sql"), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, "0049_reviews_duration_ms.sql"), "utf8"));
 
     // No duration is fabricated for history: a pre-column round reports none,
     // and the UI omits the time rather than printing a made-up 0.
@@ -2395,7 +2395,7 @@ describe("migrations/0049_workspace_check_min_score.sql", () => {
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
       (migration) => migrationNumber(migration) < migrationNumber(SCORE_MIGRATION),
     )) {
-      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
     }
     return db;
   }
@@ -2410,7 +2410,7 @@ describe("migrations/0049_workspace_check_min_score.sql", () => {
       .prepare("INSERT INTO pull_requests (id, app_id, owner, repo, pr_number, state) VALUES ('pr-1', 'app-kept', 'acme', 'widgets', 7, 'open')")
       .run();
 
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, SCORE_MIGRATION), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, SCORE_MIGRATION), "utf8"));
 
     // The workspace keeps its row and starts at the absent state (the platform
     // default lives in code, not in a column default that could freeze it).
@@ -2453,7 +2453,7 @@ describe("migrations/0050_reviews_round.sql", () => {
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
       (migration) => migrationNumber(migration) < migrationNumber(ROUND_MIGRATION),
     )) {
-      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
     }
     return db;
   }
@@ -2467,7 +2467,7 @@ describe("migrations/0050_reviews_round.sql", () => {
       )
       .run();
 
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, ROUND_MIGRATION), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, ROUND_MIGRATION), "utf8"));
 
     // Pre-column rows read NULL, which is exactly the branch the detail read
     // turns into its positional fallback.
@@ -2715,7 +2715,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
     for (const name of readdirSync(MIGRATIONS_DIR)
       .filter((name) => name.endsWith(".sql") && name >= "0003" && name < "0056")
       .sort()) {
-      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
     }
     insertGithubAppRow(db, { id: "app-1", name: "Acme Reviewer", githubAppId: 5001 });
     db.raw.exec(
@@ -2741,7 +2741,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
     };
     expect(before.bot).toHaveLength(1);
 
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0056_review_bots_rename.sql"), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, "0056_review_bots_rename.sql"), "utf8"));
 
     expect(db.raw.query("SELECT * FROM review_bots").all()).toEqual(before.bot);
     expect(db.raw.query("SELECT bot_id, workspace_id FROM bot_workspaces").all()).toEqual(before.workspaces);
@@ -2816,7 +2816,7 @@ describe("migrations/0057_review_targets.sql", () => {
     "check_pass_verdicts, allowlist_enabled, created_by, created_at, updated_at, deleted_at";
 
   function applySplit(db: TestD1): void {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, SPLIT_MIGRATION), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, SPLIT_MIGRATION), "utf8"));
   }
 
   function insertClaim(db: TestD1, commentId: number, state: string, payload: string | null): void {

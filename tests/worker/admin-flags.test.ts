@@ -12,7 +12,7 @@ import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { isFlagEnabled, type ServerFlagKey } from "../../src/admin/flags";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import {
@@ -272,6 +272,9 @@ async function seedApp(db: TestD1): Promise<void> {
     )
     .run(id, privateKeyEnc, webhookSecretEnc);
   db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')").run(id);
+  // The webhook resolves the bot's target before it classifies anything, so a
+  // bot without one answers `ignored` and the flag under test never runs.
+  seedTarget(db, id, { id: "target-app-x" });
 }
 
 function queueCapture(): { queue: Env["REVIEW_QUEUE"]; sent: ReviewJobPayload[] } {
