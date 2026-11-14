@@ -54,6 +54,33 @@
 # received, publishing that row `addressed`. The Worker cannot repair either from
 # outside (I-000396).
 #
+# rebuild: the ask-fitting rule (and the assignment's fixed prose it is measured
+# against) moved out of `packages/runner/src/recheck.ts` into
+# `packages/shared/src/recheck-wire.ts`, so the Worker now FITS the document it
+# hands over instead of the seat fitting what it was handed; both files are image
+# inputs and no manifest, lockfile or CLI pin moved. What a mismatched pair does
+# therefore depends on WHO fits, and there are four cells:
+#   - old Worker + old image: the seat fits the unfitted document with its
+#     all-or-nothing rule and refuses the whole round when targets + discussion
+#     overrun the budget. That refusal is the staging failure this change
+#     removes — `review_failures` records it as stage `recheck` with
+#     `skipped: budget (config): ... targets + discussion need at least N bytes,
+#     the budget is 65536`, no seat ran, and the PR repeated it every round.
+#   - new Worker + image from just BEFORE this change: the Worker fits, so the
+#     seat's older in-runner fit receives an already-fitting document and passes
+#     it through unchanged. The head rescue, the bounded body and the `budget`
+#     exclusions exist only Worker-side: the stale seat never applies a second
+#     bound, it simply has nothing to refuse.
+#   - new Worker + still-older image (no in-runner fit at all): the seat asks the
+#     fitted document exactly as handed over, i.e. the same ask a current image
+#     would make.
+#   - old Worker + new image: the unfitted up-to-512 KiB `mstar.recheck-input/v1`
+#     document reaches a seat that fits it — the pre-change behaviour, and the
+#     context-pressure shape the rebuild entry directly above describes
+#     (`failed`/`seat-failed`, status `unavailable`).
+# The rebuild is what moves the fitting rule to where the new documents are built;
+# it does not change the wire shape either way.
+#
 # rebuild: the runner's pinned engine moves to 4.2.0 (`packages/runner/package.json`
 # and its lockfile are image inputs, so the container must be rebuilt with them).
 # rebuild: the image's CLI pin and harness clone ref move to 4.2.0
