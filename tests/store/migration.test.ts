@@ -3196,6 +3196,31 @@ describe("migrations/0057_review_targets.sql", () => {
     expect(() => applySplit(db)).toThrow(/guard_queued_claim_without_target/);
   });
 
+  test("creates idx_review_targets_bot_id ON review_targets(bot_id)", () => {
+    const db = createMigratedTestD1();
+    const index = db.raw
+      .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_targets_bot_id'")
+      .get() as { tbl_name: string } | null;
+    expect(index).not.toBeNull();
+    expect(index!.tbl_name).toBe("review_targets");
+    const columns = db.raw.query("PRAGMA index_info(idx_review_targets_bot_id)").all() as Array<{
+      name: string;
+    }>;
+    expect(columns.map((c) => c.name)).toEqual(["bot_id"]);
+  });
+
+  test("the per-bot target lookup uses the index, not a table scan (EXPLAIN QUERY PLAN)", () => {
+    // The partial unique (bot_id, installation_id) index cannot serve this
+    // predicate — installation_id is unknown here — so without its own index
+    // every dashboard read, webhook fallback and backfill UPDATE scans.
+    const db = createMigratedTestD1();
+    const plan = db.raw
+      .query("EXPLAIN QUERY PLAN SELECT id FROM review_targets WHERE bot_id = 'bot-1'")
+      .all() as Array<{ detail: string }>;
+    expect(plan.some((p) => p.detail.includes("USING INDEX idx_review_targets_bot_id"))).toBe(true);
+    expect(plan.some((p) => p.detail.includes("SCAN review_targets"))).toBe(false);
+  });
+
   test("creates the target tables with the contract's columns, defaults and checks", () => {
     const db = createMigratedTestD1();
     expect(columnNames(db, "review_targets")).toEqual(TARGET_COLUMNS);

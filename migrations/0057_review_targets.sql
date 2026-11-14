@@ -59,6 +59,13 @@ CREATE TABLE review_targets (
   deleted_at TEXT
 );
 
+-- The bot's targets are looked up by bot id on every dashboard read
+-- (`resolveInWorkspace`), every webhook resolution fallback (`resolve`) and
+-- both attribution backfills below. The partial unique index cannot serve a
+-- `WHERE bot_id = ?` scan (it is only usable when `installation_id` is known),
+-- so this is its own index.
+CREATE INDEX idx_review_targets_bot_id ON review_targets(bot_id);
+
 -- One installation binds to one target: a second claim of the same
 -- (bot, installation) would make webhook resolution ambiguous. An unbound
 -- target (NULL) is outside the index on purpose — the create path writes it.
