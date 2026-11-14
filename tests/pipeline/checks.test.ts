@@ -222,7 +222,7 @@ describe("beginCheck — the create contract", () => {
     expect(raw.head_sha).toBe(SHA);
     expect(raw.owner).toBe("acme");
     expect(raw.repo).toBe("widgets");
-    expect(raw.status).toBe("in_progress");
+    expect(raw.status).toBe("queued");
     // spec §7.9 / RL-12: details_url is omitted ENTIRELY (not null, not "").
     expect("details_url" in raw).toBe(false);
     // No caller-chosen run identity is ever sent on create.
@@ -3298,6 +3298,133 @@ describe("markQueuedBehindInflight — the held-check relabel is bounded", () =>
     const warns: string[] = [];
 
     expect(await relabel(adapterFor(db, null), warns)).toBe(false);
+    expect(warns).toHaveLength(0);
+  });
+});
+
+describe("markInProgress — the queued → in_progress promotion (spec §7.9)", () => {
+  const promote = (
+    adapter: ReturnType<typeof adapterFor>,
+    identity: CheckIdentity,
+    lease: Lease,
+    warns: string[] = [],
+    updateBudgetMs = 1_000,
+  ) =>
+    adapter.markInProgress!({
+      identity,
+      lease,
+      summary: "Review started for 0123456 — this run reports the review of this commit.",
+      updateBudgetMs,
+      warn: (detail) => warns.push(detail),
+    });
+
+  test("sends in_progress on the PERSISTED run id, carrying only the one summary", async () => {
+    const db = await seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
+    const warns: string[] = [];
+
+    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns)).toBe(true);
+
+    expect(warns).toHaveLength(0);
+    expect(fake.updates).toHaveLength(1);
+    const raw = fake.updates[0]!.raw;
+    expect(raw.status).toBe("in_progress");
+    // The ids come from the persisted row, never from the caller.
+    expect(raw.check_run_id).toBe(4242);
+    expect(raw.output).toEqual({
+      title: CHECK_NAME,
+      summary: "Review started for 0123456 — this run reports the review of this commit.",
+    });
+    // A promotion is NON-terminal: no conclusion may ride it.
+    expect("conclusion" in raw).toBe(false);
+  });
+
+  test("an attempt with no attached run is refused without a send", async () => {
+    const db = await seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
+    const warns: string[] = [];
+
+    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns)).toBe(false);
+
+    expect(fake.updates).toHaveLength(0);
+    expect(warns).toHaveLength(0);
+  });
+
+  test("a lease that is no longer live refuses the send", async () => {
+    const db = await seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
+    CLOCK = lease.untilMs + 1; // the holder expired before this promotion
+
+    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease)).toBe(false);
+    expect(fake.updates).toHaveLength(0);
+  });
+
+  test("a rejected send is ONE warn and false — it never reaches the caller as a throw", async () => {
+    const db = await seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    const fake = fakeChecks({
+      update: () => {
+        throw Object.assign(new Error("boom"), { status: 500 });
+      },
+    });
+    const warns: string[] = [];
+
+    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns)).toBe(false);
+
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("check in-progress failed: boom");
+    expect(fake.updates).toHaveLength(1);
+  });
+
+  test("a send that never answers ends at its per-call budget", async () => {
+    const db = await seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    const fake = fakeChecks({ update: () => new Promise<CheckRunPayload>(() => {}) });
+    const warns: string[] = [];
+    const started = Date.now();
+
+    expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns, 25)).toBe(false);
+
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("exceeded 25ms");
+  });
+
+  test("the lifecycle promotes the handle's owned run, and a handle with no run promotes nothing", async () => {
+    const db = await seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+    const handle = {
+      attemptId: attempt.identity.attemptId,
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      lease,
+    };
+    const warns: string[] = [];
+    const summary = "Review started for 0123456 — this run reports the review of this commit.";
+
+    // Not attached yet: nothing to promote, and nothing is sent.
+    expect(await lifecycle.markInProgress({ handle, summary, updateBudgetMs: 1_000, warn: (d) => warns.push(d) })).toBe(false);
+    expect(fake.updates).toHaveLength(0);
+
+    await attachedRun(db, attempt, lease, 4242);
+    expect(await lifecycle.markInProgress({ handle, summary, updateBudgetMs: 1_000, warn: (d) => warns.push(d) })).toBe(true);
+    expect(fake.updates).toHaveLength(1);
+    expect(fake.updates[0]!.params.output).toEqual({ title: CHECK_NAME, summary });
     expect(warns).toHaveLength(0);
   });
 });

@@ -76,6 +76,7 @@ import {
   type CheckRunPayload,
   type ChecksAdapter,
   type ChecksCreateParams,
+  type ChecksInProgressParams,
   type ChecksOctokit,
   type ChecksRelabelParams,
   type ChecksUpdateParams,
@@ -5958,7 +5959,8 @@ function scriptedChecks(): ChecksOctokit {
             name: params.name,
             head_sha: params.head_sha,
             external_id: params.external_id,
-            status: "in_progress",
+            // The adapter creates `queued`; the promotion moves it later.
+            status: params.status,
             conclusion: null,
             app: { id: TEST_GITHUB_APP_ID },
           };
@@ -5974,11 +5976,14 @@ function scriptedChecks(): ChecksOctokit {
           // A request WITHOUT status/conclusion is the held-check relabel: it
           // moves the text only, so the run must stay exactly as it was —
           // writing `completed` with a null conclusion would fabricate a state
-          // the API never produces.
+          // the API never produces. A `queued` → `in_progress` promotion moves
+          // the status and stops short of a conclusion.
           const updated: CheckRunPayload =
-            "status" in params
+            "conclusion" in params
               ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
-              : run;
+              : "status" in params
+                ? { ...run, status: "in_progress" }
+                : run;
           checkRuns.set(params.check_run_id, updated);
           return { data: updated };
         },
@@ -6082,7 +6087,7 @@ function beginInput(sha: string, executionDeadlineMs: number) {
 }
 
 describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
-  test("check lifecycle: a published review creates one in-progress run and terminalizes success when the review meets the App gate", async () => {
+  test("check lifecycle: a published review creates one queued run, promotes it in-progress, and terminalizes success when the review meets the App gate", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
@@ -6093,13 +6098,20 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // Exactly one create and one terminal update — nothing else.
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    // Exactly one create, ONE promotion (queued → in_progress when the review
+    // starts) and one terminal update — nothing else.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const create = checkRequests[0]!.params as unknown as ChecksCreateParams;
-    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    const promotion = checkRequests[1]!.params as unknown as ChecksInProgressParams;
+    const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(create.name).toBe(CHECK_NAME);
     expect(create.head_sha).toBe(SHA);
-    expect(create.status).toBe("in_progress");
+    expect(create.status).toBe("queued");
+    expect(promotion.status).toBe("in_progress");
+    expect(promotion.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
+    expect(promotion.output.summary).toBe(
+      `Review started for ${SHA.slice(0, 7)} — this run reports the review of this commit.`,
+    );
     expect(create.owner).toBe("acme");
     expect(create.repo).toBe("widgets");
     expect("details_url" in (checkRequests[0]!.params as object)).toBe(false);
@@ -6121,9 +6133,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(revParseIdx).toBeGreaterThan(-1);
     expect(runnerIdx).toBeGreaterThan(revParseIdx);
     expect(checkRequests[0]!.sandboxCalls).toBe(0);
-    expect(checkRequests[1]!.sandboxCalls).toBeGreaterThan(runnerIdx);
+    // The promotion is part of the claim step too: it lands before the
+    // container, and the terminal send still waits for the publication.
+    expect(checkRequests[1]!.sandboxCalls).toBe(0);
+    expect(checkRequests[2]!.sandboxCalls).toBeGreaterThan(runnerIdx);
     expect(postIdx).toBeGreaterThan(-1);
-    expect(checkRequests[1]!.commenterCalls).toBeGreaterThan(postIdx);
+    expect(checkRequests[2]!.commenterCalls).toBeGreaterThan(postIdx);
 
     // Durable row: the run is OUR attached run, the intent was frozen BEFORE
     // the update, the observation came from the validated response, and the
@@ -6145,6 +6160,65 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.publication_id).toBe(pub.id);
   });
 
+  test("check lifecycle: the review's begin promotes the queued run exactly once, before the container starts", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    const real = lifecycleFor(db);
+    let promotions = 0;
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+      checks: {
+        begin: (input) => real.begin(input),
+        markInProgress: (input) => {
+          promotions += 1;
+          return real.markInProgress(input);
+        },
+        terminalize: (input) => real.terminalize(input),
+      },
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    expect(promotions).toBe(1);
+    const promotion = checkRequests[1]!;
+    expect(promotion.op).toBe("update");
+    expect(promotion.params.status).toBe("in_progress");
+    expect(promotion.params.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
+    expect(promotion.params.output).toEqual({
+      title: CHECK_NAME,
+      summary: `Review started for ${SHA.slice(0, 7)} — this run reports the review of this commit.`,
+    });
+    // The status is truthful while the review works, not only when it ends.
+    expect(promotion.sandboxCalls).toBe(0);
+    expect(checkRowFor(db, SHA).observed).toBe("success");
+  });
+
+  test("check lifecycle: a refused promotion is ONE warn and the review runs anyway", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    const real = lifecycleFor(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+      checks: {
+        begin: (input) => real.begin(input),
+        markInProgress: async () => {
+          throw new Error("promotion boom");
+        },
+        terminalize: (input) => real.terminalize(input),
+      },
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    expect(h.logLines.filter((line) => line.fields.event === "check_in_progress_failed")).toHaveLength(1);
+    // The handle still returned, so the run still terminalized from proof.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    expect(checkRowFor(db, SHA).observed).toBe("success");
+    expect(publicationRow(db).phase).toBe("applied");
+  });
+
   test("check lifecycle: duplicate delivery takes no second claim and no second remote run", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
@@ -6158,8 +6232,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(h.makeBatch(makePayload())); // the same message delivered twice
 
     // The second delivery is acked by the idempotency check BEFORE step 4, so
-    // it never reaches the Check lane: one attempt, one run, one publication.
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    // it never reaches the Check lane: one attempt, one run (with its one
+    // promotion), one publication.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     expect(checkRows(db)).toHaveLength(1);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(h.kvPuts).toHaveLength(1);
@@ -6393,7 +6468,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // recorded as `completed` with a null conclusion would fabricate a state
     // GitHub never produces and hide a settlement behind the request log.
     const run = checkRuns.get(FIRST_CHECK_RUN_ID + 1)!;
-    expect(run.status).toBe("in_progress");
+    // Created `queued` and never promoted (the guard refused before begin), so
+    // the text-only relabels left it exactly as the attach created it.
+    expect(run.status).toBe("queued");
     expect(run.conclusion).toBeNull();
   });
 
@@ -6498,8 +6575,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     // The attempt begun at step 4 is closed ONCE, from the code path's honest
     // knowledge (no publication send ever happened) — and never a second row.
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
-    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
+    const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
     expect(update.output.summary).toBe(CHECK_SUMMARIES.prePublicationFailure("unknown pipeline failure"));
     expect(checkRows(db)).toHaveLength(1);
@@ -6522,8 +6599,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
-    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
+    const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
     expect(update.output.summary).toBe(CHECK_SUMMARIES.degraded);
     const pub = publicationRow(db);
@@ -6549,8 +6626,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
-    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
+    const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
     expect(update.output.summary).toBe(CHECK_SUMMARIES.degradedNotPosted);
     // ONE attempt: the rejection closes the same row, it never mints a second.
@@ -6621,8 +6698,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
-    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
+    const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("success");
     expect(update.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
     const row = checkRowFor(db, SHA);
@@ -6663,8 +6740,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     // No proof ⇒ the Check must NOT claim success; the same attempt closes as
     // the truthful unconfirmed failure.
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
-    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
+    const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
     expect(update.output.summary).toBe(CHECK_SUMMARIES.unconfirmed);
     const row = checkRowFor(db, SHA);
@@ -6895,7 +6972,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const row = checkRowFor(db, SHA);
     // One attempt, its frozen success intent retained, observed NOT advanced.
     expect(checkRows(db)).toHaveLength(1);
@@ -7141,8 +7218,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(publicationRow(db).phase).toBe("applied");
     expect(h.kvPuts).toHaveLength(1);
-    // Exactly one create; NO update could be sent without the adapter.
-    expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
+    // Exactly one create plus its promotion (the adapter was still there at
+    // begin); NO TERMINAL update could be sent once it was gone.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
 
     const row = checkRowFor(db, SHA);
     // The attempt keeps its identity and the run it created.
@@ -7189,7 +7267,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
                 name: params.name,
                 head_sha: params.head_sha,
                 external_id: params.external_id,
-                status: "in_progress",
+                status: params.status,
                 conclusion: null,
                 app: { id: TEST_GITHUB_APP_ID },
               });
@@ -7197,11 +7275,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             },
             async update(params) {
               const run = checkRuns.get(params.check_run_id)!;
-              // Partial PATCH (a relabel) moves no terminal state.
+              // Partial PATCH (a relabel) moves no terminal state; a
+              // `queued` → `in_progress` promotion moves only the status.
               const updated: CheckRunPayload =
-                "status" in params
+                "conclusion" in params
                   ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
-                  : run;
+                  : "status" in params
+                    ? { ...run, status: "in_progress" }
+                    : run;
               checkRuns.set(params.check_run_id, updated);
               return { data: updated };
             },
@@ -7296,7 +7377,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
                 name: params.name,
                 head_sha: params.head_sha,
                 external_id: params.external_id,
-                status: "in_progress",
+                status: params.status,
                 conclusion: null,
                 app: { id: TEST_GITHUB_APP_ID },
               };
@@ -7400,7 +7481,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
                 name: params.name,
                 head_sha: params.head_sha,
                 external_id: params.external_id,
-                status: "in_progress",
+                status: params.status,
                 conclusion: null,
                 app: { id: TEST_GITHUB_APP_ID },
               });
@@ -7408,11 +7489,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             },
             async update(params) {
               const run = checkRuns.get(params.check_run_id)!;
-              // Partial PATCH (a relabel) moves no terminal state.
+              // Partial PATCH (a relabel) moves no terminal state; a
+              // `queued` → `in_progress` promotion moves only the status.
               const updated: CheckRunPayload =
-                "status" in params
+                "conclusion" in params
                   ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
-                  : run;
+                  : "status" in params
+                    ? { ...run, status: "in_progress" }
+                    : run;
               checkRuns.set(params.check_run_id, updated);
               return { data: updated };
             },
@@ -7491,7 +7575,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(h.makeBatch(makePayload({ pr_number: 42 })));
     await consumer(h.makeBatch(makePayload({ pr_number: 43 })));
 
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "create", "update"]);
+    expect(checkRequests.map((r) => r.op)).toEqual([
+      "create",
+      "update",
+      "update",
+      "create",
+      "update",
+      "update",
+    ]);
     const rowA = checkRowForPr(db, 42);
     const rowB = checkRowForPr(db, 43);
     for (const row of [rowA, rowB]) {
@@ -7749,11 +7840,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
 
-    // create(A) — then create(B) + its terminal update. A's `superseded` send
-    // is owned by the minute recovery cron, so nothing on the new head's path
-    // waits for it; the early run is still local-terminal immediately.
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "create", "update"]);
-    expect((checkRequests[2]!.params as ChecksUpdateParams).check_run_id).toBe(FIRST_CHECK_RUN_ID + 2);
+    // create(A) + its promotion, then create(B) + its promotion and B's
+    // terminal update. A's `superseded` send is owned by the minute recovery
+    // cron, so nothing on the new head's path waits for it; the early run is
+    // still local-terminal immediately.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "create", "update", "update"]);
+    expect((checkRequests[4]!.params as ChecksUpdateParams).check_run_id).toBe(FIRST_CHECK_RUN_ID + 2);
 
     const early = checkRowFor(db, SHA);
     expect(early.desired).toBe("failure");
@@ -7781,19 +7873,23 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // The operator terminalize wait is 5 s: if the supersede path used it, this
     // case would take at least that long.
     seedCheckBudget(db, "review.check.terminalize_timeout_ms", "5000");
-    // The EARLY run's update parks forever. The supersede path must never send
-    // it (recovery does), so this override is never even reached.
+    // The EARLY run's TERMINAL update parks forever. The supersede path must
+    // never send it (recovery does), so this override is never even reached;
+    // the early run's queued → in_progress promotion is a different,
+    // non-terminal send and does land.
     let earlyUpdateSent = false;
     checkRequestOverrides.update = (params) => {
-      if (params.check_run_id === FIRST_CHECK_RUN_ID + 1) {
+      if (params.check_run_id === FIRST_CHECK_RUN_ID + 1 && "conclusion" in params) {
         earlyUpdateSent = true;
         return Promise.withResolvers<CheckRunPayload>().promise;
       }
       const run = checkRuns.get(params.check_run_id)!;
       const updated: CheckRunPayload =
-        "status" in params
+        "conclusion" in params
           ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
-          : run;
+          : "status" in params
+            ? { ...run, status: "in_progress" }
+            : run;
       checkRuns.set(params.check_run_id, updated);
       return updated;
     };
@@ -7808,7 +7904,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // The old run's update was never sent, and the operation order proves the
     // new head's path never went through the terminalize budget.
     expect(earlyUpdateSent).toBe(false);
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "create", "update"]);
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "create", "update", "update"]);
     expect(checkRowFor(db, SHA).holder).toBeNull();
     expect(checkRowFor(db, SHA2).observed).toBe("success");
     expect(publicationRow(db).phase).toBe("applied");
@@ -7853,6 +7949,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       // The handoff reported no release, so NO claim was made at the new head —
       // the contradicted attempt may still hold this invocation's lease.
       expect(beginCalls, step).toEqual([SHA]);
+      // The seam double here supplies no `markInProgress`, so the run keeps
+      // only its create.
       expect(checkRequests.map((r) => r.op), step).toEqual(["create"]);
       expect(checkRows(db), step).toHaveLength(1);
       const early = checkRows(db)[0]!;
@@ -7920,8 +8018,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       // superseded; only the new head's admitted run is closed by the hit, and
       // it closes with the head's INHERITED result: both variants have an
       // unreadable baseline here (no review row / no tally), which fails closed.
-      expect(checkRequests.map((r) => r.op), dedup).toEqual(["create", "create", "update"]);
-      expect((checkRequests[2]!.params as ChecksUpdateParams).conclusion, dedup).toBe("failure");
+      expect(checkRequests.map((r) => r.op), dedup).toEqual([
+        "create",
+        "update",
+        "create",
+        "update",
+        "update",
+      ]);
+      expect((checkRequests[4]!.params as ChecksUpdateParams).conclusion, dedup).toBe("failure");
 
       const early = checkRowFor(db, SHA);
       expect(early.desired, dedup).toBe("failure");
@@ -7958,8 +8062,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // The claim happens before the dedup read, so the run it created is
     // terminalized before ack — carrying the reviewed head's own gate result
     // through the empty-increment inheritance, not a fresh `neutral`.
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
-    const update = checkRequests[1]!.params as ChecksUpdateParams;
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
+    const update = checkRequests[2]!.params as ChecksUpdateParams;
     expect(update.conclusion).toBe("success");
     // The SAME head is the subject and the baseline, so the summary names it
     // once — `since <head>` would be nonsense.
@@ -7986,10 +8090,11 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The claim exists and was handed to recovery — create only, no terminal
-    // update. Left on the consumer's lease it would sit `in_progress` for the
-    // full execution window and then close red on a reviewed commit.
-    expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
+    // The claim exists and was handed to recovery — create plus its promotion,
+    // no terminal update. Left on the consumer's lease it would sit
+    // `in_progress` for the full execution window and then close red on a
+    // reviewed commit.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const row = checkRowFor(db, SHA);
     // The hand-off LINKED the journal row it found: the proof that publication
     // will carry is this attempt's to conclude from, so nothing is frozen here

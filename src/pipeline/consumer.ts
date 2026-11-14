@@ -223,6 +223,7 @@ import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandb
 // §7.10 Check seam implementation: `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
 import {
+  CHECK_SUMMARIES,
   createCheckBeginLatch,
   createCheckLifecycle,
   type CheckBeginLatch,
@@ -441,8 +442,11 @@ export type ConsumerLogFields = {
    * when a write threw — the message names which write refused. A COMPLETED
    * hand-off has no event of its own; its only line is the info above it
    * ("publication journal hit"), printed before the link.
+   * `check_in_progress_failed` (union widened ADDITIVELY): the best-effort
+   * promotion of a delivery-created (`queued`) run to `in_progress` failed or
+   * ran out of budget — the review itself is unaffected.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -1220,6 +1224,22 @@ export type CheckLifecycleHooks = {
      */
     latch?: CheckBeginLatch;
   }): Promise<CheckHandle | null>;
+  /**
+   * §7.9 status truthfulness (optional, additive): the run was created
+   * `queued` at delivery acceptance, so the review's own begin is what makes
+   * the public status `in_progress`. Resolves `false` when there is nothing to
+   * promote or the bounded send failed; a hook that cannot reach a Checks
+   * surface simply omits this, and the review never waits on it.
+   */
+  markInProgress?(input: {
+    handle: CheckHandle;
+    /** The one text the promoted run carries. */
+    summary: string;
+    /** `review.check.update_timeout_ms` — its own bound, not the begin hook's. */
+    updateBudgetMs: number;
+    /** One warn when the best-effort send failed or ran out of budget. */
+    warn: (detail: string) => void;
+  }): Promise<boolean>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
     outcome: CheckTerminalOutcome;
     /**
@@ -4233,6 +4253,53 @@ async function processMessage(
   };
 
   /**
+   * The run is created `queued` at delivery acceptance (spec §7.9), so the
+   * review's own begin is what makes the public status truthful. Promoted
+   * here under the operator's update budget — NEVER the begin hook's 2 s,
+   * which bounds a different step — and never on the review's critical path
+   * past that budget: a Check fault only warns.
+   */
+  const promoteCheckInProgress = async (handle: CheckHandle): Promise<void> => {
+    if (deps.checks?.markInProgress === undefined) return;
+    const budgetMs = checkBudgets?.updateMs ?? CHECK_UPDATE_DEFAULT;
+    const warn = (detail: string) =>
+      deps.log.warn(
+        {
+          ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
+          attempt_id: handle.attemptId,
+          event: "check_in_progress_failed",
+        },
+        detail,
+      );
+    try {
+      const promoted = await boundedBestEffort(
+        deps.checks
+          .markInProgress({
+            handle,
+            summary: CHECK_SUMMARIES.inProgress(handle.headSha.slice(0, 7)),
+            updateBudgetMs: budgetMs,
+            warn,
+          })
+          .catch((err: unknown) => {
+            // A rejection that lands after the deadline still gets its warn
+            // instead of becoming an unhandled rejection.
+            warn(`check in-progress promotion failed (the review is unaffected): ${err instanceof Error ? err.message : String(err)}`);
+            return false;
+          }),
+        budgetMs,
+      );
+      if (promoted === null) {
+        warn(
+          `check in-progress promotion skipped: it exceeded ${budgetMs}ms (the review is unaffected)`,
+        );
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      warn(`check in-progress promotion failed (the review is unaffected): ${detail}`);
+    }
+  };
+
+  /**
    * The §7.10 begin hook over one SHA, isolated exactly as before: its own
    * latch (never shared or reset), the 2 s consumer bound, and a throw that
    * only warns — a Check never prevents the review.
@@ -4244,8 +4311,9 @@ async function processMessage(
     // message stays abandoned for its whole lifetime (QC1-001 replacement
     // race).
     const beginLatch = createCheckBeginLatch();
+    let handle: CheckHandle | null;
     try {
-      return await withHookTimeout(
+      handle = await withHookTimeout(
         deps.checks.begin({
           scope,
           githubAppId,
@@ -4275,6 +4343,9 @@ async function processMessage(
       );
       return null;
     }
+    // A handle means THIS review is starting, so the run may say so.
+    if (handle !== null) await promoteCheckInProgress(handle);
+    return handle;
   };
 
   try {

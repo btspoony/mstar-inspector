@@ -1,8 +1,9 @@
 /**
  * GitHub Checks adapter (spec review-lifecycle §7.9).
  *
- * One advisory Check per review attempt: created `in_progress` at the
- * authoritative head SHA and terminalized from PERSISTED publication proof.
+ * One advisory Check per review attempt: created `queued` at the delivery
+ * acceptance head SHA, promoted to `in_progress` when the review itself starts,
+ * and terminalized from PERSISTED publication proof.
  * The adapter is the only place a Check HTTP request is built, and it builds no
  * credential: the client comes from `src/pipeline/comment.ts`'s single per-App
  * `createAppAuth` path through the SAME purpose-scoped `review-write` octokit
@@ -106,7 +107,8 @@ export type ChecksCreateParams = {
   name: string;
   head_sha: string;
   external_id: string;
-  status: "in_progress";
+  /** Created `queued`: the review has not started yet (promoted by `markInProgress`). */
+  status: "queued";
 };
 
 /**
@@ -138,6 +140,15 @@ export type ChecksUpdateParams = ChecksRelabelParams & {
   conclusion: CheckConclusion["desired"];
 };
 
+/**
+ * The NON-TERMINAL promotion: the run is created `queued` when the delivery is
+ * accepted, and the review's own begin moves it to `in_progress` with the text
+ * that says so. No conclusion — a run carrying one is finished.
+ */
+export type ChecksInProgressParams = ChecksRelabelParams & {
+  status: "in_progress";
+};
+
 export type ChecksListParams = {
   owner: string;
   repo: string;
@@ -166,7 +177,9 @@ export type ChecksOctokit = {
   rest: {
     checks: {
       create(params: ChecksCreateParams): Promise<{ data: CheckRunPayload }>;
-      update(params: ChecksRelabelParams): Promise<{ data: CheckRunPayload }>;
+      update(
+        params: ChecksRelabelParams | ChecksInProgressParams | ChecksUpdateParams,
+      ): Promise<{ data: CheckRunPayload }>;
       get(params: { owner: string; repo: string; check_run_id: number }): Promise<{ data: CheckRunPayload }>;
       listForRef(params: ChecksListParams): Promise<{ data: ChecksListPage }>;
     };
@@ -285,6 +298,25 @@ export type ChecksAdapter = {
     | { kind: "completed"; remote: CheckRemote }
     | { kind: "unavailable"; reason: string; requests: number }
   >;
+  /**
+   * Promote the run this attempt created to `in_progress` when the review
+   * actually starts (spec §7.9): the create happens at delivery acceptance, so
+   * until the review begins the truthful state is `queued`. Proven on the live
+   * lease and the PERSISTED run id, exactly like `completeCheck`; bounded by
+   * `updateBudgetMs`, and a refusal, rejection or budget overrun answers
+   * `false` (one warn through `warn`) — it never throws, because a Check never
+   * blocks or delays the review. Optional like the relabel beside it: an
+   * implementation or double without it simply promotes nothing.
+   */
+  markInProgress?(input: {
+    identity: CheckIdentity;
+    lease: Lease;
+    summary: string;
+    /** The operator-configured update budget for THIS call; omitted → the adapter-level fallback. */
+    updateBudgetMs?: number;
+    /** One warn when the send failed or ran out of budget — never a throw. */
+    warn: (detail: string) => void;
+  }): Promise<boolean>;
   /**
    * Relabel an owned run WITHOUT moving it: the text says this delivery is
    * QUEUED behind the PR's live review (the in-flight guard held it). No status,
@@ -409,18 +441,21 @@ export function createChecksAdapter(deps: ChecksDeps): ChecksAdapter {
     beginCheck: (input) => beginCheckWith(deps, input),
     adoptCheckRun: (input) => adoptCheckRunWith(deps, input),
     completeCheck: (input) => completeCheckWith(deps, input),
+    markInProgress: (input) => markInProgressWith(deps, input),
     markQueuedBehindInflight: (input) => markQueuedBehindInflightWith(deps, input),
     fetchCheckRun: (input) => fetchCheckRunWith(deps, input),
   };
 }
 
 /**
- * Create the in-progress run for an attempt this invocation holds (spec §7.9
+ * Create the run for an attempt this invocation holds (spec §7.9
  * "Create/adopt"): prove the persisted row still belongs to this identity and
  * live lease, prove no run is attached yet, then send `external_id` with NO
- * `details_url`. A response failing the identity check is `unavailable` — an
- * unprovable create is never adopted, and the attempt stays `unknown` for
- * read-only recovery rather than blind re-creation.
+ * `details_url` and `status: "queued"` — the review has not started, so the
+ * public surface must not claim it has (`markInProgress` promotes it when the
+ * review's own begin runs). A response failing the identity check is
+ * `unavailable` — an unprovable create is never adopted, and the attempt stays
+ * `unknown` for read-only recovery rather than blind re-creation.
  */
 async function beginCheckWith(
   deps: ChecksDeps,
@@ -485,7 +520,7 @@ async function beginCheckWith(
       name: CHECK_NAME,
       head_sha: identity.headSha,
       external_id: identity.externalId,
-      status: "in_progress",
+      status: "queued",
     }),
   );
   if ("failure" in attempted.outcome) {
@@ -678,6 +713,60 @@ async function completeCheckWith(
     return { kind: "unavailable", requests: attempted.sent, reason: "check update response is not the intended terminal state" };
   }
   return { kind: "completed", remote };
+}
+
+/**
+ * Promote the created-but-not-started run to `in_progress` (spec §7.9): the
+ * delivery acceptance creates it `queued`, and only the review's own begin may
+ * say it is running. Ownership and the run id come from the PERSISTED row, so
+ * an attempt with no attached run, a lost lease or an unresolvable client
+ * refuses without a send.
+ *
+ * Bounded and never rejecting: it sits on the review's critical path right
+ * after `begin`, so a hanging PATCH must end at the budget instead of holding
+ * the round — past it the caller gets `false` and one warn, and the review runs
+ * regardless.
+ */
+async function markInProgressWith(
+  deps: ChecksDeps,
+  input: {
+    identity: CheckIdentity;
+    lease: Lease;
+    summary: string;
+    updateBudgetMs?: number;
+    warn: (detail: string) => void;
+  },
+): Promise<boolean> {
+  const owned = await guardOwnership(deps, input.identity, input.lease, deps.nowMs());
+  if (owned.kind === "unavailable") return false;
+  const runId = owned.data.checkRunId;
+  // Nothing to promote: the run this attempt created is not attached here.
+  if (runId === null) return false;
+  const { scope } = owned.data.identity;
+  const budgetMs = input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT;
+  const send = (async (): Promise<boolean> => {
+    const resolvedClient = await clientFor(deps, scope);
+    if ("reason" in resolvedClient) return false;
+    const client = resolvedClient.client;
+    if (!hasChecksMethod(client, "update")) return false;
+    // Same fresh live-lease proof as the terminal send: token minting can cross
+    // `lease.untilMs`, and an expired holder must not speak for the run.
+    if (!(await stillLive(deps, owned.data.identity, input.lease))) return false;
+    await client.rest.checks.update({
+      owner: scope.owner,
+      repo: scope.repo,
+      check_run_id: runId,
+      status: "in_progress",
+      output: { title: CHECK_NAME, summary: input.summary },
+    });
+    return true;
+  })();
+  const outcome = (await sendRequestsWithin(send, budgetMs, "check in-progress")).outcome;
+  if (typeof outcome !== "boolean") {
+    input.warn(surfaceFailure(outcome.failure, "check in-progress"));
+    return false;
+  }
+  return outcome;
 }
 
 /**
@@ -948,6 +1037,11 @@ export const CHECK_SUMMARIES = {
   gateUnreadableConfig: (sha7: string) =>
     `Review gate could not be evaluated for ${sha7}: the App's gate configuration could not be read.`,
   degraded: "Review output was invalid; a degraded summary comment was published.",
+  /**
+   * The promotion text: the run created at delivery acceptance reports THIS
+   * commit's review from the moment the review starts (§7.9).
+   */
+  inProgress: (sha7: string) => `Review started for ${sha7} — this run reports the review of this commit.`,
   prePublicationFailure: (reason: string) =>
     `Review execution failed before publication: ${reason}. No review was published.`,
   degradedNotPosted: "Review output was invalid and the degraded notice was not published.",
@@ -1350,6 +1444,23 @@ export type CheckLifecycle = {
     updateBudgetMs?: number;
   }): Promise<void>;
   /**
+   * Promote the run this handle's attempt created to `in_progress`: the run is
+   * created `queued` at delivery acceptance, so the review's own begin is what
+   * makes the public status truthful. Best-effort by contract — `false` when
+   * there is nothing to promote (no run, no Checks surface, a lease this
+   * invocation no longer holds) or the bounded send failed; one warn rides
+   * `warn`, and nothing here can block the review.
+   */
+  markInProgress(input: {
+    handle: CheckLifecycleHandle;
+    /** The one text the promoted run carries. */
+    summary: string;
+    /** The operator-configured bound; omitted → the adapter, then the store's default. */
+    updateBudgetMs?: number;
+    /** One warn when the best-effort send failed or ran out of budget. */
+    warn: (detail: string) => void;
+  }): Promise<boolean>;
+  /**
    * §7.9 skip settlement: the delivery was SKIPPED before execution (an
    * idempotency hit, a publication-journal hand-off, an in-flight guard
    * rejection, a paused App), so its attached run has no review to report and
@@ -1473,8 +1584,9 @@ export type CheckAttachResult =
 /**
  * Attach a Check to an ACCEPTED delivery (spec §7.7 step 4 / §7.9).
  *
- * The delivery path claims the attempt, creates the `in_progress` run against
- * the payload's head SHA and gives the row straight back, so the run appears
+ * The delivery path claims the attempt, creates the `queued` run against
+ * the payload's head SHA (the review's own begin promotes it to `in_progress`,
+ * §7.9) and gives the row straight back, so the run appears
  * within seconds of the webhook instead of when a worker finally starts the
  * message. The row keeps `create_state = 'known'` and the run id — the durable
  * facts the consumer's `begin` adopts — and the long
@@ -1861,6 +1973,30 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         headSha: identity.headSha,
         lease: claim.lease,
       };
+    },
+
+    async markInProgress(input) {
+      const adapter = deps.getAdapter(input.handle.scope);
+      if (adapter === null) return false;
+      // The adapter proves ownership from the PERSISTED row and sends that
+      // row's run id, so the identity it is handed is the row's — never one
+      // rebuilt from the handle.
+      let attempt: CheckAttempt | null;
+      try {
+        attempt = await getCheckAttempt(deps.db, input.handle.attemptId);
+      } catch {
+        return false;
+      }
+      if (attempt === null) return false;
+      return (
+        (await adapter.markInProgress?.({
+          identity: attempt.identity,
+          lease: input.handle.lease,
+          summary: input.summary,
+          updateBudgetMs: input.updateBudgetMs,
+          warn: input.warn,
+        })) ?? false
+      );
     },
 
     async settleSkipped(input) {
