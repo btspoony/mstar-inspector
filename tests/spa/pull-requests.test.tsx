@@ -65,7 +65,7 @@ const IDENTITY_APP = {
 const identityPayload: SettingsPayload = {
   can_manage: false,
   workspace_id: "ws_0123456789abcdefghijkl",
-  target_id: 501,
+  target_id: "rt-501",
   app: IDENTITY_APP,
 };
 

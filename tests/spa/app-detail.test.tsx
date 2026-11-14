@@ -60,7 +60,7 @@ const IDENTITY_APP = {
 const identityPayload = {
   can_manage: false as const,
   workspace_id: "ws_0123456789abcdefghijkl",
-  target_id: 1,
+  target_id: "rt-1",
   app: IDENTITY_APP,
 };
 
@@ -70,7 +70,7 @@ const BOOT = { locale: "en" as const, login: "mallory", name: null };
 const managePayload = {
   can_manage: true as const,
   workspace_id: "ws_0123456789abcdefghijkl",
-  target_id: 1,
+  target_id: "rt-1",
   app: {
     ...IDENTITY_APP,
     last_webhook_at: null,
@@ -122,16 +122,17 @@ describe("settings payload parser — the top-level target id (fail closed)", ()
     // review configuration's id beside workspace_id; the parsed discriminant
     // is unchanged.
     expect(parseSettings(identityPayload)?.can_manage).toBe(false);
-    expect(parseSettings(identityPayload)?.target_id).toBe(1);
+    expect(parseSettings(identityPayload)?.target_id).toBe("rt-1");
     expect(parseSettings(managePayload)?.can_manage).toBe(true);
+    expect(parseSettings(managePayload)?.target_id).toBe("rt-1");
     const { target_id: _identityTarget, ...identityWithoutTarget } = identityPayload;
     const { target_id: _manageTarget, ...manageWithoutTarget } = managePayload;
     // A payload that cannot name its target is not a settings read.
     expect(parseSettings(identityWithoutTarget)).toBeNull();
     expect(parseSettings(manageWithoutTarget)).toBeNull();
-    expect(parseSettings({ ...identityPayload, target_id: "t1" })).toBeNull();
-    expect(parseSettings({ ...managePayload, target_id: null })).toBeNull();
-    expect(parseSettings({ ...managePayload, target_id: 1.5 })).toBeNull();
+    expect(parseSettings({ ...identityPayload, target_id: null })).toBeNull();
+    expect(parseSettings({ ...managePayload, target_id: 1 })).toBeNull();
+    expect(parseSettings({ ...managePayload, target_id: "" })).toBeNull();
   });
 });
 

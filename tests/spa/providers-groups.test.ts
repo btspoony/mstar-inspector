@@ -40,7 +40,7 @@ function payload(overrides: Partial<SettingsManagePayload> = {}): SettingsManage
   return {
     can_manage: true,
     workspace_id: "ws_test",
-    target_id: 501,
+    target_id: "rt-501",
     app: {
       github_app_id: 1,
       status: "active",

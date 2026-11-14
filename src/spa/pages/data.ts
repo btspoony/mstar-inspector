@@ -551,7 +551,7 @@ export type SettingsReadOnlyPayload = {
    * edits belong to a target. Required on both faces: a payload that cannot
    * name its target is not a settings read.
    */
-  target_id: number;
+  target_id: string;
   app: SettingsIdentityAppMeta;
 };
 
@@ -574,7 +574,7 @@ export type SettingsManagePayload = {
   /** The App's stable workspace id — server-resolved, never a path segment. */
   workspace_id: string;
   /** The review configuration's id every review-policy key below is read from. */
-  target_id: number;
+  target_id: string;
   app: SettingsAppMeta;
   /**
    * The review gate (migration 0045) — the Check's pass condition. `null` =
@@ -1857,7 +1857,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // The review configuration this App resolved to in this workspace (the
   // target every review-policy key belongs to). Required on both faces — a
   // payload that cannot name its target is not a settings read.
-  if (typeof data.target_id !== "number" || !Number.isInteger(data.target_id)) return null;
+  if (typeof data.target_id !== "string" || data.target_id.length === 0) return null;
   if (typeof data.app.status !== "string") return null;
   if (typeof data.app.review_enabled !== "boolean") return null;
   if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;

@@ -259,7 +259,7 @@ describe("members/apps/settings parsers", () => {
     const ok = parseSettings({
       can_manage: true,
       workspace_id: "ws_0123456789abcdefghijkl",
-      target_id: 501,
+      target_id: "rt-501",
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -311,7 +311,7 @@ describe("members/apps/settings parsers", () => {
     const manageBase = {
       can_manage: true,
       workspace_id: "ws_0123456789abcdefghijkl",
-      target_id: 501,
+      target_id: "rt-501",
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -361,7 +361,7 @@ describe("members/apps/settings parsers", () => {
     const base = {
       can_manage: true,
       workspace_id: "ws_0123456789abcdefghijkl",
-      target_id: 501,
+      target_id: "rt-501",
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -428,7 +428,7 @@ describe("members/apps/settings parsers", () => {
     const base = {
       can_manage: true,
       workspace_id: "ws_0123456789abcdefghijkl",
-      target_id: 501,
+      target_id: "rt-501",
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -505,7 +505,7 @@ describe("members/apps/settings parsers", () => {
     const identityBase = {
       can_manage: false,
       workspace_id: "ws_0123456789abcdefghijkl",
-      target_id: 501,
+      target_id: "rt-501",
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -540,7 +540,7 @@ describe("members/apps/settings parsers", () => {
     const manageBase = {
       can_manage: true,
       workspace_id: "ws_0123456789abcdefghijkl",
-      target_id: 501,
+      target_id: "rt-501",
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -678,7 +678,7 @@ describe("members/apps/settings parsers", () => {
     };
     const readOnly = parseSettings({
       workspace_id: "ws_0123456789abcdefghijkl",
-      target_id: 501,
+      target_id: "rt-501",
       can_manage: false,
       app: identityApp,
     });
@@ -691,7 +691,7 @@ describe("members/apps/settings parsers", () => {
     const { created_at: _dropped, ...withoutCreated } = identityApp;
     expect(parseSettings({
       workspace_id: "ws_0123456789abcdefghijkl",
-      target_id: 501,
+      target_id: "rt-501",
       can_manage: false,
       app: withoutCreated,
     })).toBeNull();
@@ -700,7 +700,7 @@ describe("members/apps/settings parsers", () => {
       parseSettings({
         can_manage: true,
         workspace_id: "ws_0123456789abcdefghijkl",
-        target_id: 501,
+        target_id: "rt-501",
         app: {
           github_slug: "demo",
           id: "app-demo",
@@ -783,7 +783,7 @@ describe("provider catalog rows + add selection", () => {
   const manageBase = {
     can_manage: true,
     workspace_id: "ws_0123456789abcdefghijkl",
-    target_id: 501,
+    target_id: "rt-501",
     app: {
       github_slug: "demo",
       id: "app-demo",

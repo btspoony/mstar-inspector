@@ -78,7 +78,7 @@ const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat"
 const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
   workspace_id: "ws_0123456789abcdefghijkl",
-  target_id: 501,
+  target_id: "rt-501",
   app: {
     github_slug: "acme-app",
     id: "app-acme",
@@ -119,7 +119,7 @@ const detailPayload = (): SettingsManagePayload => ({
 const memberPayload = (): SettingsReadOnlyPayload => ({
   can_manage: false,
   workspace_id: "ws_0123456789abcdefghijkl",
-  target_id: 501,
+  target_id: "rt-501",
   app: {
     github_app_id: 1,
     status: "active",
