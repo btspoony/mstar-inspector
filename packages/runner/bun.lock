@@ -5,7 +5,7 @@
     "": {
       "name": "@mstar-inspector/runner",
       "dependencies": {
-        "@mstar-harness/engine": "4.6.0",
+        "@mstar-harness/engine": "4.6.1",
         "@oh-my-pi/pi-coding-agent": "18.18.1",
       },
     },
@@ -19,7 +19,7 @@
 
     "@babel/types": ["@babel/types@7.29.8", "", { "dependencies": { "@babel/helper-string-parser": "^7.29.7", "@babel/helper-validator-identifier": "^7.29.7" } }, "sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg=="],
 
-    "@mstar-harness/engine": ["@mstar-harness/engine@4.6.0", "", { "dependencies": { "mdast-util-from-markdown": "^2.0.3", "mdast-util-gfm": "^3.1.0", "micromark-extension-gfm": "^3.0.0" } }, "sha512-ldyZrrHb1yiMjKplFc+o8EI+HzMXwzCSRNFbjO+J7TpKRjoEN3wLdvIN8yd3JN8ybUiS5h5JPMNxRtv3JXEbiQ=="],
+    "@mstar-harness/engine": ["@mstar-harness/engine@4.6.1", "", { "dependencies": { "mdast-util-from-markdown": "^2.0.3", "mdast-util-gfm": "^3.1.0", "micromark-extension-gfm": "^3.0.0" } }, "sha512-r/G8+iGzwi54cba4iKfecsHE9RUTQUN7XiXhAspDDWdkTKj833jyQAcAHRDPGf0x0gZbHYkkHD0J/9tIr4Jv2w=="],
 
     "@oh-my-pi/omp-stats": ["@oh-my-pi/omp-stats@18.18.1", "", { "dependencies": { "@oh-my-pi/pi-ai": "18.18.1", "@oh-my-pi/pi-catalog": "18.18.1", "@oh-my-pi/pi-utils": "18.18.1", "lucide-react": "^1.24.0", "react": "19.2.7", "react-dom": "19.2.7" }, "bin": { "omp-stats": "src/index.ts" } }, "sha512-pmVxFVbPxEXMAvwpHkubRZgcgKV8nrf7WdzlNIQu42MCxhN89iAU3cG++9/b7caF3rDgKoFUVzTz0eObEaxorw=="],
 

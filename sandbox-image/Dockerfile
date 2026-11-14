@@ -230,6 +230,11 @@
 # `sandbox-image/cli-global/package.json` are image inputs, and the pinned ref
 # is the tree the skills are cloned from; a stale image would run the previous
 # engine and skills against this Worker).
+# rebuild: the runner's engine pin, the CLI global-install pin and the harness
+# clone ref move to 4.6.1 (`packages/runner/package.json`, its lockfile and
+# `sandbox-image/cli-global/package.json` are image inputs, and the pinned ref
+# is the tree the skills are cloned from; a stale image would run the previous
+# engine and skills against this Worker).
 # rebuild: the per-review models.yml carries no image-declared provider anymore
 # (`packages/runner/src/models-synthesis.ts` and the runner input shape in
 # `packages/shared/src/runtime.ts` accept an EMPTY `capabilityHosts` array, and
@@ -356,7 +361,7 @@ RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.c
     && { echo "bun $(/usr/local/bin/bun --version)"; gh --version | head -1; } > /etc/mstar-image-versions \
     && cat /etc/mstar-image-versions
 
-# mstar-harness plugin, pinned ref 109922bb7d4cae3b87956e7c14576500cdca25cf (tag v4.6.0, bumped 2026-11-14).
+# mstar-harness plugin, pinned ref 8ff83b33141b67a353886d5ac18457ba08cc4dd5 (tag v4.6.1, bumped 2026-11-14).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -367,7 +372,7 @@ RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.c
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin 109922bb7d4cae3b87956e7c14576500cdca25cf \
+    && git -C /opt/mstar-harness fetch --depth 1 origin 8ff83b33141b67a353886d5ac18457ba08cc4dd5 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && git -C /opt/mstar-harness rev-parse HEAD > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git
