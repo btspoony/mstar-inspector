@@ -223,9 +223,11 @@ import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandb
 // §7.10 Check seam implementation: `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
 import {
+  CHECK_SUMMARIES,
   createCheckBeginLatch,
   createCheckLifecycle,
   type CheckBeginLatch,
+  type CheckPromotion,
   type CheckTerminalOutcome,
 } from "./checks";
 // Review admission (review-concurrency §1.2): one `review_inflight` row is the
@@ -441,8 +443,11 @@ export type ConsumerLogFields = {
    * when a write threw — the message names which write refused. A COMPLETED
    * hand-off has no event of its own; its only line is the info above it
    * ("publication journal hit"), printed before the link.
+   * `check_in_progress_failed` (union widened ADDITIVELY): the best-effort
+   * promotion of a delivery-created (`queued`) run to `in_progress` failed or
+   * ran out of budget — the review itself is unaffected.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -773,7 +778,11 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
  *
  * So the derived runner deadline is 666_000ms — 646_000 when an operator
  * configures terminalize at its 30_000 ceiling — below `deep`'s 840_000 table
- * on every level. That is what makes an oversized-diff capture fit: the
+ * on every level. NOT a reserve term: the `queued` → `in_progress` promotion
+ * (§7.9) is bounded by the operator's `review.check.update_timeout_ms` too, but
+ * it runs at ADMISSION — before the container and the runner — so it spends the
+ * round's own clock rather than this post-runner reserve, and the sum above is
+ * unchanged by it. That is what makes an oversized-diff capture fit: the
  * fallback needs one `EXEC_TIMEOUT_GIT_MS` (120_000) of the deadline and still
  * leaves 546_000 for the runner. Every post-diff sandbox step (increment
  * capture, numstat, the runner-input write, the PR-context reads) and the
@@ -948,10 +957,11 @@ async function boundedBestEffort<T>(step: Promise<T>, budgetMs: number): Promise
 
 /**
  * §7.10 held-Check visibility: a delivery the in-flight guard refused still owns
- * the Check its attach created, and that run would otherwise read
- * `in_progress` for the whole backoff with nothing saying why (measured on
- * staging 2026-11-13: 41 of one run's 49 minutes were queue time). Relabel it
- * with the HOLDER's head, so the PR page names the review this commit waits for.
+ * the `queued` Check its attach created, and without context that run would sit
+ * nameless for the whole backoff (measured on staging 2026-11-13: 41 of one
+ * run's 49 minutes were queue time). Relabel it with the HOLDER's head, so the
+ * PR page names the review this commit waits for; the run stays `queued`
+ * because nothing has started, and only the summary moves.
  *
  * Best-effort by contract, exactly like the skip settlement: one warn on a
  * fault, and the delayed retry the caller is about to schedule never changes.
@@ -1074,10 +1084,10 @@ async function handleGuardHeld(
   const delays = guardRetryDelaysSeconds(level);
   const delaySeconds = delays[message.attempts - 1];
   if (delaySeconds !== undefined) {
-    // Say WHY nothing has started: the attach already put a run on this commit,
-    // so a refused delivery would otherwise leave it reading `in_progress` for
-    // the whole backoff. Only a `pr-held` refusal names a live review to wait
-    // for — a cap/storage refusal has no holder and must not claim one.
+    // Say WHY nothing has started: the attach already put a `queued` run on
+    // this commit, and the relabel adds the holder's context to it. Only a
+    // `pr-held` refusal names a live review to wait for — a cap/storage
+    // refusal has no holder and must not claim one.
     if (admission.reason === "pr-held") {
       await markQueuedBehindInflightRow(deps, message.body, heldHeadSha);
     }
@@ -1220,6 +1230,24 @@ export type CheckLifecycleHooks = {
      */
     latch?: CheckBeginLatch;
   }): Promise<CheckHandle | null>;
+  /**
+   * §7.9 status truthfulness (optional, additive): the run was created
+   * `queued` at delivery acceptance, so the review's own begin is what makes
+   * the public status `in_progress`. A settled answer means the send is over
+   * (landed or cleanly refused); `abandoned` means its budget ended the wait
+   * while the PATCH may still be in flight, so the terminalize below must hand
+   * the attempt to recovery instead of writing over a run it could still
+   * reopen. A hook that cannot reach a Checks surface simply omits this.
+   */
+  markInProgress?(input: {
+    handle: CheckHandle;
+    /** The one text the promoted run carries. */
+    summary: string;
+    /** `review.check.update_timeout_ms` — its own bound, not the begin hook's. */
+    updateBudgetMs: number;
+    /** One warn when the best-effort send failed or ran out of budget. */
+    warn: (detail: string) => void;
+  }): Promise<CheckPromotion>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
     outcome: CheckTerminalOutcome;
     /**
@@ -1238,11 +1266,29 @@ export type CheckLifecycleHooks = {
    * none is frozen (the predicate is in the UPDATE, so a concurrent
    * terminalize's text wins) and releases the lease to recovery WITHOUT a
    * remote request, so the minute reconciler closes the run instead of waiting
-   * out the execution deadline. Resolves `true` only when the fenced release
-   * changed the row — a lease recovery already claimed, or an expired lease,
-   * changed nothing and resolves `false`; a store fault rejects.
+   * out the execution deadline. The frozen fallback is ONLY what the caller
+   * already knew: an outcome-only conclusion (`superseded`, `local-error`,
+   * `pre-publication-failure`) or, for `skipped`, the inherited head's gate
+   * result — never a blanket `unconfirmed` over a decided result. It is not the
+   * proof-derived conclusion (`publication-unknown`, `expired`,
+   * `degraded-not-posted` carry no proof here); the recovery lane re-reads the
+   * proof as the last writer and corrects it. An `abandoned` promotion's
+   * handoff also carries `firstRecoveryDelayMs`, so recovery writes only after
+   * that request can no longer land. Resolves
+   * `true` only when the fenced release changed the row — a lease recovery
+   * already claimed, or an expired lease, changed nothing and resolves
+   * `false`; a store fault rejects.
    */
-  abandonTerminalize?(input: { handle: CheckHandle; reason: string; outcome?: "superseded" }): Promise<boolean>;
+  abandonTerminalize?(input: {
+    handle: CheckHandle;
+    reason: string;
+    /** The terminal knowledge this hand-off carries; omitted → `unconfirmed`. */
+    outcome?: CheckTerminalOutcome;
+    /** Set with `outcome: "skipped"`: the head whose result the run inherits. */
+    inheritedHeadSha?: string;
+    /** Delay this row's first recovery attempt past an abandoned send's lifetime. */
+    firstRecoveryDelayMs?: number;
+  }): Promise<boolean>;
   /**
    * §7.9 skip settlement (optional, additive): the delivery ACKs before (or
    * without) a handle — an idempotency hit, a publication-journal hand-off, an
@@ -1264,11 +1310,11 @@ export type CheckLifecycleHooks = {
   }): Promise<boolean>;
   /**
    * §7.10 held-Check visibility (optional, additive): the in-flight guard
-   * refused this delivery while its Check was already attached, so the run is
-   * relabelled "queued behind the live review" — it keeps running and only its
-   * text moves, because a Check that reads `in_progress` for the whole backoff
-   * with no reason reads as a stuck review. Best-effort: `false` means there was
-   * nothing to label, a fault rejects, and neither changes the retry outcome.
+   * refused this delivery while its Check was already attached. The run is
+   * created `queued` at delivery acceptance, so the relabel adds which live
+   * review holds the slot — the status stays `queued` and only the text moves.
+   * Best-effort: `false` means there was nothing to label, a fault rejects, and
+   * neither changes the retry outcome.
    */
   markQueuedBehindInflight?(input: {
     scope: Scope;
@@ -4041,6 +4087,14 @@ async function processMessage(
   // isolated warns, and a hook timeout resolves without blocking the path.
   let checkHandle: CheckHandle | null = null;
   let checkTerminalized = false;
+  /**
+   * The attempt whose promotion was ABANDONED (its update budget ended the
+   * wait while the PATCH may still be in flight). This invocation must then
+   * not write the terminal state itself: the late promotion could land after
+   * it and reopen a finished run that is no longer due for recovery. Cleared
+   * by every new begin, so it always describes `checkHandle`.
+   */
+  let checkPromotionAbandoned: string | null = null;
   // Whether the ADMISSION-time claim ran. The post-`rev-parse` block is the
   // fallback for a message whose SHA was not knowable then, so it must not
   // claim a second time (a failed early claim included: the claim INSERT is the
@@ -4070,8 +4124,19 @@ async function processMessage(
    * no-op proved it was not ours to release), so a caller taking a second
    * Check ownership must not do so — a Check fault never blocks the review,
    * but it must not double-claim either.
+   *
+   * EVERY hand-off of an attempt whose promotion was ABANDONED gets the longer
+   * first recovery delay, because the property belongs to the attempt, not to
+   * one exit: the abandoned PATCH is bounded only by its update budget plus the
+   * transport's own lifetime, and no cancellation exists — the bound only stops
+   * the wait. Scheduling the recovery write beyond that bound is what makes it
+   * the LAST writer; it is an assumption about network lifetime, not a proof.
    */
-  const abandonCheck = (handle: CheckHandle, reason: string, outcome?: "superseded"): Promise<boolean> => {
+  const abandonCheck = (
+    handle: CheckHandle,
+    reason: string,
+    options?: { outcome?: CheckTerminalOutcome; inheritedHeadSha?: string },
+  ): Promise<boolean> => {
     const abandon = deps.checks?.abandonTerminalize;
     // No give-up seam (test doubles only; production always supplies it):
     // nothing can prove this attempt released, so report the handoff as failed.
@@ -4082,7 +4147,22 @@ async function processMessage(
       attempt_id: handle.attemptId,
       check_reason: reason,
     };
-    const release = abandon({ handle, reason, ...(outcome === undefined ? {} : { outcome }) }).then(
+    // Two budgets of margin past the abandoned send itself (the promotion runs
+    // on the operator's update budget), never shorter than the shared rung.
+    const firstRecoveryDelayMs =
+      checkPromotionAbandoned === handle.attemptId
+        ? Math.max(
+            CHECK_BACKOFF_MS[0]!,
+            2 * (checkBudgets?.updateMs ?? CHECK_UPDATE_DEFAULT) + 60_000,
+          )
+        : undefined;
+    const release = abandon({
+      handle,
+      reason,
+      ...(options?.outcome === undefined ? {} : { outcome: options.outcome }),
+      ...(options?.inheritedHeadSha === undefined ? {} : { inheritedHeadSha: options.inheritedHeadSha }),
+      ...(firstRecoveryDelayMs === undefined ? {} : { firstRecoveryDelayMs }),
+    }).then(
       (released) => {
         if (released) {
           deps.log.warn(
@@ -4149,6 +4229,31 @@ async function processMessage(
     const recordDetached = (outcome: "budget-exceeded"): void => {
       void record(outcome);
     };
+    if (checkPromotionAbandoned === handle.attemptId) {
+      // The promotion's PATCH may still be on the wire (its bound only stopped
+      // the wait). A terminal write from THIS invocation could be overtaken by
+      // it and the finished run reopened — and a reopened run is no longer due
+      // for recovery (`terminal_ms` is set), so it would read `in_progress`
+      // forever. Hand the attempt over with the conclusion this invocation
+      // already computed (the inherited head included) and let the recovery
+      // lane be the last writer, minutes behind the abandoned request.
+      const release = abandonCheck(
+        handle,
+        "check promotion exceeded its update budget (the terminal send is left to recovery)",
+        {
+          outcome,
+          ...(inheritedHeadSha === undefined ? {} : { inheritedHeadSha }),
+        },
+      );
+      if (deps.background === undefined) await release;
+      // This exit hands the attempt over without ever calling the hook. Record
+      // it with a NULL elapsed so `handed-off` never reads as a fast success:
+      // the column exists to separate "never ran" from "ran and timed out". The
+      // store turns `completed` into `handed-off` for a row whose observation
+      // never met its intent.
+      await recordTerminalizeOutcome(deps.env.DB, handle.attemptId, "completed", null).catch(() => {});
+      return;
+    }
     try {
       const terminalize = deps.checks!.terminalize({
         handle,
@@ -4233,19 +4338,76 @@ async function processMessage(
   };
 
   /**
+   * The run is created `queued` at delivery acceptance (spec §7.9), so the
+   * review's own begin is what makes the public status truthful. Promoted
+   * here under the operator's update budget — NEVER the begin hook's 2 s,
+   * which bounds a different step — and this wait is bounded too, but the
+   * FAILURE REPORT belongs to the adapter alone: it owns the same budget and
+   * names the real cause, so warning again here would log one hung PATCH
+   * twice. Only an unexpected rejection (the adapter promises never to throw)
+   * is reported at this layer, as the unhandled-rejection guard.
+   *
+   * The ANSWER is what matters to the caller: `abandoned` means the PATCH may
+   * still be on the wire, so the terminal write must not be issued from this
+   * invocation.
+   */
+  const promoteCheckInProgress = async (handle: CheckHandle): Promise<CheckPromotion["kind"]> => {
+    if (deps.checks?.markInProgress === undefined) return "settled";
+    const budgetMs = checkBudgets?.updateMs ?? CHECK_UPDATE_DEFAULT;
+    const warn = (detail: string) =>
+      deps.log.warn(
+        {
+          ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
+          attempt_id: handle.attemptId,
+          event: "check_in_progress_failed",
+        },
+        detail,
+      );
+    try {
+      const waited = await boundedBestEffort(
+        deps.checks
+          .markInProgress({
+            handle,
+            summary: CHECK_SUMMARIES.inProgress(handle.headSha.slice(0, 7)),
+            updateBudgetMs: budgetMs,
+            warn,
+          })
+          .catch((err: unknown): CheckPromotion => {
+            // A rejection that lands after this layer stopped waiting still
+            // gets its warn instead of becoming an unhandled rejection.
+            warn(`check in-progress promotion failed (the review is unaffected): ${err instanceof Error ? err.message : String(err)}`);
+            return { kind: "settled", promoted: false };
+          }),
+        budgetMs,
+      );
+      // This layer stopped waiting: the adapter may still be mid-send, so the
+      // only safe reading is "abandoned" (its own warn carries the cause).
+      if (waited === null) return "abandoned";
+      return waited.value.kind;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      warn(`check in-progress promotion failed (the review is unaffected): ${detail}`);
+      return "settled";
+    }
+  };
+
+  /**
    * The §7.10 begin hook over one SHA, isolated exactly as before: its own
    * latch (never shared or reset), the 2 s consumer bound, and a throw that
    * only warns — a Check never prevents the review.
    */
   const beginCheck = async (scope: Scope, githubAppId: number, headSha: string): Promise<CheckHandle | null> => {
     if (deps.checks === undefined) return null;
+    // Every begin owns the flag: it must always describe the handle we return.
+    checkPromotionAbandoned = null;
     // One latch per `begin` call, created HERE and never stored anywhere: a
     // later message cannot clear or reuse it, so a detached begin from this
     // message stays abandoned for its whole lifetime (QC1-001 replacement
     // race).
     const beginLatch = createCheckBeginLatch();
+    let handle: CheckHandle | null;
     try {
-      return await withHookTimeout(
+      handle = await withHookTimeout(
         deps.checks.begin({
           scope,
           githubAppId,
@@ -4275,6 +4437,13 @@ async function processMessage(
       );
       return null;
     }
+    // A handle means THIS review is starting, so the run may say so — and if
+    // that send was abandoned rather than settled, this invocation must not
+    // terminalize the run itself (the promotion may still land).
+    if (handle !== null && (await promoteCheckInProgress(handle)) === "abandoned") {
+      checkPromotionAbandoned = handle.attemptId;
+    }
+    return handle;
   };
 
   try {
@@ -4698,7 +4867,7 @@ async function processMessage(
       const handedOff = await abandonCheck(
         supersededHandle,
         "the checkout proved a newer commit than the claim",
-        "superseded",
+        { outcome: "superseded" },
       );
       if (handedOff) {
         checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);

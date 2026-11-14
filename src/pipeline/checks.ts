@@ -1,8 +1,9 @@
 /**
  * GitHub Checks adapter (spec review-lifecycle §7.9).
  *
- * One advisory Check per review attempt: created `in_progress` at the
- * authoritative head SHA and terminalized from PERSISTED publication proof.
+ * One advisory Check per review attempt: created `queued` at the delivery
+ * acceptance head SHA, promoted to `in_progress` when the review itself starts,
+ * and terminalized from PERSISTED publication proof.
  * The adapter is the only place a Check HTTP request is built, and it builds no
  * credential: the client comes from `src/pipeline/comment.ts`'s single per-App
  * `createAppAuth` path through the SAME purpose-scoped `review-write` octokit
@@ -106,7 +107,8 @@ export type ChecksCreateParams = {
   name: string;
   head_sha: string;
   external_id: string;
-  status: "in_progress";
+  /** Created `queued`: the review has not started yet (promoted by `markInProgress`). */
+  status: "queued";
 };
 
 /**
@@ -138,6 +140,27 @@ export type ChecksUpdateParams = ChecksRelabelParams & {
   conclusion: CheckConclusion["desired"];
 };
 
+/**
+ * The NON-TERMINAL promotion: the run is created `queued` when the delivery is
+ * accepted, and the review's own begin moves it to `in_progress` with the text
+ * that says so. No conclusion — a run carrying one is finished.
+ */
+export type ChecksInProgressParams = ChecksRelabelParams & {
+  status: "in_progress";
+};
+
+/**
+ * What a promotion actually achieved (spec §7.9). `abandoned` is the load-
+ * bearing case: the budget ended the WAIT while the PATCH may still be on the
+ * wire, so a terminal write from the same invocation could be reordered after
+ * it and reopen a finished run. The caller must then leave the run to the
+ * recovery lane instead of updating it itself.
+ */
+export type CheckPromotion =
+  /** The send settled: `promoted` says the PATCH landed. */
+  | { kind: "settled"; promoted: boolean }
+  | { kind: "abandoned" };
+
 export type ChecksListParams = {
   owner: string;
   repo: string;
@@ -166,7 +189,9 @@ export type ChecksOctokit = {
   rest: {
     checks: {
       create(params: ChecksCreateParams): Promise<{ data: CheckRunPayload }>;
-      update(params: ChecksRelabelParams): Promise<{ data: CheckRunPayload }>;
+      update(
+        params: ChecksRelabelParams | ChecksInProgressParams | ChecksUpdateParams,
+      ): Promise<{ data: CheckRunPayload }>;
       get(params: { owner: string; repo: string; check_run_id: number }): Promise<{ data: CheckRunPayload }>;
       listForRef(params: ChecksListParams): Promise<{ data: ChecksListPage }>;
     };
@@ -286,6 +311,29 @@ export type ChecksAdapter = {
     | { kind: "unavailable"; reason: string; requests: number }
   >;
   /**
+   * Promote the run this attempt created to `in_progress` when the review
+   * actually starts (spec §7.9): the create happens at delivery acceptance, so
+   * until the review begins the truthful state is `queued`. Proven on the live
+   * lease and the PERSISTED run id, exactly like `completeCheck`, and bounded
+   * by `updateBudgetMs`. A REFUSAL (no attached run, an already-decided
+   * attempt, no client, no callable `update`) is not a failure and stays
+   * silent: it answers settled with `promoted: false`. A rejection or a budget
+   * overrun IS the failure this lane reports — exactly one warn through
+   * `warn` — and a budget overrun answers `abandoned`, because its PATCH may
+   * still be on the wire. It never throws: a Check never blocks or delays the
+   * review. Optional like the relabel beside it: an implementation or double
+   * without it simply promotes nothing.
+   */
+  markInProgress?(input: {
+    identity: CheckIdentity;
+    lease: Lease;
+    summary: string;
+    /** The operator-configured update budget for THIS call; omitted → the adapter-level fallback. */
+    updateBudgetMs?: number;
+    /** One warn when the send failed or ran out of budget — never a throw. */
+    warn: (detail: string) => void;
+  }): Promise<CheckPromotion>;
+  /**
    * Relabel an owned run WITHOUT moving it: the text says this delivery is
    * QUEUED behind the PR's live review (the in-flight guard held it). No status,
    * no conclusion — a run that reported one could not be reopened. Resolves
@@ -380,16 +428,31 @@ function sendRequests<T>(promise: Promise<T>): Promise<{ sent: number; outcome: 
  * `sendRequests` bounded by a wall-clock budget. A timed-out request may still
  * have reached GitHub, so it is reported as SENT (`requests: 1`) — recovery
  * must adopt/retry conservatively instead of assuming nothing landed.
+ *
+ * `settled: false` is the one thing a caller cannot otherwise observe: the
+ * budget won while the request may still be ON THE WIRE. A caller whose later
+ * write must not be overtaken by this one (the promotion before a terminal
+ * send) reads it; every other lane only reads `sent`/`outcome`.
  */
 async function sendRequestsWithin<T>(
   promise: Promise<T>,
   budgetMs: number,
   label: string,
-): Promise<{ sent: number; outcome: T | { failure: unknown } }> {
-  const { promise: budget, resolve } = Promise.withResolvers<{ sent: number; outcome: { failure: unknown } }>();
-  const timer = setTimeout(() => resolve({ sent: 1, outcome: { failure: new Error(`${label} exceeded ${budgetMs}ms`) } }), budgetMs);
+): Promise<
+  | { settled: true; sent: number; outcome: T | { failure: unknown } }
+  | { settled: false; sent: 1; outcome: { failure: unknown } }
+> {
+  const { promise: budget, resolve } = Promise.withResolvers<{
+    settled: false;
+    sent: 1;
+    outcome: { failure: unknown };
+  }>();
+  const timer = setTimeout(
+    () => resolve({ settled: false, sent: 1, outcome: { failure: new Error(`${label} exceeded ${budgetMs}ms`) } }),
+    budgetMs,
+  );
   try {
-    return await Promise.race([sendRequests(promise), budget]);
+    return await Promise.race([sendRequests(promise).then((result) => ({ ...result, settled: true as const })), budget]);
   } finally {
     clearTimeout(timer);
   }
@@ -409,18 +472,21 @@ export function createChecksAdapter(deps: ChecksDeps): ChecksAdapter {
     beginCheck: (input) => beginCheckWith(deps, input),
     adoptCheckRun: (input) => adoptCheckRunWith(deps, input),
     completeCheck: (input) => completeCheckWith(deps, input),
+    markInProgress: (input) => markInProgressWith(deps, input),
     markQueuedBehindInflight: (input) => markQueuedBehindInflightWith(deps, input),
     fetchCheckRun: (input) => fetchCheckRunWith(deps, input),
   };
 }
 
 /**
- * Create the in-progress run for an attempt this invocation holds (spec §7.9
+ * Create the run for an attempt this invocation holds (spec §7.9
  * "Create/adopt"): prove the persisted row still belongs to this identity and
  * live lease, prove no run is attached yet, then send `external_id` with NO
- * `details_url`. A response failing the identity check is `unavailable` — an
- * unprovable create is never adopted, and the attempt stays `unknown` for
- * read-only recovery rather than blind re-creation.
+ * `details_url` and `status: "queued"` — the review has not started, so the
+ * public surface must not claim it has (`markInProgress` promotes it when the
+ * review's own begin runs). A response failing the identity check is
+ * `unavailable` — an unprovable create is never adopted, and the attempt stays
+ * `unknown` for read-only recovery rather than blind re-creation.
  */
 async function beginCheckWith(
   deps: ChecksDeps,
@@ -485,7 +551,7 @@ async function beginCheckWith(
       name: CHECK_NAME,
       head_sha: identity.headSha,
       external_id: identity.externalId,
-      status: "in_progress",
+      status: "queued",
     }),
   );
   if ("failure" in attempted.outcome) {
@@ -678,6 +744,72 @@ async function completeCheckWith(
     return { kind: "unavailable", requests: attempted.sent, reason: "check update response is not the intended terminal state" };
   }
   return { kind: "completed", remote };
+}
+
+/**
+ * Promote the created-but-not-started run to `in_progress` (spec §7.9): the
+ * delivery acceptance creates it `queued`, and only the review's own begin may
+ * say it is running. Ownership and the run id come from the PERSISTED row, so
+ * an attempt with no attached run, a lost lease, an already-decided row or an
+ * unresolvable client is REFUSED without a send — and silently, because a
+ * refusal is not a failure.
+ *
+ * Bounded and never rejecting: it sits on the review's critical path right
+ * after `begin`, so a hanging PATCH must end at the budget instead of holding
+ * the round. Past that budget the answer is `abandoned` with one warn, because
+ * the PATCH may still be in flight; the review runs regardless.
+ */
+async function markInProgressWith(
+  deps: ChecksDeps,
+  input: {
+    identity: CheckIdentity;
+    lease: Lease;
+    summary: string;
+    updateBudgetMs?: number;
+    warn: (detail: string) => void;
+  },
+): Promise<CheckPromotion> {
+  const owned = await guardOwnership(deps, input.identity, input.lease, deps.nowMs());
+  if (owned.kind === "unavailable") return { kind: "settled", promoted: false };
+  // Already decided: a frozen terminal intent means the review reached its
+  // conclusion (the close is imminent or recovery owns it), so promoting the
+  // status now would be a lie. The evidence is the persisted row's own field —
+  // no extra store read.
+  if (owned.data.desired !== "in_progress") return { kind: "settled", promoted: false };
+  const runId = owned.data.checkRunId;
+  // Nothing to promote: the run this attempt created is not attached here.
+  if (runId === null) return { kind: "settled", promoted: false };
+  const { scope } = owned.data.identity;
+  const budgetMs = input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT;
+  const send = (async (): Promise<boolean> => {
+    const resolvedClient = await clientFor(deps, scope);
+    if ("reason" in resolvedClient) return false;
+    const client = resolvedClient.client;
+    if (!hasChecksMethod(client, "update")) return false;
+    // Same fresh live-lease proof as the terminal send: token minting can cross
+    // `lease.untilMs`, and an expired holder must not speak for the run.
+    if (!(await stillLive(deps, owned.data.identity, input.lease))) return false;
+    await client.rest.checks.update({
+      owner: scope.owner,
+      repo: scope.repo,
+      check_run_id: runId,
+      status: "in_progress",
+      output: { title: CHECK_NAME, summary: input.summary },
+    });
+    return true;
+  })();
+  const attempted = await sendRequestsWithin(send, budgetMs, "check in-progress");
+  if (!attempted.settled) {
+    // The PATCH may still be in flight: report that honestly so the caller
+    // does not write a terminal state it could be overtaken by.
+    input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
+    return { kind: "abandoned" };
+  }
+  if (typeof attempted.outcome !== "boolean") {
+    input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
+    return { kind: "settled", promoted: false };
+  }
+  return { kind: "settled", promoted: attempted.outcome };
 }
 
 /**
@@ -948,6 +1080,11 @@ export const CHECK_SUMMARIES = {
   gateUnreadableConfig: (sha7: string) =>
     `Review gate could not be evaluated for ${sha7}: the App's gate configuration could not be read.`,
   degraded: "Review output was invalid; a degraded summary comment was published.",
+  /**
+   * The promotion text: the run created at delivery acceptance reports THIS
+   * commit's review from the moment the review starts (§7.9).
+   */
+  inProgress: (sha7: string) => `Review started for ${sha7} — this run reports the review of this commit.`,
   prePublicationFailure: (reason: string) =>
     `Review execution failed before publication: ${reason}. No review was published.`,
   degradedNotPosted: "Review output was invalid and the degraded notice was not published.",
@@ -1350,6 +1487,25 @@ export type CheckLifecycle = {
     updateBudgetMs?: number;
   }): Promise<void>;
   /**
+   * Promote the run this handle's attempt created to `in_progress`: the run is
+   * created `queued` at delivery acceptance, so the review's own begin is what
+   * makes the public status truthful. Best-effort by contract — a settled
+   * `false` means there was nothing to promote (no run, no Checks surface, a
+   * lease this invocation no longer holds, an already-terminal attempt) or the
+   * bounded send failed; one warn rides `warn`, and nothing here can block the
+   * review. `abandoned` means the budget ended the WAIT while the PATCH may
+   * still be in flight, so the caller must NOT write a terminal state itself.
+   */
+  markInProgress(input: {
+    handle: CheckLifecycleHandle;
+    /** The one text the promoted run carries. */
+    summary: string;
+    /** The operator-configured bound; omitted → the adapter, then the store's default. */
+    updateBudgetMs?: number;
+    /** One warn when the best-effort send failed or ran out of budget. */
+    warn: (detail: string) => void;
+  }): Promise<CheckPromotion>;
+  /**
    * §7.9 skip settlement: the delivery was SKIPPED before execution (an
    * idempotency hit, a publication-journal hand-off, an in-flight guard
    * rejection, a paused App), so its attached run has no review to report and
@@ -1383,9 +1539,9 @@ export type CheckLifecycle = {
   /**
    * §7.10 held-Check visibility: the in-flight guard refused a message whose
    * Check was already attached, so the run must SAY it is queued behind the PR's
-   * live review — otherwise the public surface reads `in_progress` for the whole
-   * backoff with nothing explaining it. Writes the frozen text only (never the
-   * status, never the intent) on THIS delivery's own attach row.
+   * live review — the run is `queued` already, and without this it would sit
+   * there for the whole backoff with nothing explaining it. Writes the text only
+   * (never the status, never the intent) on THIS delivery's own attach row.
    *
    * Resolves true only when the relabel was sent; false means there was nothing
    * to label (no own attach row, no remote run) or no Checks surface to send
@@ -1433,13 +1589,33 @@ export type CheckLifecycle = {
     handle: CheckLifecycleHandle;
     reason: string;
     /**
-     * The terminal outcome this give-up owes when nothing is frozen yet.
-     * Omitted → the generic `failure/unconfirmed` of an interrupted
-     * terminalize. `superseded` is the one outcome the consumer decides with
-     * no proof read: the checkout contradicted the claim, so that run
-     * reviewed nothing for its own SHA.
+     * The terminal knowledge this hand-off carries. Omitted → the generic
+     * `failure/unconfirmed` of an interrupted terminalize. Given, the frozen
+     * fallback is only what the CALLER already knew: an outcome-only conclusion
+     * for `superseded` / `local-error` / `pre-publication-failure`, and for
+     * `skipped` with `inheritedHeadSha` the inherited head's gate result.
+     *
+     * It is deliberately NOT the terminal path's conclusion for
+     * `publication-unknown` / `expired` / `degraded-not-posted`: that path reads
+     * `readPublicationProof` and can conclude `success`, while this seam always
+     * passes `proof: null` and freezes the unconfirmed fallback. The safety net
+     * is the recovery lane — the last writer — which re-reads the proof and
+     * corrects the frozen intent.
      */
-    outcome?: "superseded";
+    outcome?: CheckTerminalOutcome;
+    /**
+     * Set with `outcome: "skipped"`: the reviewed head whose result the run
+     * inherits, read exactly as `terminalize` reads it.
+     */
+    inheritedHeadSha?: string;
+    /**
+     * Delay THIS row's first recovery attempt past the maximum possible
+     * lifetime of an ABANDONED promotion request: the update budget bounds the
+     * send's own life and the transport adds the rest; scheduling recovery
+     * beyond that is what makes the recovery write the last writer. Omitted →
+     * the shared first backoff rung.
+     */
+    firstRecoveryDelayMs?: number;
   }): Promise<boolean>;
 };
 
@@ -1473,8 +1649,9 @@ export type CheckAttachResult =
 /**
  * Attach a Check to an ACCEPTED delivery (spec §7.7 step 4 / §7.9).
  *
- * The delivery path claims the attempt, creates the `in_progress` run against
- * the payload's head SHA and gives the row straight back, so the run appears
+ * The delivery path claims the attempt, creates the `queued` run against
+ * the payload's head SHA (the review's own begin promotes it to `in_progress`,
+ * §7.9) and gives the row straight back, so the run appears
  * within seconds of the webhook instead of when a worker finally starts the
  * message. The row keeps `create_state = 'known'` and the run id — the durable
  * facts the consumer's `begin` adopts — and the long
@@ -1686,6 +1863,13 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     lease: Lease,
     reason: string,
     requestsSpent: boolean,
+    /**
+     * A TARGETED override of the first recovery attempt, never a change to the
+     * shared schedule: the abandoned-promotion handoff uses it so the recovery
+     * write lands after the abandoned request's maximum possible lifetime
+     * (budget + transport). Omitted → the first backoff rung.
+     */
+    firstRecoveryDelayMs?: number,
   ): Promise<boolean> => {
     const nowMs = deps.nowMs();
     return deferCheckRecovery(
@@ -1694,7 +1878,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       lease,
       {
         state: requestsSpent ? "remote-unconfirmed" : "pending",
-        nextAttemptMs: nowMs + CHECK_BACKOFF_MS[0]!,
+        nextAttemptMs: nowMs + (firstRecoveryDelayMs ?? CHECK_BACKOFF_MS[0]!),
         reason,
       },
       nowMs,
@@ -1861,6 +2045,32 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         headSha: identity.headSha,
         lease: claim.lease,
       };
+    },
+
+    async markInProgress(input) {
+      const adapter = deps.getAdapter(input.handle.scope);
+      if (adapter === null) return { kind: "settled", promoted: false };
+      // The adapter proves ownership from the PERSISTED row and sends that
+      // row's run id, so the identity it is handed is the row's — never one
+      // rebuilt from the handle.
+      let attempt: CheckAttempt | null;
+      try {
+        attempt = await getCheckAttempt(deps.db, input.handle.attemptId);
+      } catch {
+        return { kind: "settled", promoted: false };
+      }
+      // This attempt already ended: never reopen a finished run. The attempt
+      // this lane already read is the terminal evidence — no second read.
+      if (attempt === null || attempt.terminalMs !== null) return { kind: "settled", promoted: false };
+      return (
+        (await adapter.markInProgress?.({
+          identity: attempt.identity,
+          lease: input.handle.lease,
+          summary: input.summary,
+          updateBudgetMs: input.updateBudgetMs,
+          warn: input.warn,
+        })) ?? { kind: "settled", promoted: false }
+      );
     },
 
     async settleSkipped(input) {
@@ -2080,17 +2290,35 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
 
     async abandonTerminalize(input) {
       const { handle } = input;
-      const fence = fenceFor(handle.lease);
+      // The fallback is what the CALLER already knew, decided from the outcome
+      // alone (plus, for `skipped`, the inherited head — read exactly as
+      // `terminalize` reads it). It is deliberately NOT the terminal path's
+      // proof-derived conclusion: `proof: null` here, so `publication-unknown`
+      // / `expired` / `degraded-not-posted` freeze the unconfirmed fallback that
+      // path would have used without proof. The safety net is the recovery
+      // lane — the last writer — which re-reads the proof and can correct it.
+      // `outcome` omitted is the interrupted-terminalize case, whose honest
+      // text is `unconfirmed`.
       const conclusion: CheckConclusion =
         input.outcome === undefined
           ? { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed }
           : decideConclusion({
               proof: null,
               outcome: input.outcome,
-              gate: null,
-              review: null,
+              gate: input.inheritedHeadSha === undefined ? null : await deps.getCheckGate(handle.scope),
+              review:
+                input.inheritedHeadSha === undefined
+                  ? null
+                  : await readInheritedReview(deps.db, { scope: handle.scope, headSha: input.inheritedHeadSha }),
+              ...(input.inheritedHeadSha === undefined
+                ? {}
+                : { inherited: { headSha: handle.headSha, reviewedHeadSha: input.inheritedHeadSha } }),
               headSha: handle.headSha,
             });
+      // Sample the fence clock for THIS write, after the reads above: the
+      // inherited-head reads are D1 round trips, and a snapshot taken before
+      // them could authorise a write that lands after the lease expired.
+      const fence = fenceFor(handle.lease);
       // The fallback lands ONLY where nothing is frozen yet: the state
       // predicate is part of the UPDATE, so a concurrent terminalize's
       // proof-derived conclusion and its exact summary survive this write.
@@ -2101,7 +2329,13 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // terminalize may already have updated (RL-12). The boolean is the
       // RELEASE write's own result: a dead fence (recovery claimed the
       // attempt, or the lease expired) changed nothing and reports `false`.
-      return releaseForRecovery(handle.attemptId, fence.lease, input.reason, true);
+      return releaseForRecovery(
+        handle.attemptId,
+        fence.lease,
+        input.reason,
+        true,
+        input.firstRecoveryDelayMs,
+      );
     },
   };
 }

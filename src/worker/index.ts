@@ -217,11 +217,13 @@ async function withinBudget(promise: Promise<unknown>, budgetMs: number): Promis
 /**
  * Attach the review Check on the DELIVERY path (spec §7.7 step 4 / §7.9).
  *
- * Runs BEFORE the enqueue: the attempt is claimed and its `in_progress` run
- * created NOW, so the Check shows up within seconds of the webhook instead of
- * when a worker finally starts the message — and an admitted message finds a
- * row it can adopt instead of racing this holder. The row is then released with
- * the run id persisted, which is exactly what the consumer's `begin` adopts.
+ * Runs BEFORE the enqueue: the attempt is claimed and its `queued` run created
+ * NOW, so the Check shows up within seconds of the webhook instead of when a
+ * worker finally starts the message — and an admitted message finds a row it
+ * can adopt instead of racing this holder. The row is then RELEASED with the
+ * run id persisted, which is exactly what the consumer's `begin` adopts; that
+ * begin PROMOTES the run to `in_progress` once the review actually starts
+ * (§7.9).
  *
  * Best-effort by contract: the client comes from the SAME
  * `createReviewCommenter` construction point every other Check send uses (spec
