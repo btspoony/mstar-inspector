@@ -688,6 +688,13 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     // …but the silence is attributable: the round still logs its accounting.
     const line = h.logLines.find((l) => l.msg.startsWith("recheck round accounted — no input sent"))!;
     expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
+    // …and the ask itself says why it could not be built: both figures, so an
+    // operator can tell a budget that is too small from an ask that grew.
+    const noFit = h.logLines.find((l) => l.fields.event === "review_recheck_no_fit")!;
+    expect(noFit.level).toBe("warn");
+    expect(noFit.fields).toMatchObject({ assignment_max_bytes: RECHECK_ASSIGNMENT_MIN, selected: 1 });
+    expect(Number(noFit.fields.required_bytes)).toBeGreaterThan(RECHECK_ASSIGNMENT_MIN);
+    expect(noFit.msg).toContain("keeps its budget reason and its rotation clock");
     const findingRow = db.raw.query("SELECT state, last_assessed_ms, last_scheduled_ms FROM review_findings").get() as {
       state: string;
       last_assessed_ms: number | null;

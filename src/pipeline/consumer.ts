@@ -447,8 +447,13 @@ export type ConsumerLogFields = {
    * `check_in_progress_failed` (union widened ADDITIVELY): the best-effort
    * promotion of a delivery-created (`queued`) run to `in_progress` failed or
    * ran out of budget — the review itself is unaffected.
+   * `review_recheck_no_fit` (same channel, additive): the round's smallest
+   * possible ask — the assignment's prose plus one finding's fixed fields plus
+   * the discussion, with no body and no catalog — overruns the operator's byte
+   * budget, so nothing is sent. It names both figures and is NOT a seat skip:
+   * no seat was started.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -480,6 +485,16 @@ export type ConsumerLogFields = {
   effective?: number;
   /** The degraded recheck ask-budget read's value (the runner's documented default). */
   max_bytes?: number;
+  /**
+   * The `review_recheck_no_fit` pair: the operator's ask budget for that round
+   * and the bytes the SMALLEST document it could build still needs (the ask's
+   * prose, one finding's fixed fields and the discussion — no body, no
+   * catalog). Together they say whether the budget or the ask is the limit.
+   */
+  assignment_max_bytes?: number;
+  required_bytes?: number;
+  /** Selected-row count on a round-level line (`review_recheck_no_fit`). */
+  selected?: number;
   /**
    * Why a degraded settings read answered conservatively — the runtime-config
    * store's cause (`read-failed` / `malformed` / `untrusted`), relayed by the
@@ -5550,6 +5565,33 @@ async function processMessage(
       }
       const sentIds = new Set(included.map((target) => target.rowId));
       for (const target of candidates) if (!sentIds.has(target.rowId)) budgetExcluded.add(target.rowId);
+      if (included.length === 0) {
+        // Nothing can be asked: even the head's fixed fields plus the discussion
+        // overrun the budget, so no body length and no catalog can rescue it.
+        // Name both figures so the operator can tell a budget that is too small
+        // from an ask that grew, and never report it as a seat skip — no seat was
+        // started.
+        const requiredBytes =
+          RECHECK_ASSIGNMENT_PROSE_BYTES +
+          jsonByteLength({
+            schema: RECHECK_INPUT_SCHEMA,
+            headSha,
+            targets:
+              head === undefined ? [] : [{ ...head, original: { ...head.original, body: "" } }],
+            evidence: [],
+            discussion,
+          });
+        deps.log.warn(
+          {
+            ...(baseFields ?? payloadIdentityFields(payload)),
+            event: "review_recheck_no_fit",
+            assignment_max_bytes: budget.maxBytes,
+            required_bytes: requiredBytes,
+            selected: targets.length,
+          },
+          `recheck ask cannot fit the assignment budget — the smallest document this round can ask (prose + one finding's fixed fields + discussion) needs ${requiredBytes} bytes, the budget is ${budget.maxBytes}; nothing was sent, so every row keeps its budget reason and its rotation clock (raise review.recheck.assignment_max_bytes to let the round run)`,
+        );
+      }
       // The seat's view of the discussion: issue items and their coverage and
       // digest are the round's context and stay, while a thread is offered only
       // for a row that rides — a resolve verifies a thread the seat saw.

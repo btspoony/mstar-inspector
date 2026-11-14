@@ -8,6 +8,7 @@
  * D1 seeders and payload builders come from ../helpers/consumer-harness.
  */
 import { beforeEach, describe, expect, test } from "bun:test";
+import { RECHECK_ASSIGNMENT_PROSE_BYTES } from "../../packages/shared/src/recheck-wire";
 import {
   SHA,
   TARGET_ORIGINAL,
@@ -20,7 +21,11 @@ import {
   seedOpenTarget,
   seedPriorPublication,
 } from "../helpers/consumer-fixtures";
-import { RECHECK_ASSIGNMENT_KEY, RECHECK_ASSIGNMENT_MIN } from "../../src/dashboard/runtime-config-store";
+import {
+  RECHECK_ASSIGNMENT_KEY,
+  RECHECK_ASSIGNMENT_MAX,
+  RECHECK_ASSIGNMENT_MIN,
+} from "../../src/dashboard/runtime-config-store";
 import {
   createConsumerHarness,
   DIFF_PREFETCH_MAX_BYTES,
@@ -34,6 +39,11 @@ let h = createConsumerHarness();
 beforeEach(() => {
   h = createConsumerHarness();
 });
+
+/** UTF-8 byte length of one JSON value — the unit every recheck cap is stated in. */
+function jsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
 
 /**
  * A src/auth.ts diff whose ONE hunk is `lineCount` lines (1-based numbering).
@@ -339,6 +349,9 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.recheckFileContent = ""; // no document: every row is accounted by WHY it has no verdict
     const db = await createSeededTestD1();
+    db.raw
+      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)")
+      .run(RECHECK_ASSIGNMENT_KEY, String(RECHECK_ASSIGNMENT_MAX), new Date().toISOString());
     await seedPriorPublication(db);
     for (let i = 0; i < rowCount; i++) {
       await seedOpenTarget(db, {
@@ -360,9 +373,20 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as {
       recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ path: string }> };
     };
-    // The budget really bit: not every provable row could ride.
-    expect(runnerInput.recheck.targets.length).toBeLessThan(rowCount);
-    expect(new Set(runnerInput.recheck.evidence.map((slice) => slice.path)).size).toBeLessThan(rowCount);
+    // The CATALOG budget really bit: not every provable row could ride, and the
+    // assignment budget could not have been the constraint (it is seeded at its
+    // documented ceiling here). Every riding row keeps its four windows; the
+    // rows behind it lost their slices to the catalog byte budget, not to size.
+    const targets = runnerInput.recheck.targets.length;
+    expect(targets).toBeGreaterThan(0);
+    expect(targets).toBeLessThan(rowCount);
+    expect(runnerInput.recheck.evidence.length).toBe(targets * 4);
+    const paths = new Set(runnerInput.recheck.evidence.map((slice) => slice.path));
+    expect(paths.size).toBe(targets);
+    expect(paths.size).toBeLessThan(rowCount);
+    expect(
+      jsonBytes(runnerInput.recheck) + RECHECK_ASSIGNMENT_PROSE_BYTES,
+    ).toBeLessThanOrEqual(RECHECK_ASSIGNMENT_MAX);
     const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     // The dropped rows were never sent because their slices lost a BYTE budget
     // — the same cause as the size budget. `no-evidence` would claim their
@@ -372,16 +396,20 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
   });
 
   test("the rescued rotation head rides bounded with its OWN slices, never a dropped neighbour's", async () => {
-    // Two provable rows over the size cap, both on their own bodies: row A (the
-    // rotation head) brings four slices of its file, row B one slice of another.
-    // The head can never be dropped for want of room — an omitted row keeps its
-    // clock and comes back first forever — so it rides with a bounded body and
-    // as much of its own catalog as fits, while B waits its turn. What this
-    // case pins is the rescue's evidence accounting: the rescued head carries
-    // only its own catalog, never a slice of a row that did not ride. The
-    // final-input measurement itself (a row judged WITHOUT a dropped
-    // neighbour's slices) needs a fixture where that measurement decides the
-    // outcome; the sibling case below is that fixture.
+    // Two provable rows, both over the assignment budget (65,536 B): row A (the
+    // rotation head) has a 520 KiB body that is ALSO over the §7.3 wire cap
+    // (512 KiB), so it can never ride whole; row B's 515,000 B body is under
+    // that wire cap and is dropped by the ASSIGNMENT fit alone. The wire cap is
+    // in fact unreachable as a binding limit now — the operator ceiling
+    // (262,144 B) minus the ask's prose is below 524,288 B — so the per-target
+    // wire-cap guard is defense in depth for a direct caller and this case
+    // covers the assignment fit.
+    // What the case pins is the rescue's evidence accounting: the rescued head
+    // rides with a bounded body and only its OWN catalog, never a slice of a
+    // row that did not ride, while B waits its turn. The final-input
+    // measurement itself (a row judged WITHOUT a dropped neighbour's slices)
+    // needs a fixture where that measurement decides the outcome; the sibling
+    // case below is that fixture.
     h.sandbox.diffStdout = [
       catalogBudgetDiff(1),
       "diff --git a/src/other.ts b/src/other.ts",
