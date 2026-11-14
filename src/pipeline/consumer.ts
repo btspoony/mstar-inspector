@@ -1266,11 +1266,25 @@ export type CheckLifecycleHooks = {
    * none is frozen (the predicate is in the UPDATE, so a concurrent
    * terminalize's text wins) and releases the lease to recovery WITHOUT a
    * remote request, so the minute reconciler closes the run instead of waiting
-   * out the execution deadline. Resolves `true` only when the fenced release
-   * changed the row — a lease recovery already claimed, or an expired lease,
-   * changed nothing and resolves `false`; a store fault rejects.
+   * out the execution deadline. The frozen fallback is the conclusion the
+   * caller already knew (`outcome`, and the inherited head for a `skipped`
+   * round), never a blanket `unconfirmed` over a decided result; an
+   * `abandoned` promotion's handoff also carries `firstRecoveryDelayMs`, so
+   * recovery writes only after that request can no longer land. Resolves
+   * `true` only when the fenced release changed the row — a lease recovery
+   * already claimed, or an expired lease, changed nothing and resolves
+   * `false`; a store fault rejects.
    */
-  abandonTerminalize?(input: { handle: CheckHandle; reason: string; outcome?: "superseded" }): Promise<boolean>;
+  abandonTerminalize?(input: {
+    handle: CheckHandle;
+    reason: string;
+    /** The conclusion this invocation already computed; omitted → `unconfirmed`. */
+    outcome?: CheckTerminalOutcome;
+    /** Set with `outcome: "skipped"`: the head whose result the run inherits. */
+    inheritedHeadSha?: string;
+    /** Delay this row's first recovery attempt past an abandoned send's lifetime. */
+    firstRecoveryDelayMs?: number;
+  }): Promise<boolean>;
   /**
    * §7.9 skip settlement (optional, additive): the delivery ACKs before (or
    * without) a handle — an idempotency hit, a publication-journal hand-off, an
@@ -4106,8 +4120,13 @@ async function processMessage(
    * no-op proved it was not ours to release), so a caller taking a second
    * Check ownership must not do so — a Check fault never blocks the review,
    * but it must not double-claim either.
+   *
    */
-  const abandonCheck = (handle: CheckHandle, reason: string, outcome?: "superseded"): Promise<boolean> => {
+  const abandonCheck = (
+    handle: CheckHandle,
+    reason: string,
+    options?: { outcome?: CheckTerminalOutcome; inheritedHeadSha?: string; firstRecoveryDelayMs?: number },
+  ): Promise<boolean> => {
     const abandon = deps.checks?.abandonTerminalize;
     // No give-up seam (test doubles only; production always supplies it):
     // nothing can prove this attempt released, so report the handoff as failed.
@@ -4118,7 +4137,13 @@ async function processMessage(
       attempt_id: handle.attemptId,
       check_reason: reason,
     };
-    const release = abandon({ handle, reason, ...(outcome === undefined ? {} : { outcome }) }).then(
+    const release = abandon({
+      handle,
+      reason,
+      ...(options?.outcome === undefined ? {} : { outcome: options.outcome }),
+      ...(options?.inheritedHeadSha === undefined ? {} : { inheritedHeadSha: options.inheritedHeadSha }),
+      ...(options?.firstRecoveryDelayMs === undefined ? {} : { firstRecoveryDelayMs: options.firstRecoveryDelayMs }),
+    }).then(
       (released) => {
         if (released) {
           deps.log.warn(
@@ -4185,6 +4210,34 @@ async function processMessage(
     const recordDetached = (outcome: "budget-exceeded"): void => {
       void record(outcome);
     };
+    if (checkPromotionAbandoned === handle.attemptId) {
+      // The promotion's PATCH may still be on the wire (its bound only stopped
+      // the wait). A terminal write from THIS invocation could be overtaken by
+      // it and the finished run reopened — and a reopened run is no longer due
+      // for recovery (`terminal_ms` is set), so it would read `in_progress`
+      // forever. Hand the attempt over with the conclusion this invocation
+      // already computed (the inherited head included) and let the recovery
+      // lane be the last writer, minutes behind the abandoned request.
+      // The abandoned PATCH is bounded only by its update budget plus the
+      // transport's own lifetime (the bound stops the WAIT, it never cancels
+      // the request), so recovery is scheduled beyond that: twice the budget
+      // plus a minute of margin, never shorter than the shared first rung.
+      const promotionLifetimeMs = Math.max(
+        CHECK_BACKOFF_MS[0]!,
+        2 * budgets.updateMs + 60_000,
+      );
+      const release = abandonCheck(
+        handle,
+        "check promotion exceeded its update budget (the terminal send is left to recovery)",
+        {
+          outcome,
+          ...(inheritedHeadSha === undefined ? {} : { inheritedHeadSha }),
+          firstRecoveryDelayMs: promotionLifetimeMs,
+        },
+      );
+      if (deps.background === undefined) await release;
+      return;
+    }
     try {
       const terminalize = deps.checks!.terminalize({
         handle,
@@ -4265,22 +4318,6 @@ async function processMessage(
   ): Promise<void> => {
     if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
     checkTerminalized = true;
-    if (checkPromotionAbandoned === checkHandle.attemptId) {
-      // The promotion's PATCH may still be on the wire. A terminal write from
-      // THIS invocation could be overtaken by it and the finished run reopened
-      // — and a reopened run is no longer due for recovery (`terminal_ms` is
-      // set), so it would read `in_progress` forever. Hand the attempt to the
-      // recovery lane exactly as a budget-exceeded terminalize does: the
-      // fallback intent is frozen where none is frozen and the lease is
-      // released, so the minute cron is the last writer — minutes behind any
-      // abandoned PATCH — and corrects the conclusion from publication proof.
-      const release = abandonCheck(
-        checkHandle,
-        "check promotion exceeded its update budget (the terminal send is left to recovery)",
-      );
-      if (deps.background === undefined) await release;
-      return;
-    }
     await runTerminalize(checkHandle, publicationId, outcome, inheritedHeadSha);
   };
 
@@ -4814,7 +4851,7 @@ async function processMessage(
       const handedOff = await abandonCheck(
         supersededHandle,
         "the checkout proved a newer commit than the claim",
-        "superseded",
+        { outcome: "superseded" },
       );
       if (handedOff) {
         checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);

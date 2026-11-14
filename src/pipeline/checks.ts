@@ -314,11 +314,11 @@ export type ChecksAdapter = {
    * Promote the run this attempt created to `in_progress` when the review
    * actually starts (spec §7.9): the create happens at delivery acceptance, so
    * until the review begins the truthful state is `queued`. Proven on the live
-   * lease and the PERSISTED run id, exactly like `completeCheck`; bounded by
-   * `updateBudgetMs`, and a refusal, rejection or budget overrun answers
+   * lease and the PERSISTED run id, exactly like `completeCheck`, and bounded
+   * by `updateBudgetMs`, and a refusal, rejection or budget overrun answers
    * `false` (one warn through `warn`) — it never throws, because a Check never
-   * blocks or delays the review. Optional like the relabel beside it: an
-   * implementation or double without it simply promotes nothing.
+   * blocks or delays the review. Optional like the relabel beside it: an implementation or double
+   * without it simply promotes nothing.
    */
   markInProgress?(input: {
     identity: CheckIdentity;
@@ -751,8 +751,8 @@ async function completeCheckWith(
  *
  * Bounded and never rejecting: it sits on the review's critical path right
  * after `begin`, so a hanging PATCH must end at the budget instead of holding
- * the round — past it the caller gets `false` and one warn, and the review runs
- * regardless.
+ * the round. Past that budget the answer is `abandoned` with one warn, because
+ * the PATCH may still be in flight; the review runs regardless.
  */
 async function markInProgressWith(
   deps: ChecksDeps,
@@ -1584,13 +1584,27 @@ export type CheckLifecycle = {
     handle: CheckLifecycleHandle;
     reason: string;
     /**
-     * The terminal outcome this give-up owes when nothing is frozen yet.
-     * Omitted → the generic `failure/unconfirmed` of an interrupted
-     * terminalize. `superseded` is the one outcome the consumer decides with
-     * no proof read: the checkout contradicted the claim, so that run
-     * reviewed nothing for its own SHA.
+     * The terminal outcome this give-up owes when nothing is frozen yet. Omitted
+     * → the generic `failure/unconfirmed` of an interrupted terminalize. Given,
+     * the fallback is the SAME conclusion the terminal path would have sent —
+     * `skipped` reads the inherited head's result and gate (`inheritedHeadSha`),
+     * every other value decides from the outcome alone. A handoff must never
+     * freeze `unconfirmed` over a conclusion the caller already had.
      */
-    outcome?: "superseded";
+    outcome?: CheckTerminalOutcome;
+    /**
+     * Set with `outcome: "skipped"`: the reviewed head whose result the run
+     * inherits, read exactly as `terminalize` reads it.
+     */
+    inheritedHeadSha?: string;
+    /**
+     * Delay THIS row's first recovery attempt past the maximum possible
+     * lifetime of an ABANDONED promotion request: the update budget bounds the
+     * send's own life and the transport adds the rest; scheduling recovery
+     * beyond that is what makes the recovery write the last writer. Omitted →
+     * the shared first backoff rung.
+     */
+    firstRecoveryDelayMs?: number;
   }): Promise<boolean>;
 };
 
@@ -1838,6 +1852,13 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     lease: Lease,
     reason: string,
     requestsSpent: boolean,
+    /**
+     * A TARGETED override of the first recovery attempt, never a change to the
+     * shared schedule: the abandoned-promotion handoff uses it so the recovery
+     * write lands after the abandoned request's maximum possible lifetime
+     * (budget + transport). Omitted → the first backoff rung.
+     */
+    firstRecoveryDelayMs?: number,
   ): Promise<boolean> => {
     const nowMs = deps.nowMs();
     return deferCheckRecovery(
@@ -1846,7 +1867,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       lease,
       {
         state: requestsSpent ? "remote-unconfirmed" : "pending",
-        nextAttemptMs: nowMs + CHECK_BACKOFF_MS[0]!,
+        nextAttemptMs: nowMs + (firstRecoveryDelayMs ?? CHECK_BACKOFF_MS[0]!),
         reason,
       },
       nowMs,
@@ -2259,14 +2280,24 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     async abandonTerminalize(input) {
       const { handle } = input;
       const fence = fenceFor(handle.lease);
+      // The fallback must equal what the terminal path would have sent: an
+      // inherited head is read exactly as `terminalize` reads it, and every
+      // other outcome decides from that outcome alone. `outcome` omitted is the
+      // interrupted-terminalize case, whose honest text is `unconfirmed`.
       const conclusion: CheckConclusion =
         input.outcome === undefined
           ? { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed }
           : decideConclusion({
               proof: null,
               outcome: input.outcome,
-              gate: null,
-              review: null,
+              gate: input.inheritedHeadSha === undefined ? null : await deps.getCheckGate(handle.scope),
+              review:
+                input.inheritedHeadSha === undefined
+                  ? null
+                  : await readInheritedReview(deps.db, { scope: handle.scope, headSha: input.inheritedHeadSha }),
+              ...(input.inheritedHeadSha === undefined
+                ? {}
+                : { inherited: { headSha: handle.headSha, reviewedHeadSha: input.inheritedHeadSha } }),
               headSha: handle.headSha,
             });
       // The fallback lands ONLY where nothing is frozen yet: the state
@@ -2279,7 +2310,13 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // terminalize may already have updated (RL-12). The boolean is the
       // RELEASE write's own result: a dead fence (recovery claimed the
       // attempt, or the lease expired) changed nothing and reports `false`.
-      return releaseForRecovery(handle.attemptId, fence.lease, input.reason, true);
+      return releaseForRecovery(
+        handle.attemptId,
+        fence.lease,
+        input.reason,
+        true,
+        input.firstRecoveryDelayMs,
+      );
     },
   };
 }

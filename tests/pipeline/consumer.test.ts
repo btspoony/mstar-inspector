@@ -6032,6 +6032,7 @@ type CheckRowShape = {
   next_attempt_ms: number | null;
   last_error: string | null;
   terminal_ms: number | null;
+  terminalize_outcome: string | null;
   execution_deadline_ms: number;
 };
 
@@ -6284,6 +6285,64 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const settled = checkRowFor(db, SHA);
     expect(settled.observed).toBe("success");
     expect(settled.terminal_ms).not.toBeNull();
+  }, 20_000);
+
+  test("check lifecycle: an abandoned promotion keeps the INHERITED conclusion instead of freezing failure", async () => {
+    const db = await createSeededTestD1();
+    // The delivery is a duplicate: a completed, gate-PASSING review already
+    // exists for the checked-out sha, so the admitted run owes THAT result —
+    // the give-up fallback must not overwrite a conclusion this invocation
+    // already had.
+    await createArtifactStore(db).put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: GATED_OUTPUT,
+      appId: TEST_APP_ID,
+    });
+    seedCheckBudget(db, "review.check.update_timeout_ms", "1000");
+    checkRequestOverrides.update = (params) => {
+      if ("status" in params && !("conclusion" in params)) return Promise.withResolvers<CheckRunPayload>().promise;
+      const run = checkRuns.get(params.check_run_id)!;
+      const updated: CheckRunPayload =
+        "conclusion" in params
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          : { ...run, status: "in_progress" };
+      checkRuns.set(params.check_run_id, updated);
+      return updated;
+    };
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // The abandoned promotion sends nothing terminally (the cron owns it)...
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    const row = checkRowFor(db, SHA);
+    // ...and what it hands over is the INHERITED result, never `failure`.
+    expect(row.desired).toBe("success");
+    expect(row.desired_summary).toBe(
+      `No new changes since the reviewed head ${SHA.slice(0, 7)}; its own gate result is inherited: verdict "ship it", score 85 (floor ${GATE.minScore}; allowed: ship it).`,
+    );
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.holder).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+
+    // The recovery lane sends that frozen conclusion once the attempt is due.
+    seedAppInstallation(db);
+    const dueAt = row.execution_deadline_ms + 1;
+    const pass = await reconcileReviewChecks({ DB: db as never } as never, {
+      now: () => dueAt,
+      credentials: async () => ({ kind: "ok" as const, paused: false, adapter: checksAdapterFor(db, () => dueAt) }),
+      log: { warn: () => {}, info: () => {} },
+    });
+    expect(pass.completed).toBe(1);
+    const terminal = checkRequests.filter((r) => r.op === "update").at(-1)!;
+    expect(terminal.params.conclusion).toBe("success");
+    expect(checkRowFor(db, SHA).observed).toBe("success");
   }, 20_000);
 
   test("check lifecycle: duplicate delivery takes no second claim and no second remote run", async () => {
