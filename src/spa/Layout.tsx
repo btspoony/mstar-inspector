@@ -12,6 +12,7 @@ import { WorkspaceSwitcher } from "./components/WorkspaceSwitcher";
 import { SupportNotice } from "./components/SupportNotice";
 import type { FlashKind } from "./flash";
 import { PageNotice } from "./pages/PageNotice";
+import { pageDocumentTitle } from "./document-title";
 import { matchSpaRoute } from "./routes";
 import { buildNavbarModel, buildSidebarModel, buildWorkspaceSwitcherModel } from "./shell";
 import { useLiveMemberships, WorkspaceMembershipsProvider } from "./workspace-memberships";
@@ -90,8 +91,21 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
 
   return (
     <SidebarProvider defaultOpen className="h-svh overflow-hidden print:h-auto print:overflow-visible">
+      {/* First focusable control in the shell: keyboard users land on the
+          sidebar's three links before the page, and the skip target is the
+          `<main>` below (WCAG 2.4.1). Hidden until focused. */}
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-(--radius-control) focus:bg-(--surface-raised) focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-(--text-primary) focus:no-underline"
+      >
+        {t(boot.locale, "nav.skipToContent")}
+      </a>
       <AppSidebar model={sidebar} />
-      <SidebarInset className="h-svh overflow-hidden print:h-auto print:overflow-visible">
+      <SidebarInset
+        id="main"
+        tabIndex={-1}
+        className="h-svh overflow-hidden outline-none print:h-auto print:overflow-visible"
+      >
         {/* v0.3 (DESIGN.md): navbar sits on the raised surface, one step above
             the page canvas, matching the sidebar chrome layer. Two clusters: the
             workspace switcher names what the whole shell is scoped to (left),
@@ -157,6 +171,23 @@ export function Layout({ boot, pathname, flash: bootFlash, children }: LayoutPro
     shownOn.current = pathname;
     setFlash(null);
   }, [pathname]);
+  // A client-side navigation replaces the content under a static document
+  // title, and leaves focus on the sidebar link that was clicked: the tab
+  // still says the same thing and nothing tells assistive technology the page
+  // changed. Name the destination and move focus into it.
+  //
+  // Keyed on the pathname, not a "first run" latch: StrictMode's development
+  // double-invoke re-runs a mount effect with refs intact, so a one-shot flag
+  // would announce (and steal focus) on the first paint there. A same-pathname
+  // run is the only one that skips — which is what the first paint is.
+  const announcedOn = useRef(pathname);
+  const page = route?.page ?? null;
+  useLayoutEffect(() => {
+    if (announcedOn.current === pathname) return;
+    announcedOn.current = pathname;
+    document.title = pageDocumentTitle(boot.locale, page);
+    document.getElementById("main")?.focus();
+  }, [pathname, boot.locale, page]);
   if (route?.page === "login") {
     return <LoginChrome>{children}</LoginChrome>;
   }

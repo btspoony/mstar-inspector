@@ -42,6 +42,8 @@ import {
 } from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
+import { pageDocumentTitle } from "../spa/document-title";
+import { localizeDocument } from "./document-locale";
 import { isSpaAssetPath, matchSpaRoute, wantsHtml } from "../spa/routes";
 import { deploymentModeOf, type DeploymentMode, type Env } from "./env";
 
@@ -312,10 +314,20 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // append instead). HEAD and an asset failure above return before this line,
   // so neither can spend it for a shell that never showed the boot.
   if (firstInstance) headers.append("set-cookie", expireCookie(FIRST_INSTANCE_COOKIE));
-  return new Response(injectSpaBoot(html, boot), {
-    status: assetResponse.status,
-    headers,
-  });
+  // The document's own locale, not just its boot: the template declares
+  // `lang="en"` and an English title, and a zh_CN reader must not be handed a
+  // Chinese UI marked as English (WCAG 3.1.1).
+  return new Response(
+    localizeDocument(
+      injectSpaBoot(html, boot),
+      boot.locale,
+      pageDocumentTitle(boot.locale, route?.page ?? null),
+    ),
+    {
+      status: assetResponse.status,
+      headers,
+    },
+  );
 }
 
 export function spaDispatch(): MiddlewareHandler<{ Bindings: Env }> {
