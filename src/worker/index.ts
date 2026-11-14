@@ -220,9 +220,10 @@ async function withinBudget(promise: Promise<unknown>, budgetMs: number): Promis
  * Runs BEFORE the enqueue: the attempt is claimed and its `queued` run created
  * NOW, so the Check shows up within seconds of the webhook instead of when a
  * worker finally starts the message — and an admitted message finds a row it
- * can adopt instead of racing this holder. The review's own begin PROMOTES that
- * run to `in_progress` when it starts (§7.9); the row is then released with the
- * run id persisted, which is exactly what the consumer's `begin` adopts.
+ * can adopt instead of racing this holder. The row is then RELEASED with the
+ * run id persisted, which is exactly what the consumer's `begin` adopts; that
+ * begin PROMOTES the run to `in_progress` once the review actually starts
+ * (§7.9).
  *
  * Best-effort by contract: the client comes from the SAME
  * `createReviewCommenter` construction point every other Check send uses (spec

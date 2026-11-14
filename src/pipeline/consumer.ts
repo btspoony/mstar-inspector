@@ -777,7 +777,11 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
  *
  * So the derived runner deadline is 666_000ms — 646_000 when an operator
  * configures terminalize at its 30_000 ceiling — below `deep`'s 840_000 table
- * on every level. That is what makes an oversized-diff capture fit: the
+ * on every level. NOT a reserve term: the `queued` → `in_progress` promotion
+ * (§7.9) is bounded by the operator's `review.check.update_timeout_ms` too, but
+ * it runs at ADMISSION — before the container and the runner — so it spends the
+ * round's own clock rather than this post-runner reserve, and the sum above is
+ * unchanged by it. That is what makes an oversized-diff capture fit: the
  * fallback needs one `EXEC_TIMEOUT_GIT_MS` (120_000) of the deadline and still
  * leaves 546_000 for the runner. Every post-diff sandbox step (increment
  * capture, numstat, the runner-input write, the PR-context reads) and the
@@ -952,10 +956,11 @@ async function boundedBestEffort<T>(step: Promise<T>, budgetMs: number): Promise
 
 /**
  * §7.10 held-Check visibility: a delivery the in-flight guard refused still owns
- * the Check its attach created, and that run would otherwise read
- * `in_progress` for the whole backoff with nothing saying why (measured on
- * staging 2026-11-13: 41 of one run's 49 minutes were queue time). Relabel it
- * with the HOLDER's head, so the PR page names the review this commit waits for.
+ * the `queued` Check its attach created, and without context that run would sit
+ * nameless for the whole backoff (measured on staging 2026-11-13: 41 of one
+ * run's 49 minutes were queue time). Relabel it with the HOLDER's head, so the
+ * PR page names the review this commit waits for; the run stays `queued`
+ * because nothing has started, and only the summary moves.
  *
  * Best-effort by contract, exactly like the skip settlement: one warn on a
  * fault, and the delayed retry the caller is about to schedule never changes.
@@ -1078,10 +1083,10 @@ async function handleGuardHeld(
   const delays = guardRetryDelaysSeconds(level);
   const delaySeconds = delays[message.attempts - 1];
   if (delaySeconds !== undefined) {
-    // Say WHY nothing has started: the attach already put a run on this commit,
-    // so a refused delivery would otherwise leave it reading `in_progress` for
-    // the whole backoff. Only a `pr-held` refusal names a live review to wait
-    // for — a cap/storage refusal has no holder and must not claim one.
+    // Say WHY nothing has started: the attach already put a `queued` run on
+    // this commit, and the relabel adds the holder's context to it. Only a
+    // `pr-held` refusal names a live review to wait for — a cap/storage
+    // refusal has no holder and must not claim one.
     if (admission.reason === "pr-held") {
       await markQueuedBehindInflightRow(deps, message.body, heldHeadSha);
     }
@@ -1284,11 +1289,11 @@ export type CheckLifecycleHooks = {
   }): Promise<boolean>;
   /**
    * §7.10 held-Check visibility (optional, additive): the in-flight guard
-   * refused this delivery while its Check was already attached, so the run is
-   * relabelled "queued behind the live review" — it keeps running and only its
-   * text moves, because a Check that reads `in_progress` for the whole backoff
-   * with no reason reads as a stuck review. Best-effort: `false` means there was
-   * nothing to label, a fault rejects, and neither changes the retry outcome.
+   * refused this delivery while its Check was already attached. The run is
+   * created `queued` at delivery acceptance, so the relabel adds which live
+   * review holds the slot — the status stays `queued` and only the text moves.
+   * Best-effort: `false` means there was nothing to label, a fault rejects, and
+   * neither changes the retry outcome.
    */
   markQueuedBehindInflight?(input: {
     scope: Scope;
@@ -4256,8 +4261,11 @@ async function processMessage(
    * The run is created `queued` at delivery acceptance (spec §7.9), so the
    * review's own begin is what makes the public status truthful. Promoted
    * here under the operator's update budget — NEVER the begin hook's 2 s,
-   * which bounds a different step — and never on the review's critical path
-   * past that budget: a Check fault only warns.
+   * which bounds a different step — and this wait is bounded too, but the
+   * FAILURE REPORT belongs to the adapter alone: it owns the same budget and
+   * names the real cause, so warning again here would log one hung PATCH
+   * twice. Only an unexpected rejection (the adapter promises never to throw)
+   * is reported at this layer, as the unhandled-rejection guard.
    */
   const promoteCheckInProgress = async (handle: CheckHandle): Promise<void> => {
     if (deps.checks?.markInProgress === undefined) return;
@@ -4272,7 +4280,7 @@ async function processMessage(
         detail,
       );
     try {
-      const promoted = await boundedBestEffort(
+      await boundedBestEffort(
         deps.checks
           .markInProgress({
             handle,
@@ -4281,18 +4289,13 @@ async function processMessage(
             warn,
           })
           .catch((err: unknown) => {
-            // A rejection that lands after the deadline still gets its warn
-            // instead of becoming an unhandled rejection.
+            // A rejection that lands after this layer stopped waiting still
+            // gets its warn instead of becoming an unhandled rejection.
             warn(`check in-progress promotion failed (the review is unaffected): ${err instanceof Error ? err.message : String(err)}`);
             return false;
           }),
         budgetMs,
       );
-      if (promoted === null) {
-        warn(
-          `check in-progress promotion skipped: it exceeded ${budgetMs}ms (the review is unaffected)`,
-        );
-      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       warn(`check in-progress promotion failed (the review is unaffected): ${detail}`);

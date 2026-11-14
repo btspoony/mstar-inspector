@@ -1494,9 +1494,9 @@ export type CheckLifecycle = {
   /**
    * §7.10 held-Check visibility: the in-flight guard refused a message whose
    * Check was already attached, so the run must SAY it is queued behind the PR's
-   * live review — otherwise the public surface reads `in_progress` for the whole
-   * backoff with nothing explaining it. Writes the frozen text only (never the
-   * status, never the intent) on THIS delivery's own attach row.
+   * live review — the run is `queued` already, and without this it would sit
+   * there for the whole backoff with nothing explaining it. Writes the text only
+   * (never the status, never the intent) on THIS delivery's own attach row.
    *
    * Resolves true only when the relabel was sent; false means there was nothing
    * to label (no own attach row, no remote run) or no Checks surface to send

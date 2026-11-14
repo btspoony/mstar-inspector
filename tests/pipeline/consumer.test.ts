@@ -6219,6 +6219,43 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(publicationRow(db).phase).toBe("applied");
   });
 
+  test("check lifecycle: a promotion that never answers is ONE warn — the adapter owns the failure report", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    // The smallest legal update budget: the hung PATCH is ended by the bound
+    // the adapter and the consumer's wait BOTH share.
+    seedCheckBudget(db, "review.check.update_timeout_ms", "1000");
+    const hungPromotion = Promise.withResolvers<CheckRunPayload>();
+    checkRequestOverrides.update = (params) => {
+      // Only the promotion (a status send with no conclusion) hangs; the
+      // terminal update still answers so the review closes normally.
+      if ("status" in params && !("conclusion" in params)) return hungPromotion.promise;
+      const run = checkRuns.get(params.check_run_id)!;
+      const updated: CheckRunPayload =
+        "conclusion" in params
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          : { ...run, status: "in_progress" };
+      checkRuns.set(params.check_run_id, updated);
+      return updated;
+    };
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // One hung PATCH, one line: the adapter names the real cause and the
+    // consumer's own wait staying silent is what keeps this from doubling.
+    const warns = h.logLines.filter((line) => line.fields.event === "check_in_progress_failed");
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.msg).toContain("exceeded 1000ms");
+    // The hung promotion never touches the review or its terminal conclusion.
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(checkRowFor(db, SHA).observed).toBe("success");
+  }, 10_000);
+
   test("check lifecycle: duplicate delivery takes no second claim and no second remote run", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
