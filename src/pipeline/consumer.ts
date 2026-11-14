@@ -4121,11 +4121,17 @@ async function processMessage(
    * Check ownership must not do so — a Check fault never blocks the review,
    * but it must not double-claim either.
    *
+   * EVERY hand-off of an attempt whose promotion was ABANDONED gets the longer
+   * first recovery delay, because the property belongs to the attempt, not to
+   * one exit: the abandoned PATCH is bounded only by its update budget plus the
+   * transport's own lifetime, and no cancellation exists — the bound only stops
+   * the wait. Scheduling the recovery write beyond that bound is what makes it
+   * the LAST writer; it is an assumption about network lifetime, not a proof.
    */
   const abandonCheck = (
     handle: CheckHandle,
     reason: string,
-    options?: { outcome?: CheckTerminalOutcome; inheritedHeadSha?: string; firstRecoveryDelayMs?: number },
+    options?: { outcome?: CheckTerminalOutcome; inheritedHeadSha?: string },
   ): Promise<boolean> => {
     const abandon = deps.checks?.abandonTerminalize;
     // No give-up seam (test doubles only; production always supplies it):
@@ -4137,12 +4143,21 @@ async function processMessage(
       attempt_id: handle.attemptId,
       check_reason: reason,
     };
+    // Two budgets of margin past the abandoned send itself (the promotion runs
+    // on the operator's update budget), never shorter than the shared rung.
+    const firstRecoveryDelayMs =
+      checkPromotionAbandoned === handle.attemptId
+        ? Math.max(
+            CHECK_BACKOFF_MS[0]!,
+            2 * (checkBudgets?.updateMs ?? CHECK_UPDATE_DEFAULT) + 60_000,
+          )
+        : undefined;
     const release = abandon({
       handle,
       reason,
       ...(options?.outcome === undefined ? {} : { outcome: options.outcome }),
       ...(options?.inheritedHeadSha === undefined ? {} : { inheritedHeadSha: options.inheritedHeadSha }),
-      ...(options?.firstRecoveryDelayMs === undefined ? {} : { firstRecoveryDelayMs: options.firstRecoveryDelayMs }),
+      ...(firstRecoveryDelayMs === undefined ? {} : { firstRecoveryDelayMs }),
     }).then(
       (released) => {
         if (released) {
@@ -4218,24 +4233,19 @@ async function processMessage(
       // forever. Hand the attempt over with the conclusion this invocation
       // already computed (the inherited head included) and let the recovery
       // lane be the last writer, minutes behind the abandoned request.
-      // The abandoned PATCH is bounded only by its update budget plus the
-      // transport's own lifetime (the bound stops the WAIT, it never cancels
-      // the request), so recovery is scheduled beyond that: twice the budget
-      // plus a minute of margin, never shorter than the shared first rung.
-      const promotionLifetimeMs = Math.max(
-        CHECK_BACKOFF_MS[0]!,
-        2 * budgets.updateMs + 60_000,
-      );
       const release = abandonCheck(
         handle,
         "check promotion exceeded its update budget (the terminal send is left to recovery)",
         {
           outcome,
           ...(inheritedHeadSha === undefined ? {} : { inheritedHeadSha }),
-          firstRecoveryDelayMs: promotionLifetimeMs,
         },
       );
       if (deps.background === undefined) await release;
+      // This exit hands the attempt over without ever calling the hook; the
+      // store turns `completed` into `handed-off` for a row whose observation
+      // never met its intent.
+      await record("completed");
       return;
     }
     try {

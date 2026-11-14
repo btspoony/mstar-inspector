@@ -6267,6 +6267,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(released.desired).toBe("failure");
     expect(released.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
     expect(h.logLines.filter((line) => line.fields.event === "check_abandon_released")).toHaveLength(1);
+    // This exit records the honest handoff outcome (no send ever happened).
+    expect(released.terminalize_outcome).toBe("handed-off");
+    // The first recovery attempt is scheduled past the abandoned request's
+    // possible lifetime, not at the shared rung: max(60_000, 2 × 1000 + 60_000).
+    const recoveryDelayMs = released.next_attempt_ms! - Date.now();
+    expect(recoveryDelayMs).toBeGreaterThan(61_500);
+    expect(recoveryDelayMs).toBeLessThan(65_000);
     // The review itself is untouched.
     expect(publicationRow(db).phase).toBe("applied");
 
@@ -8045,6 +8052,51 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRowFor(db, SHA).holder).toBeNull();
     expect(checkRowFor(db, SHA2).observed).toBe("success");
     expect(publicationRow(db).phase).toBe("applied");
+  }, 20_000);
+
+  test("check lifecycle: a superseded attempt whose promotion was abandoned also gets the longer recovery delay", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    h.sandbox.resolvedSha = SHA2; // the clone landed a newer commit
+    const db = await createSeededTestD1();
+    seedCheckBudget(db, "review.check.update_timeout_ms", "1000");
+    // ONLY the early attempt's promotion (run FIRST+1) hangs: its `in_progress`
+    // PATCH may still be in flight when the checkout contradicts the claim, so
+    // this handoff must not be scheduled a minute later like an ordinary one.
+    checkRequestOverrides.update = (params) => {
+      if (params.check_run_id === FIRST_CHECK_RUN_ID + 1 && "status" in params && !("conclusion" in params)) {
+        return Promise.withResolvers<CheckRunPayload>().promise;
+      }
+      const run = checkRuns.get(params.check_run_id)!;
+      const updated: CheckRunPayload =
+        "conclusion" in params
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          : "status" in params
+            ? { ...run, status: "in_progress" }
+            : run;
+      checkRuns.set(params.check_run_id, updated);
+      return updated;
+    };
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const early = checkRowFor(db, SHA);
+    // The contradicted attempt still freezes ITS conclusion, not the fallback.
+    expect(early.desired).toBe("failure");
+    expect(early.desired_summary).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
+    expect(early.recovery_state).toBe("remote-unconfirmed");
+    expect(early.holder).toBeNull();
+    // The property belongs to the ATTEMPT: this exit gets the same margin past
+    // the abandoned request as the terminalize exit does.
+    const recoveryDelayMs = early.next_attempt_ms! - Date.now();
+    expect(recoveryDelayMs).toBeGreaterThan(61_500);
+    expect(recoveryDelayMs).toBeLessThan(65_000);
+    // The new head's review is unaffected.
+    expect(checkRowFor(db, SHA2).observed).toBe("success");
   }, 20_000);
 
   test("check lifecycle: a give-up that did not release keeps the review and claims NO second Check", async () => {

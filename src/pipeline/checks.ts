@@ -315,9 +315,13 @@ export type ChecksAdapter = {
    * actually starts (spec §7.9): the create happens at delivery acceptance, so
    * until the review begins the truthful state is `queued`. Proven on the live
    * lease and the PERSISTED run id, exactly like `completeCheck`, and bounded
-   * by `updateBudgetMs`, and a refusal, rejection or budget overrun answers
-   * `false` (one warn through `warn`) — it never throws, because a Check never
-   * blocks or delays the review. Optional like the relabel beside it: an implementation or double
+   * by `updateBudgetMs`. A REFUSAL (no attached run, an already-decided
+   * attempt, no client, no callable `update`) is not a failure and stays
+   * silent: it answers settled with `promoted: false`. A rejection or a budget
+   * overrun IS the failure this lane reports — exactly one warn through
+   * `warn` — and a budget overrun answers `abandoned`, because its PATCH may
+   * still be on the wire. It never throws: a Check never blocks or delays the
+   * review. Optional like the relabel beside it: an implementation or double
    * without it simply promotes nothing.
    */
   markInProgress?(input: {
@@ -746,8 +750,9 @@ async function completeCheckWith(
  * Promote the created-but-not-started run to `in_progress` (spec §7.9): the
  * delivery acceptance creates it `queued`, and only the review's own begin may
  * say it is running. Ownership and the run id come from the PERSISTED row, so
- * an attempt with no attached run, a lost lease or an unresolvable client
- * refuses without a send.
+ * an attempt with no attached run, a lost lease, an already-decided row or an
+ * unresolvable client is REFUSED without a send — and silently, because a
+ * refusal is not a failure.
  *
  * Bounded and never rejecting: it sits on the review's critical path right
  * after `begin`, so a hanging PATCH must end at the budget instead of holding

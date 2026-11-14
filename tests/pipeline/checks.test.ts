@@ -41,7 +41,6 @@ import {
   listCheckReconcileBatch,
   rollbackCheckCreateDispatch,
   readPublishedReview,
-  recordCheckObservation,
   recordTerminalizeOutcome,
   releaseAttachedCheck,
   releaseCheckClaim,
@@ -3414,24 +3413,32 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     expect(warns[0]).toContain("exceeded 25ms");
   });
 
-  test("an attempt that already ended is never reopened: no send, no warn", async () => {
+  test("the lifecycle refuses a TERMINAL attempt before it consults the adapter", async () => {
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
-    // The run is finished: the terminal observation is what makes reopening it
-    // a lie, and the check reads that state from the attempt it already has.
-    expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
-    const completed = toCheckRemote(
-      runPayload(attempt.identity, { status: "completed", conclusion: "success" }),
-    );
-    if (completed === null) throw new Error("fixture: expected a narrowable run payload");
-    expect(await recordCheckObservation(db, attempt.identity.attemptId, lease, completed, T0)).toBe(true);
-    const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
-    const warns: string[] = [];
+    // `terminal_ms` set while the intent still wants `in_progress`: the row is
+    // finished but its persisted intent cannot say so — exactly the state the
+    // lifecycle's own attempt read has to catch (the adapter's ownership read
+    // would answer `null` too, so the adapter call is what this pins).
+    db.raw
+      .prepare("UPDATE review_checks SET terminal_ms = ? WHERE id = ?")
+      .run(T0, attempt.identity.attemptId);
+    let adapterCalls = 0;
     const lifecycle = createCheckLifecycle({
       db,
       nowMs: () => CLOCK,
-      getAdapter: () => adapterFor(db, fake.octokit),
+      getAdapter: () =>
+        ({
+          beginCheck: async () => ({ kind: "unavailable" as const, requests: 0, reason: "unused" }),
+          adoptCheckRun: async () => ({ kind: "absent" as const }),
+          completeCheck: async () => ({ kind: "unavailable" as const, requests: 0, reason: "unused" }),
+          fetchCheckRun: async () => ({ kind: "absent" as const }),
+          markInProgress: async () => {
+            adapterCalls += 1;
+            return { kind: "settled" as const, promoted: true };
+          },
+        }),
       getCheckGate: async () => GATE,
     });
 
@@ -3439,14 +3446,31 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
       handle: { attemptId: attempt.identity.attemptId, scope: SCOPE, githubAppId: GITHUB_APP_ID, headSha: SHA, lease },
       summary: "Review started for 0123456 — this run reports the review of this commit.",
       updateBudgetMs: 1_000,
-      warn: (detail) => warns.push(detail),
+      warn: () => {},
     });
+
+    expect(answer).toEqual({ kind: "settled", promoted: false });
+    // The adapter is never reached for a run that already ended.
+    expect(adapterCalls).toBe(0);
+    expect((await rowOf(db, attempt)).observed).toBe("unknown");
+  });
+
+  test("the adapter refuses an attempt whose terminal intent is already frozen", async () => {
+    const db = await seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    // The run is still non-terminal, but the review has decided its result:
+    // promoting it to `in_progress` now would be a lie. This is the adapter's
+    // OWN guard — the lifecycle passes here (attempt not terminal).
+    expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
+    const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
+    const warns: string[] = [];
+
+    const answer = await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns);
 
     expect(answer).toEqual({ kind: "settled", promoted: false });
     expect(fake.updates).toHaveLength(0);
     expect(warns).toHaveLength(0);
-    // The finished run stays finished.
-    expect((await rowOf(db, attempt)).observed).toBe("success");
   });
 
   test("the lifecycle promotes the handle's owned run, and a handle with no run promotes nothing", async () => {
