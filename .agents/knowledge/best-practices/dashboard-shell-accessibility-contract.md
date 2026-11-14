@@ -49,10 +49,17 @@ ships an English document to a `zh_CN` reader — and the test helper serves the
 
 **One page-label map, imported by both faces.** `pageDocumentTitle` is shared by
 the Worker (which writes the served document) and the client router effect;
-two maps would eventually disagree. It also resolves the **rendered face**, in
-the same order `pages.tsx` early-returns: a support-grant operator is served at
-`<ref>/apps` while seeing the support page, and a workspace-less sign-in sees the
-setup page. The title follows what is on screen, never the path.
+two maps would eventually disagree. It also resolves the **rendered face** from
+the boot's own flags, in the order `pages.tsx` checks them: `needsWorkspace`
+first (the setup page), then `supportOnly` (the read-only support page). The
+title follows what is on screen, never the path — a support-grant operator is
+served at `<ref>/apps` while seeing the support page.
+
+The face is a boot fact, not a route fact, and the login document is why: the
+shell serves it a minimal boot with neither flag, so `documentFaceOf` never
+overrides the login title even though `pages.tsx` also short-circuits on
+`route.page !== "login"`. If a future boot ever carries a face flag on the login
+route, the function — not the caller — must learn that guard.
 
 **Landmarks are elements or roles, never labels on generic divs.**
 `AppSidebar` passes `role="navigation"` down to the primitive, and the label then
