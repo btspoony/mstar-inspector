@@ -1467,6 +1467,70 @@ describe("the recheck ask is FITTED to the operator's assignment budget (§7.3/�
     expect(clockById.get(filler!)).toBeNull();
   });
 
+  test("the rotation clock moves for every selected row except the fit-omitted ones", async () => {
+    // Three classes, one rule: a row the FIT could not fit holds its clock so it
+    // gets its turn; a row the catalog could not prove, and every row of a round
+    // that captured no context at all, must keep rotating — a row that can only
+    // be re-proved by a later diff would otherwise sit in the 25-row cap at the
+    // head forever.
+    const clockOf = (db: SeededDb) => {
+      const rows = db.raw.query("SELECT id, last_scheduled_ms FROM review_findings").all() as {
+        id: string;
+        last_scheduled_ms: number | null;
+      }[];
+      return new Map(rows.map((row) => [row.id, row.last_scheduled_ms]));
+    };
+
+    // (a) catalog-excluded: the seeded diff has no hunk for its file.
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.recheckFileContent = "";
+    const catalogDb = await createSeededTestD1();
+    await seedPriorPublication(catalogDb);
+    const unprovableRowId = "catalog-excluded-row";
+    await seedOpenTarget(catalogDb, {
+      rowId: unprovableRowId,
+      findingId: "catalog-excluded-finding",
+      original: { filePath: "src/not-in-diff.ts", lineStart: 4, lineEnd: 4, fingerprintHint: "unprovable-fp" },
+      nowMs: 1_500,
+    });
+    const [provableRowId] = await seedRotation(catalogDb, 1, 200);
+    const catalogConsumer = createReviewConsumer(
+      await h.makeEnv({ DB: catalogDb as never }),
+      h.testLog,
+      h.overrides,
+    );
+
+    await catalogConsumer(h.makeBatch(makePayload()));
+
+    // It never rode the wire…
+    expect(wireRecheck(h).recheck!.targets.map((target) => target.rowId)).not.toContain(unprovableRowId);
+    const catalogClocks = clockOf(catalogDb);
+    // …and it still rotated out: only a later diff can re-prove it.
+    expect(catalogClocks.get(unprovableRowId)).not.toBeNull();
+    expect(catalogClocks.get(provableRowId!)).not.toBeNull();
+
+    // (b) capture failed: no input at all, so no row is fit-omitted.
+    const h2 = createConsumerHarness();
+    h2.sandbox.diffStdout = VALID_DIFF;
+    h2.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h2.commenterState.discussionError = new Error("discussion capture unavailable");
+    const captureDb = await createSeededTestD1();
+    await seedPriorPublication(captureDb);
+    const capturedRows = await seedRotation(captureDb, 2, 200);
+    const captureConsumer = createReviewConsumer(
+      await h2.makeEnv({ DB: captureDb as never }),
+      h2.testLog,
+      h2.overrides,
+    );
+
+    await captureConsumer(h2.makeBatch(makePayload()));
+
+    expect(JSON.parse(h2.sandbox.writtenInputJson!).recheck).toBeUndefined();
+    const captureClocks = clockOf(captureDb);
+    for (const rowId of capturedRows) expect(captureClocks.get(rowId)).not.toBeNull();
+  });
+
   test("two rounds over the same rotation send DISJOINT prefixes — the omitted rows go first", async () => {
     // ~6 KiB rows against a ~52 KiB document budget fit roughly a third of the
     // rotation, so the first round omits more rows than the second can send:

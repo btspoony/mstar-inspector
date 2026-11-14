@@ -10,7 +10,7 @@ symptoms:
   - "review_failures records stage=recheck with 'skipped: budget (config): ... need at least 66k-75k bytes, the budget is 65536' on every round of a long-lived PR"
   - "Addresses findings from earlier rounds never resolve their GitHub conversations; D1 review_threads stays resolution_state='pending' with verified_json NULL"
   - "The same concerns are re-published as new findings each round because no assessment ever runs"
-root_cause: "The recheck ask was all-or-nothing: fitRecheckInput refused the whole round when targets + discussion exceeded review.recheck.assignment_max_bytes, and rotation only advanced rows that were selected, so an omitted row could never make progress"
+root_cause: "The recheck ask was all-or-nothing: fitRecheckInput refused the whole round when targets + discussion exceeded review.recheck.assignment_max_bytes, and neither face could shrink the ask — only evidence slices were droppable — so every round of a long-lived PR was refused outright and nothing in the lifecycle advanced"
 resolution_type: code_fix
 related_components:
   - consumer
@@ -33,20 +33,21 @@ A pull request that stays open for many rounds accumulates findings. Each round 
 
 ## What made it a deadlock rather than a slow lane
 
-- The ask was all-or-nothing by design: "every target and the discussion always ride (no prior finding may vanish from the ask)". Only evidence slices were droppable.
-- Rotation advances `last_scheduled_ms` only for rows that were **selected**, and the selector scopes are a fixed cap — so an omitted row was never distinguishable from a scheduled one. It came back at the front next round and was refused again.
+- The ask was all-or-nothing by design: "every target and the discussion always ride (no prior finding may vanish from the ask)". Only evidence slices were droppable, so there was no smaller round to ask.
+- A refused round applied nothing: no publication, no lifecycle batch, so no clock moved at all — not because rotation was unfair, but because the round produced no state to advance. Rotation order was never the constraint; the absence of any way to shrink the ask was.
 - Raising the budget moves the cliff; it does not remove it. Long-lived PRs grow without bound.
 
 ## Resolution
 
 - Move the fit predicate to `packages/shared/src/recheck-wire.ts` so the worker runs the same rule as the runner; the runner keeps its skip path for a direct call.
-- The consumer now fits during input construction: candidates ride in rotation order up to `min(512 KiB wire cap, assignment budget − prose)`. Rows that do not fit are `budget` / never-sent and join `budgetExcluded`; `selectedRowIds` is built from the rows actually sent, so their rotation clock — and only theirs — advances.
+- The consumer now fits during input construction: candidates ride in rotation order up to `min(512 KiB wire cap, assignment budget − prose)`. Rows that do not fit are `budget` / never-sent and join `budgetExcluded`.
+- Rotation accounting follows one rule: `selectedRowIds` is every selected row EXCEPT the fit-omitted ones. A sent row advances (as before, even when its answer is unusable); a row the catalog could not prove, and every row of a round whose capture failed, advance too — they cannot be re-proved by waiting at the head, and holding them would park them inside the 25-row cap; only a fit-omitted row holds its clock, stays at the head and gets its turn next round.
 - The rotation head is rescued whenever it does not fit whole: its ORIGINAL body is bounded by a byte-accurate binary search (rowId, title, path and line anchors unchanged, body marked truncated), first beside the fitting rows with its own catalog, then without it, then alone when the budget cannot be shared. A displaced row keeps its clock and comes first next round.
 - Discussion is narrowed to the sent associations before serializing; issue items, coverage and digest stay. Resolution eligibility still requires the same snapshot/coverage/digest fences.
 
 ## Invariants worth keeping
 
-- Never-sent means never-advanced: only rows that rode the wire may move `last_scheduled_ms`.
+- Only a row the FIT omitted holds `last_scheduled_ms`. Everything else selected advances: sent rows because they were asked, catalog- and capture-excluded rows because a later diff is the only way to re-prove them and holding them starves the cap.
 - `assessed + invalid-output + omitted = selected` still holds; an omitted row is `budget`, not `assessed`.
 - The budget is a fitting budget, not a gate; the only all-or-nothing case left is a budget too small to carry prose plus one minimal target.
 

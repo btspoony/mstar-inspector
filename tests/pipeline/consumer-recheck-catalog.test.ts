@@ -20,6 +20,7 @@ import {
   seedOpenTarget,
   seedPriorPublication,
 } from "../helpers/consumer-fixtures";
+import { RECHECK_ASSIGNMENT_KEY, RECHECK_ASSIGNMENT_MIN } from "../../src/dashboard/runtime-config-store";
 import {
   createConsumerHarness,
   DIFF_PREFETCH_MAX_BYTES,
@@ -652,4 +653,38 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     expect(prepared.body).toContain("unverifiable (no-evidence)");
     expect(prepared.body).not.toContain("unverifiable (invalid-output)");
   });
+  test("a head that fits with its full body carries no truncation marker", async () => {
+    // The rescue ladder can reach an attempt where the head's full body fits
+    // once its own catalog is dropped: at the operator floor the four slices of
+    // its file do not fit beside any body, while the body alone does. A body
+    // that was not cut must not claim it was.
+    h.sandbox.diffStdout = catalogBudgetDiff(1);
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.recheckFileContent = "";
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)")
+      .run(RECHECK_ASSIGNMENT_KEY, String(RECHECK_ASSIGNMENT_MIN), new Date().toISOString());
+    await seedPriorPublication(db);
+    const body = "q".repeat(1_000);
+    await seedOpenTarget(db, {
+      rowId: "full-body-head-row",
+      findingId: "full-body-head-finding",
+      original: { body, filePath: "src/b01.ts", lineStart: 1, lineEnd: 1, fingerprintHint: "full-body-fp" },
+      nowMs: 1_500,
+    });
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as {
+      recheck: { targets: Array<{ rowId: string; original: { body: string } }>; evidence: unknown[] };
+    };
+    expect(runnerInput.recheck.targets).toHaveLength(1);
+    expect(runnerInput.recheck.targets[0]!.original.body).toBe(body);
+    expect(runnerInput.recheck.targets[0]!.original.body).not.toContain("[... body truncated ...]");
+    // The slices were what had to go, and they went whole.
+    expect(runnerInput.recheck.evidence).toHaveLength(0);
+  });
+
 });

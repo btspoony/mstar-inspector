@@ -1468,9 +1468,11 @@ function jsonByteLength(value: unknown): number {
  * caller's bound was measured on.
  */
 function truncatedBody(body: string, length: number): string {
-  let cut = Math.max(0, Math.min(length, body.length));
-  if (cut > 0 && cut < body.length && /[\uD800-\uDBFF]/.test(body[cut - 1]!)) cut -= 1;
-  return body.slice(0, cut) + BODY_TRUNCATED_SUFFIX;
+  const cut = Math.max(0, Math.min(length, body.length));
+  // Nothing was cut: a body that fits whole must never claim it was shortened.
+  if (cut >= body.length) return body;
+  const end = cut > 0 && /[\uD800-\uDBFF]/.test(body[cut - 1]!) ? cut - 1 : cut;
+  return body.slice(0, end) + BODY_TRUNCATED_SUFFIX;
 }
 
 /**
@@ -6181,10 +6183,15 @@ async function processMessage(
     }
 
     const lifecycleRound: LifecycleRound = {
-      // Only the rows that actually rode the wire advance the rotation clock:
-      // a row the byte budget could not fit is never-sent `budget`, so moving
-      // its clock would starve it behind every row that did fit.
-      selectedRowIds: recheckInput?.targets.map((target) => target.rowId) ?? [],
+      // The clock moves for every selected row EXCEPT the rows the FIT omitted
+      // for room. A row the catalog could not prove, or one a capture failure
+      // never offered, is re-proved by a later round's diff — parking it at the
+      // rotation head would keep it inside the 25-row cap forever. A fit-omitted
+      // row is different: it was provable and simply did not fit, so it holds its
+      // clock, stays at the head and is rescued when the next round reaches it.
+      selectedRowIds: targets
+        .filter((target) => !budgetExcluded.has(target.rowId))
+        .map((target) => target.rowId),
       assessments: reconciled.assessments,
       seen,
       resolutions: reconciled.resolutions,
