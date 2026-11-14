@@ -370,12 +370,14 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     expect(prepared.body).not.toContain("unverifiable (no-evidence)");
   });
 
-  test("a size-budget row is judged against the final input, not against a dropped neighbour's slices", async () => {
-    // Two provable rows. Row A is over the §7.3 cap on its own (a ~520 KiB
-    // body) and brings four slices; row B fits only once A is gone, because A's
-    // slices push B's input over the cap. Measuring B against the WHOLE
-    // candidate set — as the old fixpoint did — excluded it for evidence it
-    // never rode with, and it never came back.
+  test("the rescued rotation head rides bounded with its OWN slices, never a dropped neighbour's", async () => {
+    // Two provable rows over the size cap, both on their own bodies: row A (the
+    // rotation head) brings four slices of its file, row B one slice of another.
+    // The head can never be dropped for want of room — an omitted row keeps its
+    // clock and comes back first forever — so it rides with a bounded body and
+    // as much of its own catalog as fits, while B waits its turn. Byte
+    // accounting stays measured against the FINAL input either way: A carries
+    // no slice of the row that did not ride, and B is judged without A's slices.
     h.sandbox.diffStdout = [
       catalogBudgetDiff(1),
       "diff --git a/src/other.ts b/src/other.ts",
@@ -423,15 +425,29 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     await consumer(h.makeBatch(makePayload()));
 
     const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as {
-      recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ path: string }> };
+      recheck: {
+        targets: Array<{ rowId: string; original: { title: string; filePath: string; body: string } }>;
+        evidence: Array<{ path: string }>;
+      };
     };
-    // B rides alone: A cannot fit any input, so it contributes no evidence.
-    expect(runnerInput.recheck.targets.map((target) => target.rowId)).toEqual([affordableRowId]);
-    expect(runnerInput.recheck.evidence.map((slice) => slice.path)).toEqual(["src/other.ts"]);
+    // The rotation head rides alone — bounded, and still the same finding row.
+    expect(runnerInput.recheck.targets.map((target) => target.rowId)).toEqual([oversizedRowId]);
+    const [rescued] = runnerInput.recheck.targets;
+    expect(rescued!.original.title).toBe("Oversized neighbour");
+    expect(rescued!.original.filePath).toBe("src/b01.ts");
+    expect(rescued!.original.body.length).toBeLessThan(520 * 1024);
+    expect(rescued!.original.body).toContain("[... body truncated ...]");
+    // Only the head's own catalog rides: the row that did not ride leaves no
+    // orphan evidence behind, and the head carries no slice it cannot cite.
+    const paths = runnerInput.recheck.evidence.map((slice) => slice.path);
+    expect(paths.length).toBeGreaterThan(0);
+    expect(new Set(paths)).toEqual(new Set(["src/b01.ts"]));
+    expect(paths).not.toContain("src/other.ts");
     const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    // The never-sent row keeps the budget reason; the sent row was answered.
-    expect(prepared.body).toContain("| Oversized neighbour | unverifiable (budget) ");
-    expect(prepared.body).toContain("| Affordable row | unverifiable (invalid-output) ");
+    // This fixture delivers no document: the sent head is the attempted-but-
+    // unusable row, the omitted one keeps its never-sent budget reason.
+    expect(prepared.body).toContain("| Oversized neighbour | unverifiable (invalid-output) ");
+    expect(prepared.body).toContain("| Affordable row | unverifiable (budget) ");
   });
 
   test("an oversized hunk is sliced into windows that still contain the target line", async () => {
