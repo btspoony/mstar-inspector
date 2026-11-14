@@ -85,9 +85,9 @@ async function setAssignmentBudget(db: SeededDb, maxBytes: number): Promise<void
  * stays `complete`) and serialize to roughly 9.5 KiB — the discussion half of
  * the staging-shaped ask.
  */
-function bigDiscussion(): Discussion {
+function bigDiscussion(items = 7): Discussion {
   return {
-    items: Array.from({ length: 7 }, (_, index) => ({
+    items: Array.from({ length: items }, (_, index) => ({
       source: "issue" as const,
       associationId: null,
       id: `issue-comment-${index}`,
@@ -1366,11 +1366,105 @@ describe("the recheck ask is FITTED to the operator's assignment budget (§7.3/�
     expect(sent!.original.body).toContain("[... body truncated ...]");
     expect(jsonBytes(recheck) + RECHECK_ASSIGNMENT_PROSE_BYTES).toBeLessThanOrEqual(RECHECK_ASSIGNMENT_MAX_BYTES);
     expect(fitRecheckInput(recheck!, RECHECK_ASSIGNMENT_MAX_BYTES).ok).toBe(true);
+    // Its own catalog rides too: a rescued row with no citable slice could only
+    // ever come back `unverifiable`.
+    expect(recheck!.evidence).toHaveLength(1);
+    expect(recheck!.evidence[0]!.path).toBe("src/auth.ts");
     // It rode the wire, so its clock advanced like any other sent row.
     const clock = db.raw.query("SELECT last_scheduled_ms FROM review_findings WHERE id = ?").get(TARGET_ROW_ID) as {
       last_scheduled_ms: number | null;
     };
     expect(clock.last_scheduled_ms).not.toBeNull();
+  });
+
+  test("an oversized rotation HEAD rides bounded while the rows after it keep their place", async () => {
+    // The mixed rotation: a head whose own body cannot fit, followed by rows
+    // that do. Dropping the head would leave it first in the rotation every
+    // round (an omitted row never advances its clock) and `budget` forever, so
+    // it is bounded into the room the others leave instead.
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.commenterState.discussion = bigDiscussion();
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    const headBody = "z".repeat(120 * 1024);
+    const headRowId = "oversized-head-row";
+    // Created first, so it heads the rotation.
+    await seedOpenTarget(db, {
+      rowId: headRowId,
+      findingId: "oversized-head-finding",
+      original: { body: headBody, filePath: "src/auth.ts", lineStart: 21, lineEnd: 21, fingerprintHint: "head-fp" },
+      nowMs: 1_500,
+    });
+    const later = await seedRotation(db, 5, 3_000);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const { recheck } = wireRecheck(h);
+    expect(recheck).toBeDefined();
+    const sent = recheck!.targets.map((target) => target.rowId);
+    // The head is sent FIRST, with the same identity and a bounded body…
+    expect(sent[0]).toBe(headRowId);
+    const rescued = recheck!.targets[0]!;
+    expect(rescued.original.title).toBe(TARGET_ORIGINAL.title);
+    expect(rescued.original.filePath).toBe(TARGET_ORIGINAL.filePath);
+    expect(rescued.original.lineStart).toBe(TARGET_ORIGINAL.lineStart);
+    expect(rescued.original.body.length).toBeLessThan(headBody.length);
+    expect(rescued.original.body).toContain("[... body truncated ...]");
+    // …its own catalog still rides…
+    expect(recheck!.evidence.some((slice) => slice.path === "src/auth.ts")).toBe(true);
+    // …and every row behind it kept its place in the same ask.
+    expect(sent.slice(1)).toEqual(later);
+    expect(jsonBytes(recheck) + RECHECK_ASSIGNMENT_PROSE_BYTES).toBeLessThanOrEqual(RECHECK_ASSIGNMENT_MAX_BYTES);
+    expect(fitRecheckInput(recheck!, RECHECK_ASSIGNMENT_MAX_BYTES).ok).toBe(true);
+    // The rescued head advances the clock, so it cannot head the rotation again.
+    const clock = db.raw.query("SELECT last_scheduled_ms FROM review_findings WHERE id = ?").get(headRowId) as {
+      last_scheduled_ms: number | null;
+    };
+    expect(clock.last_scheduled_ms).not.toBeNull();
+  });
+
+  test("a head no room can share still rides ALONE, so its clock moves and it rotates behind the rest", async () => {
+    // The pathological ordering: the rows that fit leave less than the head's
+    // own minimal document. Leaving the head out would put it first again on
+    // every round, forever — so it takes the round and the displaced rows keep
+    // their place for the next one (their clocks never moved).
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Sized so the filler row fits the floor budget ALONE but not beside the
+    // head (and the head fits alone): that is the room-sharing failure.
+    h.commenterState.discussion = bigDiscussion(2);
+    const db = await createSeededTestD1();
+    await setAssignmentBudget(db, RECHECK_ASSIGNMENT_MIN);
+    await seedPriorPublication(db);
+    const headBody = "z".repeat(5_000);
+    const headRowId = "alone-head-row";
+    await seedOpenTarget(db, {
+      rowId: headRowId,
+      findingId: "alone-head-finding",
+      original: { body: headBody, filePath: "src/auth.ts", lineStart: 21, lineEnd: 21, fingerprintHint: "alone-fp" },
+      nowMs: 1_500,
+    });
+    const [filler] = await seedRotation(db, 1, 300);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const { recheck } = wireRecheck(h);
+    expect(recheck).toBeDefined();
+    // Only the rescued head: the room could not be shared.
+    expect(recheck!.targets.map((target) => target.rowId)).toEqual([headRowId]);
+    expect(recheck!.targets[0]!.original.body).toContain("[... body truncated ...]");
+    expect(jsonBytes(recheck) + RECHECK_ASSIGNMENT_PROSE_BYTES).toBeLessThanOrEqual(RECHECK_ASSIGNMENT_MIN);
+    const clocks = db.raw.query("SELECT id, last_scheduled_ms FROM review_findings").all() as {
+      id: string;
+      last_scheduled_ms: number | null;
+    }[];
+    const clockById = new Map(clocks.map((row) => [row.id, row.last_scheduled_ms]));
+    // The head rotated; the displaced row did not, so it goes first next round.
+    expect(clockById.get(headRowId)).not.toBeNull();
+    expect(clockById.get(filler!)).toBeNull();
   });
 
   test("two rounds over the same rotation send DISJOINT prefixes — the omitted rows go first", async () => {

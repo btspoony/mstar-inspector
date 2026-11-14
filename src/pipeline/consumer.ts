@@ -5475,47 +5475,75 @@ async function processMessage(
         evidence = nextEvidence;
         for (const id of withRow) referenced.add(id);
       }
-      // No candidate fit even alone. The rotation's first candidate still
-      // rides with whatever room is left, because a round that sends nothing
-      // never advances the clock and the same rows come back forever. Its
-      // catalog slices are dropped whole first (the fit's own evidence
-      // accounting), and only then is the ORIGINAL body cut short: the rowId,
-      // title, file path, line anchors and every other field stay exactly as
-      // captured, so this is the same finding row, never a rewritten one.
-      if (included.length === 0) {
-        const first = candidates[0];
-        if (first !== undefined) {
-          // Measured against the WHOLE discussion: the row is not included
-          // yet, so the narrowed view would still exclude its threads.
-          const bareBytes = (target: RecheckTarget): number =>
-            jsonByteLength({
-              schema: RECHECK_INPUT_SCHEMA,
-              headSha,
-              targets: [target],
-              evidence: [],
-              discussion,
-            });
-          const withBody = (length: number): RecheckTarget => ({
-            ...first,
-            original: { ...first.original, body: truncatedBody(first.original.body, length) },
+      // The rotation HEAD is the one row the fit must never drop for want of
+      // room. A row it omits never advances the clock, so the same row comes
+      // back first on every round and is dropped again — permanently
+      // `budget`, the deadlock this fitting removes. So whenever the head did
+      // not fit whole, its ORIGINAL body is bounded into the room that is left
+      // (beside the rows that did fit, or alone when none did) and its own
+      // catalog rides as far as it fits, so the seat can still cite its proof.
+      // The rowId, title, file path, line anchors and every other field stay
+      // exactly as captured: the same finding row, never a rewritten one.
+      const head = candidates[0];
+      if (head !== undefined && !included.some((target) => target.rowId === head.rowId)) {
+        // Measured against the WHOLE discussion: the head is not included yet,
+        // so the narrowed view would also drop its own threads. Probes are the
+        // serialized document itself, so a multi-byte body is bounded by real
+        // UTF-8 bytes, and the binary search is logarithmic in body length.
+        const bytesOf = (targets: RecheckTarget[], slices: EvidenceSlice[], target: RecheckTarget): number =>
+          jsonByteLength({
+            schema: RECHECK_INPUT_SCHEMA,
+            headSha,
+            targets: [...targets, target],
+            evidence: slices,
+            discussion,
           });
-          if (bareBytes(first) <= documentMaxBytes) {
-            included.push(first);
-          } else {
-            // Bounded binary search over the body's length: each probe measures
-            // real UTF-8 bytes on the serialized document, so a multi-byte body
-            // is bounded by bytes and not by code units, and the probe count is
-            // logarithmic in the body's length.
-            let low = 0;
-            let high = first.original.body.length;
-            while (low < high) {
-              const mid = Math.ceil((low + high) / 2);
-              if (bareBytes(withBody(mid)) <= documentMaxBytes) low = mid;
-              else high = mid - 1;
-            }
-            const bounded = withBody(low);
-            if (bareBytes(bounded) <= documentMaxBytes) included.push(bounded);
+        const withBody = (length: number): RecheckTarget => ({
+          ...head,
+          original: { ...head.original, body: truncatedBody(head.original.body, length) },
+        });
+        /** The head bounded into `slices` beside `targets`, or null when not even an empty body fits. */
+        const rescue = (targets: RecheckTarget[], slices: EvidenceSlice[]): RecheckTarget | null => {
+          if (bytesOf(targets, slices, withBody(0)) > documentMaxBytes) return null;
+          let low = 0;
+          let high = head.original.body.length;
+          while (low < high) {
+            const mid = Math.ceil((low + high) / 2);
+            if (bytesOf(targets, slices, withBody(mid)) <= documentMaxBytes) low = mid;
+            else high = mid - 1;
           }
+          return withBody(low);
+        };
+        const own = new Set(catalog.sliceIdsByRowId.get(head.rowId) ?? []);
+        // The head's own catalog, and the union a shared document needs — never
+        // a slice of a row that ends up unsent (that would be orphan evidence).
+        const headSlices = catalog.slices.filter((slice) => own.has(slice.id));
+        const withOwn = catalog.slices.filter((slice) => own.has(slice.id) || referenced.has(slice.id));
+        // Room for the rows that fit comes first; the head gives up its catalog
+        // before those rows give up their place. A head that cannot share the
+        // budget at all still rides alone — its clock moves, and the rows it
+        // displaced keep their own place for the next round.
+        const attempts: { targets: RecheckTarget[]; slices: EvidenceSlice[] }[] =
+          included.length === 0
+            ? [
+                { targets: [], slices: headSlices },
+                { targets: [], slices: [] },
+              ]
+            : [
+                { targets: included, slices: withOwn },
+                { targets: included, slices: evidence },
+                { targets: [], slices: headSlices },
+                { targets: [], slices: [] },
+              ];
+        for (const attempt of attempts) {
+          const bounded = rescue(attempt.targets, attempt.slices);
+          if (bounded === null) continue;
+          // Array order does not change a serialized document's byte count, so
+          // the head goes back where the rotation had it: first.
+          included.splice(0, included.length, ...attempt.targets);
+          included.unshift(bounded);
+          evidence = attempt.slices;
+          break;
         }
       }
       const sentIds = new Set(included.map((target) => target.rowId));
