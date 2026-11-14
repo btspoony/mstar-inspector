@@ -42,7 +42,7 @@ import {
 } from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
-import { pageDocumentTitle } from "../spa/document-title";
+import { documentFaceOf, pageDocumentTitle } from "../spa/document-title";
 import { localizeDocument } from "./document-locale";
 import { isSpaAssetPath, matchSpaRoute, wantsHtml } from "../spa/routes";
 import { deploymentModeOf, type DeploymentMode, type Env } from "./env";
@@ -321,7 +321,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     localizeDocument(
       injectSpaBoot(html, boot),
       boot.locale,
-      pageDocumentTitle(boot.locale, route?.page ?? null),
+      pageDocumentTitle(boot.locale, route?.page ?? null, documentFaceOf(boot)),
     ),
     {
       status: assetResponse.status,

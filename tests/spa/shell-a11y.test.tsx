@@ -57,13 +57,20 @@ describe("dashboard shell accessibility", () => {
       // The skip link is the FIRST focusable element in the shell, ahead of
       // every sidebar link it exists to skip.
       const focusables = container.querySelectorAll('a[href], button, [tabindex]:not([tabindex="-1"])');
-      expect((focusables[0] as unknown as Element | undefined)?.getAttribute("href")).toBe("#main");
+      expect((focusables[0] as unknown as Element | undefined)?.getAttribute("href")).toBe("#content");
       expect(focusables[0]?.textContent).toBe(t("en", "nav.skipToContent"));
 
+      // The target is the content column, not `<main>`: `<main>` also holds the
+      // toolbar, so skipping to it would still leave the switcher, theme,
+      // locale and logout controls ahead of the page.
+      const content = win.document.getElementById("content");
+      expect(content).not.toBeNull();
+      expect(content?.getAttribute("tabindex")).toBe("-1");
       const main = mainOf(win) as { tagName: string; getAttribute(name: string): string | null } | null;
       expect(main).not.toBeNull();
       expect(main?.tagName).toBe("MAIN");
       expect(main?.getAttribute("tabindex")).toBe("-1");
+      expect((main as unknown as { contains(node: unknown): boolean }).contains(content)).toBe(true);
     } finally {
       await act(async () => root.unmount());
       cleanup();
@@ -104,8 +111,9 @@ describe("dashboard shell accessibility", () => {
     try {
       await act(async () => root.render(shell("/dashboard/login")));
       expect(win.document.querySelector('[role="navigation"]')).toBeNull();
-      expect(win.document.querySelector('a[href="#main"]')).toBeNull();
+      expect(win.document.querySelector('a[href="#content"]')).toBeNull();
       expect(win.document.getElementById("main")).toBeNull();
+      expect(win.document.getElementById("content")).toBeNull();
     } finally {
       await act(async () => root.unmount());
       cleanup();
@@ -132,6 +140,31 @@ describe("dashboard shell accessibility", () => {
       );
       expect(win.document.title).toBe(title(t("en", "nav.members")));
       expect(win.document.activeElement === mainOf(win)).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      cleanup();
+    }
+  });
+
+  test("a page rendered instead of the route's own names itself in the title", async () => {
+    // A support-grant operator is served at `<ref>/apps` but sees SupportPage;
+    // the title must follow the rendered page, not the path.
+    const supportBoot: SpaBoot = { ...boot, login: null, supportOnly: true, memberships: undefined };
+    const faceShell = (pathname: string) =>
+      createElement(Layout, {
+        boot: supportBoot,
+        pathname,
+        flash: null,
+        children: createElement("p", null, "Support"),
+      });
+    const { win, cleanup } = installDom("http://localhost/dashboard/ws_acme/apps");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () => root.render(faceShell("/dashboard/ws_acme/apps")));
+      await act(async () => root.render(faceShell("/dashboard/ws_acme/members")));
+      expect(win.document.title).toBe(title(t("en", "support.heading")));
     } finally {
       await act(async () => root.unmount());
       cleanup();
