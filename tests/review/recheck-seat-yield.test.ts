@@ -52,6 +52,7 @@ import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 
 import type { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import {
+  fitRecheckInput,
   MODEL_ITEM_MAX_CHARS,
   MODEL_MAX_ITEMS,
   MODEL_TOTAL_MAX_CHARS,
@@ -64,7 +65,6 @@ import {
 } from "../../packages/shared/src/recheck-wire";
 import {
   anchorRecheckDeadline,
-  fitRecheckInput,
   OUTER_RUNNER_CAP_MS,
   RECHECK_ASSIGNMENT_MAX_BYTES,
   resetRecheckAnchor,

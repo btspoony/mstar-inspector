@@ -9,11 +9,21 @@
  * ../helpers/consumer-harness, shared by all three.
  */
 import { beforeEach, describe, expect, test } from "bun:test";
-import { ASSESSMENT_TARGET_CAP, RECHECK_STATUS_ERROR_MAX_CHARS } from "../../packages/shared/src/recheck-wire";
+import {
+  ASSESSMENT_TARGET_CAP,
+  fitRecheckInput,
+  RECHECK_ASSIGNMENT_MAX_BYTES,
+  RECHECK_ASSIGNMENT_PROSE_BYTES,
+  RECHECK_STATUS_ERROR_MAX_CHARS,
+  type Discussion,
+  type RecheckInput,
+} from "../../packages/shared/src/recheck-wire";
+import { RECHECK_ASSIGNMENT_KEY, RECHECK_ASSIGNMENT_MIN } from "../../src/dashboard/runtime-config-store";
 import { REDACTED } from "../../src/pipeline/redact";
 import {
   ASSOC_ID,
   SHA,
+  TARGET_ORIGINAL,
   TARGET_ROW_ID,
   VALID_DIFF,
   VALID_OUTPUT,
@@ -38,6 +48,88 @@ let h = createConsumerHarness();
 beforeEach(() => {
   h = createConsumerHarness();
 });
+
+// --- the assignment budget's fitting (spec §7.3/§7.8) -----------------------
+// The seat's ask is FITTED to `review.recheck.assignment_max_bytes`, not
+// measured against it: targets ride in rotation order up to the budget, a row
+// that does not fit is never sent (and never advances the rotation), and one
+// oversized target ships with a bounded body instead of losing the round.
+
+/** A harness slice the wire helpers read (the sandbox double records the runner input). */
+type WireHarness = { sandbox: { writtenInputJson: string | undefined } };
+type SeededDb = Awaited<ReturnType<typeof createSeededTestD1>>;
+
+/** UTF-8 byte length of one JSON value — the accounting every cap uses. */
+function jsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+/** The recheck document + budget this round actually put on the wire. */
+function wireRecheck(harness: WireHarness): { recheck: RecheckInput | undefined; budget: number | undefined } {
+  const written = harness.sandbox.writtenInputJson;
+  if (written === undefined) throw new Error("the round wrote no runner input");
+  const input = JSON.parse(written) as { recheck?: RecheckInput; recheckAssignmentMaxBytes?: number };
+  return { recheck: input.recheck, budget: input.recheckAssignmentMaxBytes };
+}
+
+/** Store the operator's ask budget — the one adjustable cap of this fit. */
+async function setAssignmentBudget(db: SeededDb, maxBytes: number): Promise<void> {
+  db.raw
+    .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)")
+    .run(RECHECK_ASSIGNMENT_KEY, String(maxBytes), new Date().toISOString());
+}
+
+/**
+ * A discussion as large as the §7.8 model caps allow: seven ~1,120-char issue
+ * items stay inside the 50-item / 1,200-char / 8,000-char caps (so its coverage
+ * stays `complete`) and serialize to roughly 9.5 KiB — the discussion half of
+ * the staging-shaped ask.
+ */
+function bigDiscussion(items = 7): Discussion {
+  return {
+    items: Array.from({ length: items }, (_, index) => ({
+      source: "issue" as const,
+      associationId: null,
+      id: `issue-comment-${index}`,
+      author: `reviewer-${index}`,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      body: "detail ".repeat(160),
+      ownAuthor: false,
+    })),
+    issueCoverage: "complete",
+    issueModelCoverage: "complete",
+    issueDigest: "issue-digest",
+    capturedMs: 0,
+    threads: [],
+  };
+}
+
+/**
+ * `count` open rows in rotation order (`created_ms` and id both ascending), all
+ * on the seeded diff's own file so every one is catalog-provable. Returns the
+ * row ids in that order.
+ */
+async function seedRotation(db: SeededDb, count: number, bodyChars: number): Promise<string[]> {
+  const ids: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const rowId = `rotation-row-${String(index).padStart(2, "0")}`;
+    ids.push(rowId);
+    await seedOpenTarget(db, {
+      rowId,
+      findingId: `rotation-finding-${index}`,
+      original: {
+        body: "y".repeat(bodyChars),
+        filePath: "src/auth.ts",
+        lineStart: 21,
+        lineEnd: 21,
+        fingerprintHint: `rotation-fp-${index}`,
+      },
+      nowMs: 2_000 + index,
+    });
+  }
+  return ids;
+}
 
 describe("recheck round attribution — status and row accounting (§7.7/§7.4/§7.10)", () => {
   test("a failed seat status with no document makes the round attributable: every row invalid-output, one recheck failure row", async () => {
@@ -569,16 +661,18 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     expect(failureRows(db)).toHaveLength(0);
   });
 
-  test("a size-budget-excluded round sends nothing: rows are budget, and the round is still attributed", async () => {
+  test("a round no fit can reach sends nothing: rows are budget, and the round is still attributed", async () => {
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // One open row whose own JSON exceeds the whole §7.3 input budget, so the
-    // builder excludes every target and no recheck input exists at all. The
-    // row was never sent — `invalid-output` would blame a seat that never ran.
-    const oversizedBody = "x".repeat(600 * 1024);
+    // The operator floor (8,192 B) minus the ask's own prose leaves ~4.5 KiB,
+    // less than this round's discussion alone — so even one target with an
+    // empty body cannot fit, and no recheck input exists at all. The row was
+    // never sent — `invalid-output` would blame a seat that never ran.
+    h.commenterState.discussion = bigDiscussion();
     const db = await createSeededTestD1();
+    await setAssignmentBudget(db, RECHECK_ASSIGNMENT_MIN);
     await seedPriorPublication(db);
-    await seedOpenTarget(db, { original: { body: oversizedBody } });
+    await seedOpenTarget(db);
     await seedAssociation(db, "PRRT_thread1");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
@@ -594,12 +688,27 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     // …but the silence is attributable: the round still logs its accounting.
     const line = h.logLines.find((l) => l.msg.startsWith("recheck round accounted — no input sent"))!;
     expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
-    const findingRow = db.raw.query("SELECT state, last_assessed_ms FROM review_findings").get() as {
+    // …and the ask itself says why it could not be built: both figures, so an
+    // operator can tell a budget that is too small from an ask that grew.
+    const noFit = h.logLines.find((l) => l.fields.event === "review_recheck_no_fit")!;
+    expect(noFit.level).toBe("warn");
+    expect(noFit.fields).toMatchObject({ assignment_max_bytes: RECHECK_ASSIGNMENT_MIN, selected: 1 });
+    expect(Number(noFit.fields.required_bytes)).toBeGreaterThan(RECHECK_ASSIGNMENT_MIN);
+    expect(noFit.msg).toContain("keeps its budget reason and its rotation clock");
+    const findingRow = db.raw.query("SELECT state, last_assessed_ms, last_scheduled_ms FROM review_findings").get() as {
       state: string;
       last_assessed_ms: number | null;
+      last_scheduled_ms: number | null;
     };
     expect(findingRow.state).toBe("open");
     expect(findingRow.last_assessed_ms).toBeNull();
+    // Never sent, so the rotation clock stayed put: this row is preferred
+    // again on the next round instead of starving behind the rows that fit.
+    expect(findingRow.last_scheduled_ms).toBeNull();
+    // The runner input carries neither a document nor a budget field.
+    const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as Record<string, unknown>;
+    expect(runnerInput.recheck).toBeUndefined();
+    expect(runnerInput.recheckAssignmentMaxBytes).toBeUndefined();
   });
 
   test("a status from another HEAD attributes nothing: the row stays omitted, never invalid-output", async () => {
@@ -1184,5 +1293,308 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     expect(String(rows[0]!.error)).toBe("document absent: ok: null: null");
     const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (invalid-output)");
+  });
+});
+describe("the recheck ask is FITTED to the operator's assignment budget (§7.3/§7.8)", () => {
+  test("a staging-shaped ask rides as a rotation prefix; every other row is budget, never sent", async () => {
+    // The staging shape: ~20 open findings × ~3 KiB of original body plus a
+    // discussion at the §7.8 model caps = a ~75 KiB serialized ask against the
+    // documented 65,536 B budget. The round used to be skipped whole (no seat,
+    // no finding re-assessed, so no resolution could ever reconcile); it now
+    // sends the rotation's prefix and accounts the rest.
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.commenterState.discussion = bigDiscussion();
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    const rotation = await seedRotation(db, 20, 3_000);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // A seat ran with the document and the operator's own budget beside it.
+    expect(h.sandbox.calls.some((c) => c.cmd.includes("--recheck-out"))).toBe(true);
+    const { recheck, budget } = wireRecheck(h);
+    expect(budget).toBe(RECHECK_ASSIGNMENT_MAX_BYTES);
+    expect(recheck).toBeDefined();
+
+    // The ask is a strict PREFIX of the rotation: the rows that fit ride, the
+    // rest wait their turn instead of starving behind them.
+    const sent = recheck!.targets.map((target) => target.rowId);
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.length).toBeLessThan(rotation.length);
+    expect(sent).toEqual(rotation.slice(0, sent.length));
+
+    // The document plus the assignment's own prose stays inside the budget…
+    expect(jsonBytes(recheck) + RECHECK_ASSIGNMENT_PROSE_BYTES).toBeLessThanOrEqual(RECHECK_ASSIGNMENT_MAX_BYTES);
+    // …and the runner's own fit accepts it, so no `skipped: budget` can follow.
+    expect(fitRecheckInput(recheck!, RECHECK_ASSIGNMENT_MAX_BYTES).ok).toBe(true);
+
+    // Every row that did not ride is accounted `budget` (never-sent)…
+    const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    const budgetRows = prepared.body.split("\n").filter((line) => line.includes("| unverifiable (budget) "));
+    expect(budgetRows).toHaveLength(rotation.length - sent.length);
+    // …and only the sent rows advanced the rotation clock.
+    const clocks = db.raw.query("SELECT id, last_scheduled_ms FROM review_findings").all() as {
+      id: string;
+      last_scheduled_ms: number | null;
+    }[];
+    for (const row of clocks) expect(row.last_scheduled_ms !== null).toBe(sent.includes(row.id));
+  });
+
+  test("one target larger than the whole budget still ships, with a bounded body", async () => {
+    // The single-row case that used to be a permanent skip: a 200 KiB original
+    // body cannot fit any budget below it, but the finding itself can. The row
+    // rides with its body cut short — same row id, title and anchors — so the
+    // seat still assesses THAT concern instead of the round dying.
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const body = "z".repeat(200 * 1024);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db, { original: { body } });
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const { recheck, budget } = wireRecheck(h);
+    expect(budget).toBe(RECHECK_ASSIGNMENT_MAX_BYTES);
+    expect(recheck?.targets).toHaveLength(1);
+    const [sent] = recheck!.targets;
+    // The SAME finding row: nothing fabricated, nothing reordered.
+    expect(sent!.rowId).toBe(TARGET_ROW_ID);
+    expect(sent!.original.title).toBe(TARGET_ORIGINAL.title);
+    expect(sent!.original.filePath).toBe(TARGET_ORIGINAL.filePath);
+    expect(sent!.original.lineStart).toBe(TARGET_ORIGINAL.lineStart);
+    expect(sent!.original.lineEnd).toBe(TARGET_ORIGINAL.lineEnd);
+    // …with a body bounded to the room the budget leaves, and said so.
+    expect(sent!.original.body.length).toBeLessThan(body.length);
+    expect(sent!.original.body).toContain("[... body truncated ...]");
+    expect(jsonBytes(recheck) + RECHECK_ASSIGNMENT_PROSE_BYTES).toBeLessThanOrEqual(RECHECK_ASSIGNMENT_MAX_BYTES);
+    expect(fitRecheckInput(recheck!, RECHECK_ASSIGNMENT_MAX_BYTES).ok).toBe(true);
+    // Its own catalog rides too: a rescued row with no citable slice could only
+    // ever come back `unverifiable`.
+    expect(recheck!.evidence).toHaveLength(1);
+    expect(recheck!.evidence[0]!.path).toBe("src/auth.ts");
+    // It rode the wire, so its clock advanced like any other sent row.
+    const clock = db.raw.query("SELECT last_scheduled_ms FROM review_findings WHERE id = ?").get(TARGET_ROW_ID) as {
+      last_scheduled_ms: number | null;
+    };
+    expect(clock.last_scheduled_ms).not.toBeNull();
+  });
+
+  test("an oversized rotation HEAD rides bounded while the rows after it keep their place", async () => {
+    // The mixed rotation: a head whose own body cannot fit, followed by rows
+    // that do. Dropping the head would leave it first in the rotation every
+    // round (an omitted row never advances its clock) and `budget` forever, so
+    // it is bounded into the room the others leave instead.
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.commenterState.discussion = bigDiscussion();
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    const headBody = "z".repeat(120 * 1024);
+    const headRowId = "oversized-head-row";
+    // Created first, so it heads the rotation.
+    await seedOpenTarget(db, {
+      rowId: headRowId,
+      findingId: "oversized-head-finding",
+      original: { body: headBody, filePath: "src/auth.ts", lineStart: 21, lineEnd: 21, fingerprintHint: "head-fp" },
+      nowMs: 1_500,
+    });
+    const later = await seedRotation(db, 5, 3_000);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const { recheck } = wireRecheck(h);
+    expect(recheck).toBeDefined();
+    const sent = recheck!.targets.map((target) => target.rowId);
+    // The head is sent FIRST, with the same identity and a bounded body…
+    expect(sent[0]).toBe(headRowId);
+    const rescued = recheck!.targets[0]!;
+    expect(rescued.original.title).toBe(TARGET_ORIGINAL.title);
+    expect(rescued.original.filePath).toBe(TARGET_ORIGINAL.filePath);
+    expect(rescued.original.lineStart).toBe(TARGET_ORIGINAL.lineStart);
+    expect(rescued.original.body.length).toBeLessThan(headBody.length);
+    expect(rescued.original.body).toContain("[... body truncated ...]");
+    // …its own catalog still rides…
+    expect(recheck!.evidence.some((slice) => slice.path === "src/auth.ts")).toBe(true);
+    // …and every row behind it kept its place in the same ask.
+    expect(sent.slice(1)).toEqual(later);
+    expect(jsonBytes(recheck) + RECHECK_ASSIGNMENT_PROSE_BYTES).toBeLessThanOrEqual(RECHECK_ASSIGNMENT_MAX_BYTES);
+    expect(fitRecheckInput(recheck!, RECHECK_ASSIGNMENT_MAX_BYTES).ok).toBe(true);
+    // The rescued head advances the clock, so it cannot head the rotation again.
+    const clock = db.raw.query("SELECT last_scheduled_ms FROM review_findings WHERE id = ?").get(headRowId) as {
+      last_scheduled_ms: number | null;
+    };
+    expect(clock.last_scheduled_ms).not.toBeNull();
+  });
+
+  test("a head no room can share still rides ALONE, so its clock moves and it rotates behind the rest", async () => {
+    // The pathological ordering: the rows that fit leave less than the head's
+    // own minimal document. Leaving the head out would put it first again on
+    // every round, forever — so it takes the round and the displaced rows keep
+    // their place for the next one (their clocks never moved).
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Sized so the filler row fits the floor budget ALONE but not beside the
+    // head (and the head fits alone): that is the room-sharing failure.
+    h.commenterState.discussion = bigDiscussion(2);
+    const db = await createSeededTestD1();
+    await setAssignmentBudget(db, RECHECK_ASSIGNMENT_MIN);
+    await seedPriorPublication(db);
+    const headBody = "z".repeat(5_000);
+    const headRowId = "alone-head-row";
+    await seedOpenTarget(db, {
+      rowId: headRowId,
+      findingId: "alone-head-finding",
+      original: { body: headBody, filePath: "src/auth.ts", lineStart: 21, lineEnd: 21, fingerprintHint: "alone-fp" },
+      nowMs: 1_500,
+    });
+    const [filler] = await seedRotation(db, 1, 300);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const { recheck } = wireRecheck(h);
+    expect(recheck).toBeDefined();
+    // Only the rescued head: the room could not be shared.
+    expect(recheck!.targets.map((target) => target.rowId)).toEqual([headRowId]);
+    expect(recheck!.targets[0]!.original.body).toContain("[... body truncated ...]");
+    expect(jsonBytes(recheck) + RECHECK_ASSIGNMENT_PROSE_BYTES).toBeLessThanOrEqual(RECHECK_ASSIGNMENT_MIN);
+    const clocks = db.raw.query("SELECT id, last_scheduled_ms FROM review_findings").all() as {
+      id: string;
+      last_scheduled_ms: number | null;
+    }[];
+    const clockById = new Map(clocks.map((row) => [row.id, row.last_scheduled_ms]));
+    // Both rows must be in the read before their clocks say anything.
+    for (const rowId of [headRowId, filler!]) expect(clockById.has(rowId)).toBe(true);
+    // The head rotated; the displaced row did not, so it goes first next round.
+    expect(clockById.get(headRowId)).not.toBeNull();
+    expect(clockById.get(filler!)).toBeNull();
+  });
+
+  test("the rotation clock moves for every selected row except the fit-omitted ones", async () => {
+    // Three classes, one rule: a row the FIT could not fit holds its clock so it
+    // gets its turn; a row the catalog could not prove, and every row of a round
+    // that captured no context at all, must keep rotating — a row that can only
+    // be re-proved by a later diff would otherwise sit in the 25-row cap at the
+    // head forever.
+    const clockOf = (db: SeededDb) => {
+      const rows = db.raw.query("SELECT id, last_scheduled_ms FROM review_findings").all() as {
+        id: string;
+        last_scheduled_ms: number | null;
+      }[];
+      return new Map(rows.map((row) => [row.id, row.last_scheduled_ms]));
+    };
+
+    // (a) catalog-excluded: the seeded diff has no hunk for its file.
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.recheckFileContent = "";
+    const catalogDb = await createSeededTestD1();
+    await seedPriorPublication(catalogDb);
+    const unprovableRowId = "catalog-excluded-row";
+    await seedOpenTarget(catalogDb, {
+      rowId: unprovableRowId,
+      findingId: "catalog-excluded-finding",
+      original: { filePath: "src/not-in-diff.ts", lineStart: 4, lineEnd: 4, fingerprintHint: "unprovable-fp" },
+      nowMs: 1_500,
+    });
+    const [provableRowId] = await seedRotation(catalogDb, 1, 200);
+    const catalogConsumer = createReviewConsumer(
+      await h.makeEnv({ DB: catalogDb as never }),
+      h.testLog,
+      h.overrides,
+    );
+
+    await catalogConsumer(h.makeBatch(makePayload()));
+
+    // It never rode the wire…
+    expect(wireRecheck(h).recheck!.targets.map((target) => target.rowId)).not.toContain(unprovableRowId);
+    const catalogClocks = clockOf(catalogDb);
+    // Presence first: a Map lookup on a missing row is `undefined`, which would
+    // make the nullity checks below pass vacuously. (The round also publishes
+    // new findings, so the table holds more rows than these two — assert the
+    // rows under test are present, not that they are the whole table.)
+    for (const rowId of [unprovableRowId, provableRowId!]) expect(catalogClocks.has(rowId)).toBe(true);
+    // …and it still rotated out: only a later diff can re-prove it.
+    expect(catalogClocks.get(unprovableRowId)).not.toBeNull();
+    expect(catalogClocks.get(provableRowId!)).not.toBeNull();
+
+    // (b) capture failed: no input at all, so no row is fit-omitted.
+    const h2 = createConsumerHarness();
+    h2.sandbox.diffStdout = VALID_DIFF;
+    h2.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h2.commenterState.discussionError = new Error("discussion capture unavailable");
+    const captureDb = await createSeededTestD1();
+    await seedPriorPublication(captureDb);
+    const capturedRows = await seedRotation(captureDb, 2, 200);
+    const captureConsumer = createReviewConsumer(
+      await h2.makeEnv({ DB: captureDb as never }),
+      h2.testLog,
+      h2.overrides,
+    );
+
+    await captureConsumer(h2.makeBatch(makePayload()));
+
+    expect(JSON.parse(h2.sandbox.writtenInputJson!).recheck).toBeUndefined();
+    const captureClocks = clockOf(captureDb);
+    // Same guard: the seeded rows must really be in the read, not missing from it.
+    for (const rowId of capturedRows) expect(captureClocks.has(rowId)).toBe(true);
+    for (const rowId of capturedRows) expect(captureClocks.get(rowId)).not.toBeNull();
+  });
+
+  test("two rounds over the same rotation send DISJOINT prefixes — the omitted rows go first", async () => {
+    // ~6 KiB rows against a ~52 KiB document budget fit roughly a third of the
+    // rotation, so the first round omits more rows than the second can send:
+    // the two prefixes cannot overlap, and no row can starve.
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.commenterState.discussion = bigDiscussion();
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    const rotation = await seedRotation(db, 20, 6_000);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const first = wireRecheck(h).recheck!.targets.map((target) => target.rowId);
+    expect(first.length).toBeGreaterThan(0);
+    expect(first.length).toBeLessThan(rotation.length);
+    expect(first).toEqual(rotation.slice(0, first.length));
+
+    // The next round reads exactly the state this one left behind: the sent
+    // rows' clock moved, the omitted rows' did not. That state is rebuilt on a
+    // fresh head so no same-head dedup can mask which rows the rotation offers.
+    const clocks = db.raw.query("SELECT id, last_scheduled_ms FROM review_findings").all() as {
+      id: string;
+      last_scheduled_ms: number | null;
+    }[];
+    const next = await createSeededTestD1();
+    await seedPriorPublication(next);
+    await seedRotation(next, 20, 6_000);
+    for (const row of clocks) {
+      if (row.last_scheduled_ms !== null) {
+        next.raw.prepare("UPDATE review_findings SET last_scheduled_ms = ? WHERE id = ?").run(row.last_scheduled_ms, row.id);
+      }
+    }
+    const h2 = createConsumerHarness();
+    h2.sandbox.diffStdout = VALID_DIFF;
+    h2.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h2.commenterState.discussion = bigDiscussion();
+    const consumer2 = createReviewConsumer(await h2.makeEnv({ DB: next as never }), h2.testLog, h2.overrides);
+
+    await consumer2(h2.makeBatch(makePayload()));
+
+    const second = wireRecheck(h2).recheck!.targets.map((target) => target.rowId);
+    expect(second.length).toBeGreaterThan(0);
+    // Disjoint from the first round…
+    expect(second.filter((rowId) => first.includes(rowId))).toEqual([]);
+    // …and the prefix of exactly the rows the first round left behind.
+    const omitted = rotation.filter((rowId) => !first.includes(rowId));
+    expect(second).toEqual(omitted.slice(0, second.length));
   });
 });

@@ -133,6 +133,7 @@ import {
 import {
   ASSESSMENT_TARGET_CAP,
   isRecheckStatusReason,
+  RECHECK_ASSIGNMENT_PROSE_BYTES,
   RECHECK_OUTPUT_PATH,
   RECHECK_STATUS_ERROR_MAX_CHARS,
   validateRecheckDoc,
@@ -146,7 +147,7 @@ import {
   type RecheckTarget,
   type Scope,
 } from "../../packages/shared/src/recheck-wire";
-import { boundDiscussion } from "./discussion-context";
+import { BODY_TRUNCATED_SUFFIX, boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import type { ShellCommand } from "./shell-command";
@@ -446,8 +447,13 @@ export type ConsumerLogFields = {
    * `check_in_progress_failed` (union widened ADDITIVELY): the best-effort
    * promotion of a delivery-created (`queued`) run to `in_progress` failed or
    * ran out of budget — the review itself is unaffected.
+   * `review_recheck_no_fit` (same channel, additive): the round's smallest
+   * possible ask — the assignment's prose plus one finding's fixed fields plus
+   * the discussion, with no body and no catalog — overruns the operator's byte
+   * budget, so nothing is sent. It names both figures and is NOT a seat skip:
+   * no seat was started.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -479,6 +485,16 @@ export type ConsumerLogFields = {
   effective?: number;
   /** The degraded recheck ask-budget read's value (the runner's documented default). */
   max_bytes?: number;
+  /**
+   * The `review_recheck_no_fit` pair: the operator's ask budget for that round
+   * and the bytes the SMALLEST document it could build still needs (the ask's
+   * prose, one finding's fixed fields and the discussion — no body, no
+   * catalog). Together they say whether the budget or the ask is the limit.
+   */
+  assignment_max_bytes?: number;
+  required_bytes?: number;
+  /** Selected-row count on a round-level line (`review_recheck_no_fit`). */
+  selected?: number;
   /**
    * Why a degraded settings read answered conservatively — the runtime-config
    * store's cause (`read-failed` / `malformed` / `untrusted`), relayed by the
@@ -1457,6 +1473,21 @@ async function withHookTimeout<T>(
 /** One JSON.stringify size in UTF-8 bytes (bounded-input accounting). */
 function jsonByteLength(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+/**
+ * `body` cut to at most `length` code units and marked truncated — the same
+ * marker a clamped discussion item carries, so the seat reads a short body and
+ * never mistakes it for the whole concern. A surrogate pair is never split: a
+ * lone half would serialize as a replacement escape and change the bytes the
+ * caller's bound was measured on.
+ */
+function truncatedBody(body: string, length: number): string {
+  const cut = Math.max(0, Math.min(length, body.length));
+  // Nothing was cut: a body that fits whole must never claim it was shortened.
+  if (cut >= body.length) return body;
+  const end = cut > 0 && /[\uD800-\uDBFF]/.test(body[cut - 1]!) ? cut - 1 : cut;
+  return body.slice(0, end) + BODY_TRUNCATED_SUFFIX;
 }
 
 /**
@@ -5394,7 +5425,40 @@ async function processMessage(
     // no slice it owns consumes the byte budget.
     let recheckInput: RecheckInput | undefined;
     const budgetExcluded = new Set<string>();
+    // What the seat is actually handed. Narrowed to the sent rows'
+    // associations once they are known: a thread of a row this round could not
+    // fit was not seen by the seat, so it must never be offered for resolution.
+    let askedDiscussion = discussion;
+    let recheckAssignmentMaxBytes: number | undefined;
     if (targets.length > 0 && !captureFailed) {
+      // §7.8: the seat's ask budget is an operator setting, read ONCE per
+      // message and only when a recheck round will actually be asked, so a
+      // delivery with no open rows pays nothing. It rides the runner input as
+      // its own top-level field — the `mstar.recheck-input/v1` document stays
+      // frozen — and it FITS this ask instead of refusing it whole: the prose
+      // is fixed, so the document gets what the budget leaves, and the rows the
+      // budget could not reach are accounted `budget` rather than skipped by a
+      // seat that never ran.
+      const budget = await getRecheckAssignmentMaxBytes(deps.env.DB);
+      // A degraded read answers the documented default and owes the operator
+      // one structured warn (the level/concurrency readers' contract). It is
+      // reported even when nothing fits below: the budget decided that.
+      if (budget.degraded) {
+        deps.log.warn(
+          {
+            ...(baseFields ?? payloadIdentityFields(payload)),
+            event: "review_recheck_assignment_degraded",
+            max_bytes: budget.maxBytes,
+          },
+          "recheck assignment budget read degraded — using the documented default",
+        );
+      }
+      // The one byte cap a row must fit: the §7.3 wire cap, or the room the
+      // assignment budget leaves once its own prose is paid.
+      const documentMaxBytes = Math.min(
+        RECHECK_INPUT_MAX_BYTES,
+        budget.maxBytes - RECHECK_ASSIGNMENT_PROSE_BYTES,
+      );
       const candidates = targets.filter(
         (target) => !catalogExcluded.has(target.rowId) && !catalogBudgetExcluded.has(target.rowId),
       );
@@ -5411,9 +5475,11 @@ async function processMessage(
       for (const target of candidates) {
         const withRow = new Set([...referenced, ...(catalog.sliceIdsByRowId.get(target.rowId) ?? [])]);
         const nextEvidence = catalog.slices.filter((slice) => withRow.has(slice.id));
-        // §7.3 cap measured on the SERIALIZED input — schema, headSha,
+        // The cap is measured on the SERIALIZED input — schema, headSha,
         // evidence, discussion, array brackets and separators included — so
-        // the accepted document is exactly what the cap counts.
+        // the accepted document is exactly what the cap counts. The discussion
+        // measured here is the whole capture: narrowing it to the sent rows can
+        // only shrink the document, so this stays an upper bound.
         const candidate = {
           schema: RECHECK_INPUT_SCHEMA,
           headSha,
@@ -5421,44 +5487,133 @@ async function processMessage(
           evidence: nextEvidence,
           discussion,
         };
-        // §7.3: an oversized whole target is accounted, never truncated.
-        if (jsonByteLength(candidate) > RECHECK_INPUT_MAX_BYTES) continue;
+        if (jsonByteLength(candidate) > documentMaxBytes) continue;
         included.push(target);
         evidence = nextEvidence;
         for (const id of withRow) referenced.add(id);
       }
+      // The rotation HEAD is the one row the fit must never drop for want of
+      // room. A row it omits never advances the clock, so the same row comes
+      // back first on every round and is dropped again — permanently
+      // `budget`, the deadlock this fitting removes. So whenever the head did
+      // not fit whole, its ORIGINAL body is bounded into the room that is left
+      // (beside the rows that did fit, or alone when none did) and its own
+      // catalog rides as far as it fits, so the seat can still cite its proof.
+      // The rowId, title, file path, line anchors and every other field stay
+      // exactly as captured: the same finding row, never a rewritten one.
+      const head = candidates[0];
+      if (head !== undefined && !included.some((target) => target.rowId === head.rowId)) {
+        // Measured against the WHOLE discussion: the head is not included yet,
+        // so the narrowed view would also drop its own threads. Probes are the
+        // serialized document itself, so a multi-byte body is bounded by real
+        // UTF-8 bytes, and the binary search is logarithmic in body length.
+        const bytesOf = (targets: RecheckTarget[], slices: EvidenceSlice[], target: RecheckTarget): number =>
+          jsonByteLength({
+            schema: RECHECK_INPUT_SCHEMA,
+            headSha,
+            targets: [...targets, target],
+            evidence: slices,
+            discussion,
+          });
+        const withBody = (length: number): RecheckTarget => ({
+          ...head,
+          original: { ...head.original, body: truncatedBody(head.original.body, length) },
+        });
+        /** The head bounded into `slices` beside `targets`, or null when not even an empty body fits. */
+        const rescue = (targets: RecheckTarget[], slices: EvidenceSlice[]): RecheckTarget | null => {
+          if (bytesOf(targets, slices, withBody(0)) > documentMaxBytes) return null;
+          let low = 0;
+          let high = head.original.body.length;
+          while (low < high) {
+            const mid = Math.ceil((low + high) / 2);
+            if (bytesOf(targets, slices, withBody(mid)) <= documentMaxBytes) low = mid;
+            else high = mid - 1;
+          }
+          return withBody(low);
+        };
+        const own = new Set(catalog.sliceIdsByRowId.get(head.rowId) ?? []);
+        // The head's own catalog, and the union a shared document needs — never
+        // a slice of a row that ends up unsent (that would be orphan evidence).
+        const headSlices = catalog.slices.filter((slice) => own.has(slice.id));
+        const withOwn = catalog.slices.filter((slice) => own.has(slice.id) || referenced.has(slice.id));
+        // Room for the rows that fit comes first; the head gives up its catalog
+        // before those rows give up their place. A head that cannot share the
+        // budget at all still rides alone — its clock moves, and the rows it
+        // displaced keep their own place for the next round.
+        const attempts: { targets: RecheckTarget[]; slices: EvidenceSlice[] }[] =
+          included.length === 0
+            ? [
+                { targets: [], slices: headSlices },
+                { targets: [], slices: [] },
+              ]
+            : [
+                { targets: included, slices: withOwn },
+                { targets: included, slices: evidence },
+                { targets: [], slices: headSlices },
+                { targets: [], slices: [] },
+              ];
+        for (const attempt of attempts) {
+          const bounded = rescue(attempt.targets, attempt.slices);
+          if (bounded === null) continue;
+          // Array order does not change a serialized document's byte count, so
+          // the head goes back where the rotation had it: first.
+          included.splice(0, included.length, ...attempt.targets);
+          included.unshift(bounded);
+          evidence = attempt.slices;
+          break;
+        }
+      }
       const sentIds = new Set(included.map((target) => target.rowId));
       for (const target of candidates) if (!sentIds.has(target.rowId)) budgetExcluded.add(target.rowId);
+      if (included.length === 0) {
+        // Nothing can be asked: even the head's fixed fields plus the discussion
+        // overrun the budget, so no body length and no catalog can rescue it.
+        // Name both figures so the operator can tell a budget that is too small
+        // from an ask that grew, and never report it as a seat skip — no seat was
+        // started.
+        const requiredBytes =
+          RECHECK_ASSIGNMENT_PROSE_BYTES +
+          jsonByteLength({
+            schema: RECHECK_INPUT_SCHEMA,
+            headSha,
+            targets:
+              head === undefined ? [] : [{ ...head, original: { ...head.original, body: "" } }],
+            evidence: [],
+            discussion,
+          });
+        deps.log.warn(
+          {
+            ...(baseFields ?? payloadIdentityFields(payload)),
+            event: "review_recheck_no_fit",
+            assignment_max_bytes: budget.maxBytes,
+            required_bytes: requiredBytes,
+            selected: targets.length,
+          },
+          `recheck ask cannot fit the assignment budget — the smallest document this round can ask (prose + one finding's fixed fields + discussion) needs ${requiredBytes} bytes, the budget is ${budget.maxBytes}; nothing was sent, so every row keeps its budget reason and its rotation clock (raise review.recheck.assignment_max_bytes to let the round run)`,
+        );
+      }
+      // The seat's view of the discussion: issue items and their coverage and
+      // digest are the round's context and stay, while a thread is offered only
+      // for a row that rides — a resolve verifies a thread the seat saw.
+      const sentAssociations = new Set(included.flatMap((target) => target.associationIds));
+      askedDiscussion = {
+        ...discussion,
+        items: discussion.items.filter(
+          (item) =>
+            item.source === "issue" ||
+            (item.associationId !== null && sentAssociations.has(item.associationId)),
+        ),
+        threads: discussion.threads.filter((thread) => sentAssociations.has(thread.associationId)),
+      };
       if (included.length > 0) {
+        recheckAssignmentMaxBytes = budget.maxBytes;
         recheckInput = {
           schema: RECHECK_INPUT_SCHEMA,
           headSha,
           targets: included,
           evidence,
-          discussion,
+          discussion: askedDiscussion,
         };
-      }
-    }
-
-    // §7.8: the seat's ask budget is an operator setting, read ONCE per message
-    // and only when a recheck round will actually be asked, so a delivery with
-    // no open rows pays nothing. It rides the runner input as its own top-level
-    // field — the `mstar.recheck-input/v1` document stays frozen.
-    let recheckAssignmentMaxBytes: number | undefined;
-    if (recheckInput !== undefined) {
-      const budget = await getRecheckAssignmentMaxBytes(deps.env.DB);
-      recheckAssignmentMaxBytes = budget.maxBytes;
-      // A degraded read answers the documented default and owes the operator
-      // one structured warn (the level/concurrency readers' contract).
-      if (budget.degraded) {
-        deps.log.warn(
-          {
-            ...(baseFields ?? payloadIdentityFields(payload)),
-            event: "review_recheck_assignment_degraded",
-            max_bytes: budget.maxBytes,
-          },
-          "recheck assignment budget read degraded — using the documented default",
-        );
       }
     }
 
@@ -5848,7 +6003,9 @@ async function processMessage(
       targets,
       doc: recheckDoc,
       status: recheck?.status ?? null,
-      discussion,
+      // The seat's own view: a thread of a row this round could not fit was
+      // never handed over, so it cannot authorize a resolve either.
+      discussion: askedDiscussion,
       output,
       staleContext,
       catalogExcluded,
@@ -5948,6 +6105,9 @@ async function processMessage(
         }
       }
     }
+    // The ROUND's coverage reads the whole capture, never the narrowed wire
+    // view: an unsent row's truncated thread still leaves this round's context
+    // short, and publication must not claim more than capture could read.
     const contextCoverage: Coverage = staleContext
       ? "unavailable"
       : roundContextCoverage(discussion);
@@ -6065,7 +6225,15 @@ async function processMessage(
     }
 
     const lifecycleRound: LifecycleRound = {
-      selectedRowIds: targets.map((t) => t.rowId),
+      // The clock moves for every selected row EXCEPT the rows the FIT omitted
+      // for room. A row the catalog could not prove, or one a capture failure
+      // never offered, is re-proved by a later round's diff — parking it at the
+      // rotation head would keep it inside the 25-row cap forever. A fit-omitted
+      // row is different: it was provable and simply did not fit, so it holds its
+      // clock, stays at the head and is rescued when the next round reaches it.
+      selectedRowIds: targets
+        .filter((target) => !budgetExcluded.has(target.rowId))
+        .map((target) => target.rowId),
       assessments: reconciled.assessments,
       seen,
       resolutions: reconciled.resolutions,

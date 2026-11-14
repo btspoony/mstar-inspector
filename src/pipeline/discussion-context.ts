@@ -260,7 +260,12 @@ function metaValue(value: string): string {
   return neutralizeUntrustedText(value).replace(/[\n\r]/g, " ");
 }
 
-const ITEM_BODY_TRUNCATED_SUFFIX = "\n[... body truncated ...]";
+/**
+ * Marker a body bounded against a byte cap carries — the discussion's clamped
+ * items and the recheck ask's body-bounded target share it, so a shortened body
+ * always says so instead of reading as the whole concern.
+ */
+export const BODY_TRUNCATED_SUFFIX = "\n[... body truncated ...]";
 
 /**
  * The model-visible body of one RETAINED item: at most
@@ -276,7 +281,7 @@ const ITEM_BODY_TRUNCATED_SUFFIX = "\n[... body truncated ...]";
 function modelBodyOf(body: string, overCap: boolean): string {
   if (!overCap) return neutralizeUntrustedText(body);
   const clamped = neutralizeUntrustedText(body.slice(0, MODEL_ITEM_MAX_CHARS));
-  return `${clamped.replace(/<!--(?:(?!-->)[\s\S])*$/, "")}${ITEM_BODY_TRUNCATED_SUFFIX}`;
+  return `${clamped.replace(/<!--(?:(?!-->)[\s\S])*$/, "")}${BODY_TRUNCATED_SUFFIX}`;
 }
 
 /**

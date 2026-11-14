@@ -8,6 +8,7 @@
  * D1 seeders and payload builders come from ../helpers/consumer-harness.
  */
 import { beforeEach, describe, expect, test } from "bun:test";
+import { RECHECK_ASSIGNMENT_PROSE_BYTES } from "../../packages/shared/src/recheck-wire";
 import {
   SHA,
   TARGET_ORIGINAL,
@@ -21,6 +22,11 @@ import {
   seedPriorPublication,
 } from "../helpers/consumer-fixtures";
 import {
+  RECHECK_ASSIGNMENT_KEY,
+  RECHECK_ASSIGNMENT_MAX,
+  RECHECK_ASSIGNMENT_MIN,
+} from "../../src/dashboard/runtime-config-store";
+import {
   createConsumerHarness,
   DIFF_PREFETCH_MAX_BYTES,
   loadConsumer,
@@ -33,6 +39,11 @@ let h = createConsumerHarness();
 beforeEach(() => {
   h = createConsumerHarness();
 });
+
+/** UTF-8 byte length of one JSON value — the unit every recheck cap is stated in. */
+function jsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
 
 /**
  * A src/auth.ts diff whose ONE hunk is `lineCount` lines (1-based numbering).
@@ -338,6 +349,9 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.recheckFileContent = ""; // no document: every row is accounted by WHY it has no verdict
     const db = await createSeededTestD1();
+    db.raw
+      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)")
+      .run(RECHECK_ASSIGNMENT_KEY, String(RECHECK_ASSIGNMENT_MAX), new Date().toISOString());
     await seedPriorPublication(db);
     for (let i = 0; i < rowCount; i++) {
       await seedOpenTarget(db, {
@@ -359,9 +373,20 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as {
       recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ path: string }> };
     };
-    // The budget really bit: not every provable row could ride.
-    expect(runnerInput.recheck.targets.length).toBeLessThan(rowCount);
-    expect(new Set(runnerInput.recheck.evidence.map((slice) => slice.path)).size).toBeLessThan(rowCount);
+    // The CATALOG budget really bit: not every provable row could ride, and the
+    // assignment budget could not have been the constraint (it is seeded at its
+    // documented ceiling here). Every riding row keeps its four windows; the
+    // rows behind it lost their slices to the catalog byte budget, not to size.
+    const targets = runnerInput.recheck.targets.length;
+    expect(targets).toBeGreaterThan(0);
+    expect(targets).toBeLessThan(rowCount);
+    expect(runnerInput.recheck.evidence.length).toBe(targets * 4);
+    const paths = new Set(runnerInput.recheck.evidence.map((slice) => slice.path));
+    expect(paths.size).toBe(targets);
+    expect(paths.size).toBeLessThan(rowCount);
+    expect(
+      jsonBytes(runnerInput.recheck) + RECHECK_ASSIGNMENT_PROSE_BYTES,
+    ).toBeLessThanOrEqual(RECHECK_ASSIGNMENT_MAX);
     const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     // The dropped rows were never sent because their slices lost a BYTE budget
     // — the same cause as the size budget. `no-evidence` would claim their
@@ -370,12 +395,21 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     expect(prepared.body).not.toContain("unverifiable (no-evidence)");
   });
 
-  test("a size-budget row is judged against the final input, not against a dropped neighbour's slices", async () => {
-    // Two provable rows. Row A is over the §7.3 cap on its own (a ~520 KiB
-    // body) and brings four slices; row B fits only once A is gone, because A's
-    // slices push B's input over the cap. Measuring B against the WHOLE
-    // candidate set — as the old fixpoint did — excluded it for evidence it
-    // never rode with, and it never came back.
+  test("the rescued rotation head rides bounded with its OWN slices, never a dropped neighbour's", async () => {
+    // Two provable rows, both over the assignment budget (65,536 B): row A (the
+    // rotation head) has a 520 KiB body that is ALSO over the §7.3 wire cap
+    // (512 KiB), so it can never ride whole; row B's 515,000 B body is under
+    // that wire cap and is dropped by the ASSIGNMENT fit alone. The wire cap is
+    // in fact unreachable as a binding limit now — the operator ceiling
+    // (262,144 B) minus the ask's prose is below 524,288 B — so the per-target
+    // wire-cap guard is defense in depth for a direct caller and this case
+    // covers the assignment fit.
+    // What the case pins is the rescue's evidence accounting: the rescued head
+    // rides with a bounded body and only its OWN catalog, never a slice of a
+    // row that did not ride, while B waits its turn. The final-input
+    // measurement itself (a row judged WITHOUT a dropped neighbour's slices)
+    // needs a fixture where that measurement decides the outcome; the sibling
+    // case below is that fixture.
     h.sandbox.diffStdout = [
       catalogBudgetDiff(1),
       "diff --git a/src/other.ts b/src/other.ts",
@@ -423,15 +457,136 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     await consumer(h.makeBatch(makePayload()));
 
     const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as {
+      recheck: {
+        targets: Array<{ rowId: string; original: { title: string; filePath: string; body: string } }>;
+        evidence: Array<{ path: string }>;
+      };
+    };
+    // The rotation head rides alone — bounded, and still the same finding row.
+    expect(runnerInput.recheck.targets.map((target) => target.rowId)).toEqual([oversizedRowId]);
+    const [rescued] = runnerInput.recheck.targets;
+    expect(rescued!.original.title).toBe("Oversized neighbour");
+    expect(rescued!.original.filePath).toBe("src/b01.ts");
+    expect(rescued!.original.body.length).toBeLessThan(520 * 1024);
+    expect(rescued!.original.body).toContain("[... body truncated ...]");
+    // Only the head's own catalog rides: the row that did not ride leaves no
+    // orphan evidence behind, and the head carries no slice it cannot cite.
+    const paths = runnerInput.recheck.evidence.map((slice) => slice.path);
+    expect(paths.length).toBeGreaterThan(0);
+    expect(new Set(paths)).toEqual(new Set(["src/b01.ts"]));
+    expect(paths).not.toContain("src/other.ts");
+    const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    // This fixture delivers no document: the sent head is the attempted-but-
+    // unusable row, the omitted one keeps its never-sent budget reason.
+    expect(prepared.body).toContain("| Oversized neighbour | unverifiable (invalid-output) ");
+    expect(prepared.body).toContain("| Affordable row | unverifiable (budget) ");
+  });
+
+  test("a candidate is measured against the FINAL input, never a dropped neighbour's slices", async () => {
+    // The fixpoint property this suite exists to protect, isolated so the head
+    // rescue cannot mask it. At the operator floor the document budget is
+    // ~4.5 KiB, and three provable rows compete:
+    //   C (rotation head, small body, its own small slice) → always fits
+    //   B (small body, its own small slice)                → fits beside C
+    //   A (520 KiB body, four ~3.6 KiB slices)             → never fits
+    // Measured against the FINAL input, B's candidate carries only the slices
+    // the accepted rows reference: C's and its own (~2.4 KiB) → B rides.
+    // Measured against the WHOLE candidate set — the old fixpoint — B also
+    // absorbs A's ~14.5 KiB and is dropped for evidence it never rode with.
+    // C rides either way, so no rescue fires and the two measurements really
+    // do differ: reverting to the whole-set loop makes this case send only C.
+    h.sandbox.diffStdout = [
+      catalogBudgetDiff(1),
+      "diff --git a/src/other.ts b/src/other.ts",
+      "index 3333333..4444444 100644",
+      "--- a/src/other.ts",
+      "+++ b/src/other.ts",
+      "@@ -1,2 +1,3 @@",
+      " export const a = 1;",
+      "+export const b = 2;",
+      " export const c = 3;",
+      "diff --git a/src/head.ts b/src/head.ts",
+      "index 5555555..6666666 100644",
+      "--- a/src/head.ts",
+      "+++ b/src/head.ts",
+      "@@ -1,2 +1,3 @@",
+      " export const x = 1;",
+      "+export const y = 2;",
+      " export const z = 3;",
+      "",
+    ].join("\n");
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.recheckFileContent = ""; // no document: each row is accounted by its own cause
+    const headRowId = "eeeeeeee-0000-4000-8000-00000000000c";
+    const affordableRowId = "eeeeeeee-0000-4000-8000-00000000000d";
+    const droppedRowId = "eeeeeeee-0000-4000-8000-00000000000e";
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)")
+      .run(RECHECK_ASSIGNMENT_KEY, String(RECHECK_ASSIGNMENT_MIN), new Date().toISOString());
+    await seedPriorPublication(db);
+    await seedOpenTarget(db, {
+      rowId: headRowId,
+      findingId: "finding-small-head",
+      original: {
+        title: "Small head",
+        filePath: "src/head.ts",
+        lineStart: 1,
+        lineEnd: 1,
+        body: "c".repeat(200),
+      },
+      nowMs: 1_400,
+    });
+    await seedOpenTarget(db, {
+      rowId: affordableRowId,
+      findingId: "finding-affordable",
+      original: {
+        title: "Affordable row",
+        filePath: "src/other.ts",
+        lineStart: 1,
+        lineEnd: 1,
+        body: "b".repeat(200),
+      },
+      nowMs: 1_500,
+    });
+    await seedOpenTarget(db, {
+      rowId: droppedRowId,
+      findingId: "finding-dropped-neighbour",
+      original: {
+        title: "Dropped neighbour",
+        filePath: "src/b01.ts",
+        lineStart: 1,
+        lineEnd: 1,
+        body: "a".repeat(520 * 1024),
+      },
+      nowMs: 1_600,
+    });
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as {
       recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ path: string }> };
     };
-    // B rides alone: A cannot fit any input, so it contributes no evidence.
-    expect(runnerInput.recheck.targets.map((target) => target.rowId)).toEqual([affordableRowId]);
-    expect(runnerInput.recheck.evidence.map((slice) => slice.path)).toEqual(["src/other.ts"]);
+    // Both fitting rows ride, in rotation order, and A's slices never enter.
+    expect(runnerInput.recheck.targets.map((target) => target.rowId)).toEqual([headRowId, affordableRowId]);
+    expect(runnerInput.recheck.evidence.map((slice) => slice.path).sort()).toEqual(["src/head.ts", "src/other.ts"]);
+    expect(runnerInput.recheck.evidence.map((slice) => slice.path)).not.toContain("src/b01.ts");
     const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    // The never-sent row keeps the budget reason; the sent row was answered.
-    expect(prepared.body).toContain("| Oversized neighbour | unverifiable (budget) ");
+    expect(prepared.body).toContain("| Dropped neighbour | unverifiable (budget) ");
     expect(prepared.body).toContain("| Affordable row | unverifiable (invalid-output) ");
+    // The dropped row was fit-omitted, so it holds its clock and gets its turn.
+    const clocks = db.raw.query("SELECT id, last_scheduled_ms FROM review_findings").all() as {
+      id: string;
+      last_scheduled_ms: number | null;
+    }[];
+    const clockById = new Map(clocks.map((row) => [row.id, row.last_scheduled_ms]));
+    // All three seeded rows must be in the read: a missing one would make the
+    // nullity checks vacuous.
+    for (const rowId of [headRowId, affordableRowId, droppedRowId]) expect(clockById.has(rowId)).toBe(true);
+    expect(clockById.get(droppedRowId)).toBeNull();
+    expect(clockById.get(affordableRowId)).not.toBeNull();
+    expect(clockById.get(headRowId)).not.toBeNull();
   });
 
   test("an oversized hunk is sliced into windows that still contain the target line", async () => {
@@ -636,4 +791,38 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     expect(prepared.body).toContain("unverifiable (no-evidence)");
     expect(prepared.body).not.toContain("unverifiable (invalid-output)");
   });
+  test("a head that fits with its full body carries no truncation marker", async () => {
+    // The rescue ladder can reach an attempt where the head's full body fits
+    // once its own catalog is dropped: at the operator floor the four slices of
+    // its file do not fit beside any body, while the body alone does. A body
+    // that was not cut must not claim it was.
+    h.sandbox.diffStdout = catalogBudgetDiff(1);
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.recheckFileContent = "";
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)")
+      .run(RECHECK_ASSIGNMENT_KEY, String(RECHECK_ASSIGNMENT_MIN), new Date().toISOString());
+    await seedPriorPublication(db);
+    const body = "q".repeat(1_000);
+    await seedOpenTarget(db, {
+      rowId: "full-body-head-row",
+      findingId: "full-body-head-finding",
+      original: { body, filePath: "src/b01.ts", lineStart: 1, lineEnd: 1, fingerprintHint: "full-body-fp" },
+      nowMs: 1_500,
+    });
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as {
+      recheck: { targets: Array<{ rowId: string; original: { body: string } }>; evidence: unknown[] };
+    };
+    expect(runnerInput.recheck.targets).toHaveLength(1);
+    expect(runnerInput.recheck.targets[0]!.original.body).toBe(body);
+    expect(runnerInput.recheck.targets[0]!.original.body).not.toContain("[... body truncated ...]");
+    // The slices were what had to go, and they went whole.
+    expect(runnerInput.recheck.evidence).toHaveLength(0);
+  });
+
 });
