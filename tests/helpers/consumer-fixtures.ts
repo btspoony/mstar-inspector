@@ -125,10 +125,10 @@ export async function createSeededTestD1(): Promise<TestD1> {
     .prepare(
       `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
-          check_min_score, created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, 424242, 'consumer-test-app', ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+          created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, 424242, 'consumer-test-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
-    .run(TEST_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC, DEFAULT_CHECK_MIN_SCORE);
+    .run(TEST_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC);
   // Production shape (migration 0026): createApp writes the App row and its
   // `bot_workspaces` mapping in ONE batch, so no App exists unmapped — the
   // consumer's strict read face resolves a real App. A test that needs an
@@ -136,6 +136,15 @@ export async function createSeededTestD1(): Promise<TestD1> {
   db.raw
     .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
     .run(TEST_APP_ID);
+  // …and one review target: the consumer reads the depth, the gate and the
+  // business pause from it, so a targetless App is a DLQ, not a review.
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, check_min_score, created_by, created_at, updated_at)
+       VALUES (?, 'default', ?, 'consumer-test-app', ?, 'tester', datetime('now'), datetime('now'))`,
+    )
+    .run(`target-${TEST_APP_ID}`, TEST_APP_ID, DEFAULT_CHECK_MIN_SCORE);
   // The default App's per-App AI config (AL-24-5 health baseline). AWAITED
   // so the seed completes before any caller re-seeds the same bot_id with a
   // different chain (Rev24T6 Important-2: the fire-and-forget seed raced
@@ -165,11 +174,11 @@ export async function seedAppConfig(
 }
 
 /**
- * Seed the review depth on an App row (migration 0047). `null` is the
- * "follow the operator default" face; both faces are stored verbatim.
+ * Seed the review depth on an App's TARGET. `null` is the "follow the operator
+ * default" face; both faces are stored verbatim.
  */
 export function setAppReviewLevel(db: TestD1, appId: string, level: string | null): void {
-  db.raw.prepare("UPDATE review_bots SET review_level = ? WHERE id = ?").run(level, appId);
+  db.raw.prepare("UPDATE review_targets SET review_level = ? WHERE bot_id = ?").run(level, appId);
 }
 
 /**
@@ -193,9 +202,9 @@ export async function seedReviewingApp(
   db.raw
     .prepare(
       `INSERT INTO review_bots
-         (id, github_app_id, name, private_key_enc, webhook_secret_enc, review_level,
-          check_min_score, created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+         (id, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(
       appId,
@@ -203,12 +212,23 @@ export async function seedReviewingApp(
       `consumer-test-app-${githubAppId}`,
       privateKeyEnc,
       webhookSecretEnc,
-      reviewLevel,
-      DEFAULT_CHECK_MIN_SCORE,
     );
   db.raw
     .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
     .run(appId);
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, review_level, check_min_score, created_by, created_at, updated_at)
+       VALUES (?, 'default', ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
+    )
+    .run(
+      `target-${appId}`,
+      appId,
+      `consumer-test-app-${githubAppId}`,
+      reviewLevel,
+      DEFAULT_CHECK_MIN_SCORE,
+    );
   await seedAppConfig(db, appId);
 }
 

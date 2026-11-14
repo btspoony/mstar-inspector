@@ -383,7 +383,7 @@ export function isReviewTriggerMode(value: unknown): value is ReviewTriggerMode 
 }
 
 /**
- * Per-App review levels (migration 0047) — the `review_bots.review_level`
+ * Per-App review levels (migration 0047) — the `review_targets.review_level`
  * closed vocabulary. Mirrors packages/shared/src/runtime `REVIEW_LEVELS`
  * across the bundle boundary (the REVIEW_TRIGGER_MODES convention: documented,
  * deliberately not imported). Values are wire-verbatim; only labels localize.

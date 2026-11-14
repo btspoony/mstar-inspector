@@ -28,7 +28,7 @@ import { Webhooks } from "@octokit/webhooks";
 import { z } from "zod";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import type { ReviewJobPayload } from "../contracts/review-job";
-import type { ReviewTriggerMode } from "../dashboard/apps-store";
+import type { ReviewTriggerMode } from "../dashboard/targets-store";
 import type { HandlerLog } from "./handlers";
 
 export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as const;

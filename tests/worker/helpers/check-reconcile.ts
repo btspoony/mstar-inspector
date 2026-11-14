@@ -67,10 +67,18 @@ export function seedApp(
     .prepare(
       `INSERT INTO review_bots
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-          check_min_score, created_by, status, deleted_at, review_enabled, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', ?, 'tester', ?, NULL, 1, datetime('now'), datetime('now'))`,
+          created_by, status, deleted_at, review_enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, NULL, 1, datetime('now'), datetime('now'))`,
     )
-    .run(id, `checks-${id}`, githubAppId, `checks-${id}`, DEFAULT_CHECK_MIN_SCORE, status);
+    .run(id, `checks-${id}`, githubAppId, `checks-${id}`, status);
+  // One review target per bot: the gate the reconcile lane re-reads lives there.
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, check_min_score, created_by, created_at, updated_at)
+       VALUES (?, 'default', ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
+    )
+    .run(`target-${id}`, id, `checks-${id}`, DEFAULT_CHECK_MIN_SCORE);
   if (install) {
     db.raw
       .prepare(

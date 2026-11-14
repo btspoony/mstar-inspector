@@ -421,7 +421,9 @@ describe("review depth op (per-App review level)", () => {
 
   /** The stored column — the zero-write / stored assertion. */
   const storedLevel = (db: TestD1, appId: string): string | null => {
-    const row = db.raw.query("SELECT review_level FROM review_bots WHERE id = ?").get(appId) as {
+    const row = db.raw
+      .query("SELECT review_level FROM review_targets WHERE bot_id = ?")
+      .get(appId) as {
       review_level: string | null;
     } | null;
     return row?.review_level ?? null;

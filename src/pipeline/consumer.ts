@@ -203,10 +203,15 @@ import {
 // sanctioned reader of the dashboard store leaves (apps-store reads the
 // review_bots row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
-import { createReviewBotsStore, parseAppReviewLevel } from "../dashboard/apps-store";
+import { createReviewBotsStore } from "../dashboard/apps-store";
+import {
+  createTargetsStore,
+  parseTargetReviewLevel,
+  targetCheckGate,
+} from "../dashboard/targets-store";
 import { createSecretbox } from "../dashboard/secretbox";
 // The operator default review depth (migration 0047 pairing): read ONLY when
-// the App row's `review_level` is NULL, through the same runtime-config leaf
+// the target row's `review_level` is NULL, through the same runtime-config leaf
 // the admission settings use.
 import { getRecheckAssignmentMaxBytes, readDefaultReviewLevel } from "../dashboard/runtime-config-store";
 // Per-App AI-config resolution: the same sanctioned reader
@@ -268,8 +273,8 @@ export type PipelineEnv = {
    * per-provider key fields were retired. Every key and the chain resolve
    * from the App's own per-App config (resolveAppConfig keys map +
    * modelChain, custom declarations); an App missing either fails closed
-   * (assertAppConfigComplete → F-001 channel). The review depth is per App
-   * too (`review_bots.review_level`, falling back to the operator default in
+   * (assertAppConfigComplete → F-001 channel). The review depth is per target
+   * too (`review_targets.review_level`, falling back to the operator default in
    * `review_runtime_settings`) — this env carries no deployment-wide level.
    */
 };
@@ -2904,6 +2909,12 @@ type ProcessDeps = {
   env: PipelineEnv;
   store: D1ArtifactStore;
   /**
+   * The `review_targets` store, built ONCE per consumer (and injectable in
+   * tests) like the bot store: every message resolves its target through it,
+   * and rebuilding the narrow face per message would be pure overhead.
+   */
+  targets: ReturnType<typeof createTargetsStore>;
+  /**
    * review_failures leaf (AL-1 + AL-6): the parse-fail
    * degrade branch and the infra-failure catch record through it. Both call
    * sites are best-effort (try/catch at the call site — an insert failure
@@ -3030,9 +3041,9 @@ type CommenterResolution =
       githubAppId: number;
       workspaceId: string;
       /**
-       * The App row's RAW `review_level` (migration 0047) — `null` = follow the
-       * operator default. Read through `parseAppReviewLevel`; carrying it here
-       * keeps the depth on the same per-message row read (never a second query).
+       * The target row's RAW `review_level` (migration 0047) — `null` = follow
+       * the operator default. Read through `parseTargetReviewLevel`; carrying
+       * it here keeps the depth on the per-message configuration read.
        */
       reviewLevel: string | null;
     }
@@ -3082,14 +3093,30 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
     deps.appCommenters.delete(appRef.appId);
     throw new Error(`per-App credential resolution failed: app ${appRef.appId} is ${row.status}`);
   }
+  // The workspace-owned half of the configuration — review depth and the
+  // business pause — lives on the bot's target; the installation on the
+  // delivery picks a bound target when one exists.
+  const target = await deps.targets.resolve(row.id, payload.installation_id);
+  // A bot with no resolvable target has UNKNOWN review configuration, not an
+  // absence to default: reviewing with one row's credential and no gate is
+  // exactly what this split exists to prevent. The structured failure channel
+  // (retry → DLQ) is the answer, never a silent fallback to the operator
+  // default.
+  if (target === null) {
+    deps.appCommenters.delete(appRef.appId);
+    throw new Error(
+      `per-App credential resolution failed: app ${appRef.appId} has no resolvable review target`,
+    );
+  }
   // Architect lock L4: the PAUSED gate sits AFTER the status/
   // deleted gates (disabled is judged first — its throw→retry→DLQ semantics
   // stay byte-identical) and returns the DISTINCT typed outcome instead of
-  // throwing. The cached instance (if any) is deliberately LEFT in place —
-  // resuming the App must reuse the warm instance, and the credential
-  // fingerprint (`github_app_id` + `private_key_enc`) is immune to
-  // review_enabled writes.
-  if (row.review_enabled === 0) {
+  // throwing. Either pause flag suppresses the review: the bot's operational
+  // pause and the target's business pause. The cached instance (if any) is
+  // deliberately LEFT in place — resuming must reuse the warm instance, and
+  // the credential fingerprint (`github_app_id` + `private_key_enc`) is immune
+  // to review_enabled writes.
+  if (row.review_enabled === 0 || target.review_enabled === 0) {
     // Architect lock L4: the pause gate makes ZERO credential/GitHub calls —
     // no decrypt, no commenter, no token. A delivery attached BEFORE the pause
     // is settled by the STORE-only path (§7.9), which needs no commenter.
@@ -3109,7 +3136,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
       commenter: cached.commenter,
       githubAppId: cached.githubAppId,
       workspaceId: row.workspace_id,
-      reviewLevel: row.review_level,
+      reviewLevel: target.review_level,
     };
   }
   // Cache miss (first message for this App) or fingerprint mismatch
@@ -3128,7 +3155,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
     commenter,
     githubAppId: row.github_app_id,
     workspaceId: row.workspace_id,
-    reviewLevel: row.review_level,
+    reviewLevel: target.review_level,
   };
 }
 
@@ -3894,9 +3921,13 @@ export function createReviewConsumer(
   // One App-ledger store per consumer: `selectPrHead` is the supersede
   // decision's point read and must not rebuild the store per message.
   const appsStore = createReviewBotsStore(env.DB);
+  // One target store per consumer: the Check lane's gate read resolves the
+  // bot's target on every terminalization instead of rebuilding the store.
+  const targetsStore = createTargetsStore(env.DB);
   const deps: ProcessDeps = {
     env,
     store: overrides.store ?? createArtifactStore(env.DB),
+    targets: targetsStore,
     failureStore: overrides.failureStore ?? createFailureStore(env.DB),
     appCommenters,
     // Production factory (§7.5/§7.7 step 11): the commenter is bound
@@ -3922,9 +3953,12 @@ export function createReviewConsumer(
       db: env.DB,
       nowMs: () => Date.now(),
       getAdapter: (scope) => appCommenters.get(scope.appId)?.commenter.checks ?? null,
-      // The App gate is a stored configuration value, read through the same
-      // per-consumer store as the ledger reads (spec §7.9).
-      getCheckGate: (scope) => appsStore.getCheckGate(scope.appId),
+      // The Check gate is the target's configuration: the scope names the bot,
+      // so the bot's single target answers (spec §7.9).
+      getCheckGate: async (scope) => {
+        const target = await targetsStore.resolve(scope.appId, null);
+        return target === null ? null : targetCheckGate(target);
+      },
     });
   return async (batch) => {
     for (const message of batch.messages) {
@@ -4661,7 +4695,7 @@ async function processMessage(
     //
     // AFTER the supersede skip on purpose: a superseded delivery is not the
     // live review, so it must not pay — or degrade on — this read.
-    const appLevel = parseAppReviewLevel(resolution.reviewLevel);
+    const appLevel = parseTargetReviewLevel(resolution.reviewLevel);
     if (appLevel !== null) {
       level = appLevel;
     } else {

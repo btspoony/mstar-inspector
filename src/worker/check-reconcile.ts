@@ -90,6 +90,7 @@ import {
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createReviewBotsStore } from "../dashboard/apps-store";
+import { createTargetsStore, targetCheckGate } from "../dashboard/targets-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { getCheckBudgets } from "../dashboard/runtime-config-store";
 import { sha256Hex } from "../pipeline/review-threads";
@@ -1405,15 +1406,16 @@ async function readProof(
 }
 
 /**
- * The App's gate, or `null` when it cannot be read (unknown row, corrupt
- * stored verdicts, or a failed read) — the same "unreadable" meaning the
- * consumer lane gets, so a review proof concludes `failure`. A read failure is
- * never a reason to abandon the row: the conclusion below still gets
- * persisted.
+ * The target's gate for a bot, or `null` when it cannot be read (no target,
+ * corrupt stored verdicts, or a failed read) — the same "unreadable" meaning
+ * the consumer lane gets, so a review proof concludes `failure`. A read
+ * failure is never a reason to abandon the row: the conclusion below still
+ * gets persisted.
  */
 async function readRecoveryGate(db: D1Like, appId: string): Promise<ReviewGate | null> {
   try {
-    return await createReviewBotsStore(db).getCheckGate(appId);
+    const target = await createTargetsStore(db).resolve(appId, null);
+    return target === null ? null : targetCheckGate(target);
   } catch {
     return null;
   }

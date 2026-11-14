@@ -15,12 +15,8 @@
  * (src/contracts/sandbox-images.ts — the registry, not pipeline/review code —
  * and src/contracts/failure-stages.ts — the `review_failures` stage
  * partition), which bound the sandbox_image_id value domain and keep the
- * failure-count/history SQL off hand-written stage literals, plus the pure
- * types+constants packages/shared/src/runtime.ts, whose closed REVIEW_LEVELS
- * vocabulary is the review-level value domain (imported, never restated).
- * The one engine symbol pair (`PR_VERDICTS` / `PrVerdict`) is the review gate's
- * verdict vocabulary: it is imported, never restated, so a gate value the
- * engine rejects can never be stored (the src/review/schema.ts convention).
+ * failure-count/history SQL off hand-written stage literals, plus
+ * src/contracts/review-gate.ts for the create path's score floor.
  * The `db` parameter is a locally-declared narrow D1 face (types
  * only, zero imports) — a real `D1Database`, the bun:sqlite test double
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
@@ -28,8 +24,15 @@
  * dashboard modules must not import store/pipeline/review code (architect
  * decision Q2). The narrow face carries the operations this store needs:
  * multi-row reads go through IN-list queries (deliverySummaries) and the
- * writes that must commit together — App creation, the allowlist replace,
- * the installation reconcile — go through `batch()`.
+ * writes that must commit together — bot creation with its target and owner
+ * mapping, the user-facing delete, the installation reconcile — go through
+ * `batch()`.
+ *
+ * The workspace-owned review configuration — trigger mode, review depth, Check
+ * gate, owner allowlist, the business pause — lives on `review_targets` and is
+ * served by `src/dashboard/targets-store.ts`. This store keeps only the
+ * execution identity: credentials, model and sandbox configuration,
+ * installations, and `review_enabled` as the OPERATIONAL pause.
  *
  * Semantics (route call sites rely on these):
  *   - getAppForWebhook / getAppByGithubId / getAppById return the row
@@ -42,9 +45,11 @@
  *   - listApps is the dashboard-list face: non-deleted rows, newest first.
  *   - setAppStatus refuses soft-deleted rows (a deleted app can never be
  *     re-activated) and returns whether a row changed.
- *   - setReviewEnabled (migration 0008) is the per-App pause
- *     switch: writes review_enabled + updated_at (an operator mutation) and
- *     refuses soft-deleted rows exactly like setAppStatus.
+ *   - setReviewEnabled (migration 0008) is the per-bot OPERATIONAL pause
+ *     switch (a delivery failure, an operator intervention): writes
+ *     review_enabled + updated_at and refuses soft-deleted rows exactly like
+ *     setAppStatus. The value users change lives on the target; nothing in the
+ *     dashboard writes this column.
  *   - setSandboxImage (migration 0018) is the per-App sandbox
  *     runtime-image selection: the id must be an ENABLED entry of the
  *     sandbox-image registry (plain Error backstop, the recordDelivery
@@ -52,22 +57,6 @@
  *     updated_at, and refuses soft-deleted rows exactly like setAppStatus.
  *     createApp omits the column, so the migration 0018 DDL default seeds
  *     'omp'.
- *   - setReviewTriggerMode (migration 0022, spec review-trigger-policy §2)
- *     is the per-App auto-trigger selection: the mode must be on the
- *     REVIEW_TRIGGER_MODES vocabulary (plain Error backstop, the
- *     setSandboxImage convention — the settings route 400s first; the DDL
- *     CHECK is the last-line backstop), writes review_trigger_mode +
- *     updated_at, and refuses soft-deleted rows exactly like setAppStatus.
- *     createApp omits the column, so the migration 0022 DDL default seeds
- *     'every_push' (today's behavior, preserved exactly).
- *   - setReviewLevel (migration 0047) is the per-App review depth: `null` is
- *     the "follow the operator default" choice and writes the column back to
- *     NULL, a non-null level must be on the shared REVIEW_LEVELS vocabulary
- *     (the setReviewTriggerMode backstop; the DDL CHECK is the last line),
- *     and it writes review_level + updated_at, refusing soft-deleted rows
- *     exactly like setAppStatus. The read face is the row column itself, so
- *     parseAppReviewLevel is the one parser: an off-vocabulary stored value
- *     reads as absent, never as an error.
  *   - touchLastWebhook (migration 0008) writes ONLY
  *     last_webhook_at — never updated_at, which stays the operator-mutation
  *     timestamp (L5: the per-webhook frequency of this touch must not churn
@@ -88,16 +77,6 @@
  *     updated_at. Together with the 0036 NULL-slug staleness rule it bounds
  *     an unsyncable App to one fetch per TTL window instead of one per
  *     settings read.
- *   - getCheckGate / saveCheckGate (migration 0045) are the review gate
- *     face: the gate is App configuration, the save refuses a score outside
- *     0..100 and a verdict outside the engine `PR_VERDICTS` vocabulary before
- *     any write (the settings route 400s first; the DDL CHECK is the score
- *     backstop only), and it writes updated_at (an operator mutation).
- *   - getAllowlist / saveAllowlist (migration 0045) are the owner allowlist
- *     face: the switch is App configuration and the owner set is REPLACED
- *     (delete-then-insert in ONE batch), never merged; saveAllowlist refuses
- *     a deduped set past ALLOWLIST_MAX_OWNERS and a soft-deleted or unknown
- *     App before writing (the setAppStatus rule).
  *   - getGithubVisibility / saveGithubVisibility (migration 0045) are the
  *     cached App-visibility face: NULL reads as 'unknown', and the writer is
  *     the metadata refresh's anonymous probe — machine-triggered, so like
@@ -107,7 +86,10 @@
  *     recently seen first. markInstallationRemoved / reconcileInstallations
  *     stamp the rows GitHub no longer has — never delete them.
  *   - softDeleteApp is idempotent — the FIRST deleted_at wins; returns
- *     whether THIS call performed the delete.
+ *     whether THIS call performed the delete. It stamps the bot AND every
+ *     target the bot owns in ONE batch: the user-facing delete removes one
+ *     product surface, and a target left live would keep a deleted bot's
+ *     configuration readable.
  *   - recordDelivery / deliverySummary / listRecentDeliveries (migration
  *     0011) are the webhook_deliveries face: the per-App webhook
  *     route appends one best-effort row per CLASSIFIED delivery (ok /
@@ -136,8 +118,6 @@
  *     (bot_id, installation_id) pairs, and unknown app references are
  *     caller-visible errors, never swallowed.
  */
-import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
-import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
@@ -162,46 +142,12 @@ export type GithubAppRow = {
   status: GithubAppStatus;
   /** NULL = live row; a timestamp = soft-deleted (the only removal path). */
   deleted_at: string | null;
-  /** Per-App pause switch (migration 0008): 1 = reviewing, 0 = paused. */
+  /**
+   * Per-bot OPERATIONAL pause (migration 0008): 1 = running, 0 = paused. The
+   * business pause users change lives on the target; both gate enqueue and the
+   * in-flight consumer.
+   */
   review_enabled: number;
-  /**
-   * Per-App auto-trigger selection (migration 0022, spec
-   * review-trigger-policy §2): 'open' | 'every_push' | 'manual'; the DDL
-   * default seeds 'every_push' (today's behavior). The bot-mention comment
-   * trigger is orthogonal and works in every mode.
-   */
-  review_trigger_mode: ReviewTriggerMode;
-  /**
-   * Per-App review depth (migration 0047): 'quick' | 'default' | 'deep' — the
-   * packages/shared/src/runtime `REVIEW_LEVELS` vocabulary. NULL = no App
-   * choice, i.e. follow the operator default (`review_runtime_settings` key
-   * `review.level.default`); there is deliberately no backfill, so every App
-   * starts NULL. Read it through parseAppReviewLevel, which treats an
-   * off-vocabulary stored value as absent instead of throwing on the review
-   * path.
-   */
-  review_level: string | null;
-  /**
-   * Review-gate score floor (migration 0045): a published review concludes
-   * the Check `success` only when its tally score is at least this value.
-   * The DDL CHECK bounds it to 0..100. `createApp` seeds it from the
-   * workspace's default (platform default 60); 0045's column default (80)
-   * never applies to a real App.
-   */
-  check_min_score: number;
-  /**
-   * Review-gate passing verdicts (migration 0045): the JSON array of engine
-   * `PR_VERDICTS` spellings that satisfy the gate; the DDL default seeds
-   * `["ship it"]`. Written only by saveCheckGate, which validates the
-   * vocabulary before the write — read it through getCheckGate.
-   */
-  check_pass_verdicts: string;
-  /**
-   * Owner allowlist switch (migration 0045): 1 = only allowlisted repository
-   * owners are reviewed, 0 = every owner (today's behavior). Off by default;
-   * on with an empty list refuses every owner.
-   */
-  allowlist_enabled: number;
   /**
    * Cached GitHub App visibility (migration 0045): 'public' | 'private' |
    * 'unknown', written by the anonymous `GET /apps/{slug}` probe. Two callers
@@ -269,107 +215,12 @@ export type GithubAppStatus = "active" | "disabled";
 export type GithubAppTenantRow = GithubAppRow & { workspace_id: string };
 
 /**
- * The per-App auto-trigger vocabulary (migration 0022, spec
- * review-trigger-policy §2 — exact enum spelling is wire-visible: the
- * settings POST body carries it and the SPA replays it). Producer-side
- * enforced like DELIVERY_OUTCOMES: an off-vocabulary mode throws BEFORE any
- * row is written; the DDL CHECK is the last-line backstop. The array is
- * typed against the union, so a misspelled literal here is a compile error;
- * every member must also appear in the migration 0022 CHECK.
- */
-export type ReviewTriggerMode = "open" | "every_push" | "manual";
-
-export const REVIEW_TRIGGER_MODES: readonly ReviewTriggerMode[] = Object.freeze([
-  "open",
-  "every_push",
-  "manual",
-]);
-
-/**
  * Cached GitHub App visibility (migration 0045, the `github_visibility`
  * column value domain). `unknown` is also what a NULL column reads as. The
  * anonymous `GET /apps/{slug}` probe answers public/404 and `null` to a
  * no-answer; both callers keep the last stored value on `null`.
  */
 export type GithubVisibility = "public" | "private" | "unknown";
-
-/**
- * The stored per-App review level (migration 0047), or `null` when the row
- * carries no usable choice: a NULL column (follow the operator default) or a
- * value outside the shared `REVIEW_LEVELS` vocabulary. An off-vocabulary
- * stored value is UNTRUSTED and treated as absent — the review path falls back
- * to the operator default and never throws for a row it cannot read.
- */
-export function parseAppReviewLevel(value: unknown): ReviewLevel | null {
-  return isReviewLevel(value) ? value : null;
-}
-
-/**
- * The per-App review gate (migration 0045): a published review concludes the
- * Check `success` only when its verdict is on `passVerdicts` AND its tally
- * score is at least `minScore`. `passVerdicts` is engine `PR_VERDICTS`
- * vocabulary — saveCheckGate refuses anything else before writing.
- */
-export type CheckGate = {
-  /** Integer score floor, 0..100 inclusive (the DDL CHECK's domain). */
-  minScore: number;
-  /** Verdicts that satisfy the gate; `["ship it"]` until saved otherwise. */
-  passVerdicts: readonly PrVerdict[];
-};
-
-/**
- * The stored verdict array, or `null` when the stored value is unreadable
- * (bad JSON, not an array, or off-vocabulary). `null` is unreadable
- * CONFIGURATION, never "the default": the Check lanes read the gate on every
- * terminalization and must fail closed on a row they cannot read.
- */
-function storedPassVerdicts(raw: string): readonly PrVerdict[] | null {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.every((entry) => PR_VERDICTS.includes(entry as PrVerdict))) {
-      return parsed as PrVerdict[];
-    }
-  } catch {
-    // unreadable — reported as null below
-  }
-  return null;
-}
-
-/**
- * The per-App owner allowlist (migration 0045): `enabled` is the switch
- * (default off — every owner behaves as before) and `owners` the accepted
- * repository-owner logins. Enabled with an empty list refuses every owner.
- */
-export type AppAllowlist = {
-  enabled: boolean;
-  owners: readonly string[];
-};
-
-/**
- * The owner allowlist's accepted size: the whole set is replaced inside ONE D1
- * batch, so an unbounded paste would build an arbitrarily large batch. 100
- * covers every realistic shared install. Enforced by `saveAllowlist` (the
- * layer that states the batch-size invariant) and, for the operator-facing
- * 400, by the settings route.
- */
-export const ALLOWLIST_MAX_OWNERS = 100;
-
-/**
- * Collapse the allowlist owner set: GitHub logins are case-insensitive, so
- * `Ada` and `ada` are ONE owner and the first submitted spelling is the one
- * kept. Order is NOT preserved: the table has no sequence column and
- * `getAllowlist` reads `ORDER BY owner_login`, so the settings form lists the
- * owners alphabetically however they were submitted.
- */
-export function dedupeOwnerLogins(logins: readonly string[]): string[] {
-  const seen = new Set<string>();
-  return logins.filter((login) => {
-    const folded = login.toLowerCase();
-    if (seen.has(folded)) return false;
-    seen.add(folded);
-    return true;
-  });
-}
 
 /** Input for createApp — encrypted payloads are built by the caller. */
 export type CreateAppInput = {
@@ -900,39 +751,46 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * Insert a new active app row (status 'active', deleted_at NULL) with
      * the CALLER-SUPPLIED id as the row PK (review pin — the caller's
      * secretbox AAD rowKey is this id), plus its `bot_workspaces` mapping to
-     * the REQUIRED `input.workspaceId`. Ownership is never discovered: the
-     * named workspace must still be live, and a dead target refuses the write
-     * with zero rows. The two inserts are ONE batch transaction, so an App
-     * never exists without an owner. sandbox_image_id is omitted: the
-     * migration 0018 DDL default materializes every new row onto the
-     * registry's default image ('omp') — the store face for changing it is
-     * setSandboxImage. A UNIQUE violation on github_app_id throws — the
-     * commit path turns it into `already_connected` (409).
+     * the REQUIRED `input.workspaceId` and its ONE review target. Ownership is
+     * never discovered: the named workspace must still be live, and a dead
+     * target refuses the write with zero rows. The three inserts are ONE batch
+     * transaction, so a bot never exists without an owner or an unconfigured
+     * review surface. sandbox_image_id is omitted: the migration 0018 DDL
+     * default materializes every new row onto the registry's default image
+     * ('omp') — the store face for changing it is setSandboxImage. A UNIQUE
+     * violation on github_app_id throws — the commit path turns it into
+     * `already_connected` (409).
      *
-     * `check_min_score` is seeded explicitly from `input.defaultCheckMinScore`
-     * (the caller's workspace read; platform default `DEFAULT_CHECK_MIN_SCORE`
-     * when absent), so a new App inherits the tenant's default floor instead of
-     * the column's historical 0045 value.
+     * The target keeps the DDL defaults a migrated target carries —
+     * review_enabled 1, review_trigger_mode 'every_push', review_level NULL,
+     * `["ship it"]` verdicts, allowlist off — except for `check_min_score`,
+     * seeded explicitly from `input.defaultCheckMinScore` (the caller's
+     * workspace read; platform default `DEFAULT_CHECK_MIN_SCORE` when absent),
+     * so a new target inherits the tenant's default floor. `installation_id`
+     * stays NULL: the create path binds no installation.
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
       // Ownership is a caller input, never a lookup: the named workspace must
       // still be live (a soft-deleted one is refused identically to an unknown
       // id). A clean throw here leaves no half-written App.
-      const target = await db
+      const liveWorkspace = await db
         .prepare(`SELECT id FROM workspaces WHERE id = ? AND deleted_at IS NULL`)
         .bind(input.workspaceId)
         .first<{ id: string }>();
-      if (!target) {
+      if (!liveWorkspace) {
         throw new Error("apps-store: createApp target workspace is not live");
       }
+      const checkMinScore = isCheckMinScoreValue(input.defaultCheckMinScore)
+        ? input.defaultCheckMinScore
+        : DEFAULT_CHECK_MIN_SCORE;
       await db.batch([
         db
           .prepare(
             `INSERT INTO review_bots
                (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-                check_min_score, created_by, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
+                created_by, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
           )
           .bind(
             id,
@@ -941,14 +799,18 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             input.name,
             input.privateKeyEnc,
             input.webhookSecretEnc,
-            isCheckMinScoreValue(input.defaultCheckMinScore)
-              ? input.defaultCheckMinScore
-              : DEFAULT_CHECK_MIN_SCORE,
             input.createdBy,
           ),
         db
           .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)`)
           .bind(id, input.workspaceId),
+        db
+          .prepare(
+            `INSERT INTO review_targets
+               (id, workspace_id, bot_id, name, check_min_score, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+          )
+          .bind(crypto.randomUUID(), input.workspaceId, id, input.name, checkMinScore, input.createdBy),
       ]);
       const row = await db.prepare(`SELECT * FROM review_bots WHERE id = ?`).bind(id).first<GithubAppRow>();
       if (!row) {
@@ -1011,60 +873,6 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The App's review gate (migration 0045). Unknown id → null (the
-     * getSandboxImageId convention). No tenant join: the gate is a
-     * configuration value. A stored verdict array that is unparseable,
-     * off-vocabulary or not an array also reads as null — the same
-     * "unreadable" meaning, so every consumer fails closed instead of
-     * inventing a permissive default.
-     *
-     * The floor a NEW App starts at is `input.defaultCheckMinScore` (the
-     * caller's workspace read; platform default `DEFAULT_CHECK_MIN_SCORE`, 60),
-     * seeded by `createApp`.
-     * The column's own `DEFAULT 80` is 0045's historical value: SQLite cannot
-     * alter it without a parent-table rebuild, and that rebuild would run
-     * `pull_requests`' `ON DELETE CASCADE` (0039) against a dropped parent.
-     */
-    async getCheckGate(appId: string): Promise<CheckGate | null> {
-      const row = await db
-        .prepare(`SELECT check_min_score, check_pass_verdicts FROM review_bots WHERE id = ?`)
-        .bind(appId)
-        .first<{ check_min_score: number; check_pass_verdicts: string }>();
-      if (!row) return null;
-      const passVerdicts = storedPassVerdicts(row.check_pass_verdicts);
-      if (passVerdicts === null) return null;
-      return { minScore: row.check_min_score, passVerdicts };
-    },
-
-    /**
-     * The App's owner allowlist (migration 0045): the switch plus the owner
-     * logins sorted by `owner_login` (SQLite's BINARY collation). The read is
-     * alphabetical, NOT submission order — there is no sequence column, so the
-     * settings form does not play the list back as it was saved. Unknown id →
-     * null. ONE statement, so the switch and the owner set come from the same
-     * snapshot — a save landing between two reads could otherwise admit against
-     * a switch that no longer applies to the list it was read with.
-     */
-    async getAllowlist(appId: string): Promise<AppAllowlist | null> {
-      const rows = await db
-        .prepare(
-          `SELECT g.allowlist_enabled AS enabled, a.owner_login
-             FROM review_bots g
-             LEFT JOIN app_owner_allowlist a ON a.app_id = g.id
-            WHERE g.id = ?
-            ORDER BY a.owner_login`,
-        )
-        .bind(appId)
-        .all<{ enabled: number; owner_login: string | null }>();
-      const [first] = rows.results;
-      if (first === undefined) return null;
-      return {
-        enabled: first.enabled !== 0,
-        owners: rows.results.flatMap((row) => (row.owner_login === null ? [] : [row.owner_login])),
-      };
-    },
-
-    /**
      * The cached GitHub App visibility (migration 0045). Unknown id → null;
      * a never-probed App reads as 'unknown' (the column is NULL), which is
      * treated as "cannot prove private".
@@ -1111,156 +919,6 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .bind(enabled ? 1 : 0, id)
         .run();
       return res.meta.changes > 0;
-    },
-
-    /**
-     * Select the per-App review trigger mode (migration 0022, spec
-     * review-trigger-policy §2). The mode must be on the
-     * REVIEW_TRIGGER_MODES vocabulary — anything else throws BEFORE any
-     * write (the setSandboxImage store-enforced value domain backstop; the
-     * settings route answers 400 first, and the DDL CHECK is the last line).
-     * Writes review_trigger_mode + updated_at (an operator mutation, the
-     * setReviewEnabled convention) and refuses soft-deleted rows exactly
-     * like setAppStatus. Returns whether a row changed (false also covers
-     * unknown ids).
-     */
-    async setReviewTriggerMode(id: string, mode: ReviewTriggerMode): Promise<boolean> {
-      if (!REVIEW_TRIGGER_MODES.includes(mode)) {
-        throw new Error(
-          `apps-store: review trigger mode ${JSON.stringify(mode)} is not on the vocabulary (${REVIEW_TRIGGER_MODES.join(" | ")}) — zero rows written`,
-        );
-      }
-      const res = await db
-        .prepare(
-          `UPDATE review_bots SET review_trigger_mode = ?, updated_at = datetime('now')
-           WHERE id = ? AND deleted_at IS NULL`,
-        )
-        .bind(mode, id)
-        .run();
-      return res.meta.changes > 0;
-    },
-
-    /**
-     * Select the App's review level (migration 0047). `null` is the
-     * "follow the operator default" choice and writes the column back to NULL,
-     * so it is a successful write, not a no-op. A non-null level must be on the
-     * shared `REVIEW_LEVELS` vocabulary — anything else throws BEFORE any write
-     * (the setReviewTriggerMode backstop; the settings route 400s first, and
-     * the DDL CHECK is the last line). Writes review_level + updated_at (an
-     * operator mutation, the setReviewEnabled convention) and refuses
-     * soft-deleted rows exactly like setAppStatus. Returns whether a row
-     * changed (false also covers unknown ids).
-     */
-    async setReviewLevel(id: string, level: ReviewLevel | null): Promise<boolean> {
-      if (level !== null && !isReviewLevel(level)) {
-        throw new Error(
-          `apps-store: review level ${JSON.stringify(level)} is not on the vocabulary (${REVIEW_LEVELS.join(" | ")}) — zero rows written`,
-        );
-      }
-      const res = await db
-        .prepare(
-          `UPDATE review_bots SET review_level = ?, updated_at = datetime('now')
-           WHERE id = ? AND deleted_at IS NULL`,
-        )
-        .bind(level, id)
-        .run();
-      return res.meta.changes > 0;
-    },
-
-    /**
-     * Save the App's review gate (migration 0045). The score must be an
-     * integer in 0..100 and every verdict must be on the engine `PR_VERDICTS`
-     * vocabulary — anything else throws BEFORE any write (the
-     * setReviewTriggerMode backstop; the settings route answers 400 first,
-     * and the DDL CHECK is the last line for the score). The verdict array is
-     * stored as JSON, the form the DDL default uses. Writes the two gate
-     * columns + updated_at (an operator mutation) and refuses soft-deleted
-     * rows exactly like setAppStatus. Returns whether a row changed (false
-     * also covers unknown ids).
-     */
-    async saveCheckGate(id: string, gate: CheckGate): Promise<boolean> {
-      if (!Number.isInteger(gate.minScore) || gate.minScore < 0 || gate.minScore > 100) {
-        throw new Error(
-          `apps-store: check gate min score ${JSON.stringify(gate.minScore)} is outside 0..100 — zero rows written`,
-        );
-      }
-      for (const verdict of gate.passVerdicts) {
-        if (!PR_VERDICTS.includes(verdict)) {
-          throw new Error(
-            `apps-store: check gate verdict ${JSON.stringify(verdict)} is not on PR_VERDICTS (${PR_VERDICTS.join(" | ")}) — zero rows written`,
-          );
-        }
-      }
-      const res = await db
-        .prepare(
-          `UPDATE review_bots
-           SET check_min_score = ?, check_pass_verdicts = ?, updated_at = datetime('now')
-           WHERE id = ? AND deleted_at IS NULL`,
-        )
-        .bind(gate.minScore, JSON.stringify(gate.passVerdicts), id)
-        .run();
-      return res.meta.changes > 0;
-    },
-
-    /**
-     * Save the App's owner allowlist (migration 0045): the switch plus the
-     * owner set, which is REPLACED — delete-then-insert in ONE batch, so a
-     * removal is written by the same operation that adds. Duplicate logins
-     * collapse case-insensitively (GitHub logins are case-insensitive; the
-     * first spelling is kept), because SQLite's (app_id, owner_login) key is
-     * case-sensitive; an empty set is legal and, with the switch on, refuses
-     * every owner (fail closed).
-     * Refuses a soft-deleted or unknown App BEFORE writing (the setAppStatus
-     * rule) and writes updated_at (an operator mutation). Refuses a collapsed
-     * set larger than ALLOWLIST_MAX_OWNERS, also before any read: this method
-     * is where the one-batch bound is documented, so it enforces it for direct
-     * callers too. Returns whether the
-     * App row was still live when the batch ran: every batch statement — the
-     * DELETE, each INSERT and the UPDATE — repeats the `deleted_at IS NULL`
-     * predicate, so a delete landing between the pre-read and the batch writes
-     * nothing at all (no orphan owner rows) and the UPDATE's change count
-     * reports `false` instead of a save that never took effect.
-     */
-    async saveAllowlist(id: string, allowlist: AppAllowlist): Promise<boolean> {
-      // Collapse first: the INSERT count is the deduped set, so duplicates
-      // must not consume the budget.
-      const owners = dedupeOwnerLogins(allowlist.owners);
-      if (owners.length > ALLOWLIST_MAX_OWNERS) {
-        throw new Error(
-          `apps-store: owner allowlist holds ${owners.length} logins, above ALLOWLIST_MAX_OWNERS (${ALLOWLIST_MAX_OWNERS}) — zero rows written`,
-        );
-      }
-      const live = await db
-        .prepare(`SELECT id FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
-        .bind(id)
-        .first<{ id: string }>();
-      if (!live) return false;
-      // Every statement repeats the liveness predicate: a soft delete landing
-      // between the pre-read and the batch then writes NO owner rows and does
-      // not flip the switch, instead of leaving a deleted App's list behind.
-      // ONE batch on purpose: chunking was tried and reverted because a split
-      // replace is not atomic — a failed later chunk leaves a partial owner
-      // set. The statement count (ALLOWLIST_MAX_OWNERS + 2) stays below any
-      // observed D1 batch limit.
-      const liveApp = `EXISTS (SELECT 1 FROM review_bots g WHERE g.id = ? AND g.deleted_at IS NULL)`;
-      const results = await db.batch([
-        db.prepare(`DELETE FROM app_owner_allowlist WHERE app_id = ? AND ${liveApp}`).bind(id, id),
-        ...owners.map((owner) =>
-          db
-            .prepare(
-              `INSERT INTO app_owner_allowlist (app_id, owner_login, created_at)
-               SELECT ?, ?, datetime('now') WHERE ${liveApp}`,
-            )
-            .bind(id, owner, id),
-        ),
-        db
-          .prepare(
-            `UPDATE review_bots SET allowlist_enabled = ?, updated_at = datetime('now')
-             WHERE id = ? AND deleted_at IS NULL`,
-          )
-          .bind(allowlist.enabled ? 1 : 0, id),
-      ]);
-      return (results.at(-1)?.meta.changes ?? 0) > 0;
     },
 
     /**
@@ -1313,18 +971,28 @@ export function createReviewBotsStore(db: AppsStoreD1) {
 
     /**
      * Soft delete (the only removal path, Clarify #4): stamps deleted_at
-     * once — a second call is a no-op returning false and the first
-     * timestamp wins. Returns whether THIS call performed the delete.
+     * once on the bot AND on every target the bot owns — one product surface,
+     * so a deleted bot must not leave readable review configuration behind.
+     * Both statements are ONE batch and both carry `deleted_at IS NULL`, so a
+     * second call is a no-op returning false and the first timestamp wins on
+     * both rows. Returns whether THIS call performed the delete.
      */
     async softDeleteApp(id: string): Promise<boolean> {
-      const res = await db
-        .prepare(
-          `UPDATE review_bots SET deleted_at = datetime('now'), updated_at = datetime('now')
-           WHERE id = ? AND deleted_at IS NULL`,
-        )
-        .bind(id)
-        .run();
-      return res.meta.changes > 0;
+      const [botResult] = await db.batch([
+        db
+          .prepare(
+            `UPDATE review_bots SET deleted_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ? AND deleted_at IS NULL`,
+          )
+          .bind(id),
+        db
+          .prepare(
+            `UPDATE review_targets SET deleted_at = datetime('now'), updated_at = datetime('now')
+             WHERE bot_id = ? AND deleted_at IS NULL`,
+          )
+          .bind(id),
+      ]);
+      return (botResult?.meta.changes ?? 0) > 0;
     },
 
     /**

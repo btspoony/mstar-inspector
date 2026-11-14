@@ -118,6 +118,16 @@ function seedApp(db: TestD1, workspaceId: string): void {
     now,
   );
   seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('app-acme', ?)", workspaceId);
+  // Every bot owns one target — the settings face's review configuration.
+  seed(
+    db,
+    `INSERT INTO review_targets
+       (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+     VALUES ('target-app-acme', ?, 'app-acme', 'acme-app', 'dana', ?, ?)`,
+    workspaceId,
+    now,
+    now,
+  );
 }
 
 /** The live workspace 0026 seeds (`default`) plus the role matrix. */

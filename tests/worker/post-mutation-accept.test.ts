@@ -58,7 +58,15 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0017_app_model_chains.sql",
     "0024_provider_multi_key.sql",
     "0025_provider_model_evidence.sql",
+    // The review configuration moves onto `review_targets`: the pause/resume
+    // routes write the target, so the fixture needs the installation stamp
+    // (0055), the review depth column (0047) and the claim table (0048) that
+    // 0057 rewrites.
+    "0055_app_installations_removed_at.sql",
+    "0047_review_level_per_app.sql",
+    "0048_comment_trigger_claims.sql",
     "0056_review_bots_rename.sql",
+    "0057_review_targets.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

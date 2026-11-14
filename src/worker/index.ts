@@ -41,10 +41,10 @@ import {
 import { defaultLog, handleReviewJob } from "./handlers";
 import {
   createReviewBotsStore,
-  type AppAllowlist,
   type DeliveryOutcome,
   type GithubAppTenantRow,
 } from "../dashboard/apps-store";
+import { createTargetsStore, type OwnerAllowlist } from "../dashboard/targets-store";
 import { attachCheckAtAcceptance } from "../pipeline/checks";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
@@ -449,6 +449,25 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("unknown webhook path", 404);
   }
 
+  // The review configuration a delivery reads lives on the bot's target, not
+  // on the bot row: trigger mode, the owner allowlist and the business pause.
+  // The delivery's installation id is not available before the body is
+  // classified, so this read uses the single-target step (a bot has one target
+  // today); a classifier that gates on the delivery's own installation will
+  // pass it in here.
+  // shortcut: a bot with no resolvable target keeps the legacy defaults
+  // (`every_push`, allowlist off) instead of refusing the delivery; every
+  // created or migrated bot has exactly one target, so the branch is
+  // unreachable until a create path can leave a bot targetless — refuse the
+  // delivery then.
+  const targetsStore = createTargetsStore(db);
+  const target = await targetsStore.resolve(row.id, null);
+  // Effective pause: the bot's OPERATIONAL flag and the target's BUSINESS flag.
+  // Both suppress a review, and the settings switch users flip is the target's,
+  // so this webhook must consult both — one derivation, read at the delivery
+  // record and at the pause gate.
+  const paused = row.review_enabled === 0 || target?.review_enabled === 0;
+
   // Decrypt this App's webhook secret (secretbox envelope, AAD pins the
   // row). Fail-closed 500 on any decrypt failure — the signature is never
   // verified against anything but the stored secret, and nothing enqueues.
@@ -472,8 +491,8 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // cacheKey — a rotated webhook secret (same id, new envelope → new
   // secret) is rebuilt + REPLACED on the next delivery; entries are
   // structurally bounded (≤ review_bots rows) with no eviction policy.
-  // Trigger context (spec review-trigger-policy §2 read path): the
-  // already-resolved row's review_trigger_mode gates the pull_request auto
+  // Trigger context (spec review-trigger-policy §2 read path): the resolved
+  // target's review_trigger_mode gates the pull_request auto
   // face and its GitHub slug keys the issue_comment bot mention — no second
   // lookup, no App identity beyond that. The mention target is GitHub's own
   // slug (`github_slug`), NOT our webhook path: a rename changes the login that
@@ -491,7 +510,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     eventName,
     defaultLog,
     row.id,
-    { mode: row.review_trigger_mode, appSlug },
+    { mode: target?.review_trigger_mode ?? "every_push", appSlug },
     (parsed) => {
       classified = parsed;
     },
@@ -545,9 +564,12 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     outcome.kind !== "reject" && (eventName === "pull_request" || eventName === "issue_comment");
   const ownerLogin = reviewTriggering ? webhookRepositoryOwnerLogin(classified) : null;
   if (ownerLogin !== null) {
-    let allowlist: AppAllowlist | null;
+    let allowlist: OwnerAllowlist | null;
     try {
-      allowlist = await appsStore.getAllowlist(row.id);
+      allowlist =
+        target === null
+          ? { enabled: false, owners: [] }
+          : await targetsStore.getAllowlist(target.workspace_id, target.id);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       webhookWarn(
@@ -635,7 +657,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     await appsStore.recordDelivery({
       appId: row.id,
       eventName,
-      outcome: deliveryOutcomeFromWebhook(outcome, row.review_enabled, reviewGlobal),
+      outcome: deliveryOutcomeFromWebhook(outcome, paused ? 0 : 1, reviewGlobal),
       statusCode: outcome.kind === "reject" ? outcome.status : null,
       // The diagnostics face's "which repo did this come from?" answer, read
       // off the classifier's own single parse of the body — null when the
@@ -760,12 +782,12 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("accepted", 200);
   }
 
-  // Pause gate (spec 语义锁 — paused ≠ disabled): review_enabled
+  // Pause gate (spec 语义锁 — paused ≠ disabled): either pause flag
   // =0 answers 2xx with ZERO enqueue — the webhook stays healthy (and
   // touched, above) while reviews are paused. disabled/deleted already
   // returned 404 above; the consumer ack-skips the in-flight messages it
   // can no longer prevent (lock L4).
-  if (row.review_enabled === 0) {
+  if (paused) {
     // AL-23-2: warn→info — paused is a legitimate ops state (2xx, zero
     // enqueue), so the line rides the info channel with the same structured
     // fields; no sampling, no aggregation state.

@@ -564,7 +564,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     // throws either — `getCheckGate` reports it as null, the same UNREADABLE
     // input. Neither is a reason to skip the terminal conclusion: an attempt
     // that only retried would never conclude its Check.
-    const degraded = withFailingReads(db, /check_pass_verdicts|SELECT payload_json FROM review_publications/);
+    const degraded = withFailingReads(db, /FROM review_targets|SELECT payload_json FROM review_publications/);
     const fetchStub = stubFetch();
     const pushed: CheckConclusion[] = [];
     try {
