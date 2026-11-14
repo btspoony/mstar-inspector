@@ -133,6 +133,7 @@ import {
 import {
   ASSESSMENT_TARGET_CAP,
   isRecheckStatusReason,
+  RECHECK_ASSIGNMENT_PROSE_BYTES,
   RECHECK_OUTPUT_PATH,
   RECHECK_STATUS_ERROR_MAX_CHARS,
   validateRecheckDoc,
@@ -146,7 +147,7 @@ import {
   type RecheckTarget,
   type Scope,
 } from "../../packages/shared/src/recheck-wire";
-import { boundDiscussion } from "./discussion-context";
+import { BODY_TRUNCATED_SUFFIX, boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import type { ShellCommand } from "./shell-command";
@@ -1457,6 +1458,19 @@ async function withHookTimeout<T>(
 /** One JSON.stringify size in UTF-8 bytes (bounded-input accounting). */
 function jsonByteLength(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+/**
+ * `body` cut to at most `length` code units and marked truncated — the same
+ * marker a clamped discussion item carries, so the seat reads a short body and
+ * never mistakes it for the whole concern. A surrogate pair is never split: a
+ * lone half would serialize as a replacement escape and change the bytes the
+ * caller's bound was measured on.
+ */
+function truncatedBody(body: string, length: number): string {
+  let cut = Math.max(0, Math.min(length, body.length));
+  if (cut > 0 && cut < body.length && /[\uD800-\uDBFF]/.test(body[cut - 1]!)) cut -= 1;
+  return body.slice(0, cut) + BODY_TRUNCATED_SUFFIX;
 }
 
 /**
@@ -5394,7 +5408,40 @@ async function processMessage(
     // no slice it owns consumes the byte budget.
     let recheckInput: RecheckInput | undefined;
     const budgetExcluded = new Set<string>();
+    // What the seat is actually handed. Narrowed to the sent rows'
+    // associations once they are known: a thread of a row this round could not
+    // fit was not seen by the seat, so it must never be offered for resolution.
+    let askedDiscussion = discussion;
+    let recheckAssignmentMaxBytes: number | undefined;
     if (targets.length > 0 && !captureFailed) {
+      // §7.8: the seat's ask budget is an operator setting, read ONCE per
+      // message and only when a recheck round will actually be asked, so a
+      // delivery with no open rows pays nothing. It rides the runner input as
+      // its own top-level field — the `mstar.recheck-input/v1` document stays
+      // frozen — and it FITS this ask instead of refusing it whole: the prose
+      // is fixed, so the document gets what the budget leaves, and the rows the
+      // budget could not reach are accounted `budget` rather than skipped by a
+      // seat that never ran.
+      const budget = await getRecheckAssignmentMaxBytes(deps.env.DB);
+      // A degraded read answers the documented default and owes the operator
+      // one structured warn (the level/concurrency readers' contract). It is
+      // reported even when nothing fits below: the budget decided that.
+      if (budget.degraded) {
+        deps.log.warn(
+          {
+            ...(baseFields ?? payloadIdentityFields(payload)),
+            event: "review_recheck_assignment_degraded",
+            max_bytes: budget.maxBytes,
+          },
+          "recheck assignment budget read degraded — using the documented default",
+        );
+      }
+      // The one byte cap a row must fit: the §7.3 wire cap, or the room the
+      // assignment budget leaves once its own prose is paid.
+      const documentMaxBytes = Math.min(
+        RECHECK_INPUT_MAX_BYTES,
+        budget.maxBytes - RECHECK_ASSIGNMENT_PROSE_BYTES,
+      );
       const candidates = targets.filter(
         (target) => !catalogExcluded.has(target.rowId) && !catalogBudgetExcluded.has(target.rowId),
       );
@@ -5411,9 +5458,11 @@ async function processMessage(
       for (const target of candidates) {
         const withRow = new Set([...referenced, ...(catalog.sliceIdsByRowId.get(target.rowId) ?? [])]);
         const nextEvidence = catalog.slices.filter((slice) => withRow.has(slice.id));
-        // §7.3 cap measured on the SERIALIZED input — schema, headSha,
+        // The cap is measured on the SERIALIZED input — schema, headSha,
         // evidence, discussion, array brackets and separators included — so
-        // the accepted document is exactly what the cap counts.
+        // the accepted document is exactly what the cap counts. The discussion
+        // measured here is the whole capture: narrowing it to the sent rows can
+        // only shrink the document, so this stays an upper bound.
         const candidate = {
           schema: RECHECK_INPUT_SCHEMA,
           headSha,
@@ -5421,44 +5470,78 @@ async function processMessage(
           evidence: nextEvidence,
           discussion,
         };
-        // §7.3: an oversized whole target is accounted, never truncated.
-        if (jsonByteLength(candidate) > RECHECK_INPUT_MAX_BYTES) continue;
+        if (jsonByteLength(candidate) > documentMaxBytes) continue;
         included.push(target);
         evidence = nextEvidence;
         for (const id of withRow) referenced.add(id);
       }
+      // No candidate fit even alone. The rotation's first candidate still
+      // rides with whatever room is left, because a round that sends nothing
+      // never advances the clock and the same rows come back forever. Its
+      // catalog slices are dropped whole first (the fit's own evidence
+      // accounting), and only then is the ORIGINAL body cut short: the rowId,
+      // title, file path, line anchors and every other field stay exactly as
+      // captured, so this is the same finding row, never a rewritten one.
+      if (included.length === 0) {
+        const first = candidates[0];
+        if (first !== undefined) {
+          // Measured against the WHOLE discussion: the row is not included
+          // yet, so the narrowed view would still exclude its threads.
+          const bareBytes = (target: RecheckTarget): number =>
+            jsonByteLength({
+              schema: RECHECK_INPUT_SCHEMA,
+              headSha,
+              targets: [target],
+              evidence: [],
+              discussion,
+            });
+          const withBody = (length: number): RecheckTarget => ({
+            ...first,
+            original: { ...first.original, body: truncatedBody(first.original.body, length) },
+          });
+          if (bareBytes(first) <= documentMaxBytes) {
+            included.push(first);
+          } else {
+            // Bounded binary search over the body's length: each probe measures
+            // real UTF-8 bytes on the serialized document, so a multi-byte body
+            // is bounded by bytes and not by code units, and the probe count is
+            // logarithmic in the body's length.
+            let low = 0;
+            let high = first.original.body.length;
+            while (low < high) {
+              const mid = Math.ceil((low + high) / 2);
+              if (bareBytes(withBody(mid)) <= documentMaxBytes) low = mid;
+              else high = mid - 1;
+            }
+            const bounded = withBody(low);
+            if (bareBytes(bounded) <= documentMaxBytes) included.push(bounded);
+          }
+        }
+      }
       const sentIds = new Set(included.map((target) => target.rowId));
       for (const target of candidates) if (!sentIds.has(target.rowId)) budgetExcluded.add(target.rowId);
+      // The seat's view of the discussion: issue items and their coverage and
+      // digest are the round's context and stay, while a thread is offered only
+      // for a row that rides — a resolve verifies a thread the seat saw.
+      const sentAssociations = new Set(included.flatMap((target) => target.associationIds));
+      askedDiscussion = {
+        ...discussion,
+        items: discussion.items.filter(
+          (item) =>
+            item.source === "issue" ||
+            (item.associationId !== null && sentAssociations.has(item.associationId)),
+        ),
+        threads: discussion.threads.filter((thread) => sentAssociations.has(thread.associationId)),
+      };
       if (included.length > 0) {
+        recheckAssignmentMaxBytes = budget.maxBytes;
         recheckInput = {
           schema: RECHECK_INPUT_SCHEMA,
           headSha,
           targets: included,
           evidence,
-          discussion,
+          discussion: askedDiscussion,
         };
-      }
-    }
-
-    // §7.8: the seat's ask budget is an operator setting, read ONCE per message
-    // and only when a recheck round will actually be asked, so a delivery with
-    // no open rows pays nothing. It rides the runner input as its own top-level
-    // field — the `mstar.recheck-input/v1` document stays frozen.
-    let recheckAssignmentMaxBytes: number | undefined;
-    if (recheckInput !== undefined) {
-      const budget = await getRecheckAssignmentMaxBytes(deps.env.DB);
-      recheckAssignmentMaxBytes = budget.maxBytes;
-      // A degraded read answers the documented default and owes the operator
-      // one structured warn (the level/concurrency readers' contract).
-      if (budget.degraded) {
-        deps.log.warn(
-          {
-            ...(baseFields ?? payloadIdentityFields(payload)),
-            event: "review_recheck_assignment_degraded",
-            max_bytes: budget.maxBytes,
-          },
-          "recheck assignment budget read degraded — using the documented default",
-        );
       }
     }
 
@@ -5848,7 +5931,9 @@ async function processMessage(
       targets,
       doc: recheckDoc,
       status: recheck?.status ?? null,
-      discussion,
+      // The seat's own view: a thread of a row this round could not fit was
+      // never handed over, so it cannot authorize a resolve either.
+      discussion: askedDiscussion,
       output,
       staleContext,
       catalogExcluded,
@@ -5948,6 +6033,9 @@ async function processMessage(
         }
       }
     }
+    // The ROUND's coverage reads the whole capture, never the narrowed wire
+    // view: an unsent row's truncated thread still leaves this round's context
+    // short, and publication must not claim more than capture could read.
     const contextCoverage: Coverage = staleContext
       ? "unavailable"
       : roundContextCoverage(discussion);
@@ -6065,7 +6153,10 @@ async function processMessage(
     }
 
     const lifecycleRound: LifecycleRound = {
-      selectedRowIds: targets.map((t) => t.rowId),
+      // Only the rows that actually rode the wire advance the rotation clock:
+      // a row the byte budget could not fit is never-sent `budget`, so moving
+      // its clock would starve it behind every row that did fit.
+      selectedRowIds: recheckInput?.targets.map((target) => target.rowId) ?? [],
       assessments: reconciled.assessments,
       seen,
       resolutions: reconciled.resolutions,

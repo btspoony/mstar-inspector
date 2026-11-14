@@ -54,6 +54,14 @@
 # received, publishing that row `addressed`. The Worker cannot repair either from
 # outside (I-000396).
 #
+# rebuild: the ask-fitting rule (and the assignment's fixed prose it is measured
+# against) moved out of `packages/runner/src/recheck.ts` into
+# `packages/shared/src/recheck-wire.ts`, so the Worker fits the same rule the seat
+# validates against; both files are image inputs and no manifest, lockfile or CLI
+# pin moved. A stale image carries the previous shared copy, which exports no fit:
+# the runner's import of it fails at startup and the recheck seat never starts,
+# while the Worker believes it handed the seat a fitted ask.
+#
 # rebuild: the runner's pinned engine moves to 4.2.0 (`packages/runner/package.json`
 # and its lockfile are image inputs, so the container must be rebuilt with them).
 # rebuild: the image's CLI pin and harness clone ref move to 4.2.0
