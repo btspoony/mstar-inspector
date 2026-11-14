@@ -65,16 +65,24 @@ export function seedApp(
   const { install = true, installationId = 123, status = "active" } = options;
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-          check_min_score, created_by, status, deleted_at, review_enabled, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', ?, 'tester', ?, NULL, 1, datetime('now'), datetime('now'))`,
+          created_by, status, deleted_at, review_enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, NULL, 1, datetime('now'), datetime('now'))`,
     )
-    .run(id, `checks-${id}`, githubAppId, `checks-${id}`, DEFAULT_CHECK_MIN_SCORE, status);
+    .run(id, `checks-${id}`, githubAppId, `checks-${id}`, status);
+  // One review target per bot: the gate the reconcile lane re-reads lives there.
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, check_min_score, created_by, created_at, updated_at)
+       VALUES (?, 'default', ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
+    )
+    .run(`target-${id}`, id, `checks-${id}`, DEFAULT_CHECK_MIN_SCORE);
   if (install) {
     db.raw
       .prepare(
-        `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
          VALUES (?, ?, ?, 'acme', datetime('now'))`,
       )
       .run(`inst-${id}-${installationId}`, id, installationId);
@@ -156,7 +164,7 @@ export function seedPublication(
   db.raw
     .prepare(
       `INSERT INTO review_publications
-         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms, confirmed_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'done', ?, ?, ?)`,
     )
@@ -206,7 +214,7 @@ export function seedJournal(
   db.raw
     .prepare(
       `INSERT INTO review_publications
-         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'review', ?, '{}', NULL, 0, 'pending', ?, ?)`,
     )

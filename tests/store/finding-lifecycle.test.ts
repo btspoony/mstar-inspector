@@ -70,10 +70,12 @@ import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
 import { createArtifactStore, type ReviewArtifactDoc } from "../../src/store/artifact-store";
 import { idemKey } from "../../src/contracts/idem";
-import { createMigratedTestD1, type TestD1 } from "./helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "./helpers";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
 const OTHER_APP_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const TARGET_ID = "11111111-2222-3333-4444-777777777777";
+const OTHER_TARGET_ID = "aaaaaaaa-bbbb-cccc-dddd-ffffffffffff";
 const SCOPE: Scope = { appId: APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA2 = "ffffffffffffffffffffffffffffffffffffffff";
@@ -81,7 +83,7 @@ const SHA2 = "ffffffffffffffffffffffffffffffffffffffff";
 function seedAppRow(db: TestD1, id: string, githubAppId = 1001): void {
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -93,6 +95,8 @@ function createSeededTestD1(): TestD1 {
   const db = createMigratedTestD1();
   seedAppRow(db, APP_ID);
   seedAppRow(db, OTHER_APP_ID, 1002);
+  seedTarget(db, APP_ID, { id: TARGET_ID });
+  seedTarget(db, OTHER_APP_ID, { id: OTHER_TARGET_ID });
   return db;
 }
 
@@ -124,6 +128,7 @@ function artifactDoc(overrides: Partial<ReviewArtifactDoc> = {}): ReviewArtifact
     schema: "mstar.review/v1",
     payload: enginePayload(),
     appId: APP_ID,
+    targetId: TARGET_ID,
     ...overrides,
   };
 }
@@ -937,7 +942,7 @@ describe("fair rotation (spec §7.2)", () => {
       db.raw
         .prepare(
           `INSERT INTO review_findings
-             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+             (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
               first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
               first_seen_round, last_seen_round, state, created_ms, updated_ms)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pub-1', 'pub-1', ?, ?, 1, 1, 'open', ?, ?)`,
@@ -991,7 +996,7 @@ describe("fair rotation (spec §7.2)", () => {
       db.raw
         .prepare(
           `INSERT INTO review_findings
-             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+             (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
               first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
               first_seen_round, last_seen_round, state, created_ms, updated_ms)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pub-1', 'pub-1', ?, ?, 1, 1, ?, ?, ?)`,
@@ -1026,7 +1031,7 @@ describe("fair rotation (spec §7.2)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_findings
-           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+           (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
             first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
             first_seen_round, last_seen_round, state, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pub-1', 'pub-1', ?, ?, 1, 1, ?, ?, ?)`,
@@ -1045,7 +1050,7 @@ describe("fair rotation (spec §7.2)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_threads
-           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+           (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
             original_sha, round, intent_json, resolution_state, verified_json,
             superseded_by_publication_id, created_ms, updated_ms)
          VALUES (?, ?, 'pub-1', ?, 123, 'acme', 'widgets', 42, ?, 1, '{}', ?, '{"snapshot":1}', ?, ?, ?)`,
@@ -1130,7 +1135,7 @@ describe("resolution queue selection (spec §7.11.1)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_findings
-           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+           (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
             first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
             first_seen_round, last_seen_round, state, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pub-seed', 'pub-seed', ?, ?, 1, 1, 'open', 1000, 1000)`,
@@ -1140,7 +1145,7 @@ describe("resolution queue selection (spec §7.11.1)", () => {
       id,
       finding_row_id: `finding-for-${id}`,
       publication_id: "pub-seed",
-      app_id: APP_ID,
+      bot_id: APP_ID,
       installation_id: 123,
       owner: "acme",
       repo: "widgets",
@@ -1161,13 +1166,13 @@ describe("resolution queue selection (spec §7.11.1)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_threads
-           (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+           (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
             original_sha, round, intent_json, resolution_state, verified_json, attempts,
             next_attempt_ms, holder, lease_until_ms, superseded_by_publication_id, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        row.id, row.finding_row_id, row.publication_id, row.app_id, row.installation_id,
+        row.id, row.finding_row_id, row.publication_id, row.bot_id, row.installation_id,
         row.owner, row.repo, row.pr_number, row.original_sha, row.round, row.intent_json,
         row.resolution_state, row.verified_json, row.attempts, row.next_attempt_ms,
         row.holder, row.lease_until_ms, row.superseded_by_publication_id, row.created_ms, row.created_ms,
@@ -1208,7 +1213,7 @@ describe("tenant/App isolation", () => {
     db.raw
       .prepare(
         `INSERT INTO review_findings
-           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+           (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
             first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
             first_seen_round, last_seen_round, state, created_ms, updated_ms)
          VALUES ('row-other-app', ?, ?, ?, ?, ?, 'f-1', ?, 'pub-1', 'pub-1', ?, ?, 1, 1, 'open', 1000, 1000)`,
@@ -1219,7 +1224,7 @@ describe("tenant/App isolation", () => {
     db.raw
       .prepare(
         `INSERT INTO review_findings
-           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+           (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
             first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
             first_seen_round, last_seen_round, state, created_ms, updated_ms)
          VALUES ('row-other-repo', ?, ?, ?, ?, ?, 'f-1', ?, 'pub-1', 'pub-1', ?, ?, 1, 1, 'open', 1000, 1000)`,
@@ -1276,7 +1281,7 @@ describe("retryLifecycleWork (spec §7.11.1 operator retry)", () => {
     db.raw
       .prepare(
         `INSERT INTO review_findings
-           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+           (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
             first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
             first_seen_round, last_seen_round, state, created_ms, updated_ms)
          VALUES ('row-1', ?, ?, ?, ?, ?, 'f-1', ?, 'pub-1', 'pub-1', ?, ?, 1, 1, 'open', 1000, 1000)`,
@@ -1286,7 +1291,7 @@ describe("retryLifecycleWork (spec §7.11.1 operator retry)", () => {
       db.raw
         .prepare(
           `INSERT INTO review_threads
-             (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+             (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
               original_sha, round, intent_json, resolution_state, verified_json, attempts, last_error, created_ms, updated_ms)
            VALUES (?, 'row-1', 'pub-1', ?, ?, ?, ?, ?, ?, 1, '{}', ?, '{\"snapshot\":1}', 3, 'boom', 1000, 1000)`,
         )

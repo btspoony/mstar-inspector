@@ -33,11 +33,11 @@
  * bun:sqlite test double and a real `D1Database` both satisfy it
  * structurally.
  *
- * Per-App attribution (migration 0005; REQUIRED):
- * the put doc carries the caller-supplied `appId` — the resolved `appRef`'s
- * id — which is bound into `reviews.app_id`. Every new write is attributed;
- * `app_id` NULL survives only on legacy historical rows (the column
- * stays nullable, zero DDL — AL-24-4). The column's FK to `github_apps(id)`
+ * Per-bot attribution (migration 0005; REQUIRED):
+ * the put doc carries the caller-supplied `appId` — the resolved `botRef`'s
+ * id — which is bound into `reviews.bot_id`. Every new write is attributed;
+ * `bot_id` NULL survives only on legacy historical rows (the column
+ * stays nullable, zero DDL — AL-24-4). The column's FK to `review_bots(id)`
  * makes an unknown appId a loud batch failure, never a silent
  * mis-attribution.
  *
@@ -155,12 +155,20 @@ function assertTargetAgrees(key: IdempotencyKey, payload: MstarReviewV1): void {
  */
 export type ReviewArtifactDoc = ArtifactDoc & {
   /**
-   * `github_apps.id` the review belongs to. REQUIRED on every new write
+   * `review_bots.id` the review belongs to. REQUIRED on every new write
    * (AL-24-4): the type-level guarantee that no new row is
-   * unattributed — `app_id` NULL survives only on legacy historical
+   * unattributed — `bot_id` NULL survives only on legacy historical
    * rows. Never a credential.
    */
   appId: string;
+  /**
+   * `review_targets.id` the review ran under. REQUIRED on every new write:
+   * the tenant read faces bind `target_id` (joined to the target's
+   * workspace), so a row written without it is invisible to every workspace
+   * — including the one that paid for the review. NULL survives only on
+   * legacy rows written before the target split.
+   */
+  targetId: string;
   /**
    * Version record: the HEAD (primary) selector of the
    * effective chain the review ran with — `chainHeadSelector` (consumer.ts)
@@ -212,7 +220,7 @@ export type ReviewArtifactDoc = ArtifactDoc & {
 export type D1ArtifactStore = ArtifactStore & {
   /**
    * Widened put input (see `ReviewArtifactDoc`): the REQUIRED `appId` rides
-   * the doc into `reviews.app_id`; the optional `model` / `provider`
+   * the doc into `reviews.bot_id`; the optional `model` / `provider`
    * version records ride into `reviews.model` /
    * `reviews.provider` (absent/NULL = unset).
    */
@@ -272,15 +280,17 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
       assertTargetAgrees(key, payload);
 
       const reviewId = crypto.randomUUID();
-      // app_id: the REQUIRED caller-supplied per-App attribution
+      // bot_id: the REQUIRED caller-supplied per-bot attribution
       // (every new row is attributed; NULL survives only on
-      // legacy historical rows). The FK to github_apps(id) rejects an
-      // unknown appId loud.
+      // legacy historical rows). The FK to review_bots(id) rejects an
+      // unknown appId loud. `target_id` is the tenant half of the same
+      // attribution: the read faces bind it, so a row without it is
+      // invisible to every workspace.
       const appId = doc.appId;
       const reviewStmt = db
         .prepare(
-          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id, model, provider, context_incomplete, duration_ms, round)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, bot_id, target_id, model, provider, context_incomplete, duration_ms, round)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO NOTHING`,
         )
         .bind(
@@ -299,6 +309,7 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           // restorable via get() (no 64KB truncation on this column).
           JSON.stringify(payload),
           appId,
+          doc.targetId,
           // Version records: the caller-supplied chain head
           // selector / provider — `?? null` because D1 .bind() rejects
           // undefined; omitted put-input fields persist NULL (byte-compat).

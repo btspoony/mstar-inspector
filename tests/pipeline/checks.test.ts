@@ -93,7 +93,7 @@ async function seededDb(): Promise<TestD1> {
   const db = createMigratedTestD1();
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, 'checks-test', 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -1453,14 +1453,14 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     db.raw
       .prepare(
         `INSERT INTO reviews
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, verdict, envelope, reviewed_at)
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, verdict, envelope, reviewed_at)
          VALUES ('earlier-attempt', ?, ?, ?, ?, ?, ?, 'ship it', '{"tally":{"scorePct":96}}', datetime('now'))`,
       )
       .run(APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA);
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{"version":1,"artifact":null}', ?, ?)`,
       )
       .run(
@@ -1732,7 +1732,7 @@ describe("empty increment inheritance (spec §7.9)", () => {
     if (corruptEnvelope) db.raw.exec("PRAGMA ignore_check_constraints = ON");
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, envelope)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, envelope)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
@@ -1843,7 +1843,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms,
             confirmed_ms, applied_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'applied', ?, ?, 1, 'done', ?, ?, ?, ?)`,
@@ -1914,7 +1914,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms,
             confirmed_ms, applied_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'applied', ?, ?, 1, 'done', ?, ?, ?, ?)`,
@@ -1938,7 +1938,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'degraded', 'sending', '{}', NULL, 1, 'pending', ?, ?)`,
       )
@@ -3246,7 +3246,7 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
     for (const key of [
       "attempts", "next_attempt_ms", "last_error", "desired", "observed",
       "external_id", "generation", "check_run_id", "publication_id", "terminal_ms",
-      "holder", "lease_epoch", "lease_until_ms", "app_id", "owner", "repo", "head_sha",
+      "holder", "lease_epoch", "lease_until_ms", "bot_id", "owner", "repo", "head_sha",
     ]) {
       expect([key, after[key]]).toEqual([key, before[key]]);
     }

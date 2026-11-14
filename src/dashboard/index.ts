@@ -1,7 +1,7 @@
 /**
  * /dashboard Hono sub-app: GitHub OAuth login + signed-cookie session
  * + GitHub App Manifest start/callback/commit (the
- * commit writes the encrypted github_apps D1 row, the Cloudflare secrets-bulk
+ * commit writes the encrypted review_bots D1 row, the Cloudflare secrets-bulk
  * path is retired) + per-App management UI (/dashboard/apps list,
  * POST …/disable|enable|delete — workspace owner/admin) + per-App review
  * pause/resume (POST …/pause|/resume — the same action
@@ -62,16 +62,21 @@ import {
 } from "./manifest";
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";
 import {
-  ALLOWLIST_MAX_OWNERS,
-  createAppsStore,
-  dedupeOwnerLogins,
-  parseAppReviewLevel,
-  REVIEW_TRIGGER_MODES,
+  createReviewBotsStore,
   type DeliverySummary,
   type GithubAppRow,
+  type LedgerScope,
   type PullRequestReviewing,
-  type ReviewTriggerMode,
 } from "./apps-store";
+import {
+  ALLOWLIST_MAX_OWNERS,
+  createTargetsStore,
+  dedupeOwnerLogins,
+  parseTargetReviewLevel,
+  REVIEW_TRIGGER_MODES,
+  type ReviewTargetRow,
+  type ReviewTriggerMode,
+} from "./targets-store";
 import {
   countFreeMembershipsForLogin,
   countLiveWorkspaces,
@@ -718,9 +723,9 @@ function errorTypeName(err: unknown): string {
   return err instanceof Error ? err.name : String(err);
 }
 
-/** The sqlite UNIQUE violation for one github_apps column. */
+/** The sqlite UNIQUE violation for one review_bots column. */
 function isAppsUniqueViolation(err: unknown, column: "github_app_id"): boolean {
-  return err instanceof Error && err.message.includes(`github_apps.${column}`);
+  return err instanceof Error && err.message.includes(`review_bots.${column}`);
 }
 
 // --- Workspace (tenant) routing gate (migration 0026) ---
@@ -1404,7 +1409,7 @@ dashboardApp.post("/:workspaceRef/manifest/start", (c) => manifestStartRoute(c, 
 // success the code is exchanged and — AC4b — the App is committed
 // immediately (no second click): the shared commit path (commitManifestApp,
 // the same write the POST /manifest/commit recovery route uses) encrypts
-// the credentials with DASHBOARD_ENCRYPTION_KEY and writes one github_apps
+// the credentials with DASHBOARD_ENCRYPTION_KEY and writes one review_bots
 // row INTO THE WORKSPACE THE STATE NAMES (carried from start). Success → 302
 // to that workspace's onboarding page; non-retryable conflicts (409) burn the
 // hold like the commit route; retryable outcomes (500) park the hold cookie so
@@ -1613,7 +1618,7 @@ type ManifestCommitOutcome =
  * second click) and the POST /manifest/commit recovery route. The decrypted
  * hold payload + the acting session login are passed in; the hold's login
  * binding is re-checked here on EVERY call. Outcomes mirror the route's long-standing
- * semantics: success = ONE github_apps row (secretbox AAD rowKey = the row
+ * semantics: success = ONE review_bots row (secretbox AAD rowKey = the row
  * PK, which IS the start-minted app id — the same value the manifest's
  * webhook URL carries);
  * login_mismatch / already_connected = non-retryable (the caller burns the
@@ -1669,7 +1674,7 @@ async function commitManifestApp(args: {
   }
   // The remaining UNIQUE identity is github_app_id: the same GitHub App
   // cannot be connected twice, and a retry cannot help — the hold is burned.
-  const apps = createAppsStore(db);
+  const apps = createReviewBotsStore(db);
   // The floor a new App starts at: the workspace's own default, else the
   // platform default. A degraded read is refused above — it would otherwise
   // seed a wider floor than the tenant configured.
@@ -1765,7 +1770,7 @@ const appOnboardingRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
   const app = await resolveScopedApp(
-    createAppsStore(member.db),
+    createReviewBotsStore(member.db),
     c.req.param("appId") ?? "",
     member.scope,
   );
@@ -2479,7 +2484,7 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
 //
 // The floor a newly connected App of this workspace starts at. Existing Apps
 // keep their own stored floor (the per-App settings face writes that), so this
-// route never rewrites `github_apps`. Same role gate as the concurrency cap:
+// route never rewrites `review_bots`. Same role gate as the concurrency cap:
 // owner/admin read and write, a plain member gets the tenant 404.
 const workspaceCheckMinScoreReadRoute = async (c: DashboardContext) => {
   const gate = await workspaceConcurrencyGate(c);
@@ -2592,7 +2597,7 @@ function canManageApp(scope: WorkspaceScope): boolean {
  * are all equally invisible (404).
  */
 async function resolveScopedApp(
-  apps: ReturnType<typeof createAppsStore>,
+  apps: ReturnType<typeof createReviewBotsStore>,
   appIdParam: string,
   scope: WorkspaceScope,
 ): Promise<GithubAppRow | null> {
@@ -2624,7 +2629,7 @@ function appDisplayName(
  * carries its health summary (the App's newest review-verdict
  * webhook_deliveries row — outcome tier, see the store's deliverySummaries —
  * plus the 24h rejected count). The health column reads webhook_deliveries —
- * NOT the github_apps.last_webhook_at column, which stays the L5 "last
+ * NOT the review_bots.last_webhook_at column, which stays the L5 "last
  * verified delivery" stamp (display-only, no computed health).
  *
  * The summaries come from the store's BATCHED deliverySummaries face
@@ -2637,7 +2642,7 @@ function appDisplayName(
  * when a workspace can hold enough Apps for the scan to matter.
  */
 async function appsListWithHealth(
-  apps: ReturnType<typeof createAppsStore>,
+  apps: ReturnType<typeof createReviewBotsStore>,
   scope: WorkspaceScope,
 ): Promise<Array<GithubAppRow & { health: DeliverySummary }>> {
   const rows = (await apps.listApps()).filter((app) => app.workspace_id === scope.workspaceId);
@@ -2649,31 +2654,45 @@ async function appsListWithHealth(
 const appListRoute = async (c: DashboardContext) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const rows = await appsListWithHealth(createAppsStore(gate.db), gate.scope);
+  const rows = await appsListWithHealth(createReviewBotsStore(gate.db), gate.scope);
+  // The pause the list renders is the TARGET's business pause — the one the
+  // pause/resume routes write. A bot has one target today, so the map is
+  // one-to-one. A bot with no live target emits NO `review_enabled`: the row
+  // carries no pause state, and inventing one would show a switch position the
+  // database does not hold.
+  const targetByBot = new Map(
+    (await createTargetsStore(gate.db).list(gate.scope.workspaceId)).map((target) => [
+      target.bot_id,
+      target,
+    ]),
+  );
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
-    apps: rows.map((app) => ({
-      // App id + the cached GitHub facts (D6): the list links and labels by
-      // the immutable id, and renders whatever GitHub currently calls the App.
-      github_app_id: app.github_app_id,
-      github_name: app.github_name ?? null,
-      github_slug: app.github_slug ?? null,
-      github_avatar_url: app.github_avatar_url ?? null,
-      status: app.status,
-      review_enabled: app.review_enabled,
-      created_by: app.created_by,
-      health: {
-        latest: app.health.latest
-          ? {
-              event_name: app.health.latest.event_name,
-              outcome: app.health.latest.outcome,
-              status_code: app.health.latest.status_code,
-              created_at: app.health.latest.created_at,
-            }
-          : null,
-        rejected24h: app.health.rejected24h,
-      },
-    })),
+    apps: rows.map((app) => {
+      const target = targetByBot.get(app.id);
+      return {
+        // App id + the cached GitHub facts (D6): the list links and labels by
+        // the immutable id, and renders whatever GitHub currently calls the App.
+        github_app_id: app.github_app_id,
+        github_name: app.github_name ?? null,
+        github_slug: app.github_slug ?? null,
+        github_avatar_url: app.github_avatar_url ?? null,
+        status: app.status,
+        ...(target === undefined ? {} : { review_enabled: target.review_enabled }),
+        created_by: app.created_by,
+        health: {
+          latest: app.health.latest
+            ? {
+                event_name: app.health.latest.event_name,
+                outcome: app.health.latest.outcome,
+                status_code: app.health.latest.status_code,
+                created_at: app.health.latest.created_at,
+              }
+            : null,
+          rejected24h: app.health.rejected24h,
+        },
+      };
+    }),
   });
 };
 
@@ -2691,7 +2710,7 @@ async function appStatusAction(
 ): Promise<Response> {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
+  const apps = createReviewBotsStore(gate.db);
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
@@ -2751,14 +2770,19 @@ async function appReviewAction(
 ): Promise<Response> {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
+  const apps = createReviewBotsStore(gate.db);
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   const htmlRedirect = reviewActionRedirect(c, app.github_app_id);
-  const paused = app.review_enabled === 0;
+  // The switch users flip is the TARGET's business pause; `review_bots`'
+  // review_enabled is the operational pause and has no dashboard writer.
+  const targets = createTargetsStore(gate.db);
+  const target = await targets.resolveInWorkspace(gate.scope.workspaceId, app.id);
+  if (!target) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+  const paused = target.review_enabled === 0;
   if (action === "pause" ? paused : !paused) return pinnedPostMutationResponse(c, htmlRedirect, "ok"); // idempotent no-op — never touch the row
-  await apps.setReviewEnabled(app.id, action === "resume");
+  await targets.setReviewEnabled(gate.scope.workspaceId, target.id, action === "resume");
   return pinnedPostMutationResponse(c, htmlRedirect, "ok");
 }
 
@@ -2798,7 +2822,7 @@ function isReviewTriggerMode(value: string): value is ReviewTriggerMode {
 async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response> {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
+  const apps = createReviewBotsStore(gate.db);
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
@@ -2807,8 +2831,11 @@ async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response
   if (!isReviewTriggerMode(mode)) {
     return settings400Response(c, app.github_app_id, SETTINGS_400_KEYS.triggerModeUnknown, { mode });
   }
-  if (app.review_trigger_mode !== mode) {
-    await apps.setReviewTriggerMode(app.id, mode);
+  const targets = createTargetsStore(gate.db);
+  const target = await targets.resolveInWorkspace(gate.scope.workspaceId, app.id);
+  if (!target) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+  if (target.review_trigger_mode !== mode) {
+    await targets.setReviewTriggerMode(gate.scope.workspaceId, target.id, mode);
   }
   return settingsPostResponse(c, app.github_app_id, "ok");
 }
@@ -2839,6 +2866,12 @@ type AppSettingsGate =
       session: SessionPayload;
       db: DashboardDb;
       app: GithubAppRow;
+      /**
+       * The bot's ONE review target — where the workspace-owned review
+       * configuration lives. Required: a bot without a target has no settings
+       * surface (every bot has exactly one).
+       */
+      target: ReviewTargetRow;
       user: DashboardUserRow;
       scope: WorkspaceScope;
     }
@@ -2854,12 +2887,22 @@ async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> 
   const member = await requireMember(c);
   if (!member.ok) return member;
   const app = await resolveScopedApp(
-    createAppsStore(member.db),
+    createReviewBotsStore(member.db),
     c.req.param("appId") ?? "",
     member.scope,
   );
   if (!app) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
-  return { ok: true, session: member.session, db: member.db, app, user: member.user, scope: member.scope };
+  const target = await createTargetsStore(member.db).resolveInWorkspace(
+    member.scope.workspaceId,
+    app.id,
+  );
+  if (!target) {
+    // The bot resolved but its configuration did not: every bot has exactly
+    // one target, so this is a row that no longer exists, and 404 is the honest
+    // answer rather than a page of defaults it does not have.
+    return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
+  }
+  return { ok: true, session: member.session, db: member.db, app, target, user: member.user, scope: member.scope };
 }
 
 /**
@@ -3288,7 +3331,7 @@ type GithubMetadataRefresh =
 
 async function refreshGithubMetadata(
   app: GithubAppRow,
-  apps: ReturnType<typeof createAppsStore>,
+  apps: ReturnType<typeof createReviewBotsStore>,
   encryptionKey: string | undefined,
   options: { force: boolean },
 ): Promise<GithubMetadataRefresh> {
@@ -3405,7 +3448,7 @@ async function refreshGithubMetadata(
  */
 async function refreshGithubMetadataForRead(
   app: GithubAppRow,
-  apps: ReturnType<typeof createAppsStore>,
+  apps: ReturnType<typeof createReviewBotsStore>,
   encryptionKey: string | undefined,
 ): Promise<GithubAppRow> {
   const refresh = await refreshGithubMetadata(app, apps, encryptionKey, { force: false });
@@ -3422,7 +3465,7 @@ async function refreshGithubMetadataForRead(
 const appSettingsRoute = async (c: DashboardContext) => {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
+  const apps = createReviewBotsStore(gate.db);
   // Outside the render try on purpose: the refresh leg carries its own
   // catch-all, so no metadata failure can reach this route's 500 face
   // (AD-531 fail-open by structure).
@@ -3443,10 +3486,14 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // it composes the webhook delivery URL. Server-resolved, never the
         // request's path segment (a ref may be a slug).
         workspace_id: gate.scope.workspaceId,
+        // The review configuration this App resolved to IN this workspace.
+        // The SPA parses it as required: the settings a manager edits belong to
+        // a target, and a payload that cannot name it is not a settings read.
+        target_id: gate.target.id,
         app: {
           github_app_id: app.github_app_id,
           status: app.status,
-          review_enabled: app.review_enabled !== 0,
+          review_enabled: gate.target.review_enabled !== 0,
           created_by: app.created_by,
           created_at: app.created_at,
           github_name: app.github_name ?? null,
@@ -3465,23 +3512,24 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const installations = await apps.listInstallations(app.id);
     const deliveries = await apps.listRecentDeliveries(app.id, 10);
     const deliverySummary = await apps.deliverySummary(app.id);
-    // Migration 0045 configuration: the review gate, the owner allowlist and
-    // the cached GitHub visibility, read from the row this route has already
-    // resolved. The two nulls do NOT mean the same thing — `getCheckGate` is
-    // null for a deleted row AND for a live row whose stored verdict list is
-    // unreadable, while `getAllowlist` reads the row itself, so its null can
-    // only mean the row is gone. A VANISHED row is the 500 (reading an App's
-    // configuration it no longer has is the honest failure); an unreadable
-    // verdict list is not — the face serves `check_gate: null`, every other
-    // field stays readable, and the SPA renders a read-only notice instead of
-    // controls that could not round-trip.
-    const checkGate = await apps.getCheckGate(app.id);
-    const allowlist = await apps.getAllowlist(app.id);
+    // The review gate and the owner allowlist are the TARGET's configuration
+    // (the gate resolved with the request); the cached GitHub visibility is a
+    // bot fact. The two nulls do NOT mean the same thing — `getCheckGate` is
+    // null for a target whose stored verdict list is unreadable AND for one
+    // that is gone, while `getAllowlist` reads the target row itself, so its
+    // null can only mean the target is gone. A VANISHED target is the 500
+    // (reading configuration it no longer has is the honest failure); an
+    // unreadable verdict list is not — the face serves `check_gate: null`,
+    // every other field stays readable, and the SPA renders a read-only
+    // notice instead of controls that could not round-trip.
+    const targets = createTargetsStore(gate.db);
+    const checkGate = await targets.getCheckGate(gate.scope.workspaceId, gate.target.id);
+    const allowlist = await targets.getAllowlist(gate.scope.workspaceId, gate.target.id);
     const githubVisibility = await apps.getGithubVisibility(app.id);
     if (allowlist === null) {
       throw new Error(`app settings row ${app.id} vanished while reading its review gate configuration`);
     }
-    // The level a NULL App column resolves to (migration 0047) — the depth
+    // The level a NULL target column resolves to (migration 0047) — the depth
     // control's inherit face names it, so a manager never needs the operator
     // console to know what "follow the operator default" currently runs.
     const defaultReviewLevel = (await readDefaultReviewLevel(gate.db)).value;
@@ -3490,26 +3538,30 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // never the request's path segment): with `app.id` it composes the
       // webhook delivery URL.
       workspace_id: gate.scope.workspaceId,
+      // The target every review-policy key below is read from — the App's
+      // single live target in this workspace.
+      target_id: gate.target.id,
       app: {
         github_app_id: app.github_app_id,
         status: app.status,
-        review_enabled: app.review_enabled !== 0,
+        review_enabled: gate.target.review_enabled !== 0,
         created_by: app.created_by,
         last_webhook_at: app.last_webhook_at ?? null,
         // (spec § Technical interfaces): the App's selected runtime
         // harness — read-only on BOTH faces (registry id only, never
         // image-local configuration or secrets).
         sandbox_image_id: app.sandbox_image_id,
-        // The App's review trigger mode (spec review-trigger-policy §2,
+        // The review trigger mode (spec review-trigger-policy §2,
         // read face the SPA's mode control consumes) — vocabulary-checked
         // by the column's CHECK enum, so the wire value is always one of
         // open | every_push | manual.
-        review_trigger_mode: app.review_trigger_mode,
-        // The App's review depth (migration 0047): the stored level, or null
-        // for "follow the operator default". Read through parseAppReviewLevel
-        // so an off-vocabulary stored value renders as the inherit face (the
-        // review path treats it the same way) instead of a dead selection.
-        review_level: parseAppReviewLevel(app.review_level),
+        review_trigger_mode: gate.target.review_trigger_mode,
+        // The review depth (migration 0047): the stored level, or null
+        // for "follow the operator default". Read through
+        // parseTargetReviewLevel so an off-vocabulary stored value renders as
+        // the inherit face (the review path treats it the same way) instead of
+        // a dead selection.
+        review_level: parseTargetReviewLevel(gate.target.review_level),
         // The operator level the inherit face names. MANAGER face only: the
         // member face is identity-set only and renders no depth control.
         default_review_level: defaultReviewLevel,
@@ -3721,7 +3773,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
 const appRefreshMetadataRoute = async (c: DashboardContext): Promise<Response> => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
+  const apps = createReviewBotsStore(gate.db);
   const refresh = await refreshGithubMetadata(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY, {
     force: true,
   });
@@ -4707,7 +4759,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.runtimeHarnessUnknown);
     }
     try {
-      await createAppsStore(gate.db).setSandboxImage(gate.app.id, image.id);
+      await createReviewBotsStore(gate.db).setSandboxImage(gate.app.id, image.id);
     } catch (err) {
       logSettingsFailure("save_sandbox_image", gate.app.id, err);
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
@@ -4715,13 +4767,13 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     return settingsPostResponse(c, gate.app.github_app_id, `Saved the ${image.id} runtime harness for ${appDisplayName(gate.app)}.`);
   }
   if (op === "save-review-level") {
-    // The App's review depth (migration 0047): a REVIEW_LEVELS value is
-    // stored, the inherit sentinel writes the column back to NULL (follow the
-    // operator default — a real choice, not a no-op), and anything else is a
-    // keyed 400 with zero writes. The store's isReviewLevel guard and the DDL
-    // CHECK are the backstops; setReviewLevel stamps updated_at.
+    // The review depth (migration 0047): a REVIEW_LEVELS value is stored, the
+    // inherit sentinel writes the column back to NULL (follow the operator
+    // default — a real choice, not a no-op), and anything else is a keyed 400
+    // with zero writes. The store's isReviewLevel guard and the DDL CHECK are
+    // the backstops; setReviewLevel stamps updated_at.
     const rawLevel = typeof form.level === "string" ? form.level.trim() : "";
-    const level = rawLevel === REVIEW_LEVEL_INHERIT ? null : parseAppReviewLevel(rawLevel);
+    const level = rawLevel === REVIEW_LEVEL_INHERIT ? null : parseTargetReviewLevel(rawLevel);
     if (level === null && rawLevel !== REVIEW_LEVEL_INHERIT) {
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.reviewLevelUnknown, {
         level: rawLevel,
@@ -4730,7 +4782,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     try {
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
-      if (!(await createAppsStore(gate.db).setReviewLevel(gate.app.id, level))) {
+      if (!(await createTargetsStore(gate.db).setReviewLevel(gate.scope.workspaceId, gate.target.id, level))) {
         throw new Error(`app ${gate.app.id} vanished before its review level save`);
       }
     } catch (err) {
@@ -4744,7 +4796,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     );
   }
   if (op === "save-check-gate") {
-    // The App's review gate (migration 0045): the score floor plus the set of
+    // The review gate (migration 0045): the score floor plus the set of
     // verdicts that satisfy it. Both bounds are checked HERE — an invalid
     // submission is a keyed 400 with zero writes (saveCheckGate re-validates
     // as the backstop and the DDL CHECK is the last line for the score). An
@@ -4776,7 +4828,12 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     try {
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
-      if (!(await createAppsStore(gate.db).saveCheckGate(gate.app.id, { minScore, passVerdicts }))) {
+      if (
+        !(await createTargetsStore(gate.db).saveCheckGate(gate.scope.workspaceId, gate.target.id, {
+          minScore,
+          passVerdicts,
+        }))
+      ) {
         throw new Error(`app ${gate.app.id} vanished before its review gate save`);
       }
     } catch (err) {
@@ -4790,7 +4847,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     );
   }
   if (op === "save-allowlist") {
-    // The App's owner allowlist (migration 0045): the switch plus the accepted
+    // The owner allowlist (migration 0045): the switch plus the accepted
     // owner logins, REPLACED as a set on every save (saveAllowlist
     // delete-then-inserts in one batch), so removing an owner is the same
     // submission as adding one. Enabled with an empty list refuses every
@@ -4825,11 +4882,18 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         limit: ALLOWLIST_MAX_OWNERS,
       });
     }
-    const apps = createAppsStore(gate.db);
+    const apps = createReviewBotsStore(gate.db);
     try {
-      // `false` = the App row vanished (or was soft-deleted) before this
-      // write: nothing was saved, so the success notice would lie.
-      if (!(await apps.saveAllowlist(gate.app.id, { enabled: enabled === "1", owners }))) {
+      // `false` = the target vanished (or was soft-deleted, or belongs to
+      // another workspace) before this write: nothing was saved, so the
+      // success notice would lie.
+      if (
+        !(await createTargetsStore(gate.db).saveAllowlist(
+          gate.scope.workspaceId,
+          gate.target.id,
+          { enabled: enabled === "1", owners },
+        ))
+      ) {
         throw new Error(`app ${gate.app.id} vanished before its owner allowlist save`);
       }
     } catch (err) {
@@ -5028,9 +5092,11 @@ const appInsightsRoute = async (c: DashboardContext) => {
     windowDays: params.windowDays,
     repo: params.repoFilter,
     includeRepos: params.includeRepos,
-    // The App row PK (never empty — the GitHub App id resolved a real row),
-    // composed into every aggregation by the store's appId filter.
-    appId: gate.app.id,
+    // The target the App resolves to IN this workspace, and the workspace
+    // itself: the store binds both, so another tenant's reviews can never
+    // reach this payload.
+    targetId: gate.target.id,
+    workspaceId: gate.scope.workspaceId,
   });
   return c.json({
     window_days: clampWindow(params.windowDays),
@@ -5067,20 +5133,43 @@ const appInsightsRoute = async (c: DashboardContext) => {
  * The store is built ONCE and handed back: the ledger faces need exactly this
  * store, and rebuilding it per handler was a second construction of the same
  * narrow face.
+ *
+ * The gate also resolves the App's target IN the session workspace and hands
+ * it back with the ledger scope: these faces read review configuration and
+ * ledger rows that belong to a target, and a bot without one has no data to
+ * serve (404, the same answer an unknown App gets).
  */
 async function requireAppManagerJson(
   c: DashboardContext,
 ): Promise<
-  | { ok: true; app: GithubAppRow; db: DashboardDb; store: ReturnType<typeof createAppsStore> }
+  | {
+      ok: true;
+      app: GithubAppRow;
+      target: ReviewTargetRow;
+      scope: WorkspaceScope;
+      db: DashboardDb;
+      store: ReturnType<typeof createReviewBotsStore>;
+    }
   | { ok: false; response: Response }
 > {
   const member = await requireMember(c);
   if (!member.ok) return member;
-  const store = createAppsStore(member.db);
+  const store = createReviewBotsStore(member.db);
   const app = await resolveScopedApp(store, c.req.param("appId") ?? "", member.scope);
   if (!app) return { ok: false, response: c.json({ error: "unknown app" }, 404) };
   if (!canManageApp(member.scope)) return { ok: false, response: c.json({ error: "forbidden" }, 403) };
-  return { ok: true, app, db: member.db, store };
+  const target = await createTargetsStore(member.db).resolveInWorkspace(member.scope.workspaceId, app.id);
+  if (!target) return { ok: false, response: c.json({ error: "unknown app" }, 404) };
+  return { ok: true, app, target, scope: member.scope, db: member.db, store };
+}
+
+/** The ledger scope the PR faces bind: the resolved target, its workspace, its bot. */
+function ledgerScopeOf(gate: {
+  app: GithubAppRow;
+  target: ReviewTargetRow;
+  scope: WorkspaceScope;
+}): LedgerScope {
+  return { targetId: gate.target.id, workspaceId: gate.scope.workspaceId, botId: gate.app.id };
 }
 
 /**
@@ -5145,7 +5234,7 @@ const appPullRequestsRoute = async (c: DashboardContext) => {
   // The option set rides the same batch: the App's whole ledger, never a
   // window over it and never narrowed by the current selection — that is the
   // only way a repository behind the row cap can be picked at all.
-  const { rows, repos } = await gate.store.listPullRequests(gate.app.id, parsed.filter ?? undefined);
+  const { rows, repos } = await gate.store.listPullRequests(ledgerScopeOf(gate), parsed.filter ?? undefined);
   return c.json({
     pull_requests: rows.map((row) => ({ ...row, ...pullRequestWireColumns(row) })),
     repos,
@@ -5207,9 +5296,9 @@ const appPullRequestRoute = async (c: DashboardContext) => {
   // never a same-number row from another repo.
   const owner = c.req.param("owner") ?? "";
   const repo = c.req.param("repo") ?? "";
-  const head = await gate.store.getPullRequestHead(gate.app.id, owner, repo, number);
+  const head = await gate.store.getPullRequestHead(ledgerScopeOf(gate), owner, repo, number);
   if (head === null) return c.json({ error: "unknown pull request" }, 404);
-  const counts = await gate.store.countPullRequestRecords(gate.app.id, owner, repo, number);
+  const counts = await gate.store.countPullRequestRecords(ledgerScopeOf(gate), owner, repo, number);
   // Same total-shape rule as the list, from the same mapping: the store reports
   // the tables' actual columns, and this boundary is where a nullable column
   // becomes "". The record families are paged separately — the head carries
@@ -5294,12 +5383,12 @@ const appPullRequestRecordsRoute = async (
     // malformed filter on it — so the refusal keeps one head probe instead of
     // the family's batch.
     if (malformed) {
-      const head = await gate.store.getPullRequestHead(gate.app.id, owner, repo, number);
+      const head = await gate.store.getPullRequestHead(ledgerScopeOf(gate), owner, repo, number);
       if (head === null) return c.json({ error: "unknown pull request" }, 404);
       const outsideVocabulary = rawSeverity !== "" && !isFindingSeverity(rawSeverity);
       return c.json({ error: outsideVocabulary ? "invalid severity" : "invalid filter" }, 400);
     }
-    const page = await gate.store.listPullRequestFindings(gate.app.id, owner, repo, number, {
+    const page = await gate.store.listPullRequestFindings(ledgerScopeOf(gate), owner, repo, number, {
       offset,
       limit,
       severity: rawSeverity === "" ? null : rawSeverity,
@@ -5321,7 +5410,7 @@ const appPullRequestRecordsRoute = async (
     });
   }
   if (section === "reviews") {
-    const page = await gate.store.listPullRequestReviews(gate.app.id, owner, repo, number, { offset, limit });
+    const page = await gate.store.listPullRequestReviews(ledgerScopeOf(gate), owner, repo, number, { offset, limit });
     if (page === null) return c.json({ error: "unknown pull request" }, 404);
     return c.json({
       items: page.items.map((review) => ({
@@ -5338,7 +5427,7 @@ const appPullRequestRecordsRoute = async (
       limit,
     });
   }
-  const page = await gate.store.listPullRequestFailures(gate.app.id, owner, repo, number, { offset, limit });
+  const page = await gate.store.listPullRequestFailures(ledgerScopeOf(gate), owner, repo, number, { offset, limit });
   if (page === null) return c.json({ error: "unknown pull request" }, 404);
   return c.json({ items: page.items, total: page.total, limit });
 };

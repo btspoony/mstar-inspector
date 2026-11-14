@@ -16,6 +16,7 @@ import { Webhooks } from "@octokit/webhooks";
 import {
   classifyEvent,
   classifyWebhook,
+  NO_TARGET_REASON,
   payloadMentionsALogin,
   PULL_REQUEST_ACTIONS,
   verifySignature,
@@ -133,6 +134,77 @@ describe("classifyWebhook — signature verification (fail-closed)", () => {
     if (outcome.kind === "reject") {
       expect(outcome.status).toBe(500);
     }
+  });
+});
+
+describe("classifyWebhook — target resolution seam", () => {
+  test("the resolver is consulted AFTER the signature verifies, with the delivery's installation id", async () => {
+    const body = pullRequestBody("opened");
+    const signature = await makeWebhooks(SECRET).sign(body);
+    const seen: Array<number | null> = [];
+    const outcome = await classifyWebhook(
+      SECRET,
+      body,
+      signature,
+      "pull_request",
+      undefined,
+      undefined,
+      async (installationId) => {
+        seen.push(installationId);
+        return EVERY_PUSH;
+      },
+    );
+
+    expect(seen).toEqual([123]);
+    expect(outcome.kind).toBe("job");
+  });
+
+  test("a delivery that fails verification never reaches the resolver (no target from an unauthenticated body)", async () => {
+    const body = pullRequestBody("opened");
+    const resolver = mock(async () => EVERY_PUSH);
+    const outcome = await classifyWebhook(
+      SECRET,
+      body,
+      await makeWebhooks("other-secret").sign(body),
+      "pull_request",
+      undefined,
+      undefined,
+      resolver,
+    );
+
+    expect(outcome).toEqual({ kind: "reject", status: 401, reason: "signature verification failed" });
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
+  test("the resolver's mode is the one that gates classification", async () => {
+    const body = pullRequestBody("synchronize");
+    const signature = await makeWebhooks(SECRET).sign(body);
+    const open = await classifyWebhook(SECRET, body, signature, "pull_request", undefined, undefined, async () => ({
+      mode: "open",
+      appSlug: APP_SLUG,
+    }));
+    const everyPush = await classifyWebhook(SECRET, body, signature, "pull_request", undefined, undefined, async () => EVERY_PUSH);
+
+    expect(open.kind).toBe("ignore");
+    expect(everyPush.kind).toBe("job");
+  });
+
+  test("no resolved target → the `ignore` carrying NO_TARGET_REASON, not a job and not a reject", async () => {
+    const body = pullRequestBody("opened");
+    const signature = await makeWebhooks(SECRET).sign(body);
+    const outcome = await classifyWebhook(SECRET, body, signature, "pull_request", undefined, undefined, async () => null);
+
+    expect(outcome).toEqual({ kind: "ignore", reason: NO_TARGET_REASON });
+  });
+
+  test("an installation delivery never consults the resolver (no review configuration to resolve)", async () => {
+    const body = JSON.stringify({ action: "created", installation: { id: 123, account: { login: "acme" } } });
+    const signature = await makeWebhooks(SECRET).sign(body);
+    const resolver = mock(async () => null);
+    const outcome = await classifyWebhook(SECRET, body, signature, "installation", undefined, undefined, resolver);
+
+    expect(resolver).not.toHaveBeenCalled();
+    expect(outcome.kind).toBe("installation");
   });
 });
 

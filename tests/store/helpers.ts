@@ -13,7 +13,7 @@
  * - `createMigratedTestD1()` — the full current shape: every `*.sql` in
  *   `migrations/` applied in filename order, i.e. what
  *   `wrangler d1 migrations apply` produces today. The store adapter's INSERT
- *   binds `reviews.app_id` (QC fix wave 1 F-001), so every test exercising the
+ *   binds `reviews.bot_id` (QC fix wave 1 F-001), so every test exercising the
  *   REAL store.put against production-shaped data runs on this one — and
  *   fixtures get the per-App config tables without re-applying migrations by
  *   hand.
@@ -91,8 +91,82 @@ function applyMigration(db: Database, migrations: readonly string[]): void {
   // SQLite enforces foreign keys per-connection; D1 has them on by default.
   db.exec("PRAGMA foreign_keys = ON;");
   for (const name of migrations) {
-    db.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
+}
+
+/**
+ * Split a migration script into its statements, tracking `--` / `/* *\/`
+ * comments and single-, double- and back-quoted literals so a `;` inside any of
+ * them does not split. Comment-only and whitespace-only fragments are dropped
+ * (they carry no statement).
+ */
+export function splitSqlStatements(script: string): string[] {
+  const statements: string[] = [];
+  let current = "";
+  let hasCode = false;
+  let quote: string | null = null;
+  for (let index = 0; index < script.length; index += 1) {
+    const char = script[index]!;
+    const next = script[index + 1];
+    if (quote !== null) {
+      current += char;
+      if (char === quote) {
+        // A doubled quote is an escape, not the end of the literal.
+        if (script[index + 1] === quote) {
+          current += quote;
+          index += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if (char === "-" && next === "-") {
+      const end = script.indexOf("\n", index);
+      const stop = end === -1 ? script.length : end;
+      current += script.slice(index, stop);
+      index = stop - 1;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      const end = script.indexOf("*/", index + 2);
+      const stop = end === -1 ? script.length : end + 2;
+      current += script.slice(index, stop);
+      index = stop - 1;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      hasCode = true;
+      current += char;
+      continue;
+    }
+    if (char === ";") {
+      if (hasCode) statements.push(current.trim());
+      current = "";
+      hasCode = false;
+      continue;
+    }
+    if (!/\s/.test(char)) hasCode = true;
+    current += char;
+  }
+  if (hasCode) statements.push(current.trim());
+  return statements;
+}
+
+/**
+ * Apply one migration script the way D1 does: statement by statement, the
+ * first failure aborting the migration.
+ *
+ * `Database.exec` runs the whole string as one script, and on bun 1.4.0 —
+ * the version CI pins — a statement that fails inside a multi-statement string
+ * is silently SKIPPED while the rest of the script still runs (1.4.4 throws).
+ * A guard that exists to fail a migration would then pass on CI and fail
+ * everywhere else, and a fixture would silently come up half-migrated.
+ */
+export function execMigrationScript(db: Database, script: string): void {
+  for (const statement of splitSqlStatements(script)) db.exec(statement);
 }
 
 /** Read one INTEGER scalar on the connection (SQLite change counters). */
@@ -228,12 +302,12 @@ export function createTestD1(): TestD1 {
  * Fully-migrated variant (the full migration list): the same double
  * with every `migrations/*.sql` applied in wrangler's numeric order — the
  * production shape, with no hand-picked subset.
- * Reviews carries the `app_id` column (FK to github_apps), so tests exercising
- * the REAL store.put — whose INSERT binds `app_id` — run against the
+ * Reviews carries the `bot_id` column (FK to review_bots), so tests exercising
+ * the REAL store.put — whose INSERT binds `bot_id` — run against the
  * production-shaped schema, the per-App config tables
- * (app_provider_keys / app_model_config) exist without extra fixture work,
- * github_apps carries the ops columns (review_enabled /
- * last_webhook_at), and the per-role table (app_model_roles) exists
+ * (bot_provider_keys / bot_model_config) exist without extra fixture work,
+ * review_bots carries the ops columns (review_enabled /
+ * last_webhook_at), and the per-role table (bot_model_roles) exists
  * for the consumer modelOverrides tests. Each call returns an independent
  * database.
  */
@@ -245,14 +319,37 @@ export function createMigratedTestD1(): TestD1 {
 
 /**
  * Attribute a raw-seeded App row to the `default` workspace. The one App read
- * face INNER JOINs `app_workspaces`, so a fixture that inserts `github_apps`
+ * face INNER JOINs `bot_workspaces`, so a fixture that inserts `review_bots`
  * directly (not through `createApp`) must map it or the row is invisible.
  */
 export async function mapAppToDefaultWorkspace(db: D1Like, appId: string): Promise<void> {
   await db
-    .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
+    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')")
     .bind(appId)
     .run();
+}
+
+/**
+ * Insert one live `review_targets` row for a raw-seeded bot and return its id.
+ * Review and pull-request rows carry `target_id`, and the tenant reads bind it
+ * together with `review_targets.workspace_id`, so a fixture that seeds those
+ * rows itself needs the target that owns them. Defaults mirror the create
+ * path (the DDL defaults, no installation binding).
+ */
+export function seedTarget(
+  db: TestD1,
+  botId: string,
+  opts: { id?: string; workspaceId?: string; name?: string } = {},
+): string {
+  const id = opts.id ?? crypto.randomUUID();
+  const now = "2026-01-01T00:00:00.000Z";
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'fixture', ?, ?)`,
+    )
+    .run(id, opts.workspaceId ?? "default", botId, opts.name ?? botId, now, now);
+  return id;
 }
 
 /**

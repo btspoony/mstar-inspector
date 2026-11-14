@@ -24,7 +24,7 @@ Dashboard App detail routing, member identity-only reads, manager-only operation
 | App detail identity set (github_app_id, status, review_enabled, created_by, created_at, cached public GitHub profile `github_*`, local App `id`; top-level `workspace_id`) | visible | visible |
 | Install health / delivery payload (`installations`, `deliveries`, `delivery_summary`, `last_webhook_at`) | **absent from payload** | visible |
 | Runtime/ops config fields (`sandbox_image_id`, `review_trigger_mode`) | **absent from payload** | visible |
-| Settings payload (keys, chains, providers, trigger mode) | hidden (`can_manage: false` shape) | visible (unchanged) |
+| Settings payload (keys, chains, providers, trigger mode, top-level `target_id`) | hidden (`can_manage: false` shape; the identity face still carries `target_id`) | visible |
 | `GET /api/apps/:appId/insights/summary` | 403 | 200 |
 | Mutations (disable/enable/delete, pause/resume, settings writes, key/delete) | 403 (unchanged) | allowed (unchanged) |
 | Global insights page + `GET /api/insights/summary` | **removed for everyone** | removed |

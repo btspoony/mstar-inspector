@@ -267,7 +267,10 @@ export function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJo
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
-    appRef: { appId: TEST_APP_ID },
+    // The seeded App and the target `createSeededTestD1` gives it — the two
+    // ids every job names (a test that wants another App overrides both).
+    botRef: { appId: TEST_APP_ID },
+    targetId: `target-${TEST_APP_ID}`,
     ...overrides,
   };
 }

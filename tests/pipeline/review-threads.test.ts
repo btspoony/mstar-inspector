@@ -3,7 +3,7 @@
  * (spec review-lifecycle §7.5) — `src/pipeline/review-threads.ts` against the
  * bun:sqlite double running the real migration SQL (createMigratedTestD1:
  * 0001 → 0020, so review_publications/review_findings/review_threads/
- * app_installations/github_apps are production-shaped) plus an in-memory
+ * bot_installations/review_bots are production-shaped) plus an in-memory
  * GraphQL transport double.
  *
  * Behaviors covered (brief verification list):
@@ -85,7 +85,7 @@ async function createSeededTestD1(): Promise<TestD1> {
   const db = createMigratedTestD1();
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -93,7 +93,7 @@ async function createSeededTestD1(): Promise<TestD1> {
     .run(APP_ID, GITHUB_APP_ID, SLUG);
   await mapAppToDefaultWorkspace(db, APP_ID);
   db.raw
-    .prepare(`INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES (?, ?, ?, 'acme', datetime('now'))`)
+    .prepare(`INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES (?, ?, ?, 'acme', datetime('now'))`)
     .run(uuid(1), APP_ID, INSTALLATION_ID);
   return db;
 }
@@ -143,7 +143,7 @@ async function seedLifecycle(db: TestD1): Promise<LineIntent> {
   db.raw
     .prepare(
       `INSERT INTO review_findings
-         (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+         (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
           first_seen_round, last_seen_round, state, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 1, 1, 'addressed', 1000, 1000)`,
@@ -155,7 +155,7 @@ async function seedLifecycle(db: TestD1): Promise<LineIntent> {
   db.raw
     .prepare(
       `INSERT INTO review_threads
-         (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+         (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
           original_sha, round, intent_json, review_id, comment_id, thread_id, resolution_state, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 555, ?, ?, 'pending', 1000, 1000)`,
     )

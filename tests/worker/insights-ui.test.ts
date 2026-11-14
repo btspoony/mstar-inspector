@@ -13,7 +13,7 @@ import type { Env } from "../../src/worker/env";
 import { createSessionValue, SESSION_COOKIE } from "../../src/dashboard/session";
 import { SPA_BOOT_MARKER, withSpaAssets } from "../helpers/spa";
 import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createUser } from "../../src/dashboard/users";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
@@ -107,7 +107,7 @@ async function insightsWorld(): Promise<{
   const appId = crypto.randomUUID();
   const otherAppId = crypto.randomUUID();
   const box = createSecretbox(API_TEST_KEY);
-  await createAppsStore(db).createApp({
+  await createReviewBotsStore(db).createApp({
     id: appId,
     githubSlug: "widgets-app",
     githubAppId: WIDGETS_APP_ID,
@@ -117,7 +117,7 @@ async function insightsWorld(): Promise<{
     createdBy: "mallory",
     workspaceId: "default",
   });
-  await createAppsStore(db).createApp({
+  await createReviewBotsStore(db).createApp({
     id: otherAppId,
     githubSlug: "other-app",
     githubAppId: OTHER_APP_ID,
@@ -130,23 +130,23 @@ async function insightsWorld(): Promise<{
 
   const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().replace("T", " ").slice(0, 19);
   const insertReview = db.raw.query(
-    `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, app_id)
-     VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', '{}', ?)`,
+    `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, bot_id, target_id)
+     VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', '{}', ?, (SELECT id FROM review_targets WHERE bot_id = ?))`,
   );
   const insertFinding = db.raw.query(
     `INSERT INTO findings (id, review_id, severity, category, title, body, fingerprint)
      VALUES (?, ?, ?, ?, ?, 'b', ?)`,
   );
-  insertReview.run("r-a", "acme", "widgets", 1, daysAgo(25), "comment", appId);
+  insertReview.run("r-a", "acme", "widgets", 1, daysAgo(25), "comment", appId, appId);
   insertFinding.run("f-a1", "r-a", "must-fix", "logic", "Null deref risk", "fp-x");
   insertFinding.run("f-a2", "r-a", "nit", null, "Trailing space", "fp-y");
-  insertReview.run("r-b", "acme", "widgets", 2, daysAgo(15), "approve", appId);
+  insertReview.run("r-b", "acme", "widgets", 2, daysAgo(15), "approve", appId, appId);
   insertFinding.run("f-b1", "r-b", "must-fix", "logic", "Null deref risk", "fp-x");
   // Second repo of the SAME app — lets the repo= filter case prove the
   // filter is applied (not merely echoed) within one App's data.
-  insertReview.run("r-d", "acme", "portal", 4, daysAgo(10), "approve", appId);
+  insertReview.run("r-d", "acme", "portal", 4, daysAgo(10), "approve", appId, appId);
   // The other App's review — must stay out of widgets-app's numbers.
-  insertReview.run("r-c", "globex", "gadgets", 3, daysAgo(5), "request changes", otherAppId);
+  insertReview.run("r-c", "globex", "gadgets", 3, daysAgo(5), "request changes", otherAppId, otherAppId);
   insertFinding.run("f-c1", "r-c", "should-fix", "security", "Injection", "fp-z");
 
   const env = {
@@ -308,7 +308,7 @@ describe("GET /dashboard/api/apps/:appId/insights/summary", () => {
     expect(unknown.status).toBe(404);
     expect(((await unknown.json()) as { error?: string }).error).toBeDefined();
 
-    db.raw.query("UPDATE github_apps SET deleted_at = datetime('now') WHERE github_app_id = ?").run(WIDGETS_APP_ID);
+    db.raw.query("UPDATE review_bots SET deleted_at = datetime('now') WHERE github_app_id = ?").run(WIDGETS_APP_ID);
     const deleted = await appsInsightsGet(env, WIDGETS_APP_ID, await apiCookie(SESSION_SECRET_API, "mallory"));
     expect(deleted.status).toBe(404);
   });

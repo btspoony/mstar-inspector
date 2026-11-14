@@ -1,5 +1,5 @@
 /**
- * Unit tests: migrations 0004/0005 + the github_apps store layer
+ * Unit tests: migrations 0004/0005 + the review_bots store layer
  * (spec dashboard-multi-app-platform § Data model, architect lock L2).
  *
  * Production-shaped sequence (the brief's STOP anchor): the bun:sqlite
@@ -11,26 +11,25 @@
  * STOPs (no table rebuild improvisation).
  *
  * Schema contracts pinned by lock L2:
- *   - 0004 creates github_apps BEFORE app_installations (same-file FK);
+ *   - 0004 creates review_bots BEFORE bot_installations (same-file FK);
  *     status CHECK ('active','disabled'); github_app_id UNIQUE;
  *     NO ON DELETE clause anywhere (default NO ACTION — a hard DELETE of an
  *     app referenced by reviews must be refused; soft-delete is the only
  *     removal path).
- *   - 0005 is the metadata-only `ALTER TABLE reviews ADD COLUMN app_id TEXT
- *     REFERENCES github_apps(id)`; existing rows keep app_id NULL (legacy).
+ *   - 0005 is the metadata-only `ALTER TABLE reviews ADD COLUMN bot_id TEXT
+ *     REFERENCES review_bots(id)`; existing rows keep bot_id NULL (legacy).
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1 } from "../store/helpers";
-import { createAppsStore, REVIEW_TRIGGER_MODES } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { D1Like } from "../../src/store/types";
 import type {
   CreateAppInput,
   GithubAppMetadataInput,
   GithubAppRow,
-  ReviewTriggerMode,
 } from "../../src/dashboard/apps-store";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -72,7 +71,7 @@ function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void
  * Seed DB + every migration from 0003 on, in wrangler (filename) order. 0026
  * carries the workspace data plane `createApp` now writes into, so the fixture
  * applies the production shape from 0003; the rest of the chain is applied
- * whole because 0038 rebuilds `github_apps` from the columns the intervening
+ * whole because 0038 rebuilds `review_bots` from the columns the intervening
  * migrations add. Every store call here therefore runs against the column
  * names the store actually binds.
  */
@@ -87,7 +86,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
 }
 
 function store(db: D1Like) {
-  return createAppsStore(db);
+  return createReviewBotsStore(db);
 }
 
 const APP_INPUT: CreateAppInput = {
@@ -119,9 +118,9 @@ describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", ()
     expect(() => createMigratedD1()).not.toThrow();
   });
 
-  test("github_apps columns follow the spec data model", () => {
+  test("review_bots columns follow the spec data model", () => {
     const db = createMigratedD1();
-    const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+    const cols = db.raw.query("PRAGMA table_info(review_bots)").all() as Array<{
       name: string;
       notnull: number;
       pk: number;
@@ -162,34 +161,34 @@ describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", ()
     const db = createMigratedD1();
     await seedApp(db);
     await expect(
-      db.prepare("UPDATE github_apps SET status = 'paused'").run(),
+      db.prepare("UPDATE review_bots SET status = 'paused'").run(),
     ).rejects.toThrow(/CHECK constraint failed/);
-    await db.prepare("UPDATE github_apps SET status = 'disabled'").run();
+    await db.prepare("UPDATE review_bots SET status = 'disabled'").run();
   });
 
   test("github_app_id is UNIQUE (the one remaining identity constraint)", async () => {
     const db = createMigratedD1();
     await seedApp(db);
     await expect(seedApp(db, { githubAppId: APP_INPUT.githubAppId })).rejects.toThrow(
-      /UNIQUE constraint failed: github_apps.github_app_id/,
+      /UNIQUE constraint failed: review_bots.github_app_id/,
     );
   });
 
-  test("app_installations: FK to github_apps enforced, UNIQUE (app_id, installation_id)", async () => {
+  test("bot_installations: FK to review_bots enforced, UNIQUE (bot_id, installation_id)", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
-    // Unknown app_id → FK failure (github_apps created before app_installations).
+    // Unknown bot_id → FK failure (review_bots created before bot_installations).
     await expect(
       db
         .prepare(
-          `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+          `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
            VALUES ('inst-x', 'no-such-app', 1, 'octocat', '2026-01-01 00:00:00')`,
         )
         .run(),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
     await db
       .prepare(
-        `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
          VALUES ('inst-1', ?, 777, 'octocat', '2026-01-01 00:00:00')`,
       )
       .bind(app.id)
@@ -197,7 +196,7 @@ describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", ()
     await expect(
       db
         .prepare(
-          `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+          `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
            VALUES ('inst-2', ?, 777, 'octocat', '2026-01-01 00:00:00')`,
         )
         .bind(app.id)
@@ -207,18 +206,18 @@ describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", ()
 });
 
 describe("migration 0005_reviews_app_id.sql (on a seeded production-shaped DB)", () => {
-  test("existing reviews keep working: app_id NULL (legacy) after the ALTER", () => {
+  test("existing reviews keep working: bot_id NULL (legacy) after the ALTER", () => {
     const db = createMigratedD1();
     const rows = db.raw
-      .query("SELECT id, app_id FROM reviews ORDER BY id")
-      .all() as Array<{ id: string; app_id: string | null }>;
+      .query("SELECT id, bot_id FROM reviews ORDER BY id")
+      .all() as Array<{ id: string; bot_id: string | null }>;
     expect(rows).toEqual([
-      { id: "review-1", app_id: null },
-      { id: "review-2", app_id: null },
+      { id: "review-1", bot_id: null },
+      { id: "review-2", bot_id: null },
     ]);
   });
 
-  test("the legacy insert path (no app_id) still works after the ALTER", async () => {
+  test("the legacy insert path (no bot_id) still works after the ALTER", async () => {
     const db = createMigratedD1();
     db.raw
       .prepare(
@@ -226,10 +225,10 @@ describe("migration 0005_reviews_app_id.sql (on a seeded production-shaped DB)",
          VALUES ('review-3', 123, 'acme', 'widgets', 44, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'comment')`,
       )
       .run();
-    const row = db.raw.query("SELECT app_id FROM reviews WHERE id = 'review-3'").get() as {
-      app_id: string | null;
+    const row = db.raw.query("SELECT bot_id FROM reviews WHERE id = 'review-3'").get() as {
+      bot_id: string | null;
     };
-    expect(row.app_id).toBeNull();
+    expect(row.bot_id).toBeNull();
   });
 
   test("new rows may reference an app; unknown references are refused (FK)", async () => {
@@ -237,20 +236,20 @@ describe("migration 0005_reviews_app_id.sql (on a seeded production-shaped DB)",
     const app = await seedApp(db);
     rawRun(
       db,
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id)
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id)
        VALUES ('review-4', 123, 'acme', 'widgets', 45, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'comment', ?)`,
       app.id,
     );
     const joined = db.raw
       .query(
-        `SELECT r.id, a.name FROM reviews r JOIN github_apps a ON a.id = r.app_id WHERE r.id = 'review-4'`,
+        `SELECT r.id, a.name FROM reviews r JOIN review_bots a ON a.id = r.bot_id WHERE r.id = 'review-4'`,
       )
       .get() as { id: string; name: string };
     expect(joined.name).toBe(APP_INPUT.name);
     expect(() =>
       rawRun(
         db,
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id)
          VALUES ('review-5', 123, 'acme', 'widgets', 46, 'cccccccccccccccccccccccccccccccccccccccc', 'comment', 'no-such-app')`,
       ),
     ).toThrow(/FOREIGN KEY constraint failed/);
@@ -261,25 +260,25 @@ describe("migration 0005_reviews_app_id.sql (on a seeded production-shaped DB)",
     const app = await seedApp(db);
     rawRun(
       db,
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id)
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id)
        VALUES ('review-6', 123, 'acme', 'widgets', 47, 'dddddddddddddddddddddddddddddddddddddddd', 'comment', ?)`,
       app.id,
     );
-    expect(() => rawRun(db, "DELETE FROM github_apps WHERE id = ?", app.id)).toThrow(
+    expect(() => rawRun(db, "DELETE FROM review_bots WHERE id = ?", app.id)).toThrow(
       /FOREIGN KEY constraint failed/,
     );
-    // Since 0026 every App has an `app_workspaces` ownership row (NO ACTION),
+    // Since 0026 every App has an `bot_workspaces` ownership row (NO ACTION),
     // so even an App without review history cannot be hard-deleted: the
     // ownership map outlives the review history, and soft delete is the only
     // removal path at the schema level.
     const orphan = await seedApp(db, { githubAppId: 42 });
-    expect(() => rawRun(db, "DELETE FROM github_apps WHERE id = ?", orphan.id)).toThrow(
+    expect(() => rawRun(db, "DELETE FROM review_bots WHERE id = ?", orphan.id)).toThrow(
       /FOREIGN KEY constraint failed/,
     );
   });
 });
 
-describe("apps-store (createAppsStore)", () => {
+describe("apps-store (createReviewBotsStore)", () => {
   test("createApp persists a full active row with the CALLER-SUPPLIED id and timestamps", async () => {
     const db = createMigratedD1();
     // Direct call (not seedApp) so the pinned APP_INPUT.id is the row PK.
@@ -314,7 +313,7 @@ describe("apps-store (createAppsStore)", () => {
     expect(app.id).toBe(id);
     expect(app.github_slug).toBe("acme-inspector");
     const raw = db.raw
-      .query("SELECT id, github_slug FROM github_apps WHERE id = ?")
+      .query("SELECT id, github_slug FROM review_bots WHERE id = ?")
       .get(app.id) as { id: string; github_slug: string | null };
     expect(raw).toEqual({ id, github_slug: "acme-inspector" });
     // Omitted github_slug stays NULL: "never synced" is the honest default.
@@ -422,8 +421,8 @@ describe("apps-store (createAppsStore)", () => {
     const newer = await seedApp(db, { githubAppId: 2 });
     const deleted = await seedApp(db, { githubAppId: 3 });
     // Distinct timestamps (datetime('now') has second resolution).
-    rawRun(db, "UPDATE github_apps SET created_at = '2026-01-01 00:00:00' WHERE id = ?", older.id);
-    rawRun(db, "UPDATE github_apps SET created_at = '2026-02-01 00:00:00' WHERE id = ?", newer.id);
+    rawRun(db, "UPDATE review_bots SET created_at = '2026-01-01 00:00:00' WHERE id = ?", older.id);
+    rawRun(db, "UPDATE review_bots SET created_at = '2026-02-01 00:00:00' WHERE id = ?", newer.id);
     await store(db).softDeleteApp(deleted.id);
     const listed = await store(db).listApps();
     expect(listed.map((a) => a.id)).toEqual([newer.id, older.id]);
@@ -432,7 +431,7 @@ describe("apps-store (createAppsStore)", () => {
   test("setAppStatus toggles active/disabled, bumps updated_at, and reports whether a row changed", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
-    rawRun(db, "UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_bots SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
     expect(await store(db).setAppStatus(app.id, "disabled")).toBe(true);
     const disabled = (await store(db).getAppById(app.id))!;
     expect(disabled.status).toBe("disabled");
@@ -458,7 +457,7 @@ describe("apps-store (createAppsStore)", () => {
     const deleted = (await store(db).getAppById(app.id))!;
     expect(deleted.deleted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     // Second delete is a no-op: the first timestamp wins.
-    rawRun(db, "UPDATE github_apps SET deleted_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_bots SET deleted_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
     expect(await store(db).softDeleteApp(app.id)).toBe(false);
     const row = (await store(db).getAppById(app.id))!;
     expect(row.deleted_at).toBe("2026-01-01 00:00:00");
@@ -471,17 +470,17 @@ describe("apps-store (createAppsStore)", () => {
     const s = store(db);
     await s.upsertInstallation({ appId: app.id, installationId: 777, accountLogin: "octocat" });
     let rows = db.raw
-      .query("SELECT id, app_id, installation_id, account_login, seen_at FROM app_installations")
+      .query("SELECT id, bot_id, installation_id, account_login, seen_at FROM bot_installations")
       .all() as Array<{
       id: string;
-      app_id: string;
+      bot_id: string;
       installation_id: number;
       account_login: string | null;
       seen_at: string;
     }>;
     expect(rows).toHaveLength(1);
     expect(UUID_RE.test(rows[0]!.id)).toBe(true);
-    expect(rows[0]!.app_id).toBe(app.id);
+    expect(rows[0]!.bot_id).toBe(app.id);
     expect(rows[0]!.installation_id).toBe(777);
     expect(rows[0]!.account_login).toBe("octocat");
     expect(rows[0]!.seen_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{3})?$/);
@@ -489,7 +488,7 @@ describe("apps-store (createAppsStore)", () => {
     // Simulate time passing, then touch: same pair → still ONE row, seen_at
     // refreshed, login replaced because the writer is authoritative.
     db.raw
-      .prepare("UPDATE app_installations SET seen_at = '2020-01-01 00:00:00'")
+      .prepare("UPDATE bot_installations SET seen_at = '2020-01-01 00:00:00'")
       .run();
     await s.upsertInstallation({
       appId: app.id,
@@ -497,15 +496,15 @@ describe("apps-store (createAppsStore)", () => {
       accountLogin: "octocat-2",
       authoritative: true,
     });
-    rows = db.raw.query("SELECT * FROM app_installations").all() as typeof rows;
+    rows = db.raw.query("SELECT * FROM bot_installations").all() as typeof rows;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.account_login).toBe("octocat-2");
     expect(rows[0]!.seen_at).not.toBe("2020-01-01 00:00:00");
 
     // A touch without a login must not wipe the stored account_login.
-    db.raw.prepare("UPDATE app_installations SET seen_at = '2020-01-01 00:00:00'").run();
+    db.raw.prepare("UPDATE bot_installations SET seen_at = '2020-01-01 00:00:00'").run();
     await s.upsertInstallation({ appId: app.id, installationId: 777 });
-    rows = db.raw.query("SELECT * FROM app_installations").all() as typeof rows;
+    rows = db.raw.query("SELECT * FROM bot_installations").all() as typeof rows;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.account_login).toBe("octocat-2");
     expect(rows[0]!.seen_at).not.toBe("2020-01-01 00:00:00");
@@ -559,9 +558,9 @@ describe("apps-store (createAppsStore)", () => {
     await s.markInstallationRemoved(app.id, 9);
     expect(await s.listInstallations(app.id)).toHaveLength(0);
     // The row itself survives — the credential-routing / attribution joins
-    // read app_installations, so an uninstall may never delete it.
+    // read bot_installations, so an uninstall may never delete it.
     const rows = db.raw
-      .query("SELECT account_login, removed_at FROM app_installations")
+      .query("SELECT account_login, removed_at FROM bot_installations")
       .all() as Array<{ account_login: string | null; removed_at: string | null }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.account_login).toBe("old-org");
@@ -594,7 +593,7 @@ describe("apps-store (createAppsStore)", () => {
     expect(await s.listInstallations(app.id)).toEqual([
       expect.objectContaining({ installation_id: 1 }),
     ]);
-    const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
+    const n = db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get() as { n: number };
     expect(n.n).toBe(3); // nothing deleted, the sibling untouched
     const siblingRows = await s.listInstallations(sibling.id);
     expect(siblingRows).toEqual([expect.objectContaining({ installation_id: 3 })]);
@@ -619,7 +618,7 @@ describe("apps-store (createAppsStore)", () => {
     await s.reconcileInstallations(app.id, [], await s.currentTimestamp());
 
     expect(await s.listInstallations(app.id)).toHaveLength(0);
-    const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
+    const n = db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get() as { n: number };
     expect(n.n).toBe(2); // stamped, never deleted
   });
 
@@ -648,7 +647,7 @@ describe("apps-store (createAppsStore)", () => {
     expect(db.boundValueCounts!.slice(-2)).toEqual([2, 2]);
     const rows = await s.listInstallations(app.id);
     expect(rows.map((row) => row.installation_id).sort((a, b) => a - b)).toEqual([1, 100, 150]);
-    const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
+    const n = db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get() as { n: number };
     expect(n.n).toBe(5); // nothing deleted
   });
 
@@ -661,7 +660,7 @@ describe("apps-store (createAppsStore)", () => {
     // the same second — otherwise the row stays hidden until the next TTL.
     db.raw
       .prepare(
-        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at, removed_at) VALUES ('legacy', ?, 7, 'legacy-org', datetime('now'), datetime('now'))",
+        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at) VALUES ('legacy', ?, 7, 'legacy-org', datetime('now'), datetime('now'))",
       )
       .run(app.id);
     const observedAt = await s.currentTimestamp();
@@ -683,7 +682,7 @@ describe("apps-store (createAppsStore)", () => {
     // even though the fetched live set cannot contain it yet.
     db.raw
       .prepare(
-        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('in-flight', ?, 11, 'new-org', strftime('%Y-%m-%d %H:%M:%f','now','+0.010 seconds'))",
+        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('in-flight', ?, 11, 'new-org', strftime('%Y-%m-%d %H:%M:%f','now','+0.010 seconds'))",
       )
       .run(app.id);
 
@@ -703,28 +702,28 @@ describe("apps-store (createAppsStore)", () => {
     // live set only because it did not exist yet — it must stay present.
     db.raw
       .prepare(
-        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('late', ?, 10, 'late-org', datetime('now', '+10 seconds'))",
+        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('late', ?, 10, 'late-org', datetime('now', '+10 seconds'))",
       )
       .run(app.id);
     // A removal observed AFTER the snapshot is newer news than the live set,
     // so the clear leg must leave it stamped even though 20 is present.
     db.raw
       .prepare(
-        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at, removed_at) VALUES ('fresh-removal', ?, 20, 'gone-org', datetime('now'), datetime('now', '+10 seconds'))",
+        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at) VALUES ('fresh-removal', ?, 20, 'gone-org', datetime('now'), datetime('now', '+10 seconds'))",
       )
       .run(app.id);
     // …while a row older than the snapshot and absent from the live set is
     // exactly what the stamping leg exists for.
     db.raw
       .prepare(
-        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('old', ?, 30, 'old-org', '2020-01-01 00:00:00')",
+        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('old', ?, 30, 'old-org', '2020-01-01 00:00:00')",
       )
       .run(app.id);
 
     await s.reconcileInstallations(app.id, [20], observedAt);
 
     const rows = db.raw
-      .query("SELECT installation_id, removed_at IS NOT NULL AS removed FROM app_installations ORDER BY installation_id")
+      .query("SELECT installation_id, removed_at IS NOT NULL AS removed FROM bot_installations ORDER BY installation_id")
       .all() as Array<{ installation_id: number; removed: number }>;
     expect(rows).toEqual([
       { installation_id: 10, removed: 0 },
@@ -739,7 +738,7 @@ describe("apps-store (createAppsStore)", () => {
     const s = store(db);
     await s.upsertInstallation({ appId: app.id, installationId: 1 });
     await s.upsertInstallation({ appId: app.id, installationId: 2 });
-    const n = db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number };
+    const n = db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get() as { n: number };
     expect(n.n).toBe(2);
     await expect(
       s.upsertInstallation({ appId: "no-such-app", installationId: 3 }),
@@ -749,7 +748,7 @@ describe("apps-store (createAppsStore)", () => {
 
 describe("apps-store workspace dual write (migration 0026)", () => {
   type CountRow = { n: number };
-  type MappingRow = { app_id: string; workspace_id: string };
+  type MappingRow = { bot_id: string; workspace_id: string };
   /** Minimal statement face for the SQL-recording double below. */
   type RecordingStatement = {
     bind(...values: unknown[]): RecordingStatement;
@@ -762,28 +761,28 @@ describe("apps-store workspace dual write (migration 0026)", () => {
   };
 
   function appCount(db: ReturnType<typeof createTestD1>): number {
-    const row = db.raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as CountRow;
+    const row = db.raw.query("SELECT COUNT(*) AS n FROM review_bots").get() as CountRow;
     return row.n;
   }
 
   function mappingRows(db: ReturnType<typeof createTestD1>): MappingRow[] {
-    return db.raw.query("SELECT app_id, workspace_id FROM app_workspaces").all() as MappingRow[];
+    return db.raw.query("SELECT bot_id, workspace_id FROM bot_workspaces").all() as MappingRow[];
   }
 
   test("createApp writes the App row AND its default-workspace mapping", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
-    expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "default" }]);
+    expect(mappingRows(db)).toEqual([{ bot_id: app.id, workspace_id: "default" }]);
     expect(appCount(db)).toBe(1);
   });
 
-  test("one transaction: a failing app_workspaces insert rolls the App row back", async () => {
+  test("one transaction: a failing bot_workspaces insert rolls the App row back", async () => {
     const db = createMigratedD1();
     // A split-write implementation (INSERT then a separate mapping run) leaves
-    // the github_apps row behind when this ABORT fires — the test then fails.
+    // the review_bots row behind when this ABORT fires — the test then fails.
     rawRun(
       db,
-      `CREATE TRIGGER fail_mapping BEFORE INSERT ON app_workspaces
+      `CREATE TRIGGER fail_mapping BEFORE INSERT ON bot_workspaces
        BEGIN SELECT RAISE(ABORT, 'mapping fail'); END;`,
     );
     await expect(seedApp(db)).rejects.toThrow(/mapping fail/);
@@ -796,10 +795,10 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     const first = await seedApp(db);
     // Same GitHub App id, fresh row id — the identity conflict the store refuses.
     await expect(seedApp(db, { githubAppId: APP_INPUT.githubAppId })).rejects.toThrow(
-      /UNIQUE constraint failed: github_apps.github_app_id/,
+      /UNIQUE constraint failed: review_bots.github_app_id/,
     );
     // The failed batch left no mapping behind for the rejected id...
-    expect(mappingRows(db)).toEqual([{ app_id: first.id, workspace_id: "default" }]);
+    expect(mappingRows(db)).toEqual([{ bot_id: first.id, workspace_id: "default" }]);
     expect(appCount(db)).toBe(1);
   });
 
@@ -819,7 +818,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     // The named path is the multi-workspace answer: the App lands exactly where
     // the caller said, whichever workspace that is.
     const app = await seedApp(db, { workspaceId: "second" });
-    expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "second" }]);
+    expect(mappingRows(db)).toEqual([{ bot_id: app.id, workspace_id: "second" }]);
   });
 
   test("a soft-deleted workspace row is never the write target: the named live one receives the mapping", async () => {
@@ -830,7 +829,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
        VALUES ('retired', 'retired', 'Retired', NULL, '2026-10-21T00:00:00.000Z', '2026-10-21T01:00:00.000Z')`,
     );
     const app = await seedApp(db);
-    expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "default" }]);
+    expect(mappingRows(db)).toEqual([{ bot_id: app.id, workspace_id: "default" }]);
   });
 
   test("a soft-deleted NAMED target refuses the write with zero rows and the pinned message", async () => {
@@ -850,7 +849,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     expect(mappingRows(db)).toHaveLength(2);
   });
 
-  test("every execution-facing read joins app_workspaces in ONE statement", async () => {
+  test("every execution-facing read joins bot_workspaces in ONE statement", async () => {
     const queries: string[] = [];
     const statement: RecordingStatement = {
       bind: () => statement,
@@ -865,26 +864,26 @@ describe("apps-store workspace dual write (migration 0026)", () => {
       },
       batch: async () => [],
     };
-    const s = createAppsStore(db);
+    const s = createReviewBotsStore(db);
     await s.getAppForWebhook("workspace", "app");
     await s.getAppByGithubId(1);
     await s.getAppById("id");
     await s.listApps();
     expect(queries).toHaveLength(4);
     for (const query of queries) {
-      expect(query).toContain("INNER JOIN app_workspaces");
+      expect(query).toContain("INNER JOIN bot_workspaces");
       expect(query).toContain("w.workspace_id");
     }
   });
 
-  test("src/ has exactly one INSERT INTO github_apps site (createApp is the only creation path)", () => {
+  test("src/ has exactly one INSERT INTO review_bots site (createApp is the only creation path)", () => {
     const sites: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const path = join(dir, entry.name);
         if (entry.isDirectory()) walk(path);
         else if (entry.name.endsWith(".ts")) {
-          const hits = readFileSync(path, "utf8").match(/INSERT INTO github_apps\b/g)?.length ?? 0;
+          const hits = readFileSync(path, "utf8").match(/INSERT INTO review_bots\b/g)?.length ?? 0;
           if (hits > 0) sites.push(`${path}:${hits}`);
         }
       }
@@ -905,7 +904,7 @@ describe("apps-store sandbox image selection (migration 0018)", () => {
   test("setSandboxImage stores an enabled registry id, bumps updated_at, and reports the change", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
-    rawRun(db, "UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_bots SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
     expect(await store(db).setSandboxImage(app.id, "omp")).toBe(true);
     const row = (await store(db).getAppById(app.id))!;
     expect(row.sandbox_image_id).toBe("omp");
@@ -934,61 +933,6 @@ describe("apps-store sandbox image selection (migration 0018)", () => {
     const row = (await store(db).getAppById(app.id))!;
     expect(row.deleted_at).not.toBeNull();
     expect(row.updated_at).toBe(deleted.updated_at); // the refused write bumped nothing
-  });
-});
-
-describe("apps-store review trigger mode (migration 0022)", () => {
-  test("createApp omits the column: the 0022 DDL default seeds 'every_push'", async () => {
-    const db = createMigratedD1();
-    const app = await seedApp(db);
-    expect(app.review_trigger_mode).toBe("every_push");
-  });
-
-  test("setReviewTriggerMode round-trips every vocabulary mode, bumps updated_at, and reports the change", async () => {
-    const db = createMigratedD1();
-    const app = await seedApp(db);
-    for (const mode of REVIEW_TRIGGER_MODES) {
-      rawRun(db, "UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
-      expect(await store(db).setReviewTriggerMode(app.id, mode)).toBe(true);
-      const row = (await store(db).getAppById(app.id))!;
-      expect(row.review_trigger_mode).toBe(mode);
-      expect(row.updated_at).not.toBe("2026-01-01 00:00:00"); // an operator mutation
-    }
-    // An unknown app id changed nothing (the setAppStatus convention).
-    expect(await store(db).setReviewTriggerMode("no-such-id", "manual")).toBe(false);
-  });
-
-  test("setReviewTriggerMode throws on an off-vocabulary mode BEFORE any write (the store-enforced value domain)", async () => {
-    const db = createMigratedD1();
-    const app = await seedApp(db);
-    rawRun(db, "UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
-    for (const bogus of ["whenever", "", "EVERY_PUSH", "open "]) {
-      await expect(store(db).setReviewTriggerMode(app.id, bogus as ReviewTriggerMode)).rejects.toThrow(
-        /is not on the vocabulary/,
-      );
-    }
-    const row = (await store(db).getAppById(app.id))!;
-    expect(row.review_trigger_mode).toBe("every_push"); // untouched — zero rows written
-    expect(row.updated_at).toBe("2026-01-01 00:00:00"); // and updated_at did not churn
-  });
-
-  test("setReviewTriggerMode refuses soft-deleted apps (a deleted app is never mutated)", async () => {
-    const db = createMigratedD1();
-    const app = await seedApp(db);
-    await store(db).softDeleteApp(app.id);
-    const deleted = (await store(db).getAppById(app.id))!;
-    expect(await store(db).setReviewTriggerMode(app.id, "manual")).toBe(false);
-    const row = (await store(db).getAppById(app.id))!;
-    expect(row.review_trigger_mode).toBe("every_push");
-    expect(row.updated_at).toBe(deleted.updated_at); // the refused write bumped nothing
-  });
-
-  test("the 0022 CHECK is the last-line backstop: a raw off-vocabulary write is unrepresentable", async () => {
-    const db = createMigratedD1();
-    const app = await seedApp(db);
-    expect(() =>
-      rawRun(db, "UPDATE github_apps SET review_trigger_mode = 'whenever' WHERE id = ?", app.id),
-    ).toThrow(/CHECK constraint failed/);
   });
 });
 
@@ -1073,7 +1017,7 @@ describe("apps-store delivery read faces (consumption)", () => {
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-25 hours')
-         WHERE app_id = ? AND outcome = 'rejected'`,
+         WHERE bot_id = ? AND outcome = 'rejected'`,
       )
       .run(appB.id);
 
@@ -1202,7 +1146,7 @@ describe("saveGithubMetadata (migrations 0019/0036)", () => {
     // (the touchLastWebhook L5 precedent) and must leave the operator
     // timestamp alone — a same-second datetime('now') would mask a wrongly
     // touched column, so the pin makes the assertion deterministic.
-    db.raw.prepare("UPDATE github_apps SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(app.id);
+    db.raw.prepare("UPDATE review_bots SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(app.id);
 
     const changed = await store(db).saveGithubMetadata(app.id, METADATA);
     expect(changed).toBe(true);
@@ -1211,7 +1155,7 @@ describe("saveGithubMetadata (migrations 0019/0036)", () => {
       .query(
         `SELECT github_name, github_description, github_html_url, github_avatar_url,
                 github_slug, github_metadata_synced_at, updated_at
-         FROM github_apps WHERE id = ?`,
+         FROM review_bots WHERE id = ?`,
       )
       .get(app.id) as {
       github_name: string;
@@ -1288,7 +1232,7 @@ describe("touchGithubMetadataAttempt (migration 0037)", () => {
   test("stamps only github_metadata_attempted_at — never the profile columns or updated_at", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db);
-    db.raw.prepare("UPDATE github_apps SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(app.id);
+    db.raw.prepare("UPDATE review_bots SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(app.id);
 
     await store(db).touchGithubMetadataAttempt(app.id);
 

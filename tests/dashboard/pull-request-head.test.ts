@@ -16,36 +16,38 @@
  * case below pins with a numeric-offset input.
  */
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
-import { createAppsStore, type UpsertPullRequestInput } from "../../src/dashboard/apps-store";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { createReviewBotsStore, type UpsertPullRequestInput } from "../../src/dashboard/apps-store";
 
 const APP_ID = "app-pr-head";
+const TARGET_ID = "target-app-pr-head";
 
 function seedApp(db: TestD1, id = APP_ID, githubAppId = 3001): void {
   const now = "2026-01-01T00:00:00.000Z";
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, created_at, updated_at)
        VALUES (?, NULL, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
                'octocat', 'active', ?, ?)`,
     )
     .run(id, githubAppId, id, now, now);
+  seedTarget(db, id, { id: `target-${id}` });
 }
 
-const ADDRESS = { appId: APP_ID, owner: "acme", repo: "widgets", prNumber: 132 };
+const ADDRESS = { targetId: TARGET_ID, owner: "acme", repo: "widgets", prNumber: 132 };
 
 function delivery(over: Partial<UpsertPullRequestInput> = {}): UpsertPullRequestInput {
-  return { ...ADDRESS, title: "Add a thing", state: "open", headSha: "sha-1", ...over };
+  return { ...ADDRESS, appId: APP_ID, title: "Add a thing", state: "open", headSha: "sha-1", ...over };
 }
 
 describe("upsertPullRequest head watermark (0044)", () => {
   test("a first delivery naming a sha stores the sha and the stamp it arrived with", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
-    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
+    expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-1",
       headAt: "2026-03-01T10:00:00.000Z",
     });
@@ -54,11 +56,11 @@ describe("upsertPullRequest head watermark (0044)", () => {
   test("a newer stamp advances BOTH the sha and the watermark", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
-    await createAppsStore(db).upsertPullRequest(
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
+    await createReviewBotsStore(db).upsertPullRequest(
       delivery({ headSha: "sha-2", updatedAt: "2026-03-01T10:05:00.000Z" }),
     );
-    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+    expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-2",
       headAt: "2026-03-01T10:05:00.000Z",
     });
@@ -67,13 +69,13 @@ describe("upsertPullRequest head watermark (0044)", () => {
   test("an out-of-order (older) delivery rewinds neither the sha nor the watermark", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(
+    await createReviewBotsStore(db).upsertPullRequest(
       delivery({ headSha: "sha-new", updatedAt: "2026-03-01T10:05:00.000Z" }),
     );
-    await createAppsStore(db).upsertPullRequest(
+    await createReviewBotsStore(db).upsertPullRequest(
       delivery({ headSha: "sha-old", updatedAt: "2026-03-01T10:00:00.000Z" }),
     );
-    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+    expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-new",
       headAt: "2026-03-01T10:05:00.000Z",
     });
@@ -82,13 +84,13 @@ describe("upsertPullRequest head watermark (0044)", () => {
   test("an equal stamp takes the arriving delivery (the tie the state predicate also takes)", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(
+    await createReviewBotsStore(db).upsertPullRequest(
       delivery({ headSha: "sha-a", updatedAt: "2026-03-01T10:00:00.000Z" }),
     );
-    await createAppsStore(db).upsertPullRequest(
+    await createReviewBotsStore(db).upsertPullRequest(
       delivery({ headSha: "sha-b", updatedAt: "2026-03-01T10:00:00.000Z" }),
     );
-    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+    expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-b",
       headAt: "2026-03-01T10:00:00.000Z",
     });
@@ -97,9 +99,9 @@ describe("upsertPullRequest head watermark (0044)", () => {
   test("a delivery with no usable stamp still fills an unknown sha and leaves the watermark unknown", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest({ ...ADDRESS, title: null, state: "open", headSha: null });
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: null }));
-    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ title: null, headSha: null }));
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: null }));
+    expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-1",
       headAt: null,
     });
@@ -110,12 +112,12 @@ describe("upsertPullRequest head watermark (0044)", () => {
     // only the `head_at IS NULL` disjunct of the write CASE can ever fill it.
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest({ ...ADDRESS, title: null, state: "open", headSha: null });
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: null }));
-    await createAppsStore(db).upsertPullRequest(
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ title: null, headSha: null }));
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: null }));
+    await createReviewBotsStore(db).upsertPullRequest(
       delivery({ headSha: "sha-2", updatedAt: "2026-03-01T10:00:00.000Z" }),
     );
-    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+    expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-2",
       headAt: "2026-03-01T10:00:00.000Z",
     });
@@ -124,9 +126,9 @@ describe("upsertPullRequest head watermark (0044)", () => {
   test("a newer stamp for the SAME sha advances only the watermark", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:05:00.000Z" }));
-    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:05:00.000Z" }));
+    expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-1",
       headAt: "2026-03-01T10:05:00.000Z",
     });
@@ -135,14 +137,12 @@ describe("upsertPullRequest head watermark (0044)", () => {
   test("a stamp without a sha dates no sha it never had", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
     // A later delivery that carries only a state change (no head sha).
-    await createAppsStore(db).upsertPullRequest({
-      ...ADDRESS,
-      state: "open",
-      updatedAt: "2026-03-01T11:00:00.000Z",
-    });
-    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+    await createReviewBotsStore(db).upsertPullRequest(
+      delivery({ headSha: undefined, updatedAt: "2026-03-01T11:00:00.000Z" }),
+    );
+    expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-1",
       headAt: "2026-03-01T10:00:00.000Z",
     });
@@ -154,34 +154,39 @@ describe("upsertPullRequest head watermark (0044)", () => {
     // sha wins) would rewrite the row back to an older commit here.
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(
+    await createReviewBotsStore(db).upsertPullRequest(
       delivery({ headSha: "sha-new", updatedAt: "2026-03-01T10:05:00.000Z" }),
     );
-    await createAppsStore(db).upsertPullRequest(delivery({ headSha: "sha-old", updatedAt: null }));
-    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ headSha: "sha-old", updatedAt: null }));
+    expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-new",
       headAt: "2026-03-01T10:05:00.000Z",
     });
   });
 
-  test("selectPrHead is scoped to one App's rows", async () => {
+  test("selectPrHead is scoped to one target's rows", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
     const otherId = "app-pr-head-other";
     seedApp(db, otherId, 3002);
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
-    await createAppsStore(db).upsertPullRequest({
-      ...delivery({ headSha: "sha-other", updatedAt: "2026-03-01T10:05:00.000Z" }),
-      appId: otherId,
-    });
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
+    await createReviewBotsStore(db).upsertPullRequest(
+      delivery({
+        appId: otherId,
+        targetId: `target-${otherId}`,
+        headSha: "sha-other",
+        updatedAt: "2026-03-01T10:05:00.000Z",
+      }),
+    );
 
-    const store = createAppsStore(db);
+    const store = createReviewBotsStore(db);
     expect(await store.selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-1",
       headAt: "2026-03-01T10:00:00.000Z",
     });
-    // An App with no ledger row is "unknown" — never another App's watermark.
-    expect(await store.selectPrHead({ ...ADDRESS, appId: "app-with-no-rows" })).toBeNull();
+    // A target with no ledger row is "unknown" — never another target's
+    // watermark.
+    expect(await store.selectPrHead({ ...ADDRESS, targetId: "target-with-no-rows" })).toBeNull();
   });
 
   test("a numeric-offset stamp is rewritten to UTC inside the write, not trusted from the caller", async () => {
@@ -190,13 +195,13 @@ describe("upsertPullRequest head watermark (0044)", () => {
     // The column is ordered lexically, so a `+02:00` spelling stored verbatim
     // would sort below a `Z` value five minutes older. The store normalizes,
     // so no caller can put an unorderable stamp in the watermark.
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T12:00:00+02:00" }));
-    expect((await createAppsStore(db).selectPrHead(ADDRESS))?.headAt).toBe("2026-03-01T10:00:00.000Z");
+    await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T12:00:00+02:00" }));
+    expect((await createReviewBotsStore(db).selectPrHead(ADDRESS))?.headAt).toBe("2026-03-01T10:00:00.000Z");
   });
 
   test("selectPrHead answers null for a row that does not exist", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toBeNull();
+    expect(await createReviewBotsStore(db).selectPrHead(ADDRESS)).toBeNull();
   });
 });

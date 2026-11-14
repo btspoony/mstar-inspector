@@ -70,6 +70,7 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
   return {
     can_manage: true,
     workspace_id: "ws_test",
+    target_id: "rt-501",
     app: {
       github_app_id: 42,
       status: "active",

@@ -1,5 +1,5 @@
 /**
- * D1 store for `github_apps` / `app_installations` — the
+ * D1 store for `review_bots` / `bot_installations` — the
  * ONE write authority for multi-App rows. Spec
  * dashboard-multi-app-platform § Data model; migrations 0004/0005 are the
  * DDL single sources.
@@ -15,12 +15,8 @@
  * (src/contracts/sandbox-images.ts — the registry, not pipeline/review code —
  * and src/contracts/failure-stages.ts — the `review_failures` stage
  * partition), which bound the sandbox_image_id value domain and keep the
- * failure-count/history SQL off hand-written stage literals, plus the pure
- * types+constants packages/shared/src/runtime.ts, whose closed REVIEW_LEVELS
- * vocabulary is the review-level value domain (imported, never restated).
- * The one engine symbol pair (`PR_VERDICTS` / `PrVerdict`) is the review gate's
- * verdict vocabulary: it is imported, never restated, so a gate value the
- * engine rejects can never be stored (the src/review/schema.ts convention).
+ * failure-count/history SQL off hand-written stage literals, plus
+ * src/contracts/review-gate.ts for the create path's score floor.
  * The `db` parameter is a locally-declared narrow D1 face (types
  * only, zero imports) — a real `D1Database`, the bun:sqlite test double
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
@@ -28,8 +24,15 @@
  * dashboard modules must not import store/pipeline/review code (architect
  * decision Q2). The narrow face carries the operations this store needs:
  * multi-row reads go through IN-list queries (deliverySummaries) and the
- * writes that must commit together — App creation, the allowlist replace,
- * the installation reconcile — go through `batch()`.
+ * writes that must commit together — bot creation with its target and owner
+ * mapping, the user-facing delete, the installation reconcile — go through
+ * `batch()`.
+ *
+ * The workspace-owned review configuration — trigger mode, review depth, Check
+ * gate, owner allowlist, the business pause — lives on `review_targets` and is
+ * served by `src/dashboard/targets-store.ts`. This store keeps only the
+ * execution identity: credentials, model and sandbox configuration,
+ * installations, and `review_enabled` as the OPERATIONAL pause.
  *
  * Semantics (route call sites rely on these):
  *   - getAppForWebhook / getAppByGithubId / getAppById return the row
@@ -42,9 +45,11 @@
  *   - listApps is the dashboard-list face: non-deleted rows, newest first.
  *   - setAppStatus refuses soft-deleted rows (a deleted app can never be
  *     re-activated) and returns whether a row changed.
- *   - setReviewEnabled (migration 0008) is the per-App pause
- *     switch: writes review_enabled + updated_at (an operator mutation) and
- *     refuses soft-deleted rows exactly like setAppStatus.
+ *   - setReviewEnabled (migration 0008) is the per-bot OPERATIONAL pause
+ *     switch (a delivery failure, an operator intervention): writes
+ *     review_enabled + updated_at and refuses soft-deleted rows exactly like
+ *     setAppStatus. The value users change lives on the target; nothing in the
+ *     dashboard writes this column.
  *   - setSandboxImage (migration 0018) is the per-App sandbox
  *     runtime-image selection: the id must be an ENABLED entry of the
  *     sandbox-image registry (plain Error backstop, the recordDelivery
@@ -52,22 +57,6 @@
  *     updated_at, and refuses soft-deleted rows exactly like setAppStatus.
  *     createApp omits the column, so the migration 0018 DDL default seeds
  *     'omp'.
- *   - setReviewTriggerMode (migration 0022, spec review-trigger-policy §2)
- *     is the per-App auto-trigger selection: the mode must be on the
- *     REVIEW_TRIGGER_MODES vocabulary (plain Error backstop, the
- *     setSandboxImage convention — the settings route 400s first; the DDL
- *     CHECK is the last-line backstop), writes review_trigger_mode +
- *     updated_at, and refuses soft-deleted rows exactly like setAppStatus.
- *     createApp omits the column, so the migration 0022 DDL default seeds
- *     'every_push' (today's behavior, preserved exactly).
- *   - setReviewLevel (migration 0047) is the per-App review depth: `null` is
- *     the "follow the operator default" choice and writes the column back to
- *     NULL, a non-null level must be on the shared REVIEW_LEVELS vocabulary
- *     (the setReviewTriggerMode backstop; the DDL CHECK is the last line),
- *     and it writes review_level + updated_at, refusing soft-deleted rows
- *     exactly like setAppStatus. The read face is the row column itself, so
- *     parseAppReviewLevel is the one parser: an off-vocabulary stored value
- *     reads as absent, never as an error.
  *   - touchLastWebhook (migration 0008) writes ONLY
  *     last_webhook_at — never updated_at, which stays the operator-mutation
  *     timestamp (L5: the per-webhook frequency of this touch must not churn
@@ -88,16 +77,6 @@
  *     updated_at. Together with the 0036 NULL-slug staleness rule it bounds
  *     an unsyncable App to one fetch per TTL window instead of one per
  *     settings read.
- *   - getCheckGate / saveCheckGate (migration 0045) are the review gate
- *     face: the gate is App configuration, the save refuses a score outside
- *     0..100 and a verdict outside the engine `PR_VERDICTS` vocabulary before
- *     any write (the settings route 400s first; the DDL CHECK is the score
- *     backstop only), and it writes updated_at (an operator mutation).
- *   - getAllowlist / saveAllowlist (migration 0045) are the owner allowlist
- *     face: the switch is App configuration and the owner set is REPLACED
- *     (delete-then-insert in ONE batch), never merged; saveAllowlist refuses
- *     a deduped set past ALLOWLIST_MAX_OWNERS and a soft-deleted or unknown
- *     App before writing (the setAppStatus rule).
  *   - getGithubVisibility / saveGithubVisibility (migration 0045) are the
  *     cached App-visibility face: NULL reads as 'unknown', and the writer is
  *     the metadata refresh's anonymous probe — machine-triggered, so like
@@ -107,7 +86,10 @@
  *     recently seen first. markInstallationRemoved / reconcileInstallations
  *     stamp the rows GitHub no longer has — never delete them.
  *   - softDeleteApp is idempotent — the FIRST deleted_at wins; returns
- *     whether THIS call performed the delete.
+ *     whether THIS call performed the delete. It stamps the bot AND every
+ *     target the bot owns in ONE batch: the user-facing delete removes one
+ *     product surface, and a target left live would keep a deleted bot's
+ *     configuration readable.
  *   - recordDelivery / deliverySummary / listRecentDeliveries (migration
  *     0011) are the webhook_deliveries face: the per-App webhook
  *     route appends one best-effort row per CLASSIFIED delivery (ok /
@@ -133,18 +115,16 @@
  *     The manifest flow mints that id at start, so the webhook URL is known
  *     before GitHub creates the App.
  *   - UNIQUE / FK violations throw (fail-loud): duplicate github_app_id or
- *     (app_id, installation_id) pairs, and unknown app references are
+ *     (bot_id, installation_id) pairs, and unknown app references are
  *     caller-visible errors, never swallowed.
  */
-import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
-import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
 import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
 
-/** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
+/** A row of `review_bots` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
   /**
    * The local App UID — also the webhook URL's app segment
@@ -162,46 +142,12 @@ export type GithubAppRow = {
   status: GithubAppStatus;
   /** NULL = live row; a timestamp = soft-deleted (the only removal path). */
   deleted_at: string | null;
-  /** Per-App pause switch (migration 0008): 1 = reviewing, 0 = paused. */
+  /**
+   * Per-bot OPERATIONAL pause (migration 0008): 1 = running, 0 = paused. The
+   * business pause users change lives on the target; both gate enqueue and the
+   * in-flight consumer.
+   */
   review_enabled: number;
-  /**
-   * Per-App auto-trigger selection (migration 0022, spec
-   * review-trigger-policy §2): 'open' | 'every_push' | 'manual'; the DDL
-   * default seeds 'every_push' (today's behavior). The bot-mention comment
-   * trigger is orthogonal and works in every mode.
-   */
-  review_trigger_mode: ReviewTriggerMode;
-  /**
-   * Per-App review depth (migration 0047): 'quick' | 'default' | 'deep' — the
-   * packages/shared/src/runtime `REVIEW_LEVELS` vocabulary. NULL = no App
-   * choice, i.e. follow the operator default (`review_runtime_settings` key
-   * `review.level.default`); there is deliberately no backfill, so every App
-   * starts NULL. Read it through parseAppReviewLevel, which treats an
-   * off-vocabulary stored value as absent instead of throwing on the review
-   * path.
-   */
-  review_level: string | null;
-  /**
-   * Review-gate score floor (migration 0045): a published review concludes
-   * the Check `success` only when its tally score is at least this value.
-   * The DDL CHECK bounds it to 0..100. `createApp` seeds it from the
-   * workspace's default (platform default 60); 0045's column default (80)
-   * never applies to a real App.
-   */
-  check_min_score: number;
-  /**
-   * Review-gate passing verdicts (migration 0045): the JSON array of engine
-   * `PR_VERDICTS` spellings that satisfy the gate; the DDL default seeds
-   * `["ship it"]`. Written only by saveCheckGate, which validates the
-   * vocabulary before the write — read it through getCheckGate.
-   */
-  check_pass_verdicts: string;
-  /**
-   * Owner allowlist switch (migration 0045): 1 = only allowlisted repository
-   * owners are reviewed, 0 = every owner (today's behavior). Off by default;
-   * on with an empty list refuses every owner.
-   */
-  allowlist_enabled: number;
   /**
    * Cached GitHub App visibility (migration 0045): 'public' | 'private' |
    * 'unknown', written by the anonymous `GET /apps/{slug}` probe. Two callers
@@ -261,29 +207,12 @@ export type GithubAppRow = {
 export type GithubAppStatus = "active" | "disabled";
 
 /**
- * An execution-facing App row: the two resolutions INNER JOIN `app_workspaces`,
+ * An execution-facing App row: the two resolutions INNER JOIN `bot_workspaces`,
  * so `workspace_id` is present by construction. Typing it here (instead of at
  * the call sites with `!`) keeps the invariant where SQL enforces it — a future
  * LEFT JOIN breaks the read's type rather than binding `undefined`.
  */
 export type GithubAppTenantRow = GithubAppRow & { workspace_id: string };
-
-/**
- * The per-App auto-trigger vocabulary (migration 0022, spec
- * review-trigger-policy §2 — exact enum spelling is wire-visible: the
- * settings POST body carries it and the SPA replays it). Producer-side
- * enforced like DELIVERY_OUTCOMES: an off-vocabulary mode throws BEFORE any
- * row is written; the DDL CHECK is the last-line backstop. The array is
- * typed against the union, so a misspelled literal here is a compile error;
- * every member must also appear in the migration 0022 CHECK.
- */
-export type ReviewTriggerMode = "open" | "every_push" | "manual";
-
-export const REVIEW_TRIGGER_MODES: readonly ReviewTriggerMode[] = Object.freeze([
-  "open",
-  "every_push",
-  "manual",
-]);
 
 /**
  * Cached GitHub App visibility (migration 0045, the `github_visibility`
@@ -292,84 +221,6 @@ export const REVIEW_TRIGGER_MODES: readonly ReviewTriggerMode[] = Object.freeze(
  * no-answer; both callers keep the last stored value on `null`.
  */
 export type GithubVisibility = "public" | "private" | "unknown";
-
-/**
- * The stored per-App review level (migration 0047), or `null` when the row
- * carries no usable choice: a NULL column (follow the operator default) or a
- * value outside the shared `REVIEW_LEVELS` vocabulary. An off-vocabulary
- * stored value is UNTRUSTED and treated as absent — the review path falls back
- * to the operator default and never throws for a row it cannot read.
- */
-export function parseAppReviewLevel(value: unknown): ReviewLevel | null {
-  return isReviewLevel(value) ? value : null;
-}
-
-/**
- * The per-App review gate (migration 0045): a published review concludes the
- * Check `success` only when its verdict is on `passVerdicts` AND its tally
- * score is at least `minScore`. `passVerdicts` is engine `PR_VERDICTS`
- * vocabulary — saveCheckGate refuses anything else before writing.
- */
-export type CheckGate = {
-  /** Integer score floor, 0..100 inclusive (the DDL CHECK's domain). */
-  minScore: number;
-  /** Verdicts that satisfy the gate; `["ship it"]` until saved otherwise. */
-  passVerdicts: readonly PrVerdict[];
-};
-
-/**
- * The stored verdict array, or `null` when the stored value is unreadable
- * (bad JSON, not an array, or off-vocabulary). `null` is unreadable
- * CONFIGURATION, never "the default": the Check lanes read the gate on every
- * terminalization and must fail closed on a row they cannot read.
- */
-function storedPassVerdicts(raw: string): readonly PrVerdict[] | null {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.every((entry) => PR_VERDICTS.includes(entry as PrVerdict))) {
-      return parsed as PrVerdict[];
-    }
-  } catch {
-    // unreadable — reported as null below
-  }
-  return null;
-}
-
-/**
- * The per-App owner allowlist (migration 0045): `enabled` is the switch
- * (default off — every owner behaves as before) and `owners` the accepted
- * repository-owner logins. Enabled with an empty list refuses every owner.
- */
-export type AppAllowlist = {
-  enabled: boolean;
-  owners: readonly string[];
-};
-
-/**
- * The owner allowlist's accepted size: the whole set is replaced inside ONE D1
- * batch, so an unbounded paste would build an arbitrarily large batch. 100
- * covers every realistic shared install. Enforced by `saveAllowlist` (the
- * layer that states the batch-size invariant) and, for the operator-facing
- * 400, by the settings route.
- */
-export const ALLOWLIST_MAX_OWNERS = 100;
-
-/**
- * Collapse the allowlist owner set: GitHub logins are case-insensitive, so
- * `Ada` and `ada` are ONE owner and the first submitted spelling is the one
- * kept. Order is NOT preserved: the table has no sequence column and
- * `getAllowlist` reads `ORDER BY owner_login`, so the settings form lists the
- * owners alphabetically however they were submitted.
- */
-export function dedupeOwnerLogins(logins: readonly string[]): string[] {
-  const seen = new Set<string>();
-  return logins.filter((login) => {
-    const folded = login.toLowerCase();
-    if (seen.has(folded)) return false;
-    seen.add(folded);
-    return true;
-  });
-}
 
 /** Input for createApp — encrypted payloads are built by the caller. */
 export type CreateAppInput = {
@@ -440,7 +291,7 @@ export type GithubAppMetadataInput = {
 };
 
 /**
- * An `app_installations` row as the settings health panel reads it
+ * A `bot_installations` row as the settings health panel reads it
  * (DDL = migration 0004). The `id` PK is deliberately not projected —
  * the panel keys installations by installation_id.
  */
@@ -540,6 +391,24 @@ const PULL_REQUEST_LEDGER_ORDER = "last_seen_at DESC, pr_number DESC";
 const PULL_REQUEST_REPO_PREDICATE = " AND owner = ? AND repo = ?";
 
 /**
+ * The tenant scope every ledger read binds: the review target, the workspace
+ * that must own it, and the bot whose installation mapping attributes the
+ * failure rows. The route resolves all three from the session workspace; the
+ * SQL re-checks the target/workspace pair so a route bug cannot leak another
+ * tenant's rows.
+ */
+export type LedgerScope = { targetId: string; workspaceId: string; botId: string };
+
+/**
+ * The tenant predicate for a ledger statement over `alias` — the target AND
+ * the workspace that owns it, bound in the SAME statement. Those two bind
+ * values always come first in the statement's bind list.
+ */
+function ledgerScopeSql(alias: string): string {
+  return `${alias}.target_id = ? AND EXISTS (SELECT 1 FROM review_targets t WHERE t.id = ${alias}.target_id AND t.workspace_id = ?)`;
+}
+
+/**
  * The list's ONE bounded window. Used as the row statement's own predicate and
  * as the scope of both aggregate statements, so the payload is not merely
  * capped: the work is. A repository filter narrows the window ITSELF, so the
@@ -547,7 +416,7 @@ const PULL_REQUEST_REPO_PREDICATE = " AND owner = ? AND repo = ?";
  */
 function pullRequestWindowSql(repoPredicate: string): string {
   return `SELECT owner, repo, pr_number FROM pull_requests
-  WHERE app_id = ?${repoPredicate}
+  WHERE ${ledgerScopeSql("pull_requests")}${repoPredicate}
   ORDER BY ${PULL_REQUEST_LEDGER_ORDER} LIMIT ?`;
 }
 
@@ -555,10 +424,23 @@ function pullRequestWindowSql(repoPredicate: string): string {
  * Statement 0 of every record-section batch: is this PR on the ledger at all?
  * A section reader answers pages, not PR existence — `total: 0` covers both an
  * empty section and an unknown PR — so existence must be decided in the same
- * batch, and `null` (the route's 404) means "this App never received it".
+ * batch, and `null` (the route's 404) means "this target never received it".
  */
-const PULL_REQUEST_EXISTS_SQL = `SELECT 1 AS found FROM pull_requests
-  WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? LIMIT 1`;
+const PULL_REQUEST_EXISTS_SQL = `SELECT 1 AS found FROM pull_requests p
+  WHERE ${ledgerScopeSql("p")} AND p.owner = ? AND p.repo = ? AND p.pr_number = ? LIMIT 1`;
+
+/**
+ * The join that reaches a bot-attributed ledger row's target. `review_findings`
+ * and `review_failures` keep bot attribution only (execution ledgers), so the
+ * target predicate reaches them through the PR row they belong to.
+ *
+ * Valid while a bot has exactly one live target; a second target needs
+ * `target_id` on those execution ledgers instead of this join.
+ */
+function prOwnerJoin(alias: string, botExpression: string): string {
+  return `JOIN pull_requests p ON p.bot_id = ${botExpression} AND p.owner = ${alias}.owner
+    AND p.repo = ${alias}.repo AND p.pr_number = ${alias}.pr_number`;
+}
 
 /**
  * Slice to `max` UTF-16 units without leaving half a surrogate pair behind
@@ -596,7 +478,7 @@ export type RecordDeliveryInput = {
 /** A row of `webhook_deliveries` (D1 column names, snake_case; migration 0011). */
 export type WebhookDeliveryRow = {
   id: string;
-  app_id: string;
+  bot_id: string;
   event_name: string | null;
   outcome: DeliveryOutcome;
   status_code: number | null;
@@ -621,6 +503,12 @@ export type DeliverySummary = {
 /** Input for upsertPullRequest — one VERIFIED `pull_request` delivery. */
 export type UpsertPullRequestInput = {
   appId: string;
+  /**
+   * The review target the ledger row belongs to (`review_targets.id`).
+   * REQUIRED: the ledger's identity is `(target_id, owner, repo, pr_number)`,
+   * and a row written without it would be invisible to every tenant read.
+   */
+  targetId: string;
   owner: string;
   repo: string;
   prNumber: number;
@@ -712,7 +600,7 @@ function countOf(result: AppsStoreBatchResult): number {
 
 /**
  * Tenant read face (migration 0026) — there is exactly one. Every
- * execution-facing App read INNER JOINs `app_workspaces`, so an App with no
+ * execution-facing App read INNER JOINs `bot_workspaces`, so an App with no
  * workspace mapping is invisible to every face; the two resolution reads also
  * require the workspace itself to be live, so a soft-deleted tenant is
  * unresolvable and can never start a review.
@@ -726,10 +614,10 @@ function countOf(result: AppsStoreBatchResult): number {
  * must not hide its Apps from operators.
  */
 export const APP_READ_SQL = {
-  getAppById: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
-  getAppForWebhook: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
-  getAppByGithubId: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
-  listApps: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
+  getAppById: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
+  getAppForWebhook: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
+  getAppByGithubId: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
+  listApps: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
 
 /**
@@ -750,21 +638,21 @@ const UPSERT_INSTALLATION_SQL = {
   // clears a removal stamp: a reinstall (`installation.created`) makes the row
   // visible again. An INFERRED login is ordinary review traffic and says
   // nothing about install state, so it never clears the stamp.
-  authoritative: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+  authoritative: `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
     VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
-    ON CONFLICT (app_id, installation_id) DO UPDATE SET
+    ON CONFLICT (bot_id, installation_id) DO UPDATE SET
       account_login = COALESCE(excluded.account_login, account_login),
       seen_at = strftime('%Y-%m-%d %H:%M:%f','now'),
       removed_at = NULL`,
-  inferred: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+  inferred: `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
     VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
-    ON CONFLICT (app_id, installation_id) DO UPDATE SET
+    ON CONFLICT (bot_id, installation_id) DO UPDATE SET
       account_login = COALESCE(account_login, excluded.account_login),
       seen_at = strftime('%Y-%m-%d %H:%M:%f','now')`,
 } as const;
 
-/** Create the github_apps / app_installations store over one D1 handle. */
-export function createAppsStore(db: AppsStoreD1) {
+/** Create the review_bots / bot_installations store over one D1 handle. */
+export function createReviewBotsStore(db: AppsStoreD1) {
   /**
    * Bounded ledger retention (migration 0039). Terminal rows only: an open PR
    * is still a review target however stale its clock, so `state` gates the
@@ -827,35 +715,35 @@ export function createAppsStore(db: AppsStoreD1) {
     const [latestRes, rejectedRes] = await Promise.all([
       db
         .prepare(
-          `SELECT app_id, id, event_name, outcome, status_code, repository_full_name, created_at FROM (
-             SELECT *, ROW_NUMBER() OVER (PARTITION BY app_id
+          `SELECT bot_id, id, event_name, outcome, status_code, repository_full_name, created_at FROM (
+             SELECT *, ROW_NUMBER() OVER (PARTITION BY bot_id
                ORDER BY ${DELIVERY_VERDICT_TIER_SQL},
                         created_at DESC, rowid DESC) AS rn
-             FROM webhook_deliveries WHERE app_id IN (${placeholders})
+             FROM webhook_deliveries WHERE bot_id IN (${placeholders})
            ) WHERE rn = 1`,
         )
         .bind(...appIds)
         .all<WebhookDeliveryRow>(),
       db
         .prepare(
-          `SELECT app_id, COUNT(*) AS n FROM webhook_deliveries
-           WHERE app_id IN (${placeholders}) AND outcome = 'rejected'
+          `SELECT bot_id, COUNT(*) AS n FROM webhook_deliveries
+           WHERE bot_id IN (${placeholders}) AND outcome = 'rejected'
              AND created_at > datetime('now', '-24 hours')
-           GROUP BY app_id`,
+           GROUP BY bot_id`,
         )
         .bind(...appIds)
-        .all<{ app_id: string; n: number }>(),
+        .all<{ bot_id: string; n: number }>(),
     ]);
     const byApp: Record<string, DeliverySummary> = {};
     for (const appId of appIds) {
       byApp[appId] = { latest: null, rejected24h: 0 };
     }
     for (const row of latestRes.results) {
-      const entry = byApp[row.app_id];
+      const entry = byApp[row.bot_id];
       if (entry) entry.latest = row;
     }
     for (const row of rejectedRes.results) {
-      const entry = byApp[row.app_id];
+      const entry = byApp[row.bot_id];
       if (entry) entry.rejected24h = row.n;
     }
     return byApp;
@@ -883,7 +771,7 @@ export function createAppsStore(db: AppsStoreD1) {
         .prepare(
           `SELECT r.owner, r.repo, r.pr_number, r.head_sha, r.acquired_at
            FROM review_inflight r
-           JOIN app_installations i ON i.installation_id = r.installation_id AND i.app_id = ?
+           JOIN bot_installations i ON i.installation_id = r.installation_id AND i.bot_id = ?
            WHERE r.expires_at > ?`,
         )
         .bind(appId, new Date().toISOString())
@@ -899,40 +787,47 @@ export function createAppsStore(db: AppsStoreD1) {
     /**
      * Insert a new active app row (status 'active', deleted_at NULL) with
      * the CALLER-SUPPLIED id as the row PK (review pin — the caller's
-     * secretbox AAD rowKey is this id), plus its `app_workspaces` mapping to
-     * the REQUIRED `input.workspaceId`. Ownership is never discovered: the
-     * named workspace must still be live, and a dead target refuses the write
-     * with zero rows. The two inserts are ONE batch transaction, so an App
-     * never exists without an owner. sandbox_image_id is omitted: the
-     * migration 0018 DDL default materializes every new row onto the
-     * registry's default image ('omp') — the store face for changing it is
-     * setSandboxImage. A UNIQUE violation on github_app_id throws — the
-     * commit path turns it into `already_connected` (409).
+     * secretbox AAD rowKey is this id), plus its `bot_workspaces` mapping to
+     * the REQUIRED `input.workspaceId` and its ONE review target. Ownership is
+     * never discovered: the named workspace must still be live, and a dead
+     * target refuses the write with zero rows. The three inserts are ONE batch
+     * transaction, so a bot never exists without an owner or an unconfigured
+     * review surface. sandbox_image_id is omitted: the migration 0018 DDL
+     * default materializes every new row onto the registry's default image
+     * ('omp') — the store face for changing it is setSandboxImage. A UNIQUE
+     * violation on github_app_id throws — the commit path turns it into
+     * `already_connected` (409).
      *
-     * `check_min_score` is seeded explicitly from `input.defaultCheckMinScore`
-     * (the caller's workspace read; platform default `DEFAULT_CHECK_MIN_SCORE`
-     * when absent), so a new App inherits the tenant's default floor instead of
-     * the column's historical 0045 value.
+     * The target keeps the DDL defaults a migrated target carries —
+     * review_enabled 1, review_trigger_mode 'every_push', review_level NULL,
+     * `["ship it"]` verdicts, allowlist off — except for `check_min_score`,
+     * seeded explicitly from `input.defaultCheckMinScore` (the caller's
+     * workspace read; platform default `DEFAULT_CHECK_MIN_SCORE` when absent),
+     * so a new target inherits the tenant's default floor. `installation_id`
+     * stays NULL: the create path binds no installation.
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
       // Ownership is a caller input, never a lookup: the named workspace must
       // still be live (a soft-deleted one is refused identically to an unknown
       // id). A clean throw here leaves no half-written App.
-      const target = await db
+      const liveWorkspace = await db
         .prepare(`SELECT id FROM workspaces WHERE id = ? AND deleted_at IS NULL`)
         .bind(input.workspaceId)
         .first<{ id: string }>();
-      if (!target) {
+      if (!liveWorkspace) {
         throw new Error("apps-store: createApp target workspace is not live");
       }
+      const checkMinScore = isCheckMinScoreValue(input.defaultCheckMinScore)
+        ? input.defaultCheckMinScore
+        : DEFAULT_CHECK_MIN_SCORE;
       await db.batch([
         db
           .prepare(
-            `INSERT INTO github_apps
+            `INSERT INTO review_bots
                (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-                check_min_score, created_by, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
+                created_by, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
           )
           .bind(
             id,
@@ -941,16 +836,20 @@ export function createAppsStore(db: AppsStoreD1) {
             input.name,
             input.privateKeyEnc,
             input.webhookSecretEnc,
-            isCheckMinScoreValue(input.defaultCheckMinScore)
-              ? input.defaultCheckMinScore
-              : DEFAULT_CHECK_MIN_SCORE,
             input.createdBy,
           ),
         db
-          .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)`)
+          .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)`)
           .bind(id, input.workspaceId),
+        db
+          .prepare(
+            `INSERT INTO review_targets
+               (id, workspace_id, bot_id, name, check_min_score, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+          )
+          .bind(crypto.randomUUID(), input.workspaceId, id, input.name, checkMinScore, input.createdBy),
       ]);
-      const row = await db.prepare(`SELECT * FROM github_apps WHERE id = ?`).bind(id).first<GithubAppRow>();
+      const row = await db.prepare(`SELECT * FROM review_bots WHERE id = ?`).bind(id).first<GithubAppRow>();
       if (!row) {
         throw new Error("apps-store: createApp row vanished on read-back");
       }
@@ -1004,64 +903,10 @@ export function createAppsStore(db: AppsStoreD1) {
      */
     async getSandboxImageId(appId: string): Promise<string | null> {
       const row = await db
-        .prepare(`SELECT sandbox_image_id FROM github_apps WHERE id = ?`)
+        .prepare(`SELECT sandbox_image_id FROM review_bots WHERE id = ?`)
         .bind(appId)
         .first<{ sandbox_image_id: string }>();
       return row?.sandbox_image_id ?? null;
-    },
-
-    /**
-     * The App's review gate (migration 0045). Unknown id → null (the
-     * getSandboxImageId convention). No tenant join: the gate is a
-     * configuration value. A stored verdict array that is unparseable,
-     * off-vocabulary or not an array also reads as null — the same
-     * "unreadable" meaning, so every consumer fails closed instead of
-     * inventing a permissive default.
-     *
-     * The floor a NEW App starts at is `input.defaultCheckMinScore` (the
-     * caller's workspace read; platform default `DEFAULT_CHECK_MIN_SCORE`, 60),
-     * seeded by `createApp`.
-     * The column's own `DEFAULT 80` is 0045's historical value: SQLite cannot
-     * alter it without a parent-table rebuild, and that rebuild would run
-     * `pull_requests`' `ON DELETE CASCADE` (0039) against a dropped parent.
-     */
-    async getCheckGate(appId: string): Promise<CheckGate | null> {
-      const row = await db
-        .prepare(`SELECT check_min_score, check_pass_verdicts FROM github_apps WHERE id = ?`)
-        .bind(appId)
-        .first<{ check_min_score: number; check_pass_verdicts: string }>();
-      if (!row) return null;
-      const passVerdicts = storedPassVerdicts(row.check_pass_verdicts);
-      if (passVerdicts === null) return null;
-      return { minScore: row.check_min_score, passVerdicts };
-    },
-
-    /**
-     * The App's owner allowlist (migration 0045): the switch plus the owner
-     * logins sorted by `owner_login` (SQLite's BINARY collation). The read is
-     * alphabetical, NOT submission order — there is no sequence column, so the
-     * settings form does not play the list back as it was saved. Unknown id →
-     * null. ONE statement, so the switch and the owner set come from the same
-     * snapshot — a save landing between two reads could otherwise admit against
-     * a switch that no longer applies to the list it was read with.
-     */
-    async getAllowlist(appId: string): Promise<AppAllowlist | null> {
-      const rows = await db
-        .prepare(
-          `SELECT g.allowlist_enabled AS enabled, a.owner_login
-             FROM github_apps g
-             LEFT JOIN app_owner_allowlist a ON a.app_id = g.id
-            WHERE g.id = ?
-            ORDER BY a.owner_login`,
-        )
-        .bind(appId)
-        .all<{ enabled: number; owner_login: string | null }>();
-      const [first] = rows.results;
-      if (first === undefined) return null;
-      return {
-        enabled: first.enabled !== 0,
-        owners: rows.results.flatMap((row) => (row.owner_login === null ? [] : [row.owner_login])),
-      };
     },
 
     /**
@@ -1071,7 +916,7 @@ export function createAppsStore(db: AppsStoreD1) {
      */
     async getGithubVisibility(appId: string): Promise<GithubVisibility | null> {
       const row = await db
-        .prepare(`SELECT github_visibility FROM github_apps WHERE id = ?`)
+        .prepare(`SELECT github_visibility FROM review_bots WHERE id = ?`)
         .bind(appId)
         .first<{ github_visibility: GithubVisibility | null }>();
       if (!row) return null;
@@ -1086,7 +931,7 @@ export function createAppsStore(db: AppsStoreD1) {
     async setAppStatus(id: string, status: GithubAppStatus): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE github_apps SET status = ?, updated_at = datetime('now')
+          `UPDATE review_bots SET status = ?, updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(status, id)
@@ -1105,162 +950,12 @@ export function createAppsStore(db: AppsStoreD1) {
     async setReviewEnabled(id: string, enabled: boolean): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE github_apps SET review_enabled = ?, updated_at = datetime('now')
+          `UPDATE review_bots SET review_enabled = ?, updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(enabled ? 1 : 0, id)
         .run();
       return res.meta.changes > 0;
-    },
-
-    /**
-     * Select the per-App review trigger mode (migration 0022, spec
-     * review-trigger-policy §2). The mode must be on the
-     * REVIEW_TRIGGER_MODES vocabulary — anything else throws BEFORE any
-     * write (the setSandboxImage store-enforced value domain backstop; the
-     * settings route answers 400 first, and the DDL CHECK is the last line).
-     * Writes review_trigger_mode + updated_at (an operator mutation, the
-     * setReviewEnabled convention) and refuses soft-deleted rows exactly
-     * like setAppStatus. Returns whether a row changed (false also covers
-     * unknown ids).
-     */
-    async setReviewTriggerMode(id: string, mode: ReviewTriggerMode): Promise<boolean> {
-      if (!REVIEW_TRIGGER_MODES.includes(mode)) {
-        throw new Error(
-          `apps-store: review trigger mode ${JSON.stringify(mode)} is not on the vocabulary (${REVIEW_TRIGGER_MODES.join(" | ")}) — zero rows written`,
-        );
-      }
-      const res = await db
-        .prepare(
-          `UPDATE github_apps SET review_trigger_mode = ?, updated_at = datetime('now')
-           WHERE id = ? AND deleted_at IS NULL`,
-        )
-        .bind(mode, id)
-        .run();
-      return res.meta.changes > 0;
-    },
-
-    /**
-     * Select the App's review level (migration 0047). `null` is the
-     * "follow the operator default" choice and writes the column back to NULL,
-     * so it is a successful write, not a no-op. A non-null level must be on the
-     * shared `REVIEW_LEVELS` vocabulary — anything else throws BEFORE any write
-     * (the setReviewTriggerMode backstop; the settings route 400s first, and
-     * the DDL CHECK is the last line). Writes review_level + updated_at (an
-     * operator mutation, the setReviewEnabled convention) and refuses
-     * soft-deleted rows exactly like setAppStatus. Returns whether a row
-     * changed (false also covers unknown ids).
-     */
-    async setReviewLevel(id: string, level: ReviewLevel | null): Promise<boolean> {
-      if (level !== null && !isReviewLevel(level)) {
-        throw new Error(
-          `apps-store: review level ${JSON.stringify(level)} is not on the vocabulary (${REVIEW_LEVELS.join(" | ")}) — zero rows written`,
-        );
-      }
-      const res = await db
-        .prepare(
-          `UPDATE github_apps SET review_level = ?, updated_at = datetime('now')
-           WHERE id = ? AND deleted_at IS NULL`,
-        )
-        .bind(level, id)
-        .run();
-      return res.meta.changes > 0;
-    },
-
-    /**
-     * Save the App's review gate (migration 0045). The score must be an
-     * integer in 0..100 and every verdict must be on the engine `PR_VERDICTS`
-     * vocabulary — anything else throws BEFORE any write (the
-     * setReviewTriggerMode backstop; the settings route answers 400 first,
-     * and the DDL CHECK is the last line for the score). The verdict array is
-     * stored as JSON, the form the DDL default uses. Writes the two gate
-     * columns + updated_at (an operator mutation) and refuses soft-deleted
-     * rows exactly like setAppStatus. Returns whether a row changed (false
-     * also covers unknown ids).
-     */
-    async saveCheckGate(id: string, gate: CheckGate): Promise<boolean> {
-      if (!Number.isInteger(gate.minScore) || gate.minScore < 0 || gate.minScore > 100) {
-        throw new Error(
-          `apps-store: check gate min score ${JSON.stringify(gate.minScore)} is outside 0..100 — zero rows written`,
-        );
-      }
-      for (const verdict of gate.passVerdicts) {
-        if (!PR_VERDICTS.includes(verdict)) {
-          throw new Error(
-            `apps-store: check gate verdict ${JSON.stringify(verdict)} is not on PR_VERDICTS (${PR_VERDICTS.join(" | ")}) — zero rows written`,
-          );
-        }
-      }
-      const res = await db
-        .prepare(
-          `UPDATE github_apps
-           SET check_min_score = ?, check_pass_verdicts = ?, updated_at = datetime('now')
-           WHERE id = ? AND deleted_at IS NULL`,
-        )
-        .bind(gate.minScore, JSON.stringify(gate.passVerdicts), id)
-        .run();
-      return res.meta.changes > 0;
-    },
-
-    /**
-     * Save the App's owner allowlist (migration 0045): the switch plus the
-     * owner set, which is REPLACED — delete-then-insert in ONE batch, so a
-     * removal is written by the same operation that adds. Duplicate logins
-     * collapse case-insensitively (GitHub logins are case-insensitive; the
-     * first spelling is kept), because SQLite's (app_id, owner_login) key is
-     * case-sensitive; an empty set is legal and, with the switch on, refuses
-     * every owner (fail closed).
-     * Refuses a soft-deleted or unknown App BEFORE writing (the setAppStatus
-     * rule) and writes updated_at (an operator mutation). Refuses a collapsed
-     * set larger than ALLOWLIST_MAX_OWNERS, also before any read: this method
-     * is where the one-batch bound is documented, so it enforces it for direct
-     * callers too. Returns whether the
-     * App row was still live when the batch ran: every batch statement — the
-     * DELETE, each INSERT and the UPDATE — repeats the `deleted_at IS NULL`
-     * predicate, so a delete landing between the pre-read and the batch writes
-     * nothing at all (no orphan owner rows) and the UPDATE's change count
-     * reports `false` instead of a save that never took effect.
-     */
-    async saveAllowlist(id: string, allowlist: AppAllowlist): Promise<boolean> {
-      // Collapse first: the INSERT count is the deduped set, so duplicates
-      // must not consume the budget.
-      const owners = dedupeOwnerLogins(allowlist.owners);
-      if (owners.length > ALLOWLIST_MAX_OWNERS) {
-        throw new Error(
-          `apps-store: owner allowlist holds ${owners.length} logins, above ALLOWLIST_MAX_OWNERS (${ALLOWLIST_MAX_OWNERS}) — zero rows written`,
-        );
-      }
-      const live = await db
-        .prepare(`SELECT id FROM github_apps WHERE id = ? AND deleted_at IS NULL`)
-        .bind(id)
-        .first<{ id: string }>();
-      if (!live) return false;
-      // Every statement repeats the liveness predicate: a soft delete landing
-      // between the pre-read and the batch then writes NO owner rows and does
-      // not flip the switch, instead of leaving a deleted App's list behind.
-      // ONE batch on purpose: chunking was tried and reverted because a split
-      // replace is not atomic — a failed later chunk leaves a partial owner
-      // set. The statement count (ALLOWLIST_MAX_OWNERS + 2) stays below any
-      // observed D1 batch limit.
-      const liveApp = `EXISTS (SELECT 1 FROM github_apps g WHERE g.id = ? AND g.deleted_at IS NULL)`;
-      const results = await db.batch([
-        db.prepare(`DELETE FROM app_owner_allowlist WHERE app_id = ? AND ${liveApp}`).bind(id, id),
-        ...owners.map((owner) =>
-          db
-            .prepare(
-              `INSERT INTO app_owner_allowlist (app_id, owner_login, created_at)
-               SELECT ?, ?, datetime('now') WHERE ${liveApp}`,
-            )
-            .bind(id, owner, id),
-        ),
-        db
-          .prepare(
-            `UPDATE github_apps SET allowlist_enabled = ?, updated_at = datetime('now')
-             WHERE id = ? AND deleted_at IS NULL`,
-          )
-          .bind(allowlist.enabled ? 1 : 0, id),
-      ]);
-      return (results.at(-1)?.meta.changes ?? 0) > 0;
     },
 
     /**
@@ -1275,7 +970,7 @@ export function createAppsStore(db: AppsStoreD1) {
     async saveGithubVisibility(id: string, visibility: GithubVisibility): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE github_apps SET github_visibility = ?
+          `UPDATE review_bots SET github_visibility = ?
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(visibility, id)
@@ -1303,7 +998,7 @@ export function createAppsStore(db: AppsStoreD1) {
       }
       const res = await db
         .prepare(
-          `UPDATE github_apps SET sandbox_image_id = ?, updated_at = datetime('now')
+          `UPDATE review_bots SET sandbox_image_id = ?, updated_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(image.id, id)
@@ -1313,18 +1008,28 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * Soft delete (the only removal path, Clarify #4): stamps deleted_at
-     * once — a second call is a no-op returning false and the first
-     * timestamp wins. Returns whether THIS call performed the delete.
+     * once on the bot AND on every target the bot owns — one product surface,
+     * so a deleted bot must not leave readable review configuration behind.
+     * Both statements are ONE batch and both carry `deleted_at IS NULL`, so a
+     * second call is a no-op returning false and the first timestamp wins on
+     * both rows. Returns whether THIS call performed the delete.
      */
     async softDeleteApp(id: string): Promise<boolean> {
-      const res = await db
-        .prepare(
-          `UPDATE github_apps SET deleted_at = datetime('now'), updated_at = datetime('now')
-           WHERE id = ? AND deleted_at IS NULL`,
-        )
-        .bind(id)
-        .run();
-      return res.meta.changes > 0;
+      const [botResult] = await db.batch([
+        db
+          .prepare(
+            `UPDATE review_bots SET deleted_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ? AND deleted_at IS NULL`,
+          )
+          .bind(id),
+        db
+          .prepare(
+            `UPDATE review_targets SET deleted_at = datetime('now'), updated_at = datetime('now')
+             WHERE bot_id = ? AND deleted_at IS NULL`,
+          )
+          .bind(id),
+      ]);
+      return (botResult?.meta.changes ?? 0) > 0;
     },
 
     /**
@@ -1337,7 +1042,7 @@ export function createAppsStore(db: AppsStoreD1) {
      */
     async touchLastWebhook(id: string): Promise<void> {
       await db
-        .prepare(`UPDATE github_apps SET last_webhook_at = datetime('now') WHERE id = ?`)
+        .prepare(`UPDATE review_bots SET last_webhook_at = datetime('now') WHERE id = ?`)
         .bind(id)
         .run();
     },
@@ -1361,7 +1066,7 @@ export function createAppsStore(db: AppsStoreD1) {
     async saveGithubMetadata(id: string, metadata: GithubAppMetadataInput): Promise<boolean> {
       const res = await db
         .prepare(
-          `UPDATE github_apps
+          `UPDATE review_bots
            SET github_name = ?, github_description = ?, github_html_url = ?,
                github_avatar_url = ?, github_slug = COALESCE(?, github_slug),
                github_metadata_synced_at = datetime('now')
@@ -1392,7 +1097,7 @@ export function createAppsStore(db: AppsStoreD1) {
     async touchGithubMetadataAttempt(id: string): Promise<void> {
       await db
         .prepare(
-          `UPDATE github_apps SET github_metadata_attempted_at = datetime('now')
+          `UPDATE review_bots SET github_metadata_attempted_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(id)
@@ -1422,8 +1127,8 @@ export function createAppsStore(db: AppsStoreD1) {
     async listInstallations(appId: string): Promise<AppInstallationRow[]> {
       const res = await db
         .prepare(
-          `SELECT installation_id, account_login, seen_at FROM app_installations
-           WHERE app_id = ? AND removed_at IS NULL ORDER BY seen_at DESC, installation_id`,
+          `SELECT installation_id, account_login, seen_at FROM bot_installations
+           WHERE bot_id = ? AND removed_at IS NULL ORDER BY seen_at DESC, installation_id`,
         )
         .bind(appId)
         .all<AppInstallationRow>();
@@ -1454,7 +1159,7 @@ export function createAppsStore(db: AppsStoreD1) {
     /**
      * Stamp one installation row as removed (`installation.deleted`). The row
      * SURVIVES — the credential-routing and failure-attribution joins read
-     * `app_installations`, and the installation's historical reviews still
+     * `bot_installations`, and the installation's historical reviews still
      * reference it. An unknown pair is a silent no-op: the delivery may
      * predate any local row, and refusing it would change the webhook answer.
      *
@@ -1470,8 +1175,8 @@ export function createAppsStore(db: AppsStoreD1) {
     async markInstallationRemoved(appId: string, installationId: number): Promise<void> {
       await db
         .prepare(
-          `UPDATE app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
-           WHERE app_id = ? AND installation_id = ?`,
+          `UPDATE bot_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
+           WHERE bot_id = ? AND installation_id = ?`,
         )
         .bind(appId, installationId)
         .run();
@@ -1525,8 +1230,8 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `WITH snapshot(body) AS (SELECT ?)
-             UPDATE app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
-             WHERE app_id = ?
+             UPDATE bot_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
+             WHERE bot_id = ?
                AND removed_at IS NULL
                AND seen_at <= (SELECT json_extract(body, '$.observedAt') FROM snapshot)
                AND installation_id NOT IN (
@@ -1537,8 +1242,8 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `WITH snapshot(body) AS (SELECT ?)
-             UPDATE app_installations SET removed_at = NULL
-             WHERE app_id = ?
+             UPDATE bot_installations SET removed_at = NULL
+             WHERE bot_id = ?
                AND removed_at IS NOT NULL
                AND removed_at < (SELECT json_extract(body, '$.observedAt') FROM snapshot)
                AND installation_id IN (
@@ -1576,7 +1281,7 @@ export function createAppsStore(db: AppsStoreD1) {
           : truncateBounded(input.repositoryFullName, REPOSITORY_FULL_NAME_MAX_LENGTH);
       await db
         .prepare(
-          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name)
+          `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name)
            VALUES (?, ?, ?, ?, ?, ?)`,
         )
         .bind(
@@ -1629,7 +1334,7 @@ export function createAppsStore(db: AppsStoreD1) {
       const res = await db
         .prepare(
           `SELECT * FROM webhook_deliveries
-           WHERE app_id = ?
+           WHERE bot_id = ?
            ORDER BY ${DELIVERY_VERDICT_TIER_SQL}, created_at DESC, rowid DESC
            LIMIT ?`,
         )
@@ -1640,7 +1345,7 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * Record one VERIFIED `pull_request` delivery (migration 0039) —
-     * idempotent on the UNIQUE (app_id, owner, repo, pr_number) tuple: a PR
+     * idempotent on the UNIQUE (bot_id, owner, repo, pr_number) tuple: a PR
      * that arrives several times (opened, synchronize, closed, …) keeps ONE
      * row and `title` / `state` / `head_sha` refresh only when the caller
      * supplies them (a payload that omits a field keeps the last known value
@@ -1682,6 +1387,12 @@ export function createAppsStore(db: AppsStoreD1) {
      *   - an older stamp → both untouched.
      */
     async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
+      // The target is the row's identity half. Refused here, before any bind,
+      // so a caller that forgot it fails loudly instead of writing a row no
+      // tenant read can ever reach (target_id is nullable in the DDL).
+      if (typeof input.targetId !== "string" || input.targetId === "") {
+        throw new Error("upsertPullRequest: targetId is required — the ledger key is (target_id, owner, repo, pr_number)");
+      }
       // The canonical UTC ISO-8601 spelling (`new Date(v).toISOString()`) is a
       // PRECONDITION of the column, which is ordered lexically — a numeric
       // offset would sort wrongly against the stored `Z` values. Enforced here
@@ -1696,9 +1407,9 @@ export function createAppsStore(db: AppsStoreD1) {
       await db
         .prepare(
           `INSERT INTO pull_requests
-             (id, app_id, owner, repo, pr_number, title, state, head_sha, head_at, last_seen_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?), datetime('now')))
-           ON CONFLICT (app_id, owner, repo, pr_number) DO UPDATE SET
+             (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, head_at, last_seen_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?), datetime('now')))
+           ON CONFLICT (target_id, owner, repo, pr_number) DO UPDATE SET
              title = COALESCE(excluded.title, title),
              state = CASE
                WHEN pull_requests.state = 'merged' THEN 'merged'
@@ -1720,6 +1431,7 @@ export function createAppsStore(db: AppsStoreD1) {
         .bind(
           crypto.randomUUID(),
           input.appId,
+          input.targetId,
           input.owner,
           input.repo,
           input.prNumber,
@@ -1740,12 +1452,13 @@ export function createAppsStore(db: AppsStoreD1) {
      * reads it to decide whether a delivery it just dequeued has already been
      * overtaken by a newer commit.
      *
-     * Missing row → `null` (an unknown PR is never a reason to skip), and the
-     * two fields are reported as the row holds them — a `null` stamp is
-     * "unknown", not "now".
+     * EXECUTION read: the job already names the target the webhook resolved,
+     * so this binds the ledger key and no workspace. Missing row → `null` (an
+     * unknown PR is never a reason to skip), and the two fields are reported
+     * as the row holds them — a `null` stamp is "unknown", not "now".
      */
     async selectPrHead(input: {
-      appId: string;
+      targetId: string;
       owner: string;
       repo: string;
       prNumber: number;
@@ -1753,9 +1466,9 @@ export function createAppsStore(db: AppsStoreD1) {
       const row = await db
         .prepare(
           `SELECT head_sha, head_at FROM pull_requests
-           WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+           WHERE target_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
         )
-        .bind(input.appId, input.owner, input.repo, input.prNumber)
+        .bind(input.targetId, input.owner, input.repo, input.prNumber)
         .first<{ head_sha: string | null; head_at: string | null }>();
       return row === null ? null : { headSha: row.head_sha, headAt: row.head_at };
     },
@@ -1766,7 +1479,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * row's D11 reviewing projection. FIVE statements per call regardless of
      * N — the rows, the newest review per (owner, repo, pr_number) via a
      * ROW_NUMBER() window (the deliverySummaries shape), the failure count
-     * joined through `app_installations`, the option set, and the App's live
+     * joined through `bot_installations`, the option set, and the App's live
      * review locks (`liveReviewLocks`) — never one query per row, and never a
      * second round trip for any of them (the lock read is issued beside the
      * batch, not after it).
@@ -1796,7 +1509,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * rides the same batch — and binds only `appId` — so opening the list is
      * one round trip, not two.
      *
-     * Failure attribution assumes ONE installation per App. `app_installations`
+     * Failure attribution assumes ONE installation per App. `bot_installations`
      * permits the same installation id under two App rows, and in that case a
      * failure row would count toward both — accepted, because the alternative
      * (a constraint) would refuse a legitimate re-install shape, and a
@@ -1813,18 +1526,21 @@ export function createAppsStore(db: AppsStoreD1) {
      * tab number, the pager and the rows can never disagree.
      */
     async listPullRequests(
-      appId: string,
+      scope: LedgerScope,
       filter?: { owner: string; repo: string },
     ): Promise<{ rows: PullRequestRow[]; repos: string[] }> {
-      // One binding list per window scope: the App, then the repository when
-      // the caller filtered. The row statement takes it once before the limit;
-      // each aggregate takes its own app_id first, then that same list for the
-      // window subquery, then the limit — the order each SQL splices its `?` in.
-      const scope = filter === undefined ? [appId] : [appId, filter.owner, filter.repo];
       // ONE suffix feeds the row statement and the window, so a change to the
       // window helper cannot leave the rows filtering after the cap.
       const repoPredicate = filter === undefined ? "" : PULL_REQUEST_REPO_PREDICATE;
       const window = pullRequestWindowSql(repoPredicate);
+      // The window's own binds (tenant pair, repo filter, cap), spliced after
+      // each aggregate's own leading predicate.
+      const windowBinds = [
+        scope.targetId,
+        scope.workspaceId,
+        ...(filter === undefined ? [] : [filter.owner, filter.repo]),
+        PULL_REQUEST_LIST_LIMIT,
+      ];
       // The lock projection rides the same round trip: the ledger batch and
       // the App's live locks are independent reads, and only the first may
       // fail the payload.
@@ -1833,41 +1549,44 @@ export function createAppsStore(db: AppsStoreD1) {
           db
             .prepare(
               `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-               FROM pull_requests WHERE app_id = ?${repoPredicate}
+               FROM pull_requests WHERE ${ledgerScopeSql("pull_requests")}${repoPredicate}
                ORDER BY ${PULL_REQUEST_LEDGER_ORDER}
                LIMIT ?`,
             )
-            .bind(...scope, PULL_REQUEST_LIST_LIMIT),
+            .bind(...windowBinds),
           db
             .prepare(
               `SELECT owner, repo, pr_number, verdict, reviewed_at FROM (
                  SELECT owner, repo, pr_number, verdict, reviewed_at,
                         ROW_NUMBER() OVER (PARTITION BY owner, repo, pr_number
                           ORDER BY reviewed_at DESC, rowid DESC) AS rn
-                 FROM reviews
-                 WHERE app_id = ?
+                 FROM reviews r
+                 WHERE ${ledgerScopeSql("r")}
                    AND (owner, repo, pr_number) IN (${window})
                ) WHERE rn = 1`,
             )
-            .bind(appId, ...scope, PULL_REQUEST_LIST_LIMIT),
+            .bind(scope.targetId, scope.workspaceId, ...windowBinds),
           db
             .prepare(
               `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
                FROM review_failures f
-               JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-               WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
+               ${prOwnerJoin("f", "i.bot_id")}
+               WHERE ${ledgerScopeSql("p")}
+                 AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                  AND (f.owner, f.repo, f.pr_number) IN (${window})
                GROUP BY f.owner, f.repo, f.pr_number`,
             )
-            .bind(appId, ...scope, PULL_REQUEST_LIST_LIMIT),
+            .bind(scope.botId, scope.targetId, scope.workspaceId, ...windowBinds),
           db
             .prepare(
-              `SELECT DISTINCT owner, repo FROM pull_requests WHERE app_id = ?
+              `SELECT DISTINCT owner, repo FROM pull_requests
+               WHERE ${ledgerScopeSql("pull_requests")}
                ORDER BY owner, repo`,
             )
-            .bind(appId),
+            .bind(scope.targetId, scope.workspaceId),
         ]),
-        liveReviewLocks(appId),
+        liveReviewLocks(scope.botId),
       ]);
       return {
         rows: assemblePullRequests(
@@ -1884,10 +1603,11 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * ONE pull request's head row — the detail face's first read. The address
-     * is the ledger's OWN key (app_id, owner, repo, pr_number): one App can be
-     * installed on several repos, and a number is only unique WITHIN a repo,
-     * so a number-only lookup would answer with a different repo's PR. A miss
-     * is `null` — never a same-number row from another repo.
+     * is the ledger's OWN key (target_id, owner, repo, pr_number): one target
+     * can hold several repos, and a number is only unique WITHIN a repo, so a
+     * number-only lookup would answer with a different repo's PR. A miss is
+     * `null` — never a same-number row from another repo, and never a row
+     * whose target belongs to another workspace.
      *
      * The newest review rides along as a whole row: it is the header's ONE
      * authoritative verdict/attribution source, so paging the reviews section
@@ -1898,7 +1618,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * one field to `unknown` rather than failing the head.
      */
     async getPullRequestHead(
-      appId: string,
+      scope: LedgerScope,
       owner: string,
       repo: string,
       prNumber: number,
@@ -1908,18 +1628,18 @@ export function createAppsStore(db: AppsStoreD1) {
           db
             .prepare(
               `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-               FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+               FROM pull_requests p WHERE ${ledgerScopeSql("p")} AND p.owner = ? AND p.repo = ? AND p.pr_number = ?`,
             )
-            .bind(appId, owner, repo, prNumber),
+            .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber),
           db
             .prepare(
-              `SELECT verdict, model, provider, reviewed_at, head_sha FROM reviews
-               WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+              `SELECT verdict, model, provider, reviewed_at, head_sha FROM reviews r
+               WHERE ${ledgerScopeSql("r")} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?
                ORDER BY reviewed_at DESC, rowid DESC LIMIT 1`,
             )
-            .bind(appId, owner, repo, prNumber),
+            .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber),
         ]),
-        liveReviewLocks(appId),
+        liveReviewLocks(scope.botId),
       ]);
       const row = results[0]!.results[0] as PullRequestBaseRow | undefined;
       if (row === undefined) return null;
@@ -1951,7 +1671,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * work left on the PR — it must not keep the tab count or the dot alive.
      */
     async countPullRequestRecords(
-      appId: string,
+      scope: LedgerScope,
       owner: string,
       repo: string,
       prNumber: number,
@@ -1959,31 +1679,37 @@ export function createAppsStore(db: AppsStoreD1) {
       const results = await db.batch([
         db
           .prepare(
-            `SELECT COUNT(*) AS n FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'`,
+            `SELECT COUNT(*) AS n FROM review_findings rf
+             ${prOwnerJoin("rf", "rf.bot_id")}
+             WHERE ${ledgerScopeSql("p")}
+               AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'`,
           )
-          .bind(appId, owner, repo, prNumber),
+          .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT COUNT(*) AS n FROM reviews
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+            `SELECT COUNT(*) AS n FROM reviews r
+             WHERE ${ledgerScopeSql("r")} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?`,
           )
-          .bind(appId, owner, repo, prNumber),
+          .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_failures f
-             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+             JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
+             ${prOwnerJoin("f", "i.bot_id")}
+             WHERE ${ledgerScopeSql("p")}
+               AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
-          .bind(appId, owner, repo, prNumber),
+          .bind(scope.botId, scope.targetId, scope.workspaceId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT COUNT(*) AS n FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'
-               AND json_extract(original_json, '$.mergeClass') = ?`,
+            `SELECT COUNT(*) AS n FROM review_findings rf
+             ${prOwnerJoin("rf", "rf.bot_id")}
+             WHERE ${ledgerScopeSql("p")}
+               AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'
+               AND json_extract(rf.original_json, '$.mergeClass') = ?`,
           )
-          .bind(appId, owner, repo, prNumber, MUST_FIX_SEVERITY),
+          .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber, MUST_FIX_SEVERITY),
       ]);
       return {
         findings: countOf(results[0]!),
@@ -2031,7 +1757,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * immutable insert key for the same reason.
      */
     async listPullRequestFindings(
-      appId: string,
+      scope: LedgerScope,
       owner: string,
       repo: string,
       prNumber: number,
@@ -2053,13 +1779,15 @@ export function createAppsStore(db: AppsStoreD1) {
           ? []
           : [page.severity];
       const results = await db.batch([
-        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
+        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(scope.targetId, scope.workspaceId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings rf
-             WHERE rf.app_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}`,
+             ${prOwnerJoin("rf", "rf.bot_id")}
+             WHERE ${ledgerScopeSql("p")}
+               AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}`,
           )
-          .bind(appId, owner, repo, prNumber, ...filterBinds),
+          .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber, ...filterBinds),
         db
           .prepare(
             `SELECT rf.finding_id,
@@ -2070,11 +1798,13 @@ export function createAppsStore(db: AppsStoreD1) {
                     json_extract(rf.original_json, '$.body') AS body,
                     rf.first_seen_round AS review_round
              FROM review_findings rf
-             WHERE rf.app_id = ? AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}
+             ${prOwnerJoin("rf", "rf.bot_id")}
+             WHERE ${ledgerScopeSql("p")}
+               AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}
              ORDER BY rf.rowid DESC
              LIMIT ? OFFSET ?`,
           )
-          .bind(appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
+          .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
       ]);
       if (results[0]!.results.length === 0) return null;
       return {
@@ -2104,20 +1834,20 @@ export function createAppsStore(db: AppsStoreD1) {
      * `{}`, never NULL.
      */
     async listPullRequestReviews(
-      appId: string,
+      scope: LedgerScope,
       owner: string,
       repo: string,
       prNumber: number,
       page: PullRequestPageRequest,
     ): Promise<PullRequestRecordPage<PullRequestReviewDetailRow> | null> {
       const results = await db.batch([
-        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
+        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(scope.targetId, scope.workspaceId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT COUNT(*) AS n FROM reviews
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+            `SELECT COUNT(*) AS n FROM reviews r
+             WHERE ${ledgerScopeSql("r")} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?`,
           )
-          .bind(appId, owner, repo, prNumber),
+          .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT x.verdict, x.model, x.provider, x.reviewed_at, x.head_sha,
@@ -2132,11 +1862,11 @@ export function createAppsStore(db: AppsStoreD1) {
                             ROW_NUMBER() OVER (ORDER BY r.reviewed_at ASC, r.rowid ASC)
                           ) AS round
                    FROM reviews r
-                   WHERE r.app_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) x
+                   WHERE ${ledgerScopeSql("r")} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) x
              ORDER BY x.reviewed_at DESC, x.rid DESC
              LIMIT ? OFFSET ?`,
           )
-          .bind(appId, owner, repo, prNumber, page.limit, page.offset),
+          .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber, page.limit, page.offset),
       ]);
       if (results[0]!.results.length === 0) return null;
       return {
@@ -2157,34 +1887,38 @@ export function createAppsStore(db: AppsStoreD1) {
      * rows. `null` = the App's ledger does not hold this PR.
      */
     async listPullRequestFailures(
-      appId: string,
+      scope: LedgerScope,
       owner: string,
       repo: string,
       prNumber: number,
       page: PullRequestPageRequest,
     ): Promise<PullRequestRecordPage<PullRequestFailureDetailRow> | null> {
       const results = await db.batch([
-        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
+        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(scope.targetId, scope.workspaceId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n
              FROM review_failures f
-             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+             JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
+             ${prOwnerJoin("f", "i.bot_id")}
+             WHERE ${ledgerScopeSql("p")}
+               AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
-          .bind(appId, owner, repo, prNumber),
+          .bind(scope.botId, scope.targetId, scope.workspaceId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
-             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+             JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
+             ${prOwnerJoin("f", "i.bot_id")}
+             WHERE ${ledgerScopeSql("p")}
+               AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC
              LIMIT ? OFFSET ?`,
           )
-          .bind(appId, owner, repo, prNumber, page.limit, page.offset),
+          .bind(scope.botId, scope.targetId, scope.workspaceId, owner, repo, prNumber, page.limit, page.offset),
       ]);
       if (results[0]!.results.length === 0) return null;
       return {

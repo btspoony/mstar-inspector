@@ -381,7 +381,7 @@ describe("deploy-prod.yml guards", () => {
     for (const n of [
       "Verify Cloudflare account",
       "Apply prod D1 migrations (remote)",
-      "Re-run App attribution repair (0027, idempotent)",
+      "Re-run App attribution repair (workspace-backfill.sql, idempotent)",
       "Assert zero orphan Apps (pre-deploy gate)",
       "Deploy Worker (prod)",
       "Deploy serving version (prod)",
@@ -412,7 +412,7 @@ describe("deploy-prod.yml guards", () => {
         "Deploy serving version (prod)",
         "Deploy Worker (prod)",
         "Re-capture live Worker version",
-        "Re-run App attribution repair (0027, idempotent)",
+        "Re-run App attribution repair (workspace-backfill.sql, idempotent)",
         "Verify Cloudflare account",
         "Write ALERT_WEBHOOK_URL secret (bind, or null-delete when unset)",
         "Write required secrets",

@@ -470,7 +470,7 @@ describe("no deployment allowlist survives", () => {
 
 /**
  * The deployment-wide review brake is GONE end to end (2026-10): per-App
- * `github_apps.review_enabled` is the only review control, so a surviving
+ * `review_bots.review_enabled` is the only review control, so a surviving
  * reader, env declaration or doc row would document a variable nothing reads
  * — and would imply a deployment can freeze every tenant's reviews.
  * `.changes/unreleased/*` is release history and deliberately NOT scanned.

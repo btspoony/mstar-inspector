@@ -11,3 +11,4 @@ These specifications describe current contracts; decision history lives in the A
 | Feature | [Review lifecycle](feature/review-lifecycle.md) |
 | Feature | [Review trigger policy](feature/review-trigger-policy.md) |
 | Feature | [App detail visibility](feature/app-detail-visibility.md) |
+| Feature | [Review targets](feature/review-targets.md) |

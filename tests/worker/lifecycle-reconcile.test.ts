@@ -66,7 +66,7 @@ import type { UpsertPlan } from "../../src/pipeline/comment";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { PreparedSendRejected } from "../../src/pipeline/comment";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { testAppPem } from "../helpers/rsa-key";
 
 const APP = "11111111-2222-3333-4444-555555555555";
@@ -120,16 +120,17 @@ function seedApp(db: TestD1, id: string, seed: AppSeed = {}): void {
   } = seed;
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, review_enabled, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, ?, ?, datetime('now'), datetime('now'))`,
     )
     .run(id, `reconcile-${id}`, githubAppId, `reconcile-${id}`, status, deletedAt, reviewEnabled);
+  seedTarget(db, id, { id: `target-${id}` });
   if (install) {
     db.raw
       .prepare(
-        `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
          VALUES (?, ?, ?, 'acme', datetime('now'))`,
       )
       .run(`inst-${id}-${installationId}`, id, installationId);
@@ -169,6 +170,7 @@ function artifactDoc(scope: Scope, headSha: string) {
     schema: "mstar.review/v1" as const,
     payload: enginePayload(),
     appId: scope.appId,
+    targetId: `target-${scope.appId}`,
   };
 }
 
@@ -271,7 +273,7 @@ async function seedRealApp(db: TestD1, id: string, githubAppId: number): Promise
   );
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, review_enabled, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'enc-secret', 'tester', 'active', NULL, 1, datetime('now'), datetime('now'))`,
@@ -279,17 +281,18 @@ async function seedRealApp(db: TestD1, id: string, githubAppId: number): Promise
     .run(id, `reconcile-${id}`, githubAppId, `reconcile-${id}`, encrypted);
   db.raw
     .prepare(
-      `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
        VALUES (?, ?, ?, 'acme', datetime('now'))`,
     )
     .run(`inst-${id}-${SCOPE.installationId}`, id, SCOPE.installationId);
+  seedTarget(db, id, { id: `target-${id}` });
 }
 
 function seedFindingRow(db: TestD1, id: string, publicationId: string, scope: Scope, state = "addressed"): void {
   db.raw
     .prepare(
       `INSERT INTO review_findings
-         (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+         (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
           first_seen_round, last_seen_round, state, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 1, 1, ?, ?, ?)`,
@@ -324,7 +327,7 @@ function seedThreadRow(
   db.raw
     .prepare(
       `INSERT INTO review_threads
-         (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+         (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
           original_sha, round, intent_json, resolution_state, verified_json, attempts, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
     )
@@ -726,7 +729,7 @@ describe("credential routing — suspension and re-enable (spec §7.6/§7.11.1)"
     const db = createMigratedTestD1();
     const APP_C = "cccccccc-dddd-eeee-ffff-000000000001";
     const SCOPE_C: Scope = { appId: APP_C, installationId: 789, owner: "third", repo: "tools", prNumber: 9 };
-    seedApp(db, APP, { install: false }); // missing app_installations mapping
+    seedApp(db, APP, { install: false }); // missing bot_installations mapping
     seedApp(db, APP_B, { githubAppId: 1002, status: "disabled", installationId: SCOPE_B.installationId });
     seedApp(db, APP_C, { githubAppId: 1003, deletedAt: new Date().toISOString(), installationId: SCOPE_C.installationId });
     await seedPrepared(db, "pub-a", degradedPayload(SCOPE), 120_000);
@@ -761,7 +764,7 @@ describe("credential routing — suspension and re-enable (spec §7.6/§7.11.1)"
     await reconcile(db, { now: () => T0 }); // production routing: disabled → suspended
     expect(pubRow(db, "pub-a").recovery_state).toBe("suspended");
 
-    db.raw.prepare(`UPDATE github_apps SET status = 'active' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE review_bots SET status = 'active' WHERE id = ?`).run(APP);
     // The re-enable probe is D1-only; the injected reviewer keeps the
     // resumed pair off the suspension path for this pass.
     await reconcile(db, { now: () => T0 + 1_000, reviewer: okReviewer() });
@@ -1520,7 +1523,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
         correctedPem,
         `github_apps.private_key_enc:${APP}`,
       );
-      db.raw.prepare(`UPDATE github_apps SET private_key_enc = ? WHERE id = ?`).run(corrected, APP);
+      db.raw.prepare(`UPDATE review_bots SET private_key_enc = ? WHERE id = ?`).run(corrected, APP);
       globalThis.fetch = (async (input: unknown) => {
         requests.push(String(input));
         return new Response(JSON.stringify({ id: 1001, slug: "acme-inspector" }), {
@@ -1548,7 +1551,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
     expect(pubRow(db, "pub-a").recovery_state).toBe("suspended");
     expect(pubRow(db, "pub-a").last_error).toContain("suspend:disabled:");
 
-    db.raw.prepare(`UPDATE github_apps SET status = 'active' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE review_bots SET status = 'active' WHERE id = ?`).run(APP);
     // The status-only resume still applies: no credential identity question
     // was ever at issue for a disabled App.
     await reconcile(db, { now: () => T0 + 1_000, reviewer: okReviewer() });

@@ -10,8 +10,8 @@
  * Column shapes mirror `migrations/0001_reviews.sql` +
  * `0002_mstar_review_v1.sql` (DDL single sources). Later append-only
  * migrations extend the table WITHOUT changing these types: migration 0005
- * added `reviews.app_id` (TEXT, NULL = legacy; FK to github_apps), which is
- * bound on WRITE only — the ArtifactStore `put` doc carries the per-App
+ * added `reviews.bot_id` (TEXT, NULL = legacy; FK to `review_bots`), which is
+ * bound on WRITE only — the ArtifactStore `put` doc carries the per-bot
  * `appId` (src/store/artifact-store.ts) — and `ReviewRow` deliberately
  * omits it because no read path consumes the column.
  */
@@ -83,7 +83,7 @@ export type FindingRow = {
 /** A row of the `review_publications` journal (private — spec §7.1 Visibility). */
 export type ReviewPublicationRow = {
   id: string;
-  app_id: string;
+  bot_id: string;
   installation_id: number;
   owner: string;
   repo: string;
@@ -109,7 +109,7 @@ export type ReviewPublicationRow = {
 /** A row of the `review_findings` lifecycle table. */
 export type ReviewFindingRow = {
   id: string;
-  app_id: string;
+  bot_id: string;
   installation_id: number;
   owner: string;
   repo: string;
@@ -147,7 +147,7 @@ export type ReviewThreadRow = {
   id: string;
   finding_row_id: string;
   publication_id: string;
-  app_id: string;
+  bot_id: string;
   installation_id: number;
   owner: string;
   repo: string;
@@ -183,7 +183,7 @@ export type ReviewThreadRow = {
  */
 export type ReviewCheckRow = {
   id: string;
-  app_id: string;
+  bot_id: string;
   github_app_id: number;
   installation_id: number;
   owner: string;

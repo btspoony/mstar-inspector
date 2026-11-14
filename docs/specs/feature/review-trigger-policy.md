@@ -21,8 +21,8 @@ The comment trigger is a **bare mention**: no slash command, no magic wording. `
 
 | Field | Contract |
 |---|---|
-| Storage | `github_apps.review_trigger_mode TEXT NOT NULL DEFAULT 'every_push' CHECK (review_trigger_mode IN ('open','every_push','manual'))` (migration `0022_app_trigger_mode.sql`) |
-| Scope | Per App. No deployment-level override — `github_apps.review_enabled` governs every enqueue path alongside the platform `review_global` flag |
+| Storage | `review_targets.review_trigger_mode TEXT NOT NULL DEFAULT 'every_push' CHECK (review_trigger_mode IN ('open','every_push','manual'))` — moved there by `0057_review_targets.sql`; the bot row no longer holds it |
+| Scope | Per review target. No deployment-level override — the target's `review_enabled` (business pause) or the bot's (operational pause) governs every enqueue path alongside the platform `review_global` flag |
 | Default | `every_push` — new Apps inherit it via the column default; no old-App compatibility or migration UX |
 | Write path | Dashboard App settings (same API surface as the `review_enabled` toggle); an unknown/invalid mode value fails closed with the structured-400 pattern and the stored row is left unchanged — no silent coercion to the default |
 | Read path | The webhook face resolves the App row by workspace id and internal App id before classification and passes the mode (plus the row's cached `github_slug`) into classification — no second lookup, no TOCTOU window beyond the existing row read |

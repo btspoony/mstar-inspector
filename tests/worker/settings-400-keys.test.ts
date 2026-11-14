@@ -8,7 +8,7 @@
  */
 import { describe, expect, spyOn, test } from "bun:test";
 import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
@@ -31,7 +31,7 @@ async function seededWorld(malloryRole: "owner" | "member" = "owner") {
   seedDefaultMemberships(db, { octocat: "owner", mallory: malloryRole });
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
-  const app = await createAppsStore(db).createApp({
+  const app = await createReviewBotsStore(db).createApp({
     id,
     githubSlug: "mallorys-app",
     githubAppId: APP_ID,
@@ -116,7 +116,7 @@ describe("settings 400 key transport", () => {
 
   test("add-key eligibility precheck (non-omp image) → keyed JSON naming provider + image", async () => {
     const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_bots SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);
     const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
       op: "add-key",
       provider: "anthropic",
@@ -275,7 +275,7 @@ describe("F1: a `!`-prefixed key is refused where the operator types it", () => 
       message:
         'That API key starts with "!" — the review runtime would run it as a shell command, so keys of that shape are refused. Nothing was stored.',
     });
-    expect(rawCount(db, "app_provider_keys")).toBe(0);
+    expect(rawCount(db, "bot_provider_keys")).toBe(0);
   });
 
   test("keys/verify → keyed 400 on the closed reason enum, zero writes", async () => {
@@ -289,7 +289,7 @@ describe("F1: a `!`-prefixed key is refused where the operator types it", () => 
       message:
         'That API key starts with "!" — the review runtime would run it as a shell command, so keys of that shape are refused. Nothing was stored.',
     });
-    expect(rawCount(db, "app_provider_keys")).toBe(0);
+    expect(rawCount(db, "bot_provider_keys")).toBe(0);
   });
 
   test("add-custom-provider and add-template-provider → keyed 400, zero writes", async () => {
@@ -313,8 +313,8 @@ describe("F1: a `!`-prefixed key is refused where the operator types it", () => 
           'That API key starts with "!" — the review runtime would run it as a shell command, so keys of that shape are refused. Nothing was stored.',
       });
     }
-    expect(rawCount(db, "app_custom_providers")).toBe(0);
-    expect(rawCount(db, "app_custom_provider_keys")).toBe(0);
+    expect(rawCount(db, "bot_custom_providers")).toBe(0);
+    expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
   });
 
   test("a key that merely CONTAINS `!` still stores (only the leading prefix is the command shape)", async () => {
@@ -331,7 +331,7 @@ describe("F1: a `!`-prefixed key is refused where the operator types it", () => 
         key: sk("ant-mid!bang-1234"),
       });
       expect(res.status).toBe(200);
-      expect(rawCount(db, "app_provider_keys")).toBe(1);
+      expect(rawCount(db, "bot_provider_keys")).toBe(1);
     } finally {
       fetchSpy.mockRestore();
     }
@@ -356,9 +356,9 @@ describe("verify route: a provider the App never declared", () => {
         params: { provider: "opencode-go" },
       });
       expect(fetchSpy).not.toHaveBeenCalled();
-      expect(rawCount(db, "app_custom_providers")).toBe(0);
-      expect(rawCount(db, "app_custom_provider_keys")).toBe(0);
-      expect(rawCount(db, "app_provider_keys")).toBe(0);
+      expect(rawCount(db, "bot_custom_providers")).toBe(0);
+      expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
+      expect(rawCount(db, "bot_provider_keys")).toBe(0);
     } finally {
       fetchSpy.mockRestore();
     }
@@ -368,7 +368,7 @@ describe("verify route: a provider the App never declared", () => {
 describe("CARRY-2: verify-route eligibility rejection gains the keyed face", () => {
   test("/keys/verify precheck → same key as the settings POST family, reason unchanged", async () => {
     const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);
+    rawRun(db, "UPDATE review_bots SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);
     const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: sk("ant-123") });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
@@ -393,7 +393,7 @@ describe("verify route: a spent provider account keeps its own reason", () => {
       const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: sk("ant-123") });
       expect(res.status).toBe(400);
       expect(await res.json()).toEqual({ ok: false, reason: "quota_exhausted" });
-      expect(rawCount(db, "app_provider_keys")).toBe(0);
+      expect(rawCount(db, "bot_provider_keys")).toBe(0);
     } finally {
       fetchSpy.mockRestore();
     }
@@ -421,7 +421,9 @@ describe("review depth op (per-App review level)", () => {
 
   /** The stored column — the zero-write / stored assertion. */
   const storedLevel = (db: TestD1, appId: string): string | null => {
-    const row = db.raw.query("SELECT review_level FROM github_apps WHERE id = ?").get(appId) as {
+    const row = db.raw
+      .query("SELECT review_level FROM review_targets WHERE bot_id = ?")
+      .get(appId) as {
       review_level: string | null;
     } | null;
     return row?.review_level ?? null;

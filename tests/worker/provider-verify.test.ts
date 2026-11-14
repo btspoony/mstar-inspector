@@ -12,6 +12,10 @@
  * exercised against a DB that already holds data, exactly like
  * `wrangler d1 migrations apply`.
  *
+ * This world stops below 0056: the suite needs the pre-0015 provider tables
+ * (it applies 0015 itself), and those tables are exactly the ones the rename
+ * rewrites, so the fixture keeps the pre-rename names it builds and asserts.
+ *
  * Verify-service tests use a mocked fetch: success+models / 401 / timeout /
  * non-JSON / quota-class refusals (402, a generic quota body) / a 429 kept
  * apart as its own throttled reason /
@@ -22,7 +26,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
 import { PROVIDER_VERIFY_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
-import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import {
   MAX_PROVIDER_KEY_LENGTH,
@@ -66,7 +70,7 @@ function rawRun(db: TestD1, sql: string, ...params: (string | number | null)[]):
 async function seedApp(db: DashboardD1, slug: string): Promise<GithubAppRow> {
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
-  return createAppsStore(db).createApp({
+  return createReviewBotsStore(db).createApp({
     id,
     githubSlug: slug,
     githubAppId: 1001,
@@ -83,27 +87,44 @@ async function seedApp(db: DashboardD1, slug: string): Promise<GithubAppRow> {
  * on an App seeded like production, plus the physical tables a later tail
  * migration indexes (0010/0020) and the 0038-derived tail itself. 0015's own
  * columns are absent here — the test that owns that migration applies it.
+ * The shape stops below 0056, so the App row is written raw in the pre-rename
+ * names (the store faces would address `review_bots`).
  */
 async function createPopulatedPre0015D1(): Promise<TestD1> {
   const db = createTestD1();
   applyMigrations(db, PROVIDER_VERIFY_MIGRATIONS);
-  const app = await seedApp(db, "legacy-app");
+  const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
+  db.raw
+    .prepare(
+      `INSERT INTO github_apps
+         (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, 'legacy-app', 1001, 'legacy-app', ?, ?, 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
+    )
+    .run(
+      id,
+      await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`),
+      await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
+    );
+  db.raw
+    .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
+    .run(id);
   // A key row written BEFORE 0015 — the pre-migration column set.
   rawRun(
     db,
     `INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at, updated_at)
      VALUES (?, 'anthropic', ?, datetime('now'), datetime('now'))`,
-    app.id,
-    await box.encryptSecret(PLAIN_KEY, `app_provider_keys.key_enc:${app.id}:anthropic`),
+    id,
+    await box.encryptSecret(PLAIN_KEY, `app_provider_keys.key_enc:${id}:anthropic`),
   );
   // A custom-provider declaration written BEFORE 0015.
   rawRun(
     db,
     `INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at)
      VALUES (?, 'legacy-custom', 'https://example.com/v1', 'openai-completions', '["m1"]', ?, datetime('now'), datetime('now'))`,
-    app.id,
-    await box.encryptSecret(PLAIN_KEY, `app_custom_providers.api_key_enc:${app.id}:legacy-custom`),
+    id,
+    await box.encryptSecret(PLAIN_KEY, `app_custom_providers.api_key_enc:${id}:legacy-custom`),
   );
   return db;
 }
@@ -193,35 +214,35 @@ describe("migration 0015_provider_verification.sql (on a seeded production-shape
     }
   });
 
-  test("app_provider_models DDL: PK (app_id, provider, key_id), FK to github_apps, NO ON DELETE", () => {
-    const db = createMigratedTestD1(); // 0001 → 0025 in filename order
-    const cols = db.raw.query("PRAGMA table_info(app_provider_models)").all() as Array<{
+  test("bot_provider_models DDL: PK (bot_id, provider, key_id), FK to review_bots, NO ON DELETE", () => {
+    const db = createMigratedTestD1(); // the full chain, so the rename has landed
+    const cols = db.raw.query("PRAGMA table_info(bot_provider_models)").all() as Array<{
       name: string;
       type: string;
       notnull: number;
       pk: number;
     }>;
     const byName = Object.fromEntries(cols.map((c) => [c.name, c])) as Record<string, (typeof cols)[number]>;
-    expect(Object.keys(byName).sort()).toEqual(["app_id", "fetched_at", "key_id", "models_json", "provider"]);
-    expect(byName.app_id!.notnull).toBe(1);
-    expect(byName.app_id!.pk).toBe(1);
+    expect(Object.keys(byName).sort()).toEqual(["bot_id", "fetched_at", "key_id", "models_json", "provider"]);
+    expect(byName.bot_id!.notnull).toBe(1);
+    expect(byName.bot_id!.pk).toBe(1);
     expect(byName.provider!.notnull).toBe(1);
     expect(byName.provider!.pk).toBe(2); // second column of the composite PK
-    // 0025 moved the table from one aggregate row per (app_id, provider) to one
+    // 0025 moved the table from one aggregate row per (bot_id, provider) to one
     // EVIDENCE row per key: the third PK column is the credential's own id.
     expect(byName.key_id!.notnull).toBe(1);
     expect(byName.key_id!.pk).toBe(3);
     expect(byName.models_json!.notnull).toBe(1);
     expect(byName.fetched_at!.notnull).toBe(1);
-    const fks = db.raw.query("PRAGMA foreign_key_list(app_provider_models)").all() as Array<{
+    const fks = db.raw.query("PRAGMA foreign_key_list(bot_provider_models)").all() as Array<{
       table: string;
       from: string;
       to: string;
       on_delete: string;
     }>;
     expect(fks).toHaveLength(1);
-    expect(fks[0]!.table).toBe("github_apps");
-    expect(fks[0]!.from).toBe("app_id");
+    expect(fks[0]!.table).toBe("review_bots");
+    expect(fks[0]!.from).toBe("bot_id");
     expect(fks[0]!.to).toBe("id");
     expect(fks[0]!.on_delete).toBe("NO ACTION");
   });
@@ -1009,7 +1030,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6", "claude-opus-4-7"]);
 
     const keyRow = db.raw
-      .query("SELECT * FROM app_provider_keys WHERE app_id = ? AND provider = 'anthropic'")
+      .query("SELECT * FROM bot_provider_keys WHERE bot_id = ? AND provider = 'anthropic'")
       .get(app.id) as Record<string, string | null>;
     expect(keyRow.verified_at).toMatch(SQLITE_TS_RE);
     expect(keyRow.verified_status).toBe("ok");
@@ -1035,11 +1056,11 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     await store.saveVerifiedKey(app.id, "ark", PLAIN_KEY, ["doubao-seed-2-1-pro"]);
 
     const keyRow = db.raw
-      .query("SELECT provider, verified_status FROM app_provider_keys WHERE app_id = ?")
+      .query("SELECT provider, verified_status FROM bot_provider_keys WHERE bot_id = ?")
       .all(app.id) as Array<{ provider: string; verified_status: string }>;
     expect(keyRow).toEqual([{ provider: "ark", verified_status: "ok" }]);
     const cacheRow = db.raw
-      .query("SELECT provider, models_json FROM app_provider_models WHERE app_id = ?")
+      .query("SELECT provider, models_json FROM bot_provider_models WHERE bot_id = ?")
       .all(app.id) as Array<{ provider: string; models_json: string }>;
     expect(cacheRow).toEqual([{ provider: "ark", models_json: JSON.stringify(["doubao-seed-2-1-pro"]) }]);
   });
@@ -1050,7 +1071,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const store = configStore(db);
     await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
     let row = db.raw
-      .query("SELECT verified_at, verified_status FROM app_provider_keys WHERE app_id = ?")
+      .query("SELECT verified_at, verified_status FROM bot_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
     expect(row.verified_status).toBe("ok");
     // The SAME key re-submitted on the unverified path collapses onto its own
@@ -1058,7 +1079,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     // verified bookkeeping.
     await store.addProviderKey(app.id, "openai", PLAIN_KEY);
     const after = db.raw
-      .query("SELECT verified_at, verified_status, key_enc, key_id FROM app_provider_keys WHERE app_id = ?")
+      .query("SELECT verified_at, verified_status, key_enc, key_id FROM bot_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null; key_enc: string; key_id: string };
     expect(after.verified_at).toBeNull();
     expect(after.verified_status).toBeNull();
@@ -1068,16 +1089,16 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     ).resolves.toBe(PLAIN_KEY);
   });
 
-  test("getVerifiedModels fails loud on a malformed app_provider_models row, citing app_provider_models.models_json (not app_custom_providers.model_ids)", async () => {
+  test("getVerifiedModels fails loud on a malformed bot_provider_models row, citing bot_provider_models.models_json (not bot_custom_providers.model_ids)", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "malformed-cache-app");
     const store = configStore(db);
     await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
     db.raw
-      .prepare("UPDATE app_provider_models SET models_json = ? WHERE app_id = ? AND provider = ?")
+      .prepare("UPDATE bot_provider_models SET models_json = ? WHERE bot_id = ? AND provider = ?")
       .run("null", app.id, "openai");
     await expect(store.getVerifiedModels(app.id)).rejects.toThrow(
-      /app_provider_models\.models_json is not a JSON array of strings/,
+      /bot_provider_models\.models_json is not a JSON array of strings/,
     );
   });
 
@@ -1090,9 +1111,9 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     // refreshes the provider's cached model list.
     await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5", "gpt-5-mini"]);
 
-    const keyCount = db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys WHERE app_id = ?").get(app.id) as { n: number };
+    const keyCount = db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys WHERE bot_id = ?").get(app.id) as { n: number };
     const cacheCount = db.raw
-      .query("SELECT COUNT(*) AS n FROM app_provider_models WHERE app_id = ?")
+      .query("SELECT COUNT(*) AS n FROM bot_provider_models WHERE bot_id = ?")
       .get(app.id) as { n: number };
     expect(keyCount.n).toBe(1);
     expect(cacheCount.n).toBe(1);
@@ -1100,7 +1121,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     expect(cached).toHaveLength(1);
     expect(cached[0]!.models).toEqual(["gpt-5", "gpt-5-mini"]);
     // The row carries the same key envelope (decryptable only with the AAD).
-    const row = db.raw.query("SELECT key_enc, key_id FROM app_provider_keys WHERE app_id = ?").get(app.id) as {
+    const row = db.raw.query("SELECT key_enc, key_id FROM bot_provider_keys WHERE bot_id = ?").get(app.id) as {
       key_enc: string;
       key_id: string;
     };
@@ -1117,7 +1138,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     // the ENDPOINT answered; the key itself is unproven.
     await store.saveVerifiedKey(app.id, "kilo", PLAIN_KEY, ["kilo-auto/efficient"]);
     const row = db.raw
-      .query("SELECT verified_at, verified_status FROM app_provider_keys WHERE app_id = ?")
+      .query("SELECT verified_at, verified_status FROM bot_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
     expect(row.verified_at).toMatch(SQLITE_TS_RE);
     expect(row.verified_status).toBe("reachable");
@@ -1146,11 +1167,11 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     // written under the retired alias by the prior release.
     await store.addProviderKey(app.id, "ark", PLAIN_KEY);
     const keyId = (
-      db.raw.query("SELECT key_id FROM app_provider_keys WHERE app_id = ?").get(app.id) as { key_id: string }
+      db.raw.query("SELECT key_id FROM bot_provider_keys WHERE bot_id = ?").get(app.id) as { key_id: string }
     ).key_id;
     db.raw
       .prepare(
-        `INSERT INTO app_provider_models (app_id, provider, key_id, models_json, fetched_at)
+        `INSERT INTO bot_provider_models (bot_id, provider, key_id, models_json, fetched_at)
          VALUES (?, 'ark-plan', ?, '["doubao"]', datetime('now'))`,
       )
       .run(app.id, keyId);
@@ -1166,7 +1187,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const store = configStore(db);
     await store.addProviderKey(app.id, "xai", PLAIN_KEY);
     const row = db.raw
-      .query("SELECT verified_at, verified_status FROM app_provider_keys WHERE app_id = ?")
+      .query("SELECT verified_at, verified_status FROM bot_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
     expect(row.verified_at).toBeNull();
     expect(row.verified_status).toBeNull();
@@ -1195,7 +1216,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     await expect(
       store.saveVerifiedKey(app.id, "openai", "x".repeat(MAX_PROVIDER_KEY_LENGTH + 1), ["gpt-5"]),
     ).rejects.toBeInstanceOf(ProviderKeyTooLongError);
-    const keyCount = db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys WHERE app_id = ?").get(app.id) as { n: number };
+    const keyCount = db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys WHERE bot_id = ?").get(app.id) as { n: number };
     expect(keyCount.n).toBe(0);
   });
 
@@ -1218,7 +1239,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
         has_keys: true,
       },
     ]);
-    // Custom providers never write app_provider_models rows (spec §6.1).
+    // Custom providers never write bot_provider_models rows (spec §6.1).
     expect(await store.getVerifiedModels(app.id)).toEqual([]);
   });
 
@@ -1246,7 +1267,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
       await store.upsertCustomProvider(app.id, { ...decl, model_ids: ["m1"] }, PLAIN_KEY);
     }
     const rows = db.raw
-      .query("SELECT provider, verified_at, verified_status FROM app_custom_provider_keys WHERE app_id = ? ORDER BY provider")
+      .query("SELECT provider, verified_at, verified_status FROM bot_custom_provider_keys WHERE bot_id = ? ORDER BY provider")
       .all(app.id) as Array<{ provider: string; verified_at: string | null; verified_status: string | null }>;
     expect(rows).toEqual([
       { provider: "commandcode", verified_at: expect.stringMatching(SQLITE_TS_RE), verified_status: "reachable" },
@@ -1310,7 +1331,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
       PLAIN_KEY,
     );
     const row = db.raw
-      .query("SELECT verified_status FROM app_custom_provider_keys WHERE app_id = ?")
+      .query("SELECT verified_status FROM bot_custom_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_status: string | null };
     expect(row.verified_status).toBe("reachable");
   });
@@ -1327,7 +1348,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
       PLAIN_KEY,
     );
     const row = db.raw
-      .query("SELECT verified_status FROM app_custom_provider_keys WHERE app_id = ?")
+      .query("SELECT verified_status FROM bot_custom_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_status: string | null };
     expect(row.verified_status).toBe("ok");
   });

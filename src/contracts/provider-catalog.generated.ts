@@ -16,7 +16,7 @@
  *
  * Tiers: `builtin` = the per-App BYOK allowlist (AL-24-5); `template` =
  * metadata + prefill only, materialized through the existing custom-provider
- * machinery (app_custom_providers) at save time (spec §5). The hand-curated
+ * machinery (bot_custom_providers) at save time (spec §5). The hand-curated
  * `workers-ai` template carries the {account_id} base-URL placeholder the
  * save flow substitutes.
  *

@@ -187,7 +187,7 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
   const now = new Date().toISOString();
   seed(
     db,
-    `INSERT INTO github_apps
+    `INSERT INTO review_bots
        (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
      VALUES (?, NULL, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
@@ -198,13 +198,27 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
     now,
     now,
   );
-  seed(db, "INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+  seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+  // Every bot owns exactly one target: the review configuration the settings
+  // and pause routes read and write lives there.
+  seed(
+    db,
+    `INSERT INTO review_targets
+       (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'octocat', ?, ?)`,
+    `target-${id}`,
+    workspaceId,
+    id,
+    slug,
+    now,
+    now,
+  );
 }
 
 /** The numeric GitHub App id a fixture App was seeded with (the App's identity). */
 function appAcmeId(db: TestD1): number {
   return (
-    db.raw.prepare("SELECT github_app_id FROM github_apps WHERE id = ?").get("app-acme") as {
+    db.raw.prepare("SELECT github_app_id FROM review_bots WHERE id = ?").get("app-acme") as {
       github_app_id: number;
     }
   ).github_app_id;
@@ -1362,7 +1376,7 @@ describe("App creation is owner/admin", () => {
     // The App is mapped into the workspace the flow named — not into `acme`,
     // and not into some "sole" workspace.
     const mapping = db.raw
-      .prepare("SELECT app_workspaces.workspace_id AS ws FROM app_workspaces JOIN github_apps ON github_apps.id = app_workspaces.app_id WHERE github_apps.github_app_id = ?")
+      .prepare("SELECT bot_workspaces.workspace_id AS ws FROM bot_workspaces JOIN review_bots ON review_bots.id = bot_workspaces.bot_id WHERE review_bots.github_app_id = ?")
       .get(CONVERSION.id) as { ws: string } | null;
     expect(mapping?.ws).toBe("ws-other");
     // The READ is tenant-scoped too, for the very row this flow created: the
@@ -1432,7 +1446,7 @@ describe("App creation is owner/admin", () => {
       globalThis.fetch = realFetch;
     }
     const mapping = db.raw
-      .prepare("SELECT app_workspaces.workspace_id AS ws FROM app_workspaces JOIN github_apps ON github_apps.id = app_workspaces.app_id WHERE github_apps.github_app_id = ?")
+      .prepare("SELECT bot_workspaces.workspace_id AS ws FROM bot_workspaces JOIN review_bots ON review_bots.id = bot_workspaces.bot_id WHERE review_bots.github_app_id = ?")
       .get(CONVERSION.id) as { ws: string } | null;
     // The App belongs to the ORIGINAL workspace — the one that owns the id —
     // and emphatically not to `ws-squatter`, which merely holds the old slug.
@@ -1488,7 +1502,7 @@ describe("App creation is owner/admin", () => {
     // The App row was written before the workspace vanished: the named failure
     // is about the missing landing page, not about a lost write.
     const row = db.raw
-      .prepare("SELECT COUNT(*) AS n FROM github_apps WHERE github_app_id = ?")
+      .prepare("SELECT COUNT(*) AS n FROM review_bots WHERE github_app_id = ?")
       .get(CONVERSION.id) as { n: number };
     expect(row.n).toBe(1);
   });
@@ -1527,7 +1541,7 @@ describe("App creation is owner/admin", () => {
     // The App row was written before the workspace vanished: the named failure
     // is about the missing landing page, not about a lost write.
     const row = db.raw
-      .prepare("SELECT COUNT(*) AS n FROM github_apps WHERE github_app_id = ?")
+      .prepare("SELECT COUNT(*) AS n FROM review_bots WHERE github_app_id = ?")
       .get(CONVERSION.id) as { n: number };
     expect(row.n).toBe(1);
   });
@@ -1726,7 +1740,7 @@ describe("a mid-flight demotion cannot finish the flow", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
-    const rows = db.raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number };
+    const rows = db.raw.query("SELECT COUNT(*) AS n FROM review_bots").get() as { n: number };
     expect(rows.n).toBe(0);
   });
 

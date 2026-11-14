@@ -430,7 +430,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     db.raw
       .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, recovery_state = 'suspended' WHERE id = ?`)
       .run(attempt.identity.attemptId);
-    db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(APP);
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db) });
@@ -564,7 +564,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     // throws either — `getCheckGate` reports it as null, the same UNREADABLE
     // input. Neither is a reason to skip the terminal conclusion: an attempt
     // that only retried would never conclude its Check.
-    const degraded = withFailingReads(db, /check_pass_verdicts|SELECT payload_json FROM review_publications/);
+    const degraded = withFailingReads(db, /FROM review_targets|SELECT payload_json FROM review_publications/);
     const fetchStub = stubFetch();
     const pushed: CheckConclusion[] = [];
     try {
@@ -1187,7 +1187,7 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
     expect(badRow.terminal_ms).toBeNull();
     // The suspended row kept its whole identity for a later inspection.
     expect(badRow.external_id).toBe(bad.attempt.identity.externalId);
-    expect(badRow.app_id).toBe(APP_B);
+    expect(badRow.bot_id).toBe(APP_B);
     expect(badRow.attempts).toBe(0);
   });
 
@@ -1205,7 +1205,7 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
     }
     // The second row's App row is NOT active: its suspension must survive even
     // though its recorded kind is the status-resumable one.
-    db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(APP_B);
+    db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(APP_B);
     const asked: string[] = [];
     const fetchStub = stubFetch();
     try {
@@ -1371,7 +1371,7 @@ describe("scheduled composition (spec §7.11)", () => {
   test("a throwing sweep and a throwing lifecycle lane never escape the handler", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    db.raw.prepare(`DELETE FROM app_installations WHERE app_id = ?`).run(APP);
+    db.raw.prepare(`DELETE FROM bot_installations WHERE bot_id = ?`).run(APP);
     // A broken DB makes the sweep's own D1 read throw and both reconcilers'
     // internal catch fire — one stage's failure never becomes another's.
     const broken = {
@@ -1408,7 +1408,7 @@ describe("scheduled composition (spec §7.11)", () => {
         .run(`boom-${i}`);
     }
     const { attempt } = await claim(db);
-    db.raw.prepare(`DELETE FROM app_installations WHERE app_id = ?`).run(APP);
+    db.raw.prepare(`DELETE FROM bot_installations WHERE bot_id = ?`).run(APP);
     const env = { DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE };
 
     const minute = await captureComposition(env, "* * * * *");
@@ -2251,7 +2251,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     const id = attempt.identity.attemptId;
     // The digest the production factory would derive from the STORED envelope —
     // so the next pass's comparison is exercising the real value, not a fiction.
-    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM review_bots WHERE id = ?`).get(APP) as {
       private_key_enc: string;
     };
     const DIGEST = await sha256Hex(envelope.private_key_enc);
@@ -2295,7 +2295,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     const db = seededDb();
     // The row records an identity-mismatch proven against the digest of the
     // envelope currently stored on the App row.
-    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM review_bots WHERE id = ?`).get(APP) as {
       private_key_enc: string;
     };
     const digest = await sha256Hex(envelope.private_key_enc);
@@ -2332,13 +2332,13 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
 
   test("an operator-corrected envelope reopens the pair and resumes the SAME attempt identity", async () => {
     const db = seededDb();
-    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM review_bots WHERE id = ?`).get(APP) as {
       private_key_enc: string;
     };
     const oldDigest = await sha256Hex(envelope.private_key_enc);
     const id = await seedSuspended(db, "identity-mismatch", oldDigest);
     // The operator replaces the credentials.
-    db.raw.prepare(`UPDATE github_apps SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE review_bots SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(APP);
 
     let probes = 0;
     const fetchStub = stubFetch();
@@ -2365,12 +2365,12 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
 
   test("a KEPT-failing corrected envelope re-stamps with the new digest instead of churning", async () => {
     const db = seededDb();
-    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM review_bots WHERE id = ?`).get(APP) as {
       private_key_enc: string;
     };
     const oldDigest = await sha256Hex(envelope.private_key_enc);
     const id = await seedSuspended(db, "identity-mismatch", oldDigest);
-    db.raw.prepare(`UPDATE github_apps SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE review_bots SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(APP);
     const newDigest = await sha256Hex("enc-pem-rotated");
 
     let probes = 0;
@@ -2436,7 +2436,7 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
     const { attempt } = await claim(db);
     const id = attempt.identity.attemptId;
     const externalId = attempt.identity.externalId;
-    db.raw.prepare(`UPDATE github_apps SET review_enabled = 0 WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE review_bots SET review_enabled = 0 WHERE id = ?`).run(APP);
     let creates = 0;
     const fetchStub = stubFetch();
     try {
@@ -2474,7 +2474,7 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
 
       // The kill switch lifts: the SAME row resumes and creates under a fresh
       // claim, addressing the SAME historical identity.
-      db.raw.prepare(`UPDATE github_apps SET review_enabled = 1 WHERE id = ?`).run(APP);
+      db.raw.prepare(`UPDATE review_bots SET review_enabled = 1 WHERE id = ?`).run(APP);
       const resumed = await run(db, {
         now: () => T0 + 30 * 60_000,
         credentials: scriptedCredentials(db, {
@@ -2505,7 +2505,7 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
     const db = seededDb();
     const { attempt } = await claim(db);
     db.raw.prepare(`UPDATE review_checks SET create_state = 'sending' WHERE id = ?`).run(attempt.identity.attemptId);
-    db.raw.prepare(`UPDATE github_apps SET review_enabled = 0 WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE review_bots SET review_enabled = 0 WHERE id = ?`).run(APP);
     let creates = 0;
     const fetchStub = stubFetch();
     try {
@@ -2636,7 +2636,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
     const DISTRACTOR = 100;
     db.raw
       .prepare(
-        `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
          VALUES ('inst-distractor', ?, ?, 'acme', datetime('now'))`,
       )
       .run(APP, DISTRACTOR);
@@ -3111,9 +3111,9 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     // attempt published — `reviews` is a first-write-wins projection that can
     // belong to an earlier attempt for the same SHA, so it must never decide.
     seedReview(db, SCOPE, SHA, "ship it", 95);
-    // The projection is read per App; the helper leaves `app_id` unset, so
+    // The projection is read per App; the helper leaves `bot_id` unset, so
     // stamp it the way the apply write does.
-    db.raw.prepare(`UPDATE reviews SET app_id = ? WHERE head_sha = ?`).run(SCOPE.appId, SHA);
+    db.raw.prepare(`UPDATE reviews SET bot_id = ? WHERE head_sha = ?`).run(SCOPE.appId, SHA);
     // THIS attempt's own applied publication: its payload's envelope fails the
     // gate, and that verdict is immutable. The link is what attributes it.
     const proof = proofFor(attempt.identity);

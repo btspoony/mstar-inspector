@@ -23,7 +23,7 @@
  * precedent as the B0 session cookie key).
  *
  * AAD: caller-supplied `<table>.<column>:<rowKey>` string (composite keys
- * join with `:`, e.g. `<appId>:<provider>` for app_provider_keys).
+ * join with `:`, e.g. `<appId>:<provider>` for bot_provider_keys).
  * An AAD mismatch fails GCM tag verification → decrypt throws.
  *
  * Module boundary (lock L1): zero-dependency leaf — no imports at all — so

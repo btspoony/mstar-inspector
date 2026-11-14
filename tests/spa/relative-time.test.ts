@@ -39,7 +39,7 @@ describe("formatRelativeTime", () => {
   });
 
   test("the sub-second SQLite form buckets exactly like the plain one", () => {
-    // app_installations.seen_at is written by strftime('%Y-%m-%d %H:%M:%f','now'),
+    // bot_installations.seen_at is written by strftime('%Y-%m-%d %H:%M:%f','now'),
     // so the installed table must not degrade to "unknown".
     expect(formatRelativeTime(`${stamp(120_000)}.123`, "en", NOW)).toBe("2 minutes ago");
     expect(formatRelativeTime(`${stamp(3_600_000)}.000`, "zh_CN", NOW)).toBe("1 小时前");

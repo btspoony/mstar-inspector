@@ -28,7 +28,7 @@ import { Webhooks } from "@octokit/webhooks";
 import { z } from "zod";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import type { ReviewJobPayload } from "../contracts/review-job";
-import type { ReviewTriggerMode } from "../dashboard/apps-store";
+import type { ReviewTriggerMode } from "../dashboard/targets-store";
 import type { HandlerLog } from "./handlers";
 
 export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as const;
@@ -45,15 +45,33 @@ export const INSTALLATION_ACTIONS = ["created", "new_permissions_accepted"] as c
 
 /**
  * The per-App trigger inputs classification branches on (spec
- * review-trigger-policy §2/§3 read path): the resolved row's
- * `review_trigger_mode` and its GitHub slug (the mention target — one App's
- * mention never triggers another App). The mention login is GitHub's mutable
- * `github_slug`, never our local webhook path or the row id. The per-App
- * webhook route passes both from the already-resolved row — no second lookup.
- * An omitted context defaults to `every_push` with NO mention target (empty
- * slug never matches — fail-safe: no trigger rather than a spurious one).
+ * review-trigger-policy §2/§3 read path): the resolved target's
+ * `review_trigger_mode` and the bot's GitHub slug (the mention target — one
+ * App's mention never triggers another App). The mention login is GitHub's
+ * mutable `github_slug`, never our local webhook path or the row id. The
+ * per-App webhook route passes both from the rows it resolved — no second
+ * lookup. An omitted context defaults to `every_push` with NO mention target
+ * (empty slug never matches — fail-safe: no trigger rather than a spurious
+ * one).
  */
 export type ReviewTriggerContext = { mode: ReviewTriggerMode; appSlug: string };
+
+/** The one trigger context a delivery without a resolver is classified with. */
+const DEFAULT_TRIGGER: ReviewTriggerContext = { mode: "every_push", appSlug: "" };
+
+/**
+ * The delivery's install identity, read from the already-parsed body. This is
+ * GitHub's installation number, not our row id: the route resolves the target
+ * from it, and the classifier itself never learns the bot or target id.
+ */
+export type ReviewTriggerResolver = (installationId: number | null) => Promise<ReviewTriggerContext | null>;
+
+/**
+ * The classification of a delivery with no resolved review target. It is an
+ * `ignore` — the delivery is verified and correctly refused, not rejected —
+ * and the route logs it under this exact reason.
+ */
+export const NO_TARGET_REASON = "no review target resolves for this delivery";
 
 /**
  * The GitHub login continuation set (spec §3): `A-Z a-z 0-9 -`. A mention
@@ -246,11 +264,11 @@ export const WEBHOOK_BODY_LIMIT = 1_000_000;
  * request only to call `verify`, which uses nothing but `options.secret`.
  * KEYED BY CACHEKEY, NOT the raw secret: each entry is `{ secret, webhooks }`
  * under the caller's cache key — each per-App
- * `POST /webhook/:workspaceId/:appId` route passes its `github_apps.id` — so per-App isolation holds AND a
+ * `POST /webhook/:workspaceId/:appId` route passes its `review_bots.id` — so per-App isolation holds AND a
  * cached entry whose `secret` differs from the caller's current secret
  * (credential rotation) is rebuilt and REPLACED: the rotated secret
  * verifies with the NEW secret only, and the old entry is evicted exactly
- * (no LRU wait). The bound is STRUCTURAL (≤ github_apps rows — keys are
+ * (no LRU wait). The bound is STRUCTURAL (≤ review_bots rows — keys are
  * drawn from the fixed universe of row ids), so no eviction policy is
  * tunable or needed; an entry outliving its row (soft-deleted App) is dead
  * weight only — that route 404s before classifyWebhook, so the entry can
@@ -307,11 +325,11 @@ export async function verifySignature(
 }
 
 /**
- * Classifier outcome. The `job` payload NEVER carries `appRef`
- * (AL-24-2/4): the classifier is secret-parameterized only and never sees
- * the App identity — the ONLY production attach point is the per-App
- * `POST /webhook/:workspaceId/:appId` route, which adds `appRef: { appId }`
- * after classification, before enqueue.
+ * Classifier outcome. The `job` payload NEVER carries `botRef` or `targetId`
+ * (AL-24-2/4): the classifier is secret-parameterized only and never sees the
+ * bot or target identity — the ONLY production attach point is the per-App
+ * `POST /webhook/:workspaceId/:appId` route, which adds both after
+ * classification, before enqueue.
  */
 export type WebhookOutcome =
   | { kind: "reject"; status: 400 | 401 | 500; reason: string }
@@ -324,14 +342,14 @@ export type WebhookOutcome =
    * receive an owner-derived login). It is carried OUTSIDE
    * `payload` so it never enters the queue message (the consumer contract
    * `ReviewJobPayload` must not grow an account field) while the route can
-   * still record it on `app_installations`.
+   * still record it on `bot_installations`.
    *
    * `accountAuthoritative` is always false here: a review payload is not an
    * install statement, so the store only lets this value FILL an empty login.
    */
   | {
       kind: "job";
-      payload: Omit<ReviewJobPayload, "appRef">;
+      payload: Omit<ReviewJobPayload, "botRef" | "targetId">;
       installationAccount: string;
       accountAuthoritative: false;
     }
@@ -361,7 +379,7 @@ export type WebhookOutcome =
  * Minimal webhook payload shapes — only the fields the gateway consumes.
  *
  * `account.login` is the installation's own account — the authority for
- * `app_installations.account_login`. `repository.owner.login` is only a
+ * `bot_installations.account_login`. `repository.owner.login` is only a
  * fallback: an install covers repositories owned by the installing account,
  * but the payload's own `installation.account` is the value GitHub states,
  * and it must win so it is never overwritten by an inferred owner.
@@ -392,7 +410,7 @@ const repositorySchema = z
  * delivery without `installation.account` allows — shared by both review
  * classifiers so the authority order is stated once.
  *
- * Two sources, one rule (`app_installations.account_login` is either
+ * Two sources, one rule (`bot_installations.account_login` is either
  * AUTHORITATIVE or INFERRED):
  * - authoritative = `installation.account.login` on an `installation.*` event
  *   (the installation's own statement) — overwrites a stored login;
@@ -486,7 +504,7 @@ const issueCommentSchema = z.object({
  *
  * `cacheKey` (the hardening item / architect lock L1) is a
  * MEMOIZATION-ONLY parameter for the verifier cache — a per-App route
- * passes its `github_apps.id`; the classifier NEVER branches on it (same
+ * passes its `review_bots.id`; the classifier NEVER branches on it (same
  * secret + same payload classifies identically whichever key rides along).
  * Omitted → the verifier memoizes under the secret itself (the legacy
  * shape, for direct callers).
@@ -497,8 +515,15 @@ const issueCommentSchema = z.object({
  * never the literal "unknown", so log consumers can filter by event alone.
  *
  * `trigger` (spec review-trigger-policy §2 read path) is the resolved
- * App row's mode + slug, passed straight to classifyEvent — the classifier
- * branches on it but still never sees the App identity (no appId).
+ * target's mode + the bot's slug, passed straight to the classifier — the
+ * classifier branches on it but still never sees a bot or target id.
+ *
+ * …or a RESOLVER, for the route that can only know a delivery's installation
+ * after the body is parsed: it is called BETWEEN signature verification and
+ * classification, so a target is never selected from a body nobody has
+ * authenticated. `null` from it means no target resolves, and the delivery
+ * classifies as the `NO_TARGET_REASON` ignore — no trigger mode is invented
+ * for a delivery that has no review configuration.
  */
 export async function classifyWebhook(
   secret: string,
@@ -507,7 +532,7 @@ export async function classifyWebhook(
   eventName: string | null,
   log?: HandlerLog,
   cacheKey?: string,
-  trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
+  trigger: ReviewTriggerContext | ReviewTriggerResolver = DEFAULT_TRIGGER,
   onParsed?: (parsed: unknown) => void,
 ): Promise<WebhookOutcome> {
   if (!secret || secret === "development") {
@@ -538,7 +563,28 @@ export async function classifyWebhook(
     );
     return { kind: "reject", status: 401, reason: "signature verification failed" };
   }
-  return classifyEvent(eventName, rawBody, log, trigger, onParsed);
+  // ONE parse per delivery (see classifyEvent): verification has passed, so
+  // this document may be read, and `onParsed` hands it on without a second
+  // JSON.parse.
+  const parsed = parseBody(rawBody);
+  onParsed?.(parsed);
+  // A resolver asks the route for the delivery's target, so it is consulted
+  // only for the two events that can enqueue a review: an install delivery is
+  // bot-scoped bookkeeping with no review configuration to resolve.
+  if (typeof trigger === "function" && (eventName === "pull_request" || eventName === "issue_comment")) {
+    const resolved = await trigger(installationIdOf(parsed));
+    if (resolved === null) return { kind: "ignore", reason: NO_TARGET_REASON };
+    return classifyParsed(eventName, parsed, log, resolved);
+  }
+  return classifyParsed(eventName, parsed, log, typeof trigger === "function" ? DEFAULT_TRIGGER : trigger);
+}
+
+/** The body's `installation.id`, or null when the document names none. */
+function installationIdOf(parsed: unknown): number | null {
+  const installation =
+    typeof parsed === "object" && parsed !== null && "installation" in parsed ? parsed.installation : null;
+  if (typeof installation !== "object" || installation === null || !("id" in installation)) return null;
+  return typeof installation.id === "number" ? installation.id : null;
 }
 
 /**
@@ -551,14 +597,14 @@ export async function classifyWebhook(
  *
  * `trigger` is the per-App trigger context (spec review-trigger-policy §2):
  * `mode` gates the pull_request auto face (§2.1 matrix) and `appSlug` (the
- * row's GitHub slug) keys the issue_comment bot mention (§3). Defaults to
+ * bot's GitHub slug) keys the issue_comment bot mention (§3). Defaults to
  * `every_push` with no mention target.
  */
 export function classifyEvent(
   eventName: string | null,
   rawBody: string,
   log?: HandlerLog,
-  trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
+  trigger: ReviewTriggerContext = DEFAULT_TRIGGER,
   onParsed?: (parsed: unknown) => void,
 ): WebhookOutcome {
   // ONE parse per delivery: the classifiers read this document, and `onParsed`
@@ -566,6 +612,16 @@ export function classifyEvent(
   // from it), so no delivery is JSON.parse'd a second time.
   const parsed = parseBody(rawBody);
   onParsed?.(parsed);
+  return classifyParsed(eventName, parsed, log, trigger);
+}
+
+/** The dispatch over an already-parsed body — the shared tail of both entry points. */
+function classifyParsed(
+  eventName: string | null,
+  parsed: unknown,
+  log: HandlerLog | undefined,
+  trigger: ReviewTriggerContext,
+): WebhookOutcome {
   if (!eventName) {
     return { kind: "ignore", reason: "missing X-GitHub-Event header" };
   }
@@ -584,7 +640,7 @@ export function classifyEvent(
 /**
  * `installation.{created,new_permissions_accepted}` → the installing account's
  * login. This is the one path that observes a fresh install before any review
- * traffic exists, so it is the reason `app_installations.account_login` can be
+ * traffic exists, so it is the reason `bot_installations.account_login` can be
  * filled at all. `installation.deleted` names the installation being removed.
  *
  * Every malformed case is a 400 reject, exactly like the sibling classifiers:

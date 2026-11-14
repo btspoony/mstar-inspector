@@ -88,7 +88,7 @@ function seedReview(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id, context_incomplete, reviewed_at)
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, context_incomplete, reviewed_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
@@ -296,22 +296,22 @@ describe("incremental review rounds: the compare gate", () => {
     await consumer(h.makeBatch(makePayload()));
 
     // Non-vacuity: both rows carry the identity this round reviews for, so
-    // `app_id` is the only field that can explain the exclusion.
+    // `bot_id` is the only field that can explain the exclusion.
     const rows = db.raw
       .query(
-        "SELECT app_id, installation_id, owner, repo, pr_number FROM reviews WHERE head_sha IN (?, ?) ORDER BY reviewed_at",
+        "SELECT bot_id, installation_id, owner, repo, pr_number FROM reviews WHERE head_sha IN (?, ?) ORDER BY reviewed_at",
       )
       .all(PREVIOUS_SHA, otherAppHead) as Array<Record<string, string | number>>;
     expect(rows).toEqual([
       {
-        app_id: ROUND_IDENTITY.appId,
+        bot_id: ROUND_IDENTITY.appId,
         installation_id: ROUND_IDENTITY.installationId,
         owner: ROUND_IDENTITY.owner,
         repo: ROUND_IDENTITY.repo,
         pr_number: ROUND_IDENTITY.prNumber,
       },
       {
-        app_id: TEST_OTHER_APP_ID,
+        bot_id: TEST_OTHER_APP_ID,
         installation_id: ROUND_IDENTITY.installationId,
         owner: ROUND_IDENTITY.owner,
         repo: ROUND_IDENTITY.repo,
@@ -326,7 +326,7 @@ describe("incremental review rounds: the compare gate", () => {
   test("the seeded identity IS the payload's identity (no negative case can pass vacuously)", () => {
     const payload = makePayload();
     expect(ROUND_IDENTITY).toEqual({
-      appId: payload.appRef.appId,
+      appId: payload.botRef.appId,
       installationId: payload.installation_id,
       owner: payload.owner,
       repo: payload.repo,

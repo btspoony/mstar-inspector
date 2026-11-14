@@ -4,7 +4,7 @@
  * The GitHub App Manifest start/callback coverage (state CSRF,
  * locked conversion headers, encrypted hold cookie, no-secret HTML);
  * the commit coverage pins the rewritten flow: app-id-carrying signed state,
- * hold-bound D1 write of the encrypted github_apps row (AAD rowKey = row PK),
+ * hold-bound D1 write of the encrypted review_bots row (AAD rowKey = row PK),
  * the already-connected 409 burn, fail-closed DASHBOARD_ENCRYPTION_KEY, zero
  * api.cloudflare.com calls, no-secret summary HTML.
  *
@@ -66,7 +66,7 @@ import {
   removedPage,
 } from "../../src/dashboard/views";
 import { createSecretbox } from "../../src/dashboard/secretbox";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
 import { LOCALE_COOKIE, t } from "../../src/i18n";
@@ -1459,11 +1459,11 @@ describe("/dashboard manifest routes", () => {
       cookies.some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
     ).toBe(true);
     expect(cookies.some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`) && !c.includes("Max-Age=0"))).toBe(false);
-    // Exactly one encrypted github_apps row: the row PK IS the state-carried
+    // Exactly one encrypted review_bots row: the row PK IS the state-carried
     // app id the manifest URL names (one identity, no second UUID), and
     // GitHub's own slug as captured at conversion.
     const rows = dbOf(env).raw.query(
-      "SELECT id, github_slug, github_app_id, created_by FROM github_apps",
+      "SELECT id, github_slug, github_app_id, created_by FROM review_bots",
     ).all() as Array<{
       id: string;
       github_slug: string | null;
@@ -1668,8 +1668,8 @@ describe("/dashboard manifest routes", () => {
     ).toBe(false);
   });
 
-  test("callback retryable 500 (github_apps missing) → hold parked, confirm gate reachable", async () => {
-    // A pre-apps DB: users + the workspace plane, but no github_apps table.
+  test("callback retryable 500 (review_bots missing) → hold parked, confirm gate reachable", async () => {
+    // A pre-apps DB: users + the workspace plane, but no review_bots table.
     // The creation gate resolves the caller as the workspace owner, and the
     // inline commit then fails on the missing table: retryable, hold parked
     // for the resume path. The workspace floor column must exist (0049; it
@@ -1914,7 +1914,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
 
   function commitEnv(overrides: Partial<Env> = {}): Env {
     // makeEnv seeds the default members (octocat is an admin) and the
-    // production-shaped DB — the commit writes github_apps.
+    // production-shaped DB — the commit writes review_bots.
     return makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, ...overrides });
   }
 
@@ -2060,9 +2060,9 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
-  test("migrations not applied (no github_apps table) → 500 fail-closed, hold KEPT", async () => {
+  test("migrations not applied (no review_bots table) → 500 fail-closed, hold KEPT", async () => {
     const rec = stubFetchRecording();
-    // through=3: a pre-apps DB (users only — no github_apps table).
+    // through=3: a pre-apps DB (users only — no review_bots table).
     const res = await doCommit({
       env: {
         ...baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY }),
@@ -2075,7 +2075,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(rec.urls).toHaveLength(0);
   });
 
-  test("e2e start→callback AUTO-COMMIT: encrypted github_apps row, PEM verbatim (L1), AAD rowKey = row PK, onboarding shows slug/webhook URL/id, ZERO api.cloudflare.com calls, no secrets in HTML", async () => {
+  test("e2e start→callback AUTO-COMMIT: encrypted review_bots row, PEM verbatim (L1), AAD rowKey = row PK, onboarding shows slug/webhook URL/id, ZERO api.cloudflare.com calls, no secrets in HTML", async () => {
     const rec = stubGitHubConversionOnly();
     const env = commitEnv();
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
@@ -2114,7 +2114,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     // The row: exactly one — the state-carried webhook path, GitHub's own slug
     // captured at conversion, encrypted columns.
     const db = dbOf(env);
-    const rows = db.raw.query("SELECT * FROM github_apps").all() as Array<{
+    const rows = db.raw.query("SELECT * FROM review_bots").all() as Array<{
       id: string;
       github_slug: string | null;
       github_app_id: number;
@@ -2218,7 +2218,11 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(committed.status).toBe(302);
     expect(appRowCount(env)).toBe(1);
     const seeded = db.raw
-      .query("SELECT check_min_score FROM github_apps WHERE github_app_id = ?")
+      .query(
+        `SELECT t.check_min_score FROM review_targets t
+           JOIN review_bots b ON b.id = t.bot_id
+          WHERE b.github_app_id = ?`,
+      )
       .get(CONVERSION.id) as { check_min_score: number };
     expect(seeded.check_min_score).toBe(90);
   });
@@ -2346,7 +2350,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(committed.status).toBe(302);
     expect(committed.headers.get("Location")).toBe(`/dashboard/default/apps/${CONVERSION.id}/onboarding`);
     expectHoldExpired(committed);
-    const rows = dbOf(brokeEnv).raw.query("SELECT id FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ id: string }>;
+    const rows = dbOf(brokeEnv).raw.query("SELECT id FROM review_bots WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ id: string }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.id).toBe(START_APP_ID);
     // 3. Replaying the same hold after success is a 409 conflict against the
@@ -2397,7 +2401,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(callback.status).toBe(302);
     expect(callback.headers.get("Location")).toBe(`/dashboard/default/apps/${CONVERSION.id}/onboarding`);
     const rows = db.raw.query(
-      "SELECT id, github_slug, github_app_id FROM github_apps WHERE github_app_id = ?",
+      "SELECT id, github_slug, github_app_id FROM review_bots WHERE github_app_id = ?",
     ).all(CONVERSION.id) as Array<{
       id: string;
       github_slug: string | null;
@@ -2437,7 +2441,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     );
     expect(secondCallback.status).toBe(302);
     const all = db.raw.query(
-      "SELECT id, github_app_id FROM github_apps ORDER BY github_app_id",
+      "SELECT id, github_app_id FROM review_bots ORDER BY github_app_id",
     ).all() as Array<{ id: string; github_app_id: number }>;
     expect(all.map((r) => [r.github_app_id, r.id])).toEqual([
       [CONVERSION.id, first.startAppId],
@@ -2696,7 +2700,6 @@ describe("existing routes unaffected", () => {
 
   test("bare POST /webhook is 404 — the legacy face is retired and the dashboard mount does not intercept it", async () => {
     const db = createDashboardTestD1();
-    applyDeliveries(db.raw);
     const sent: unknown[] = [];
     const env = makeDbEnv(db, {
       REVIEW_QUEUE: { send: async (msg: unknown) => { sent.push(msg); } } as unknown as Env["REVIEW_QUEUE"],
@@ -2722,26 +2725,19 @@ describe("existing routes unaffected", () => {
 // Local mirror of tests/store/helpers.ts createTestD1 (which pins 0001+0002
 // and pin 0001+0002 only): migrations apply over a DB that
 // ALREADY holds rows, so the fixture seeds a review row between 0002 and
-// 0003 (AC). The manifest work extends the production shape through
-// 0005 — /dashboard routes (manifest start/commit, apps UI) read/write
-// github_apps — with a `through` index kept for pre-manifest DB premises.
+// 0003 (AC). The manifest work extends the production shape through the
+// rename — /dashboard routes (manifest start/commit, apps UI) read/write
+// `review_bots` — with a `through` index kept for pre-manifest DB premises.
 
 function applyMigrationFile(db: Database, name: string): void {
   db.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
 }
 
 /**
- * The delivery log as THIS fixture builds it: 0011 plus 0043's source column.
- * Listed explicitly, not derived from the migrations directory — the dashboard
- * fixture stops at 0038 for `github_apps`, so it is not the production schema,
- * and a migration that assumes a shape this world never built must be a
- * deliberate choice here rather than a silently joined tail.
+ * The dashboard world: production's shape through the bot rename. The manifest
+ * routes write the bot row through the current store, so the fixture carries
+ * every table 0056 renames and the indexes it drops.
  */
-function applyDeliveries(db: Database): void {
-  applyMigrationFile(db, "0011_webhook_deliveries.sql");
-  applyMigrationFile(db, "0043_webhook_delivery_repository.sql");
-}
-
 const DASHBOARD_MIGRATION_SEQUENCE = [
   "0001_reviews.sql",
   "0002_mstar_review_v1.sql",
@@ -2773,6 +2769,35 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0045_review_gate_and_owner_allowlist.sql",
   // 0049: the commit path reads the workspace's default floor before writing.
   "0049_workspace_check_min_score.sql",
+  // The delivery log (0011) and its source column (0043).
+  "0011_webhook_deliveries.sql",
+  "0043_webhook_delivery_repository.sql",
+  // Every remaining table 0056 renames or alters: the PR ledger, the lifecycle
+  // journal, the checks registry, then the bot-family config tables and the
+  // review index the rename drops and recreates. Without them the rename has
+  // nothing to rename.
+  "0039_pull_requests.sql",
+  "0020_finding_lifecycle.sql",
+  "0021_review_checks.sql",
+  "0007_reviews_app_id_index.sql",
+  "0006_app_provider_config.sql",
+  "0009_app_model_roles.sql",
+  "0012_custom_providers_and_key_updated_at.sql",
+  "0015_provider_verification.sql",
+  "0017_app_model_chains.sql",
+  "0024_provider_multi_key.sql",
+  "0025_provider_model_evidence.sql",
+  // 0057 needs the installation stamp (0055), the review depth column (0047)
+  // and the comment-claim table (0048) it rewrites — all before the rename
+  // 0056, which renames the tables they belong to.
+  "0055_app_installations_removed_at.sql",
+  "0047_review_level_per_app.sql",
+  "0048_comment_trigger_claims.sql",
+  "0056_review_bots_rename.sql",
+  // The review configuration moves onto `review_targets`: createApp writes a
+  // bot, its workspace mapping and its one target in one batch, and the delete
+  // stamps both rows.
+  "0057_review_targets.sql",
 ] as const;
 
 function createDashboardTestD1(
@@ -2919,12 +2944,12 @@ function dbOf(env: Env): DashboardTestDb {
 }
 
 function appRowCount(env: Env): number {
-  return (dbOf(env).raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number }).n;
+  return (dbOf(env).raw.query("SELECT COUNT(*) AS n FROM review_bots").get() as { n: number }).n;
 }
 
 /** Apps store over the env's DB (seeding colliding rows before a commit). */
 function envDb(env: Env) {
-  return createAppsStore(dbOf(env));
+  return createReviewBotsStore(dbOf(env));
 }
 
 /**
@@ -2956,7 +2981,7 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
     }).then(async (row) => {
       if (!overrides.deletedAt) return row;
       await dbOf(env).raw
-        .prepare(`UPDATE github_apps SET deleted_at = ? WHERE id = ?`)
+        .prepare(`UPDATE review_bots SET deleted_at = ? WHERE id = ?`)
         .run(overrides.deletedAt, row.id);
       return row;
     });
@@ -3266,7 +3291,6 @@ describe("dashboard users store (users.ts)", () => {
   test("an accepted invite lets the member read the workspace App list", async () => {
     const env = makeEnv();
     const db = dbOf(env);
-    applyDeliveries(db.raw); // the list's health face
     await envDb(env).createApp({
       id: crypto.randomUUID(),
       githubSlug: CONVERSION.slug,
@@ -3911,7 +3935,7 @@ describe("members page (workspace-scoped shell)", () => {
 // --- Review Health insights summary API --------------------------
 // The cross-App global endpoint GET /dashboard/api/insights/summary is
 // REMOVED — insights are a per-App read face now: the store filters every
-// aggregation by the `github_apps.id` row PK, and the data is served by
+// aggregation by the `review_bots.id` row PK, and the data is served by
 // GET /dashboard/api/apps/:slug/insights/summary behind the membership +
 // creator-or-admin gate (matrix in app-permission-matrix.test.ts). The
 // member-GET → 404 no-compat-shim removal pin lives in

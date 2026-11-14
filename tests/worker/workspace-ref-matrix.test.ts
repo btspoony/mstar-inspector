@@ -121,7 +121,7 @@ function seedApp(db: TestD1, workspaceId: string): void {
   const now = new Date().toISOString();
   seed(
     db,
-    `INSERT INTO github_apps
+    `INSERT INTO review_bots
        (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
@@ -133,7 +133,7 @@ function seedApp(db: TestD1, workspaceId: string): void {
     now,
     now,
   );
-  seed(db, "INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", `app-${workspaceId}`, workspaceId);
+  seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", `app-${workspaceId}`, workspaceId);
 }
 
 /**

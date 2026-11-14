@@ -22,6 +22,10 @@ function touchedTables(sql: string): string[] {
   const created = new Set(
     [...ddl.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)/gi)].map((match) => match[1]!),
   );
+  // A rename CREATES its target name in the same statement — `ALTER TABLE a
+  // RENAME TO b` needs `b` absent and `a` present, so the target is no
+  // below-anchor reference to chase.
+  for (const match of ddl.matchAll(/ALTER\s+TABLE\s+"?(\w+)"?\s+RENAME\s+TO\s+"?(\w+)/gi)) created.add(match[2]!);
   const targets: string[] = [];
   for (const pattern of [
     /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+ON\s+"?(\w+)/gi,
@@ -57,6 +61,50 @@ describe("fixture shapes (TAIL_PREREQUISITES)", () => {
         }
         applyMigrations(db, [name]);
       }
+    });
+  }
+});
+
+/**
+ * The App family is a review bot, and the derived tail renames it and then
+ * splits the review configuration onto a target. A shape either carries that
+ * tail — and must end on the bot vocabulary with a target table and no review
+ * configuration on the bot row — or it stops below it, which only the pre-0015
+ * provider world does today. Either way the world is pinned: a hand-listed
+ * shape that drifts between the states cannot serve a suite that reads one of
+ * the names.
+ */
+describe("fixture shapes (review bot vocabulary)", () => {
+  const RENAME = "0056_review_bots_rename.sql";
+
+  for (const [shape, migrations] of Object.entries(FIXTURE_SHAPES)) {
+    test(`${shape}: matches the shape's bot and target vocabulary`, () => {
+      const renamed = migrations.includes(RENAME);
+      const db = createTestD1();
+      applyMigrations(db, migrations);
+      const tables = new Set(
+        (db.raw.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+          (row) => row.name,
+        ),
+      );
+      expect(tables.has("review_bots"), `${shape}: reviewed bot parent`).toBe(renamed);
+      expect(tables.has("github_apps"), `${shape}: pre-rename parent`).toBe(!renamed);
+      const reviews = (
+        db.raw.query("PRAGMA table_info(reviews)").all() as Array<{ name: string }>
+      ).map((column) => column.name);
+      expect(reviews, `${shape}: review attribution column`).toContain(renamed ? "bot_id" : "app_id");
+      // The split is the rename's tail: the target table exists exactly where
+      // the bot vocabulary does, and the bot row no longer carries the review
+      // configuration there, so no shape is left half-split.
+      expect(tables.has("review_targets"), `${shape}: target table`).toBe(renamed);
+      const botColumns = (
+        db.raw.query(`PRAGMA table_info(${renamed ? "review_bots" : "github_apps"})`).all() as Array<{
+          name: string;
+        }>
+      ).map((column) => column.name);
+      expect(botColumns.includes("review_trigger_mode"), `${shape}: review configuration on the bot row`).toBe(
+        !renamed,
+      );
     });
   }
 });

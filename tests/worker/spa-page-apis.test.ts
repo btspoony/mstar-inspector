@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
 import { createTestD1 } from "../store/helpers";
@@ -46,7 +46,7 @@ async function seededWorld(): Promise<ReturnType<typeof createTestD1>> {
   // A stable local App UID so the payload assertion can name it.
   const id = "app-mallory";
   const enc = await encryptedColumns(id);
-  await createAppsStore(db).createApp({
+  await createReviewBotsStore(db).createApp({
     id,
     githubSlug: "mstar-inspector-mallory",
     githubAppId: 1001,
@@ -206,7 +206,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(otherBody.can_manage).toBe(false);
     expect(otherBody.app.github_app_id).toBe(1001);
     expect(otherBody.app.github_slug).toBe("mstar-inspector-mallory");
-    expect(Object.keys(otherBody).sort()).toEqual(["app", "can_manage", "workspace_id"]);
+    expect(Object.keys(otherBody).sort()).toEqual(["app", "can_manage", "target_id", "workspace_id"]);
     expect(Object.keys(otherBody.app).sort()).toEqual([
       "created_at",
       "created_by",

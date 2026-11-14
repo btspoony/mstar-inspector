@@ -935,16 +935,18 @@ contradict a successful deploy.
 Each deploy run performs, in order:
 
 1. `wrangler d1 migrations apply` — forward-only; applies `0026`/`0027`/`0030`
-   on a fresh database. `0027` is the only replayable half (step 2); `0030` is
+   on a fresh database. `0027` is the historical attribution backfill: it runs
+   here, before `0056` renames the tables it names. `0030` is
    the one-time, cutover-scoped membership backfill and runs here exactly once.
-2. **Re-run** [`migrations/0027_workspace_backfill.sql`](../migrations/0027_workspace_backfill.sql)
-   — the remaining statement is `INSERT … SELECT … WHERE NOT EXISTS` over
-   `app_workspaces`, so a re-run repairs a partially applied deploy and inserts
-   nothing that exists. It writes **no** `workspace_members` row: replaying a
-   per-person write is what made a routine deploy re-add every login (removed
-   members included) to `default`. Never add one back.
+2. **Replay** [`scripts/workspace-backfill.sql`](../scripts/workspace-backfill.sql)
+   — `0027`'s statement in the post-rename names (`review_bots`,
+   `bot_workspaces(bot_id)`): `INSERT … SELECT … WHERE NOT EXISTS`, so a re-run
+   repairs a partially applied deploy and inserts nothing that exists. It writes
+   **no** `workspace_members` row: replaying a per-person write is what made a
+   routine deploy re-add every login (removed members included) to `default`.
+   Never add one back.
 3. `bun scripts/assert-tenant-attribution.ts` —
-   `SELECT COUNT(*) … WHERE w.app_id IS NULL` through
+   `SELECT COUNT(*) … WHERE w.bot_id IS NULL` through
    `wrangler d1 execute --remote --json`. **A non-zero count exits the run
    before every deploy-capable step** (an unmapped App vanishes from every
    execution-facing read, silently).

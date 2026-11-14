@@ -18,6 +18,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SpaBoot } from "../../src/spa/boot";
 import { canCreateAppFor, loadApps } from "../../src/spa/pages/AppsPage";
+import { parseApps } from "../../src/spa/pages/data";
 import { workspaceRefOf } from "../../src/spa/routes";
 import { apiBase } from "../../src/spa/workspace-base";
 
@@ -57,6 +58,19 @@ async function readUnder(pathname: string): Promise<{ url: string; apps: string[
     globalThis.fetch = realFetch;
   }
 }
+
+describe("AppsPage list face — split payload leaves list links on the numeric App id", () => {
+  test("list rows stay keyed by github_app_id; the settings split adds no list key", () => {
+    // The settings JSON grew a top-level target_id, but the Apps LIST face is
+    // untouched: rows keep the numeric github_app_id the list links target
+    // (`/apps/:githubAppId`), and no target id leaks onto the list wire.
+    const payload = parseApps({
+      viewer: { login: "octocat", role: "admin" },
+      apps: [{ github_app_id: 1001, github_slug: "acme-app" }],
+    });
+    expect(payload?.apps[0]?.github_app_id).toBe(1001);
+  });
+});
 
 describe("AppsPage create eligibility — addressed workspace", () => {
   test("navigating from workspace A (owner) to workspace B (member) flips Create off", () => {

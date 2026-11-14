@@ -2,7 +2,7 @@
  * Per-App runner-env assembly tests (spec § Per-App BYOK).
  *
  * The consumer resolves the App's AI config (`getAppConfig` decrypt face, ONE
- * read per message) off the SAME appRef resolution as the commenter and feeds
+ * read per message) off the SAME bot resolution as the commenter and feeds
  * it into the runner exec (buildRunnerEnv for the harness paths + chain,
  * buildRunnerCredentials for the stdin credential payload):
  *   - the App's OWN keys ride the credential payload as one pool per provider
@@ -71,11 +71,11 @@ const VALID_OUTPUT: ReviewOutput = {
 
 // --- seeding helpers ---------------------------------------------------------
 
-/** Distinct github_app_id per seeded App (github_apps.github_app_id is UNIQUE). */
+/** Distinct github_app_id per seeded App (review_bots.github_app_id is UNIQUE). */
 let githubAppIdSeq = 100000;
 
 /**
- * Raw-insert an active, non-deleted github_apps row (the commenter face).
+ * Raw-insert an active, non-deleted review_bots row (the commenter face).
  * `configured: false` skips the AI-config health baseline (a chain + the ark
  * BYOK key) — the input for the AL-24-5 fail-closed tests.
  */
@@ -83,7 +83,7 @@ async function seedApp(
   db: ReturnType<typeof createMigratedTestD1>,
   slug: string,
   opts: { configured?: boolean } = {},
-): Promise<{ id: string }> {
+): Promise<{ id: string; targetId: string }> {
   const id = crypto.randomUUID();
   const githubAppId = ++githubAppIdSeq;
   const box = createSecretbox(TEST_KEY);
@@ -91,17 +91,27 @@ async function seedApp(
   const webhookSecretEnc = await box.encryptSecret(`whsec-${slug}`, `github_apps.webhook_secret_enc:${id}`);
   db.raw
     .prepare(
-      `INSERT INTO github_apps
+      `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, githubAppId, slug, privateKeyEnc, webhookSecretEnc);
   await mapAppToDefaultWorkspace(db, id);
+  // The job names the target its review configuration comes from (level, gate,
+  // business pause), so every seeded App gets its one (DDL defaults).
+  const targetId = `target-${id}`;
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+       VALUES (?, 'default', ?, ?, 'tester', datetime('now'), datetime('now'))`,
+    )
+    .run(targetId, id, slug);
   if (opts.configured !== false) {
     await configureApp(db, id);
   }
-  return { id };
+  return { id, targetId };
 }
 
 /**
@@ -128,7 +138,7 @@ async function configureApp(
 /**
  * Map one seat to a named chain holding the given selector
  * spec §4.4): the `seat-<role>` chain + the reference row — the same shape
- * migration 0017's backfill produces for legacy app_model_roles rows.
+ * migration 0017's backfill produces for legacy bot_model_roles rows.
  */
 async function mapRole(
   db: ReturnType<typeof createMigratedTestD1>,
@@ -157,7 +167,7 @@ async function seedTamperedKey(
   );
   db.raw
     .prepare(
-      `INSERT INTO app_provider_keys (app_id, provider, key_id, key_enc, created_at)
+      `INSERT INTO bot_provider_keys (bot_id, provider, key_id, key_enc, created_at)
        VALUES (?, ?, 'deadbeefdeadbeef', ?, datetime('now'))`,
     )
     .run(appId, provider, keyEnc);
@@ -311,9 +321,10 @@ function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayloa
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
-    // Required single shape — every test overrides it with
-    // a seeded App id; the default is type-only (never resolved).
-    appRef: { appId: "00000000-0000-0000-0000-000000000000" },
+    // Required pair — every test overrides it with a seeded App + its target;
+    // the default is type-only (never resolved).
+    botRef: { appId: "00000000-0000-0000-0000-000000000000" },
+    targetId: "00000000-0000-0000-0000-000000000001",
     ...overrides,
   };
 }
@@ -425,7 +436,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     const env = runnerEnvs()[0]!;
     const pools = runnerPools()[0]!;
@@ -459,7 +470,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     // The chain's FIRST selector (`openai/gpt-app`) is missing its key in
     // the App's config — the gate throws on the first key-less provider.
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(/per-App config incomplete: app .*provider openai has no configured key/);
 
     expect(sandboxCalls).toHaveLength(0); // no clone, no runner
@@ -487,7 +498,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     const expected = (await store.getAppConfig(appX.id)).keys.openai!;
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     const env = runnerEnvs()[0]!;
     // Store order IS transport order: the payload array is exactly the order
@@ -506,7 +517,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     const pools = runnerPools()[0]!;
     expect(pools.anthropic).toEqual([sk("app-x-SECRET")]);
@@ -522,11 +533,11 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
   test("App with no AI config at all → fail closed: missing model chain (zero-config is not a valid review state)", async () => {
     reset();
     const db = createMigratedTestD1();
-    const appX = await seedApp(db, "app-x", { configured: false }); // github_apps row, NO config rows
+    const appX = await seedApp(db, "app-x", { configured: false }); // review_bots row, NO config rows
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(/per-App config incomplete: app .*missing model chain/);
 
     expect(sandboxCalls).toHaveLength(0); // no clone, no runner
@@ -559,8 +570,8 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     await expect(
       consumer(
         makeBatch(
-          makePayload({ pr_number: 42, appRef: { appId: appX.id } }),
-          makePayload({ pr_number: 43, appRef: { appId: appY.id } }),
+          makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId }),
+          makePayload({ pr_number: 43, botRef: { appId: appY.id }, targetId: appY.targetId }),
         ),
       ),
     ).rejects.toThrow(/per-App config incomplete: app .*missing model chain/);
@@ -590,14 +601,14 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     // the fail-closed + verbatim guards independent of store semantics.
     db.raw
       .prepare(
-        `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+        `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
          VALUES (?, 'default', '   ', 1, datetime('now'), datetime('now'))`,
       )
       .run(appX.id);
     const padded = "  openai/gpt-padded , anthropic/claude-padded  ";
     db.raw
       .prepare(
-        `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+        `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
          VALUES (?, 'default', ?, 1, datetime('now'), datetime('now'))`,
       )
       .run(appY.id, padded);
@@ -613,8 +624,8 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     await expect(
       consumer(
         makeBatch(
-          makePayload({ pr_number: 43, appRef: { appId: appY.id } }),
-          makePayload({ pr_number: 42, appRef: { appId: appX.id } }),
+          makePayload({ pr_number: 43, botRef: { appId: appY.id }, targetId: appY.targetId }),
+          makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId }),
         ),
       ),
     ).rejects.toThrow(/per-App config incomplete: app .*missing model chain/);
@@ -649,8 +660,8 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
 
     await consumer(
       makeBatch(
-        makePayload({ pr_number: 42, appRef: { appId: appX.id } }),
-        makePayload({ pr_number: 43, appRef: { appId: appY.id } }),
+        makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId }),
+        makePayload({ pr_number: 43, botRef: { appId: appY.id }, targetId: appY.targetId }),
       ),
     );
 
@@ -670,7 +681,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     const appX = await seedApp(db, "app-x", { configured: false });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })))).rejects.toThrow(
+    await expect(consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })))).rejects.toThrow(
       /per-App config incomplete: app .*missing model chain/,
     );
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(0);
@@ -690,9 +701,9 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     // review with no shared mutable state between messages.
     await consumer(
       makeBatch(
-        makePayload({ pr_number: 42, appRef: { appId: appX.id } }),
-        makePayload({ pr_number: 43, appRef: { appId: appY.id } }),
-        makePayload({ pr_number: 44, appRef: { appId: appX.id } }),
+        makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId }),
+        makePayload({ pr_number: 43, botRef: { appId: appY.id }, targetId: appY.targetId }),
+        makePayload({ pr_number: 44, botRef: { appId: appX.id }, targetId: appX.targetId }),
       ),
     );
 
@@ -727,7 +738,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     const secrets = [sk("app-x-openai-SECRET"), ARK_KEY, sk("tampered-SECRET")];
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     // The assembly lines EXIST (the assertion is not vacuous)…
     const sources = Object.fromEntries(keySourceLines().map((l) => [l.fields.provider, l.fields.key_source]));
@@ -750,7 +761,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(/per-App config resolution failed/);
 
     expect(sandboxCalls).toHaveLength(0); // no clone, no runner
@@ -780,7 +791,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     // side effects. (The config-face decrypt failure alone is pinned by the
     // tamper test above.)
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { appId: appY.id } }))),
+      consumer(makeBatch(makePayload({ botRef: { appId: appY.id }, targetId: appY.targetId }))),
     ).rejects.toThrow(/DASHBOARD_ENCRYPTION_KEY is not set/);
     expect(sandboxCalls).toHaveLength(0);
     expect(kvGuardPuts).toHaveLength(0);
@@ -795,11 +806,11 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     await store.addProviderKey(appX.id, "anthropic", sk("v1-SECRET"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId })));
     expect(runnerPools()[0]!.anthropic).toEqual([sk("v1-SECRET")]);
 
     await store.addProviderKey(appX.id, "anthropic", sk("v2-SECRET"));
-    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId })));
     const second = runnerPools()[1]!.anthropic!;
     expect(second).toHaveLength(2);
     expect(second).toContain(sk("v1-SECRET"));
@@ -815,7 +826,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     await createAppConfigStore(db, TEST_KEY).addProviderKey(appX.id, "not-a-provider", sk("rogue-SECRET"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     expect(runnerEnvs()[0]).toEqual({
       HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
@@ -842,7 +853,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     // A whitespace-only key = not configured — and there is NO global key to
     // fall back to, so the chain provider's missing key fails the review.
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(/per-App config incomplete: app .*provider anthropic has no configured key/);
     expect(sandboxCalls).toHaveLength(0);
     expect(kvGuardPuts).toHaveLength(0);
@@ -868,8 +879,8 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     await expect(
       consumer(
         makeBatch(
-          makePayload({ pr_number: 42, appRef: { appId: healthy.id } }),
-          makePayload({ pr_number: 43, appRef: { appId: missingKey.id } }),
+          makePayload({ pr_number: 42, botRef: { appId: healthy.id }, targetId: healthy.targetId }),
+          makePayload({ pr_number: 43, botRef: { appId: missingKey.id }, targetId: missingKey.targetId }),
         ),
       ),
     ).rejects.toThrow(/per-App config incomplete/);
@@ -919,7 +930,7 @@ describe("runner input modelOverrides threading", () => {
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     const startedAt = await withFrozenClock(async (clock) => {
-      await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+      await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
       return clock.now;
     });
 
@@ -944,10 +955,10 @@ describe("runner input modelOverrides threading", () => {
     // helper's decode must be UTF-8 (atob would mangle it to latin1).
     numstatStdout = "1\t1\tdocs/中文.md\n";
     const appDb = createMigratedTestD1();
-    const appX = await seedApp(appDb, "app-x"); // github_apps row, NO role rows
+    const appX = await seedApp(appDb, "app-x"); // review_bots row, NO role rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
     await withFrozenClock(() =>
-      appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } }))),
+      appConsumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId }))),
     );
     const [appInput] = runnerInputs();
     // No role map → the role field is omitted entirely; the rest is the shape
@@ -967,7 +978,7 @@ describe("runner input modelOverrides threading", () => {
     await store.clearModelChainSeat(appX.id, "mstar-review-seat"); // cleared → empty map
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await withFrozenClock(() => consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))));
+    await withFrozenClock(() => consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))));
 
     const input = runnerInputs()[0]!;
     expectOuterDeadline(input);
@@ -986,9 +997,9 @@ describe("runner input modelOverrides threading", () => {
     await mapRole(db, appX.id, "code-reviewer", "openai/v1");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId })));
     await mapRole(db, appX.id, "code-reviewer", "openai/v2");
-    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     const [first, second] = runnerInputs();
     expect(first!.modelOverrides).toEqual({ "code-reviewer": "openai/v1" });
@@ -1005,7 +1016,7 @@ describe("runner input modelOverrides threading", () => {
       get(target, prop, receiver) {
         if (prop === "prepare") {
           return (query: string) => {
-            if (query.includes("FROM app_model_chain_seats")) throw new Error("roles read boom");
+            if (query.includes("FROM bot_model_chain_seats")) throw new Error("roles read boom");
             return (target as typeof db).prepare(query);
           };
         }
@@ -1015,11 +1026,11 @@ describe("runner input modelOverrides threading", () => {
     const consumer = createReviewConsumer(makeEnv({ DB: failingDb as never }), testLog, testOverrides);
 
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(`per-App model-role resolution failed: app ${appX.id}: roles read boom`);
 
     // Zero side effects: no sandbox, no input write, no guard acquisition
-    // (the read hangs off the appRef gate, before the in-flight guard).
+    // (the read hangs off the bot gate, before the in-flight guard).
     expect(sandboxCalls).toHaveLength(0);
     expect(runnerInputs()).toHaveLength(0);
     expect(kvGuardPuts).toHaveLength(0);
@@ -1054,8 +1065,8 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     await expect(
       consumer(
         makeBatch(
-          makePayload({ pr_number: 42, appRef: { appId: healthy.id } }),
-          makePayload({ pr_number: 43, appRef: { appId: badOverride.id } }),
+          makePayload({ pr_number: 42, botRef: { appId: healthy.id }, targetId: healthy.targetId }),
+          makePayload({ pr_number: 43, botRef: { appId: badOverride.id }, targetId: badOverride.targetId }),
         ),
       ),
     ).rejects.toThrow(
@@ -1090,7 +1101,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     await mapRole(db, appX.id, "code-reviewer", "openai/gpt-5:thinking, openai/gpt-5-mini");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     // The override passed the gate and reaches the runner input verbatim;
     // the App key rides the credential payload under its provider id.
@@ -1119,7 +1130,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     await mapRole(db, appX.id, "frontend-dev", "my-provider/m1");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({ "frontend-dev": "my-provider/m1" });
@@ -1147,7 +1158,7 @@ describe("applied-provider attribution (runner observation → reviews.provider)
     appliedModelDoc = JSON.stringify({ appliedModel: "anthropic/claude-app" });
 
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     // The ONE projection: the runner's observation reaches the row verbatim.
     expect(await storedProvider(db)).toBe("anthropic/claude-app");
@@ -1181,7 +1192,7 @@ describe("applied-provider attribution (runner observation → reviews.provider)
       appliedModelDoc = doc;
 
       const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
-      await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+      await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
       const row = db.raw.query("SELECT provider FROM reviews WHERE pr_number = 42").get() as {
         provider: string | null;
@@ -1202,7 +1213,7 @@ describe("applied-provider attribution (runner observation → reviews.provider)
     appliedModelDoc = undefined; // the runner wrote no document
 
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     expect(await storedProvider(db)).toBeNull();
     // The absence is visible as the ordinary shape, never as a fault.
@@ -1238,7 +1249,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await withFrozenClock(() => consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))));
+    await withFrozenClock(() => consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))));
 
     // Credential transport: decrypted keys into their provider's pool.
     const env = runnerEnvs()[0]!;
@@ -1312,7 +1323,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await withFrozenClock(() => consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))));
+    await withFrozenClock(() => consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))));
 
     const input = runnerInputs()[0]!;
     // provider_id-ascending, the store's read order.
@@ -1360,7 +1371,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     // The gate passes (the custom declaration supplies the key) and the review
     // completes — the key reaches the runner under the SAME provider id the
     // synthesized models.yml declares (AL-23-1 loop).
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     const env = runnerEnvs()[0]!;
     expect(runnerPools()[0]!["my-provider"]).toEqual([sk("custom-fixture-AAA")]);
@@ -1390,7 +1401,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     const customLines = keySourceLines().filter((l) => l.fields.key_source === "custom");
     expect(customLines).toHaveLength(1);
@@ -1411,17 +1422,17 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(/the ark-plan provider was removed — point the chain at a provider the runtime serves/);
   });
 
   test("app with NO custom providers: input JSON + payload carry no custom-provider surface (byte-identical to a no-declaration run)", async () => {
     reset();
     const appDb = createMigratedTestD1();
-    const appX = await seedApp(appDb, "app-x"); // github_apps row, NO custom rows
+    const appX = await seedApp(appDb, "app-x"); // review_bots row, NO custom rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
     await withFrozenClock(() =>
-      appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } }))),
+      appConsumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId }))),
     );
     const [appInput] = runnerInputs();
     const [appEnv] = runnerEnvs();
@@ -1449,7 +1460,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId })));
     // The endpoint may only move while the pool is EMPTY (A1), so the edit is
     // the same remove-then-re-declare an operator performs — the declaration
     // this consumer must re-read is wholesale new.
@@ -1459,7 +1470,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
       { provider_id: "my-provider", base_url: "https://two.example.com/v1", api: "openai-completions", model_ids: ["m2"] },
       sk("custom-fixture-BBB"),
     );
-    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     const [first, second] = runnerInputs();
     expect((first!.customProviders as Array<{ base_url: string; model_ids: string[] }>)[0]!.base_url).toBe(
@@ -1478,7 +1489,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     const appX = await seedApp(db, "app-x");
     db.raw
       .prepare(
-        `INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, created_at, updated_at)
+        `INSERT INTO bot_custom_providers (bot_id, provider_id, base_url, api, model_ids, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       )
       .run(appX.id, "my-provider", "https://my-provider.example.com/v1", "openai-completions", JSON.stringify(["m1"]));
@@ -1489,14 +1500,14 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     );
     db.raw
       .prepare(
-        `INSERT INTO app_custom_provider_keys (app_id, provider, key_id, key_enc, created_at)
+        `INSERT INTO bot_custom_provider_keys (bot_id, provider, key_id, key_enc, created_at)
          VALUES (?, ?, 'deadbeefdeadbeef', ?, datetime('now'))`,
       )
       .run(appX.id, "my-provider", enc);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(`per-App custom-provider resolution failed: app ${appX.id}`);
 
     expect(sandboxCalls).toHaveLength(0);
@@ -1518,7 +1529,7 @@ describe("sandbox image resolution at review execution", () => {
     const appX = await seedApp(db, "app-x");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     const input = runnerInputs()[0]!;
     // The image declares no provider: the per-review models.yml is the App's
@@ -1537,12 +1548,12 @@ describe("sandbox image resolution at review execution", () => {
     // Bypass the store (the threat model: a direct DB write or a
     // registry contraction can hold an id the current registry rejects).
     db.raw
-      .prepare(`UPDATE github_apps SET sandbox_image_id = 'retired-image' WHERE id = ?`)
+      .prepare(`UPDATE review_bots SET sandbox_image_id = 'retired-image' WHERE id = ?`)
       .run(appX.id);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(
       `per-App sandbox image resolution failed: app ${appX.id}: unknown sandbox image id "retired-image"`,
     );
@@ -1568,19 +1579,19 @@ describe("sandbox image resolution at review execution", () => {
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     db.raw
-      .prepare(`UPDATE github_apps SET sandbox_image_id = 'no-such-image' WHERE id = ?`)
+      .prepare(`UPDATE review_bots SET sandbox_image_id = 'no-such-image' WHERE id = ?`)
       .run(appX.id);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
-      consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(/unknown sandbox image id/);
     expect(sandboxCalls).toHaveLength(0); // the bad-id message never started one
 
     db.raw
-      .prepare(`UPDATE github_apps SET sandbox_image_id = 'omp' WHERE id = ?`)
+      .prepare(`UPDATE review_bots SET sandbox_image_id = 'omp' WHERE id = ?`)
       .run(appX.id);
-    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId })));
     // The valid-id message started exactly one sandbox and completed.
     expect(sandboxCalls.length).toBeGreaterThan(0);
     expect(runnerInputs()).toHaveLength(1);
@@ -1622,7 +1633,7 @@ describe("custom provider sizes resolve from the catalog at the runner boundary"
       await configureApp(db, appX.id, `${covered.providerId}/${covered.modelId}`);
       const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-      await withFrozenClock(() => consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))));
+      await withFrozenClock(() => consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))));
 
       // The operator stated nothing, so nothing is STORED — but the runner has
       // no catalog of its own, so the projection resolves the blank from it.

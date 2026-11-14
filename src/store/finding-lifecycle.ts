@@ -148,13 +148,13 @@ function publicationRowOf(row: ReviewPublicationRow): PublicationRow {
   };
 }
 
-function threadScope(row: { id: string; app_id: string; installation_id: number; owner: string; repo: string; pr_number: number }): {
+function threadScope(row: { id: string; bot_id: string; installation_id: number; owner: string; repo: string; pr_number: number }): {
   associationId: string; scope: Scope;
 } {
   return {
     associationId: row.id,
     scope: {
-      appId: row.app_id, installationId: row.installation_id,
+      appId: row.bot_id, installationId: row.installation_id,
       owner: row.owner, repo: row.repo, prNumber: row.pr_number,
     },
   };
@@ -170,14 +170,14 @@ function threadScope(row: { id: string; app_id: string; installation_id: number;
  * into a lying `capped` remainder. Binds the scope tuple TWICE (the finding
  * row, then its association probe): bind it with `recheckableScopeBinds`.
  */
-const RECHECKABLE_WHERE_SQL = `f.app_id = ? AND f.installation_id = ? AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
+const RECHECKABLE_WHERE_SQL = `f.bot_id = ? AND f.installation_id = ? AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
          AND (
            f.state = 'open'
            OR (
              f.state = 'addressed'
              AND EXISTS (
                SELECT 1 FROM review_threads t
-               WHERE t.app_id = ? AND t.installation_id = ? AND t.owner = ? AND t.repo = ? AND t.pr_number = ?
+               WHERE t.bot_id = ? AND t.installation_id = ? AND t.owner = ? AND t.repo = ? AND t.pr_number = ?
                  AND t.finding_row_id = f.id
                  AND t.superseded_by_publication_id IS NULL
                  AND t.resolution_state IN ('pending','retry','needs-recheck','local-error')
@@ -300,7 +300,7 @@ export async function stagePublication(
   const insert = await db
     .prepare(
       `INSERT INTO review_publications
-         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?, ?)
        ON CONFLICT DO NOTHING`,
@@ -320,7 +320,7 @@ export async function stagePublication(
       (await db
         .prepare(
           `SELECT * FROM review_publications
-           WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+           WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
              AND head_sha = ? AND kind = ?`,
         )
         .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, input.payload.headSha, input.payload.kind)
@@ -379,7 +379,7 @@ export async function recordPublicationProof(db: D1Like, id: string, lease: Leas
            recovery_state = 'pending', next_attempt_ms = NULL
        WHERE id = ? AND holder = ? AND lease_epoch = ?
          AND phase IN ('prepared','sending','unknown','confirmed')
-         AND app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND head_sha = ?`,
     )
     .bind(
@@ -406,7 +406,7 @@ export async function readPublicationProof(
   const row = await db
     .prepare(
       `SELECT proof_json FROM review_publications
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+       WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND head_sha = ? AND proof_json IS NOT NULL
        ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END,
                 CASE WHEN kind = 'review' THEN 0 ELSE 1 END,
@@ -492,7 +492,7 @@ export async function findPublicationJournal(
   const row = await db
     .prepare(
       `SELECT id, phase, (proof_json IS NOT NULL AND json_valid(proof_json)) AS has_proof FROM review_publications
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+       WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND head_sha = ? AND phase IN (${placeholders}) ${writeFloor}
        ORDER BY ${order} LIMIT 1`,
     )
@@ -721,12 +721,12 @@ function lifecycleApplyBatch(
       db
         .prepare(
           `INSERT INTO review_findings
-             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+             (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
               first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
               first_seen_round, last_seen_round, state, created_ms, updated_ms)
            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?
            WHERE ${APPLY_LEASE_GUARD_SQL}
-           ON CONFLICT(app_id, installation_id, owner, repo, pr_number, finding_id) DO UPDATE SET
+           ON CONFLICT(bot_id, installation_id, owner, repo, pr_number, finding_id) DO UPDATE SET
              last_publication_id = excluded.last_publication_id,
              last_seen_sha = excluded.last_seen_sha,
              last_seen_round = excluded.last_seen_round,
@@ -805,7 +805,7 @@ function lifecycleApplyBatch(
       db
         .prepare(
           `INSERT INTO review_threads
-             (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+             (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
               original_sha, round, intent_json, resolution_state, created_ms, updated_ms)
            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?
            WHERE ${APPLY_LEASE_GUARD_SQL}
@@ -877,7 +877,7 @@ export async function listResolutionRecovery(
 ): Promise<{ associationId: string; scope: Scope }[]> {
   const rows = await db
     .prepare(
-      `SELECT id, app_id, installation_id, owner, repo, pr_number FROM review_threads
+      `SELECT id, bot_id, installation_id, owner, repo, pr_number FROM review_threads
        WHERE resolution_state IN ('pending','retry') AND verified_json IS NOT NULL
          AND superseded_by_publication_id IS NULL AND attempts < ?
          AND (next_attempt_ms IS NULL OR next_attempt_ms <= ?)
@@ -886,7 +886,7 @@ export async function listResolutionRecovery(
        LIMIT ?`,
     )
     .bind(LIFECYCLE_MAX_ATTEMPTS, nowMs, nowMs, limit)
-    .all<{ id: string; app_id: string; installation_id: number; owner: string; repo: string; pr_number: number }>();
+    .all<{ id: string; bot_id: string; installation_id: number; owner: string; repo: string; pr_number: number }>();
   return rows.results.map(threadScope);
 }
 
@@ -907,7 +907,7 @@ export async function retryLifecycleWork(
   const hasAssociation = input.associationId !== undefined;
   if (hasPublication === hasAssociation) return false; // exactly one work ID required
 
-  const scopeGuard = "app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?";
+  const scopeGuard = "bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?";
   const scopeBinds = [input.scope.appId, input.scope.installationId, input.scope.owner, input.scope.repo, input.scope.prNumber];
   const freeLease = "(lease_until_ms IS NULL OR lease_until_ms <= ?)";
 
@@ -1034,7 +1034,7 @@ export async function hasUnprovenDegradedPublication(db: D1Like, scope: Scope): 
   const row = await db
     .prepare(
       `SELECT id FROM review_publications
-       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+       WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
          AND kind = 'degraded' AND proof_json IS NULL
          AND phase IN ('prepared','sending','unknown')
        LIMIT 1`,
@@ -1228,7 +1228,7 @@ export async function supersedePublication(db: D1Like, id: string, reason: strin
 /**
  * Durable App-lifecycle suspension (spec §7.6/§7.11.1): missing mapping,
  * disabled or deleted App — every pending recovery row of the EXACT
- * `(app_id, installation_id)` pair stops (no cross-App substitution), lease
+ * `(bot_id, installation_id)` pair stops (no cross-bot substitution), lease
  * released, attempts untouched. Returns the number of suspended rows.
  */
 export async function suspendPublicationRecovery(
@@ -1241,7 +1241,7 @@ export async function suspendPublicationRecovery(
     .prepare(
       `UPDATE review_publications
        SET recovery_state = 'suspended', last_error = ?, holder = NULL, lease_until_ms = NULL, updated_ms = ?
-       WHERE app_id = ? AND installation_id = ? AND recovery_state IN ('pending','suspended') AND ${FREE_LEASE_SQL}`,
+       WHERE bot_id = ? AND installation_id = ? AND recovery_state IN ('pending','suspended') AND ${FREE_LEASE_SQL}`,
     )
     .bind(
       suspensionReasonOf(input.kind, recoveryReason(input.reason), input.credentialFingerprint),
@@ -1265,7 +1265,7 @@ export async function suspendResolutionRecovery(
     .prepare(
       `UPDATE review_threads
        SET resolution_state = 'suspended', last_error = ?, holder = NULL, lease_until_ms = NULL, updated_ms = ?
-       WHERE app_id = ? AND installation_id = ? AND resolution_state IN ('pending','retry','suspended') AND ${FREE_LEASE_SQL}`,
+       WHERE bot_id = ? AND installation_id = ? AND resolution_state IN ('pending','retry','suspended') AND ${FREE_LEASE_SQL}`,
     )
     .bind(
       suspensionReasonOf(input.kind, recoveryReason(input.reason), input.credentialFingerprint),
@@ -1279,7 +1279,7 @@ export async function suspendResolutionRecovery(
 }
 
 /**
- * Distinct suspended `(app_id, installation_id)` pairs across both lanes,
+ * Distinct suspended `(bot_id, installation_id)` pairs across both lanes,
  * bounded — the re-enable probe input (§7.11.1: "Suspended rows are checked
  * for exact-App re-enable before returning to pending"). `requiresIdentityProof`
  * is true when ANY of the pair's suspended rows was suspended for a reason
@@ -1304,18 +1304,18 @@ export async function listSuspendedLifecycleApps(
 > {
   const pubs = await db
     .prepare(
-      `SELECT DISTINCT app_id, installation_id, last_error FROM review_publications
+      `SELECT DISTINCT bot_id, installation_id, last_error FROM review_publications
        WHERE recovery_state = 'suspended' LIMIT ?`,
     )
     .bind(limit)
-    .all<{ app_id: string; installation_id: number; last_error: string | null }>();
+    .all<{ bot_id: string; installation_id: number; last_error: string | null }>();
   const threads = await db
     .prepare(
-      `SELECT DISTINCT app_id, installation_id, last_error FROM review_threads
+      `SELECT DISTINCT bot_id, installation_id, last_error FROM review_threads
        WHERE resolution_state = 'suspended' LIMIT ?`,
     )
     .bind(limit)
-    .all<{ app_id: string; installation_id: number; last_error: string | null }>();
+    .all<{ bot_id: string; installation_id: number; last_error: string | null }>();
   type Merged = {
     appId: string;
     installationId: number;
@@ -1325,7 +1325,7 @@ export async function listSuspendedLifecycleApps(
   };
   const merged = new Map<string, Merged>();
   for (const row of [...pubs.results, ...threads.results]) {
-    const key = `${row.app_id}:${row.installation_id}`;
+    const key = `${row.bot_id}:${row.installation_id}`;
     const existing = merged.get(key);
     const recorded = suspensionCredentialOf(row.last_error);
     let credentialFingerprint = existing?.credentialFingerprint ?? null;
@@ -1335,7 +1335,7 @@ export async function listSuspendedLifecycleApps(
       else if (credentialFingerprint !== recorded) conflicting = true;
     }
     merged.set(key, {
-      appId: row.app_id,
+      appId: row.bot_id,
       installationId: row.installation_id,
       requiresIdentityProof: (existing?.requiresIdentityProof ?? false) || suspensionKindOf(row.last_error) !== "disabled",
       credentialFingerprint,
@@ -1370,7 +1370,7 @@ export async function reenableLifecycleForApps(
         `UPDATE review_publications
          SET recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL,
              holder = NULL, lease_until_ms = NULL, updated_ms = ?
-         WHERE app_id = ? AND installation_id = ? AND recovery_state = 'suspended'`,
+         WHERE bot_id = ? AND installation_id = ? AND recovery_state = 'suspended'`,
       )
       .bind(nowMs, pair.appId, pair.installationId)
       .run();
@@ -1379,7 +1379,7 @@ export async function reenableLifecycleForApps(
         `UPDATE review_threads
          SET resolution_state = 'retry', next_attempt_ms = NULL, last_error = NULL,
              holder = NULL, lease_until_ms = NULL, updated_ms = ?
-         WHERE app_id = ? AND installation_id = ? AND resolution_state = 'suspended'`,
+         WHERE bot_id = ? AND installation_id = ? AND resolution_state = 'suspended'`,
       )
       .bind(nowMs, pair.appId, pair.installationId)
       .run();
@@ -1398,18 +1398,18 @@ export async function getResolutionRecoveryRow(
 ): Promise<{ scope: Scope; verifiedJson: string; attempts: number } | null> {
   const row = await db
     .prepare(
-      `SELECT app_id, installation_id, owner, repo, pr_number, verified_json, attempts
+      `SELECT bot_id, installation_id, owner, repo, pr_number, verified_json, attempts
        FROM review_threads WHERE id = ?`,
     )
     .bind(id)
     .first<{
-      app_id: string; installation_id: number; owner: string; repo: string;
+      bot_id: string; installation_id: number; owner: string; repo: string;
       pr_number: number; verified_json: string | null; attempts: number;
     }>();
   if (row === null || row.verified_json === null) return null;
   return {
     scope: {
-      appId: row.app_id, installationId: row.installation_id,
+      appId: row.bot_id, installationId: row.installation_id,
       owner: row.owner, repo: row.repo, prNumber: row.pr_number,
     },
     verifiedJson: row.verified_json,
