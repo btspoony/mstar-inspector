@@ -376,9 +376,12 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     // rotation head) brings four slices of its file, row B one slice of another.
     // The head can never be dropped for want of room — an omitted row keeps its
     // clock and comes back first forever — so it rides with a bounded body and
-    // as much of its own catalog as fits, while B waits its turn. Byte
-    // accounting stays measured against the FINAL input either way: A carries
-    // no slice of the row that did not ride, and B is judged without A's slices.
+    // as much of its own catalog as fits, while B waits its turn. What this
+    // case pins is the rescue's evidence accounting: the rescued head carries
+    // only its own catalog, never a slice of a row that did not ride. The
+    // final-input measurement itself (a row judged WITHOUT a dropped
+    // neighbour's slices) needs a fixture where that measurement decides the
+    // outcome; the sibling case below is that fixture.
     h.sandbox.diffStdout = [
       catalogBudgetDiff(1),
       "diff --git a/src/other.ts b/src/other.ts",
@@ -449,6 +452,109 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     // unusable row, the omitted one keeps its never-sent budget reason.
     expect(prepared.body).toContain("| Oversized neighbour | unverifiable (invalid-output) ");
     expect(prepared.body).toContain("| Affordable row | unverifiable (budget) ");
+  });
+
+  test("a candidate is measured against the FINAL input, never a dropped neighbour's slices", async () => {
+    // The fixpoint property this suite exists to protect, isolated so the head
+    // rescue cannot mask it. At the operator floor the document budget is
+    // ~4.5 KiB, and three provable rows compete:
+    //   C (rotation head, small body, its own small slice) → always fits
+    //   B (small body, its own small slice)                → fits beside C
+    //   A (520 KiB body, four ~3.6 KiB slices)             → never fits
+    // Measured against the FINAL input, B's candidate carries only the slices
+    // the accepted rows reference: C's and its own (~2.4 KiB) → B rides.
+    // Measured against the WHOLE candidate set — the old fixpoint — B also
+    // absorbs A's ~14.5 KiB and is dropped for evidence it never rode with.
+    // C rides either way, so no rescue fires and the two measurements really
+    // do differ: reverting to the whole-set loop makes this case send only C.
+    h.sandbox.diffStdout = [
+      catalogBudgetDiff(1),
+      "diff --git a/src/other.ts b/src/other.ts",
+      "index 3333333..4444444 100644",
+      "--- a/src/other.ts",
+      "+++ b/src/other.ts",
+      "@@ -1,2 +1,3 @@",
+      " export const a = 1;",
+      "+export const b = 2;",
+      " export const c = 3;",
+      "diff --git a/src/head.ts b/src/head.ts",
+      "index 5555555..6666666 100644",
+      "--- a/src/head.ts",
+      "+++ b/src/head.ts",
+      "@@ -1,2 +1,3 @@",
+      " export const x = 1;",
+      "+export const y = 2;",
+      " export const z = 3;",
+      "",
+    ].join("\n");
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.recheckFileContent = ""; // no document: each row is accounted by its own cause
+    const headRowId = "eeeeeeee-0000-4000-8000-00000000000c";
+    const affordableRowId = "eeeeeeee-0000-4000-8000-00000000000d";
+    const droppedRowId = "eeeeeeee-0000-4000-8000-00000000000e";
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)")
+      .run(RECHECK_ASSIGNMENT_KEY, String(RECHECK_ASSIGNMENT_MIN), new Date().toISOString());
+    await seedPriorPublication(db);
+    await seedOpenTarget(db, {
+      rowId: headRowId,
+      findingId: "finding-small-head",
+      original: {
+        title: "Small head",
+        filePath: "src/head.ts",
+        lineStart: 1,
+        lineEnd: 1,
+        body: "c".repeat(200),
+      },
+      nowMs: 1_400,
+    });
+    await seedOpenTarget(db, {
+      rowId: affordableRowId,
+      findingId: "finding-affordable",
+      original: {
+        title: "Affordable row",
+        filePath: "src/other.ts",
+        lineStart: 1,
+        lineEnd: 1,
+        body: "b".repeat(200),
+      },
+      nowMs: 1_500,
+    });
+    await seedOpenTarget(db, {
+      rowId: droppedRowId,
+      findingId: "finding-dropped-neighbour",
+      original: {
+        title: "Dropped neighbour",
+        filePath: "src/b01.ts",
+        lineStart: 1,
+        lineEnd: 1,
+        body: "a".repeat(520 * 1024),
+      },
+      nowMs: 1_600,
+    });
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as {
+      recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ path: string }> };
+    };
+    // Both fitting rows ride, in rotation order, and A's slices never enter.
+    expect(runnerInput.recheck.targets.map((target) => target.rowId)).toEqual([headRowId, affordableRowId]);
+    expect(runnerInput.recheck.evidence.map((slice) => slice.path).sort()).toEqual(["src/head.ts", "src/other.ts"]);
+    expect(runnerInput.recheck.evidence.map((slice) => slice.path)).not.toContain("src/b01.ts");
+    const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("| Dropped neighbour | unverifiable (budget) ");
+    expect(prepared.body).toContain("| Affordable row | unverifiable (invalid-output) ");
+    // The dropped row was fit-omitted, so it holds its clock and gets its turn.
+    const clocks = db.raw.query("SELECT id, last_scheduled_ms FROM review_findings").all() as {
+      id: string;
+      last_scheduled_ms: number | null;
+    }[];
+    const clockById = new Map(clocks.map((row) => [row.id, row.last_scheduled_ms]));
+    expect(clockById.get(droppedRowId)).toBeNull();
+    expect(clockById.get(affordableRowId)).not.toBeNull();
   });
 
   test("an oversized hunk is sliced into windows that still contain the target line", async () => {
