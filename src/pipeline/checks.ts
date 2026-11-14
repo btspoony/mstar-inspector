@@ -1589,12 +1589,18 @@ export type CheckLifecycle = {
     handle: CheckLifecycleHandle;
     reason: string;
     /**
-     * The terminal outcome this give-up owes when nothing is frozen yet. Omitted
-     * → the generic `failure/unconfirmed` of an interrupted terminalize. Given,
-     * the fallback is the SAME conclusion the terminal path would have sent —
-     * `skipped` reads the inherited head's result and gate (`inheritedHeadSha`),
-     * every other value decides from the outcome alone. A handoff must never
-     * freeze `unconfirmed` over a conclusion the caller already had.
+     * The terminal knowledge this hand-off carries. Omitted → the generic
+     * `failure/unconfirmed` of an interrupted terminalize. Given, the frozen
+     * fallback is only what the CALLER already knew: an outcome-only conclusion
+     * for `superseded` / `local-error` / `pre-publication-failure`, and for
+     * `skipped` with `inheritedHeadSha` the inherited head's gate result.
+     *
+     * It is deliberately NOT the terminal path's conclusion for
+     * `publication-unknown` / `expired` / `degraded-not-posted`: that path reads
+     * `readPublicationProof` and can conclude `success`, while this seam always
+     * passes `proof: null` and freezes the unconfirmed fallback. The safety net
+     * is the recovery lane — the last writer — which re-reads the proof and
+     * corrects the frozen intent.
      */
     outcome?: CheckTerminalOutcome;
     /**
@@ -2284,11 +2290,15 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
 
     async abandonTerminalize(input) {
       const { handle } = input;
-      const fence = fenceFor(handle.lease);
-      // The fallback must equal what the terminal path would have sent: an
-      // inherited head is read exactly as `terminalize` reads it, and every
-      // other outcome decides from that outcome alone. `outcome` omitted is the
-      // interrupted-terminalize case, whose honest text is `unconfirmed`.
+      // The fallback is what the CALLER already knew, decided from the outcome
+      // alone (plus, for `skipped`, the inherited head — read exactly as
+      // `terminalize` reads it). It is deliberately NOT the terminal path's
+      // proof-derived conclusion: `proof: null` here, so `publication-unknown`
+      // / `expired` / `degraded-not-posted` freeze the unconfirmed fallback that
+      // path would have used without proof. The safety net is the recovery
+      // lane — the last writer — which re-reads the proof and can correct it.
+      // `outcome` omitted is the interrupted-terminalize case, whose honest
+      // text is `unconfirmed`.
       const conclusion: CheckConclusion =
         input.outcome === undefined
           ? { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed }
@@ -2305,6 +2315,10 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
                 : { inherited: { headSha: handle.headSha, reviewedHeadSha: input.inheritedHeadSha } }),
               headSha: handle.headSha,
             });
+      // Sample the fence clock for THIS write, after the reads above: the
+      // inherited-head reads are D1 round trips, and a snapshot taken before
+      // them could authorise a write that lands after the lease expired.
+      const fence = fenceFor(handle.lease);
       // The fallback lands ONLY where nothing is frozen yet: the state
       // predicate is part of the UPDATE, so a concurrent terminalize's
       // proof-derived conclusion and its exact summary survive this write.

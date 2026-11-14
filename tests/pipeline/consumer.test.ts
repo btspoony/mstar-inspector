@@ -6033,6 +6033,7 @@ type CheckRowShape = {
   last_error: string | null;
   terminal_ms: number | null;
   terminalize_outcome: string | null;
+  terminalize_elapsed_ms: number | null;
   execution_deadline_ms: number;
 };
 
@@ -6241,9 +6242,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       return updated;
     };
     const adapter = checksAdapterFor(db);
+    // The lifecycle runs on the FIXTURE's clock, so the scheduled recovery
+    // instant is exact arithmetic rather than wall-clock measurement.
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       createAppCommenter: () => commenterWithChecks(adapter),
+      checks: lifecycleFor(db, checkClock),
     });
 
     await consumer(h.makeBatch(makePayload()));
@@ -6267,13 +6271,15 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(released.desired).toBe("failure");
     expect(released.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
     expect(h.logLines.filter((line) => line.fields.event === "check_abandon_released")).toHaveLength(1);
-    // This exit records the honest handoff outcome (no send ever happened).
+    // This exit records the honest handoff outcome (no send ever happened),
+    // with NO elapsed time: the hook never ran, and a few milliseconds would
+    // read as a fast success.
     expect(released.terminalize_outcome).toBe("handed-off");
+    expect(released.terminalize_elapsed_ms).toBeNull();
     // The first recovery attempt is scheduled past the abandoned request's
-    // possible lifetime, not at the shared rung: max(60_000, 2 × 1000 + 60_000).
-    const recoveryDelayMs = released.next_attempt_ms! - Date.now();
-    expect(recoveryDelayMs).toBeGreaterThan(61_500);
-    expect(recoveryDelayMs).toBeLessThan(65_000);
+    // possible lifetime, not at the shared rung: max(60_000, 2 × 1000 + 60_000)
+    // — pinned against the clock the fixture controls.
+    expect(released.next_attempt_ms).toBe(checkState.clockMs + 62_000);
     // The review itself is untouched.
     expect(publicationRow(db).phase).toBe("applied");
 
@@ -8077,9 +8083,11 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       return updated;
     };
     const adapter = checksAdapterFor(db);
+    // Same fixture clock as the terminalize case: the delay is asserted exactly.
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       createAppCommenter: () => commenterWithChecks(adapter),
+      checks: lifecycleFor(db, checkClock),
     });
 
     await consumer(h.makeBatch(makePayload()));
@@ -8092,9 +8100,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(early.holder).toBeNull();
     // The property belongs to the ATTEMPT: this exit gets the same margin past
     // the abandoned request as the terminalize exit does.
-    const recoveryDelayMs = early.next_attempt_ms! - Date.now();
-    expect(recoveryDelayMs).toBeGreaterThan(61_500);
-    expect(recoveryDelayMs).toBeLessThan(65_000);
+    expect(early.next_attempt_ms).toBe(checkState.clockMs + 62_000);
     // The new head's review is unaffected.
     expect(checkRowFor(db, SHA2).observed).toBe("success");
   }, 20_000);

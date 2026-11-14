@@ -1266,11 +1266,15 @@ export type CheckLifecycleHooks = {
    * none is frozen (the predicate is in the UPDATE, so a concurrent
    * terminalize's text wins) and releases the lease to recovery WITHOUT a
    * remote request, so the minute reconciler closes the run instead of waiting
-   * out the execution deadline. The frozen fallback is the conclusion the
-   * caller already knew (`outcome`, and the inherited head for a `skipped`
-   * round), never a blanket `unconfirmed` over a decided result; an
-   * `abandoned` promotion's handoff also carries `firstRecoveryDelayMs`, so
-   * recovery writes only after that request can no longer land. Resolves
+   * out the execution deadline. The frozen fallback is ONLY what the caller
+   * already knew: an outcome-only conclusion (`superseded`, `local-error`,
+   * `pre-publication-failure`) or, for `skipped`, the inherited head's gate
+   * result — never a blanket `unconfirmed` over a decided result. It is not the
+   * proof-derived conclusion (`publication-unknown`, `expired`,
+   * `degraded-not-posted` carry no proof here); the recovery lane re-reads the
+   * proof as the last writer and corrects it. An `abandoned` promotion's
+   * handoff also carries `firstRecoveryDelayMs`, so recovery writes only after
+   * that request can no longer land. Resolves
    * `true` only when the fenced release changed the row — a lease recovery
    * already claimed, or an expired lease, changed nothing and resolves
    * `false`; a store fault rejects.
@@ -1278,7 +1282,7 @@ export type CheckLifecycleHooks = {
   abandonTerminalize?(input: {
     handle: CheckHandle;
     reason: string;
-    /** The conclusion this invocation already computed; omitted → `unconfirmed`. */
+    /** The terminal knowledge this hand-off carries; omitted → `unconfirmed`. */
     outcome?: CheckTerminalOutcome;
     /** Set with `outcome: "skipped"`: the head whose result the run inherits. */
     inheritedHeadSha?: string;
@@ -4242,10 +4246,12 @@ async function processMessage(
         },
       );
       if (deps.background === undefined) await release;
-      // This exit hands the attempt over without ever calling the hook; the
+      // This exit hands the attempt over without ever calling the hook. Record
+      // it with a NULL elapsed so `handed-off` never reads as a fast success:
+      // the column exists to separate "never ran" from "ran and timed out". The
       // store turns `completed` into `handed-off` for a row whose observation
       // never met its intent.
-      await record("completed");
+      await recordTerminalizeOutcome(deps.env.DB, handle.attemptId, "completed", null).catch(() => {});
       return;
     }
     try {
