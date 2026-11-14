@@ -75,7 +75,7 @@ import {
   type SettingsPayload,
 } from "./data";
 import { useSaveSignal } from "../components/save-signal";
-import { LoadingNotice, LoadFailedNotice, NoticeRegion, PageNotice, type OpNotice } from "./PageNotice";
+import { LoadingNotice, LoadFailedNotice, NoticeRegion, PageNotice, SaveInFlight, type OpNotice } from "./PageNotice";
 import { ProvidersSection } from "./settings-providers";
 
 export type PendingAction =
@@ -1017,6 +1017,7 @@ export function AllowlistSection({
           <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
             {t(locale, "settings.allowlistSave")}
           </Button>
+          <SaveInFlight show={signal.status === "loading"} locale={locale} />
           {signal.status === "success" && savedCopy !== null ? (
             <span role="status" className="sr-only">
               {savedCopy}
@@ -1110,6 +1111,7 @@ function ReviewGateRecovery({
             verdicts: DEFAULT_CHECK_GATE.pass_verdicts.join(", "),
           })}
         </Button>
+        <SaveInFlight show={signal.status === "loading"} locale={locale} />
         {signal.status === "success" && savedCopy !== null ? (
           <span role="status" className="sr-only">
             {savedCopy}
@@ -1222,6 +1224,7 @@ function ReviewGateEditor({
           <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
             {t(locale, "settings.reviewGateSave")}
           </Button>
+          <SaveInFlight show={signal.status === "loading"} locale={locale} />
           {signal.status === "success" && savedCopy !== null ? (
             <span role="status" className="sr-only">
               {savedCopy}
@@ -1342,6 +1345,7 @@ function RuntimeHarnessEditor({
         <Button type="button" disabled={busy} onClick={() => void save()} status={signal.status === "idle" ? undefined : signal.status}>
           {t(locale, "settings.saveRuntimeHarness")}
         </Button>
+        <SaveInFlight show={signal.status === "loading"} locale={locale} />
         {signal.status === "success" && savedCopy !== null ? (
           <span role="status" className="sr-only">
             {savedCopy}
@@ -1647,6 +1651,7 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
         <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
           {t(locale, "workspace.nameSave")}
         </Button>
+        <SaveInFlight show={signal.status === "loading"} locale={locale} />
         {signal.status === "success" && savedCopy !== null ? (
           <span role="status" className="sr-only">
             {savedCopy}
@@ -1816,6 +1821,7 @@ function NumberSettingCard({
               <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
                 {t(locale, copy.save)}
               </Button>
+              <SaveInFlight show={signal.status === "loading"} locale={locale} />
               {signal.status === "success" && savedCopy !== null ? (
                 <span role="status" className="sr-only">
                   {savedCopy}
@@ -2372,6 +2378,7 @@ function SeatsSection({
           <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
             {t(locale, "settings.saveRoleModels")}
           </Button>
+          <SaveInFlight show={signal.status === "loading"} locale={locale} />
           {signal.status === "success" && savedCopy !== null ? (
             <span role="status" className="sr-only">
               {savedCopy}
@@ -2557,6 +2564,7 @@ function ChainEditor({
       >
         {saveLabel ?? t(locale, "settings.saveChain")}
       </Button>
+      <SaveInFlight show={signal.status === "loading"} locale={locale} />
       {signal.status === "success" && savedCopy !== null ? (
         <span role="status" className="sr-only">
           {savedCopy}

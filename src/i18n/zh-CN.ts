@@ -76,6 +76,8 @@ export const zhCN: Dictionary = {
     loading: "加载中…",
     loadFailed: "无法加载此页面。",
     saveFailed: "无法保存更改。",
+    /** 状态驱动保存按钮进行中态的文案，由卡片的 live region 播报。 */
+    saving: "保存中…",
     cancel: "取消",
     retry: "重试",
   },

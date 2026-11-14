@@ -8,6 +8,20 @@ fragment format and the per-change commit flow.
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-11-13
+
+### Changed
+
+- **Harness 4.5.3 across root, runner and the review image**: the root manifest's `@mstar-harness/engine` range moves to `^4.5.3`, `packages/runner`'s exact pin to `4.5.3`, and the image's `@mstar-harness/cli` global install, `HARNESS_VERSION` / `harnessRef` pin (ref `bc33a78c6d4fbc079c3e954833ae0bdc93a1ac3c`, tag `v4.5.3`) and Dockerfile clone ref move with them; every lockfile regenerates and the image rebuild marker is touched in the same commit because those manifests and the pinned ref are image inputs. 4.5.3 is a documentation, packaging and harness-internal release (the accepted-limits ADR is implemented with no behavior change; release prep now packs built CLI/OpenCode dist; the consumer-manifest digest gate and advisory artifact-byte comparisons are removed; `calibrate` missing-artifact errors go through the artifact helper). This repo's declared corpus layout and consumed review/seat contract are unchanged by the pin bump.
+- **Model sizes come from the catalog, not a hand-typed ritual**: the model picker pre-fills each model's context window and max token count from the provider catalog's snapshot. A value the operator leaves untouched is labelled with its snapshot and is not posted back as an override; only a model the catalog does not cover still asks for both sizes. A save whose sizes all come from the catalog stores no override field.
+- **The size copy now states the effect, not a disclaimer**: the required-size line says what the two numbers set (when context gets compacted, how long one reply can run), and the incomplete-declaration note names the missing facts and the next step. The "we do not guess" wording is gone from both locales.
+- **The sandbox image no longer declares a provider or a model**: the image registry is build inputs only. The per-review `models.yml` is synthesized from the App's own provider declarations, and a built-in provider resolves from the runtime's own catalog. The test fixture that had been shipped as a product capability host is gone; an App's model chain must name a provider it actually configured.
+- **A chain that still names the retired `ark-plan` provider now says what to do**: it fails with "the ark-plan provider was removed — point the chain at a provider the runtime serves" instead of a bare "no configured key". Verified-model evidence the previous release wrote under the alias still reads as the `ark` pool's own, so that App's settings list does not silently empty. No data rewrite is performed: the runner declares no provider for the old prefix, so the selector must be pointed at a built-in catalog provider (with its key configured) or a custom declaration — `docs/deploy.md` carries the step.
+
+### Fixed
+
+- **Incremental reviews no longer absorb the base branch's merged commits**: a round uses the previous reviewed head as its delta only when the compare gate answers `ahead`, the range carries no merge commit, and the commit list is complete. A PR branch that merged its base into itself ("update branch") previously handed the base branch's whole changeset to the review seats as this PR's "work since the last review" and reported findings about code the PR never touched (observed on PR #268: `fb75d4d...1352814` answered `ahead` with one merge and 62 files, all from a separately merged PR, while #268 changed 9). Such a round now reviews the full PR diff and logs one `increment_status: "ahead-merge"` line; an exit-0 answer that is not the gate's JSON logs `increment_status: "unusable"`.
+
 ## [1.0.0-rc.2] - 2026-11-13
 
 ### Fixed

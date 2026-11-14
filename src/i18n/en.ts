@@ -96,6 +96,8 @@ export const en = {
     loading: "Loading…",
     loadFailed: "Could not load this page.",
     saveFailed: "Could not save your changes.",
+    /** The in-flight face of a status-driving save button, announced by the card's live region. */
+    saving: "Saving…",
     cancel: "Cancel",
     retry: "Retry",
   },

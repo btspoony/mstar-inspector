@@ -26,7 +26,7 @@ import { APP_VERSION } from "../../version";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { useSaveSignal, type SaveStatus } from "../components/save-signal";
-import { PageNotice } from "../pages/PageNotice";
+import { PageNotice, SaveInFlight } from "../pages/PageNotice";
 import { concurrencySubmitBlocked } from "../pages/data";
 import { formatRelativeTime } from "../relative-time";
 import {
@@ -426,6 +426,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   >
                     {t(locale, "admin.runtime.concurrencySave")}
                   </Button>
+                  <SaveInFlight show={concurrencySignal.status === "loading"} locale={locale} />
                   {data.degraded ? (
                     <Button type="button" variant="secondary" onClick={reload}>
                       {t(locale, "common.retry")}
@@ -507,6 +508,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   >
                     {t(locale, "admin.runtime.checkSave")}
                   </Button>
+                  <SaveInFlight show={checkBudgetsSignal.status === "loading"} locale={locale} />
                   {budgets.degraded ? (
                     <Button type="button" variant="secondary" onClick={reload}>
                       {t(locale, "common.retry")}
@@ -602,6 +604,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   >
                     {t(locale, "admin.runtime.claimSave")}
                   </Button>
+                  <SaveInFlight show={commentClaimSignal.status === "loading"} locale={locale} />
                   {claim.degraded ? (
                     <Button type="button" variant="secondary" onClick={reload}>
                       {t(locale, "common.retry")}
@@ -677,6 +680,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   >
                     {t(locale, "admin.runtime.reviewLevelSave")}
                   </Button>
+                  <SaveInFlight show={reviewLevelSignal.status === "loading"} locale={locale} />
                   {level.degraded ? (
                     <Button type="button" variant="secondary" onClick={reload}>
                       {t(locale, "common.retry")}
@@ -733,6 +737,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   >
                     {t(locale, "admin.runtime.recheckSave")}
                   </Button>
+                  <SaveInFlight show={recheckAssignmentSignal.status === "loading"} locale={locale} />
                   {recheck.degraded ? (
                     <Button type="button" variant="secondary" onClick={reload}>
                       {t(locale, "common.retry")}
