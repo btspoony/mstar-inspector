@@ -458,7 +458,10 @@ exit 7
     };
   }
 
-  test("dispatch step body EXECUTES: reuse only an in-flight or successful run OF THIS TAG, dispatch for every other outcome", () => {
+  // The case shells out to `bash -e` for a whole case table, so its cost is
+  // process startup × cases — above Bun's 5s default. The budget is the
+  // case's own, not the global default.
+  test("dispatch step body EXECUTES: reuse only an in-flight or successful run OF THIS TAG, dispatch for every other outcome", { timeout: 15_000 }, () => {
     const steps = wf.jobs.release.steps as { run?: string }[];
     const run = steps.find((s) => s.run?.includes("gh workflow run deploy-prod.yml"))!.run!;
 

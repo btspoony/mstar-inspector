@@ -52,6 +52,22 @@ const readSettingsSource = () =>
   readFileSync(join(import.meta.dir, "../../src/spa/pages/settings-providers.tsx"), "utf8") +
   readFileSync(join(import.meta.dir, "../../src/spa/pages/providers-dialogs.tsx"), "utf8");
 
+/**
+ * One component's body in the tab's composed source: from its declaration to
+ * the next top-level `function …` (or EOF). Coverage division: this suite's
+ * pins are SOURCE SCANS — branch-complete over these modules, including
+ * faces no render reaches; the emitted face, composed primitives included,
+ * is pinned by the mounted renders in save-feedback.test.tsx. Neither axis
+ * replaces the other.
+ */
+const componentBody = (source: string, name: string): string => {
+  const start = source.indexOf(`function ${name}(`);
+  expect(start).toBeGreaterThan(-1);
+  const tail = source.slice(start);
+  const next = tail.slice(1).search(/\n(?:export )?(?:async )?function /);
+  return next === -1 ? tail : tail.slice(0, next + 1);
+};
+
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
 
@@ -1765,7 +1781,7 @@ describe("section-scoped op feedback", () => {
     // inside the tabpanel, inside the chains card. A rejected save-chain /
     // add-chain (e.g. the not_in_verified_models 400) can no longer surface
     // on the page top.
-    const editorBody = source.slice(source.indexOf("function ChainEditor"));
+    const editorBody = componentBody(source, "ChainEditor");
     // The save rides the button now: a failure still resolves into this
     // editor's own region (the region pin below), a success into the
     // button's check plus assistive copy.
@@ -1878,7 +1894,7 @@ describe("section-scoped op feedback", () => {
     expect(providerFormBody).toContain("disabled={busy}");
     const customBody = source.slice(source.indexOf("function CustomProviderDialog"));
     expect(customBody).toContain("disabled={busy}");
-    const editorBody = source.slice(source.indexOf("function ChainEditor"));
+    const editorBody = componentBody(source, "ChainEditor");
     expect(editorBody).toContain("disabled={busy}");
     const seatsBody = source.slice(source.indexOf("function SeatsSection"), source.indexOf("function DraftChainPanel"));
     expect(seatsBody).toContain("disabled={busy}");
@@ -1890,7 +1906,17 @@ describe("section-scoped op feedback", () => {
     expect(source).toContain("const outcome = await onSettings({ op: \"save-sandbox-image\", sandbox_image_id: selected });");
     expect(source).toContain('const outcome = await onSave(chain.join(", "));');
     expect(source).toContain("const outcome = await onSettings(fields);");
-    expect(source.match(/setNotice\(outcome\);/g)?.length).toBeGreaterThanOrEqual(3);
+    // The rule is pinned per named cluster — each save flow's own outcome
+    // resolution — not by a page-wide count another site's copy could
+    // satisfy: deleting any one of these three makes this test fail.
+    // ProviderConfigForm carries no setNotice of its own: it hands the fresh
+    // outcome to its owning dialog's report() (AddProviderDialog), whose
+    // else-branch replaces the dialog's notice — so the cluster is pinned on
+    // both halves of that handoff.
+    expect(componentBody(source, "ChainEditor")).toContain("setNotice(outcome);");
+    expect(componentBody(source, "ProviderConfigForm")).toContain("onOutcome(outcome);");
+    expect(componentBody(source, "AddProviderDialog")).toContain("setNotice(outcome);");
+    expect(componentBody(source, "SeatsSection")).toContain("setNotice(outcome);");
   });
 });
 
