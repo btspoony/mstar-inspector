@@ -77,6 +77,7 @@ import {
   type ChecksAdapter,
   type ChecksCreateParams,
   type ChecksOctokit,
+  type ChecksRelabelParams,
   type ChecksUpdateParams,
 } from "../../src/pipeline/checks";
 import {
@@ -300,6 +301,14 @@ function countDefaultLevelReads(db: TestD1): { db: TestD1; reads: () => number }
     reads: () => reads,
   };
 }
+
+/**
+ * The delivery that follows the guard's LAST rung: past the schedule the job is
+ * acked (a further retry() would land it on the DLQ), so the terminal branches
+ * of handleGuardHeld run here. Derived from the schedule, so adding a rung moves
+ * every "final delivery" case with it instead of leaving a stale literal.
+ */
+const GUARD_FINAL_ATTEMPT = guardRetryDelaysSeconds("default").length + 1;
 
 /** Live admission rows — the per-PR lock plus the capacity reservation. */
 function inflightRows(db: TestD1): Array<Record<string, unknown>> {
@@ -1123,7 +1132,7 @@ describe("createReviewConsumer", () => {
 
   test("the final delivery stamps the key failed so the commit stops counting as queued", async () => {
     h.sandbox.runnerExitCode = 1;
-    h.queueState.attempts = 4; // 1 initial delivery + max_retries 3 → the next stop is the DLQ
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT; // 1 initial delivery + max_retries 5 → the next stop is the DLQ
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
@@ -1157,7 +1166,7 @@ describe("createReviewConsumer", () => {
 
   test("a failing failed-claim KV write never masks the rethrow", async () => {
     h.sandbox.runnerExitCode = 1;
-    h.queueState.attempts = 4;
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     h.kvState.putError = new Error("kv down");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -2819,14 +2828,16 @@ describe("createReviewConsumer", () => {
     expect(infoLine!.fields.workspace_cap).toBe(WORKSPACE_CONCURRENCY_DEFAULT);
   });
 
-  test("guard-held backoff escalates 60s → 300s → 2100s across attempts (BB-3)", async () => {
+  test("guard-held backoff escalates 60s → 300s → 300s → 900s → 900s across attempts (BB-3)", async () => {
     const db = await createSeededTestD1();
     await seedInflight(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
     for (const [attempts, delaySeconds] of [
       [1, 60],
       [2, 300],
-      [3, 2100],
+      [3, 300],
+      [4, 900],
+      [5, 900],
     ] as const) {
       h.queueState.attempts = attempts;
       await consumer(h.makeBatch(makePayload()));
@@ -2834,12 +2845,14 @@ describe("createReviewConsumer", () => {
     expect(h.messageRetryCalls).toEqual([
       { attempts: 1, delaySeconds: 60 },
       { attempts: 2, delaySeconds: 300 },
-      { attempts: 3, delaySeconds: 2100 },
+      { attempts: 3, delaySeconds: 300 },
+      { attempts: 4, delaySeconds: 900 },
+      { attempts: 5, delaySeconds: 900 },
     ]);
     expect(h.messageAckCalls).toHaveLength(0);
     expect(h.sandbox.calls).toHaveLength(0);
   });
-  test("App row review_level 'deep' guard-held → delayed retries use the deep backoff 90s → 480s → 2100s (AC-S10-guard)", async () => {
+  test("App row review_level 'deep' guard-held → delayed retries use the deep backoff 90s → 480s → 300s → 900s → 900s (AC-S10-guard)", async () => {
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
     await seedInflight(db);
@@ -2847,7 +2860,9 @@ describe("createReviewConsumer", () => {
     for (const [attempts, delaySeconds] of [
       [1, 90],
       [2, 480],
-      [3, 2100],
+      [3, 300],
+      [4, 900],
+      [5, 900],
     ] as const) {
       h.queueState.attempts = attempts;
       await consumer(h.makeBatch(makePayload()));
@@ -2855,14 +2870,168 @@ describe("createReviewConsumer", () => {
     expect(h.messageRetryCalls).toEqual([
       { attempts: 1, delaySeconds: 90 },
       { attempts: 2, delaySeconds: 480 },
-      { attempts: 3, delaySeconds: 2100 },
+      { attempts: 3, delaySeconds: 300 },
+      { attempts: 4, delaySeconds: 900 },
+      { attempts: 5, delaySeconds: 900 },
     ]);
     expect(h.messageAckCalls).toHaveLength(0);
     expect(h.sandbox.calls).toHaveLength(0);
   });
 
+  test("a pr-held refusal relabels the attached Check as queued, naming the holder's head", async () => {
+    const db = await createSeededTestD1();
+    const heldHeadSha = "abcdef0123456789abcdef0123456789abcdef01";
+    await seedInflight(db, { headSha: heldHeadSha });
+    const queued: Array<{ summary: string; headSha: string; attachDeliveryId?: string; updateBudgetMs: number }> = [];
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        markQueuedBehindInflight: async (input) => {
+          queued.push({
+            summary: input.summary,
+            headSha: input.headSha,
+            attachDeliveryId: input.attachDeliveryId,
+            updateBudgetMs: input.updateBudgetMs,
+          });
+          return true;
+        },
+      },
+    });
+
+    await consumer(h.makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
+
+    // The run stays wherever it is; only its text says why nothing started, and
+    // it names the review holding the slot instead of the commit waiting.
+    expect(queued).toHaveLength(1);
+    expect(queued[0]!.summary).toContain("Queued");
+    expect(queued[0]!.summary).toContain(`head ${heldHeadSha.slice(0, 7)}`);
+    // The row lookup follows the PAYLOAD's commit — the one this delivery
+    // attached — and this delivery's own attach identity.
+    expect(queued[0]!.headSha).toBe(SHA);
+    expect(queued[0]!.attachDeliveryId).toBe("delivery-1");
+    // The send is bounded by the operator budget the path read (absent row →
+    // the documented default), so a slow GitHub can never hold the retry.
+    expect(queued[0]!.updateBudgetMs).toBe(CHECK_UPDATE_DEFAULT);
+    // The relabel never changes the guard outcome: the delayed retry still runs.
+    expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(h.messageAckCalls).toHaveLength(0);
+  });
+
+  test("a relabel fault is one warn and never holds the delayed retry", async () => {
+    const db = await createSeededTestD1();
+    await seedInflight(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        markQueuedBehindInflight: async () => {
+          throw new Error("checks down");
+        },
+      },
+    });
+
+    await consumer(h.makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
+
+    expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(h.messageAckCalls).toHaveLength(0);
+    const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("held check relabel failed"));
+    expect(warn).toBeDefined();
+    expect(warn!.msg).toContain("checks down");
+  });
+
+  test("a relabel that never answers is cut at the budget and the retry still ships", async () => {
+    const db = await createSeededTestD1();
+    await seedInflight(db);
+    // The smallest storable update budget: the relabel's store write + PATCH
+    // share it, and the whole step runs BEFORE the delayed retry.
+    seedCheckBudget(db, "review.check.update_timeout_ms", "500");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        markQueuedBehindInflight: () => Promise.withResolvers<boolean>().promise,
+      },
+    });
+    const started = Date.now();
+
+    await consumer(h.makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
+
+    // Never the platform's kill: the deadline ends the wait and the retry is
+    // still scheduled (a hung Check must not cost the delivery).
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(h.messageAckCalls).toHaveLength(0);
+    const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("exceeded 500ms"));
+    expect(warn).toBeDefined();
+    expect(warn!.fields.event).toBe("check_queued_relabel_failed");
+  });
+
+  test("the TERMINAL refusal settles the run and does not relabel it as queued", async () => {
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT;
+    const db = await createSeededTestD1();
+    // A DIFFERENT commit holds the PR: this delivery is a real drop, not the
+    // benign same-sha duplicate that returns before any settlement.
+    await seedInflight(db, { headSha: "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef" });
+    const queued: unknown[] = [];
+    const settled: unknown[] = [];
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        settleSkipped: async (input) => {
+          settled.push(input);
+          return true;
+        },
+        markQueuedBehindInflight: async (input) => {
+          queued.push(input);
+          return true;
+        },
+      },
+    });
+
+    await consumer(h.makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
+
+    // Past the schedule the delivery is dropped: "queued" would be a lie, so the
+    // terminal branch keeps its own settlement and never relabels.
+    expect(h.messageAckCalls).toHaveLength(1);
+    expect(queued).toHaveLength(0);
+    expect(settled).toHaveLength(1);
+    expect((settled[0] as { reason: string }).reason).toContain("pr-held");
+  });
+
+  test("a cap refusal has no live review to name, so the Check is not relabelled", async () => {
+    const db = await createSeededTestD1();
+    // The WORKSPACE cap holds this message while the PR itself is free: no live
+    // review exists, so "queued behind the review in flight" would send an
+    // operator looking for a review that was never started.
+    db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
+    await seedInflight(db, { pr_number: 7 });
+    const queued: unknown[] = [];
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        markQueuedBehindInflight: async (input) => {
+          queued.push(input);
+          return true;
+        },
+      },
+    });
+
+    await consumer(h.makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
+
+    expect(queued).toHaveLength(0);
+    expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+  });
+
   test("guard still held after the 3 delayed retries → ack with a warning, no DLQ (BB-3)", async () => {
-    h.queueState.attempts = 4; // final delivery before the queue would DLQ
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT; // final delivery before the queue would DLQ
     const db = await createSeededTestD1();
     await seedInflight(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -2871,7 +3040,7 @@ describe("createReviewConsumer", () => {
 
     expect(h.sandbox.calls).toHaveLength(0);
     expect(h.messageRetryCalls).toHaveLength(0);
-    expect(h.messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
     const warnLine = h.logLines.find((l) => l.level === "warn" && l.msg.includes("acking"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.msg).toContain("no DLQ");
@@ -3199,7 +3368,7 @@ describe("createReviewConsumer", () => {
     // that exhausts the whole backoff against a longer review is never
     // reviewed by it, so the drop must reach the failure sweep — a warn line
     // alone leaves the commit with no trace at all.
-    h.queueState.attempts = 4;
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     const db = await createSeededTestD1();
     await seedInflight(db); // holds SHA
     const newer = "1111111111111111111111111111111111111111";
@@ -3207,7 +3376,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload({ head_sha: newer })));
 
-    expect(h.messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
     expect(h.sandbox.calls).toHaveLength(0);
     expect(inflightRows(db)).toHaveLength(1); // the live row, untouched
     expect(failureRows(db)).toHaveLength(1);
@@ -3238,7 +3407,7 @@ describe("createReviewConsumer", () => {
     // `done` proves this consumer already reviewed that commit. The guard's
     // terminal ack for a DIFFERENT sha must leave it alone — overwriting it
     // with `dropped` would let a redelivery re-review a reviewed commit.
-    h.queueState.attempts = 4;
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     const db = await createSeededTestD1();
     await seedInflight(db); // holds SHA
     const newer = "3333333333333333333333333333333333333333";
@@ -3247,7 +3416,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload({ head_sha: newer })));
 
-    expect(h.messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
     // The drop is still traced — only the claim is left untouched.
     expect(failureRows(db)).toHaveLength(1);
     expect(h.kvPuts).toHaveLength(0);
@@ -3258,7 +3427,7 @@ describe("createReviewConsumer", () => {
     // A read fault must not turn into a blind overwrite: `putAbandonClaim`
     // returns without writing, so the claim stays as it was ("1", today's
     // behavior), which the skip then accepts and the drop row above traces.
-    h.queueState.attempts = 4;
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     const db = await createSeededTestD1();
     await seedInflight(db); // holds SHA
     h.kvState.getError = new Error("kv down");
@@ -3284,21 +3453,21 @@ describe("createReviewConsumer", () => {
     ] as const) {
       h = createConsumerHarness();
       freshChecks();
-      h.queueState.attempts = 4; // final delivery: the job is dropped here
+      h.queueState.attempts = GUARD_FINAL_ATTEMPT; // final delivery: the job is dropped here
       const db = await createSeededTestD1();
       await seedInflight(db, { headSha: held });
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
       await consumer(h.makeBatch(makePayload({ head_sha: payload })));
 
-      expect(h.messageAckCalls).toEqual([{ attempts: 4 }]);
+      expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
       expect(failureRows(db)).toHaveLength(rows);
       if (rows === 1) expect(failureRows(db)[0]).toMatchObject({ head_sha: newer });
     }
   });
 
   test("a comment-triggered delivery held by a live review stays silent (no sha to compare)", async () => {
-    h.queueState.attempts = 4;
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     const db = await createSeededTestD1();
     await seedInflight(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -3307,12 +3476,12 @@ describe("createReviewConsumer", () => {
       h.makeBatch(makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment" })),
     );
 
-    expect(h.messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
     expect(failureRows(db)).toHaveLength(0);
   });
 
   test("a cap refusal that survives the whole backoff records ONE failure row (W-1)", async () => {
-    h.queueState.attempts = 4; // final delivery: the job is dropped here
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT; // final delivery: the job is dropped here
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     db.raw
@@ -3327,7 +3496,7 @@ describe("createReviewConsumer", () => {
     await consumer(h.makeBatch(makePayload()));
 
     expect(h.sandbox.calls).toHaveLength(0);
-    expect(h.messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
     // The sweep counts `review_failures`; a dropped review must be visible
     // there, with the reason it was dropped.
     expect(failureRows(db)).toHaveLength(1);
@@ -3341,7 +3510,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("a storage error refusal that survives the whole backoff records one failure row (W-1)", async () => {
-    h.queueState.attempts = 4;
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(
       await h.makeEnv({ DB: dbFailingOn(db, "review_inflight") as never }),
@@ -3351,7 +3520,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    expect(h.messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
     expect(failureRows(db)).toHaveLength(1);
     const dropped = String(failureRows(db)[0]!.error);
     expect(dropped).toContain("error");
@@ -3365,7 +3534,7 @@ describe("createReviewConsumer", () => {
     // "" by convention (migration 0010 allows it) — but the PR identity must
     // still be readable from the row, or the drop cannot be joined back to a
     // PR at all.
-    h.queueState.attempts = 4;
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     const db = await createSeededTestD1();
     db.raw
       .prepare(
@@ -3380,7 +3549,7 @@ describe("createReviewConsumer", () => {
       h.makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" })),
     );
 
-    expect(h.messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
     expect(failureRows(db)).toHaveLength(1);
     const row = failureRows(db)[0]!;
     expect(row.head_sha).toBe("");
@@ -3784,17 +3953,19 @@ describe("createReviewConsumer", () => {
   });
 
   test("guardRetryDelaysSeconds per level — the schedule covers the guard TTL (AC-4)", () => {
-    // quick/default 60/300/2100; deep 90/480/2100. GUARD_RETRY_DELAYS_SECONDS is
-    // a literal table — nothing derives it — so this test is what keeps it
-    // honest as the TTL moves: every entry must stay BELOW
-    // reviewGuardTtlSeconds(level) (2412s quick/default, 2652s deep) so no
-    // single delay outlives the lock, and the cumulative sum (2460s / 2670s)
+    // quick/default 60/300/300/900/900; deep 90/480/300/900/900.
+    // GUARD_RETRY_DELAYS_SECONDS is a literal table — nothing derives it — so
+    // this test is what keeps it honest as the TTL moves: every entry must stay
+    // BELOW reviewGuardTtlSeconds(level) (2412s quick/default, 2652s deep) so
+    // no single delay outlives the lock, and the cumulative sum (2460s / 2670s)
     // must EXCEED it, so the final delayed attempt finds the row expired and
-    // reclaims it instead of being dropped. Add a step to
+    // reclaims it instead of being dropped. The rungs after the first two are
+    // short on purpose: a released guard is picked up in minutes, not in the
+    // half hour one 2100s tail used to cost. Add a step to
     // GUARD_TIMED_SANDBOX_STEPS and this case fails until the table is raised.
-    expect(guardRetryDelaysSeconds("quick")).toEqual([60, 300, 2100]);
-    expect(guardRetryDelaysSeconds("default")).toEqual([60, 300, 2100]);
-    expect(guardRetryDelaysSeconds("deep")).toEqual([90, 480, 2100]);
+    expect(guardRetryDelaysSeconds("quick")).toEqual([60, 300, 300, 900, 900]);
+    expect(guardRetryDelaysSeconds("default")).toEqual([60, 300, 300, 900, 900]);
+    expect(guardRetryDelaysSeconds("deep")).toEqual([90, 480, 300, 900, 900]);
     for (const level of ["quick", "default", "deep"] as const) {
       const delays = guardRetryDelaysSeconds(level);
       const ttl = reviewGuardTtlSeconds(level);
@@ -5751,7 +5922,7 @@ const checkRuns = new Map<number, CheckRunPayload>();
 let checkRequestOverrides: {
   create?: (params: ChecksCreateParams) => CheckRunPayload;
   /** A promise is a SLOW request (never answered inside the consumer's budget). */
-  update?: (params: ChecksUpdateParams) => CheckRunPayload | Promise<CheckRunPayload>;
+  update?: (params: ChecksRelabelParams) => CheckRunPayload | Promise<CheckRunPayload>;
 } = {};
 let checkRunSeq = FIRST_CHECK_RUN_ID;
 /**
@@ -5800,9 +5971,16 @@ function scriptedChecks(): ChecksOctokit {
           if (respond !== undefined) return { data: await respond(params) };
           const run = checkRuns.get(params.check_run_id);
           if (run === undefined) throw Object.assign(new Error(`no scripted run ${params.check_run_id}`), { status: 404 });
-          const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
-          checkRuns.set(params.check_run_id, completed);
-          return { data: completed };
+          // A request WITHOUT status/conclusion is the held-check relabel: it
+          // moves the text only, so the run must stay exactly as it was —
+          // writing `completed` with a null conclusion would fabricate a state
+          // the API never produces.
+          const updated: CheckRunPayload =
+            "status" in params
+              ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+              : run;
+          checkRuns.set(params.check_run_id, updated);
+          return { data: updated };
         },
         async get(params) {
           record("get", params as unknown as Record<string, unknown>);
@@ -6172,12 +6350,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     return attached;
   }
 
-  test("check lifecycle: the first three guard refusals settle nothing", async () => {
+  test("check lifecycle: the retried guard refusals relabel the run but settle nothing", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const payload = makePayload();
-    await guardHeldWithAttachedRun(db, adapter, payload);
+    const attached = await guardHeldWithAttachedRun(db, adapter, payload);
+    // The delivery identity the attach recorded on the row: the queue message
+    // carries it, and both the relabel and a settlement key on it so a duplicate
+    // delivery can never touch this row.
+    payload.attachDeliveryId = attached.deliveryId;
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       createAppCommenter: () => commenterWithChecks(adapter),
@@ -6195,7 +6377,24 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       expect(row.terminal_ms).toBeNull();
     }
     expect(h.messageRetryCalls).toHaveLength(3);
-    expect(checkRequests.some((request) => request.op === "update")).toBe(false);
+    // One PATCH per retried refusal, and it only says WHY the run is waiting:
+    // no status, no conclusion, so no run was settled (a settlement here could
+    // close the live review's own run — a premature `neutral` pass).
+    const updates = checkRequests.filter((request) => request.op === "update");
+    expect(updates).toHaveLength(3);
+    for (const update of updates) {
+      const params = update.params as unknown as Record<string, unknown>;
+      expect(params.status).toBeUndefined();
+      expect(params.conclusion).toBeUndefined();
+      expect(params.output).toMatchObject({ title: CHECK_NAME });
+      expect((params.output as { summary: string }).summary).toContain("Queued");
+    }
+    // …and the RUN the double holds is still non-terminal. A text-only PATCH
+    // recorded as `completed` with a null conclusion would fabricate a state
+    // GitHub never produces and hide a settlement behind the request log.
+    const run = checkRuns.get(FIRST_CHECK_RUN_ID + 1)!;
+    expect(run.status).toBe("in_progress");
+    expect(run.conclusion).toBeNull();
   });
 
   test("check lifecycle: the terminal guard refusal settles the released run neutral", async () => {
@@ -6213,9 +6412,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
-    // The 4th attempt is the terminal drop: this message will never run, so
+    // The delivery past the last rung is the terminal drop: this message will
+    // never run, so
     // its released attach row is settled `neutral` with the refusal named.
-    h.queueState.attempts = 4;
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     await consumer(h.makeBatch(payload));
 
     expect(h.messageAckCalls).toHaveLength(1);
@@ -6997,9 +7197,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             },
             async update(params) {
               const run = checkRuns.get(params.check_run_id)!;
-              const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
-              checkRuns.set(params.check_run_id, completed);
-              return { data: completed };
+              // Partial PATCH (a relabel) moves no terminal state.
+              const updated: CheckRunPayload =
+                "status" in params
+                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+                  : run;
+              checkRuns.set(params.check_run_id, updated);
+              return { data: updated };
             },
             async get(params) {
               return { data: checkRuns.get(params.check_run_id)! };
@@ -7204,9 +7408,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             },
             async update(params) {
               const run = checkRuns.get(params.check_run_id)!;
-              const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
-              checkRuns.set(params.check_run_id, completed);
-              return { data: completed };
+              // Partial PATCH (a relabel) moves no terminal state.
+              const updated: CheckRunPayload =
+                "status" in params
+                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+                  : run;
+              checkRuns.set(params.check_run_id, updated);
+              return { data: updated };
             },
             async get(params) {
               return { data: checkRuns.get(params.check_run_id)! };
@@ -7582,9 +7790,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         return Promise.withResolvers<CheckRunPayload>().promise;
       }
       const run = checkRuns.get(params.check_run_id)!;
-      const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
-      checkRuns.set(params.check_run_id, completed);
-      return completed;
+      const updated: CheckRunPayload =
+        "status" in params
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          : run;
+      checkRuns.set(params.check_run_id, updated);
+      return updated;
     };
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {

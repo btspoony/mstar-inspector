@@ -79,6 +79,7 @@ import {
   type Scope,
   getCheckAttempt,
   getCheckOwnership,
+  markCheckQueuedBehindInflight,
   recordTerminalizeOutcome,
 } from "../store/review-checks";
 import { redactSecrets } from "./redact";
@@ -108,12 +109,16 @@ export type ChecksCreateParams = {
   status: "in_progress";
 };
 
-export type ChecksUpdateParams = {
+/**
+ * A NON-TERMINAL relabel of an owned run: the human-facing text and nothing
+ * else. `PATCH /check-runs/{id}` accepts a partial body, so status and
+ * conclusion are simply ABSENT — the run keeps running, which is what the
+ * held-check relabel needs (§7.9/§7.10).
+ */
+export type ChecksRelabelParams = {
   owner: string;
   repo: string;
   check_run_id: number;
-  status: "completed";
-  conclusion: CheckConclusion["desired"];
   /**
    * GitHub's only carrier for the human-facing text. A top-level
    * `title`/`summary` pair is not part of `PATCH /check-runs/{id}` — the API
@@ -121,6 +126,16 @@ export type ChecksUpdateParams = {
    * conclusion while the frozen gate result stayed only in D1.
    */
   output: { title: string; summary: string };
+};
+
+/**
+ * The TERMINAL update: status and conclusion are REQUIRED and travel together,
+ * so a terminal send cannot be built without its conclusion. The relabel above
+ * is the separate, deliberately non-terminal shape.
+ */
+export type ChecksUpdateParams = ChecksRelabelParams & {
+  status: "completed";
+  conclusion: CheckConclusion["desired"];
 };
 
 export type ChecksListParams = {
@@ -151,7 +166,7 @@ export type ChecksOctokit = {
   rest: {
     checks: {
       create(params: ChecksCreateParams): Promise<{ data: CheckRunPayload }>;
-      update(params: ChecksUpdateParams): Promise<{ data: CheckRunPayload }>;
+      update(params: ChecksRelabelParams): Promise<{ data: CheckRunPayload }>;
       get(params: { owner: string; repo: string; check_run_id: number }): Promise<{ data: CheckRunPayload }>;
       listForRef(params: ChecksListParams): Promise<{ data: ChecksListPage }>;
     };
@@ -270,6 +285,22 @@ export type ChecksAdapter = {
     | { kind: "completed"; remote: CheckRemote }
     | { kind: "unavailable"; reason: string; requests: number }
   >;
+  /**
+   * Relabel an owned run WITHOUT moving it: the text says this delivery is
+   * QUEUED behind the PR's live review (the in-flight guard held it). No status,
+   * no conclusion — a run that reported one could not be reopened. Resolves
+   * false when the App has no Checks surface; a send fault rejects, so the
+   * caller logs one warn and its retry outcome is unaffected.
+   */
+  markQueuedBehindInflight?(input: {
+    scope: Scope;
+    checkRunId: number;
+    summary: string;
+    /** The operator-configured bound; omitted → the adapter, then the store's default. */
+    updateBudgetMs?: number;
+    /** One warn when the send failed or ran out of budget — never a throw. */
+    warn: (detail: string) => void;
+  }): Promise<boolean>;
   /** Read-only GET + identity proof: the recovery lane's confirmation path (§7.11.2 step 3). */
   fetchCheckRun(input: {
     identity: CheckIdentity;
@@ -378,6 +409,7 @@ export function createChecksAdapter(deps: ChecksDeps): ChecksAdapter {
     beginCheck: (input) => beginCheckWith(deps, input),
     adoptCheckRun: (input) => adoptCheckRunWith(deps, input),
     completeCheck: (input) => completeCheckWith(deps, input),
+    markQueuedBehindInflight: (input) => markQueuedBehindInflightWith(deps, input),
     fetchCheckRun: (input) => fetchCheckRunWith(deps, input),
   };
 }
@@ -610,20 +642,23 @@ async function completeCheckWith(
     return refused("lease expired before the update request");
   }
   const { scope } = identity;
+  // Typed as the TERMINAL pair: status and conclusion are required together, so
+  // this send can never be built without the frozen conclusion it reports.
+  const terminal: ChecksUpdateParams = {
+    owner: scope.owner,
+    repo: scope.repo,
+    check_run_id: input.checkRunId,
+    status: "completed",
+    conclusion: frozen.desired,
+    // GitHub reads the human-facing text from `output`, never from a
+    // top-level title/summary: an un-nested pair is dropped silently, which
+    // left every run a bare name + conclusion while the frozen gate text
+    // stayed only in D1 (spec §7.9 requires the summary to say what bar was
+    // missed).
+    output: { title: frozen.title, summary: frozen.summary },
+  };
   const attempted = await sendRequestsWithin(
-    client.rest.checks.update({
-      owner: scope.owner,
-      repo: scope.repo,
-      check_run_id: input.checkRunId,
-      status: "completed",
-      conclusion: frozen.desired,
-      // GitHub reads the human-facing text from `output`, never from a
-      // top-level title/summary: an un-nested pair is dropped silently, which
-      // left every run a bare name + conclusion while the frozen gate text
-      // stayed only in D1 (spec §7.9 requires the summary to say what bar was
-      // missed).
-      output: { title: frozen.title, summary: frozen.summary },
-    }),
+    client.rest.checks.update(terminal),
     input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT,
     "check update",
   );
@@ -643,6 +678,51 @@ async function completeCheckWith(
     return { kind: "unavailable", requests: attempted.sent, reason: "check update response is not the intended terminal state" };
   }
   return { kind: "completed", remote };
+}
+
+/**
+ * The one NON-TERMINAL send of the §7.9 surface: say the delivery is queued
+ * behind the PR's live review. The run id comes from the fenced store write that
+ * already proved this delivery's own attach row, so the send addresses a run
+ * this delivery created; the PATCH carries the output pair only, which leaves
+ * status and conclusion untouched.
+ *
+ * BOUNDED, and it never rejects: this send sits in the guard's held path BEFORE
+ * the delayed retry is scheduled, so a hanging PATCH would cost the whole
+ * delivery — the retry would never be arranged before the invocation is killed.
+ * Client resolution AND the update share one `review.check.update_timeout_ms`
+ * budget; past it the caller gets `false` and one warn.
+ */
+async function markQueuedBehindInflightWith(
+  deps: ChecksDeps,
+  input: {
+    scope: Scope;
+    checkRunId: number;
+    summary: string;
+    updateBudgetMs?: number;
+    warn: (detail: string) => void;
+  },
+): Promise<boolean> {
+  const budgetMs = input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT;
+  const send = (async (): Promise<boolean> => {
+    const resolvedClient = await clientFor(deps, input.scope);
+    if ("reason" in resolvedClient) return false;
+    const client = resolvedClient.client;
+    if (!hasChecksMethod(client, "update")) return false;
+    await client.rest.checks.update({
+      owner: input.scope.owner,
+      repo: input.scope.repo,
+      check_run_id: input.checkRunId,
+      output: { title: CHECK_NAME, summary: input.summary },
+    });
+    return true;
+  })();
+  const outcome = (await sendRequestsWithin(send, budgetMs, "held check relabel")).outcome;
+  if (typeof outcome !== "boolean") {
+    input.warn(surfaceFailure(outcome.failure, "held check relabel"));
+    return false;
+  }
+  return outcome;
 }
 
 /**
@@ -1301,6 +1381,37 @@ export type CheckLifecycle = {
     updateBudgetMs?: number;
   }): Promise<boolean>;
   /**
+   * §7.10 held-Check visibility: the in-flight guard refused a message whose
+   * Check was already attached, so the run must SAY it is queued behind the PR's
+   * live review — otherwise the public surface reads `in_progress` for the whole
+   * backoff with nothing explaining it. Writes the frozen text only (never the
+   * status, never the intent) on THIS delivery's own attach row.
+   *
+   * Resolves true only when the relabel was sent; false means there was nothing
+   * to label (no own attach row, no remote run) or no Checks surface to send
+   * with. A store/transport fault rejects, and the caller logs it as one warn —
+   * the retry it is about to schedule is never affected.
+   */
+  markQueuedBehindInflight(input: {
+    scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    /** THIS delivery's attach identity — absent means it created no row. */
+    attachDeliveryId?: string;
+    /** The queue reason the Check summary carries. */
+    summary: string;
+    /**
+     * The operator-configured bound on the one `checks.update`
+     * (`review.check.update_timeout_ms`). Required here, unlike the terminal
+     * seam: the caller sits in the guard's held path, so it always has the
+     * budget it read and must never let a hanging PATCH delay its retry.
+     */
+    updateBudgetMs: number;
+    /** One warn when the send failed or ran out of budget — never a throw. */
+    warn: (detail: string) => void;
+  }): Promise<boolean>;
+  /**
    * The consumer gave up on `terminalize` (its bounded wait elapsed, or the
    * hook threw): hand the attempt to recovery NOW with `remote-unconfirmed`,
    * so the minute Check reconciler closes the run instead of waiting out the
@@ -1818,6 +1929,33 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       }
       const observedFence = fenceFor(claimed.lease);
       return recordCheckObservation(deps.db, identity.attemptId, observedFence.lease, completed.remote, observedFence.nowMs);
+    },
+
+    async markQueuedBehindInflight(input) {
+      const nowMs = deps.nowMs();
+      const checkRunId = await markCheckQueuedBehindInflight(deps.db, {
+        scope: input.scope,
+        headSha: input.headSha,
+        triggeredBy: input.triggeredBy,
+        action: input.action,
+        attachDeliveryId: input.attachDeliveryId,
+        title: CHECK_NAME,
+        summary: input.summary,
+        nowMs,
+      });
+      // No own attach row (another delivery owns the key), a row that is no
+      // longer running, or no remote run: nothing to label.
+      if (checkRunId === null) return false;
+      const adapter = deps.getAdapter(input.scope);
+      if (adapter === null) return false;
+      const sent = await adapter.markQueuedBehindInflight?.({
+        scope: input.scope,
+        checkRunId,
+        summary: input.summary,
+        updateBudgetMs: input.updateBudgetMs,
+        warn: input.warn,
+      });
+      return sent ?? false;
     },
 
     async terminalize(input) {

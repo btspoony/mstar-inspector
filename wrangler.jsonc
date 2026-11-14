@@ -24,12 +24,14 @@
     // in-flight — deep is pinned under the 15 min CF Queue consumer wall-clock
     // cap, src/pipeline/consumer.ts runnerTimeoutMs); failures retry
     // up to max_retries then land in review-dlq. Requires `wrangler queues create review-dlq` before
-    // deploy (plan Task 4). The in-flight guard (bugbot PR-3 BB-3) never uses
-    // these retries: guard-held jobs are scheduled via per-message
-    // `message.retry({ delaySeconds })` (the per-level schedule lives ONLY in
-    // src/pipeline/consumer.ts guardRetryDelaysSeconds — do not restate it
-    // here) and finally acked —
-    // only REAL processing failures hit max_retries → DLQ.
+    // deploy (plan Task 4). max_retries covers EVERY delivery, guard-held ones
+    // included: each per-message `message.retry({ delaySeconds })` is a
+    // delivery and spends the budget. The guard's backoff has FIVE rungs (the
+    // per-level schedule lives ONLY in src/pipeline/consumer.ts
+    // guardRetryDelaysSeconds — do not restate it here), so the contract is
+    // `max_retries >= rungs + 1`: one delivery per rung, plus the delivery that
+    // acks instead of retrying. Anything lower puts the last rung's retry — or
+    // the ack — on review-dlq instead of the clean drop.
     "consumers": [
       {
         "queue": "review-queue",
@@ -49,7 +51,11 @@
         // UNSET would let the platform auto-scale by backlog with no bound
         // at all (wrangler config schema), which is why this is explicit.
         "max_concurrency": 250,
-        "max_retries": 3,
+        // One retry per guard rung (src/pipeline/consumer.ts
+        // guardRetryDelaysSeconds: five rungs), plus the delivery that acks. A
+        // lower value would put the fifth rung's retry on the DLQ instead of
+        // letting the schedule finish, and the terminal ack is the clean drop.
+        "max_retries": 5,
         "dead_letter_queue": "review-dlq"
       }
     ]
@@ -207,7 +213,7 @@
             "queue": "review-queue-prod",
             "max_batch_size": 1,
             "max_concurrency": 250,
-            "max_retries": 3,
+            "max_retries": 5,
             "dead_letter_queue": "review-dlq-prod"
           }
         ]

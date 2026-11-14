@@ -65,6 +65,7 @@ import {
   toCheckRemote,
   type CheckRunPayload,
   type ChecksCreateParams,
+  type ChecksRelabelParams,
   type ChecksListPage,
   type ChecksListParams,
   type ChecksOctokit,
@@ -138,7 +139,8 @@ function runPayload(identity: CheckIdentity, overrides: Partial<CheckRunPayload>
 }
 
 type CreateCall = { params: ChecksCreateParams; raw: Record<string, unknown> };
-type UpdateCall = { params: ChecksUpdateParams; raw: Record<string, unknown> };
+/** The request shape the adapter sends: a terminal update or a text-only relabel. */
+type UpdateCall = { params: ChecksRelabelParams; raw: Record<string, unknown> };
 
 /**
  * A scripted Checks surface. `respond` decides each call's answer; throws are
@@ -146,7 +148,7 @@ type UpdateCall = { params: ChecksUpdateParams; raw: Record<string, unknown> };
  */
 function fakeChecks(respond: Partial<{
   create: (params: ChecksCreateParams) => Promise<CheckRunPayload> | CheckRunPayload;
-  update: (params: ChecksUpdateParams) => Promise<CheckRunPayload> | CheckRunPayload;
+  update: (params: ChecksRelabelParams) => Promise<CheckRunPayload> | CheckRunPayload;
   get: (params: { owner: string; repo: string; check_run_id: number }) => CheckRunPayload;
   pages: (params: ChecksListParams, page: number) => ChecksListPage | null;
 }> = {}): {
@@ -2482,7 +2484,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
         head_sha: SHA,
         external_id: externalId,
         status: "completed",
-        conclusion: params.conclusion,
+        conclusion: (params as ChecksUpdateParams).conclusion,
         app: { id: GITHUB_APP_ID },
       }),
     });
@@ -2809,7 +2811,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
         head_sha: SHA,
         external_id: externalId,
         status: "completed",
-        conclusion: params.conclusion,
+        conclusion: (params as ChecksUpdateParams).conclusion,
         app: { id: GITHUB_APP_ID },
       }),
     });
@@ -2840,7 +2842,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     // ONE bounded update, carrying neutral and the skip reason — never a
     // proof-derived failure.
     expect(fake.updates).toHaveLength(1);
-    expect(fake.updates[0]!.params.conclusion).toBe("neutral");
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("neutral");
     expect(fake.updates[0]!.params.output.summary).toContain("already reviewed for this head");
     const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
       string,
@@ -2909,7 +2911,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
         head_sha: SHA,
         external_id: externalByRun.get(params.check_run_id) ?? "",
         status: "completed",
-        conclusion: params.conclusion,
+        conclusion: (params as ChecksUpdateParams).conclusion,
         app: { id: GITHUB_APP_ID },
       }),
     });
@@ -3248,5 +3250,54 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
     ]) {
       expect([key, after[key]]).toEqual([key, before[key]]);
     }
+  });
+});
+
+describe("markQueuedBehindInflight — the held-check relabel is bounded", () => {
+  const relabel = (adapter: ReturnType<typeof adapterFor>, warns: string[], updateBudgetMs = 1_000) =>
+    adapter.markQueuedBehindInflight!({
+      scope: SCOPE,
+      checkRunId: 4242,
+      summary: "Queued behind the review in flight for this pull request.",
+      updateBudgetMs,
+      warn: (detail) => warns.push(detail),
+    });
+
+  test("a rejected send is ONE warn and false — it never reaches the caller as a throw", async () => {
+    const db = await seededDb();
+    const fake = fakeChecks({
+      update: () => {
+        throw Object.assign(new Error("boom"), { status: 500 });
+      },
+    });
+    const warns: string[] = [];
+
+    expect(await relabel(adapterFor(db, fake.octokit), warns)).toBe(false);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("held check relabel failed: boom");
+    // The one request WAS sent — nothing here claims otherwise.
+    expect(fake.updates).toHaveLength(1);
+  });
+
+  test("a send that never answers returns false inside the budget, so the retry is never held", async () => {
+    const db = await seededDb();
+    // GitHub accepts the request and never answers it: only the budget ends it.
+    const fake = fakeChecks({ update: () => new Promise<CheckRunPayload>(() => {}) });
+    const warns: string[] = [];
+    const started = Date.now();
+
+    expect(await relabel(adapterFor(db, fake.octokit), warns, 25)).toBe(false);
+
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("exceeded 25ms");
+  });
+
+  test("no Checks surface is a silent false: nothing to send, nothing to warn about", async () => {
+    const db = await seededDb();
+    const warns: string[] = [];
+
+    expect(await relabel(adapterFor(db, null), warns)).toBe(false);
+    expect(warns).toHaveLength(0);
   });
 });

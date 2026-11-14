@@ -101,7 +101,7 @@ import { providerEnvName } from "./provider-catalog";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
-import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
+import { createFailureStore, QUEUE_MAX_ATTEMPTS, type FailureStage, type FailureStore } from "../store/failure-store";
 import { hasUsageEventForExecutionToken, recordUsageEvent } from "../store/usage-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
 // The hand-off's two fenced writes live in the Check registry (§7.9/§7.11.2):
@@ -319,7 +319,8 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
 
 /**
  * Total deliveries a message gets before the queue DLQs it: wrangler.jsonc's
- * `queues.consumers[].max_retries` is 3, so 1 initial delivery + 3 retries.
+ * `queues.consumers[].max_retries` is 5, so 1 initial delivery + 5 retries —
+ * one per guard rung (`guardRetryDelaysSeconds`) plus the delivery that acks.
  * The FINAL delivery stamps its idempotency key `failed` (processMessage's
  * catch) because that commit was never reviewed.
  *
@@ -327,7 +328,7 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
  * `tests/pipeline/queue-config-contract.test.ts` reads wrangler.jsonc and
  * fails when the two numbers drift.
  */
-export const QUEUE_MAX_ATTEMPTS = 4;
+export { QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 
 /**
  * Runner exec timeout for the job's review level (spec d5-budget L4 — the
@@ -441,7 +442,7 @@ export type ConsumerLogFields = {
    * hand-off has no event of its own; its only line is the info above it
    * ("publication journal hit"), printed before the link.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -786,25 +787,32 @@ export const ROUND_BUDGET_MS = 900_000;
 
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
- * — the first delivery is attempt 1). quick/default: 60s → 300s → 2100s; deep: 90s → 480s → 2100s.
+ * — the first delivery is attempt 1). quick/default: 60s → 300s → 300s → 900s →
+ * 900s; deep: 90s → 480s → 300s → 900s → 900s.
  *
- * The schedule must COVER the level's guard TTL, and its last entry must be
- * able to reclaim it: every entry stays BELOW the level's guard TTL
- * (2412s / 2652s) so no single delay outlives the lock, while the CUMULATIVE
- * sum (2460s / 2670s) EXCEEDS it — so by the final delayed attempt the
- * in-flight row has expired and the admission's expired-reclaim branch lets
- * this message take the lock instead of being dropped. Without that sum, a
- * legal review (600s+ runner) could hold the PR past the whole backoff and a
- * `synchronize` for a NEW commit would never be reviewed.
+ * The schedule must COVER the level's guard TTL, and no rung may outlive the
+ * lock it waits on: every entry stays BELOW the level's guard TTL
+ * (2412s / 2652s), while the CUMULATIVE sum (2460s / 2670s) EXCEEDS it — so by
+ * the final delayed attempt the in-flight row has expired and the admission's
+ * expired-reclaim branch lets this message take the lock instead of being
+ * dropped. Without that sum, a legal review (600s+ runner) could hold the PR
+ * past the whole backoff and a `synchronize` for a NEW commit would never be
+ * reviewed.
  *
- * Attempts past the schedule's end have consumed the queue's max_retries and
- * must be acked, not retried (a further retry() would land the job on the
- * DLQ).
+ * The rungs after the first two are deliberately SHORT (300-900s, never the
+ * 2100s tail this table used to end on): the live review releases the guard
+ * when it finishes, so an unlucky attempt waits at most one rung (900s) rather
+ * than half an hour — a staging delivery that arrived 6s before the release ate
+ * 35 minutes on the old tail, and the worst case is now 15.
+ *
+ * Attempts past the schedule's end have consumed the queue's max_retries
+ * (`wrangler.jsonc`: one per rung, plus the terminal delivery) and must be
+ * acked, not retried (a further retry() would land the job on the DLQ).
  */
-const GUARD_RETRY_DELAYS_SECONDS: Record<ReviewLevel, readonly [number, number, number]> = {
-  quick: [60, 300, 2100],
-  default: [60, 300, 2100],
-  deep: [90, 480, 2100],
+const GUARD_RETRY_DELAYS_SECONDS: Record<ReviewLevel, readonly number[]> = {
+  quick: [60, 300, 300, 900, 900],
+  default: [60, 300, 300, 900, 900],
+  deep: [90, 480, 300, 900, 900],
 };
 
 /** Guard-held backoff schedule for the job's review level (spec d5-budget L4). */
@@ -923,6 +931,103 @@ async function settleSkippedRow(
 }
 
 /**
+ * Run one best-effort step under a hard deadline. Resolves `null` when the
+ * deadline wins: the step keeps running (a fetch or a D1 statement cannot be
+ * cancelled from here) but the caller stops waiting for it. A rejection still
+ * propagates — the caller's single catch is what reports it.
+ */
+async function boundedBestEffort<T>(step: Promise<T>, budgetMs: number): Promise<{ value: T } | null> {
+  const { promise: deadline, resolve } = Promise.withResolvers<null>();
+  const timer = setTimeout(() => resolve(null), budgetMs);
+  try {
+    return await Promise.race([step.then((value) => ({ value })), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * §7.10 held-Check visibility: a delivery the in-flight guard refused still owns
+ * the Check its attach created, and that run would otherwise read
+ * `in_progress` for the whole backoff with nothing saying why (measured on
+ * staging 2026-11-13: 41 of one run's 49 minutes were queue time). Relabel it
+ * with the HOLDER's head, so the PR page names the review this commit waits for.
+ *
+ * Best-effort by contract, exactly like the skip settlement: one warn on a
+ * fault, and the delayed retry the caller is about to schedule never changes.
+ * The row lookup keys on the PAYLOAD's head sha — the commit this delivery
+ * attached with — never the holder's: the holder's commit belongs to another
+ * attempt and another delivery.
+ *
+ * EVERY part is bounded, because all of it runs before that retry: the settings
+ * read by the knob's own documented default (a read must not eat the budget it
+ * exists to read), the store write plus the GitHub PATCH by the operator's
+ * `review.check.update_timeout_ms`. Only ONE settings read is paid — the value
+ * is reused for the send.
+ */
+async function markQueuedBehindInflightRow(
+  deps: ProcessDeps,
+  payload: ReviewJobPayload,
+  heldHeadSha: string | null | undefined,
+): Promise<void> {
+  if (deps.checks?.markQueuedBehindInflight === undefined) return;
+  const attachedHeadSha = payload.head_sha;
+  if (attachedHeadSha === null || attachedHeadSha === undefined || attachedHeadSha === "") return;
+  if (heldHeadSha === null || heldHeadSha === undefined || heldHeadSha === "") return;
+  const warn = (detail: string) =>
+    deps.log.warn({ ...payloadIdentityFields(payload), event: "check_queued_relabel_failed" }, detail);
+  try {
+    // ONE budget read, the same value the terminalize hook uses. A degraded read
+    // answers the documented defaults and warns once through the reader itself.
+    const read = await boundedBestEffort(
+      readCheckBudgets(deps.env.DB, {
+        warn: (readerFields, msg) => deps.log.warn({ ...payloadIdentityFields(payload), ...readerFields }, msg),
+      }),
+      CHECK_UPDATE_DEFAULT,
+    );
+    if (read === null) {
+      warn(
+        `held check relabel skipped: the check-budget read exceeded ${CHECK_UPDATE_DEFAULT}ms (the delayed retry is unaffected)`,
+      );
+      return;
+    }
+    const budgets = read.value;
+    // The store write and the PATCH share the operator's update budget: the
+    // adapter applies the same value to the send it issues.
+    const relabeled = await boundedBestEffort(
+      deps.checks.markQueuedBehindInflight({
+        scope: {
+          appId: payload.appRef.appId,
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        },
+        headSha: attachedHeadSha,
+        triggeredBy: payload.triggered_by,
+        action: payload.action,
+        attachDeliveryId: payload.attachDeliveryId,
+        summary: `Queued — the review in flight for this pull request (head ${heldHeadSha.slice(0, 7)}) holds the slot; this commit starts when it finishes.`,
+        updateBudgetMs: budgets.updateMs,
+        warn,
+      }),
+      budgets.updateMs,
+    );
+    if (relabeled === null) {
+      warn(
+        `held check relabel skipped: the store write or the Check update exceeded ${budgets.updateMs}ms (the delayed retry is unaffected)`,
+      );
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(
+      { ...payloadIdentityFields(payload), event: "check_queued_relabel_failed" },
+      `held check relabel failed (the run stays as it was; the retry is unaffected): ${detail}`,
+    );
+  }
+}
+
+/**
  * Handle a guard-held message (bugbot BB-3). The guard is not an error
  * state: instead of throwing (which burns the queue's three immediate
  * retries and DLQs the job — including later synchronize events for the same
@@ -937,7 +1042,7 @@ async function settleSkippedRow(
  *
  * `heldHeadSha` is the live row's sha: a `pr-held` drop is only benign while
  * that review covers THIS message's commit. The cumulative backoff
- * (2400s quick/default, 2610s deep) now EXCEEDS the level's guard TTL
+ * (2460s quick/default, 2670s deep) now EXCEEDS the level's guard TTL
  * (2412s / 2652s), so the final delayed attempt can reclaim the expired row
  * and review the new commit. A drop that still happens — a cap/storage
  * refusal, or a row that outlived the schedule — must leave a trace, so the
@@ -969,6 +1074,13 @@ async function handleGuardHeld(
   const delays = guardRetryDelaysSeconds(level);
   const delaySeconds = delays[message.attempts - 1];
   if (delaySeconds !== undefined) {
+    // Say WHY nothing has started: the attach already put a run on this commit,
+    // so a refused delivery would otherwise leave it reading `in_progress` for
+    // the whole backoff. Only a `pr-held` refusal names a live review to wait
+    // for — a cap/storage refusal has no holder and must not claim one.
+    if (admission.reason === "pr-held") {
+      await markQueuedBehindInflightRow(deps, message.body, heldHeadSha);
+    }
     deps.log.info(
       fields,
       `${what} — scheduling delayed retry in ${delaySeconds}s (attempt ${message.attempts}; ${heldBecause})`,
@@ -1040,7 +1152,7 @@ async function handleGuardHeld(
       ? ` — the in-flight review holds head_sha ${heldSha}, so this commit was never reviewed`
       : "";
   // §7.9: the TERMINAL refusal is the only guard outcome that settles this
-  // delivery's attached run. The retried refusals (60/300/2100 s) settle
+  // delivery's attached run. The retried refusals (the rungs above) settle
   // nothing — a duplicate delivery shares this attempt_key, and the live
   // review's row must never be closed `neutral` by another message's refusal.
   // This is the real drop: the run attached for this message will never
@@ -1149,6 +1261,26 @@ export type CheckLifecycleHooks = {
     attachDeliveryId?: string;
     reason: string;
     updateBudgetMs?: number;
+  }): Promise<boolean>;
+  /**
+   * §7.10 held-Check visibility (optional, additive): the in-flight guard
+   * refused this delivery while its Check was already attached, so the run is
+   * relabelled "queued behind the live review" — it keeps running and only its
+   * text moves, because a Check that reads `in_progress` for the whole backoff
+   * with no reason reads as a stuck review. Best-effort: `false` means there was
+   * nothing to label, a fault rejects, and neither changes the retry outcome.
+   */
+  markQueuedBehindInflight?(input: {
+    scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    attachDeliveryId?: string;
+    summary: string;
+    /** `review.check.update_timeout_ms` — the relabel sits before this path's retry. */
+    updateBudgetMs: number;
+    /** One warn when the best-effort send failed or ran out of budget. */
+    warn: (detail: string) => void;
   }): Promise<boolean>;
 };
 
@@ -4380,8 +4512,8 @@ async function processMessage(
     // ONE conditional D1 insert is both the per-PR lock and the capacity
     // reservation, so a duplicate for this PR or a reached cap returns the
     // DISTINCT guard-held outcome — NOT a throw. The consumer schedules a
-    // per-message delayed retry (per level: 60/300/2040s quick/default,
-    // 90/480/2040s deep); after the final delayed attempt the job is acked
+    // per-message delayed retry (per level: 60/300/300/900/900s quick/default,
+    // 90/480/300/900/900s deep); after the final delayed attempt the job is acked
     // with a warning — guard-held is not an error state and never goes to the
     // DLQ. Admission precedes EVERY sandbox step, so a refused message costs
     // no container.
@@ -6184,8 +6316,9 @@ async function processMessage(
     // AL-6: best-effort review_failures row BEFORE the
     // rethrow — DLQ-bound infra failures otherwise leave zero D1 trace (the
     // audit blind spot). `stage` = the coarse phase in flight
-    // (failureStage); rows are per-attempt events (a DLQ'd message leaves
-    // up to 4: 1 initial delivery + max_retries = 3 retries). The insert
+    // (failureStage); rows are per-attempt events (a DLQ'd message leaves up
+    // to QUEUE_MAX_ATTEMPTS of them: 1 initial delivery + the queue's
+    // max_retries, one per guard rung). The insert
     // must never mask the rethrow: its own failure is a warn line only.
     // SEC-03: the error detail is redacted (shape + exact-value passes)
     // before the durable row — an infra error can interpolate a

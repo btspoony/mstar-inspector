@@ -1348,6 +1348,100 @@ export async function setCheckFallbackDesired(
 }
 
 /**
+ * Say on the attached run that this delivery is QUEUED behind the PR's live
+ * review. The in-flight guard refuses a delivery whose PR is being reviewed and
+ * that delivery retries minutes later, but its Check was attached at webhook
+ * time — so the public surface showed `in_progress` for the whole backoff with
+ * nothing saying why (measured on staging 2026-11-13: 41 of 49 minutes of one
+ * run were queue time). This relabels it.
+ *
+ * Only the FROZEN TEXT moves: `desired`, the conclusion, `observed` and the recovery state
+ * stay exactly as they are, so this can neither retire a head nor answer for a
+ * review that never ran. The text is bounded and flattened here for the same
+ * reason `setCheckDesired` bounds it — a Check summary is public — and a later
+ * terminalize overwrites both fields with its own conclusion.
+ *
+ * Fenced on the delivery's OWN attach identity AND its ownership of the row: the
+ * `attempt_key` + `attach_delivery_id` pair names the delivery that CREATED this
+ * row, and the holder arm below proves nobody else is using it. A duplicate
+ * delivery shares the attempt key, and a second delivery may have ADOPTED this
+ * row and be running the review (adoption never clears the creator column) — in
+ * both cases the live review's run must not be relabelled. The UPDATE repeats
+ * every predicate, so a row that went terminal, was never created, changed
+ * hands, or whose intent another lane froze between the read and the write is
+ * left alone.
+ *
+ * Returns the attached run id — the caller then sends exactly one
+ * `checks.update` — or null when there was nothing to label.
+ */
+export async function markCheckQueuedBehindInflight(
+  db: D1Like,
+  input: {
+    scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    /** THIS delivery's attach identity — absent means it created no row. */
+    attachDeliveryId?: string;
+    title: string;
+    summary: string;
+    nowMs: number;
+  },
+): Promise<number | null> {
+  if (input.attachDeliveryId === undefined || input.attachDeliveryId.length === 0) return null;
+  const key = attemptKey({
+    appId: input.scope.appId,
+    installationId: input.scope.installationId,
+    owner: input.scope.owner,
+    repo: input.scope.repo,
+    prNumber: input.scope.prNumber,
+    headSha: input.headSha,
+    triggeredBy: input.triggeredBy,
+    action: input.action,
+  });
+  // The relabelable row: still running, attached, wanting in_progress and not
+  // suspended. Identical in both statements — the SELECT only learns the run id.
+  //
+  // The HOLDER arm is what keeps this honest: `attach_delivery_id` names the
+  // delivery that CREATED the row, not the one now using it. A second delivery
+  // for the same head can ADOPT this row (`adoptReleasedCheckAttempt` does not
+  // clear the creator column) and start the review — then the creator's next
+  // `pr-held` retry would relabel a run it does not own as "Queued". Only a
+  // RELEASED row, or one still under this delivery's OWN attach holder, may be
+  // relabelled; a `consumer:*` holder and `delivery:<other>` are refused by the
+  // same predicate, exactly as `claimAttachedCheckForSettlement` refuses them.
+  const relabelable = `terminal_ms IS NULL
+          AND create_state = 'known' AND check_run_id IS NOT NULL
+          AND desired = 'in_progress'
+          AND recovery_state IN ('pending','remote-unconfirmed')
+          AND (holder IS NULL OR holder = 'delivery:' || ?)`;
+  const candidate = await db
+    .prepare(
+      `SELECT check_run_id FROM review_checks
+         WHERE attempt_key = ? AND attach_delivery_id = ? AND ${relabelable}
+         ORDER BY generation DESC LIMIT 1`,
+    )
+    .bind(key, input.attachDeliveryId, input.attachDeliveryId)
+    .first<{ check_run_id: number }>();
+  if (candidate === null) return null;
+  const relabeled = await db
+    .prepare(
+      `UPDATE review_checks SET desired_title = ?, desired_summary = ?, updated_ms = ?
+         WHERE attempt_key = ? AND attach_delivery_id = ? AND ${relabelable}`,
+    )
+    .bind(
+      frozenTitle(input.title),
+      boundText(input.summary, CHECK_SUMMARY_MAX_CHARS),
+      input.nowMs,
+      key,
+      input.attachDeliveryId,
+      input.attachDeliveryId,
+    )
+    .run();
+  return relabeled.meta.changes === 1 ? candidate.check_run_id : null;
+}
+
+/**
  * Record WHY an attempt reached (or never reached) its conclusion, on the
  * attempt itself (migration 0052).
  *

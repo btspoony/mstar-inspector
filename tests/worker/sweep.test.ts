@@ -4,15 +4,16 @@
  * (bun:sqlite D1 double, tests/store/helpers.ts) plus a recording fake for
  * the window-SQL pin and an injected fetch for the webhook paths.
  *
- * Pinned contracts: threshold constants (threshold > 5, 24h window, 3s
- * webhook timeout), the trailing-24h window SQL, the `ops_sweep_alert`
+ * Pinned contracts: the threshold DERIVED from the queue's delivery budget
+ * (one fully-failed message never alerts), the 24h window, the 3s webhook
+ * timeout, the trailing-24h window SQL, the `ops_sweep_alert`
  * payload shape (`dlq_check: "skipped"` — DLQ depth is NOT read), webhook
  * absent = log-only, webhook failure = warn log only (never throws).
  */
 
 import { describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { createFailureStore } from "../../src/store/failure-store";
+import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
   runSweep,
@@ -115,7 +116,11 @@ function recordingDb(captured: string[]): D1Like {
 
 describe("runSweep", () => {
   test("pins the AL-6 threshold/window/timeout constants", () => {
-    expect(SWEEP_FAILURE_THRESHOLD).toBe(5);
+    // Derived from the queue's delivery budget: one fully-failed message leaves
+    // QUEUE_MAX_ATTEMPTS rows, so a threshold one row above it keeps "one job
+    // never alerts, the second one does".
+    expect(SWEEP_FAILURE_THRESHOLD).toBe(QUEUE_MAX_ATTEMPTS + 1);
+    expect(SWEEP_FAILURE_THRESHOLD).toBeGreaterThan(QUEUE_MAX_ATTEMPTS);
     expect(SWEEP_WINDOW_HOURS).toBe(24);
     expect(SWEEP_WEBHOOK_TIMEOUT_MS).toBe(3000);
   });
@@ -331,9 +336,9 @@ describe("runSweep", () => {
       event: "invite_lapse_swept_failed",
       detail: "invites locked",
     });
-    expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert", failures_24h: 6 });
+    expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert", failures_24h: SWEEP_FAILURE_THRESHOLD + 1 });
     expect(result).toEqual({
-      failures24h: 6,
+      failures24h: SWEEP_FAILURE_THRESHOLD + 1,
       thresholdBreached: true,
       invitesExpired: null,
       webhook: "absent",
@@ -470,9 +475,9 @@ describe("runSweep", () => {
     };
     const result = await runSweep(wrapped, { log });
     expect(calls[0]!.fields).toMatchObject({ event: "retention_swept_failed", detail: "retention table locked" });
-    expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert", failures_24h: 6 });
+    expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert", failures_24h: SWEEP_FAILURE_THRESHOLD + 1 });
     expect(result).toEqual({
-      failures24h: 6,
+      failures24h: SWEEP_FAILURE_THRESHOLD + 1,
       thresholdBreached: true,
       invitesExpired: 0,
       webhook: "absent",
@@ -524,14 +529,16 @@ describe("runSweep", () => {
     });
   }
 
-  test("threshold boundary: exactly 5 in-window rows does not alert", async () => {
+  test("threshold boundary: ONE fully-failed message's rows do not alert", async () => {
     const db = createMigratedTestD1();
-    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD);
+    // The threshold's own case: a single DLQ'd job leaves exactly this many rows
+    // (one per delivery), and one failed message must never page an operator.
+    await seedInWindow(db, QUEUE_MAX_ATTEMPTS);
     const { log, calls } = captureLog();
 
     const result = await runSweep(db, { log });
     expect(result).toEqual({
-      failures24h: 5,
+      failures24h: QUEUE_MAX_ATTEMPTS,
       thresholdBreached: false,
       invitesExpired: 0,
       webhook: "not_attempted",
@@ -539,7 +546,7 @@ describe("runSweep", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("breach (6 rows) emits the ops_sweep_alert event; absent webhook = log-only", async () => {
+  test("breach (one row past the threshold) emits the ops_sweep_alert event; absent webhook = log-only", async () => {
     const db = createMigratedTestD1();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
     const { log, calls } = captureLog();
@@ -547,7 +554,7 @@ describe("runSweep", () => {
 
     const result = await runSweep(db, { log, fetchImpl: fetchImpl as unknown as typeof fetch });
     expect(result).toEqual({
-      failures24h: 6,
+      failures24h: SWEEP_FAILURE_THRESHOLD + 1,
       thresholdBreached: true,
       invitesExpired: 0,
       webhook: "absent",
@@ -556,9 +563,9 @@ describe("runSweep", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.fields).toEqual({
       event: "ops_sweep_alert",
-      failures_24h: 6,
+      failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
       dlq_check: "skipped",
-      thresholds: { failures_24h: 5, window_hours: 24 },
+      thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: 24 },
     });
   });
 
@@ -581,9 +588,9 @@ describe("runSweep", () => {
     expect(seen[0]!.init?.signal).toBeInstanceOf(AbortSignal);
     expect(JSON.parse(String(seen[0]!.init?.body))).toEqual({
       event: "ops_sweep_alert",
-      failures_24h: 6,
+      failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
       dlq_check: "skipped",
-      thresholds: { failures_24h: 5, window_hours: 24 },
+      thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: 24 },
     });
   });
 

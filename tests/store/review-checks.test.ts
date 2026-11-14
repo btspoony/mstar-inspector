@@ -37,6 +37,7 @@ import {
   stagePublication,
 } from "../../src/store/finding-lifecycle";
 import {
+  adoptReleasedCheckAttempt,
   attemptKey,
   attachCheckRunId,
   CHECK_ATTACH_GRACE_MS,
@@ -60,6 +61,7 @@ import {
   linkCheckPublication,
   listCheckReconcileBatch,
   markCheckLocalError,
+  markCheckQueuedBehindInflight,
   type PublicationProof as _UnusedProof,
   readPublicationProof,
   recordCheckObservation,
@@ -1246,6 +1248,133 @@ describe("the settlement claim follows the delivery identity (spec §7.9)", () =
     expect(await settleAs(db, "mine")).not.toBeNull();
   });
 });
+describe("markCheckQueuedBehindInflight (spec §7.9 held-Check text)", () => {
+  const queuedAs = (db: TestD1, attachDeliveryId: string | undefined) =>
+    markCheckQueuedBehindInflight(db, {
+      scope: SCOPE,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      attachDeliveryId,
+      title: CHECK_NAME,
+      summary: "Queued behind the review in flight for this pull request.",
+      nowMs: T0 + 1,
+    });
+
+  test("this delivery's attached row is relabelled and answers its run id", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:mine",
+      attachDeliveryId: "mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+
+    expect(await queuedAs(db, "mine")).toBe(4242);
+    const row = await rawRow(db, id);
+    expect(row.desired_title).toBe(CHECK_NAME);
+    expect(row.desired_summary).toBe("Queued behind the review in flight for this pull request.");
+    // Only the TEXT moves: the run still wants in_progress, has observed
+    // nothing, and is not terminal — a relabel can never answer for a review.
+    expect(row.desired).toBe("in_progress");
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+  });
+
+  test("a foreign attach id relabels nothing — a duplicate delivery shares the key", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:other",
+      attachDeliveryId: "other",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+
+    expect(await queuedAs(db, "mine")).toBeNull();
+    expect(await queuedAs(db, undefined)).toBeNull();
+    expect((await rawRow(db, id)).desired_summary).toBeNull();
+  });
+
+  test("a row another lane is USING is never relabelled — the creator column is history, not ownership", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:mine",
+      attachDeliveryId: "mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
+    // A second delivery for the SAME head adopted the released row and is
+    // running the review — adoption never clears the creator column, so the
+    // creator alone would still match.
+    expect(
+      await adoptReleasedCheckAttempt(db, {
+        attemptId: id,
+        githubAppId: APP_NUMERIC_ID,
+        holder: "consumer:other",
+        executionDeadlineMs: T0 + CHECK_LEASE_MS,
+        nowMs: T0 + 1,
+      }),
+    ).not.toBeNull();
+
+    expect(await queuedAs(db, "mine")).toBeNull();
+    const row = await rawRow(db, id);
+    expect(row.desired_title).toBeNull();
+    expect(row.desired_summary).toBeNull();
+    // The live holder's lease and intent are untouched.
+    expect(row.holder).toBe("consumer:other");
+    expect(row.desired).toBe("in_progress");
+  });
+
+  test("a row an adopting delivery lane holds is refused the same way", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:mine",
+      attachDeliveryId: "mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
+    // Another delivery's attach lane took the row (holder = delivery:<other>).
+    expect(
+      await adoptReleasedCheckAttempt(db, {
+        attemptId: id,
+        githubAppId: APP_NUMERIC_ID,
+        holder: "delivery:other",
+        executionDeadlineMs: T0 + CHECK_LEASE_MS,
+        nowMs: T0 + 1,
+      }),
+    ).not.toBeNull();
+
+    expect(await queuedAs(db, "mine")).toBeNull();
+    expect((await rawRow(db, id)).desired_summary).toBeNull();
+  });
+
+  test("a terminal row keeps its frozen text", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, {
+      holder: "delivery:mine",
+      attachDeliveryId: "mine",
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
+    expect(
+      await recordCheckObservation(db, id, lease, remoteFor(attempt), T0),
+    ).toBe(true);
+
+    expect(await queuedAs(db, "mine")).toBeNull();
+    const row = await rawRow(db, id);
+    expect(row.desired_summary).toBe(CONCLUSION.summary);
+    expect(row.terminal_ms).not.toBeNull();
+  });
+});
+
 describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
   test("a live claim lease hides a row; the release makes it a candidate", async () => {
     const db = seededDb();
