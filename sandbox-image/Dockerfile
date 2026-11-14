@@ -58,11 +58,16 @@
 # against) moved out of `packages/runner/src/recheck.ts` into
 # `packages/shared/src/recheck-wire.ts`, so the Worker fits the same rule the seat
 # validates against; both files are image inputs and no manifest, lockfile or CLI
-# pin moved. A stale image keeps the previous runner+shared PAIR — both are copied
-# from this commit's sources, so it imports cleanly — and keeps running recheck
-# rounds WITHOUT the fitting rule: the runner only ever fits what the Worker hands
-# it, so it validates and asks against the unfitted up-to-512 KiB document, the
-# context-pressure shape the paragraph above already describes.
+# pin moved. The rebuild is what moves the fitting from the seat to the Worker,
+# so the stale vintage decides the symptom: an image from just BEFORE this change
+# still carries the in-runner fit, which is all-or-nothing — it refuses the whole
+# round when targets + discussion overrun the budget (the `skipped: budget
+# (config)` shape the paragraph above records), so a long-lived PR keeps skipping.
+# An image older than THAT carries no fit at all and sends the unfitted up-to-512
+# KiB document, the context-pressure shape the paragraph above also describes.
+# Either way the Worker now hands over a fitted document, which the stale seat
+# re-fits under its own older rule — so the head rescue's bound is the Worker's,
+# and a stale image never applies it.
 #
 # rebuild: the runner's pinned engine moves to 4.2.0 (`packages/runner/package.json`
 # and its lockfile are image inputs, so the container must be rebuilt with them).

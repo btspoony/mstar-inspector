@@ -553,8 +553,12 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
       last_scheduled_ms: number | null;
     }[];
     const clockById = new Map(clocks.map((row) => [row.id, row.last_scheduled_ms]));
+    // All three seeded rows must be in the read: a missing one would make the
+    // nullity checks vacuous.
+    for (const rowId of [headRowId, affordableRowId, droppedRowId]) expect(clockById.has(rowId)).toBe(true);
     expect(clockById.get(droppedRowId)).toBeNull();
     expect(clockById.get(affordableRowId)).not.toBeNull();
+    expect(clockById.get(headRowId)).not.toBeNull();
   });
 
   test("an oversized hunk is sliced into windows that still contain the target line", async () => {

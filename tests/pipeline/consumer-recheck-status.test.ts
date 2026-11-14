@@ -1462,6 +1462,8 @@ describe("the recheck ask is FITTED to the operator's assignment budget (§7.3/�
       last_scheduled_ms: number | null;
     }[];
     const clockById = new Map(clocks.map((row) => [row.id, row.last_scheduled_ms]));
+    // Both rows must be in the read before their clocks say anything.
+    for (const rowId of [headRowId, filler!]) expect(clockById.has(rowId)).toBe(true);
     // The head rotated; the displaced row did not, so it goes first next round.
     expect(clockById.get(headRowId)).not.toBeNull();
     expect(clockById.get(filler!)).toBeNull();
@@ -1506,6 +1508,11 @@ describe("the recheck ask is FITTED to the operator's assignment budget (§7.3/�
     // It never rode the wire…
     expect(wireRecheck(h).recheck!.targets.map((target) => target.rowId)).not.toContain(unprovableRowId);
     const catalogClocks = clockOf(catalogDb);
+    // Presence first: a Map lookup on a missing row is `undefined`, which would
+    // make the nullity checks below pass vacuously. (The round also publishes
+    // new findings, so the table holds more rows than these two — assert the
+    // rows under test are present, not that they are the whole table.)
+    for (const rowId of [unprovableRowId, provableRowId!]) expect(catalogClocks.has(rowId)).toBe(true);
     // …and it still rotated out: only a later diff can re-prove it.
     expect(catalogClocks.get(unprovableRowId)).not.toBeNull();
     expect(catalogClocks.get(provableRowId!)).not.toBeNull();
@@ -1528,6 +1535,8 @@ describe("the recheck ask is FITTED to the operator's assignment budget (§7.3/�
 
     expect(JSON.parse(h2.sandbox.writtenInputJson!).recheck).toBeUndefined();
     const captureClocks = clockOf(captureDb);
+    // Same guard: the seeded rows must really be in the read, not missing from it.
+    for (const rowId of capturedRows) expect(captureClocks.has(rowId)).toBe(true);
     for (const rowId of capturedRows) expect(captureClocks.get(rowId)).not.toBeNull();
   });
 
