@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+## [1.0.0-rc.4] - 2026-11-14
+
+### Changed
+
+- **harness 升至 4.6.0（根、runner 与审查镜像）**：根 manifest 的 `@mstar-harness/engine` 区间改为 `^4.6.0`，`packages/runner` 的精确 pin 改为 `4.6.0`，镜像全局安装的 `@mstar-harness/cli`、`HARNESS_VERSION` / `harnessRef` pin（ref `109922bb7d4cae3b87956e7c14576500cdca25cf`，tag `v4.6.0`）与 Dockerfile 克隆 ref 一并向 4.6.0 移动；所有 lock 重新生成，并在同一提交中更新镜像重建标记——这些 manifest 与所 pin 的 ref 都是镜像输入。4.6.0 新增 Guard 13/14、`skill-corpus-audit` 审计变体、挂在 QC1 上的 Depth / Spec-Fidelity lens、一轮问完无前置条件的 frontier `clarify`、技能完成标准指引、PR 正文的 Evidence / Merge-danger，以及 audit finding 的 mechanical/judgement 分类。本仓库已声明的语料布局，以及所消费的 review/seat 契约，不因这次 pin 升级而改变。
+- **harness 升至 4.6.1（根、runner 与审查镜像）**：根 manifest 的 `@mstar-harness/engine` 区间改为 `^4.6.1`，`packages/runner` 的精确 pin 改为 `4.6.1`，镜像全局安装的 `@mstar-harness/cli`、`HARNESS_VERSION` / `harnessRef` pin（ref `8ff83b33141b67a353886d5ac18457ba08cc4dd5`，tag `v4.6.1`）与 Dockerfile 克隆 ref 一并向 4.6.1 移动；所有 lock 重新生成，并在同一提交中更新镜像重建标记——这些 manifest 与所 pin 的 ref 都是镜像输入。4.6.1 是 harness 内部补丁：dashboard 生成资源重新作为 gitignore 的构建产物、`--adopt` 会脱敏粘贴的凭据、Linear 标签发现失败的恢复指向真正的修复、`plan.bind` 的调用方身份拒绝改为 host-neutral，以及 harness 将 bun 钉到 1.4.4。本仓库已声明的语料布局，以及所消费的 review/seat 契约，不因这次 pin 升级而改变。
+
+### Fixed
+
+- **进行中的保存在读屏下会播报，而不只是一个转圈图标**：设置页与运营卡片保存时，live region 会告知读屏用户「保存中」。成功与失败的播报保持不变。
+- **consumer 测试套件不再共用一个可变 harness**：每个测试文件持有自己的记录器，一个套件的清理不会再抹掉另一个套件的证据，模块加载变慢也不会再把断言变成 `undefined is not a function`。仅测试改动，运行时行为不变。
+- **排队中的 Check 会说明自己在排队，被拒的投递几分钟内重试。** 同一 PR 已有 review 在跑时，新 commit 的投递会被 per-PR 闸门拒绝并重试；它的 Check 在 webhook 阶段就已 attach，此前整个退避期都只显示一个 `in_progress`（staging 实测：某次 run 的 49 分钟里有 41 分钟在排队）。现在它会写明「Queued —— 该 PR 正在执行的 review（head <sha7>）占着名额；本 commit 等它结束后开始」，status 保持不变；退避链改为以短档收尾 —— quick/default 60 s → 300 s → 300 s → 900 s → 900 s，`deep` 90 s → 480 s → 300 s → 900 s → 900 s —— 累计和仍覆盖 in-flight 锁。最坏排队等待从单档长延迟造成的 35 分钟降到最多 15 分钟，典型 ≤5 分钟（旧 review 一释放锁，下一次 retry 就能接上）；队列重试预算随档数一起提高，最后一档仍以干净 ack 结束而非进入 DLQ。
+- **仪表盘文档如实声明自己的语言**：`zh_CN` 工作区外壳现在声明 `<html lang="zh-CN">` 并输出本地化的页面 `<title>`，不再把中文界面标记为英文，读屏软件因此用对发音引擎，浏览器标签也能区分页面（WCAG 3.1.1、2.4.2）。
+- **侧栏成为导航地标，外壳提供跳转链接**：左侧导航现在是一个带名称的 `navigation` 区域，第一个可聚焦控件直接把焦点送到页面内容。
+- **客户端导航会播报自己**：在应用、成员、设置之间切换会更新文档标题并把焦点移入内容区域，键盘与读屏用户因此知道页面已经变化。
+
 ## [1.0.0-rc.3] - 2026-11-13
 
 ### Changed
