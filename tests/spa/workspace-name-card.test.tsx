@@ -52,6 +52,12 @@ describe("workspace name card", () => {
         });
       }
       // The shell's support-grant read — no active grant here.
+      if (call.url.endsWith("/api/settings/review-usage")) {
+        return new Response(
+          JSON.stringify({ month: "2026-11", sharedReviews: 2, ownReviews: 0, sharedBot: "available" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
       return new Response(JSON.stringify({ grants: [] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },

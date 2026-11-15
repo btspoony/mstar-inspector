@@ -19,6 +19,7 @@ export const ADMIN_PAGES = [
   { id: "flags", labelKey: "admin.nav.flags" },
   { id: "runtime", labelKey: "admin.nav.runtime" },
   { id: "workspaces", labelKey: "admin.nav.workspaces" },
+  { id: "usage", labelKey: "admin.nav.usage" },
   { id: "users", labelKey: "admin.nav.users" },
   { id: "support-grants", labelKey: "admin.nav.supportGrants" },
 ] as const satisfies readonly { id: string; labelKey: AdminLabelKey }[];

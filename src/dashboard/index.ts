@@ -114,7 +114,9 @@ import {
   memberSlotAvailable,
   resolveWorkspacePlan,
   resolveWorkspacePlans,
+  sharedBotAvailability,
 } from "./entitlement";
+import { readReviewUsage, reviewUsageMonth } from "./review-usage-store";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
   type AcceptInviteOutcome,
@@ -2533,6 +2535,34 @@ const workspaceCheckMinScoreWriteRoute = async (c: DashboardContext) => {
       max: CHECK_MIN_SCORE_MAX,
     });
   }
+};
+
+// --- Workspace settings: shared-bot review usage ---
+//
+// The card's read (spec bot-scope-and-claiming § Review usage): two counts for
+// the current UTC month plus the shared-bot row's state. Every member may read
+// it — it is the workspace's own spend, not a setting — and the workspace is
+// the resolved tenant scope, never a path value: the store's `?3` is that id,
+// so no request can name another tenant.
+const reviewUsageReadRoute = async (c: DashboardContext) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const { db, scope } = member;
+  const window = reviewUsageMonth(new Date());
+  const [rows, plan, sharedBots] = await Promise.all([
+    readReviewUsage(db, window, scope.workspaceId),
+    resolveWorkspacePlan(db, scope.workspaceId, deploymentModeOf(c.env.DEPLOYMENT_MODE)),
+    createReviewBotsStore(db).listSharedBots(scope.workspaceId),
+  ]);
+  const row = rows[0];
+  // Retired between the gate and the read: the same 404 an unknown ref gets.
+  if (!row) return await tenantNotFound(c);
+  return c.json({
+    month: window.month,
+    sharedReviews: row.sharedReviews,
+    ownReviews: row.ownReviews,
+    sharedBot: sharedBotAvailability(plan, sharedBots.length > 0),
+  });
 };
 
 // --- Apps list + per-App management (spec § Multi-App 契约,
@@ -6143,6 +6173,10 @@ dashboardApp.put(
 dashboardApp.get(
   "/:workspaceRef/api/settings/check-min-score",
   workspaceOnly(workspaceCheckMinScoreReadRoute),
+);
+dashboardApp.get(
+  "/:workspaceRef/api/settings/review-usage",
+  workspaceOnly(reviewUsageReadRoute),
 );
 dashboardApp.put(
   "/:workspaceRef/api/settings/check-min-score",

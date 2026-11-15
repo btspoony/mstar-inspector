@@ -327,6 +327,14 @@ function stubWorkspaceSettingsFetch(put: (body: string) => Response) {
         headers: { "Content-Type": "application/json" },
       });
     }
+    // The read-only usage card the page composes above these settings: a
+    // settled payload, so the page carries no unrelated failure notice.
+    if (url.endsWith("/api/settings/review-usage")) {
+      return new Response(
+        JSON.stringify({ month: "2026-11", sharedReviews: 4, ownReviews: 1, sharedBot: "available" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
     return new Response(JSON.stringify({ grants: [] }), {
       status: 200,
       headers: { "Content-Type": "application/json" },

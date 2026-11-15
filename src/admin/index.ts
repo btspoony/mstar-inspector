@@ -60,6 +60,7 @@ import { isServerFlagKey, listFlags } from "./flags";
 import { operatorLogin, type AdminContext } from "./gate";
 import { createSupportGrant, revokeSupportGrant } from "./support-grants";
 import { listUsers } from "./users";
+import { readReviewUsage, reviewUsageMonth } from "../dashboard/review-usage-store";
 import { WORKSPACE_SLUG_PATTERN, listWorkspaces, setWorkspacePlan, setWorkspaceSlug } from "./workspaces";
 
 /** One declaration row of this namespace's own route table. */
@@ -564,6 +565,22 @@ async function readWorkspaces(c: AdminContext): Promise<Response> {
 }
 
 /**
+ * Shared-bot review usage per live workspace, for the current UTC month — one
+ * statement, the same shape the workspace card reads with `?3` bound to
+ * `NULL` (spec bot-scope-and-claiming § Review usage). The order is the
+ * statement's: shared-bot reviews descending, own-bot reviews descending, then
+ * the workspace name. No paging: the console filters the loaded rows.
+ */
+async function readUsage(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  const window = reviewUsageMonth(new Date());
+  return c.json({ month: window.month, workspaces: await readReviewUsage(db, window, null) });
+}
+
+/**
  * Every known user with its SQL-side counts — one statement. `isOperator` comes
  * from the env allowlist through `isPlatformOperator`, the same predicate the
  * gate uses, so the listed flag and the authorization decision cannot diverge.
@@ -795,6 +812,7 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "patch", path: "/api/runtime", handler: setRuntime },
   { method: "get", path: "/api/workspaces", handler: readWorkspaces },
   { method: "get", path: "/api/users", handler: readUsers },
+  { method: "get", path: "/api/usage", handler: readUsage },
   { method: "patch", path: "/api/workspaces/:id/plan", handler: assignPlan },
   { method: "patch", path: "/api/workspaces/:id/slug", handler: setSlug },
   { method: "patch", path: "/api/official-workspace", handler: assignOfficialWorkspace },

@@ -98,7 +98,9 @@ capability and never reads the column.
 - `migrations/0058_review_bot_scope.sql`, `migrations/0059_install_claims.sql`
 - `src/dashboard/runtime-config-store.ts` (key + domain registry), `src/dashboard/apps-store.ts` (`setBotScope`, `listBotScopes`, `getInstallation`)
 - `src/dashboard/install-claims-store.ts`, `src/worker/install-setup.ts`
-- `src/dashboard/targets-store.ts` (`resolve` guards), `src/admin/index.ts` (`POST /api/targets/:targetId/unbind`)
+- `src/dashboard/targets-store.ts` (`resolve` guards), `src/admin/index.ts` (`POST /api/targets/:targetId/unbind`, `GET /api/usage`)
+- `src/dashboard/review-usage-store.ts` (`readReviewUsage`, `reviewUsageMonth`), `src/dashboard/index.ts` (`GET /dashboard/<ref>/api/settings/review-usage`)
+- `src/spa/pages/ReviewUsageCard.tsx`, `src/spa/admin/UsagePage.tsx`
 - `src/spa/pages/SettingsPage.tsx`, `src/spa/pages/data.ts`, `src/i18n/*`
 
 ## Change obligations
@@ -135,6 +137,33 @@ A consumer workspace may therefore still change its own target policy; only the 
 `review_findings` and `review_failures` carry `target_id`, backfilled from their pull-request row and guarded three ways: a row with no resolvable target aborts the migration, a row with several candidate targets aborts it, and only an exactly-one candidate is attributed. Tenant reads bind `target_id` directly; the bot-keyed pull-request join is no longer load-bearing. `audit_events.target_id` is nullable so a park audit can name its target.
 
 A row's `target_id` is set when it is first recorded and never rewritten; rebinding an installation moves future publications, not history.
+
+### Review usage
+
+Two read-only faces count published reviews per workspace: the settings card on
+`/dashboard/<ref>/settings` and the operator console's usage page
+(`/_internal_admin/usage`). Both read one statement
+(`src/dashboard/review-usage-store.ts#readReviewUsage`) parameterized by
+workspace.
+
+| Rule | Contract |
+|---|---|
+| Window | One UTC calendar month of `reviews.reviewed_at` — the instant the review row was recorded, i.e. the month the review finished, never the month it was requested. Half-open: `>=` the first instant of the month, `<` the first instant of the next, compared as plain `YYYY-MM-DD HH:MM:SS` text. No local-time bucketing, no rolling 30-day window, no cache. |
+| Attribution | A review belongs to the workspace of its **target**: `reviews.target_id` → `review_targets.workspace_id`. `reviews.installation_id` is not a substitute — it names the credential the run used and says nothing about which workspace consumed the review. |
+| Split | `review_bots.scope` decides the column, never which workspace owns the bot: `shared` counts as a shared-bot review **even in the shared bot's own workspace**, every other scope counts as own-bot. The scope is read at query time, so a month's split reflects the bot's scope *now*; it is not a snapshot of the scope at review time. |
+| No target | A review with no `target_id` has no bot either (migration `0057_review_targets.sql` attributes history only where `bot_id` is NOT NULL), so it names no workspace and is **excluded from both counts**. This sentence is the rule; the row is not dropped silently. |
+| Soft deletion | `workspaces.deleted_at` filters the row (a retired tenant has no face). `review_targets.deleted_at` and `review_bots.deleted_at` do **not**: the count is what happened, and a parked target keeps its month. |
+| Visibility | `?3` is the caller's workspace id on the settings card and `NULL` (every live workspace) on the operator face — one shape, two bindings. The workspace face cannot read another tenant's row, and the operator face lists live workspaces with zero reviews as well. |
+| Order | Shared-bot reviews descending, then own-bot reviews descending, then the workspace name ascending, then the workspace id ascending — `workspaces.name` is not unique, so the id closes the last key and two same-named workspaces cannot swap places between reloads. |
+| Paging | None. The route answers every live workspace in one statement and the page filters the loaded rows client-side. If a measured read ever exceeds that bounded read, server paging is a new stated contract — never a silent cap that hides rows the counter still counts. |
+
+Heading placement: a page's title names the surface, and the window sits in
+the description line under it — the month is only known once the read has
+answered, so a title carrying it would render blank and then reflow.
+
+The card's labels say `reviews` and never `attempts`: the members page's
+"this workspace" meter counts review attempts (`usage_events`), a different
+measure, and no copy on either surface may imply the two numbers agree.
 
 ### Parking an overlapping target
 
