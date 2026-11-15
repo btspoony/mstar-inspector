@@ -5477,6 +5477,52 @@ const appParkRoute = async (c: DashboardContext): Promise<Response> => {
   );
 };
 
+/**
+ * `POST /api/targets` — the workspace manager's target on a `shared` bot, the
+ * chooser's official mode. `{ botId }` is the whole body: the workspace is the
+ * request's own, and the bot is one the platform already shares.
+ *
+ * Refusals reuse the pinned-post vocabulary: a body without a `botId` is a
+ * `400`; a bot the store would not write (unknown, soft-deleted or not
+ * shared) is the same `404 unknown app` an unknown App answers; a workspace
+ * that already holds a live target on the bot is the family's `409`. A caller
+ * who is not owner/admin is refused by the manage gate before any read, and
+ * the store's own guard re-checks the bot inside the write, so a bot unshared
+ * between page load and submit writes nothing.
+ */
+const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  if (!canManageRole(member.scope.role)) {
+    return c.html(forbiddenPage(member.session.login, requestLocale(c)), 403);
+  }
+  const form = await c.req.parseBody();
+  const botId = typeof form.botId === "string" ? form.botId.trim() : "";
+  if (botId === "") {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "bot id required", 400);
+  }
+  // The floor a new target starts at is the workspace's own; a degraded read
+  // would silently widen a floor the tenant may have set higher, so it fails
+  // closed before anything is written (the manifest commit's rule).
+  const floor = await getWorkspaceCheckMinScore(member.db, member.scope.workspaceId);
+  if (floor.degraded) {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "workspace floor unreadable", 500);
+  }
+  const created = await createTargetsStore(member.db).createOnSharedBot({
+    workspaceId: member.scope.workspaceId,
+    botId,
+    createdBy: member.user.github_login,
+    checkMinScore: floor.minScore,
+  });
+  if (created.outcome === "bot_not_shared") {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "unknown app", 404);
+  }
+  if (created.outcome === "target_exists") {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "target exists", 409);
+  }
+  return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "ok");
+};
+
 /** The ledger scope the PR faces bind: the resolved target, its workspace, its bot. */
 function ledgerScopeOf(gate: {
   app: GithubAppRow;
@@ -5779,6 +5825,9 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/pause", handler: (c) => appReviewAction(c, "pause"), access: "write" },
   { method: "post", path: "/apps/:appId/resume", handler: (c) => appReviewAction(c, "resume"), access: "write" },
   { method: "post", path: "/apps/:appId/park", handler: appParkRoute, access: "write" },
+  // Workspace-scoped target creation on a shared bot — not App-addressed: the
+  // body names the bot, and the route re-checks its scope inside the write.
+  { method: "post", path: "/api/targets", handler: targetCreateRoute, access: "write" },
   { method: "post", path: "/apps/:appId/review-trigger-mode", handler: appReviewTriggerModeAction, access: "write" },
   { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },

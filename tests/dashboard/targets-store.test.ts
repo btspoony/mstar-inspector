@@ -511,6 +511,91 @@ describe("create path (manifest commit)", () => {
   });
 });
 
+describe("create on a shared bot", () => {
+  /** One live bot shared platform-wide, with no target anywhere yet. */
+  function seedSharedBot(db: TestD1, botId: string, githubAppId: number, deleted = false): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+            status, scope, shared_at, deleted_at, created_at, updated_at)
+         VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active', 'shared', datetime('now'),
+                 ${deleted ? "datetime('now')" : "NULL"}, datetime('now'), datetime('now'))`,
+      )
+      .run(botId, githubAppId, botId);
+    db.raw
+      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
+      .run(botId, OTHER_WS);
+  }
+
+  test("writes ONE unbound target, seeded from the workspace floor and the bot's own name", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, OTHER_WS);
+    db.raw.prepare("UPDATE workspaces SET check_min_score = 45 WHERE id = ?").run(WS);
+    seedSharedBot(db, "bot-shared", 6403);
+
+    const result = await createTargetsStore(db).createOnSharedBot({
+      workspaceId: WS,
+      botId: "bot-shared",
+      createdBy: "acme",
+      checkMinScore: 45,
+    });
+    expect(result.outcome).toBe("created");
+    if (result.outcome !== "created") throw new Error("unreachable");
+    expect(result.target).toMatchObject({
+      workspace_id: WS,
+      bot_id: "bot-shared",
+      name: "bot-shared",
+      installation_id: null,
+      account_login: null,
+      review_enabled: 1,
+      review_trigger_mode: "every_push",
+      review_level: null,
+      check_min_score: 45,
+      check_pass_verdicts: '["ship it"]',
+      allowlist_enabled: 0,
+      deleted_at: null,
+    });
+    // The bot is untouched: still one row, still shared, no installation bound.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_bots").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT scope FROM review_bots WHERE id = 'bot-shared'").get()).toEqual({
+      scope: "shared",
+    });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get()).toEqual({ n: 0 });
+  });
+
+  test("a second call for the same workspace and bot writes nothing", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, OTHER_WS);
+    seedSharedBot(db, "bot-shared", 6404);
+    const store = createTargetsStore(db);
+
+    const first = await store.createOnSharedBot({ workspaceId: WS, botId: "bot-shared", createdBy: "acme" });
+    expect(first.outcome).toBe("created");
+    expect(await store.createOnSharedBot({ workspaceId: WS, botId: "bot-shared", createdBy: "acme" })).toEqual({
+      outcome: "target_exists",
+    });
+    expect(await store.list(WS)).toHaveLength(1);
+  });
+
+  test("an owned, soft-deleted or unknown bot is one refusal and zero writes", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, OTHER_WS);
+    seedSharedBot(db, "bot-gone", 6405, true);
+    seedBackfilledBot(db, "bot-owned", { githubAppId: 6406, workspaceId: OTHER_WS });
+    const store = createTargetsStore(db);
+    const before = db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get();
+
+    for (const botId of ["bot-owned", "bot-gone", "bot-absent"]) {
+      expect(await store.createOnSharedBot({ workspaceId: WS, botId, createdBy: "acme" }), botId).toEqual({
+        outcome: "bot_not_shared",
+      });
+    }
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get()).toEqual(before);
+    expect(await store.list(WS)).toHaveLength(0);
+  });
+});
+
 describe("owner allowlist", () => {
   test("each save REPLACES the owner set, and the read is alphabetical", async () => {
     const db = createMigratedTestD1();

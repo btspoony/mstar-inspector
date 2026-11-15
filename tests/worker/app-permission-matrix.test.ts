@@ -47,6 +47,8 @@ const PLAIN_KEY_ID = await keyIdOf(PLAIN_KEY);
 
 /** The App's immutable GitHub App id — the only App address form (D0). */
 const APP_ID = 1001;
+/** The bot the platform shares: the create-target route's subject. */
+const SHARED_BOT_ID = "bot-shared-matrix";
 const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
 const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
 const USAGE = `/dashboard/default/api/apps/${APP_ID}/keys/usage`;
@@ -102,6 +104,27 @@ async function seededWorld(): Promise<TestD1> {
     state: "open",
     headSha: "sha-1",
   });
+  // The bot the platform shares (owned by a second workspace): the subject of
+  // the create-target route below. It carries no target in `default`, so the
+  // manager sweep's 200 side is the route's own first write.
+  db.raw
+    .prepare(
+      `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+       VALUES ('ws-shared', 'ws-shared', 'Shared', 'octocat', datetime('now'))`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO review_bots
+         (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, scope, shared_at, created_at, updated_at)
+       VALUES (?, 'platform-app', 1099, 'platform-app', 'enc', 'enc', 'octocat', 'active',
+               'shared', datetime('now'), datetime('now'), datetime('now'))`,
+    )
+    .run(SHARED_BOT_ID);
+  db.raw
+    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'ws-shared')")
+    .run(SHARED_BOT_ID);
   return db;
 }
 
@@ -175,6 +198,9 @@ function expectZeroAppMutations(db: TestD1): void {
   expect(appStatus(db, APP_ID)).toBe("active");
   expect(reviewEnabled(db, APP_ID)).toBe(1);
   for (const table of MUTABLE_APP_TABLES) expect(rawCount(db, table), table).toBe(0);
+  // The seeded world holds exactly one target (the App's). A deny path that
+  // reached the create-target route's write would show two.
+  expect(rawCount(db, "review_targets")).toBe(1);
 }
 
 type MatrixRoute = {
@@ -244,6 +270,11 @@ const MATRIX_ROUTES: MatrixRoute[] = [
   // side additionally calls api.github.com (GET /app + the bot avatar leg), so
   // the sweep's stub answers those URLs too.
   { name: "refresh-metadata", path: `/dashboard/default/api/apps/${APP_ID}/refresh-metadata` },
+  // --- workspace-scoped target creation (the shared bot's chooser) ---
+  // Not App-addressed: the body names the bot, and the route's own gates
+  // decide. A manager's 200 side writes one target on a SHARED bot, which is
+  // why the seeded world carries one.
+  { name: "create target on a shared bot", path: "/dashboard/default/api/targets", fields: { botId: SHARED_BOT_ID } },
   // --- ops family: pinned action paths ---
   { name: "pause", path: `/dashboard/default/apps/${APP_ID}/pause` },
   { name: "resume", path: `/dashboard/default/apps/${APP_ID}/resume` },

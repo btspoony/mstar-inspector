@@ -416,3 +416,159 @@ describe("the dashboard routes resolve the target inside the session workspace",
     }
   });
 });
+
+/**
+ * The create route's second-target case: a `shared` bot carries one live
+ * target per workspace, written by that workspace's manager. The fixture
+ * supplies workspace A's target and the route writes B's, so the two-target
+ * bot the isolation faces above guard is now also the state this route mints.
+ */
+describe("POST /api/targets — a target on a shared bot", () => {
+  const BOT = "app-platform";
+  const APP_ID = 7002;
+  const CREATE = `/dashboard/${WORKSPACE_B}/api/targets`;
+
+  async function postTarget(
+    db: TestD1,
+    path: string,
+    login: string | null,
+    fields: Record<string, string>,
+  ): Promise<Response> {
+    const headers: Record<string, string> = { "Content-Type": "application/x-www-form-urlencoded" };
+    if (login !== null) {
+      headers.Cookie = `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}`;
+    }
+    return worker.fetch(
+      new Request(`https://worker.local${path}`, {
+        method: "POST",
+        headers,
+        body: new URLSearchParams(fields),
+      }),
+      envFor(db),
+    );
+  }
+
+  /** One live bot shared platform-wide, owned by workspace A. */
+  function seedPlatformBot(db: TestD1, scope = "shared"): void {
+    seed(
+      db,
+      `INSERT INTO review_bots
+         (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, scope, shared_at, created_at, updated_at)
+       VALUES (?, 'platform-app', ?, 'platform-app', 'enc', 'enc', 'octocat', 'active', ?,
+               datetime('now'), datetime('now'), datetime('now'))`,
+      BOT,
+      APP_ID,
+      scope,
+    );
+    seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", BOT, WORKSPACE_A);
+  }
+
+  function liveTargets(db: TestD1): Array<{ workspace_id: string; installation_id: number | null }> {
+    return db.raw
+      .query("SELECT workspace_id, installation_id FROM review_targets WHERE bot_id = ? ORDER BY workspace_id")
+      .all(BOT) as Array<{ workspace_id: string; installation_id: number | null }>;
+  }
+
+  test("one workspace writes the bot's second live target, unbound, in one batch", async () => {
+    const { db } = isolationFixture();
+    seedPlatformBot(db);
+    seedTarget(db, BOT, { id: "target-platform-a", workspaceId: WORKSPACE_A });
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      const res = await postTarget(db, CREATE, "octocat", { botId: BOT });
+      expect(res.status).toBe(200);
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      // Two live targets on one bot, each in its own workspace, neither bound
+      // to an installation: this path installs nothing.
+      expect(liveTargets(db)).toEqual([
+        { workspace_id: WORKSPACE_A, installation_id: null },
+        { workspace_id: WORKSPACE_B, installation_id: null },
+      ]);
+      // The row the route wrote carries the workspace and the bot, no account
+      // claim, and the workspace's own floor (the seeded `default` value).
+      const written = db.raw
+        .query(
+          `SELECT workspace_id, bot_id, account_login, review_enabled, review_trigger_mode,
+                  check_min_score, check_pass_verdicts, allowlist_enabled
+             FROM review_targets WHERE bot_id = ? AND workspace_id = ?`,
+        )
+        .get(BOT, WORKSPACE_B);
+      expect(written).toEqual({
+        workspace_id: WORKSPACE_B,
+        bot_id: BOT,
+        account_login: null,
+        review_enabled: 1,
+        review_trigger_mode: "every_push",
+        check_min_score: 60,
+        check_pass_verdicts: '["ship it"]',
+        allowlist_enabled: 0,
+      });
+      // No bot write and no manifest row: the bot is still the platform share
+      // the seed created, and no second App exists.
+      expect(
+        db.raw.query("SELECT COUNT(*) AS n FROM review_bots WHERE id = ?").get(BOT),
+      ).toEqual({ n: 1 });
+      expect(db.raw.query("SELECT scope FROM review_bots WHERE id = ?").get(BOT)).toEqual({
+        scope: "shared",
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("the workspace's own count for that bot reflects the new target", async () => {
+    const { db } = isolationFixture();
+    seedPlatformBot(db);
+    seedTarget(db, BOT, { id: "target-platform-a", workspaceId: WORKSPACE_A });
+
+    const before = await createReviewBotsStore(db).listSharedBots(WORKSPACE_B);
+    expect(before).toEqual([
+      { id: BOT, github_slug: "platform-app", name: "platform-app", target_count: 0 },
+    ]);
+    expect((await postTarget(db, CREATE, "octocat", { botId: BOT })).status).toBe(200);
+    const after = await createReviewBotsStore(db).listSharedBots(WORKSPACE_B);
+    expect(after.map((bot) => bot.target_count)).toEqual([1]);
+  });
+
+  test("a second call for the same workspace and bot is refused and writes nothing", async () => {
+    const { db } = isolationFixture();
+
+    seedPlatformBot(db);
+    seedTarget(db, BOT, { id: "target-platform-a", workspaceId: WORKSPACE_A });
+
+    expect((await postTarget(db, CREATE, "octocat", { botId: BOT })).status).toBe(200);
+    const second = await postTarget(db, CREATE, "octocat", { botId: BOT });
+    expect(second.status).toBe(409);
+    expect(liveTargets(db)).toHaveLength(2);
+  });
+
+  test("an owned or unknown bot is the unknown-app 404, and a plain member is refused before any write", async () => {
+    const { db } = isolationFixture();
+    seedPlatformBot(db, "owned");
+
+    // No workspace may create a target on a bot it does not own.
+    expect((await postTarget(db, CREATE, "octocat", { botId: BOT })).status).toBe(404);
+    expect((await postTarget(db, CREATE, "octocat", { botId: "no-such-bot" })).status).toBe(404);
+    // A malformed body names the missing field, not a bot.
+    expect((await postTarget(db, CREATE, "octocat", {})).status).toBe(400);
+    expect(liveTargets(db)).toHaveLength(0);
+
+    // Sharing is not enough: creation is the workspace manager's write, so a
+    // plain member is refused by the role gate before the bot is even read.
+    seed(db, "UPDATE review_bots SET scope = 'shared' WHERE id = ?", BOT);
+    seed(
+      db,
+      "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES ('user-plain', 'plain', 'member', datetime('now'), NULL)",
+    );
+    seed(
+      db,
+      "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, 'user-plain', 'member', datetime('now'))",
+      WORKSPACE_B,
+    );
+    expect((await postTarget(db, CREATE, "plain", { botId: BOT })).status).toBe(403);
+    expect(liveTargets(db)).toHaveLength(0);
+  });
+});
