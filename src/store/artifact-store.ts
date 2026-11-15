@@ -331,7 +331,12 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
     const payload = doc.payload as MstarReviewV1;
     assertTargetAgrees(key, payload);
 
-    const reviewId = crypto.randomUUID();
+    // The review id IS the apply's idempotency key: first attempt and every
+    // retry compute the same id, so the review row satisfies first-write-wins
+    // and a finding can name it without looking any row up. The finding ids
+    // extend the same key (`<key>#<index>`), so both halves are derived, not
+    // discovered.
+    const reviewId = doc.key;
     // bot_id: the REQUIRED caller-supplied per-bot attribution
     // (every new row is attributed; NULL survives only on
     // legacy historical rows). The FK to review_bots(id) rejects an
@@ -395,22 +400,22 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
     // raw_output stays NULL on the v1 path: the envelope is authoritative
     // (its 64KB truncation is not losslessly restorable).
 
-    // Findings attach to the review by its NATURAL key, not by this attempt's
-    // generated id: the review INSERT is an idempotent no-op when the row
-    // already exists (a retry after a partial artifact write), and the finding
-    // then attaches to THAT row. The id is deterministic
-    // (`<idem key>#<envelope index>`), so `ON CONFLICT (id) DO NOTHING` writes
-    // a missing finding once and never duplicates one — a retry converges
-    // instead of skipping the artifact.
+    // Findings attach to THIS deterministic review id — never to a row found
+    // by (installation, owner, repo, pr, head_sha). Both ids come from the
+    // apply key, so a retry names the same rows and `ON CONFLICT (id) DO
+    // NOTHING` writes a missing finding once and never duplicates one. The
+    // EXISTS guard keeps a row whose review is absent (a legacy review written
+    // under another id) from raising an FK failure: such a finding is simply
+    // not written.
     const findingStmts: ComposedStatement[] = payload.findings.map((finding, index) => ({
       sql: `INSERT INTO findings (id, review_id, severity, category, file_path, line_start, line_end, title, body, fingerprint)
-             SELECT ?, r.id, ?, ?, ?, ?, ?, ?, ?, ?
-               FROM reviews r
-              WHERE r.installation_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ? AND r.head_sha = ?
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+              WHERE EXISTS (SELECT 1 FROM reviews WHERE id = ?)
                 ${options?.guard === undefined ? "" : `AND ${options.guard.sql}`}
              ON CONFLICT (id) DO NOTHING`,
       binds: [
           `${doc.key}#${index}`,
+          reviewId,
           // THE vocab-switch mapping point (architect-locked): v1 rows
           // carry the harness merge class in the legacy `severity` column.
           finding.mergeClass,
@@ -428,11 +433,7 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           // by the pure function; a blank or [REDACTED]-marker hint falls
           // back to the normalized FNV-1a fingerprint (W-1).
           computeFindingFingerprint(finding),
-          key.installation_id,
-          key.owner,
-          key.repo,
-          key.pr_number,
-          key.head_sha,
+          reviewId,
           ...(options?.guard?.binds ?? []),
       ],
     }));

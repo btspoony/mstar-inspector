@@ -1882,6 +1882,66 @@ describe("target attribution is fixed at first record (rebind)", () => {
   });
 
   /**
+   * The review id is derived from the apply key (`0001_reviews.sql` allows
+   * exactly ONE review per (installation, owner, repo, pr, head_sha) — its
+   * UNIQUE — independent of target), so a finding names its review without a
+   * lookup and a second target's apply cannot attach findings to another row:
+   * it either names the SAME row (no-op) or writes its own key's rows. What it
+   * can never do is move or grow someone else's finding set.
+   */
+  test("an apply for another target cannot attach findings to a different review", async () => {
+    const db = fixedAttributionFixture();
+    const twoFindings = [0, 1].map((i) => ({
+      mergeClass: "should-fix" as const,
+      category: "logic",
+      file_path: `src/k${i}.ts`,
+      line_start: i + 1,
+      line_end: i + 2,
+      title: `Finding ${i}`,
+      body: "body",
+      fingerprint_hint: `fp-${i}`,
+    }));
+    const artifact = artifactDoc({ payload: enginePayload({ findings: twoFindings }) });
+    // A's review for this head, with its two public findings.
+    await createArtifactStore(db).put(artifact);
+    const reviewId = artifact.key;
+    const aFindings = db.raw.query("SELECT COUNT(*) AS n FROM findings WHERE review_id = ?").get(reviewId);
+    expect(aFindings).toEqual({ n: 2 });
+
+    // A publication for the same head applies after the rebind: its artifact
+    // half is the idempotent no-op, its lifecycle findings follow the binding.
+    rebind(db);
+    const pay = payload({
+      artifact,
+      lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }),
+    });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
+
+    // One review row, first write wins (still A's), and A's findings untouched.
+    expect(db.raw.query("SELECT id, target_id FROM reviews").all()).toEqual([
+      { id: reviewId, target_id: TARGET_ID },
+    ]);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings WHERE review_id = ?").get(reviewId)).toEqual({
+      n: 2,
+    });
+    // The lifecycle row is the new attempt's record, under the live binding.
+    expect(db.raw.query("SELECT finding_id, target_id FROM review_findings").all()).toEqual([
+      { finding_id: "f-1", target_id: TARGET_B_ID },
+    ]);
+    // The schema forbids a second review for the same head, target or not —
+    // the premise of a cross-target capture cannot arise.
+    expect(() =>
+      db.raw
+        .prepare(
+          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id)
+           VALUES ('review-b', ?, 'acme', 'widgets', 42, ?, 'needs fixes', ?, ?)`,
+        )
+        .run(SCOPE.installationId, SHA, APP_ID, TARGET_B_ID),
+    ).toThrow(/UNIQUE/);
+  });
+
+  /**
    * The artifact's inserts carry the same inline lease guard as the lifecycle
    * statements. A trigger supersedes the lease right after the review INSERT
    * commits inside its chunk, so the findings that follow in the SAME chunk
