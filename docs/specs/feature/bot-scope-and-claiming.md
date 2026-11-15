@@ -96,6 +96,7 @@ capability and never reads the column.
 ## Where it lives
 
 - `migrations/0058_review_bot_scope.sql`, `migrations/0059_install_claims.sql`
+- `migrations/0062_review_usage_indexes.sql` (the usage read's composite indexes)
 - `src/dashboard/runtime-config-store.ts` (key + domain registry), `src/dashboard/apps-store.ts` (`setBotScope`, `listBotScopes`, `getInstallation`)
 - `src/dashboard/install-claims-store.ts`, `src/worker/install-setup.ts`
 - `src/dashboard/targets-store.ts` (`resolve` guards), `src/admin/index.ts` (`POST /api/targets/:targetId/unbind`, `GET /api/usage`)
@@ -148,14 +149,20 @@ workspace.
 
 | Rule | Contract |
 |---|---|
-| Window | One UTC calendar month of `reviews.reviewed_at` — the instant the review row was recorded, i.e. the month the review finished, never the month it was requested. Half-open: `>=` the first instant of the month, `<` the first instant of the next, compared as plain `YYYY-MM-DD HH:MM:SS` text. No local-time bucketing, no rolling 30-day window, no cache. |
+| Window | One UTC calendar month of `reviews.reviewed_at` — the instant the review row was recorded, i.e. the month the review finished, never the month it was requested. Half-open: `>=` the first instant of the month, `<` the first instant of the next, compared as plain `YYYY-MM-DD HH:MM:SS` text. No local-time bucketing, no rolling 30-day window, no cache. Only review rows count: a target with no review in the window adds nothing. |
 | Attribution | A review belongs to the workspace of its **target**: `reviews.target_id` → `review_targets.workspace_id`. `reviews.installation_id` is not a substitute — it names the credential the run used and says nothing about which workspace consumed the review. |
 | Split | `review_bots.scope` decides the column, never which workspace owns the bot: `shared` counts as a shared-bot review **even in the shared bot's own workspace**, every other scope counts as own-bot. The scope is read at query time, so a month's split reflects the bot's scope *now*; it is not a snapshot of the scope at review time. |
 | No target | A review with no `target_id` has no bot either (migration `0057_review_targets.sql` attributes history only where `bot_id` is NOT NULL), so it names no workspace and is **excluded from both counts**. This sentence is the rule; the row is not dropped silently. |
 | Soft deletion | `workspaces.deleted_at` filters the row (a retired tenant has no face). `review_targets.deleted_at` and `review_bots.deleted_at` do **not**: the count is what happened, and a parked target keeps its month. |
 | Visibility | `?3` is the caller's workspace id on the settings card and `NULL` (every live workspace) on the operator face — one shape, two bindings. The workspace face cannot read another tenant's row, and the operator face lists live workspaces with zero reviews as well. |
 | Order | Shared-bot reviews descending, then own-bot reviews descending, then the workspace name ascending, then the workspace id ascending — `workspaces.name` is not unique, so the id closes the last key and two same-named workspaces cannot swap places between reloads. |
-| Paging | None. The route answers every live workspace in one statement and the page filters the loaded rows client-side. If a measured read ever exceeds that bounded read, server paging is a new stated contract — never a silent cap that hides rows the counter still counts. |
+| Paging | None, by design. The operator face answers **every** live workspace with both counts in one statement — the bound is the deployment's live workspace count (three numbers per row, a few hundred at the scale this platform runs) — and the page filters the loaded rows client-side. If a measured read ever exceeds that bound, server paging is a new stated contract — never a silent cap that hides rows the counter still counts. |
+
+Indexes: `migrations/0062_review_usage_indexes.sql` adds the composite
+`reviews(target_id, reviewed_at)` and `review_targets(workspace_id)` indexes, so
+the month drives the join instead of a per-target history scan filtered
+afterwards. `idx_reviews_reviewed_at` stays: reads that filter the window with
+no target still use it.
 
 Heading placement: a page's title names the surface, and the window sits in
 the description line under it — the month is only known once the read has

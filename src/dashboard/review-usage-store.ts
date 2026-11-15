@@ -66,7 +66,10 @@ export function reviewUsageMonth(now: Date): ReviewUsageMonth {
  * `LEFT JOIN` on both the target and the window: a live workspace with no
  * target, or a target with no review this month, still answers a row with
  * zeros instead of disappearing — the operator face must list every live
- * workspace, including the ones that spent nothing.
+ * workspace, including the ones that spent nothing. Both sums therefore test
+ * `r.id IS NOT NULL` as well as the bot's scope: without it the unmatched
+ * target row would contribute one to whichever column its bot belongs to, so
+ * a target with no review (or a parked one) would read as a review.
  *
  * The order is total: `workspaces.name` is not UNIQUE (only `slug` is,
  * migration 0026), so the id closes the last key and two same-named
@@ -76,8 +79,8 @@ const REVIEW_USAGE_SQL = `
   SELECT w.id   AS workspace_id,
          w.name AS workspace_name,
          w.slug AS workspace_slug,
-         COALESCE(SUM(CASE WHEN b.scope =  'shared' THEN 1 ELSE 0 END), 0) AS shared_reviews,
-         COALESCE(SUM(CASE WHEN b.scope <> 'shared' THEN 1 ELSE 0 END), 0) AS own_reviews
+         COALESCE(SUM(CASE WHEN r.id IS NOT NULL AND b.scope =  'shared' THEN 1 ELSE 0 END), 0) AS shared_reviews,
+         COALESCE(SUM(CASE WHEN r.id IS NOT NULL AND b.scope <> 'shared' THEN 1 ELSE 0 END), 0) AS own_reviews
     FROM workspaces w
     LEFT JOIN review_targets t ON t.workspace_id = w.id
     LEFT JOIN reviews r
