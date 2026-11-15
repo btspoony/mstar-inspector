@@ -227,7 +227,10 @@ describe("GET /bot/setup — zero, one and N live claims", () => {
     const res = await setupGet(makeEnv(db), `installation_id=${INSTALLATION}&setup_action=install`);
 
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("no_live_claim");
+    const body = await res.text();
+    expect(body).toContain("no_live_claim");
+    // There is no claim, so no target can be named: the way back is the shell.
+    expect(body).toContain('href="/dashboard"');
     expect(installationCount(db)).toBe(0);
   });
 
@@ -302,7 +305,7 @@ describe("POST /bot/setup — the confirming action", () => {
       claim_id: "no-such-claim",
     });
     expect(unknown.status).toBe(404);
-    expect(await unknown.text()).toBe("claim not found");
+    expect(await unknown.json()).toEqual({ error: "claim not found" });
 
     // Another session holding the id is indistinguishable from a missing claim.
     const crossUser = await setupPost(
@@ -311,7 +314,7 @@ describe("POST /bot/setup — the confirming action", () => {
       "trudy",
     );
     expect(crossUser.status).toBe(404);
-    expect(await crossUser.text()).toBe("claim not found");
+    expect(await crossUser.json()).toEqual({ error: "claim not found" });
     expect(claimRow(world.db, claim.id)?.consumed_at).toBeNull();
     expect(installationCount(world.db)).toBe(0);
   });

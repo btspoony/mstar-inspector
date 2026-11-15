@@ -114,7 +114,8 @@ function noLiveClaimPage(c: SetupContext): Response {
     200,
     "no_live_claim",
     `<h1>no_live_claim</h1>
-     <p>No live installation claim for your account. Open the review target's page and press install again.</p>`,
+     <p>No live installation claim for your account. Open the review target's page and press install again.</p>
+     <p><a href="/dashboard">Back to the dashboard</a></p>`,
   );
 }
 
@@ -161,6 +162,21 @@ function boundPage(c: SetupContext, installationId: number, targetId: string): R
 function bindResponse(c: SetupContext, outcome: InstallBindOutcome, installationId: number): Response {
   if (outcome.outcome !== "bound") return refusalResponse(c, outcome);
   return boundPage(c, installationId, outcome.targetId);
+}
+
+/**
+ * The confirming `POST`'s refusal envelope: the contract freezes
+ * `404 {"error":"claim not found"}` as JSON for this programmatic action (the
+ * SPA's claim flow and any scripted retry read it), while the bind refusals
+ * keep § 9.4's text bodies. The `GET` pages and their text refusals are
+ * unchanged — a browser navigation reads those.
+ */
+function postRefusalResponse(
+  c: SetupContext,
+  outcome: Exclude<InstallBindOutcome, { outcome: "bound" }>,
+): Response {
+  if (outcome.outcome === "claim_not_found") return c.json({ error: "claim not found" }, 404);
+  return refusalResponse(c, outcome);
 }
 
 /**
@@ -215,5 +231,6 @@ export async function handleSetupPost(c: SetupContext): Promise<Response> {
     installationId,
     now: new Date().toISOString(),
   });
-  return bindResponse(c, outcome, installationId);
+  if (outcome.outcome !== "bound") return postRefusalResponse(c, outcome);
+  return boundPage(c, installationId, outcome.targetId);
 }
