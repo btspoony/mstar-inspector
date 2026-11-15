@@ -519,12 +519,15 @@ export async function findPublicationJournal(
  *
  *   (1) the artifact half — the review INSERT and one INSERT per public
  *       finding, composed by `createArtifactStore().statementsFor()` on EVERY
- *       attempt. It is idempotent because BOTH ids are DERIVED from the
- *       apply's idempotency key — the review row's `id` IS that key, and each
- *       public finding is `<key>#<envelope index>` — with `ON CONFLICT DO
- *       NOTHING` on each. No row is looked up: a retry computes the same ids,
- *       writes the missing findings and re-runs a complete artifact as a
- *       no-op. Its statements carry the same inline
+ *       attempt. The review row's `id` IS the apply's idempotency key, so the
+ *       first attempt and every retry compute the same id and `ON CONFLICT DO
+ *       NOTHING` keeps the first-written row. A public finding's own id is
+ *       `<key>#<envelope index>` and it attaches to the review that ACTUALLY
+ *       exists for that head — the natural-key lookup first (a historically
+ *       written review carries a UUID id; the UNIQUE admits at most one
+ *       candidate), else this attempt's derived id — with `ON CONFLICT DO
+ *       NOTHING`. A retry therefore writes the missing findings and re-runs a
+ *       complete artifact as a no-op. Its statements carry the same inline
  *       lease fence as the lifecycle's, and they are emitted as their own
  *       leading chunk(s), so a failed LIFECYCLE chunk never leaves a
  *       partially written artifact.
@@ -600,12 +603,14 @@ export async function applyPublishedLifecycle(
 
   // Step 1 — the review artifact's statements, composed on EVERY attempt and
   // emitted as their own leading chunk(s), never mixed with the lifecycle's.
-  // Both ids are DERIVED from the apply key (the review id is the key itself,
-  // a finding is `<key>#<index>`), so a retry computes the same rows and
-  // `ON CONFLICT … DO NOTHING` repairs a partial artifact instead of skipping
-  // it — no review is looked up. They carry the same inline lease guard as the
-  // lifecycle statements, so a superseded holder cannot commit them, and a
-  // failed lifecycle chunk leaves them complete rather than half-written.
+  // The review id is DERIVED from the apply key and a finding is
+  // `<key>#<index>`; a finding attaches to the review that exists for the head
+  // (a historically written UUID row, else this attempt's derived id), so a
+  // retry computes the same rows and `ON CONFLICT … DO NOTHING` repairs a
+  // partial artifact instead of skipping it. They carry the same inline lease
+  // guard as the lifecycle statements, so a superseded holder cannot commit
+  // them, and a failed lifecycle chunk leaves them complete rather than
+  // half-written.
   const leaseGuard = [row.id, lease.holder, lease.epoch, nowMs] as const;
   const artifactStatements = createArtifactStore(db)
     .statementsFor(

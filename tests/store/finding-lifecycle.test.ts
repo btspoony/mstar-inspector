@@ -2009,3 +2009,59 @@ describe("target attribution is fixed at first record (rebind)", () => {
     ).toEqual(["f-1"]);
   });
 });
+
+/**
+ * A public finding attaches to the review that ACTUALLY exists for its head.
+ *
+ * `reviews` accepts one row per (installation, owner, repo, pr, head_sha)
+ * (`0001_reviews.sql`), so the natural-key lookup has at most one candidate:
+ * a historically written review (UUID id) keeps its findings, and a head with
+ * no review yet gets this attempt's derived id.
+ */
+describe("public findings attach to the review that exists", () => {
+  /** One raw `reviews` row, as a pre-deterministic writer stored it. */
+  function seedHistoricalReview(db: TestD1, id: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO reviews
+           (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id)
+         VALUES (?, ?, 'acme', 'widgets', 42, ?, 'needs fixes', ?, ?)`,
+      )
+      .run(id, SCOPE.installationId, SHA, APP_ID, TARGET_ID);
+  }
+
+  test("a review written under a UUID id adopts this attempt's findings", async () => {
+    const db = createSeededTestD1();
+    const historicalId = crypto.randomUUID();
+    seedHistoricalReview(db, historicalId);
+    const pay = payload({ lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }) });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
+
+    // One review row — the historical one — and every public finding on it.
+    expect(db.raw.query("SELECT id FROM reviews").all()).toEqual([{ id: historicalId }]);
+    expect(
+      db.raw.query("SELECT COUNT(*) AS n, COUNT(DISTINCT review_id) AS reviews FROM findings").get(),
+    ).toEqual({ n: 1, reviews: 1 });
+    expect(db.raw.query("SELECT DISTINCT review_id FROM findings").all()).toEqual([
+      { review_id: historicalId },
+    ]);
+    // The lifecycle half still lands on the live binding's target.
+    expect(db.raw.query("SELECT finding_id, target_id FROM review_findings").all()).toEqual([
+      { finding_id: "f-1", target_id: TARGET_ID },
+    ]);
+  });
+
+  test("a head with no review yet gets this attempt's derived id", async () => {
+    const db = createSeededTestD1();
+    const pay = payload({ lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }) });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
+
+    const derived = pay.artifact!.key;
+    expect(db.raw.query("SELECT id FROM reviews").all()).toEqual([{ id: derived }]);
+    expect(db.raw.query("SELECT DISTINCT review_id FROM findings").all()).toEqual([
+      { review_id: derived },
+    ]);
+  });
+});

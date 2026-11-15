@@ -400,21 +400,28 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
     // raw_output stays NULL on the v1 path: the envelope is authoritative
     // (its 64KB truncation is not losslessly restorable).
 
-    // Findings attach to THIS deterministic review id — never to a row found
-    // by (installation, owner, repo, pr, head_sha). Both ids come from the
-    // apply key, so a retry names the same rows and `ON CONFLICT (id) DO
-    // NOTHING` writes a missing finding once and never duplicates one. The
-    // EXISTS guard keeps a row whose review is absent (a legacy review written
-    // under another id) from raising an FK failure: such a finding is simply
-    // not written.
+    // A finding attaches to the review that ACTUALLY exists for this head:
+    // the row found by the natural key first (a historically written review
+    // carries a UUID id), else the deterministic id this attempt computes
+    // (inserted by the review statement ahead of this one). The UNIQUE on
+    // (installation_id, owner, repo, pr_number, head_sha) admits at most one
+    // candidate, so the lookup cannot cross a head or a tenant. The finding id
+    // is the same derived `<key>#<index>`, so a retry writes a missing one
+    // once and never duplicates.
     const findingStmts: ComposedStatement[] = payload.findings.map((finding, index) => ({
       sql: `INSERT INTO findings (id, review_id, severity, category, file_path, line_start, line_end, title, body, fingerprint)
-             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-              WHERE EXISTS (SELECT 1 FROM reviews WHERE id = ?)
-                ${options?.guard === undefined ? "" : `AND ${options.guard.sql}`}
+             SELECT ?, COALESCE((SELECT id FROM reviews
+                                  WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?), ?),
+                    ?, ?, ?, ?, ?, ?, ?, ?
+                ${options?.guard === undefined ? "" : `WHERE ${options.guard.sql}`}
              ON CONFLICT (id) DO NOTHING`,
       binds: [
           `${doc.key}#${index}`,
+          key.installation_id,
+          key.owner,
+          key.repo,
+          key.pr_number,
+          key.head_sha,
           reviewId,
           // THE vocab-switch mapping point (architect-locked): v1 rows
           // carry the harness merge class in the legacy `severity` column.
@@ -433,7 +440,6 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           // by the pure function; a blank or [REDACTED]-marker hint falls
           // back to the normalized FNV-1a fingerprint (W-1).
           computeFindingFingerprint(finding),
-          reviewId,
           ...(options?.guard?.binds ?? []),
       ],
     }));
