@@ -512,6 +512,20 @@ describe("create path (manifest commit)", () => {
 });
 
 describe("create on a shared bot", () => {
+  /**
+   * The shared-bot capability lives on the plan (migration 0061): `pro` and
+   * `unlimited` include it, the seeded `free` row does not. A workspace with
+   * no subscription resolves `free`, so these creation cases seed `pro`.
+   */
+  function seedProPlan(db: TestD1): void {
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES (?, 'pro', 'active', datetime('now'), datetime('now'))`,
+      )
+      .run(WS);
+  }
+
   /** One live bot shared platform-wide, with no target anywhere yet. */
   function seedSharedBot(db: TestD1, botId: string, githubAppId: number, deleted = false): void {
     db.raw
@@ -531,6 +545,7 @@ describe("create on a shared bot", () => {
   test("writes ONE unbound target, seeded from the workspace floor and the bot's own name", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, OTHER_WS);
+    seedProPlan(db);
     db.raw.prepare("UPDATE workspaces SET check_min_score = 45 WHERE id = ?").run(WS);
     seedSharedBot(db, "bot-shared", 6403);
 
@@ -538,6 +553,7 @@ describe("create on a shared bot", () => {
       workspaceId: WS,
       botId: "bot-shared",
       createdBy: "acme",
+      mode: "saas",
       checkMinScore: 45,
     });
     expect(result.outcome).toBe("created");
@@ -567,12 +583,20 @@ describe("create on a shared bot", () => {
   test("a second call for the same workspace and bot writes nothing", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, OTHER_WS);
+    seedProPlan(db);
     seedSharedBot(db, "bot-shared", 6404);
     const store = createTargetsStore(db);
 
-    const first = await store.createOnSharedBot({ workspaceId: WS, botId: "bot-shared", createdBy: "acme" });
+    const first = await store.createOnSharedBot({
+      workspaceId: WS,
+      botId: "bot-shared",
+      createdBy: "acme",
+      mode: "saas",
+    });
     expect(first.outcome).toBe("created");
-    expect(await store.createOnSharedBot({ workspaceId: WS, botId: "bot-shared", createdBy: "acme" })).toEqual({
+    expect(
+      await store.createOnSharedBot({ workspaceId: WS, botId: "bot-shared", createdBy: "acme", mode: "saas" }),
+    ).toEqual({
       outcome: "target_exists",
     });
     expect(await store.list(WS)).toHaveLength(1);
@@ -581,18 +605,64 @@ describe("create on a shared bot", () => {
   test("an owned, soft-deleted or unknown bot is one refusal and zero writes", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, OTHER_WS);
+    seedProPlan(db);
     seedSharedBot(db, "bot-gone", 6405, true);
     seedBackfilledBot(db, "bot-owned", { githubAppId: 6406, workspaceId: OTHER_WS });
     const store = createTargetsStore(db);
     const before = db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get();
 
     for (const botId of ["bot-owned", "bot-gone", "bot-absent"]) {
-      expect(await store.createOnSharedBot({ workspaceId: WS, botId, createdBy: "acme" }), botId).toEqual({
+      expect(
+        await store.createOnSharedBot({ workspaceId: WS, botId, createdBy: "acme", mode: "saas" }),
+        botId,
+      ).toEqual({
         outcome: "bot_not_shared",
       });
     }
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get()).toEqual(before);
     expect(await store.list(WS)).toHaveLength(0);
+  });
+
+  test("a plan without the capability is refused before anything is written", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, OTHER_WS);
+    seedSharedBot(db, "bot-shared", 6407);
+    const store = createTargetsStore(db);
+    // No subscription row → the seeded `free` plan, which excludes the shared
+    // bot. The refusal names the plan this reader can change.
+    expect(
+      await store.createOnSharedBot({ workspaceId: WS, botId: "bot-shared", createdBy: "acme", mode: "saas" }),
+    ).toEqual({ outcome: "plan_refused", planId: "free" });
+    // Zero writes: no target, and no audit row about one.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get()).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get()).toEqual({ n: 0 });
+
+    // The capability is the plan's and the plan is read per attempt: the same
+    // store creates once the workspace moves to a plan that includes the bot.
+    seedProPlan(db);
+    expect(
+      (await store.createOnSharedBot({ workspaceId: WS, botId: "bot-shared", createdBy: "acme", mode: "saas" }))
+        .outcome,
+    ).toBe("created");
+    db.raw.close();
+  });
+
+  test("self-hosted answers without reading the catalogue", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, OTHER_WS);
+    seedSharedBot(db, "bot-shared", 6408);
+    // A catalogue read would throw here (`free` is missing); the mode resolves
+    // the unlimited constant before any read, so the create still succeeds.
+    db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
+    expect(
+      (await createTargetsStore(db).createOnSharedBot({
+        workspaceId: WS,
+        botId: "bot-shared",
+        createdBy: "acme",
+        mode: "self-hosted",
+      })).outcome,
+    ).toBe("created");
+    db.raw.close();
   });
 });
 

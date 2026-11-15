@@ -45,6 +45,9 @@ export const TAIL_PREREQUISITES = [
   // `workspaces` FK parent is created later by 0026 — SQLite resolves a
   // foreign key at DML, not at CREATE, so the early slot is inert).
   "0029_operator_support.sql",
+  // 0061 alters `plans` and updates its seeded rows; 0031 creates the table
+  // and seeds `free`/`pro`. The DML is why the guard cannot see this one.
+  "0031_plans_usage.sql",
 ] as const;
 
 /** The directory-derived tail after the shared anchor. */
@@ -176,8 +179,7 @@ export const SPA_PAGE_APIS_MIGRATIONS = shape("spa-page-apis", [
   "0028_workspace_invites.sql",
   // The shell boot reads the support-grant table, the plan catalogue +
   // subscriptions and `server_flags`, so the dispatch face runs on the
-  // production shape. 0029 already rides `TAIL_PREREQUISITES`.
-  "0031_plans_usage.sql",
+  // production shape. 0029 and 0031 already ride `TAIL_PREREQUISITES`.
   "0032_unlimited_plan.sql",
   "0033_platform_admin.sql",
   // 0036: github_apps.slug → webhook_path plus the cached github_slug.
@@ -273,7 +275,7 @@ export const APP_CONFIG_BASE_MIGRATIONS: readonly string[] = [
  * `app-config`'s pre-pool shape (0006 → 0038): app_provider_keys still carries
  * ONE row per (App, provider) under the two-segment AAD and app_custom_providers
  * still carries its key column. The sequence is 0006, 0008, 0009, the
- * `TAIL_PREREQUISITES` (0010, 0020, 0021), 0011, 0012, 0015, 0017, 0018, 0019,
+ * `TAIL_PREREQUISITES` (0010, 0020, 0021, 0029, 0031), 0011, 0012, 0015, 0017, 0018, 0019,
  * 0022, 0023, 0037, 0038 — so the prerequisites land before 0011–0019. That
  * early slot is deliberate: 0020 only needs `github_apps(id)` from 0004, 0021
  * only needs `github_apps`/`review_publications`, and nothing between them and
@@ -315,15 +317,15 @@ export const APP_CONFIG_PRE_POOL_MIGRATIONS: readonly string[] = [
 
 /**
  * The config routes' shape: 0024/0025 (the per-key pools and their model
- * evidence), 0031–0033 (the plan and `server_flags` tables the SPA boot
- * reads), the index-only 0034/0035, then the derived tail. 0029 (the
- * support-grant and audit tables, 0034's index target) already rides
- * `TAIL_PREREQUISITES`.
+ * evidence), 0032/0033 (the unlimited tier and the `server_flags` table the
+ * SPA boot reads), the index-only 0034/0035, then the derived tail. 0029
+ * (the support-grant and audit tables, 0034's index target) and 0031 (the plan
+ * catalogue, whose rows the tail's 0061 alters) already ride
+ * `TAIL_PREREQUISITES` in the prefix this shape is always applied over.
  */
 export const APP_CONFIG_MIGRATIONS: readonly string[] = [
   "0024_provider_multi_key.sql",
   "0025_provider_model_evidence.sql",
-  "0031_plans_usage.sql",
   "0032_unlimited_plan.sql",
   "0033_platform_admin.sql",
   // 0034/0035 index the support-grant and lapsed-invite predicates: index-only,
@@ -397,8 +399,11 @@ export const APP_CREDENTIAL_RESOLUTION_MIGRATIONS = shape("app-credential-resolu
   "0024_provider_multi_key.sql",
   // 0026: createApp also writes the App's workspace mapping.
   "0026_workspaces.sql",
-  // 0029: `audit_events`, which the derived tail's 0060 alters.
+  // 0029: `audit_events`, which the derived tail's 0060 alters. 0031: the
+  // plan catalogue, whose rows the tail's 0061 alters — the DML is invisible
+  // to the shape guard, so the creating migration is named here.
   "0029_operator_support.sql",
+  "0031_plans_usage.sql",
   "0036_app_identity.sql",
   // Every later migration, derived from the directory (0040–… included):
   // the consumer's per-message admission reads the runtime caps and writes

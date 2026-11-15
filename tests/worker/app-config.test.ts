@@ -80,7 +80,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
 import type { D1StatementLike } from "../../src/store/types";
-import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
+import { htmlGet, withSpaAssets } from "../helpers/spa";
 import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
@@ -2584,21 +2584,20 @@ describe("duplication locks", () => {
 
 // --- routes ---
 
-describe("GET /dashboard/default/apps/:appId/settings (SPA-owned)", () => {
-  test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
+describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => {
+  test("HTML navigation GET answers one 302 to the review-target page (no shell read)", async () => {
     const { db } = await seededWorld();
     const res = await htmlGet(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, withSpaAssets(makeEnv(db)));
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain("window.__BOOT__=");
-    expect(body).not.toContain(SPA_BOOT_MARKER);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${APP_ID}`);
+    expect(await res.text()).not.toContain("window.__BOOT__");
   });
 
-  test("the legacy SSR handler is gone: a non-HTML GET falls through to the legacy app (guard 302, never the old HTML)", async () => {
+  test("the redirect is address-level: a non-HTML GET takes it too", async () => {
     const { db } = await seededWorld();
     const res = await get(SETTINGS, "", makeEnv(db));
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${APP_ID}`);
   });
 });
 

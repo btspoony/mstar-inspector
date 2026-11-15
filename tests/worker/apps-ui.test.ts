@@ -596,7 +596,7 @@ describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App revie
     expect(deleted.status).toBe(404);
   });
 
-  test("native HTML form post keeps the pinned 302 to the App settings page", async () => {
+  test("native HTML form post keeps the pinned 302 to the review-target page", async () => {
     const db = await seededWorld();
     const res = await postForm(
       `/dashboard/default/apps/${MALLORY_APP_ID}/review-trigger-mode`,
@@ -606,29 +606,28 @@ describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App revie
       { Accept: "text/html" },
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${MALLORY_APP_ID}/settings`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${MALLORY_APP_ID}`);
     expect(reviewTriggerMode(db, MALLORY_APP_ID)).toBe("manual");
   });
 });
 
-describe("GET /dashboard/default/apps/:appId/settings (SPA-owned)", () => {
+describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => {
   const SETTINGS = `/dashboard/default/apps/${MALLORY_APP_ID}/settings`;
   const ownerCookie = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
-  test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
+  test("HTML navigation GET answers one 302 to the review-target page (no shell read)", async () => {
     const db = await seededWorld();
     const res = await htmlGet(SETTINGS, await ownerCookie(), withSpaAssets(makeEnv(db)));
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain("window.__BOOT__=");
-    expect(body).not.toContain(SPA_BOOT_MARKER);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${MALLORY_APP_ID}`);
+    expect(await res.text()).not.toContain("window.__BOOT__");
   });
 
-  test("the legacy SSR handler is gone: a non-HTML GET falls through to the legacy app (guard 302, never the old HTML)", async () => {
+  test("the redirect is address-level: a non-HTML GET takes it too", async () => {
     const db = await seededWorld();
     const res = await get(SETTINGS, "", makeEnv(db));
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${MALLORY_APP_ID}`);
   });
 });
 

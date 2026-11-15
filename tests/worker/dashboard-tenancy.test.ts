@@ -34,7 +34,7 @@ import {
 import { apiBase } from "../../src/spa/workspace-base";
 import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
 import type { SpaBoot } from "../../src/spa/boot";
-import { RESERVED_WORKSPACE_SLUGS } from "../../src/spa/routes";
+import { RESERVED_WORKSPACE_SLUGS, WORKSPACE_FAMILY_SEGMENTS, matchSpaRoute } from "../../src/spa/routes";
 import { t } from "../../src/i18n";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -541,7 +541,7 @@ describe("manage is the workspace role", () => {
 describe("success redirects stay in the workspace route family", () => {
   const SETTINGS_BODY = "op=save-sandbox-image&sandbox_image_id=omp";
 
-  test("a native settings form post answers 302 to the workspace-prefixed settings URL", async () => {
+  test("a native settings form post answers 302 to the workspace-prefixed target URL", async () => {
     const { db } = tenancyFixture();
     const env = envFor(db);
     const res = await worker.fetch(
@@ -553,7 +553,7 @@ describe("success redirects stay in the workspace route family", () => {
       env,
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/acme/apps/${ACME_APP_ID}/settings`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/acme/targets/${ACME_APP_ID}`);
   });
 
   test("a native validation 400 keeps the same workspace-prefixed target", async () => {
@@ -568,7 +568,7 @@ describe("success redirects stay in the workspace route family", () => {
       env,
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/acme/apps/${ACME_APP_ID}/settings`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/acme/targets/${ACME_APP_ID}`);
   });
 
   test("a native pause form post redirects to the workspace apps list (Referer-derived)", async () => {
@@ -834,6 +834,27 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
       );
       expect(res.status, path).toBe(404);
       expect(await res.text(), path).not.toContain("window.__BOOT__");
+    }
+  });
+});
+
+describe("the review-target surface is a page family, not a Worker route family", () => {
+  test("targets joins the SPA family and the bare spelling is no page", () => {
+    // ONE edit (the family) makes `workspaceRefOf`, the SPA matcher, `apiBase`
+    // and the sidebar follow the segment. Tenant ownership is proven through
+    // the real requests below, not by pinning the gate's internal set.
+    expect(WORKSPACE_FAMILY_SEGMENTS).toContain("targets");
+    expect(matchSpaRoute("/dashboard/targets")).toBeNull();
+  });
+
+  test("both target paths serve the shell scoped to their workspace", async () => {
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db));
+    for (const path of ["/dashboard/acme/targets", `/dashboard/acme/targets/${ACME_APP_ID}`]) {
+      const res = await worker.fetch(await authedRequest(path, "dana", { accept: "text/html" }), env);
+      expect(res.status, path).toBe(200);
+      const boot = bootOf(await res.text());
+      expect(boot.workspaceRef, path).toBe("acme");
     }
   });
 });
@@ -1109,8 +1130,8 @@ describe("the onboarding CTA stays inside the workspace", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     // GitHub's slug is NULL in this fixture (never synced), so the page shows
-    // the App id; the Settings link addresses the App by that id.
-    expect(body).toContain(`href="/dashboard/acme/apps/${appAcmeId(db)}/settings"`);
+    // the App id; the Settings CTA opens the review-target page by that id.
+    expect(body).toContain(`href="/dashboard/acme/targets/${appAcmeId(db)}"`);
     expect(body).not.toContain('href=`/dashboard/apps/${ACME_APP_ID}/settings`');
   });
 

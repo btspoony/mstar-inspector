@@ -250,7 +250,7 @@ describe("settings 400 key transport", () => {
       { Accept: "text/html" },
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}/settings`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${APP_ID}`);
   });
 });
 
@@ -452,7 +452,7 @@ describe("review depth op (per-App review level)", () => {
     expect(storedLevel(db, app.id)).toBeNull();
   });
 
-  test("native form navigation keeps the 302 back to the settings tab", async () => {
+  test("native form navigation keeps the 302 back to the target page", async () => {
     const { db, app } = await seededWorld();
     const res = await postForm(
       SETTINGS,
@@ -462,7 +462,7 @@ describe("review depth op (per-App review level)", () => {
       { Accept: "text/html" },
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}/settings`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${APP_ID}`);
     expect(storedLevel(db, app.id)).toBe("quick");
   });
 

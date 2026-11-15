@@ -14,6 +14,7 @@ import { usePathname } from "../router";
 import { workspaceRefOf } from "../routes";
 import { workspaceMembershipForRef } from "../shell";
 import { useLiveMemberships } from "../workspace-memberships";
+import { ReviewUsageCard } from "./ReviewUsageCard";
 import { WorkspaceCheckMinScoreCard, WorkspaceConcurrencyCard, WorkspaceNameCard } from "./SettingsPage";
 
 export function WorkspaceSettingsPage({ boot }: { boot: SpaBoot }) {
@@ -28,20 +29,25 @@ export function WorkspaceSettingsPage({ boot }: { boot: SpaBoot }) {
   return (
     <div className="flex flex-col gap-6">
       <PageHeader title={t(boot.locale, "workspace.settingsHeading")} />
-      {/* A plain member sees a refusal up front instead of forms whose saves
-          would fail; each manager sees exactly the cards their role may write. */}
-      {canManage ? (
-        // Keyed by the workspace: the cards hold that workspace's loaded value
-        // and draft, while their saves resolve the URL. An in-app switch must
-        // remount them, or A's state would be submitted to B.
-        <div key={ref ?? ""} className="flex flex-col">
-          {isOwner ? <WorkspaceNameCard locale={boot.locale} storedName={membership.name} /> : null}
-          <WorkspaceConcurrencyCard locale={boot.locale} />
-          <WorkspaceCheckMinScoreCard locale={boot.locale} />
-        </div>
-      ) : (
-        <p className="text-sm text-muted-foreground">{t(boot.locale, "workspace.settingsOwnerOnly")}</p>
-      )}
+      {/* Keyed by the workspace: the cards hold that workspace's loaded value
+          and draft, while their saves resolve the URL. An in-app switch must
+          remount them, or A's state would be submitted to B. */}
+      <div key={ref ?? ""} className="flex flex-col">
+        {/* Read-only usage of the addressed workspace — every member sees it,
+            because it is not a setting. */}
+        <ReviewUsageCard locale={boot.locale} deploymentMode={boot.deploymentMode} />
+        {/* A plain member sees a refusal up front instead of forms whose saves
+            would fail; each manager sees exactly the cards their role may write. */}
+        {canManage ? (
+          <>
+            {isOwner ? <WorkspaceNameCard locale={boot.locale} storedName={membership.name} /> : null}
+            <WorkspaceConcurrencyCard locale={boot.locale} />
+            <WorkspaceCheckMinScoreCard locale={boot.locale} />
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">{t(boot.locale, "workspace.settingsOwnerOnly")}</p>
+        )}
+      </div>
     </div>
   );
 }

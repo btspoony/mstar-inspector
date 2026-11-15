@@ -243,10 +243,11 @@ export type ArtifactPutOptions = {
   targetIdExpression?: TargetIdExpression;
   /**
    * An inline predicate (with its binds, in text order) that FENCES the
-   * artifact inserts: the review INSERT becomes `SELECT … WHERE <guard>` and
-   * each finding INSERT gains `AND <guard>`, so a caller that owns a lease
-   * cannot commit an artifact under a lease it no longer holds. The lifecycle
-   * apply passes its `APPLY_LEASE_GUARD_SQL`.
+   * artifact inserts: the review INSERT becomes `INSERT … SELECT … WHERE
+   * <guard>` and each finding INSERT runs as `INSERT … SELECT … WHERE <guard>`
+   * (a bare `WHERE 1` without a guard), so a caller that owns a lease cannot
+   * commit an artifact under a lease it no longer holds. The lifecycle apply
+   * passes its `APPLY_LEASE_GUARD_SQL`.
    */
   guard?: { sql: string; binds: unknown[] };
 };

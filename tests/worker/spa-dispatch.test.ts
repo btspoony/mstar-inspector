@@ -154,7 +154,9 @@ describe("SPA dispatch", () => {
     const pages: string[] = [
       "/dashboard",
       "/dashboard/acme/apps",
-      "/dashboard/acme/apps/acme/settings",
+      "/dashboard/acme/apps/12345",
+      "/dashboard/acme/targets",
+      "/dashboard/acme/targets/12345",
       // Members is workspace-scoped: the root path is retired.
       "/dashboard/acme/members",
       "/dashboard/login",
@@ -350,7 +352,8 @@ describe("SPA dispatch", () => {
     const deepLinks = [
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
-      "/dashboard/acme/apps/acme/settings",
+      "/dashboard/acme/apps/12345",
+      "/dashboard/acme/targets/12345",
     ];
     for (const path of deepLinks) {
       const { env, calls } = makeEnv();
@@ -470,5 +473,56 @@ describe("SPA dispatch", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("window.__BOOT__=");
     expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
+  });
+});
+
+describe("the retired settings-tab addresses redirect once", () => {
+  const redirects: Array<[string, string]> = [
+    [
+      "/dashboard/acme/apps/12345/settings",
+      "/dashboard/acme/targets/12345",
+    ],
+    [
+      "/dashboard/acme/apps/12345?tab=settings",
+      "/dashboard/acme/targets/12345",
+    ],
+  ];
+
+  for (const [from, to] of redirects) {
+    test(`${from} → 302 ${to}`, async () => {
+      const { env, calls } = makeEnv({ DB: memberDbStub() });
+      const session = await createSessionValue("octocat", null, SESSION_SECRET);
+      const res = await worker.fetch(
+        htmlGetRequest(from, { Cookie: `${SESSION_COOKIE}=${session}` }),
+        env,
+      );
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toBe(to);
+      // The address no longer renders a page: no shell read, no ASSETS.
+      expect(calls).toEqual([]);
+    });
+  }
+
+  test("the redirect needs no session (the destination enforces access)", async () => {
+    const { env, calls } = makeEnv();
+    const res = await worker.fetch(htmlGetRequest("/dashboard/acme/apps/12345/settings"), env);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/acme/targets/12345");
+    expect(calls).toEqual([]);
+  });
+
+  test("every other app-scoped address keeps serving its own page", async () => {
+    for (const path of [
+      "/dashboard/acme/apps/12345",
+      "/dashboard/acme/apps/12345?tab=insights",
+      "/dashboard/acme/apps/12345/bot",
+      "/dashboard/acme/targets/12345",
+    ]) {
+      const { env, calls } = makeEnv({ DB: memberDbStub() });
+      const session = await createSessionValue("octocat", null, SESSION_SECRET);
+      const res = await worker.fetch(htmlGetRequest(path, { Cookie: `${SESSION_COOKIE}=${session}` }), env);
+      expect(res.status, path).toBe(200);
+      expect(calls, path).toEqual([{ method: "GET", pathname: "/index.html" }]);
+    }
   });
 });

@@ -1,5 +1,5 @@
 /**
- * The console's five screens: each screen's loading, error,
+ * The console's six screens: each screen's loading, error,
  * empty and populated states, plus the writes they own — the flag toggle, the
  * per-row plan picker (exactly ONE PATCH) and the support-grant create/revoke.
  *
@@ -13,6 +13,7 @@ import { type Element as DomElement, type Window } from "happy-dom";
 import { FlagsPage } from "../../src/spa/admin/FlagsPage";
 import { RuntimePage } from "../../src/spa/admin/RuntimePage";
 import { SupportGrantsPage } from "../../src/spa/admin/SupportGrantsPage";
+import { UsagePage } from "../../src/spa/admin/UsagePage";
 import { UsersPage } from "../../src/spa/admin/UsersPage";
 import { WorkspacesPage } from "../../src/spa/admin/WorkspacesPage";
 import { installDom } from "./dom";
@@ -130,6 +131,10 @@ async function usersScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Pro
 
 async function supportScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
   return mount(createElement(SupportGrantsPage, { locale }), respond);
+}
+
+async function usageScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+  return mount(createElement(UsagePage, { locale }), respond);
 }
 
 const never = () => new Promise<Response>(() => {});
@@ -1312,5 +1317,66 @@ describe("Support access screen", () => {
       "没有开放的支持窗口",
     );
     await surface.close();
+  });
+});
+
+/** `GET /api/usage`: three live workspaces on a fixed month. */
+const USAGE = {
+  month: "2026-11",
+  workspaces: [
+    { workspaceId: "ws-alpha", workspaceName: "Alpha", workspaceSlug: "acme", sharedReviews: 12, ownReviews: 4 },
+    { workspaceId: "ws-gamma", workspaceName: "Gamma", workspaceSlug: "guild", sharedReviews: 0, ownReviews: 9 },
+    { workspaceId: "ws-beta", workspaceName: "Beta", workspaceSlug: "beta", sharedReviews: 0, ownReviews: 0 },
+  ],
+};
+
+/** The two count cells of a usage row: Shared bot | Own bots. */
+function usageCells(surface: Surface, needle: string): [string, string] {
+  const cells = rowContaining(surface, needle)?.querySelectorAll("td") ?? [];
+  return [cells[1]?.textContent ?? "", cells[2]?.textContent ?? ""];
+}
+
+describe("Usage screen", () => {
+  test("the heading names the window the read answered for", async () => {
+    const surface = await usageScreen(() => json(USAGE));
+    expect(surface.text()).toContain("Reviews per workspace · 2026-11 (UTC)");
+    await surface.close();
+  });
+
+  test("rows carry the workspace and the two counts, zeros included", async () => {
+    const surface = await usageScreen(() => json(USAGE));
+    // The decided columns, in order — no identity column and no total.
+    expect([...surface.container.querySelectorAll("th")].map((th) => th.textContent)).toEqual([
+      "Workspace",
+      "Shared bot",
+      "Own bots",
+    ]);
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(3);
+    expect(rowContaining(surface, "Alpha")?.textContent).toContain("acme");
+    expect(usageCells(surface, "Alpha")).toEqual(["12", "4"]);
+    expect(usageCells(surface, "Gamma")).toEqual(["0", "9"]);
+    expect(usageCells(surface, "Beta")).toEqual(["0", "0"]);
+    await surface.close();
+  });
+
+  test("search filters the loaded rows with the N / M counter", async () => {
+    const surface = await usageScreen(() => json(USAGE));
+    expect(surface.text()).toContain("3 / 3");
+    await surface.type('input[type="search"]', "guild");
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(surface.text()).toContain("1 / 3");
+    expect(rowContaining(surface, "Gamma")).not.toBeNull();
+    await surface.close();
+  });
+
+  test("a non-matching search and an empty deployment borrow the existing empty states", async () => {
+    const surface = await usageScreen(() => json(USAGE));
+    await surface.type('input[type="search"]', "zzz");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No matches");
+    await surface.close();
+
+    const empty = await usageScreen(() => json({ month: "2026-11", workspaces: [] }));
+    expect(empty.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No workspaces");
+    await empty.close();
   });
 });

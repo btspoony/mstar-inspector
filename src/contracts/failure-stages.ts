@@ -26,6 +26,29 @@
 export const PAGING_EXCLUDED_STAGES = Object.freeze(["recheck", "usage", "rate-limit"] as const);
 
 /**
+ * The `review_failures.stage` a shared-bot entitlement refusal is recorded
+ * under. It joins the failure vocabulary (it is NOT a paging-excluded stage):
+ * the delivery produced no review at all, which is exactly what the failure
+ * face exists to explain, and the commit stays unblamed by the Check's
+ * `neutral` conclusion rather than by hiding the row.
+ */
+export const SHARED_BOT_ENTITLEMENT_STAGE = "entitlement";
+
+/**
+ * The one sentence a shared-bot refusal carries, written once because THREE
+ * surfaces must not drift: the delivery's Check summary
+ * (`CHECK_SUMMARIES.skippedByDelivery`), the `review_failures.error` text of
+ * the same refusal, and the skip returned to the webhook handler.
+ *
+ * Author-facing, so it names no workspace, no workspace id, no plan id and no
+ * upgrade path: the PR author usually sits outside the workspace and can act
+ * on none of them, and a tenant name in a public Check publishes one
+ * customer's billing state to a third party.
+ */
+export const SHARED_BOT_ENTITLEMENT_SKIP_REASON =
+  "the review target's plan does not include the shared bot";
+
+/**
  * Render a stage list as the literal body of a SQL `IN (…)` / `NOT IN (…)`
  * comparison (each stage single-quoted and comma-joined, e.g.
  * `'recheck', 'usage'`). Callers supply the operator and parentheses; this

@@ -497,13 +497,18 @@ export function manifestOnboardingPage(
     id: `<span class="id">${app.id}</span>`,
   });
   // The legacy App family answers 404 under `strict`, so the primary CTA
-  // follows the workspace the page was reached through. The secondary link
-  // follows the same workspace; only a page with no ref falls back to the
-  // workbench root.
+  // follows the workspace the page was reached through. The review policy it
+  // opens lives on the review-target surface now. The secondary link follows
+  // the same workspace; only a page with no ref falls back to the workbench
+  // root.
   const settingsBase =
     workspaceRef === null
       ? "/dashboard/apps"
       : `/dashboard/${escapeHtml(workspaceRef)}/apps`;
+  const targetBase =
+    workspaceRef === null
+      ? "/dashboard/apps"
+      : `/dashboard/${escapeHtml(workspaceRef)}/targets`;
   const dashboardHref = workspaceRef === null ? "/dashboard" : settingsBase;
   return page(
     t(locale, "manifest.onboarding.title"),
@@ -514,7 +519,7 @@ export function manifestOnboardingPage(
       <p>${connected}</p>
       <p class="status">${escapeHtml(app.slug ? t(locale, "manifest.onboarding.slug", { slug: app.slug }) : t(locale, "manifest.onboarding.appId", { id: app.id }))}<br>${escapeHtml(t(locale, "manifest.onboarding.webhookUrl", { webhookUrl: app.webhookUrl }))}</p>
       <p class="note">${escapeHtml(t(locale, "manifest.onboarding.nextStep"))}</p>
-      <p><a class="primary" href="${settingsBase}/${app.id}/settings">${escapeHtml(t(locale, "manifest.onboarding.openSettings"))}</a> · <a href="${dashboardHref}">${escapeHtml(t(locale, "manifest.onboarding.dashboard"))}</a></p>
+      <p><a class="primary" href="${targetBase}/${app.id}">${escapeHtml(t(locale, "manifest.onboarding.openSettings"))}</a> · <a href="${dashboardHref}">${escapeHtml(t(locale, "manifest.onboarding.dashboard"))}</a></p>
     </section>
   </main>`,
     locale,

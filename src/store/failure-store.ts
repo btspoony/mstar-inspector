@@ -40,7 +40,11 @@
  * artifact-store.ts).
  */
 
-import { GITHUB_RATE_LIMIT_PREFIX, PAGING_EXCLUDED_STAGES } from "../contracts/failure-stages";
+import {
+  GITHUB_RATE_LIMIT_PREFIX,
+  PAGING_EXCLUDED_STAGES,
+  SHARED_BOT_ENTITLEMENT_STAGE,
+} from "../contracts/failure-stages";
 import type { D1Like } from "./types";
 
 /**
@@ -75,10 +79,21 @@ export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "runner",
   "sandbox",
   "pipeline",
+  // A delivery refused before execution (the plan lacks the shared bot): no
+  // review ran, so the row stays paged — it is not in PAGING_EXCLUDED_STAGES.
+  SHARED_BOT_ENTITLEMENT_STAGE,
   ...PAGING_EXCLUDED_STAGES,
 ]);
 
-export type FailureStage = "parse" | "runner" | "sandbox" | "pipeline" | "usage" | "recheck" | "rate-limit";
+export type FailureStage =
+  | "parse"
+  | "runner"
+  | "sandbox"
+  | "pipeline"
+  | "entitlement"
+  | "usage"
+  | "recheck"
+  | "rate-limit";
 
 /**
  * The attribution partition of the vocabulary, re-exported from the

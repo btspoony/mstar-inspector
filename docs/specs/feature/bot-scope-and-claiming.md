@@ -76,6 +76,14 @@ The webhook **never** writes a binding. An installation no target references is 
 
 Dependency: `shared` stops reviewing until an installation is claimed. Operators must share, then claim.
 
+`shared` is also a plan capability, not only a bot scope: `assertSharedBotAllowed`
+([entitlement](../architecture/entitlement-and-deployment-modes.md) §5) refuses
+a target creation on a shared bot and refuses the enqueue for a target whose
+workspace plan no longer includes it. A creation refusal writes nothing and the
+enqueue refusal sends nothing — its Check is settled `neutral` and the delivery
+records one terminal `entitlement` failure. `self-hosted` always has the
+capability and never reads the column.
+
 ## Invariants
 
 - `shared` is platform-authorized and batch-verified against the current designation.
@@ -88,9 +96,12 @@ Dependency: `shared` stops reviewing until an installation is claimed. Operators
 ## Where it lives
 
 - `migrations/0058_review_bot_scope.sql`, `migrations/0059_install_claims.sql`
+- `migrations/0062_review_usage_indexes.sql` (the usage read's composite indexes)
 - `src/dashboard/runtime-config-store.ts` (key + domain registry), `src/dashboard/apps-store.ts` (`setBotScope`, `listBotScopes`, `getInstallation`)
 - `src/dashboard/install-claims-store.ts`, `src/worker/install-setup.ts`
-- `src/dashboard/targets-store.ts` (`resolve` guards), `src/admin/index.ts` (`POST /api/targets/:targetId/unbind`)
+- `src/dashboard/targets-store.ts` (`resolve` guards), `src/admin/index.ts` (`POST /api/targets/:targetId/unbind`, `GET /api/usage`)
+- `src/dashboard/review-usage-store.ts` (`readReviewUsage`, `reviewUsageMonth`), `src/dashboard/index.ts` (`GET /dashboard/<ref>/api/settings/review-usage`)
+- `src/spa/pages/ReviewUsageCard.tsx`, `src/spa/admin/UsagePage.tsx`
 - `src/spa/pages/SettingsPage.tsx`, `src/spa/pages/data.ts`, `src/i18n/*`
 
 ## Change obligations
@@ -113,7 +124,14 @@ Both detail payload faces carry `blocked` and, when true, `blocked_reason = "bot
 
 ### Shared bots are read-only for their consumers
 
-Every bot-scoped write route — settings operations, key deletion, provider-key verification (`keys/verify`, both the builtin and the custom/declared path), disable/enable and delete — refuses a `shared` bot before parsing, probing or persisting, with zero outbound calls and no storage change. `refresh-metadata` and `keys/usage` are not configuration writes but must still authorize the bot.
+Every bot-scoped write route — settings operations, key deletion, provider-key verification (`keys/verify`, both the builtin and the custom/declared path), disable/enable and delete — refuses a `shared` bot before parsing, probing or persisting, with zero outbound calls and no storage change. `refresh-metadata` and `keys/usage` are not configuration writes but must still authorize the bot. The predicate is `canWriteBotScope` (`src/dashboard/index.ts`), which requires the bot to be `owned` **and** the caller's workspace to be the bot's owning workspace.
+
+Two surfaces carry the two halves of a bot's configuration, and only one of them is refused here:
+
+- The bot page `/dashboard/<workspaceRef>/apps/:appId/bot` (`BotSettingsPage.tsx`) is bot-owned configuration only — credentials health, provider keys, model chains, seats, sandbox image and installations.
+- The target's review policy — trigger mode, depth, Check gate, owner allowlist, pause and park — is **target** data, written on the target surface, `/dashboard/<workspaceRef>/targets/:appId` (`TargetDetailPage` in `src/spa/pages/TargetsPage.tsx`, which renders `SettingsView` from `src/spa/pages/SettingsPage.tsx`). The app detail's former settings tab is gone: `…/apps/:appId/settings` and its `?tab=settings` spelling both redirect there (`settingsTabRedirect`, `src/spa/routes.ts`). It is governed by the target's workspace role, not by `canWriteBotScope`.
+
+A consumer workspace may therefore still change its own target policy; only the bot-scoped writes above are refused for a `shared` bot.
 
 ### Execution ledgers
 
@@ -121,6 +139,41 @@ Every bot-scoped write route — settings operations, key deletion, provider-key
 
 A row's `target_id` is set when it is first recorded and never rewritten; rebinding an installation moves future publications, not history.
 
+### Review usage
+
+Two read-only faces count published reviews per workspace: the settings card on
+`/dashboard/<ref>/settings` and the operator console's usage page
+(`/_internal_admin/usage`). Both read one statement
+(`src/dashboard/review-usage-store.ts#readReviewUsage`) parameterized by
+workspace.
+
+| Rule | Contract |
+|---|---|
+| Window | One UTC calendar month of `reviews.reviewed_at` — the instant the review row was recorded, i.e. the month the review finished, never the month it was requested. Half-open: `>=` the first instant of the month, `<` the first instant of the next, compared as plain `YYYY-MM-DD HH:MM:SS` text. No local-time bucketing, no rolling 30-day window, no cache. Only review rows count: a target with no review in the window adds nothing. |
+| Attribution | A review belongs to the workspace of its **target**: `reviews.target_id` → `review_targets.workspace_id`. `reviews.installation_id` is not a substitute — it names the credential the run used and says nothing about which workspace consumed the review. |
+| Split | `review_bots.scope` decides the column, never which workspace owns the bot: `shared` counts as a shared-bot review **even in the shared bot's own workspace**, every other scope counts as own-bot. The scope is read at query time, so a month's split reflects the bot's scope *now*; it is not a snapshot of the scope at review time. |
+| No target | A review with no `target_id` has no bot either (migration `0057_review_targets.sql` attributes history only where `bot_id` is NOT NULL), so it names no workspace and is **excluded from both counts**. This sentence is the rule; the row is not dropped silently. |
+| Soft deletion | `workspaces.deleted_at` filters the row (a retired tenant has no face). `review_targets.deleted_at` and `review_bots.deleted_at` do **not**: the count is what happened, and a parked target keeps its month. |
+| Visibility | `?3` is the caller's workspace id on the settings card and `NULL` (every live workspace) on the operator face — one shape, two bindings. The workspace face cannot read another tenant's row, and the operator face lists live workspaces with zero reviews as well. |
+| Order | Shared-bot reviews descending, then own-bot reviews descending, then the workspace name ascending, then the workspace id ascending — `workspaces.name` is not unique, so the id closes the last key and two same-named workspaces cannot swap places between reloads. |
+| Paging | None, by design. The operator face answers **every** live workspace with both counts in one statement — the bound is the deployment's live workspace count (three numbers per row, a few hundred at the scale this platform runs) — and the page filters the loaded rows client-side. If a measured read ever exceeds that bound, server paging is a new stated contract — never a silent cap that hides rows the counter still counts. |
+
+Indexes: `migrations/0062_review_usage_indexes.sql` adds the composite
+`reviews(target_id, reviewed_at)` and `review_targets(workspace_id)` indexes, so
+the month drives the join instead of a per-target history scan filtered
+afterwards. `idx_reviews_reviewed_at` stays: reads that filter the window with
+no target still use it.
+
+Heading placement: a page's title names the surface, and the window sits in
+the description line under it — the month is only known once the read has
+answered, so a title carrying it would render blank and then reflow.
+
+The card's labels say `reviews` and never `attempts`: the members page's
+"this workspace" meter counts review attempts (`usage_events`), a different
+measure, and no copy on either surface may imply the two numbers agree.
+
 ### Parking an overlapping target
 
-`POST /api/apps/:appId/park` (manager on the target's workspace, or operator) writes in one batch: one `target.park` audit row, `review_enabled = 0`, and `account_login = NULL`. It refuses `no-overlap` (no other live target in the workspace carries the same `account_login`), `only-live-target` (parking would leave that owner in this workspace with no live target), and a target outside the caller's workspace, all with zero writes. It never sets `deleted_at`, so the rows stay visible.
+`POST /dashboard/<workspaceRef>/apps/:appId/park` (`appParkRoute`, the `APP_ROUTES` entry `{ method: "post", path: "/apps/:appId/park" }` mounted under `/:workspaceRef`; owner or admin of the target's workspace) writes in one batch: one `target.park` audit row, `review_enabled = 0`, and `account_login = NULL`. It refuses `no-overlap` (no other live target in the workspace carries the same `account_login`), `only-live-target` (parking would leave that owner in this workspace with no live target), and a target outside the caller's workspace, all with zero writes. It never sets `deleted_at`, so the rows stay visible. Park is a form action, never a page: the path carries no `/api` segment.
+
+Decision history: [shared bot scope and claiming](../../../.agents/adr/implemented/feature/2026-11-15-shared-bot-scope-and-claiming.md), [derived Blocked and park](../../../.agents/adr/implemented/feature/2026-11-15-derived-blocked-and-park.md).

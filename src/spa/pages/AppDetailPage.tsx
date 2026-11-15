@@ -76,13 +76,12 @@ export async function loadAppDetail(base: string, appId: string): Promise<Settin
 }
 
 /**
- * The App detail page (App detail IA): `/dashboard/apps/:appId` —
- * and the legacy `/dashboard/apps/:appId/settings` deep link (a permanent
- * settings-tab target: the settings POST family's HTML-nav 302s pin it) —
- * render this ONE two-tab shell. Default tab 应用设置 (the existing
- * settings capability, {@link SettingsView}); the 洞察 tab
- * ({@link AppInsightsTab}, per-App insights) renders ONLY when the payload
- * says `can_manage` — a non-manager never sees the tab at all.
+ * The App detail page: `/dashboard/apps/:appId` and its workspace twin. The
+ * target-owned review policy no longer lives here — it is the review-target
+ * surface's detail body ({@link SettingsView} there) — so this page renders
+ * the App's own faces: 洞察 ({@link AppInsightsTab}, the default tab), 已安装
+ * and Pull requests, each ONLY when the payload says `can_manage`. A
+ * non-manager keeps the D4 identity card it has always been served.
  *
  * Page wayfinding (the back link to the Apps list) is the shell's —
  * rendered as the first element on the error and ok faces.
@@ -201,9 +200,9 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
       // auto-reactivate a manager face on a later re-promotion.
       if (
         !canManageRef.current &&
-        parseAppDetailSearch(window.location.search, true).tab !== "settings"
+        parseAppDetailSearch(window.location.search, true).tab !== "insights"
       ) {
-        commitSearch({ tab: "settings", window: "30", repo: "", pr: "" });
+        commitSearch({ tab: "insights", window: "30", repo: "", pr: "" });
         setSearchReady(true);
         return;
       }
@@ -297,33 +296,20 @@ const BLOCKED_REASON_KEYS = {
 } as const satisfies Record<BlockedReason, string>;
 
 /**
- * The tabbed face — pure `t()` + data rendering, no window/router
- * access, so tests can static-render it (the AppInfoCard idiom). The
- * identity header (appId h1 + status + creator) belongs to the shell and
- * serves BOTH tabs; the settings tab body keeps only the version footer
- * (page wayfinding — the back link — moved to the shell).
+ * The identity header both detail pages render: the GitHub display name (D6
+ * fallback chain), the creator, the bot-configuration link, the status pill
+ * and the four figures the manager payload proves. The route `appId` stays the
+ * address, never the visible identity.
  */
-export function AppDetailView({
+export function TargetHeader({
   locale,
   appId,
   payload,
-  notice,
-  search,
-  onReload,
-  onSearch,
 }: {
   locale: SpaBoot["locale"];
   appId: string;
   payload: SettingsPayload;
-  notice: { kind: NoticeKind; message: string } | null;
-  search: AppDetailSearch;
-  onReload: (options?: { background?: boolean }) => Promise<boolean>;
-  onSearch: (next: AppDetailSearch) => void;
 }) {
-  const canManage = payload.can_manage;
-  // A stale `?tab=insights` URL after a demotion resolves to settings —
-  // the view never renders an insights face for a non-manager.
-  const tab = canManage ? search.tab : "settings";
   const pill = appStatusPill(locale, payload.app);
   // Why this target reviews nothing, if it does. The server derives it on
   // every read (no stored status), so the banner cannot go stale.
@@ -331,13 +317,6 @@ export function AppDetailView({
     payload.blocked && payload.blocked_reason
       ? t(locale, BLOCKED_REASON_KEYS[payload.blocked_reason])
       : null;
-
-  function onTabChange(next: string): void {
-    if (next !== "settings" && next !== "installations" && next !== "insights" && next !== "pull-requests") {
-      return;
-    }
-    onSearch({ ...search, tab: next });
-  }
 
   // Header band metrics — only what the landed payload proves (compass
   // D13): the four figures `SettingsManagePayload` carries — installations,
@@ -361,12 +340,7 @@ export function AppDetailView({
     : [];
 
   return (
-    <div className="flex flex-col gap-6">
-      {/* Identity header — serves both tabs. The heading names the App by its
-          GitHub display name (D6 fallback chain); the route `appId` stays the
-          address, never the visible identity. The subtitle carries the
-          creator, the action slot the status, and the metric band the four
-          figures the manager settings payload actually carries. */}
+    <>
       <PageHeader
         title={appDisplayName(payload.app)}
         description={t(locale, "apps.by", { login: payload.app.created_by })}
@@ -383,6 +357,59 @@ export function AppDetailView({
         metrics={<MetricBand metrics={metrics} />}
       />
       {blockedMessage ? <PageNotice kind="warn" message={blockedMessage} /> : null}
+    </>
+  );
+}
+
+/**
+ * The App detail face — pure `t()` + data rendering, no window/router access,
+ * so tests can static-render it. A non-manager gets the D4 identity card; a
+ * manager gets the App's own tabs, 洞察 first.
+ */
+export function AppDetailView({
+  locale,
+  appId,
+  payload,
+  notice,
+  search,
+  onReload,
+  onSearch,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  payload: SettingsPayload;
+  notice: { kind: NoticeKind; message: string } | null;
+  search: AppDetailSearch;
+  onReload: (options?: { background?: boolean }) => Promise<boolean>;
+  onSearch: (next: AppDetailSearch) => void;
+}) {
+  const canManage = payload.can_manage;
+  // A stale manager-tab URL after a demotion resolves to the default tab —
+  // the view never renders a manager face for a non-manager.
+  const tab = canManage ? search.tab : "insights";
+
+  function onTabChange(next: string): void {
+    if (next !== "installations" && next !== "insights" && next !== "pull-requests") {
+      return;
+    }
+    onSearch({ ...search, tab: next });
+  }
+
+  // D4: a non-manager's whole face is the identity card — the review policy
+  // is not theirs to read, and it lives on the review-target surface.
+  if (!canManage) {
+    return (
+      <div className="flex flex-col gap-6">
+        <TargetHeader locale={locale} appId={appId} payload={payload} />
+        {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
+        <SettingsView locale={locale} payload={payload} onReload={onReload} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <TargetHeader locale={locale} appId={appId} payload={payload} />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       <Tabs value={tab} onValueChange={onTabChange}>
         {/* Page-level tab face (DESIGN.md ### Tabs, line-tab idiom): the
@@ -397,72 +424,52 @@ export function AppDetailView({
           variant="line"
           className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
         >
-          <TabsTrigger value="settings">{t(locale, "appDetail.tabSettings")}</TabsTrigger>
-          {/* The 已安装 / 洞察 / Pull requests tabs exist ONLY on the manage
-              face — absence is the non-manager contract, pinned by test. */}
-          {canManage ? (
-            <TabsTrigger value="installations">{t(locale, "appDetail.tabInstallations")}</TabsTrigger>
-          ) : null}
-          {canManage ? (
-            <TabsTrigger value="insights">{t(locale, "appDetail.tabInsights")}</TabsTrigger>
-          ) : null}
-          {canManage ? (
-            <TabsTrigger value="pull-requests">{t(locale, "appDetail.tabPullRequests")}</TabsTrigger>
-          ) : null}
+          <TabsTrigger value="insights">{t(locale, "appDetail.tabInsights")}</TabsTrigger>
+          <TabsTrigger value="installations">{t(locale, "appDetail.tabInstallations")}</TabsTrigger>
+          <TabsTrigger value="pull-requests">{t(locale, "appDetail.tabPullRequests")}</TabsTrigger>
         </TabsList>
-        {/* forceMount on EVERY panel (mount-once tab switching): the
-            settings form state (typed inputs, Add Provider panel, op
-            notices) and the loaded insights data survive 应用设置 ↔ 已安装 ↔
-            洞察 switches — no unmount, no refetch. Radix does NOT hide
-            forced-mounted inactive panels itself; the wrapper's
-            `data-[state=inactive]:hidden` carries the one-visible-panel
-            invariant (ui-bugs knowledge pin, source-tested below). */}
-        <TabsContent value="settings" forceMount>
-          <SettingsView locale={locale} payload={payload} onReload={onReload} />
+        {/* forceMount on EVERY panel (mount-once tab switching): the loaded
+            insights data and the install block's typed state survive
+            洞察 ↔ 已安装 ↔ Pull requests switches — no unmount, no refetch.
+            Radix does NOT hide forced-mounted inactive panels itself; the
+            wrapper's `data-[state=inactive]:hidden` carries the
+            one-visible-panel invariant (ui-bugs knowledge pin,
+            source-tested below). */}
+        <TabsContent value="insights" forceMount>
+          <AppInsightsTab locale={locale} appId={appId} search={search} onSearch={onSearch} />
         </TabsContent>
-        {canManage ? (
-          <TabsContent value="installations" forceMount>
-            {/* Installed tab: the shareable install link leads, the owner
-                allowlist follows it (owners arrive through installations),
-                then the installation table and its delivery health. The
-                allowlist renders for EVERY visibility: admission enforces a
-                stored list whatever the App's visibility, so a hidden control
-                would leave a live filter unmanageable. A private App instead
-                carries a line saying the control stays visible for that
-                reason. */}
-            <div className="flex flex-col">
-              <AppInstallSection
-                locale={locale}
-                appId={appId}
-                app={payload.app}
-                installation={payload.installation}
-                pendingInstallations={
-                  payload.can_manage && !payload.blocked ? payload.pending_installations : []
-                }
-                blocked={payload.blocked}
-                onReload={onReload}
-              />
-              <AllowlistSection
-                locale={locale}
-                appId={appId}
-                allowlist={payload.allowlist}
-                privateApp={payload.app.github_visibility === "private"}
-                installations={payload.can_manage && !payload.blocked ? payload.installations : null}
-                onReload={onReload}
-              />
-            </div>
-          </TabsContent>
-        ) : null}
-        {canManage ? (
-          <TabsContent value="insights" forceMount>
-            <AppInsightsTab locale={locale} appId={appId} search={search} onSearch={onSearch} />
-          </TabsContent>
-        ) : null}
-        {canManage ? (
-          <TabsContent value="pull-requests" forceMount>
-            <AppPullRequestsTab locale={locale} appId={appId} search={search} onSearch={onSearch} />
-          </TabsContent>
-        ) : null}
+        <TabsContent value="installations" forceMount>
+          {/* Installed tab: the shareable install link leads, the owner
+              allowlist follows it (owners arrive through installations),
+              then the installation table and its delivery health. The
+              allowlist renders for EVERY visibility: admission enforces a
+              stored list whatever the App's visibility, so a hidden control
+              would leave a live filter unmanageable. A private App instead
+              carries a line saying the control stays visible for that
+              reason. */}
+          <div className="flex flex-col">
+            <AppInstallSection
+              locale={locale}
+              appId={appId}
+              app={payload.app}
+              installation={payload.installation}
+              pendingInstallations={payload.blocked ? [] : payload.pending_installations}
+              blocked={payload.blocked}
+              onReload={onReload}
+            />
+            <AllowlistSection
+              locale={locale}
+              appId={appId}
+              allowlist={payload.allowlist}
+              privateApp={payload.app.github_visibility === "private"}
+              installations={payload.blocked ? null : payload.installations}
+              onReload={onReload}
+            />
+          </div>
+        </TabsContent>
+        <TabsContent value="pull-requests" forceMount>
+          <AppPullRequestsTab locale={locale} appId={appId} search={search} onSearch={onSearch} />
+        </TabsContent>
       </Tabs>
     </div>
   );

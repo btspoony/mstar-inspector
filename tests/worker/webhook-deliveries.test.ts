@@ -353,8 +353,8 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     expect(count.n).toBe(0);
   });
 
-  test("DELIVERY_OUTCOMES is the frozen single source: exactly ok | paused | ignored | rejected", () => {
-    expect(DELIVERY_OUTCOMES).toEqual(["ok", "paused", "ignored", "rejected"]);
+  test("DELIVERY_OUTCOMES is the frozen single source: exactly ok | paused | ignored | rejected | skipped", () => {
+    expect(DELIVERY_OUTCOMES).toEqual(["ok", "paused", "ignored", "rejected", "skipped"]);
     expect(Object.isFrozen(DELIVERY_OUTCOMES)).toBe(true);
   });
 
@@ -587,6 +587,9 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       REVIEW_QUEUE: queue as never,
       DB: db as never,
       DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
+      // Self-hosted: the shared-bot capability is unconditional in this mode,
+      // so these delivery-recording cases carry no plan fixture of their own.
+      DEPLOYMENT_MODE: "self-hosted",
       ...overrides,
     };
   }
@@ -1294,6 +1297,15 @@ describe("deliveryOutcomeFromWebhook (classifier outcome → delivery outcome, Q
     // blocked job never is.
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, false)).toBe("paused");
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, true)).toBe("ok");
+    // The third gate: both switches admitted the job and the shared-bot
+    // capability refused it. `ok` would claim an enqueue, `paused` would blame
+    // a switch that is on.
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, true, true)).toBe("skipped");
+    // Either switch wins over the refusal: that delivery never reached it.
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0, true, true)).toBe("paused");
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, false, true)).toBe("paused");
+    // A refused delivery is not a refusal of the classifier's answer.
+    expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 1, true, true)).toBe("rejected");
   });
 
   // An install delivery is neither review work nor paused: it is verified but

@@ -23,7 +23,7 @@ The five moved columns leave `review_bots` through `ALTER TABLE … DROP COLUMN`
 
 ### Webhook resolution
 
-`POST /webhook/{workspaceId}/{botId}` is unchanged. After signature verification and classification, the delivery resolves `(bot_id, installation.id)` to a target: the bound installation first — honoured only while no `bot_installations` row for that pair carries `removed_at`, because a removed binding resolves nothing and does not fall through to the next step — else the bot's single non-deleted target, a step suppressed for a `shared` bot with no binding, else nothing. No target answers 200, logs `no_target_for_repo`, records outcome `ignored`, enqueues nothing and writes no ledger row. Allowlist, trigger mode and business pause come from the target; the mention slug comes from the bot; either pause flag suppresses enqueue.
+`POST /webhook/{workspaceId}/{appId}` (`src/worker/index.ts`) is unchanged; the path parameter and the `botRef.appId` field below name the same `review_bots` id, so `{appId}` is a naming drift fixed here, not a second identity. After signature verification and classification, the delivery resolves `(bot_id, installation.id)` to a target: the bound installation first — honoured only while no `bot_installations` row for that pair carries `removed_at`, because a removed binding resolves nothing and does not fall through to the next step — else the bot's single non-deleted target, a step suppressed for a `shared` bot with no binding, else nothing. No target answers 200, logs `no_target_for_repo`, records outcome `ignored`, enqueues nothing and writes no ledger row. Allowlist, trigger mode and business pause come from the target; the mention slug comes from the bot; either pause flag suppresses enqueue.
 
 ### Review job payload
 
@@ -35,7 +35,7 @@ A tenant read is any dashboard or API read that returns reviews, insights, pull 
 
 Execution reads — webhook bot lookup, consumer credential load, publication recovery, PR-head lookup — carry no workspace predicate by design.
 
-`review_findings` and `review_failures` have no `target_id`; their tenant predicate reaches the target through the `pull_requests` join, which is unique only while a bot has one live target.
+`review_findings` and `review_failures` carry `target_id` (`migrations/0060_execution_ledger_target.sql`, backfilled from their pull-request row and guarded three ways), so their tenant predicate binds it directly through `ledgerScopeSql` (`src/dashboard/apps-store.ts`); the bot-keyed `pull_requests` join is no longer load-bearing.
 
 ### Settings payload and SPA
 
@@ -48,6 +48,7 @@ Manifest commit writes one bot, its workspace mapping and one unbound target (`i
 ## Invariants
 
 - One target per bot is a product constraint, not a schema rule; a second target requires `target_id` on the execution ledgers first.
+- A target's `bot_id` is written once, by an INSERT; a re-bind is a new target. Three INSERTs write it — the manifest commit's inline batch (the caller's own new bot), `CREATE_SHARED_TARGET_SQL` (gated on a `shared`, live bot) and `createTargetsStore().create()` (no production caller today) — plus migration `0057_review_targets.sql`'s backfill; no statement ASSIGNS it after creation. A future writer of that column must consult `assertSharedBotAllowed` in that writer, never add a second guard ([entitlement](../architecture/entitlement-and-deployment-modes.md) §5).
 - Tenant reads bind both ids in SQL; execution reads bind neither workspace predicate nor target.
 - The review job payload names both ids; no code reads `appRef`.
 - The five moved columns never return to `review_bots`.

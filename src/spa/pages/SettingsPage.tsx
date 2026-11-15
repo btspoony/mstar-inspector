@@ -206,6 +206,15 @@ export function settingsOpOutcome(
   return { kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") };
 }
 
+/**
+ * The target-owned body: the review policy (identity, trigger, depth, gate)
+ * and the ops zone (pause/resume, park), rendered by the review-target
+ * detail page (`/dashboard/<ref>/targets/:appId`). The bot-owned
+ * configuration lives on the bot page; the App detail keeps the App's own
+ * faces. Pure-ish: the data load, the page notice channel and the
+ * loading/error faces live on the page shell, which threads the parsed
+ * payload and the reload callback down here.
+ */
 export function SettingsView({
   locale,
   payload,

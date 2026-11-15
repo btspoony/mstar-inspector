@@ -23,6 +23,7 @@ export const en = {
     brand: "Morning Star Inspector",
     primary: "Primary navigation",
     apps: "Apps",
+    targets: "Review targets",
     members: "Members",
     settings: "Settings",
     /** Sidebar-footer entry to the platform console (operators on `saas`). */
@@ -132,14 +133,17 @@ export const en = {
       revokeFailed: "Could not revoke {login}'s invitation — try again.",
     },
   },
-  /** App detail page (App detail IA): the tabbed shell. */
+  /**
+   * App detail page: the tabbed shell. The review policy that used to be its
+   * settings tab lives on the review-target surface (`targets.*`), so the
+   * tabs here are the App's own faces only.
+   */
   appDetail: {
     /** The page's name in the document title (`common.pageTitle` slot). */
     documentPage: "App",
     backToApps: "Back to Apps",
-    /** The link from the target detail to the bot's own settings page. */
+    /** The link from the App detail and the target detail to the bot's own settings page. */
     botSettingsLink: "Bot settings",
-    tabSettings: "Settings",
     tabInstallations: "Installed",
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
@@ -147,6 +151,19 @@ export const en = {
     // target's workspace on every read, so the copy names the one cause.
     blockedBotNotShared:
       "This bot is no longer shared with this workspace, so this target reviews nothing. Ask the platform operator to share it again.",
+  },
+  /**
+   * The review-target surface (`/dashboard/<ref>/targets`): a workspace's
+   * claim on a bot, listed and edited on its own page. Its detail body keeps
+   * the `settings.*` labels of the tab it was moved from.
+   */
+  targets: {
+    heading: "Review targets",
+    backToList: "Back to review targets",
+    /** Composed empty state (EmptyState title + description). */
+    emptyTitle: "No review targets yet",
+    emptyDescription:
+      "Review targets come from GitHub Apps — create one, or attach the shared bot if your plan includes it.",
   },
   /**
    * The bot settings page: the bot-owned configuration (credentials health,
@@ -378,6 +395,7 @@ export const en = {
         paused: "Paused",
         ignored: "Ignored",
         rejected: "Rejected",
+        skipped: "Skipped",
       },
     },
     tableName: "App",
@@ -505,6 +523,25 @@ export const en = {
     inviteAcceptFailed: "Could not accept the invitation — try again.",
     /** The manager gate on `/dashboard/<ref>/settings` — a plain member sees it. */
     settingsOwnerOnly: "Only workspace owners and admins can change these settings.",
+    /**
+     * The read-only usage card (spec bot-scope-and-claiming § Review usage):
+     * this UTC month, the two counts, and the shared-bot row's state. The two
+     * unavailable states keep distinct copy — one is the reader's plan to
+     * change, the other waits for a platform operator.
+     */
+    usageHeading: "Review usage",
+    /** {month} = the UTC calendar month, e.g. 2026-11. */
+    usageWindow: "Reviews · {month} (UTC)",
+    usageSharedReviews: "Shared bot reviews",
+    usageOwnReviews: "Own bot reviews",
+    usageSharedStatus: "Shared bot status",
+    usageAvailable: "Available",
+    usageNotInPlan: "Not in this plan",
+    usageNotInPlanHint:
+      "This workspace's plan does not include the shared bot. Use a GitHub App this workspace owns, or move to a plan that includes it.",
+    usageNotDesignated: "Not available yet",
+    usageNotDesignatedHint:
+      "No shared bot is designated on this platform. A platform operator designates it; until then your own GitHub Apps review your pull requests.",
     /** The owner's name card — the label the top-bar switcher shows. */
     nameHeading: "Workspace name",
     nameDescription:
@@ -1176,6 +1213,7 @@ export const en = {
       flags: "Server flags",
       runtime: "Runtime parameters",
       workspaces: "Workspaces",
+      usage: "Review usage",
       users: "Users",
       supportGrants: "Support access",
     },
@@ -1355,6 +1393,15 @@ export const en = {
       cancelAction: "Cancel",
       /** Fallback when the slug write fails with an unrecognised error. */
       slugChangeFailed: "Could not change the slug for {name}.",
+    },
+    /** Review usage page (spec bot-scope-and-claiming § Review usage). */
+    usage: {
+      /** {month} = the UTC calendar month the read answered for, e.g. 2026-11. */
+      window: "Reviews per workspace · {month} (UTC)",
+      loadFailed: "Could not load the review usage.",
+      workspaceColumn: "Workspace",
+      sharedColumn: "Shared bot",
+      ownColumn: "Own bots",
     },
     /** Users page. */
     users: {

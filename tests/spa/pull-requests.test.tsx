@@ -107,7 +107,7 @@ const managePayload: SettingsManagePayload = {
   deliveries: [],
 };
 
-const search = { tab: "settings" as const, window: "30" as const, repo: "", pr: "" };
+const search = { tab: "insights" as const, window: "30" as const, repo: "", pr: "" };
 const noReload = async () => true;
 const noSearch = () => {};
 
@@ -149,7 +149,7 @@ const DETAIL_B: PullRequestDetail = {
 /** The stateful wrapper AppDetailView expects: the harness owns the search. */
 function DetailHarness() {
   const [search, setSearch] = useState<AppDetailSearch>({
-    tab: "settings",
+    tab: "insights",
     window: "30",
     repo: "",
     pr: "",
