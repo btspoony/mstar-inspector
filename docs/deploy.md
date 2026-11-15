@@ -949,7 +949,10 @@ Each deploy run performs, in order:
    `SELECT COUNT(*) … WHERE w.bot_id IS NULL` through
    `wrangler d1 execute --remote --json`. **A non-zero count exits the run
    before every deploy-capable step** (an unmapped App vanishes from every
-   execution-facing read, silently).
+   execution-facing read, silently). The same script then asks whether every
+   live bot owns a live `review_targets` row, and a non-zero answer exits the
+   same way: the review configuration lives on that row, so a target-less bot
+   answers no delivery.
 4. Every step that publishes a Worker version — `wrangler secret bulk` (it
    creates and deploys a version on its own) and `wrangler deploy`. On staging
    the D1 work therefore sits **before** the secret writes, not after them.

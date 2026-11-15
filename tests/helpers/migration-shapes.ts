@@ -24,7 +24,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { migrationsAfter, type TestD1 } from "../store/helpers";
+import { execMigrationScript, migrationsAfter, type TestD1 } from "../store/helpers";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 
@@ -51,9 +51,14 @@ export function migrationSql(name: string): string {
   return readFileSync(join(MIGRATIONS_DIR, name), "utf8");
 }
 
-/** Apply migration files verbatim, in the given order (wrangler order = filename order). */
+/**
+ * Apply migration files in the given order (wrangler order = filename order),
+ * through the same fail-fast executor the shared fixtures use: statement by
+ * statement, so a failed statement aborts instead of leaving the file half
+ * applied.
+ */
 export function applyMigrations(db: TestD1, names: readonly string[]): void {
-  for (const name of names) db.raw.exec(migrationSql(name));
+  for (const name of names) execMigrationScript(db.raw, migrationSql(name));
 }
 
 /**

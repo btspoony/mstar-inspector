@@ -330,6 +330,22 @@ export async function mapAppToDefaultWorkspace(db: D1Like, appId: string): Promi
 }
 
 /**
+ * Insert one live `review_bots` row. Targets, workspace mappings and review
+ * trees reference it, so a fixture that seeds any of those needs the bot row
+ * first; `githubAppId` is UNIQUE.
+ */
+export function seedBot(db: TestD1, id: string, githubAppId: number): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_bots
+         (id, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, ?, ?, 'k', 'w', 'fixture', 'active', NULL, datetime('now'), datetime('now'))`,
+    )
+    .run(id, githubAppId, id);
+}
+
+/**
  * Insert one live `review_targets` row for a raw-seeded bot and return its id.
  * Review and pull-request rows carry `target_id`, and the tenant reads bind it
  * together with `review_targets.workspace_id`, so a fixture that seeds those

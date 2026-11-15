@@ -772,10 +772,14 @@ describe("createInsightsStore", () => {
     const at = (daysAgo: number) =>
       insights.findingsDistribution.find((b) => b.bucket_start === reviewedAt(daysAgo).slice(0, 10))!;
     expect(at(1)).toMatchObject({
-      by_severity: { "must-fix": 1, "should-fix": 0, nit: 0 },
+      by_severity: { "must-fix": 1, "should-fix": 0, "may-fix": 0, nit: 0 },
     });
-    expect(at(8)).toMatchObject({ by_severity: { "must-fix": 0, nit: 0 } });
-    expect(at(15)).toMatchObject({ by_severity: { "must-fix": 0, "should-fix": 0 } });
+    expect(at(8)).toMatchObject({
+      by_severity: { "must-fix": 0, "should-fix": 0, "may-fix": 0, nit: 0 },
+    });
+    expect(at(15)).toMatchObject({
+      by_severity: { "must-fix": 0, "should-fix": 0, "may-fix": 0, nit: 0 },
+    });
   });
 
   test("the repo list is scoped to the target too: other targets' repos never appear", async () => {
