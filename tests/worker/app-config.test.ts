@@ -4567,7 +4567,9 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(afterUnstated!.model_ids).toEqual(["fresh-a", "fresh-b"]);
     expect(afterUnstated!.models_meta).toEqual({ "fresh-a": { contextWindow: 64000, maxTokens: 2048 } });
 
-    // A stated but non-positive size is refused with the invalid-value key.
+    // A stated but non-positive size is refused with the invalid-value key —
+    // and the refusal writes nothing: the stored list AND overlay stay exactly
+    // what the accepted save above left behind.
     const invalid = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
       provider: "my-custom",
@@ -4579,6 +4581,9 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       key: "settings.error.modelMetaInvalid",
       params: { model: "fresh-a", field: "context window" },
     });
+    const [afterInvalid] = await configStore(db).listCustomProviders(app.id);
+    expect(afterInvalid!.model_ids).toEqual(["fresh-a", "fresh-b"]);
+    expect(afterInvalid!.models_meta).toEqual({ "fresh-a": { contextWindow: 64000, maxTokens: 2048 } });
   });
 
   test("an all-blank (or omitted) overlay saves the ids and stores no size at all", async () => {

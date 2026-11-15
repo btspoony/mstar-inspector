@@ -620,6 +620,12 @@ describe("ProviderModelsDialog", () => {
     expect(unstated).toContain("unstated");
     expect(unstated).toMatch(/runtime/i);
     expect(unstated).not.toMatch(/not usable|failover/i);
+    // The zh copy states the same behaviour, positively: a blank size saves as
+    // unstated and the runtime's own default applies — never a requirement.
+    expect(t("zh_CN", "settings.providers.models.sizesUnstated")).toContain("未声明");
+    expect(t("zh_CN", "settings.providers.models.sizesUnstated")).toContain("运行时");
+    expect(t("zh_CN", "settings.providers.models.requirements")).toContain("未声明");
+    expect(t("zh_CN", "settings.providers.models.requirements")).not.toMatch(/都需要|必须填写/);
     // The catalog label names the snapshot the values came from.
     expect(t(locale, "settings.providers.models.sizesFromCatalog", { snapshot: "2026-11-13" })).toContain("2026-11-13");
   });

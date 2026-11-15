@@ -3666,8 +3666,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
         ...(Object.hasOwn(LEGACY_PROVIDER_IDS, provider_id)
           ? { legacy_of: LEGACY_PROVIDER_IDS[provider_id]! }
           : {}),
-        // Absent when the owner stated nothing: the form seeds blank sizes and
-        // shows the row as saved-but-not-usable instead of inventing a number.
+        // Absent when the owner stated nothing: the sizes are unstated (the
+        // runtime's own default applies), the form seeds them blank, and no
+        // number is invented for the row.
         ...(models_meta === undefined ? {} : { models_meta }),
       })),
       // Clean cutover: the App's PERSISTED provider state only — a stored

@@ -1309,8 +1309,9 @@ describe("custom provider credential transport + runner input threading (AL-23-1
       },
       sk("custom-fixture-AAA"),
     );
-    // A second declaration states NOTHING about its models: it is the "saved,
-    // not usable" row, and the input must not claim it stated an empty set.
+    // A second declaration states NOTHING about its models: the sizes are
+    // unstated (the runtime's own default applies), and the input must not
+    // claim it stated an empty set.
     await store.upsertCustomProvider(
       appX.id,
       {
