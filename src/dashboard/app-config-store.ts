@@ -445,6 +445,13 @@ export type ProviderMirrorEntry = {
   models: readonly string[];
   /** Provider docs URL. */
   doc: string | null;
+  /** Mixed-protocol providers only: every selectable protocol, the default
+   *  first. Absent = the row's own api/baseUrl/models are its one protocol. */
+  protocols?: readonly {
+    api: string;
+    baseUrl: string | null;
+    models: readonly string[];
+  }[];
 };
 
 export const PROVIDER_META: Record<string, ProviderMirrorEntry> = PROVIDER_CATALOG;

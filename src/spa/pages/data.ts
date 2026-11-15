@@ -150,6 +150,14 @@ export type ProviderEligibility = "builtin" | "template" | "unavailable";
 /** One model's catalog-supplied sizes, in tokens. */
 export type CatalogModelLimit = { contextWindow: number; maxTokens: number };
 
+/** One selectable protocol of a mixed-protocol catalog row (server `protocols`). */
+export type CatalogProtocolOption = {
+  api: string;
+  /** The endpoint this protocol serves on — the size gate matches THIS url. */
+  base_url: string | null;
+  models: string[];
+};
+
 export type CatalogProvider = {
   id: string;
   label: string;
@@ -177,7 +185,41 @@ export type CatalogProvider = {
    * keyed to `tier` / `eligibility`.
    */
   display_group: "common" | "catalog";
+  /**
+   * Mixed-protocol rows only: every selectable protocol, the default FIRST.
+   * Absent = the row's own api/base_url/models are its one protocol.
+   */
+  protocols?: CatalogProtocolOption[];
 };
+
+/** The endpoints a catalog row owns — its default protocol's plus every
+ *  option's. A declaration's base URL is trusted for catalog numbers only when
+ *  it equals one of them (the same predicate the Worker evaluates). */
+export function catalogEndpoints(provider: CatalogProvider | undefined): readonly (string | null)[] {
+  if (provider === undefined) return [];
+  // The default protocol's endpoint is also protocols[0], so the set folds the
+  // repeat instead of matching the same URL twice.
+  return [
+    ...new Set<string | null>([
+      provider.catalog_base_url ?? provider.base_url,
+      ...(provider.protocols ?? []).map((option) => option.base_url),
+    ]),
+  ];
+}
+
+/** The row's vocabulary for the protocol a declaration materialized: the
+ *  matching option's list, else the row's own (the default protocol's). */
+export function modelsForProtocol(
+  provider: CatalogProvider | undefined,
+  api: string | null | undefined,
+): readonly string[] {
+  if (provider === undefined) return [];
+  const option =
+    api === null || api === undefined
+      ? undefined
+      : provider.protocols?.find((candidate) => candidate.api === api);
+  return option?.models ?? provider.models;
+}
 
 /**
  * The store-enforced verification vocabulary (mirrors
@@ -595,6 +637,8 @@ export type SettingsManagePayload = {
     model_ids: string[];
     /** Absent when the owner stated nothing about any model (legacy rows). */
     models_meta?: CustomProviderModelsMeta;
+    /** The provider row a collapsed per-protocol id resolves to (read-only). */
+    legacy_of?: string;
   }>;
   /** The App's persisted provider state ONLY — empty is the valid unconfigured case. */
   configured_providers: ConfiguredProvider[];
@@ -1676,6 +1720,21 @@ function isCatalogModelLimits(value: unknown): value is Record<string, CatalogMo
   return isRecord(value) && Object.values(value).every(isCatalogModelLimit);
 }
 
+/** One protocol option: a named api, its endpoint and its vocabulary. */
+function isCatalogProtocolOptions(value: unknown): value is CatalogProtocolOption[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (option) =>
+        isRecord(option) &&
+        typeof option.api === "string" &&
+        (option.base_url === null || typeof option.base_url === "string") &&
+        isStringArray(option.models),
+    )
+  );
+}
+
 /**
  * Row-level guard for the catalog: tier + eligibility are the
  * load-bearing discriminators, and the Add Provider UI renders/branches on
@@ -1683,7 +1742,9 @@ function isCatalogModelLimits(value: unknown): value is Record<string, CatalogMo
  * of them fails the parse instead of breaking the page. Review handoff S2:
  * `display_group` is word-checked too — the picker groups on
  * it, so a row without the stamp (or with a stray value) must fail the
- * parse rather than silently drop out of both groups.
+ * parse rather than silently drop out of both groups. A merged row's
+ * `protocols` options are row-validated for the same reason: the add form
+ * renders a control per option.
  */
 function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
   return (
@@ -1706,6 +1767,7 @@ function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
         isCatalogModelLimits(row.model_limits) &&
         typeof row.verifiable === "boolean" &&
         typeof row.usage_probe === "boolean" &&
+        (row.protocols === undefined || isCatalogProtocolOptions(row.protocols)) &&
         isStringArray(row.models),
     )
   );

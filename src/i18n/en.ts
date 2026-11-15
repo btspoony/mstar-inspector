@@ -531,6 +531,7 @@ export const en = {
     providerId: "Provider id",
     baseUrl: "Base URL",
     api: "API",
+    protocol: "Protocol",
     modelIds: "Model ids",
     addCustomProvider: "Add custom provider",
     selectApi: "Select an API…",

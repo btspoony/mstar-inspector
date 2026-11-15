@@ -224,6 +224,49 @@ describe("order", () => {
   });
 });
 
+describe("a declaration stored under a collapsed per-protocol id", () => {
+  const collapsed = {
+    provider_id: "merged-vendor-anthropic",
+    base_url: "https://api.merged.test/anthropic",
+    api: "anthropic-messages",
+    model_ids: ["m1"],
+    legacy_of: "merged-vendor",
+  };
+
+  test("resolves its catalog row through legacy_of, keeping the stored id as the group key", () => {
+    const groups = providerGroups(
+      payload({
+        provider_catalog: [catalogEntry("merged-vendor", "template")],
+        keys: [key("merged-vendor-anthropic", "a")],
+        custom_providers: [collapsed],
+      }),
+    );
+    expect(groups).toHaveLength(1);
+    // The stored id is what every write and removal names…
+    expect(groups[0]?.providerId).toBe("merged-vendor-anthropic");
+    // …while the label, tier and vocabulary read through the absorbed row.
+    expect(groups[0]?.catalogId).toBe("merged-vendor");
+    expect(groups[0]?.label).toBe("merged-vendor label");
+    expect(groups[0]?.kind).toBe("template");
+    expect(groups[0]?.declaration?.legacy_of).toBe("merged-vendor");
+  });
+
+  test("a stored id with no alias reads its own catalog row, and an off-catalog one keeps the id as its label", () => {
+    const groups = providerGroups(
+      payload({
+        provider_catalog: [catalogEntry("workers-ai", "template")],
+        keys: [key("workers-ai", "a"), key("mystery", "b")],
+        custom_providers: [{ provider_id: "workers-ai", base_url: "https://x.test", api: "openai-completions", model_ids: [] }],
+      }),
+    );
+    const byId = new Map(groups.map((group) => [group.providerId, group]));
+    expect(byId.get("workers-ai")?.catalogId).toBe("workers-ai");
+    expect(byId.get("workers-ai")?.label).toBe("workers-ai label");
+    expect(byId.get("mystery")?.catalogId).toBe("mystery");
+    expect(byId.get("mystery")?.label).toBe("mystery");
+  });
+});
+
 describe("summary counts", () => {
   test("each store state counts into its own bucket; null is unverified", () => {
     const groups = providerGroups(

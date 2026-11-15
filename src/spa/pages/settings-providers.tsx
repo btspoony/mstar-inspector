@@ -6,12 +6,12 @@ import { GroupCard, GroupCardBody, GroupCardHeader } from "../components/GroupCa
 import { ListRow, ListRowGroup } from "../components/ListRow";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
-import type { CatalogProvider, SettingsManagePayload } from "./data";
+import { catalogEndpoints, modelsForProtocol, type CatalogProvider, type SettingsManagePayload } from "./data";
 import { NoticeRegion, type OpNotice } from "./PageNotice";
 import { AddKeyDialog, AddProviderDialog } from "./providers-dialogs";
 import { ProviderModelsDialog } from "./provider-models-dialog";
 import { providerGroups, type ProviderGroup } from "./providers-groups";
-import { catalogBaseUrlMatches } from "../../contracts/provider-model-limits";
+import { catalogEndpointsMatch } from "../../contracts/provider-model-limits";
 import type { PendingAction } from "./SettingsPage";
 import { UsagePanel } from "./usage-panel";
 
@@ -130,7 +130,7 @@ export function ProvidersSection({
               locale={locale}
               appId={payload.app.github_app_id}
               group={group}
-              catalog={catalogById[group.providerId]}
+              catalog={catalogById[group.catalogId]}
               limitsSnapshot={payload.model_limits_snapshot}
               removeNotice={
                 removeOutcome !== null && removedProviderId === group.providerId ? removeOutcome.notice : null
@@ -179,14 +179,20 @@ export function ProvidersSection({
 function groupMeta(
   group: ProviderGroup,
   catalog: CatalogProvider | undefined,
-): { api: string; baseUrl: string; modelIds: string[] } | null {
+): { api: string; baseUrl: string; modelIds: readonly string[] } | null {
   if (group.kind === "builtin") return null;
   const api = group.declaration?.api ?? catalog?.api ?? null;
   const baseUrl = group.declaration?.base_url ?? catalog?.base_url ?? null;
   if (api === null || baseUrl === null) return null;
   // The disclosure states the provider's CATALOG vocabulary (its real model
-  // directory); the stored declaration is what the model picker edits.
-  return { api, baseUrl, modelIds: catalog?.models ?? group.declaration?.model_ids ?? [] };
+  // directory) for the protocol this declaration materialized; the stored
+  // declaration is what the model picker edits.
+  const catalogModels = modelsForProtocol(catalog, group.declaration?.api);
+  return {
+    api,
+    baseUrl,
+    modelIds: catalogModels.length > 0 ? catalogModels : (group.declaration?.model_ids ?? []),
+  };
 }
 
 /**
@@ -426,12 +432,13 @@ function ProviderGroupCard({
           label={group.label}
           storedModelIds={group.declaration.model_ids}
           storedModelsMeta={group.declaration.models_meta}
-          catalogModelIds={catalog?.models ?? []}
+          catalogModelIds={modelsForProtocol(catalog, group.declaration.api)}
           catalogLimits={
             // The Worker only trusts the vendor table when the declaration's
-            // endpoint IS the catalog row's; the dialog must not pre-fill
-            // numbers a save would then refuse.
-            catalogBaseUrlMatches(catalog?.catalog_base_url, group.declaration.base_url)
+            // endpoint is one of the catalog row's own (a protocol's endpoint
+            // included); the dialog must not pre-fill numbers a save would
+            // then refuse.
+            catalogEndpointsMatch(catalogEndpoints(catalog), group.declaration.base_url)
               ? (catalog?.model_limits ?? {})
               : {}
           }

@@ -17,13 +17,15 @@
  * a rejected credential is `unauthorized`, never a healthy bar.
  *
  * Catalog id → family. An unmapped id is `absent` + `no-probe` and NEVER a
- * guessed endpoint: the probe set is exactly ten families over fifteen catalog
- * ids, listed below as twelve rows because the Z.AI/Zhipuai and MiniMax
- * intl/CN families split by host.
+ * guessed endpoint: the probe set is exactly ten families over fourteen catalog
+ * ids, listed below as twelve rows — the Z.AI and Zhipuai id pairs share one
+ * row each, the MiniMax intl/CN pair splits into two. A declaration stored
+ * under a per-protocol id the catalog collapsed resolves to its provider's row
+ * before the lookup.
  *
  * | catalog ids                                                        | endpoint (auth)                                                        | limits |
  * |--------------------------------------------------------------------|------------------------------------------------------------------------|--------|
- * | commandcode, commandcode-anthropic                                 | GET …/alpha/whoami then …/alpha/billing/credits (Bearer)               | fiveHour/weekly windows + `month` pool (monthlyCredits) carrying `extraRemaining` (purchased+free), or a bare balance when the account has no monthly pool |
+ * | commandcode                                                        | GET …/alpha/whoami then …/alpha/billing/credits (Bearer)               | fiveHour/weekly windows + `month` pool (monthlyCredits) carrying `extraRemaining` (purchased+free), or a bare balance when the account has no monthly pool |
  * | opencode-go                                                        | GET https://opencode.ai/zen/go/v1/usage (Bearer)                       | usage.rolling / usage.weekly / usage.monthly |
  * | zai, zai-coding-plan                                               | GET https://api.z.ai/api/monitor/usage/quota/limit (key verbatim)      | hour/week-unit limits |
  * | zhipuai, zhipuai-coding-plan                                       | GET https://open.bigmodel.cn/api/monitor/usage/quota/limit (verbatim)  | hour/week-unit limits |
@@ -41,6 +43,7 @@
  * answered 404 — the probe ran, the account has nothing to meter).
  */
 
+import { LEGACY_PROVIDER_IDS } from "../contracts/provider-catalog.generated";
 import { VERIFY_TIMEOUT_MS, VERIFY_USER_AGENT, type VerifyFetch } from "./provider-verify";
 
 /** Probe outcome vocabulary (closed: callers render exactly these four faces). */
@@ -1030,7 +1033,6 @@ function hostsOf(...urls: string[]): readonly string[] {
 
 const USAGE_PROBES: Readonly<Record<string, UsageProbeEntry>> = Object.freeze({
   commandcode: { probe: commandCodeUsage, hosts: hostsOf(COMMANDCODE_ORIGIN) },
-  "commandcode-anthropic": { probe: commandCodeUsage, hosts: hostsOf(COMMANDCODE_ORIGIN) },
   "opencode-go": { probe: opencodeGoUsage, hosts: hostsOf(OPENCODE_GO_USAGE_URL) },
   zai: { probe: zaiUsage(ZAI_HOST), hosts: hostsOf(ZAI_HOST) },
   "zai-coding-plan": { probe: zaiUsage(ZAI_HOST), hosts: hostsOf(ZAI_HOST) },
@@ -1047,11 +1049,21 @@ const USAGE_PROBES: Readonly<Record<string, UsageProbeEntry>> = Object.freeze({
 });
 
 /**
+ * The catalog row a declaration id names: a declaration stored under a
+ * collapsed per-protocol id probes the same endpoint as the row that absorbed
+ * it. Own-property check: a plain index would answer `constructor` with a
+ * function and hand it back as a probe.
+ */
+function probeIdOf(provider: string): string {
+  return Object.hasOwn(LEGACY_PROVIDER_IDS, provider) ? LEGACY_PROVIDER_IDS[provider]! : provider;
+}
+
+/**
  * Whether this provider has a usage endpoint. Own-property check: a plain
  * index would answer `constructor` with a function and hand it back as a probe.
  */
 export function hasUsageProbe(provider: string): boolean {
-  return Object.hasOwn(USAGE_PROBES, provider);
+  return Object.hasOwn(USAGE_PROBES, probeIdOf(provider));
 }
 
 /**
@@ -1060,7 +1072,8 @@ export function hasUsageProbe(provider: string): boolean {
  * this probe's credential — the route refuses it before any request.
  */
 export function usageProbeHosts(provider: string): readonly string[] | null {
-  return Object.hasOwn(USAGE_PROBES, provider) ? USAGE_PROBES[provider]!.hosts : null;
+  const probeId = probeIdOf(provider);
+  return Object.hasOwn(USAGE_PROBES, probeId) ? USAGE_PROBES[probeId]!.hosts : null;
 }
 
 /**
@@ -1075,7 +1088,8 @@ export async function probeProviderUsage(
   key: string,
 ): Promise<UsageSnapshot> {
   const startedAt = Date.now();
-  if (!hasUsageProbe(provider)) {
+  const probeId = probeIdOf(provider);
+  if (!Object.hasOwn(USAGE_PROBES, probeId)) {
     return {
       status: "absent",
       fetchedAt: startedAt,
@@ -1084,7 +1098,7 @@ export async function probeProviderUsage(
       absentCause: "no-probe",
     };
   }
-  const probe = USAGE_PROBES[provider]!.probe;
+  const probe = USAGE_PROBES[probeId]!.probe;
   try {
     return await probe({ fetch: deps.fetch, deadline: startedAt + (deps.timeoutMs ?? VERIFY_TIMEOUT_MS) }, key);
   } catch {

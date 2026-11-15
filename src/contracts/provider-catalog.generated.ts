@@ -42,10 +42,11 @@
  *     cloudflare-workers-ai → workers-ai (the curated entry is preserved verbatim)
  *   - rule (c) skipped, failing CUSTOM_PROVIDER_ID_PATTERN (0 additional
  *     after rules a/b): (none)
- *   - rule (d) omp-owned mixed-protocol keys (4): the union ships one
- *     row per protocol below, so the single models.dev row is not emitted: zenmux, opencode-go, commandcode, deepinfra
+ *   - rule (d) omp-owned mixed-protocol keys (4): the union's single
+ *     row for that provider owns the key (its protocols carry the union vocabulary), so the
+ *     single models.dev row is not emitted: zenmux, opencode-go, commandcode, deepinfra
  * omp provider union (omp 18.18.1, vendored 2026-11-08 — every omp
- * API-key provider id names its rule; 102 providers → 17 template rows):
+ * API-key provider id names its rule; 102 providers → 11 template rows):
  *   - (a) already in the catalog (builtin or template) (48): anthropic, zai, zai-coding-plan, openrouter, github-copilot, cursor, xai, alibaba-coding-plan, alibaba-token-plan, aiand, umans, sakana, sambanova, xiaomi, xiaomi-token-plan-sgp, xiaomi-token-plan-ams, xiaomi-token-plan-cn, cline-pass, deepseek, stepfun, meta, inception, cerebras, baseten, nvidia, huggingface, perplexity, venice, siliconflow, siliconflow-cn, synthetic, wafer-serverless, cloudflare-ai-gateway, cloudflare-workers-ai, kilo, ollama-cloud, coralbricks, modular, mistral, scaleway, aimlapi, amazon-bedrock, azure, google, google-vertex, groq, minimax, openai
  *   - (b) naming alias of an existing catalog row (14): abliteration → abliteration-ai, zhipu-coding-plan → zhipuai-coding-plan, minimax-code → minimax-coding-plan, minimax-code-cn → minimax-cn-coding-plan, charm-hyper → hyper, moonshot → moonshotai, fireworks → fireworks-ai, together → togetherai, novita → novita-ai, nanogpt → nano-gpt, vercel-ai-gateway → vercel, opencode-zen → opencode, lm-studio → lmstudio, gmi-cloud → gmicloud
  *   - (c) non-model — no API-key env, search or local-inference surface (14):
@@ -55,12 +56,29 @@
  *     openai-codex (oauth/device-code login), kimi-code (oauth/device-code login), devin (oauth/device-code login), devin-cli (oauth/device-code login), devin-windsurf (oauth/device-code login), google-antigravity (oauth/device-code login), google-gemini-cli (oauth/device-code login), openai-codex-device (oauth/device-code login), xai-oauth (oauth/device-code login), gitlab-duo (oauth/device-code login), gitlab-duo-agent (oauth/device-code login), factory-droid (oauth/device-code login), muse-code (oauth/device-code login), snowflake (oauth/device-code login), stencil (oauth/device-code login)
  *   - union rows are `template` tier with a null envName; prefill is the omp seed
  *     vocabulary verbatim (empty when omp ships none)
- *   - a mixed-protocol omp provider ships one row per protocol (e.g. `commandcode`
- *     plus `commandcode-anthropic` / `-responses` / `-typesafe`) because a
- *     custom-provider declaration carries exactly one protocol
+ *   - a mixed-protocol omp provider ships ONE row under its provider id, whose
+ *     `protocols` array carries every materializable protocol (the base record
+ *     first) with its own api, base URL and vocabulary — an add-provider choice,
+ *     not a per-App or per-model switch
+ *   - the per-protocol record ids that row absorbed are listed in
+ *     LEGACY_PROVIDER_IDS below: read-only compatibility for a declaration
+ *     already stored under one of them
+ *   - sizes for such a row come from the models.dev key its id names, over the
+ *     union of every protocol's vocabulary; an id the directory does not carry
+ *     stays unsized
  */
 
 export type ProviderTier = "builtin" | "template";
+
+/** One selectable protocol of a mixed-protocol provider. */
+export type ProviderProtocolOption = {
+  /** Custom-provider API protocol this option materializes. */
+  api: string;
+  /** The endpoint this protocol serves on — the size gate matches THIS url. */
+  baseUrl: string | null;
+  /** This protocol's own model vocabulary (prefill; clipped to 128 at save). */
+  models: readonly string[];
+};
 
 export type ProviderCatalogEntry = {
   /** Human-readable provider label (picker/table). */
@@ -84,6 +102,9 @@ export type ProviderCatalogEntry = {
   models: readonly string[];
   /** Provider docs URL. */
   doc: string | null;
+  /** Mixed-protocol providers only: every selectable protocol, the default
+   *  FIRST. Absent = this row has exactly one protocol (api/baseUrl/models). */
+  protocols?: readonly ProviderProtocolOption[];
 };
 
 export type ProviderInfo = {
@@ -11264,7 +11285,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   },
   "commandcode": {
-    "label": "Command Code — openai-completions",
+    "label": "Command Code",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://api.commandcode.ai/provider/v1",
@@ -11321,84 +11342,130 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
       "zai-org/GLM-5.1",
       "zai-org/GLM-5.2-Fast"
     ],
-    "doc": null
-  },
-  "commandcode-anthropic": {
-    "label": "Command Code — anthropic-messages",
-    "tier": "template",
-    "envName": null,
-    "baseUrl": "https://api.commandcode.ai/provider",
-    "api": "anthropic-messages",
-    "models": [
-      "claude-fable-5",
-      "claude-fable-5-1",
-      "claude-haiku-4-5-20251001",
-      "claude-haiku-5-5",
-      "claude-opus-4-7",
-      "claude-opus-4-8",
-      "claude-opus-5",
-      "claude-opus-5-5",
-      "claude-sonnet-4-6",
-      "claude-sonnet-5",
-      "claude-sonnet-5-5"
-    ],
-    "doc": null
-  },
-  "commandcode-responses": {
-    "label": "Command Code — openai-responses",
-    "tier": "template",
-    "envName": null,
-    "baseUrl": "https://api.commandcode.ai/provider/v1",
-    "api": "openai-responses",
-    "models": [
-      "MiniMaxAI/MiniMax-M3",
-      "deepseek/deepseek-v4-flash",
-      "deepseek/deepseek-v4-flash-vision-exp",
-      "deepseek/deepseek-v4-pro",
-      "deepseek/deepseek-v4.1-flash",
-      "deepseek/deepseek-v4.1-flash-fast",
-      "google/gemini-3.1-flash-lite",
-      "google/gemini-3.5-flash",
-      "google/gemini-3.5-flash-lite",
-      "google/gemini-3.6-flash",
-      "google/gemini-3.8-flash",
-      "gpt-5.3-codex",
-      "gpt-5.4",
-      "gpt-5.4-mini",
-      "gpt-5.5",
-      "gpt-5.6-luna",
-      "gpt-5.6-sol",
-      "gpt-5.6-terra",
-      "gpt-6-astra",
-      "gpt-6-luna",
-      "gpt-6-sol",
-      "meta/muse-spark-1.1",
-      "meta/muse-spark-1.2",
-      "meta/muse-spark-1.2-contributor",
-      "meta/muse-spark-1.3",
-      "meta/muse-spark-1.3-contributor",
-      "moonshotai/Kimi-K3",
-      "sakana/fugu-ultra",
-      "stepfun/Step-5-Preview",
-      "xai/grok-4.5",
-      "xai/grok-4.6",
-      "xai/grok-4.7",
-      "z-ai/glm-5.3-flashx",
-      "zai-org/GLM-5.2",
-      "zai-org/GLM-5.3"
-    ],
-    "doc": null
-  },
-  "commandcode-typesafe": {
-    "label": "Command Code — typesafe",
-    "tier": "template",
-    "envName": null,
-    "baseUrl": "https://api.commandcode.ai/provider",
-    "api": "typesafe",
-    "models": [
-      "typesafe/jev"
-    ],
-    "doc": null
+    "doc": null,
+    "protocols": [
+      {
+        "api": "openai-completions",
+        "baseUrl": "https://api.commandcode.ai/provider/v1",
+        "models": [
+          "MiniMaxAI/MiniMax-M2.5",
+          "MiniMaxAI/MiniMax-M2.7",
+          "Qwen/Qwen3.6-Max-Preview",
+          "Qwen/Qwen3.6-Plus",
+          "Qwen/Qwen3.7-Flash",
+          "Qwen/Qwen3.7-Max",
+          "Qwen/Qwen3.7-Plus",
+          "Qwen/Qwen3.8-27B",
+          "Qwen/Qwen3.8-Flash",
+          "Qwen/Qwen3.8-Max",
+          "Qwen/Qwen3.8-Max-0902",
+          "Qwen/Qwen3.8-Max-Prime",
+          "Qwen/Qwen3.8-Omni-Flash",
+          "deepseek/deepseek-v4-flash-fast",
+          "google/gemini-3.7-flash",
+          "google/gemini-4-argon",
+          "gpt-6.1-sol",
+          "inclusionai/ling-3.1-flash",
+          "meituan/LongCat-2.0",
+          "meta/muse-spark-open",
+          "meta/muse-wonder-1.0",
+          "minimax/minimax-m3.1-flash",
+          "minimax/minimax-m3.1-flash:free",
+          "mistral/mistral-large-4",
+          "moonshotai/Kimi-K2.5",
+          "moonshotai/Kimi-K2.6",
+          "moonshotai/Kimi-K2.7-Code",
+          "moonshotai/Kimi-K2.7-Code-Highspeed",
+          "nvidia/nemotron-3-ultra-550b-a55b",
+          "nvidia/nemotron-3.5-super-vl",
+          "ornith/ornith-1.5-122b",
+          "ornith/ornith-1.5-122b:free",
+          "poolside/laguna-s-2.1-free",
+          "reflection/beam:free",
+          "stealth/glyph-cluster:free",
+          "stepfun/Step-3.5-Flash",
+          "stepfun/Step-3.7-Flash",
+          "tencent/hy3-paid",
+          "tencent/hy4-preview",
+          "thinkingmachines/inkling",
+          "thinkingmachines/inkling-small",
+          "xiaomi/mimo-v2.5",
+          "xiaomi/mimo-v2.5-pro",
+          "xiaomi/mimo-v2.6-flash",
+          "xiaomi/mimo-v2.6-pro",
+          "xiaomi/mimo-v2.6-pro-ultraspeed",
+          "z-ai/glm-5.3-flash",
+          "zai-org/GLM-5",
+          "zai-org/GLM-5.1",
+          "zai-org/GLM-5.2-Fast"
+        ]
+      },
+      {
+        "api": "anthropic-messages",
+        "baseUrl": "https://api.commandcode.ai/provider",
+        "models": [
+          "claude-fable-5",
+          "claude-fable-5-1",
+          "claude-haiku-4-5-20251001",
+          "claude-haiku-5-5",
+          "claude-opus-4-7",
+          "claude-opus-4-8",
+          "claude-opus-5",
+          "claude-opus-5-5",
+          "claude-sonnet-4-6",
+          "claude-sonnet-5",
+          "claude-sonnet-5-5"
+        ]
+      },
+      {
+        "api": "openai-responses",
+        "baseUrl": "https://api.commandcode.ai/provider/v1",
+        "models": [
+          "MiniMaxAI/MiniMax-M3",
+          "deepseek/deepseek-v4-flash",
+          "deepseek/deepseek-v4-flash-vision-exp",
+          "deepseek/deepseek-v4-pro",
+          "deepseek/deepseek-v4.1-flash",
+          "deepseek/deepseek-v4.1-flash-fast",
+          "google/gemini-3.1-flash-lite",
+          "google/gemini-3.5-flash",
+          "google/gemini-3.5-flash-lite",
+          "google/gemini-3.6-flash",
+          "google/gemini-3.8-flash",
+          "gpt-5.3-codex",
+          "gpt-5.4",
+          "gpt-5.4-mini",
+          "gpt-5.5",
+          "gpt-5.6-luna",
+          "gpt-5.6-sol",
+          "gpt-5.6-terra",
+          "gpt-6-astra",
+          "gpt-6-luna",
+          "gpt-6-sol",
+          "meta/muse-spark-1.1",
+          "meta/muse-spark-1.2",
+          "meta/muse-spark-1.2-contributor",
+          "meta/muse-spark-1.3",
+          "meta/muse-spark-1.3-contributor",
+          "moonshotai/Kimi-K3",
+          "sakana/fugu-ultra",
+          "stepfun/Step-5-Preview",
+          "xai/grok-4.5",
+          "xai/grok-4.6",
+          "xai/grok-4.7",
+          "z-ai/glm-5.3-flashx",
+          "zai-org/GLM-5.2",
+          "zai-org/GLM-5.3"
+        ]
+      },
+      {
+        "api": "typesafe",
+        "baseUrl": "https://api.commandcode.ai/provider",
+        "models": [
+          "typesafe/jev"
+        ]
+      }
+    ]
   },
   "helmcode": {
     "label": "Helmcode",
@@ -11584,7 +11651,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   },
   "zenmux": {
-    "label": "ZenMux — openai-completions",
+    "label": "ZenMux",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://zenmux.ai/api/v1",
@@ -11865,42 +11932,320 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
       "z-ai/glm-5.3-prime",
       "z-ai/glm-5v-turbo"
     ],
-    "doc": null
-  },
-  "zenmux-anthropic": {
-    "label": "ZenMux — anthropic-messages",
-    "tier": "template",
-    "envName": null,
-    "baseUrl": "https://zenmux.ai/api/anthropic",
-    "api": "anthropic-messages",
-    "models": [
-      "anthropic/claude-3.5-haiku",
-      "anthropic/claude-3.5-sonnet",
-      "anthropic/claude-3.7-sonnet",
-      "anthropic/claude-fable-5",
-      "anthropic/claude-fable-5-free",
-      "anthropic/claude-fable-5.1",
-      "anthropic/claude-haiku-4.5",
-      "anthropic/claude-haiku-5.5",
-      "anthropic/claude-opus-4",
-      "anthropic/claude-opus-4.1",
-      "anthropic/claude-opus-4.5",
-      "anthropic/claude-opus-4.6",
-      "anthropic/claude-opus-4.7",
-      "anthropic/claude-opus-4.8",
-      "anthropic/claude-opus-5",
-      "anthropic/claude-opus-5.5",
-      "anthropic/claude-sonnet-4",
-      "anthropic/claude-sonnet-4.5",
-      "anthropic/claude-sonnet-4.6",
-      "anthropic/claude-sonnet-5",
-      "anthropic/claude-sonnet-5-free",
-      "anthropic/claude-sonnet-5.5"
-    ],
-    "doc": null
+    "doc": null,
+    "protocols": [
+      {
+        "api": "openai-completions",
+        "baseUrl": "https://zenmux.ai/api/v1",
+        "models": [
+          "alibaba/wan3.0-video",
+          "alibaba/wan3.0-video-prime",
+          "atria-asi/atria-dawn",
+          "atria-asi/atria-dawn-preview",
+          "baidu/ernie-5.0-thinking-preview",
+          "baidu/ernie-5.1",
+          "baidu/ernie-x1.1-preview",
+          "bfl/flux-3-video",
+          "bytedance/doubao-seed-1.8",
+          "bytedance/doubao-seed-2.0-code",
+          "bytedance/doubao-seed-2.0-lite",
+          "bytedance/doubao-seed-2.0-mini",
+          "bytedance/doubao-seed-2.0-pro",
+          "bytedance/doubao-seed-2.1-pro",
+          "bytedance/doubao-seed-2.1-turbo",
+          "bytedance/doubao-seed-asr-2.0",
+          "bytedance/doubao-seed-character",
+          "bytedance/doubao-seed-code",
+          "bytedance/doubao-seed-evolving",
+          "bytedance/doubao-seedance-2.0",
+          "bytedance/doubao-seedance-2.5",
+          "deepseek/deepseek-chat",
+          "deepseek/deepseek-chat-v3.1",
+          "deepseek/deepseek-r1-0528",
+          "deepseek/deepseek-reasoner",
+          "deepseek/deepseek-v3.2",
+          "deepseek/deepseek-v3.2-exp",
+          "deepseek/deepseek-v4-flash",
+          "deepseek/deepseek-v4-flash-free",
+          "deepseek/deepseek-v4-flash-vision-exp",
+          "deepseek/deepseek-v4-flash-vision-exp-free",
+          "deepseek/deepseek-v4-pro",
+          "deepseek/deepseek-v4-pro-free",
+          "deepseek/deepseek-v4.1-flash",
+          "dots-studio/dots3-note-prev",
+          "google/gemini-2.0-flash",
+          "google/gemini-2.0-flash-lite-001",
+          "google/gemini-2.5-flash",
+          "google/gemini-2.5-flash-lite",
+          "google/gemini-2.5-pro",
+          "google/gemini-3-flash-preview",
+          "google/gemini-3-pro-image-preview",
+          "google/gemini-3-pro-preview",
+          "google/gemini-3.1-flash-lite",
+          "google/gemini-3.1-flash-lite-preview",
+          "google/gemini-3.1-flash-tts-preview",
+          "google/gemini-3.1-pro-preview",
+          "google/gemini-3.5-flash",
+          "google/gemini-3.5-flash-free",
+          "google/gemini-3.5-flash-lite",
+          "google/gemini-3.6-flash",
+          "google/gemini-3.7-flash",
+          "google/gemini-3.8-flash",
+          "google/gemini-3.8-flash-lite-tts",
+          "google/gemini-3.8-flash-tts",
+          "google/gemini-4-argon",
+          "google/gemini-embedding-2",
+          "google/gemma-3-12b-it",
+          "google/gemma-4-26b-a4b-it",
+          "google/gemma-4-31b-it",
+          "inclusionai/ling-1t",
+          "inclusionai/ling-2.6-1t",
+          "inclusionai/ling-2.6-flash",
+          "inclusionai/ling-3.0-flash",
+          "inclusionai/ling-3.0-flash-fin",
+          "inclusionai/ling-3.0-flash-sante",
+          "inclusionai/ling-3.0-flash-vl",
+          "inclusionai/ling-3.0-tiny",
+          "inclusionai/ling-3.1-flash",
+          "inclusionai/ling-flash-2.0",
+          "inclusionai/ling-mini-2.0",
+          "inclusionai/llada-image",
+          "inclusionai/llada-image-turbo",
+          "inclusionai/llada2.0-flash-cap",
+          "inclusionai/llada2.1-flash",
+          "inclusionai/ming-flash-omni-2.0",
+          "inclusionai/ming-image-0.1-design",
+          "inclusionai/ming-image-0.1-design-layer",
+          "inclusionai/ring-1t",
+          "inclusionai/ring-2.6-1t",
+          "inclusionai/ring-flash-2.0",
+          "inclusionai/ring-mini-2.0",
+          "klingai/kling-3.0",
+          "klingai/kling-3.0-omni",
+          "klingai/kling-3.0-turbo",
+          "kuaishou/kat-coder-air-v2.5",
+          "kuaishou/kat-coder-pro-v1",
+          "kuaishou/kat-coder-pro-v1-free",
+          "kuaishou/kat-coder-pro-v2",
+          "kuaishou/kat-coder-pro-v2.5",
+          "meituan/longcat-2.0",
+          "meituan/longcat-2.5-preview",
+          "meta/llama-3.3-70b-instruct",
+          "meta/llama-4-scout-17b-16e-instruct",
+          "meta/muse-image-1.0",
+          "meta/muse-spark-1.1",
+          "meta/muse-spark-1.2",
+          "meta/muse-spark-1.3",
+          "meta/muse-spark-1.3-contributor",
+          "meta/muse-wonder-1.0",
+          "mindai/macaron-v1-tall",
+          "mindai/macaron-v1-venti",
+          "minimax/minimax-h3",
+          "minimax/minimax-h3-fast",
+          "minimax/minimax-h3-max",
+          "minimax/minimax-m2",
+          "minimax/minimax-m2-her",
+          "minimax/minimax-m2.1",
+          "minimax/minimax-m2.5",
+          "minimax/minimax-m2.5-lightning",
+          "minimax/minimax-m2.7",
+          "minimax/minimax-m2.7-highspeed",
+          "minimax/minimax-m3",
+          "minimax/minimax-m3.1-flash",
+          "mistralai/mistral-large-2512",
+          "mistralai/mistral-large-4",
+          "moonshotai/kimi-k2-0711",
+          "moonshotai/kimi-k2-0905",
+          "moonshotai/kimi-k2-thinking",
+          "moonshotai/kimi-k2-thinking-turbo",
+          "moonshotai/kimi-k2.5",
+          "moonshotai/kimi-k2.6",
+          "moonshotai/kimi-k2.7-code",
+          "moonshotai/kimi-k2.7-code-free",
+          "moonshotai/kimi-k2.7-code-highspeed",
+          "moonshotai/kimi-k2.8-preview",
+          "moonshotai/kimi-k3",
+          "moonshotai/kimi-k3-free",
+          "nex-agi/nex-n2-pro",
+          "openai/chat-latest",
+          "openai/gpt-4.1",
+          "openai/gpt-4.1-mini",
+          "openai/gpt-4.1-nano",
+          "openai/gpt-4o",
+          "openai/gpt-4o-mini",
+          "openai/gpt-5",
+          "openai/gpt-5-chat",
+          "openai/gpt-5-codex",
+          "openai/gpt-5-mini",
+          "openai/gpt-5-nano",
+          "openai/gpt-5-pro",
+          "openai/gpt-5.1",
+          "openai/gpt-5.1-chat",
+          "openai/gpt-5.1-codex",
+          "openai/gpt-5.1-codex-mini",
+          "openai/gpt-5.2",
+          "openai/gpt-5.2-chat",
+          "openai/gpt-5.2-codex",
+          "openai/gpt-5.2-pro",
+          "openai/gpt-5.3-chat",
+          "openai/gpt-5.3-codex",
+          "openai/gpt-5.4",
+          "openai/gpt-5.4-mini",
+          "openai/gpt-5.4-nano",
+          "openai/gpt-5.4-pro",
+          "openai/gpt-5.5",
+          "openai/gpt-5.5-instant",
+          "openai/gpt-5.5-pro",
+          "openai/gpt-5.6-luna",
+          "openai/gpt-5.6-sol",
+          "openai/gpt-5.6-terra",
+          "openai/gpt-6-astra",
+          "openai/gpt-6-luna",
+          "openai/gpt-6-sol",
+          "openai/gpt-6.1-sol",
+          "openai/gpt-image-1.5",
+          "openai/gpt-image-2",
+          "openai/gpt-image-2.5-flare",
+          "openai/gpt-image-2.5-sunburst",
+          "openai/gpt-transcribe",
+          "openai/o4-mini",
+          "openai/text-embedding-3-large",
+          "openai/text-embedding-3-small",
+          "pixverse/c1",
+          "pixverse/v6",
+          "qwen/qwen-audio-3.0-tts-plus",
+          "qwen/qwen-audio-3.1-asr-flash",
+          "qwen/qwen3-14b",
+          "qwen/qwen3-235b-a22b-2507",
+          "qwen/qwen3-235b-a22b-thinking-2507",
+          "qwen/qwen3-asr-flash",
+          "qwen/qwen3-coder",
+          "qwen/qwen3-coder-plus",
+          "qwen/qwen3-max",
+          "qwen/qwen3-max-preview",
+          "qwen/qwen3-rerank",
+          "qwen/qwen3-vl-embedding",
+          "qwen/qwen3-vl-plus",
+          "qwen/qwen3-vl-rerank",
+          "qwen/qwen3.5-flash",
+          "qwen/qwen3.5-plus",
+          "qwen/qwen3.6-flash",
+          "qwen/qwen3.6-max-preview",
+          "qwen/qwen3.6-plus",
+          "qwen/qwen3.7-flash",
+          "qwen/qwen3.7-max",
+          "qwen/qwen3.7-plus",
+          "qwen/qwen3.8-2.4t-a95b",
+          "qwen/qwen3.8-27b",
+          "qwen/qwen3.8-flash",
+          "qwen/qwen3.8-max",
+          "qwen/qwen3.8-max-0902",
+          "qwen/qwen3.8-omni-flash",
+          "sakana/fugu-ultra-v2",
+          "sapiens-ai/agnes-1.5-flash",
+          "sapiens-ai/agnes-1.5-lite",
+          "sapiens-ai/agnes-1.5-pro",
+          "sapiens-ai/agnes-2.0-flash",
+          "sapiens-ai/agnes-2.5-flash",
+          "sapiens-ai/agnes-2.5-pro",
+          "stepfun/step-3",
+          "stepfun/step-3.5-flash",
+          "stepfun/step-3.5-flash-free",
+          "stepfun/step-3.7-flash",
+          "stepfun/step-3.7-flash-free",
+          "stepfun/step-5-preview",
+          "tencent/hunyuan-2.0-thinking",
+          "tencent/hy3",
+          "tencent/hy3-preview",
+          "tencent/hy4-preview",
+          "volcengine/doubao-seed-1-6-vision",
+          "volcengine/doubao-seed-1.8",
+          "volcengine/doubao-seed-2.0-code",
+          "volcengine/doubao-seed-2.0-lite",
+          "volcengine/doubao-seed-2.0-mini",
+          "volcengine/doubao-seed-2.0-pro",
+          "volcengine/doubao-seed-code",
+          "x-ai/grok-4",
+          "x-ai/grok-4-fast",
+          "x-ai/grok-4-fast-non-reasoning",
+          "x-ai/grok-4.1-fast",
+          "x-ai/grok-4.1-fast-non-reasoning",
+          "x-ai/grok-4.2-fast",
+          "x-ai/grok-4.2-fast-non-reasoning",
+          "x-ai/grok-4.3",
+          "x-ai/grok-4.5",
+          "x-ai/grok-4.5-free",
+          "x-ai/grok-4.6",
+          "x-ai/grok-4.7",
+          "x-ai/grok-build-0.1",
+          "x-ai/grok-code-fast-1",
+          "x-ai/grok-imagine-image-2.0",
+          "x-ai/grok-voice-stt-1.0",
+          "x-ai/grok-voice-tts-1.0",
+          "xiaomi/mimo-v2-flash",
+          "xiaomi/mimo-v2-flash-free",
+          "xiaomi/mimo-v2-omni",
+          "xiaomi/mimo-v2-pro",
+          "xiaomi/mimo-v2.5",
+          "xiaomi/mimo-v2.5-asr",
+          "xiaomi/mimo-v2.5-pro",
+          "xiaomi/mimo-v2.6-flash",
+          "xiaomi/mimo-v2.6-pro",
+          "xiaomi/mimo-v2.6-pro-ultraspeed",
+          "z-ai/glm-4.5",
+          "z-ai/glm-4.5-air",
+          "z-ai/glm-4.6",
+          "z-ai/glm-4.6v",
+          "z-ai/glm-4.6v-flash",
+          "z-ai/glm-4.6v-flash-free",
+          "z-ai/glm-4.7",
+          "z-ai/glm-4.7-flash-free",
+          "z-ai/glm-4.7-flashx",
+          "z-ai/glm-5",
+          "z-ai/glm-5-turbo",
+          "z-ai/glm-5.1",
+          "z-ai/glm-5.2",
+          "z-ai/glm-5.2-free",
+          "z-ai/glm-5.3",
+          "z-ai/glm-5.3-flash",
+          "z-ai/glm-5.3-flashx",
+          "z-ai/glm-5.3-free",
+          "z-ai/glm-5.3-prime",
+          "z-ai/glm-5v-turbo"
+        ]
+      },
+      {
+        "api": "anthropic-messages",
+        "baseUrl": "https://zenmux.ai/api/anthropic",
+        "models": [
+          "anthropic/claude-3.5-haiku",
+          "anthropic/claude-3.5-sonnet",
+          "anthropic/claude-3.7-sonnet",
+          "anthropic/claude-fable-5",
+          "anthropic/claude-fable-5-free",
+          "anthropic/claude-fable-5.1",
+          "anthropic/claude-haiku-4.5",
+          "anthropic/claude-haiku-5.5",
+          "anthropic/claude-opus-4",
+          "anthropic/claude-opus-4.1",
+          "anthropic/claude-opus-4.5",
+          "anthropic/claude-opus-4.6",
+          "anthropic/claude-opus-4.7",
+          "anthropic/claude-opus-4.8",
+          "anthropic/claude-opus-5",
+          "anthropic/claude-opus-5.5",
+          "anthropic/claude-sonnet-4",
+          "anthropic/claude-sonnet-4.5",
+          "anthropic/claude-sonnet-4.6",
+          "anthropic/claude-sonnet-5",
+          "anthropic/claude-sonnet-5-free",
+          "anthropic/claude-sonnet-5.5"
+        ]
+      }
+    ]
   },
   "opencode-go": {
-    "label": "OpenCode Go — openai-completions",
+    "label": "OpenCode Go",
     "tier": "template",
     "envName": null,
     "baseUrl": "https://opencode.ai/inference/go/v1",
@@ -11942,40 +12287,75 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
       "step-5-preview",
       "step-5-preview-free"
     ],
-    "doc": null
-  },
-  "opencode-go-anthropic": {
-    "label": "OpenCode Go — anthropic-messages",
-    "tier": "template",
-    "envName": null,
-    "baseUrl": "https://opencode.ai/inference/go",
-    "api": "anthropic-messages",
-    "models": [
-      "claude-haiku-5-5",
-      "minimax-m2.5",
-      "qwen3.7-plus",
-      "qwen3.8-flash",
-      "qwen3.8-max"
-    ],
-    "doc": null
-  },
-  "opencode-go-responses": {
-    "label": "OpenCode Go — openai-responses",
-    "tier": "template",
-    "envName": null,
-    "baseUrl": "https://opencode.ai/inference/go/v1",
-    "api": "openai-responses",
-    "models": [
-      "deepseek-v4-flash",
-      "gpt-5.6-luna",
-      "gpt-6-luna",
-      "grok-4.5",
-      "grok-4.6",
-      "grok-4.7",
-      "muse-spark-1.2-contributor",
-      "muse-spark-1.3-contributor"
-    ],
-    "doc": null
+    "doc": null,
+    "protocols": [
+      {
+        "api": "openai-completions",
+        "baseUrl": "https://opencode.ai/inference/go/v1",
+        "models": [
+          "beam-free",
+          "cat-jam-free",
+          "deepseek-v4-flash-vision-exp",
+          "deepseek-v4-pro",
+          "deepseek-v4.1-flash",
+          "glm-5",
+          "glm-5.1",
+          "glm-5.2",
+          "glm-5.3",
+          "glm-5.3-flash",
+          "hy3",
+          "hy4-preview",
+          "kimi-k2.5",
+          "kimi-k2.6",
+          "kimi-k2.7-code",
+          "kimi-k3",
+          "longcat-2.0",
+          "longcat-2.5-preview-free",
+          "mimo-v2-omni",
+          "mimo-v2-pro",
+          "mimo-v2.5",
+          "mimo-v2.5-pro",
+          "mimo-v2.6-flash",
+          "mimo-v2.6-pro",
+          "minimax-m2.7",
+          "minimax-m3",
+          "minimax-m3.1-flash-free",
+          "ox-alpha-free",
+          "qwen3.5-plus",
+          "qwen3.6-plus",
+          "qwen3.7-max",
+          "space-bunny",
+          "space-bunny-free",
+          "step-5-preview",
+          "step-5-preview-free"
+        ]
+      },
+      {
+        "api": "anthropic-messages",
+        "baseUrl": "https://opencode.ai/inference/go",
+        "models": [
+          "claude-haiku-5-5",
+          "minimax-m2.5",
+          "qwen3.7-plus",
+          "qwen3.8-flash",
+          "qwen3.8-max"
+        ]
+      },
+      {
+        "api": "openai-responses",
+        "baseUrl": "https://opencode.ai/inference/go/v1",
+        "models": [
+          "deepseek-v4-flash",
+          "gpt-5.6-luna",
+          "gpt-6-luna",
+          "grok-4.5",
+          "grok-4.6",
+          "grok-4.7",
+          "muse-spark-1.2-contributor",
+          "muse-spark-1.3-contributor"
+        ]
+      }
+    ]
   },
   "yolo-auto": {
     "label": "Yolo-Auto",
@@ -12004,6 +12384,19 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "doc": null
   }
 };
+
+/** Per-protocol catalog ids this catalog no longer emits → the provider row
+ *  that absorbed them. READ-ONLY compatibility for a declaration already
+ *  stored under one of them (label, size resolution, usage probe); no write
+ *  path consults it, so a save can never recreate such an id as a row. */
+export const LEGACY_PROVIDER_IDS: Readonly<Record<string, string>> = Object.freeze({
+  "commandcode-anthropic": "commandcode",
+  "commandcode-responses": "commandcode",
+  "commandcode-typesafe": "commandcode",
+  "opencode-go-anthropic": "opencode-go",
+  "opencode-go-responses": "opencode-go",
+  "zenmux-anthropic": "zenmux"
+});
 
 /** The builtin tier ids in exact mapping order (the dashboard's PROVIDER_IDS
  *  allowlist sequence — AL-24-5, `ark` last). */

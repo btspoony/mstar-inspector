@@ -54,7 +54,7 @@ The catalog's `baseUrl` is the **inference** base; the usage route usually sits 
 
 | catalog id | catalog `baseUrl` | usage endpoint |
 |---|---|---|
-| `commandcode`, `commandcode-anthropic` | `https://api.commandcode.ai/provider/v1` | `…/alpha/whoami`, then `…/alpha/billing/credits` (host root) |
+| `commandcode` (and any collapsed per-protocol id that resolves to it) | `https://api.commandcode.ai/provider/v1` | `…/alpha/whoami`, then `…/alpha/billing/credits` (host root) |
 | `opencode-go` | `https://opencode.ai/zen/go/v1` | `https://opencode.ai/zen/go/v1/usage` |
 | `zai`, `zai-coding-plan` | `https://api.z.ai/api/coding/paas/v4` | `https://api.z.ai/api/monitor/usage/quota/limit` |
 | `zhipuai`, `zhipuai-coding-plan` | `https://open.bigmodel.cn/api/paas/v4` / `…/api/coding/paas/v4` | `https://open.bigmodel.cn/api/monitor/usage/quota/limit` |
@@ -107,7 +107,7 @@ The `reason` string is diagnostic only and is never rendered verbatim. `absent` 
 
 `getProviderKeyPlaintext(appId, provider, keyId)` in `src/dashboard/app-config-store.ts` reads the built-in pool (`app_provider_keys`) and then the declaration pool (`app_custom_provider_keys`), decrypting each row with **its own** AAD, and returns `{ plainKey, custom }` or `null`. A `null` deliberately cannot distinguish "another App's id" from "a deleted id".
 
-Every covered template provider — `commandcode`, `commandcode-anthropic`, `opencode-go`, `zai-coding-plan`, `zhipuai`, `zhipuai-coding-plan`, `minimax-coding-plan`, `minimax-cn-coding-plan`, `cline-pass`, `synthetic`, `hyper`, `kimi-for-coding` — stores its keys only in the declaration pool, because template providers materialize through the custom-provider machinery; only `zai`, `umans` and `cursor` are builtin-tier rows. A lookup that reads the built-in table alone answers `unknown_key` for exactly the reported providers while looking perfectly implemented.
+Every covered template provider — `commandcode`, `opencode-go`, `zai-coding-plan`, `zhipuai`, `zhipuai-coding-plan`, `minimax-coding-plan`, `minimax-cn-coding-plan`, `cline-pass`, `synthetic`, `hyper`, `kimi-for-coding` — stores its keys only in the declaration pool, because template providers materialize through the custom-provider machinery; only `zai`, `umans` and `cursor` are builtin-tier rows. A lookup that reads the built-in table alone answers `unknown_key` for exactly the reported providers while looking perfectly implemented.
 
 ### The route orders refusals by cost, and its vocabulary is closed
 

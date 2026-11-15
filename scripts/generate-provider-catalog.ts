@@ -255,7 +255,7 @@ type BreadthAudit = {
   ompNonModel: string[];
   /** omp union: records that could not be materialized, with the failing rule. */
   ompNotMaterializable: string[];
-  /** omp union: records that became template rows. */
+  /** omp union: provider rows emitted (one per provider, protocols as options). */
   ompRowCount: number;
   /** models.dev keys skipped because a mixed-protocol omp row owns them. */
   ompOwnedKeys: string[];
@@ -281,8 +281,15 @@ const ALLOWED_URL_PLACEHOLDERS: Record<string, true> = { account_id: true };
 export function buildCatalog(
   snapshot: Record<string, SnapshotProvider>,
   omp?: OmpSnapshot,
-): { catalog: Record<string, unknown>; audit: BreadthAudit; sources: Record<string, string> } {
+): {
+  catalog: Record<string, unknown>;
+  audit: BreadthAudit;
+  sources: Record<string, string>;
+  /** Collapsed per-protocol record id → the provider row that absorbed it. */
+  legacy: Record<string, string>;
+} {
   const catalog: Record<string, unknown> = {};
+  const legacy: Record<string, string> = {};
   // catalog provider id → the models.dev snapshot key carrying its model
   // vocabulary. Only source-backed rows can contribute model sizes; the omp
   // union rows (own vocabulary) and local-only rows (cursor) have none.
@@ -388,7 +395,8 @@ export function buildCatalog(
       api: "openai-completions",
       // The FULL snapshot vocabulary: the settings face shows a configured
       // provider's real model list, and the add-template-provider flow clips
-      // it to the store's own 32-entry bound at materialization time.
+      // it to the store's own 128-entry bound (MAX_CUSTOM_PROVIDER_MODEL_IDS)
+      // at materialization time.
       models: source.model_ids,
       doc: source.doc ?? null,
     };
@@ -486,10 +494,9 @@ export function buildCatalog(
         }
         return { record, skip: null };
       });
-      // Every row of a multi-row provider names its protocol, so the picker can
-      // tell e.g. the three OpenCode Go rows apart; a single-row provider keeps
-      // its snapshot label verbatim.
-      const protocolLabelled = decisions.filter((decision) => decision.skip === null).length > 1;
+      // Only the records that actually ship become the provider row's protocol
+      // options; every skip stays audited under its own rule.
+      const shipped: OmpSnapshot["providers"] = [];
       for (const { record, skip } of decisions) {
         if (skip?.kind === "already") {
           audit.ompAlreadyPresent.push(record.id);
@@ -503,20 +510,61 @@ export function buildCatalog(
           audit.ompNotMaterializable.push(`${record.id} (${skip.detail})`);
           continue;
         }
-        catalog[record.id] = {
-          label: protocolLabelled ? `${record.label} — ${record.api}` : record.label,
-          tier: "template",
-          envName: null,
-          baseUrl: record.baseUrl,
-          api: record.api,
-          models: record.models,
-          doc: null,
-        };
-        audit.ompRowCount += 1;
+        shipped.push(record);
       }
+      if (shipped.length === 0) continue;
+      // One row per provider, living under the provider id: a provider another
+      // pass already emitted absorbs the whole group instead of being
+      // rewritten (two rows for one provider is the split this shape removes).
+      if (Object.hasOwn(catalog, providerId)) {
+        for (const record of shipped) audit.ompAlreadyPresent.push(record.id);
+        continue;
+      }
+      // The base record (id == provider id) is the DEFAULT protocol: its api,
+      // base URL and vocabulary are the row's own scalars, so a consumer that
+      // knows nothing about `protocols` keeps the default's behaviour.
+      const defaultRecord = shipped.find((record) => record.id === providerId) ?? shipped[0]!;
+      // Remaining options in code-unit api order — derived, never the
+      // snapshot's incidental ordering.
+      const options = shipped
+        .filter((record) => record !== defaultRecord)
+        .sort((a, b) => (a.api < b.api ? -1 : a.api > b.api ? 1 : 0));
+      catalog[providerId] = {
+        label: defaultRecord.label,
+        tier: "template",
+        envName: null,
+        baseUrl: defaultRecord.baseUrl,
+        api: defaultRecord.api,
+        models: defaultRecord.models,
+        doc: null,
+        // Emitted only where the provider ships more than one materializable
+        // protocol: a single-protocol row's own scalars already are its one
+        // option, and every other row keeps the same seven-key shape.
+        ...(shipped.length > 1
+          ? {
+              protocols: [defaultRecord, ...options].map((record) => ({
+                api: record.api,
+                baseUrl: record.baseUrl,
+                models: record.models,
+              })),
+            }
+          : {}),
+      };
+      audit.ompRowCount += 1;
+      // The record ids this row absorbed stay readable on the read faces
+      // (label, sizes, usage probe) without rewriting any stored declaration.
+      for (const record of shipped) {
+        if (record.id !== providerId) legacy[record.id] = providerId;
+      }
+      // A provider id that names a models.dev key draws that row's numbers: the
+      // union owns the vocabulary, the directory only donates sizes.
+      if (Object.hasOwn(snapshot, providerId)) sources[providerId] = providerId;
     }
   }
-  return { catalog, audit, sources };
+  // Code-unit id order — the emitted map must not depend on group visit order.
+  const legacySorted: Record<string, string> = {};
+  for (const id of Object.keys(legacy).sort()) legacySorted[id] = legacy[id]!;
+  return { catalog, audit, sources, legacy: legacySorted };
 }
 
 /** Keep a snapshot model's sizes only when both are usable token counts —
@@ -547,7 +595,15 @@ function buildModelLimits(
     const sourceKey = sources[providerId];
     const source = sourceKey === undefined ? undefined : snapshot[sourceKey];
     const row: Record<string, ModelLimit> = {};
-    for (const modelId of (entry as { models: string[] }).models) {
+    // A mixed-protocol row states one vocabulary per protocol; the snapshot
+    // numbers cover every id the row can materialize, so the table iterates
+    // the whole union (an id the directory does not carry stays unsized).
+    const vocabularies = entry as { models: string[]; protocols?: { models: string[] }[] };
+    const vocabulary = [
+      ...vocabularies.models,
+      ...(vocabularies.protocols ?? []).flatMap((option) => option.models),
+    ];
+    for (const modelId of vocabulary) {
       const size = modelLimitOf(source?.limits?.[modelId]);
       if (size !== undefined) row[modelId] = size;
     }
@@ -568,10 +624,11 @@ function buildModelLimits(
 async function main(): Promise<void> {
   const snapshot = JSON.parse(await readFile(SNAPSHOT_PATH, "utf8")) as Record<string, SnapshotProvider>;
   const omp = JSON.parse(await readFile(OMP_SNAPSHOT_PATH, "utf8")) as OmpSnapshot;
-  const { catalog, audit, sources } = buildCatalog(snapshot, omp);
+  const { catalog, audit, sources, legacy } = buildCatalog(snapshot, omp);
   const { limits, skipped } = buildModelLimits(catalog, sources, snapshot);
 
   const catalogLiteral = JSON.stringify(catalog, null, 2);
+  const legacyLiteral = JSON.stringify(legacy, null, 2);
   const limitsLiteral = JSON.stringify(limits, null, 2);
   const builtinIdsLiteral = JSON.stringify(BUILTIN_ORDER.map((spec) => spec.id), null, 2);
   const commonIdsLiteral = JSON.stringify(COMMON_PROVIDER_IDS, null, 2);
@@ -588,8 +645,9 @@ async function main(): Promise<void> {
  *     ${audit.dedupedKeys.map((key) => `${key} → ${TEMPLATE_DEDUPE_SNAPSHOT_KEYS[key]}`).join(", ") || "(none)"} (the curated entry is preserved verbatim)
  *   - rule (c) skipped, failing CUSTOM_PROVIDER_ID_PATTERN (${audit.idPatternFails.length} additional
  *     after rules a/b): ${wrapList(audit.idPatternFails)}
- *   - rule (d) omp-owned mixed-protocol keys (${audit.ompOwnedKeys.length}): the union ships one
- *     row per protocol below, so the single models.dev row is not emitted: ${wrapList(audit.ompOwnedKeys)}
+ *   - rule (d) omp-owned mixed-protocol keys (${audit.ompOwnedKeys.length}): the union's single
+ *     row for that provider owns the key (its protocols carry the union vocabulary), so the
+ *     single models.dev row is not emitted: ${wrapList(audit.ompOwnedKeys)}
  * omp provider union (omp ${omp.source.version}, vendored ${omp.source.extracted} — every omp
  * API-key provider id names its rule; ${omp.ompProviderIds.length} providers → ${audit.ompRowCount} template rows):
  *   - (a) already in the catalog (builtin or template) (${audit.ompAlreadyPresent.length}): ${wrapList(audit.ompAlreadyPresent)}
@@ -601,9 +659,16 @@ async function main(): Promise<void> {
  *     ${wrapList(audit.ompNotMaterializable)}
  *   - union rows are \`template\` tier with a null envName; prefill is the omp seed
  *     vocabulary verbatim (empty when omp ships none)
- *   - a mixed-protocol omp provider ships one row per protocol (e.g. \`commandcode\`
- *     plus \`commandcode-anthropic\` / \`-responses\` / \`-typesafe\`) because a
- *     custom-provider declaration carries exactly one protocol`;
+ *   - a mixed-protocol omp provider ships ONE row under its provider id, whose
+ *     \`protocols\` array carries every materializable protocol (the base record
+ *     first) with its own api, base URL and vocabulary — an add-provider choice,
+ *     not a per-App or per-model switch
+ *   - the per-protocol record ids that row absorbed are listed in
+ *     LEGACY_PROVIDER_IDS below: read-only compatibility for a declaration
+ *     already stored under one of them
+ *   - sizes for such a row come from the models.dev key its id names, over the
+ *     union of every protocol's vocabulary; an id the directory does not carry
+ *     stays unsized`;
 
   const moduleSource = `/**
  * GENERATED FILE — provider catalog (spec §5). DO NOT EDIT BY HAND — regenerate with
@@ -646,6 +711,16 @@ ${auditComment}
 
 export type ProviderTier = "builtin" | "template";
 
+/** One selectable protocol of a mixed-protocol provider. */
+export type ProviderProtocolOption = {
+  /** Custom-provider API protocol this option materializes. */
+  api: string;
+  /** The endpoint this protocol serves on — the size gate matches THIS url. */
+  baseUrl: string | null;
+  /** This protocol's own model vocabulary (prefill; clipped to 128 at save). */
+  models: readonly string[];
+};
+
 export type ProviderCatalogEntry = {
   /** Human-readable provider label (picker/table). */
   label: string;
@@ -668,6 +743,9 @@ export type ProviderCatalogEntry = {
   models: readonly string[];
   /** Provider docs URL. */
   doc: string | null;
+  /** Mixed-protocol providers only: every selectable protocol, the default
+   *  FIRST. Absent = this row has exactly one protocol (api/baseUrl/models). */
+  protocols?: readonly ProviderProtocolOption[];
 };
 
 export type ProviderInfo = {
@@ -679,6 +757,12 @@ export type ProviderInfo = {
 };
 
 export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = ${catalogLiteral};
+
+/** Per-protocol catalog ids this catalog no longer emits → the provider row
+ *  that absorbed them. READ-ONLY compatibility for a declaration already
+ *  stored under one of them (label, size resolution, usage probe); no write
+ *  path consults it, so a save can never recreate such an id as a row. */
+export const LEGACY_PROVIDER_IDS: Readonly<Record<string, string>> = Object.freeze(${legacyLiteral});
 
 /** The builtin tier ids in exact mapping order (the dashboard's PROVIDER_IDS
  *  allowlist sequence — AL-24-5, \`ark\` last). */

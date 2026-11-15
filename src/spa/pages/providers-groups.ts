@@ -11,6 +11,10 @@ import type { CustomProviderModelsMeta, ProviderKeyRow, SettingsManagePayload } 
 
 export type ProviderGroup = {
   providerId: string;
+  /** The catalog row this group's label / vocabulary / sizes come from: the
+   *  stored id itself, or the provider row a collapsed per-protocol id
+   *  resolved to (payload `legacy_of`). */
+  catalogId: string;
   label: string;
   kind: "builtin" | "template" | "custom";
   keys: ProviderKeyRow[];
@@ -19,6 +23,8 @@ export type ProviderGroup = {
     api: string;
     model_ids: string[];
     models_meta?: CustomProviderModelsMeta;
+    /** The provider row this stored id resolves to (read-only compatibility). */
+    legacy_of?: string;
   } | null;
   summary: { total: number; ok: number; reachable: number; failed: number; unverified: number };
 };
@@ -52,13 +58,19 @@ export function providerGroups(payload: SettingsManagePayload): ProviderGroup[] 
 
   const groups = [...providerIds].map((providerId): ProviderGroup => {
     const keys = payload.keys.filter((key) => key.provider === providerId);
-    const catalogEntry = catalog.get(providerId);
+    const declaration = declarations.get(providerId) ?? null;
+    // A declaration stored under a per-protocol id the catalog no longer emits
+    // reads through the row that absorbed it; the stored id stays the group key
+    // every write and removal names.
+    const catalogId = declaration?.legacy_of ?? providerId;
+    const catalogEntry = catalog.get(catalogId);
     return {
       providerId,
+      catalogId,
       label: catalogEntry?.label ?? providerId,
       kind: catalogEntry?.tier ?? "custom",
       keys,
-      declaration: declarations.get(providerId) ?? null,
+      declaration,
       summary: summaryOf(keys),
     };
   });

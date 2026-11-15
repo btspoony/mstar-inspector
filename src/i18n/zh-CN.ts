@@ -468,6 +468,7 @@ export const zhCN: Dictionary = {
     providerId: "Provider id",
     baseUrl: "Base URL",
     api: "API",
+    protocol: "协议",
     modelIds: "模型 id",
     addCustomProvider: "添加自定义 provider",
     selectApi: "选择 API…",

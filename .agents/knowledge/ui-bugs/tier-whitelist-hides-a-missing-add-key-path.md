@@ -8,7 +8,7 @@ symptoms:
   - "In App settings, the per-provider Add key button refuses every provider that is not a builtin: the operator sees 'provider returned an unexpected response — nothing was stored'."
   - "The only working workaround is re-opening Add provider and re-submitting the same provider with the new key, which appends it only because that path carries a declaration (base URL + protocol) and never asks the verify route."
   - "The defect is silent in tests: every unit and worker suite passes, because the failing case is a route branch the SPA reaches only through one dialog."
-root_cause: "The SPA add-key dialog posts {provider, key} to POST /keys/verify, and the route's first check was !PROVIDER_IDS.includes(provider) -> 400 unexpected. PROVIDER_IDS is the builtin tier only; template-tier and custom declarations live in app_custom_providers. A grouped-providers refactor deleted the custom row's inline form (which used op=add-custom-provider-key) and routed every group through the builtin-only verify dialog, so the declaration pool lost its only append entry point while the server-side op stayed alive and uncalled."
+root_cause: "The SPA add-key dialog posts {provider, key} to POST /keys/verify, and the route's first check was !PROVIDER_IDS.includes(provider) -> 400 unexpected. PROVIDER_IDS is the builtin tier only; template-tier and custom declarations live in bot_custom_providers. A grouped-providers refactor deleted the custom row's inline form (which used op=add-custom-provider-key) and routed every group through the builtin-only verify dialog, so the declaration pool lost its only append entry point while the server-side op stayed alive and uncalled."
 resolution_type: code_fix
 topic: provider settings / key pools
 tags:
