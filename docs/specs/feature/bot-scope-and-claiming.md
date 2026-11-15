@@ -119,6 +119,8 @@ Every bot-scoped write route — settings operations, key deletion, provider-key
 
 `review_findings` and `review_failures` carry `target_id`, backfilled from their pull-request row and guarded three ways: a row with no resolvable target aborts the migration, a row with several candidate targets aborts it, and only an exactly-one candidate is attributed. Tenant reads bind `target_id` directly; the bot-keyed pull-request join is no longer load-bearing. `audit_events.target_id` is nullable so a park audit can name its target.
 
+A row's `target_id` is set when it is first recorded and never rewritten; rebinding an installation moves future publications, not history.
+
 ### Parking an overlapping target
 
 `POST /api/apps/:appId/park` (manager on the target's workspace, or operator) writes in one batch: one `target.park` audit row, `review_enabled = 0`, and `account_login = NULL`. It refuses `no-overlap` (no other live target in the workspace carries the same `account_login`), `only-live-target` (parking would leave that owner in this workspace with no live target), and a target outside the caller's workspace, all with zero writes. It never sets `deleted_at`, so the rows stay visible.

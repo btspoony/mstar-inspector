@@ -521,17 +521,15 @@ export async function findPublicationJournal(
  * transitions (§7.11.1), whose FINAL statement marks the publication applied
  * under the lease. Degraded proof creates no
  * normal review/lifecycle rows — it only marks applied. Rows absent from
- * `seen` are never deleted, but they DO move with the fingerprint: when the
- * live binding for the publication's `(bot, installation)` names a target
- * other than the rows' tenant, every `review_findings` row for
- * (bot, installation, owner, repo, PR) and every `review_failures` row for
- * (installation, owner, repo, PR) is re-attributed to that target in the
- * same batch, and every `reviews` row for (bot, installation, owner, repo,
- * PR) moves with them, so a PR's review history never sits on the tenant it
- * was moved away from. The binding is resolved in-batch (one scalar subquery
- * per statement), not by a read taken before it. The frozen
- * `payload.artifact.targetId` is only a hint used to stamp a NEW row when
- * nothing is bound. Returns false (and writes nothing)
+ * `seen` are never deleted and never rewritten: `review_findings.target_id`
+ * and `reviews.target_id` are set when the row is FIRST recorded and are not
+ * migrated afterwards. A rebind therefore affects future publications only —
+ * each target keeps the history it actually reviewed — which is also why the
+ * ledger's `(target_id, owner, repo, pr_number)` key stays correct. The
+ * binding is resolved in-batch (a scalar subquery in the inserting statement)
+ * so a concurrent unbind/claim cannot be frozen; the frozen
+ * `payload.artifact.targetId` is only the hint a NEW row takes when nothing is
+ * bound, never a migration instruction. Returns false (and writes nothing)
  * when the row is unknown, the lease is not live, proof is missing, or the
  * payload is not a complete review publication; the previously-applied row
  * short-circuits to true (idempotent replay).
@@ -651,13 +649,14 @@ const APPLY_LEASE_GUARD_SQL = `EXISTS (SELECT 1 FROM review_publications AS appl
          AND apply_lease.lease_until_ms IS NOT NULL AND apply_lease.lease_until_ms > ?)`;
 
 /**
- * The live-binding scalar subquery — the ONLY attribution source. It is
- * embedded in every statement that needs the fingerprint's tenant, so the
- * binding is read when the statement runs, inside the same batch and
- * transaction as the write it feeds: a read taken before the batch could be
- * stranded by a concurrent unbind/claim. Binds, in order: `(botId,
- * installationId)`, and it yields NULL when nothing is bound (a target that
- * keeps `installation_id` but is soft-deleted holds nothing).
+ * The live-binding scalar subquery — the attribution source for a NEWLY
+ * recorded row. It is embedded in the inserting statement, so the binding is
+ * read when that statement runs, inside the same batch and transaction as the
+ * write it feeds: a read taken before the batch could be stranded by a
+ * concurrent unbind/claim. It is never used to rewrite an existing row's
+ * `target_id` — a row's tenant is fixed when it is first recorded. Binds, in
+ * order: `(botId, installationId)`; it yields NULL when nothing is bound (a
+ * target that keeps `installation_id` but is soft-deleted holds nothing).
  */
 const LIVE_BINDING_TARGET_SQL = `(SELECT id FROM review_targets
        WHERE bot_id = ? AND installation_id = ? AND deleted_at IS NULL)`;
@@ -707,32 +706,19 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
 /**
  * The §7.2 state machine as ONE batch (knowledge `d1-batch-atomicity`).
  * Order inside the batch matters and is replay-safe:
- *   0. Attribution — resolved INSIDE the batch: every statement that needs
- *      the tenant embeds `LIVE_BINDING_TARGET_SQL`, the scalar subquery for
- *      the target that CURRENTLY holds this fingerprint's `(bot,
- *      installation)`. No read is taken before the batch, so a concurrent
- *      unbind/claim cannot be frozen into an applied state. The payload's
- *      `artifact.targetId` is only a hint for a row no target can claim; it
- *      never decides where an existing row lives.
- *   1. Seen upserts — new rows insert open at the current time, attributed to
- *      the live binding (or the hint when nothing is bound); existing rows
- *      update last-seen tracking. A row closed (addressed/dismissed) under an
- *      OLDER publication reopens with reopen_count+1 ("retain original and
- *      assessment history"); rows already updated by THIS publication
- *      (replay) are skipped by the last_publication guard.
- *   1b. Whole-scope re-attribution — when the live binding differs from the
- *      rows' tenant, EVERY row of the scope moves in one statement each: all
- *      `review_findings` and `reviews` for (bot, installation, owner, repo,
- *      PR), and all `review_failures` for (installation, owner, repo, PR) —
- *      not only the rows this round re-sees. A PR's finding list and its
- *      review history therefore never sit on two tenants. A rebind is the product path that needs it:
- *      the operator unbinds an installation
- *      (`/_internal_admin/api/targets/:id/unbind`) and another workspace
- *      claims the SAME installation for its own target, so the fingerprint
- *      survives the move and the whole fingerprint's history must follow it —
- *      otherwise one PR's ledger would be split across two tenants. With
- *      NOTHING bound the rows keep the tenant they have: no binding is not
- *      evidence of a move.
+ *   0. Attribution — fixed at FIRST record. A statement that INSERTS a row
+ *      embeds `LIVE_BINDING_TARGET_SQL`, the scalar subquery for the target
+ *      that currently holds this fingerprint's `(bot, installation)` (read
+ *      in-batch, so a concurrent unbind/claim cannot be frozen into an
+ *      applied state), falling back to the payload's `artifact.targetId` as a
+ *      hint when nothing is bound. No statement rewrites `target_id` on an
+ *      existing row: a rebind moves FUTURE publications, never history —
+ *      each target's ledger is the record of what that target reviewed.
+ *   1. Seen upserts — new rows insert open at the current time; existing rows
+ *      update last-seen tracking only. A row closed (addressed/dismissed)
+ *      under an OLDER publication reopens with reopen_count+1 ("retain
+ *      original and assessment history"); rows already updated by THIS
+ *      publication (replay) are skipped by the last_publication guard.
  *   2. Per assessment — state transition (addressed/dismissed closes,
  *      unverifiable/identity-drift keeps the row open) guarded by the
  *      rounds row NOT existing yet, then the round-history insert
@@ -752,14 +738,12 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
  * guard binds are the LAST four parameters of each statement, in the order
  * `(publicationId, holder, leaseEpoch, operationNow)`.
  *
- * Attribution follows the LIVE BINDING, never the payload. The binding is
- * resolved INSIDE the batch — a scalar subquery on
- * `review_targets(bot_id, installation_id, deleted_at IS NULL)` sits in every
- * statement that needs the tenant — so a concurrent unbind/claim cannot be
- * frozen into an applied state by a read taken before the batch. The tenant
- * faces bind `review_findings.target_id` / `reviews.target_id`, so the binding
- * is the only attribution that survives a rebind. `hintTargetId` is what a NEW
- * row is written with when nothing is bound; it never moves an existing row.
+ * Attribution is fixed at FIRST record. A newly inserted row is stamped with
+ * the live binding for the fingerprint's `(bot, installation)` — resolved by a
+ * scalar subquery inside the inserting statement, so a concurrent unbind/claim
+ * cannot be frozen — and `hintTargetId` is only the fallback a new row takes
+ * when nothing is bound. No statement here rewrites `target_id` on an existing
+ * row.
  */
 function lifecycleApplyBatch(
   db: D1Like,
@@ -792,7 +776,6 @@ function lifecycleApplyBatch(
                   COALESCE(${LIVE_BINDING_TARGET_SQL}, ?)
            WHERE ${APPLY_LEASE_GUARD_SQL}
            ON CONFLICT(bot_id, installation_id, owner, repo, pr_number, finding_id) DO UPDATE SET
-             target_id = COALESCE(${LIVE_BINDING_TARGET_SQL}, review_findings.target_id),
              last_publication_id = excluded.last_publication_id,
              last_seen_sha = excluded.last_seen_sha,
              last_seen_round = excluded.last_seen_round,
@@ -814,68 +797,9 @@ function lifecycleApplyBatch(
           // payload hint.
           scope.appId, scope.installationId, hintTargetId,
           ...guard,
-          // The upsert's own binding read; no binding keeps the row's tenant.
-          scope.appId, scope.installationId,
         ),
     );
   }
-
-  // 1b. Whole-scope re-attribution — the live binding moved the installation,
-  // so the fingerprint's ENTIRE history follows it, not only the re-seen rows:
-  // findings, failures and reviews alike. ONE statement per table, each
-  // resolving the binding with its own scalar subquery (no pre-batch read) and
-  // fenced by the same live lease as every other write in the batch. The
-  // statements are unconditional on purpose: with nothing bound the subquery is
-  // NULL, `target_id <> NULL` matches no row, and NOTHING moves — no binding is
-  // not evidence of a move. Scope columns follow each table's schema:
-  // `review_findings` and `reviews` carry `bot_id`, `review_failures` does not
-  // (migration 0060 resolves it through the installation). Rows with a NULL
-  // `target_id` cannot exist after 0060's backfill guard and are not adopted.
-  statements.push(
-    db
-      .prepare(
-        `UPDATE review_findings SET target_id = ${LIVE_BINDING_TARGET_SQL}
-         WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-           AND target_id <> ${LIVE_BINDING_TARGET_SQL}
-           AND ${APPLY_LEASE_GUARD_SQL}`,
-      )
-      .bind(
-        scope.appId, scope.installationId,
-        scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
-        scope.appId, scope.installationId,
-        ...guard,
-      ),
-  );
-  statements.push(
-    db
-      .prepare(
-        `UPDATE reviews SET target_id = ${LIVE_BINDING_TARGET_SQL}
-         WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-           AND target_id <> ${LIVE_BINDING_TARGET_SQL}
-           AND ${APPLY_LEASE_GUARD_SQL}`,
-      )
-      .bind(
-        scope.appId, scope.installationId,
-        scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
-        scope.appId, scope.installationId,
-        ...guard,
-      ),
-  );
-  statements.push(
-    db
-      .prepare(
-        `UPDATE review_failures SET target_id = ${LIVE_BINDING_TARGET_SQL}
-         WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-           AND target_id <> ${LIVE_BINDING_TARGET_SQL}
-           AND ${APPLY_LEASE_GUARD_SQL}`,
-      )
-      .bind(
-        scope.appId, scope.installationId,
-        scope.installationId, scope.owner, scope.repo, scope.prNumber,
-        scope.appId, scope.installationId,
-        ...guard,
-      ),
-  );
 
   // 2. Assessments — state transition + round history (replay marker).
   for (const assessment of lifecycle.assessments) {
