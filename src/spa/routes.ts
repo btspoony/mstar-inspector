@@ -152,8 +152,8 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
     if (WORKSPACE_MEMBERS_PATH.test(pathname)) return { page: "members", pathname, workspaceRef };
     if (WORKSPACE_SETTINGS_PATH.test(pathname)) return { page: "settings", pathname, workspaceRef };
     if (WORKSPACE_TARGETS_PATH.test(pathname)) return { page: "targets", pathname, workspaceRef };
-    const targetId = WORKSPACE_TARGET_PATH.exec(pathname)?.[2];
-    if (targetId) return { page: "targets", pathname, workspaceRef, appId: targetId };
+    const targetAppId = WORKSPACE_TARGET_PATH.exec(pathname)?.[2];
+    if (targetAppId) return { page: "targets", pathname, workspaceRef, appId: targetAppId };
     const appId = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
     if (appId) return { page: appPageOf(pathname), pathname, appId, workspaceRef };
     return null;

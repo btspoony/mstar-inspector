@@ -758,10 +758,9 @@ function isRetiredAppPath(pathname: string): boolean {
  * are excluded: `settings` and `targets` are page paths with no Worker route
  * under `/<ref>/`, and admitting either would route a page path through this
  * gate. This exclusion list IS the gate's admission list: a new SPA-only
- * segment has to be excluded here too. Exported for the route-table pin: the
- * admission list, not the SPA family, is what a Worker route family may be.
+ * segment has to be excluded here too.
  */
-export const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(
+const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(
   WORKSPACE_FAMILY_SEGMENTS.filter((segment) => segment !== "settings" && segment !== "targets"),
 );
 
