@@ -69,11 +69,13 @@ const BOOT = { locale: "en" as const, login: "mallory", name: null };
 
 const managePayload = {
   can_manage: true as const,
+  installation: null,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-1",
   app: {
     ...IDENTITY_APP,
     last_webhook_at: null,
+    scope: "owned" as const,
     sandbox_image_id: "omp",
     review_trigger_mode: "every_push" as const,
     review_level: null,
@@ -1093,5 +1095,76 @@ describe("header metric band on the manage face (static SSR)", () => {
     expect(absent[3]!).toEqual({ key: "24h rejected", value: "0", danger: false });
     const refused = band(payloadWith({ installations: 1, keys: 1, chains: 1, rejected: 4 }));
     expect(refused[3]!).toEqual({ key: "24h rejected", value: "4", danger: true });
+  });
+});
+
+describe("install claim entry (static SSR)", () => {
+  /** The manager face of a SHARED bot with no bound installation. */
+  const sharedPayload = (): SettingsManagePayload => ({
+    ...managePayload,
+    app: { ...managePayload.app, scope: "shared" },
+    installation: null,
+  });
+
+  test("the claim action renders for a shared bot only, and an owned bot keeps the plain link", () => {
+    const shared = renderDetail(sharedPayload(), true);
+    expect(shared).toContain(t("en", "settings.installClaim"));
+    expect(shared).toContain(t("en", "settings.installClaimCopy"));
+    // The claim is the entry point: the raw install link would skip the claim
+    // record that makes the callback's 0/1/N split possible.
+    expect(shared).not.toContain('href="https://github.com/apps/demo/installations/new"');
+
+    const owned = renderDetail(
+      { ...sharedPayload(), app: { ...sharedPayload().app, scope: "owned" } },
+      true,
+    );
+    expect(owned).not.toContain(t("en", "settings.installClaim"));
+    expect(owned).toContain('href="https://github.com/apps/demo/installations/new"');
+    // Everything else on the block is unchanged copy.
+    expect(owned).toContain(t("en", "settings.installLink"));
+    expect(owned).toContain(t("en", "settings.installCopy"));
+  });
+
+  test("the claim block renders the bound installation's account", () => {
+    const bound = renderDetail(
+      { ...sharedPayload(), installation: { id: 4242, account_login: "acme", removed: false } },
+      true,
+    );
+    expect(bound).toContain(t("en", "settings.installBoundAccount", { account: "acme" }));
+    expect(bound).not.toContain(t("en", "settings.installRemoved"));
+    // A bound target cannot start a claim (the route answers 409), so the
+    // action is not rendered: the operator's unbind is the way to re-bind.
+    expect(bound).not.toContain(t("en", "settings.installClaim"));
+  });
+
+  test("the claim block separates an unknown account from a removed installation", () => {
+    const unknownAccount = renderDetail(
+      { ...sharedPayload(), installation: { id: 4242, account_login: null, removed: false } },
+      true,
+    );
+    expect(unknownAccount).toContain(t("en", "settings.installBoundNoAccount", { id: "4242" }));
+
+    const removed = renderDetail(
+      { ...sharedPayload(), installation: { id: 4242, account_login: "acme", removed: true } },
+      true,
+    );
+    // The binding survives the uninstall; the line says reviews stopped.
+    expect(removed).toContain(t("en", "settings.installRemoved"));
+    expect(removed).toContain(t("en", "settings.installBoundAccount", { account: "acme" }));
+  });
+
+  test("the claim payload fields parse fail-closed", () => {
+    expect(parseSettings(sharedPayload())?.can_manage).toBe(true);
+    // An off-vocabulary scope or a malformed installation fails the whole read
+    // instead of rendering a control the server would refuse.
+    expect(parseSettings({ ...sharedPayload(), app: { ...sharedPayload().app, scope: "global" } })).toBeNull();
+    expect(
+      parseSettings({ ...sharedPayload(), installation: { id: "4242", account_login: null, removed: false } }),
+    ).toBeNull();
+    expect(
+      parseSettings({ ...sharedPayload(), installation: { id: 4242, account_login: null, removed: "yes" } }),
+    ).toBeNull();
+    // `null` is the unbound state, and it stays legal.
+    expect(parseSettings({ ...sharedPayload(), installation: null })?.can_manage).toBe(true);
   });
 });

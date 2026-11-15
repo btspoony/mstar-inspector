@@ -16,7 +16,9 @@
  * and src/contracts/failure-stages.ts — the `review_failures` stage
  * partition), which bound the sandbox_image_id value domain and keep the
  * failure-count/history SQL off hand-written stage literals, plus
- * src/contracts/review-gate.ts for the create path's score floor.
+ * src/contracts/review-gate.ts for the create path's score floor, and
+ * ./runtime-config-store for the official-workspace key — `setBotScope`'s guard
+ * names that row rather than guessing it, and this module never parses it.
  * The `db` parameter is a locally-declared narrow D1 face (types
  * only, zero imports) — a real `D1Database`, the bun:sqlite test double
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
@@ -33,6 +35,11 @@
  * served by `src/dashboard/targets-store.ts`. This store keeps only the
  * execution identity: credentials, model and sandbox configuration,
  * installations, and `review_enabled` as the OPERATIONAL pause.
+ *
+ * A bot also carries a SCOPE (migration 0058): `owned` serves its own workspace
+ * only, `shared` is offered platform-wide. Only a platform operator writes it,
+ * only through `setBotScope`, and only from inside the official workspace —
+ * that is a platform authorization, never workspace self-service.
  *
  * Semantics (route call sites rely on these):
  *   - getAppForWebhook / getAppByGithubId / getAppById return the row
@@ -123,6 +130,7 @@ import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
 import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
+import { OFFICIAL_WORKSPACE_KEY } from "./runtime-config-store";
 
 /** A row of `review_bots` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
@@ -200,6 +208,13 @@ export type GithubAppRow = {
   sandbox_image_id: string;
   created_at: string;
   updated_at: string;
+  /**
+   * The bot's scope (migration 0058): `owned` serves its own workspace only,
+   * `shared` is offered platform-wide. Only `setBotScope` writes it, and
+   * `targets-store.resolve` is its one review-path reader: a shared bot has no
+   * implicit target, so it resolves nothing until a claim binds an installation.
+   */
+  scope: BotScope;
   /** Owning workspace (migration 0026); present on every execution-facing read. */
   workspace_id?: string;
 };
@@ -300,6 +315,19 @@ export type AppInstallationRow = {
   /** GitHub login of the installation account; NULL = never observed. */
   account_login: string | null;
   seen_at: string;
+};
+
+/**
+ * One installation INCLUDING a removed one — the bound-state read. Unlike
+ * `AppInstallationRow` (the install-health panel's PRESENT rows), a removed
+ * installation is exactly what this answers: a target keeps its binding
+ * through an uninstall, and the settings block says reviews stopped.
+ */
+export type AppInstallationState = {
+  installation_id: number;
+  account_login: string | null;
+  /** NULL = GitHub still has it; a timestamp = observed absent (migration 0055). */
+  removed_at: string | null;
 };
 
 /**
@@ -1136,6 +1164,25 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
+     * One installation of this bot INCLUDING a removed one — the settings
+     * block's bound-state read. `removed_at IS NULL` is the present case; a
+     * stamped row still answers, because a target keeps its binding through an
+     * uninstall and the block has to say that reviews stopped.
+     */
+    async getInstallation(
+      appId: string,
+      installationId: number,
+    ): Promise<AppInstallationState | null> {
+      return db
+        .prepare(
+          `SELECT installation_id, account_login, removed_at FROM bot_installations
+           WHERE bot_id = ? AND installation_id = ?`,
+        )
+        .bind(appId, installationId)
+        .first<AppInstallationState>();
+    },
+
+    /**
      * The database's own UTC clock in the sub-second `YYYY-MM-DD HH:MM:SS.SSS`
      * form (`strftime('%Y-%m-%d %H:%M:%f','now')`). A caller captures this
      * BEFORE an upstream read so `reconcileInstallations` can tell which rows
@@ -1927,6 +1974,164 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       };
     },
   };
+}
+
+// --- bot scope (migration 0058, contract § 7.1) ------------------------------
+
+/** A bot's scope: `owned` serves its workspace only, `shared` is offered platform-wide. */
+export type BotScope = "owned" | "shared";
+
+/**
+ * The scope transition's outcome. Refusals are VALUES, not thrown strings: the
+ * route maps each one to its frozen status/body pair and never parses a message.
+ */
+export type BotScopeOutcome =
+  | { outcome: "ok"; scope: BotScope; sharedAt: string | null }
+  | { outcome: "bot_not_found" }
+  | { outcome: "outside_official_workspace" }
+  | { outcome: "confirm_required" };
+
+/** One live bot as the operator console lists it (contract § 8.3). */
+export type BotScopeRow = {
+  id: string;
+  name: string;
+  github_app_id: number;
+  workspace_id: string | null;
+  scope: BotScope;
+  shared_at: string | null;
+  deleted_at: string | null;
+};
+
+/** The state a transition starts from: the live bot and its current scope. */
+const BOT_SCOPE_READ_SQL = `
+  SELECT scope, shared_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
+
+const BOT_SCOPE_LIST_SQL = `
+  SELECT b.id, b.name, b.github_app_id, w.workspace_id, b.scope, b.shared_at, b.deleted_at
+    FROM review_bots b LEFT JOIN bot_workspaces w ON w.bot_id = b.id
+   WHERE b.deleted_at IS NULL
+   ORDER BY b.name, b.id`;
+
+/**
+ * The share's own guard, evaluated INSIDE the batch by both statements: the
+ * bot's workspace IS the official workspace right now, and that workspace is
+ * live. Reading the designation before the batch would let a share commit
+ * against a value an operator had already cleared or re-pointed, so the row is
+ * resolved in the same transaction that writes. The key comes from
+ * `runtime-config-store`; this module never parses that row.
+ */
+const officialWorkspaceGuardSql = (botIdRef: string) => `EXISTS (
+           SELECT 1 FROM bot_workspaces w
+             JOIN review_runtime_settings s
+               ON s.key = '${OFFICIAL_WORKSPACE_KEY}' AND s.value = w.workspace_id
+             JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL
+            WHERE w.bot_id = ${botIdRef})`;
+
+/**
+ * Audit row + scope write, in ONE batch, both carrying the same guards: the bot
+ * is live, its current scope is still the transition's FROM state (so two
+ * identical transitions land once), and — for a share — it belongs to the live
+ * official workspace. A refused write therefore appends nothing. `before` is a
+ * subquery against the not-yet-updated row: a bind cannot read the old value
+ * after the write, and the `after` pair is the value the writer computed.
+ */
+const BOT_SCOPE_SHARE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'runtime.bot_scope.set', 'bot', ?3,
+         json_object(
+           'before', json_object('scope', (SELECT scope FROM review_bots WHERE id = ?3),
+                                 'shared_at', (SELECT shared_at FROM review_bots WHERE id = ?3)),
+           'after', json_object('scope', 'shared', 'shared_at', ?4)),
+         ?5
+   WHERE EXISTS (SELECT 1 FROM review_bots b
+                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'shared'
+                    AND ${officialWorkspaceGuardSql("b.id")})`;
+
+const BOT_SCOPE_SHARE_SQL = `
+  UPDATE review_bots SET scope = 'shared', shared_at = ?2
+   WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'shared'
+     AND ${officialWorkspaceGuardSql("review_bots.id")}`;
+
+const BOT_SCOPE_UNSHARE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'runtime.bot_scope.set', 'bot', ?3,
+         json_object(
+           'before', json_object('scope', (SELECT scope FROM review_bots WHERE id = ?3),
+                                 'shared_at', (SELECT shared_at FROM review_bots WHERE id = ?3)),
+           'after', json_object('scope', 'owned', 'shared_at', NULL)),
+         ?4
+   WHERE EXISTS (SELECT 1 FROM review_bots b
+                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'owned')`;
+
+/**
+ * Unsharing is NOT gated on the official workspace: a stale share must stay
+ * revocable by the only role that can revoke it. It is gated on the FROM state,
+ * so a second revoke changes nothing.
+ */
+const BOT_SCOPE_UNSHARE_SQL = `
+  UPDATE review_bots SET scope = 'owned', shared_at = NULL
+   WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'owned'`;
+
+/**
+ * Move one bot between `owned` and `shared`, auditing accepted writes in the
+ * same batch. A same-value transition is a no-op that appends nothing;
+ * `shared → owned` needs an explicit `confirm: true`; `owned → shared` needs the
+ * bot's workspace to BE the official workspace. Unsharing ignores that last
+ * condition on purpose (a stale share stays revocable).
+ */
+export async function setBotScope(
+  db: AppsStoreD1,
+  input: { botId: string; scope: BotScope; confirm?: boolean; actor: string; now: string },
+): Promise<BotScopeOutcome> {
+  const { botId, scope, actor, now } = input;
+  const current = await db
+    .prepare(BOT_SCOPE_READ_SQL)
+    .bind(botId)
+    .first<{ scope: BotScope; shared_at: string | null }>();
+  if (!current) return { outcome: "bot_not_found" };
+  if (current.scope === scope) return { outcome: "ok", scope, sharedAt: current.shared_at };
+  if (scope === "owned" && input.confirm !== true) return { outcome: "confirm_required" };
+
+  // Every precondition is re-checked inside the batch, so the pre-read above
+  // only names the refusal early — it authorizes nothing.
+  const [, write] =
+    scope === "shared"
+      ? await db.batch([
+          db
+            .prepare(BOT_SCOPE_SHARE_AUDIT_SQL)
+            .bind(crypto.randomUUID(), actor, botId, now, now),
+          db.prepare(BOT_SCOPE_SHARE_SQL).bind(botId, now),
+        ])
+      : await db.batch([
+          db.prepare(BOT_SCOPE_UNSHARE_AUDIT_SQL).bind(crypto.randomUUID(), actor, botId, now),
+          db.prepare(BOT_SCOPE_UNSHARE_SQL).bind(botId),
+        ]);
+
+  if ((write?.meta.changes ?? 0) > 0) {
+    return { outcome: "ok", scope, sharedAt: scope === "shared" ? now : null };
+  }
+
+  // The guarded write changed nothing, so it appended no audit row either.
+  // Re-read to say why: a bot retired in between is "not found"; a row that
+  // already holds the target scope means a concurrent identical transition won,
+  // which is this call's outcome too, carrying the state that was persisted;
+  // otherwise the share's designation guard refused it (the only other guard,
+  // since an unshare's FROM state is checked in the same statement).
+  const persisted = await db
+    .prepare(BOT_SCOPE_READ_SQL)
+    .bind(botId)
+    .first<{ scope: BotScope; shared_at: string | null }>();
+  if (persisted === null) return { outcome: "bot_not_found" };
+  if (persisted.scope === scope) return { outcome: "ok", scope, sharedAt: persisted.shared_at };
+  return { outcome: "outside_official_workspace" };
+}
+
+/** Every live bot with its scope, name-ordered — the operator console's list. */
+export async function listBotScopes(db: AppsStoreD1): Promise<BotScopeRow[]> {
+  const res = await db.prepare(BOT_SCOPE_LIST_SQL).all<BotScopeRow>();
+  return res.results;
 }
 
 /** The `pull_requests` columns the ledger reads (`number` = `pr_number`). */

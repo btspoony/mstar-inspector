@@ -17,6 +17,7 @@ import { RuntimeHarnessSection } from "../../src/spa/pages/SettingsPage";
 const payload = (sandboxImageId: string): SettingsManagePayload =>
   ({
     can_manage: true,
+    installation: null,
     app: { sandbox_image_id: sandboxImageId, github_slug: "acme", review_trigger_mode: "every_push" },
     sandbox_images: [
       { id: "omp", enabled: true },

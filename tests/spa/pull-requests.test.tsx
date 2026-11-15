@@ -72,9 +72,11 @@ const identityPayload: SettingsPayload = {
 const managePayload = {
   ...identityPayload,
   can_manage: true,
+  installation: null,
   app: {
     ...IDENTITY_APP,
     last_webhook_at: null,
+    scope: "owned" as const,
     sandbox_image_id: "omp",
     review_trigger_mode: "every_push" as const,
     review_level: null,

@@ -12,6 +12,8 @@
  */
 import { Hono } from "hono";
 import { isPlatformOperator } from "../dashboard/index";
+import { listBotScopes, setBotScope } from "../dashboard/apps-store";
+import { createInstallClaimsStore } from "../dashboard/install-claims-store";
 import { listAllActiveSupportGrants } from "../dashboard/operator-store";
 import {
   CHECK_TERMINALIZE_MAX,
@@ -29,15 +31,18 @@ import {
   RECHECK_ASSIGNMENT_MIN,
   RuntimeConfigError,
   SYSTEM_CONCURRENCY_MAX,
+  UnknownWorkspaceError,
   getCheckBudgets,
   getCommentClaimSettings,
   getRecheckAssignmentMaxBytes,
   getSystemConcurrency,
   isConcurrencyValue,
   readDefaultReviewLevel,
+  readOfficialWorkspaceId,
   setCheckBudgets,
   setCommentClaimSettings,
   setDefaultReviewLevel,
+  setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
   type CheckBudgetValues,
@@ -184,12 +189,23 @@ async function readRuntime(c: AdminContext): Promise<Response> {
   const db = c.env.DB;
   if (!db) return c.notFound();
   const failures = createFailureStore(db);
-  const [system, budgets, claim, level, recheck, admissionDrops24h, githubRateLimited24h, queue] = await Promise.all([
+  const [
+    system,
+    budgets,
+    claim,
+    level,
+    recheck,
+    officialWorkspaceId,
+    admissionDrops24h,
+    githubRateLimited24h,
+    queue,
+  ] = await Promise.all([
     getSystemConcurrency(db),
     getCheckBudgets(db),
     getCommentClaimSettings(db),
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
+    readOfficialWorkspaceId(db),
     failures.countAdmissionDrops24h(),
     failures.countGithubRateLimited24h(),
     readQueueBacklog(c.env.REVIEW_QUEUE),
@@ -199,6 +215,9 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     min: CONCURRENCY_MIN,
     max: SYSTEM_CONCURRENCY_MAX,
     degraded: system.degraded,
+    // The one workspace whose bots may be shared; `null` = none designated,
+    // which disables new shares and nothing else.
+    officialWorkspaceId,
     // §7.10 Check budgets: global, absent-row defaults documented in the store.
     checkBudgets: {
       terminalizeMs: budgets.terminalizeMs,
@@ -389,6 +408,145 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     );
   }
   return c.json({ concurrency: await setSystemConcurrency(db, concurrency, login) });
+}
+
+/**
+ * Set or clear the platform's official workspace (contract § 8.1): the one
+ * tenant whose bots may be offered platform-wide. `null` clears the row and is
+ * the only clear — an empty string is a body-shape error, never "clear". The
+ * value's validation, the write and its audit row belong to the leaf store.
+ */
+async function assignOfficialWorkspace(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  let value: unknown;
+  try {
+    const body = (await c.req.json()) as Record<string, unknown>;
+    // `null` is a legal body (clear). A missing field leaves `value` undefined,
+    // which the shape gate below refuses — clearing is never implied.
+    if (typeof body === "object" && body !== null && "workspaceId" in body) {
+      value = body.workspaceId;
+    }
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  if (!(value === null || (typeof value === "string" && value.length > 0))) {
+    return c.json({ error: "body must be { workspaceId: <id> | null }" }, 400);
+  }
+  try {
+    return c.json({
+      workspaceId: await setOfficialWorkspace(db, {
+        workspaceId: value,
+        actor: login,
+        now: new Date().toISOString(),
+      }),
+    });
+  } catch (error) {
+    // An unknown, retired or malformed id: nothing was written, nothing was
+    // audited. The refusal names the condition, not the value.
+    if (error instanceof UnknownWorkspaceError) return c.json({ error: "workspace not found" }, 400);
+    throw error;
+  }
+}
+
+/**
+ * Move one bot between `owned` and `shared` (contract § 8.2). The transition
+ * table, its refusals and the audit row are the store's; this handler only
+ * shapes the body and maps each refusal to its frozen status/body pair.
+ */
+async function assignBotScope(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  let scope: unknown;
+  let confirm: unknown;
+  try {
+    const body = (await c.req.json()) as { scope?: unknown; confirm?: unknown };
+    scope = body.scope;
+    confirm = body.confirm;
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  if (scope !== "owned" && scope !== "shared") {
+    return c.json({ error: 'body must be { scope: "owned" | "shared" }' }, 400);
+  }
+  const botId = c.req.param("botId");
+  if (!botId) return c.notFound();
+  const outcome = await setBotScope(db, {
+    botId,
+    scope,
+    // Only a literal `true` confirms a revoke; any other value refuses it.
+    confirm: confirm === true,
+    actor: login,
+    now: new Date().toISOString(),
+  });
+  if (outcome.outcome === "bot_not_found") return c.json({ error: "bot not found" }, 404);
+  if (outcome.outcome === "outside_official_workspace") {
+    return c.json({ error: "bot is outside the official workspace" }, 409);
+  }
+  if (outcome.outcome === "confirm_required") {
+    return c.json({ error: "unsharing requires confirm: true" }, 400);
+  }
+  return c.json({ botId, scope: outcome.scope, sharedAt: outcome.sharedAt });
+}
+
+/**
+ * Clear one target's installation binding (the repair path). A wrong bind is a
+ * state change no workspace member can undo — the claim that made it is
+ * consumed, and the bind batch refuses every later installation while a
+ * binding exists — so the operator gets the one write that makes the target
+ * claimable again. `account_login` is cleared with the id because it was
+ * copied from that installation; a surviving login would describe a binding
+ * that no longer exists.
+ *
+ * Idempotent by design: a target that holds no binding answers 200 with
+ * `unbound: false`, so a retried repair converges instead of reporting an
+ * error. An unknown or soft-deleted target is `404 target not found`.
+ *
+ * The store writes the audit row (`bot.target_unbind`, carrying the cleared
+ * before-state) in the same batch as the clear, so a refused repair appends
+ * nothing and an accepted one cannot lose its evidence.
+ */
+async function unbindTargetBinding(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  const targetId = c.req.param("targetId");
+  if (!targetId) return c.notFound();
+  const outcome = await createInstallClaimsStore(db).unbindTarget({
+    targetId,
+    actor: login,
+    now: new Date().toISOString(),
+  });
+  if (outcome.outcome === "target_not_found") return c.json({ error: "target not found" }, 404);
+  return c.json({ targetId, unbound: outcome.outcome === "unbound" });
+}
+
+/**
+ * Every live bot with its scope (contract § 8.3), name-ordered. A console read
+ * is unaudited: on this surface audit rows attach to writes.
+ */
+async function readBots(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  const rows = await listBotScopes(db);
+  return c.json({
+    bots: rows.map((row) => ({
+      botId: row.id,
+      name: row.name,
+      githubAppId: row.github_app_id,
+      workspaceId: row.workspace_id,
+      scope: row.scope,
+      sharedAt: row.shared_at,
+      deletedAt: row.deleted_at,
+    })),
+  });
 }
 
 /**
@@ -639,6 +797,10 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/users", handler: readUsers },
   { method: "patch", path: "/api/workspaces/:id/plan", handler: assignPlan },
   { method: "patch", path: "/api/workspaces/:id/slug", handler: setSlug },
+  { method: "patch", path: "/api/official-workspace", handler: assignOfficialWorkspace },
+  { method: "patch", path: "/api/bots/:botId/scope", handler: assignBotScope },
+  { method: "post", path: "/api/targets/:targetId/unbind", handler: unbindTargetBinding },
+  { method: "get", path: "/api/bots", handler: readBots },
   { method: "get", path: "/api/support-grants", handler: readSupportGrants },
   { method: "post", path: "/api/support-grants", handler: createGrant },
   { method: "delete", path: "/api/support-grants/:id", handler: revokeGrant },

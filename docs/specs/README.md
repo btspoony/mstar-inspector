@@ -12,3 +12,4 @@ These specifications describe current contracts; decision history lives in the A
 | Feature | [Review trigger policy](feature/review-trigger-policy.md) |
 | Feature | [App detail visibility](feature/app-detail-visibility.md) |
 | Feature | [Review targets](feature/review-targets.md) |
+| Feature | [Bot scope and installation claiming](feature/bot-scope-and-claiming.md) |

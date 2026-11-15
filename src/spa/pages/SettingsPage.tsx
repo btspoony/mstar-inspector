@@ -54,6 +54,7 @@ import {
   modelChainTabs,
   parseCheckMinScoreSettings,
   parseConcurrencySettings,
+  parseInstallClaimResult,
   parseStoredCheckMinScore,
   parseStoredConcurrency,
   PR_VERDICTS,
@@ -857,21 +858,55 @@ export function InstallationsSection({
 }
 
 /**
- * The Installed tab's first block: the shareable GitHub installation entry
- * point. The href is derived from the cached GitHub slug; an App whose
- * metadata has not synced yet has no slug, so the block explains that instead
- * of rendering a dead link (`installations/new` needs a slug).
+ * The Installed tab's first block: the GitHub installation entry point.
+ *
+ * An `owned` bot keeps the plain share link (derived from the cached GitHub
+ * slug; an App whose metadata has not synced explains that instead of
+ * rendering a dead link). A `shared` bot instead offers the CLAIM action: the
+ * claim row is the only thing that lets GitHub's stateless setup redirect bind
+ * this target, so sending the user straight to `installations/new` would create
+ * an installation no target can attribute. Either way the block names the
+ * target's bound installation — its account, and when GitHub no longer has it,
+ * that reviews stopped until it comes back.
  */
 export function AppInstallSection({
   locale,
+  appId,
   app,
+  installation,
 }: {
   locale: SpaBoot["locale"];
+  appId: string;
   app: SettingsManagePayload["app"];
+  installation: SettingsManagePayload["installation"];
 }) {
   const slug = app.github_slug;
   const name = appDisplayName(app);
   const href = slug ? `https://github.com/apps/${encodeURIComponent(slug)}/installations/new` : null;
+  const [claiming, setClaiming] = useState(false);
+  const [claimFailed, setClaimFailed] = useState(false);
+
+  /** Record the claim, then leave for GitHub's install page. */
+  async function startClaim(): Promise<void> {
+    setClaiming(true);
+    setClaimFailed(false);
+    try {
+      const res = await postForm(`${apiBase()}/apps/${encodeURIComponent(appId)}/claim`, {});
+      const result = res.status === 200 ? parseInstallClaimResult(JSON.parse(res.body)) : null;
+      if (result === null) {
+        setClaimFailed(true);
+        return;
+      }
+      // A full navigation out to GitHub; the claim row carries the intent, so
+      // the callback can attribute the installation the user creates there.
+      window.location.assign(result.installationUrl);
+    } catch {
+      setClaimFailed(true);
+    } finally {
+      setClaiming(false);
+    }
+  }
+
   return (
     <FlowSection title={t(locale, "settings.install")} subtitle={slug ? t(locale, "settings.installCopy") : undefined}>
       <div className="flex items-start gap-4">
@@ -882,7 +917,27 @@ export function AppInstallSection({
         />
         <div className="flex min-w-0 flex-col gap-1">
           <p className="font-semibold">{name}</p>
-          {href ? (
+          {href === null ? (
+            <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
+          ) : app.scope === "shared" && installation === null ? (
+            <>
+              <p className="text-sm text-muted-foreground">{t(locale, "settings.installClaimCopy")}</p>
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-fit"
+                disabled={claiming}
+                onClick={() => void startClaim()}
+              >
+                {t(locale, "settings.installClaim")}
+              </Button>
+              {claimFailed ? (
+                <p role="status" className="text-sm text-(--tone-warn-fg)">
+                  {t(locale, "settings.installClaimFailed")}
+                </p>
+              ) : null}
+            </>
+          ) : (
             <a
               href={href}
               target="_blank"
@@ -893,9 +948,17 @@ export function AppInstallSection({
               {t(locale, "settings.installLink")}
               <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             </a>
-          ) : (
-            <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
           )}
+          {installation === null ? null : (
+            <p className="text-sm text-muted-foreground">
+              {installation.account_login === null
+                ? t(locale, "settings.installBoundNoAccount", { id: String(installation.id) })
+                : t(locale, "settings.installBoundAccount", { account: installation.account_login })}
+            </p>
+          )}
+          {installation !== null && installation.removed ? (
+            <p className="text-sm text-(--tone-warn-fg)">{t(locale, "settings.installRemoved")}</p>
+          ) : null}
         </div>
       </div>
     </FlowSection>

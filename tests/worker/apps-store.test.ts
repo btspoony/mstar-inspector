@@ -22,7 +22,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, createTestD1 } from "../store/helpers";
+import { createMigratedTestD1, createTestD1, execMigrationScript } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { D1Like } from "../../src/store/types";
@@ -47,9 +47,9 @@ function rawRun(
   db.raw.prepare(sql).run(...params);
 }
 
-/** Apply one migration file verbatim (filename order = wrangler order). */
+/** Apply one migration file through the fail-fast executor (filename order = wrangler order). */
 function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void {
-  db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
 }
 
 /** A DB shaped like production at migration 0002: 0001/0002 + seeded rows. */function createSeededD1(): ReturnType<typeof createTestD1> {

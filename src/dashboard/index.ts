@@ -61,6 +61,7 @@ import {
   type ManifestHoldPayload,
 } from "./manifest";
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";
+import { createInstallClaimsStore } from "./install-claims-store";
 import {
   createReviewBotsStore,
   type DeliverySummary,
@@ -3526,6 +3527,16 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const checkGate = await targets.getCheckGate(gate.scope.workspaceId, gate.target.id);
     const allowlist = await targets.getAllowlist(gate.scope.workspaceId, gate.target.id);
     const githubVisibility = await apps.getGithubVisibility(app.id);
+    // The target's bound installation, with `removed` read off
+    // `bot_installations.removed_at`: the binding survives an uninstall, so the
+    // block can say the account it reviews as AND that reviews stopped. A NULL
+    // `installation_id` is the unbound state. A binding whose installation row
+    // is gone entirely (impossible through the bind batch, possible for a
+    // hand-seeded row) still reports the id it holds.
+    const boundInstallation =
+      gate.target.installation_id === null
+        ? null
+        : await apps.getInstallation(app.id, gate.target.installation_id);
     if (allowlist === null) {
       throw new Error(`app settings row ${app.id} vanished while reading its review gate configuration`);
     }
@@ -3573,9 +3584,13 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // every field nullable (NULL = never synced / absent upstream, the
         // old-row degradation) and present on BOTH faces (AC3: the
         // non-manager payload carries them too). Public profile fields only —
-        // the PEM / webhook-secret envelopes never leave the row.
+        // the PEM / webhook secret envelopes never leave the row.
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
+        // The bot's scope (migration 0058). MANAGER face only: it decides
+        // whether the install block offers the claim action, and only a
+        // manager can claim.
+        scope: app.scope,
         // The local App UID — with the workspace id it composes the absolute
         // delivery URL the manager identity card shows (the repoint surface).
         id: app.id,
@@ -3585,6 +3600,16 @@ const appSettingsRoute = async (c: DashboardContext) => {
         github_metadata_synced_at: app.github_metadata_synced_at ?? null,
       },
       installations,
+      // The target's bound installation (`null` = unbound). `removed` is the
+      // `bot_installations.removed_at` stamp: the binding stays, reviews stop.
+      installation:
+        boundInstallation === null
+          ? null
+          : {
+              id: boundInstallation.installation_id,
+              account_login: boundInstallation.account_login,
+              removed: boundInstallation.removed_at !== null,
+            },
       deliveries: deliveries.map((d) => ({
         event_name: d.event_name,
         outcome: d.outcome,
@@ -5208,6 +5233,55 @@ async function requireAppManagerJson(
   return { ok: true, app, target, scope: member.scope, db: member.db, store };
 }
 
+/**
+ * `POST /api/apps/:appId/claim` — record (or refresh) this session's intent to
+ * bind an installation to the App's target, and hand the SPA the GitHub page to
+ * send the user to. `access: "write"` like every other manager mutation:
+ * `requireMember` + `canManageApp`, so a granted support operator reaches the
+ * existing write-route refusal and no impersonated principal creates a claim.
+ *
+ * The refusals are the contract's, in order: an unknown, foreign, soft-deleted
+ * or non-numeric App is `404 unknown app` (never 403); a caller who cannot
+ * manage it is `403 forbidden`; no single live target is `404 no target`; a bot
+ * that is not `shared` advertises nothing, so `404 bot is not shared` rather
+ * than "forbidden"; a never-synced slug is `409 bot has no installation url`
+ * because there is no page to send the user to; a target that already holds a
+ * binding is `409 target already bound` — the bind batch refuses a different
+ * installation and a same-installation claim has nothing left to do, so the
+ * claim would only send the user to GitHub to fail. The operator's unbind is
+ * the repair path, and it is what makes this action available again.
+ */
+const appClaimRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const apps = createReviewBotsStore(member.db);
+  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", member.scope);
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  const target = await createTargetsStore(member.db).resolveInWorkspace(
+    member.scope.workspaceId,
+    app.id,
+  );
+  if (!target) return c.json({ error: "no target" }, 404);
+  if (app.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
+  if (app.github_slug === null) return c.json({ error: "bot has no installation url" }, 409);
+  if (target.installation_id !== null) return c.json({ error: "target already bound" }, 409);
+
+  const claim = await createInstallClaimsStore(member.db).createOrRefreshClaim({
+    userId: member.user.id,
+    workspaceId: member.scope.workspaceId,
+    targetId: target.id,
+    now: new Date().toISOString(),
+  });
+  // No `state`: GitHub preserves none, so the claim row is the only carrier of
+  // intent and `/bot/setup` treats the signed-in session as the identity.
+  return c.json({
+    claimId: claim.id,
+    expiresAt: claim.expiresAt,
+    installationUrl: `https://github.com/apps/${encodeURIComponent(app.github_slug)}/installations/new`,
+  });
+};
+
 /** The ledger scope the PR faces bind: the resolved target, its workspace, its bot. */
 function ledgerScopeOf(gate: {
   app: GithubAppRow;
@@ -5513,6 +5587,7 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
+  { method: "post", path: "/api/apps/:appId/claim", handler: appClaimRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/keys/verify", handler: appKeyVerifyRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/keys/usage", handler: appKeyUsageRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },

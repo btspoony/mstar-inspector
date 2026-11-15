@@ -960,6 +960,17 @@ export const en = {
     installLinkAria: "Install {name} on GitHub in a new tab",
     installNoSlug:
       "This App has no GitHub slug yet, so there is no installation link. Refresh the GitHub identity, then share the link.",
+    // Installed tab: claiming, for a bot shared platform-wide. The claim is
+    // what lets GitHub's stateless setup redirect bind this target, so the
+    // block sends the user to GitHub only after recording it.
+    installClaim: "Claim an installation",
+    installClaimCopy:
+      "This bot is shared platform-wide. Claiming records which target the installation you create next reviews, then opens GitHub.",
+    installClaimFailed: "The claim could not be created. Reload this page and try again.",
+    installBoundAccount: "Bound installation account: {account}",
+    installBoundNoAccount: "Bound to installation {id}; GitHub has not reported its account yet.",
+    installRemoved:
+      "GitHub no longer has this installation, so reviews are paused. Installing it again resumes them on this target.",
     // Installed tab: the owner allowlist (migration 0045).
     allowlist: "Owner allowlist",
     allowlistCopy: "With the switch on, only these repository owners are reviewed.",

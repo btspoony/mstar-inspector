@@ -23,7 +23,7 @@ The five moved columns leave `review_bots` through `ALTER TABLE … DROP COLUMN`
 
 ### Webhook resolution
 
-`POST /webhook/{workspaceId}/{botId}` is unchanged. After signature verification and classification, the delivery resolves `(bot_id, installation.id)` to a target: the bound installation first, else the bot's single non-deleted target, else nothing. No target answers 200, logs `no_target_for_repo`, records outcome `ignored`, enqueues nothing and writes no ledger row. Allowlist, trigger mode and business pause come from the target; the mention slug comes from the bot; either pause flag suppresses enqueue.
+`POST /webhook/{workspaceId}/{botId}` is unchanged. After signature verification and classification, the delivery resolves `(bot_id, installation.id)` to a target: the bound installation first — honoured only while no `bot_installations` row for that pair carries `removed_at`, because a removed binding resolves nothing and does not fall through to the next step — else the bot's single non-deleted target, a step suppressed for a `shared` bot with no binding, else nothing. No target answers 200, logs `no_target_for_repo`, records outcome `ignored`, enqueues nothing and writes no ledger row. Allowlist, trigger mode and business pause come from the target; the mention slug comes from the bot; either pause flag suppresses enqueue.
 
 ### Review job payload
 
@@ -51,6 +51,7 @@ Manifest commit writes one bot, its workspace mapping and one unbound target (`i
 - Tenant reads bind both ids in SQL; execution reads bind neither workspace predicate nor target.
 - The review job payload names both ids; no code reads `appRef`.
 - The five moved columns never return to `review_bots`.
+- The same `account_login` on more than one live target in one workspace is a decision for the operator, never an automatic repair.
 
 ## Where it lives
 
@@ -60,6 +61,7 @@ Manifest commit writes one bot, its workspace mapping and one unbound target (`i
 - `src/contracts/review-job.ts`, `src/pipeline/consumer.ts`, `src/worker/index.ts`, `src/worker/check-reconcile.ts`
 - `src/store/artifact-store.ts`, `src/spa/pages/data.ts`
 - `scripts/workspace-backfill.sql` (deploy-time replay)
+- `scripts/audit-owner-overlap.sql` (read-only: workspaces where one account owns more than one live target)
 
 ## Change obligations
 

@@ -9,7 +9,13 @@
  * the `shape()` call that declares it; there is no list here to drift from.
  */
 import { describe, expect, test } from "bun:test";
-import { createTestD1 } from "../store/helpers";
+import { Database } from "bun:sqlite";
+import {
+  createTestD1,
+  execMigrationScript,
+  splitSqlStatements,
+  type TestD1,
+} from "../store/helpers";
 import { FIXTURE_SHAPES, applyMigrations, migrationSql } from "./migration-shapes";
 
 /**
@@ -107,4 +113,90 @@ describe("fixture shapes (review bot vocabulary)", () => {
       );
     });
   }
+});
+
+/**
+ * Every fixture migration must run through the fail-fast executor: a script
+ * whose second statement fails has to abort, not leave the earlier statements
+ * applied and the rest of the file skipped. A whole-file `exec` cannot promise
+ * that — on the pinned bun a failing statement inside a multi-statement string
+ * is skipped while the rest still runs.
+ */
+describe("fixture migrations (fail-fast)", () => {
+  /** Two good statements around a failing one: `after` marks a skipped abort. */
+  const SCRIPT = [
+    "CREATE TABLE fail_fast_probe (v TEXT);",
+    "INSERT INTO fail_fast_probe (v) VALUES ('first');",
+    "INSERT INTO fail_fast_missing (v) VALUES ('boom');",
+    "INSERT INTO fail_fast_probe (v) VALUES ('after');",
+  ].join("\n");
+
+  test("a failing statement aborts and the rest of the script never runs — fail-fast", () => {
+    const db = createTestD1();
+    try {
+      expect(() => execMigrationScript(db.raw, SCRIPT)).toThrow("no such table: fail_fast_missing");
+      expect(db.raw.query("SELECT v FROM fail_fast_probe").all()).toEqual([{ v: "first" }]);
+    } finally {
+      db.raw.close();
+    }
+  });
+
+  test("applyMigrations hands each statement over on its own — fail-fast", () => {
+    // A bare connection: the test is about what `applyMigrations` hands over.
+    const db = new Database(":memory:");
+    const handed: string[] = [];
+    // `applyMigrations` touches nothing but the connection's `exec`, so
+    // recording there is enough to see whether a script arrived whole.
+    const recording = {
+      raw: {
+        exec: (sql: string) => {
+          handed.push(sql);
+          db.exec(sql);
+        },
+      },
+    } as unknown as TestD1;
+    try {
+      applyMigrations(recording, ["0059_install_claims.sql"]);
+      // The expectation is HAND-WRITTEN. Deriving it from `splitSqlStatements`
+      // would be satisfied by any splitter output, including a splitter that
+      // stopped splitting (one handed-over blob) or split inside a literal.
+      expect(handed).toHaveLength(3);
+      // The statement's head, with the leading `--` comment lines the splitter
+      // keeps attached skipped: three words identify each statement.
+      expect(
+        handed.map((statement) =>
+          (statement
+            .split("\n")
+            .map((line) => line.trim())
+            .find((line) => line !== "" && !line.startsWith("--")) ?? ""
+          )
+            .split(/\s+/)
+            .slice(0, 3)
+            .join(" "),
+        ),
+      ).toEqual([
+        "CREATE TABLE install_claims",
+        "CREATE INDEX install_claims_user_open",
+        "CREATE UNIQUE INDEX",
+      ]);
+      // ...and each one reached the connection whole: the schema is what the
+      // three statements describe, nothing more and nothing less.
+      expect(
+        db
+          .query(
+            `SELECT name FROM sqlite_master
+              WHERE tbl_name = 'install_claims' AND type IN ('table','index')
+                AND name NOT LIKE 'sqlite_%'
+              ORDER BY name`,
+          )
+          .all(),
+      ).toEqual([
+        { name: "install_claims" },
+        { name: "install_claims_live_target" },
+        { name: "install_claims_user_open" },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
 });

@@ -260,6 +260,7 @@ describe("members/apps/settings parsers", () => {
     };
     const ok = parseSettings({
       can_manage: true,
+      installation: null,
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
       app: {
@@ -270,6 +271,7 @@ describe("members/apps/settings parsers", () => {
         review_enabled: true,
         created_by: "mallory",
         last_webhook_at: null,
+        scope: "owned" as const,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
         review_level: null,
@@ -312,6 +314,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the sandbox image selection + selector choices", () => {
     const manageBase = {
       can_manage: true,
+      installation: null,
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
       app: {
@@ -322,6 +325,7 @@ describe("members/apps/settings parsers", () => {
         review_enabled: true,
         created_by: "mallory",
         last_webhook_at: null,
+        scope: "owned" as const,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
         review_level: null,
@@ -362,6 +366,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the review trigger mode and review depth on the manage face; off-vocabulary fails the parse", () => {
     const base = {
       can_manage: true,
+      installation: null,
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
       app: {
@@ -372,6 +377,7 @@ describe("members/apps/settings parsers", () => {
         review_enabled: true,
         created_by: "mallory",
         last_webhook_at: null,
+        scope: "owned" as const,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
         review_level: null,
@@ -429,6 +435,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the review gate, allowlist and visibility on the manage face; malformed values fail the parse", () => {
     const base = {
       can_manage: true,
+      installation: null,
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
       app: {
@@ -439,6 +446,7 @@ describe("members/apps/settings parsers", () => {
         review_enabled: true,
         created_by: "mallory",
         last_webhook_at: null,
+        scope: "owned" as const,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
         review_level: null,
@@ -541,6 +549,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings separates configured state from the catalog", () => {
     const manageBase = {
       can_manage: true,
+      installation: null,
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
       app: {
@@ -551,6 +560,7 @@ describe("members/apps/settings parsers", () => {
         review_enabled: true,
         created_by: "mallory",
         last_webhook_at: null,
+        scope: "owned" as const,
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
         review_level: null,
@@ -701,6 +711,7 @@ describe("members/apps/settings parsers", () => {
     expect(
       parseSettings({
         can_manage: true,
+        installation: null,
         workspace_id: "ws_0123456789abcdefghijkl",
         target_id: "rt-501",
         app: {
@@ -711,6 +722,7 @@ describe("members/apps/settings parsers", () => {
           review_enabled: true,
           created_by: "mallory",
           last_webhook_at: null,
+          scope: "owned" as const,
           sandbox_image_id: "omp",
           review_trigger_mode: "every_push",
           review_level: null,
@@ -784,6 +796,7 @@ describe("model chain tab model", () => {
 describe("provider catalog rows + add selection", () => {
   const manageBase = {
     can_manage: true,
+    installation: null,
     workspace_id: "ws_0123456789abcdefghijkl",
     target_id: "rt-501",
     app: {
@@ -794,6 +807,7 @@ describe("provider catalog rows + add selection", () => {
       review_enabled: true,
       created_by: "mallory",
       last_webhook_at: null,
+      scope: "owned" as const,
       sandbox_image_id: "omp",
       review_trigger_mode: "every_push",
       review_level: null,

@@ -1,8 +1,11 @@
 /**
  * Migration tests — the DDL in
  * `migrations/0001_reviews.sql` + `0002_mstar_review_v1.sql` is the single
- * source of truth; these tests execute it verbatim through the bun:sqlite
- * test double and assert the schema contract:
+ * source of truth; these tests execute it statement by statement through
+ * `execMigrationScript` (`./helpers`) on the bun:sqlite test double, which is
+ * fail-fast: a statement that fails aborts the file instead of being skipped,
+ * so a schema that cannot be built is never half-applied here. They assert the
+ * schema contract:
  *   - reviews / findings tables + indexes exist
  *   - UNIQUE (installation_id, owner, repo, pr_number, head_sha) rejects a
  *     second row for the same sha (authoritative dedup, must not weaken)
@@ -3275,5 +3278,201 @@ describe("migrations/0057_review_targets.sql", () => {
         `${column} = ${bad}`,
       ).toThrow();
     }
+  });
+});
+
+describe("migrations/0058_review_bot_scope.sql", () => {
+  const SCOPE_MIGRATION = "0058_review_bot_scope.sql";
+
+  /** Production's shape at 0057: every file before this one, in order. */
+  function preScopeDb(): TestD1 {
+    const db = createTestD1();
+    for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
+      (migration) => migrationNumber(migration) < migrationNumber(SCOPE_MIGRATION),
+    )) {
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  function botColumns(db: TestD1): Array<{ name: string; notnull: number; dflt_value: unknown }> {
+    return db.raw.query("PRAGMA table_info(review_bots)").all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: unknown;
+    }>;
+  }
+
+  test("adds the two columns with the contract's NOT NULL default and nothing else", () => {
+    const db = preScopeDb();
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+            status, created_at, updated_at)
+         VALUES ('bot-pre-scope', 9001, 'bot-pre-scope', 'enc', 'enc', 'acme',
+                 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, SCOPE_MIGRATION), "utf8"));
+
+    const columns = botColumns(db);
+    expect(columns.find((c) => c.name === "scope")).toMatchObject({ notnull: 1 });
+    expect(columns.find((c) => c.name === "scope")?.dflt_value).toBe("'owned'");
+    expect(columns.find((c) => c.name === "shared_at")).toMatchObject({ notnull: 0, dflt_value: null });
+
+    // A pre-column bot is owned and has never been shared: the default is the
+    // whole backfill.
+    expect(db.raw.query("SELECT scope, shared_at FROM review_bots WHERE id = 'bot-pre-scope'").get()).toEqual({
+      scope: "owned",
+      shared_at: null,
+    });
+  });
+
+  test("the CHECK refuses an unknown scope and admits both contract values", () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+            status, created_at, updated_at)
+         VALUES ('bot-scope-check', 9002, 'bot-scope-check', 'enc', 'enc', 'acme',
+                 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+
+    expect(db.raw.query("SELECT scope, shared_at FROM review_bots WHERE id = 'bot-scope-check'").get()).toEqual({
+      scope: "owned",
+      shared_at: null,
+    });
+
+    for (const scope of ["shared", "owned"] as const) {
+      db.raw.prepare("UPDATE review_bots SET scope = ? WHERE id = 'bot-scope-check'").run(scope);
+      expect(db.raw.query("SELECT scope FROM review_bots WHERE id = 'bot-scope-check'").get()).toEqual({ scope });
+    }
+
+    for (const bad of ["global", "SHARED", "", "owned ", 1]) {
+      expect(
+        () => db.raw.prepare("UPDATE review_bots SET scope = ? WHERE id = 'bot-scope-check'").run(bad),
+        `scope = ${String(bad)}`,
+      ).toThrow();
+    }
+  });
+});
+
+describe("install_claims (migrations/0059_install_claims.sql)", () => {
+  /** The claim's three foreign keys need a user, a bot, its workspace and a target. */
+  function seedClaimParents(db: TestD1): void {
+    db.raw
+      .prepare(
+        `INSERT INTO users (id, github_login, role, created_at)
+         VALUES ('user-claims', 'mallory', 'member', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+            status, created_at, updated_at)
+         VALUES ('bot-claims', 9101, 'bot-claims', 'enc', 'enc', 'acme', 'active',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw.prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-claims', 'default')`).run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES ('target-claims', 'default', 'bot-claims', 'target-claims', 'acme',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+  }
+
+  function insertClaim(db: TestD1, id: string, consumedAt: string | null = null): void {
+    db.raw
+      .prepare(
+        `INSERT INTO install_claims (id, user_id, workspace_id, target_id, created_at, expires_at, consumed_at)
+         VALUES (?, 'user-claims', 'default', 'target-claims',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z', ?)`,
+      )
+      .run(id, consumedAt);
+  }
+
+  test("install_claims carries the contract's eight columns, a NULL consume pair and its two indexes", () => {
+    const db = createMigratedTestD1();
+    const columns = db.raw.query("PRAGMA table_info(install_claims)").all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: unknown;
+    }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "id",
+      "user_id",
+      "workspace_id",
+      "target_id",
+      "created_at",
+      "expires_at",
+      "consumed_at",
+      "consumed_token",
+    ]);
+    for (const column of ["user_id", "workspace_id", "target_id", "created_at", "expires_at"]) {
+      expect(columns.find((c) => c.name === column)?.notnull, column).toBe(1);
+    }
+    // `consumed_at` is the live predicate: unclaimed means NULL, and nothing
+    // writes a default into it. `consumed_token` is the consuming REQUEST's
+    // identity — the instant alone cannot prove ownership inside the batch.
+    expect(columns.find((c) => c.name === "consumed_at")).toMatchObject({ notnull: 0, dflt_value: null });
+    expect(columns.find((c) => c.name === "consumed_token")).toMatchObject({ notnull: 0, dflt_value: null });
+
+    const indexNames = (
+      db.raw.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'install_claims'").all() as Array<{
+        name: string;
+      }>
+    ).map((row) => row.name);
+    expect(indexNames).toContain("install_claims_user_open");
+    expect(indexNames).toContain("install_claims_live_target");
+
+    const openColumns = (
+      db.raw.query("PRAGMA index_info(install_claims_user_open)").all() as Array<{ name: string }>
+    ).map((row) => row.name);
+    expect(openColumns).toEqual(["user_id", "consumed_at"]);
+
+    const liveColumns = (
+      db.raw.query("PRAGMA index_info(install_claims_live_target)").all() as Array<{ name: string }>
+    ).map((row) => row.name);
+    expect(liveColumns).toEqual(["user_id", "target_id"]);
+    const liveSqlRow = db.raw
+      .query("SELECT sql FROM sqlite_master WHERE name = 'install_claims_live_target'")
+      .get();
+    if (liveSqlRow === null || typeof liveSqlRow !== "object" || !("sql" in liveSqlRow) || typeof liveSqlRow.sql !== "string") {
+      throw new Error("install_claims_live_target is missing from the migrated schema");
+    }
+    // Partial: only an UNCONSUMED claim holds the slot.
+    expect(liveSqlRow.sql).toContain("WHERE consumed_at IS NULL");
+  });
+
+  test("install_claims_live_target refuses a second live claim for one target and admits consumed rows", () => {
+    const db = createMigratedTestD1();
+    seedClaimParents(db);
+    insertClaim(db, "claim-live");
+    expect(db.raw.query("SELECT consumed_at, consumed_token FROM install_claims WHERE id = 'claim-live'").get()).toEqual({
+      consumed_at: null,
+      consumed_token: null,
+    });
+
+    // A second LIVE claim for the same (user, target) is refused: "N claims"
+    // always means N different targets.
+    expect(() => insertClaim(db, "claim-live-2")).toThrow();
+
+    // Consuming the first frees the slot, so the same target can be claimed again.
+    db.raw
+      .prepare("UPDATE install_claims SET consumed_at = '2026-01-01T00:05:00.000Z' WHERE id = 'claim-live'")
+      .run();
+    insertClaim(db, "claim-live-3");
+    // A consumed row is outside the partial index: history may stack.
+    insertClaim(db, "claim-consumed", "2026-01-01T00:06:00.000Z");
+
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM install_claims").get()).toEqual({ n: 3 });
   });
 });

@@ -412,7 +412,12 @@ export function AppDetailView({
                 carries a line saying the control stays visible for that
                 reason. */}
             <div className="flex flex-col">
-              <AppInstallSection locale={locale} app={payload.app} />
+              <AppInstallSection
+                locale={locale}
+                appId={appId}
+                app={payload.app}
+                installation={payload.installation}
+              />
               <AllowlistSection
                 locale={locale}
                 appId={appId}
