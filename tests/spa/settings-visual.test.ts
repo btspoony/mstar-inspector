@@ -43,6 +43,7 @@ const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 /** A manage-face settings payload, so the detail shell renders its real body. */
 const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
+  installation: null,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
   app: {
@@ -58,6 +59,7 @@ const detailPayload = (): SettingsManagePayload => ({
     github_avatar_url: null,
     github_metadata_synced_at: null,
     last_webhook_at: null,
+    scope: "owned" as const,
     sandbox_image_id: "omp",
     review_trigger_mode: "every_push",
     review_level: null,

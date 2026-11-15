@@ -479,12 +479,42 @@ export type AllowlistSettings = {
   owners: string[];
 };
 
+/**
+ * A bot's scope (migration 0058) — the `review_bots.scope` closed vocabulary,
+ * mirrored across the bundle boundary (the REVIEW_TRIGGER_MODES convention:
+ * documented, deliberately not imported). `owned` serves its own workspace
+ * only; `shared` is offered platform-wide and resolves nothing until a claim
+ * binds an installation.
+ */
+export const BOT_SCOPES = ["owned", "shared"] as const;
+export type BotScope = (typeof BOT_SCOPES)[number];
+
+export function isBotScope(value: unknown): value is BotScope {
+  return (BOT_SCOPES as readonly string[]).includes(value as string);
+}
+
+/**
+ * The target's bound installation on the MANAGER face; `null` = unbound.
+ * `removed` is the `bot_installations.removed_at` stamp: the binding survives
+ * an uninstall and reviews stop until the installation comes back.
+ */
+export type BoundInstallation = {
+  id: number;
+  account_login: string | null;
+  removed: boolean;
+};
+
 export type SettingsAppMeta = {
   github_app_id: number;
   status: string;
   review_enabled: boolean;
   created_by: string;
   last_webhook_at: string | null;
+  /**
+   * The bot's scope (migration 0058). MANAGER face only: it decides whether
+   * the install block offers the claim action, and only a manager can claim.
+   */
+  scope: BotScope;
   /**
    * The local App UID — the webhook URL's app segment (never a GitHub fact).
    * It rides BOTH payload faces — the member face returns it too, and
@@ -576,6 +606,12 @@ export type SettingsManagePayload = {
   /** The review configuration's id every review-policy key below is read from. */
   target_id: string;
   app: SettingsAppMeta;
+  /**
+   * The target's bound installation, or `null` when it has none. The install
+   * block names the account it reviews as and, when `removed`, that reviews
+   * stopped — the binding itself survives an uninstall.
+   */
+  installation: BoundInstallation | null;
   /**
    * The review gate (migration 0045) — the Check's pass condition. `null` =
    * the stored verdict list is unreadable: the section renders a read-only
@@ -1907,6 +1943,11 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // Cached visibility is nullable (null = the row read failed); any other
   // value must be on the probe's own vocabulary.
   if (!isNullableGithubVisibility(data.app.github_visibility)) return null;
+  // The bot's scope and the target's bound installation (migration 0059): an
+  // off-vocabulary scope or a malformed installation fails the whole read, so
+  // the install block never renders an action the server would refuse.
+  if (!isBotScope(data.app.scope)) return null;
+  if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
   if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
   if (!isProviderKeyRowList(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
@@ -1959,6 +2000,45 @@ function isAllowlistSettings(value: unknown): value is AllowlistSettings {
 /** `null` (row unreadable) or a probe vocabulary value; anything else is drift. */
 function isNullableGithubVisibility(value: unknown): value is GithubVisibility | null {
   return value === null || value === "public" || value === "private" || value === "unknown";
+}
+
+/**
+ * The bound installation's row: the numeric installation id, an account the
+ * webhook may not have reported yet, and the removal stamp as a boolean.
+ */
+function isBoundInstallation(value: unknown): value is BoundInstallation {
+  return (
+    isRecord(value) &&
+    typeof value.id === "number" &&
+    Number.isSafeInteger(value.id) &&
+    isNullableString(value.account_login) &&
+    typeof value.removed === "boolean"
+  );
+}
+
+/** The claim entry's 200 face. */
+export type InstallClaimResult = {
+  claimId: string;
+  expiresAt: string;
+  installationUrl: string;
+};
+
+/**
+ * Parse the claim route's answer. Fail-closed, and the URL is checked against
+ * GitHub's own installation page: this value becomes a navigation target, so a
+ * drifted or hostile body must not send the user anywhere else.
+ */
+export function parseInstallClaimResult(data: unknown): InstallClaimResult | null {
+  if (!isRecord(data)) return null;
+  if (typeof data.claimId !== "string" || data.claimId.length === 0) return null;
+  if (typeof data.expiresAt !== "string" || data.expiresAt.length === 0) return null;
+  if (typeof data.installationUrl !== "string") return null;
+  if (!data.installationUrl.startsWith("https://github.com/apps/")) return null;
+  return {
+    claimId: data.claimId,
+    expiresAt: data.expiresAt,
+    installationUrl: data.installationUrl,
+  };
 }
 
 export function parseModels(data: unknown): ModelsPayload | null {

@@ -1,0 +1,170 @@
+/**
+ * `POST /dashboard/:workspaceRef/api/apps/:appId/claim` — the claim entry the
+ * target page's install action calls (contract § 8.5).
+ *
+ * Pinned here:
+ *   - a shared bot with a synced slug answers the claim id, its expiry and the
+ *     installation URL, and writes ONE live claim for the addressed target;
+ *   - a second press refreshes that claim instead of stacking;
+ *   - an owned bot is "nothing here" rather than "forbidden" (404
+ *     `bot is not shared`), and a never-synced slug is 409
+ *     `bot has no installation url` with nothing written;
+ *   - a foreign or unknown App id is the same 404 as an unknown bot, and a
+ *     non-manager is refused before any claim exists.
+ */
+import { describe, expect, test } from "bun:test";
+import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
+import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
+import { createUser } from "../../src/dashboard/users";
+import type { Env } from "../../src/worker/env";
+import worker from "../../src/worker/index";
+import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
+
+const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
+const APP_ID = 9201;
+
+function makeEnv(db: unknown): Env {
+  return {
+    REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
+    IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
+    GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
+    GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
+    DEPLOYMENT_MODE: "self-hosted",
+    DASHBOARD_SESSION_SECRET: SESSION_SECRET,
+    DB: db,
+  } as Env;
+}
+
+/** The 200 face's three fields, read out of an untyped body. */
+type ClaimAnswer = { claimId: string; expiresAt: string; installationUrl: string };
+
+function claimAnswerOf(body: unknown): ClaimAnswer {
+  if (body === null || typeof body !== "object") throw new Error("claim answer is not an object");
+  if (!("claimId" in body) || !("expiresAt" in body) || !("installationUrl" in body)) {
+    throw new Error("claim answer is missing a field");
+  }
+  const { claimId, expiresAt, installationUrl } = body;
+  if (
+    typeof claimId !== "string" ||
+    typeof expiresAt !== "string" ||
+    typeof installationUrl !== "string"
+  ) {
+    throw new Error("claim answer carries a non-string field");
+  }
+  return { claimId, expiresAt, installationUrl };
+}
+
+type World = { db: TestD1; botId: string; targetId: string };
+
+/** One bot in the `default` workspace with its target, scope and slug as asked. */
+async function seededWorld(opts: {
+  scope?: "owned" | "shared";
+  slug?: string | null;
+  githubAppId?: number;
+}): Promise<World> {
+  const db = createMigratedTestD1();
+  await createUser(db, { login: "mallory", role: "member" });
+  await createUser(db, { login: "trudy", role: "member" });
+  seedDefaultMemberships(db, { mallory: "owner", trudy: "member" });
+  const botId = "bot-claim-route";
+  await createReviewBotsStore(db).createApp({
+    id: botId,
+    githubAppId: opts.githubAppId ?? APP_ID,
+    githubSlug: opts.slug === undefined ? "shared-bot" : opts.slug,
+    name: botId,
+    privateKeyEnc: "enc",
+    webhookSecretEnc: "enc",
+    createdBy: "mallory",
+    workspaceId: "default",
+  });
+  db.raw.prepare("UPDATE review_bots SET scope = ? WHERE id = ?").run(opts.scope ?? "shared", botId);
+  const targetRow = db.raw.query("SELECT id FROM review_targets WHERE bot_id = ?").get(botId);
+  if (targetRow === null || typeof targetRow !== "object" || !("id" in targetRow) || typeof targetRow.id !== "string") {
+    throw new Error(`createApp wrote no target for ${botId}`);
+  }
+  return { db, botId, targetId: targetRow.id };
+}
+
+async function postClaim(db: TestD1, login: string, appId = String(APP_ID)): Promise<Response> {
+  return worker.fetch(
+    new Request(`https://worker.local/dashboard/default/api/apps/${appId}/claim`, {
+      method: "POST",
+      headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}` },
+    }),
+    makeEnv(db),
+  );
+}
+
+function claimCount(db: TestD1): number {
+  const row = db.raw.query("SELECT COUNT(*) AS n FROM install_claims").get();
+  if (row === null || typeof row !== "object" || !("n" in row) || typeof row.n !== "number") {
+    throw new Error("SELECT COUNT(*) on install_claims returned no count");
+  }
+  return row.n;
+}
+
+describe("POST /dashboard/:workspaceRef/api/apps/:appId/claim", () => {
+  test("a shared bot answers the claim id, its expiry and the installation URL", async () => {
+    const { db, targetId } = await seededWorld({});
+    const res = await postClaim(db, "mallory");
+
+    expect(res.status).toBe(200);
+    const body = claimAnswerOf(await res.json());
+    expect(Object.keys(body).sort()).toEqual(["claimId", "expiresAt", "installationUrl"]);
+    expect(body.installationUrl).toBe("https://github.com/apps/shared-bot/installations/new");
+    // No `state`: GitHub preserves none, so the claim row is the only carrier.
+    expect(body.installationUrl).not.toContain("state");
+    expect(Date.parse(body.expiresAt)).toBeGreaterThan(Date.now());
+    const claim = db.raw
+      .query("SELECT target_id, workspace_id, consumed_at FROM install_claims WHERE id = ?")
+      .get(body.claimId);
+    expect(claim).toEqual({ target_id: targetId, workspace_id: "default", consumed_at: null });
+  });
+
+  test("a second press refreshes the same live claim instead of stacking", async () => {
+    const { db } = await seededWorld({});
+    const first = claimAnswerOf(await (await postClaim(db, "mallory")).json());
+    const second = claimAnswerOf(await (await postClaim(db, "mallory")).json());
+
+    expect(second.claimId).toBe(first.claimId);
+    expect(claimCount(db)).toBe(1);
+  });
+
+  test("an owned bot answers 404 bot is not shared and writes nothing", async () => {
+    const { db } = await seededWorld({ scope: "owned" });
+    const res = await postClaim(db, "mallory");
+
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "bot is not shared" });
+    expect(claimCount(db)).toBe(0);
+  });
+
+  test("an unsynced slug answers 409 bot has no installation url and writes nothing", async () => {
+    const { db } = await seededWorld({ slug: null });
+    const res = await postClaim(db, "mallory");
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "bot has no installation url" });
+    expect(claimCount(db)).toBe(0);
+  });
+
+  test("an unknown or non-numeric App id is the same 404 as an unknown bot", async () => {
+    const { db } = await seededWorld({});
+    for (const appId of ["999999", "not-a-number"]) {
+      const res = await postClaim(db, "mallory", appId);
+      expect(res.status, appId).toBe(404);
+      expect(await res.json()).toEqual({ error: "unknown app" });
+    }
+    expect(claimCount(db)).toBe(0);
+  });
+
+  test("a plain member is refused before any claim exists", async () => {
+    const { db } = await seededWorld({});
+    const res = await postClaim(db, "trudy");
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "forbidden" });
+    expect(claimCount(db)).toBe(0);
+  });
+});
