@@ -1245,3 +1245,159 @@ describe("the settings payload's pending installations", () => {
     expect(((await owned.json()) as Record<string, unknown>).pending_installations).toEqual([]);
   });
 });
+
+/**
+ * Bot-scope WRITE authority is independent of the target read.
+ *
+ * A workspace that keeps a live target on ANOTHER workspace's bot can read that
+ * target (the revoked-share case), but the bot itself — lifecycle, provider
+ * configuration, keys, verification, metadata — stays the owning workspace's.
+ * The trigger this pins: A owns bot B, C has a live target on B, the platform
+ * unshares B, so B is `owned` again while C's target survives. C's manager must
+ * not reach a single bot-scoped write; A's manager must keep working, and C's
+ * target-scoped settings stay its own.
+ */
+describe("a retained target on another workspace's bot grants no bot-scope write", () => {
+  const CONSUMER_WS = "ws-consumer";
+  const FOREIGN_APP_ID = MALLORY_APP_ID;
+  /** The bot-owned tables a bot-scope write would touch. */
+  const MUTABLE_BOT_TABLES = [
+    "bot_provider_keys",
+    "bot_provider_models",
+    "bot_model_config",
+    "bot_model_chains",
+    "bot_model_chain_seats",
+    "bot_custom_providers",
+    "bot_installations",
+  ] as const;
+
+  /** The revoked-share shape: A's bot, C's surviving target, C's manager. */
+  async function crossWorkspaceWorld(): Promise<ReturnType<typeof createAppsUiD1>> {
+    const db = await seededWorld();
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES (?, ?, ?, NULL, datetime('now'))`,
+      )
+      .run(CONSUMER_WS, CONSUMER_WS, CONSUMER_WS);
+    // mallory manages BOTH workspaces, so every refusal below is the bot-scope
+    // predicate's — never a membership 404/403.
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+         SELECT ?, id, 'owner', '2026-01-01T00:00:00.000Z' FROM users WHERE github_login = 'mallory'`,
+      )
+      .run(CONSUMER_WS);
+    // The target C created while the bot was shared. Nothing about the bot
+    // changed except its scope: it was never C's.
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         SELECT 'target-consumer', ?, b.id, 'consumer', 'mallory', datetime('now'), datetime('now')
+           FROM review_bots b WHERE b.github_app_id = ?`,
+      )
+      .run(CONSUMER_WS, FOREIGN_APP_ID);
+    return db;
+  }
+
+  function botScopedWriteCounts(db: ReturnType<typeof createAppsUiD1>): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const table of MUTABLE_BOT_TABLES) {
+      counts[table] = (db.raw.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+    }
+    return counts;
+  }
+
+  test("every bot-scoped mutation of the consuming workspace refuses, with zero writes", async () => {
+    const db = await crossWorkspaceWorld();
+    const env = makeEnv(db);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const base = `/dashboard/${CONSUMER_WS}`;
+    const before = botScopedWriteCounts(db);
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
+      throw new Error("a bot-scope refusal must never reach GitHub");
+    }) as unknown as typeof fetch);
+    try {
+      // Lifecycle: retire/disable another workspace's bot.
+      for (const action of ["disable", "enable", "delete"]) {
+        const res = await post(`${base}/apps/${FOREIGN_APP_ID}/${action}`, cookie, env);
+        expect(res.status, action).toBe(403);
+        expect((await res.json()) as unknown, action).toEqual({
+          key: "settings.error.botReadOnly",
+          message: t("en", "settings.error.botReadOnly"),
+        });
+      }
+      // The settings family's bot-scoped ops (provider state, chains, keys,
+      // the runtime image) — refused; the target-scoped ops are not.
+      const botOps: Array<Record<string, string>> = [
+        { op: "save-sandbox-image", sandbox_image_id: "omp" },
+        { op: "add-key", provider: "zai", key: "sk-bot-scope-matrix" },
+        { op: "save-chain", model_chain: "" },
+        { op: "save-roles", "role_code-reviewer": "" },
+      ];
+      for (const fields of botOps) {
+        const res = await postForm(`${base}/apps/${FOREIGN_APP_ID}/settings`, cookie, env, fields);
+        expect(res.status, fields.op).toBe(403);
+        expect(((await res.json()) as { key: unknown }).key, fields.op).toBe("settings.error.botReadOnly");
+      }
+      // Provider-key verification and its usage probe: both consume the bot's
+      // stored credentials, so both are bot-scoped.
+      const credentialProbes: Array<[string, Record<string, string>]> = [
+        [`${base}/api/apps/${FOREIGN_APP_ID}/keys/verify`, { provider: "anthropic", key: "sk-foreign" }],
+        [`${base}/api/apps/${FOREIGN_APP_ID}/keys/usage`, { provider: "zai", keyId: "nope" }],
+      ];
+      for (const [path, fields] of credentialProbes) {
+        const res = await postForm(path, cookie, env, fields);
+        expect(res.status, path).toBe(403);
+        expect(((await res.json()) as { key: unknown }).key, path).toBe("settings.error.botReadOnly");
+      }
+      // The forced metadata refresh writes the bot row and reconciles its
+      // installation list — bot-scoped.
+      const refresh = await post(`${base}/api/apps/${FOREIGN_APP_ID}/refresh-metadata`, cookie, env);
+      expect(refresh.status).toBe(403);
+      expect(((await refresh.json()) as { key: unknown }).key).toBe("settings.error.botReadOnly");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    // Zero bot writes of any kind, and the bot still belongs to `default`.
+    expect(botScopedWriteCounts(db)).toEqual(before);
+    expect(appStatus(db, FOREIGN_APP_ID)).toBe("active");
+    expect(
+      db.raw.query("SELECT workspace_id FROM bot_workspaces WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)").get(FOREIGN_APP_ID),
+    ).toEqual({ workspace_id: "default" });
+    expect(
+      db.raw.query("SELECT github_metadata_synced_at FROM review_bots WHERE github_app_id = ?").get(FOREIGN_APP_ID),
+    ).toEqual({ github_metadata_synced_at: null });
+  });
+
+  test("the consuming workspace keeps its TARGET settings, and the owner keeps the bot", async () => {
+    const db = await crossWorkspaceWorld();
+    const env = makeEnv(db);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    // Target-scoped: the review depth is this workspace's own target.
+    const saved = await postForm(
+      `/dashboard/${CONSUMER_WS}/apps/${FOREIGN_APP_ID}/settings`,
+      cookie,
+      env,
+      { op: "save-review-level", level: "quick" },
+    );
+    expect(saved.status).toBe(200);
+    expect(
+      db.raw.query("SELECT review_level FROM review_targets WHERE id = 'target-consumer'").get(),
+    ).toEqual({ review_level: "quick" });
+
+    // The owning workspace still manages its own bot.
+    const ownerCookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    expect((await post(`/dashboard/default/apps/${FOREIGN_APP_ID}/disable`, ownerCookie, env)).status).toBe(200);
+    expect(appStatus(db, FOREIGN_APP_ID)).toBe("disabled");
+    const ownerOp = await postForm(
+      "/dashboard/default/apps/1001/settings",
+      ownerCookie,
+      env,
+      { op: "save-sandbox-image", sandbox_image_id: "omp" },
+    );
+    expect(ownerOp.status).toBe(200);
+  });
+});
