@@ -77,8 +77,9 @@ export type InstallClaimsStore = {
 
 /** Insert, or refresh the live row the partial unique index already holds. */
 const CREATE_CLAIM_SQL = `
-  INSERT INTO install_claims (id, user_id, workspace_id, target_id, created_at, expires_at, consumed_at)
-  VALUES (?, ?, ?, ?, ?, ?, NULL)
+  INSERT INTO install_claims
+    (id, user_id, workspace_id, target_id, created_at, expires_at, consumed_at, consumed_token)
+  VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
   ON CONFLICT (user_id, target_id) WHERE consumed_at IS NULL DO UPDATE SET
     created_at = excluded.created_at,
     expires_at = excluded.expires_at
@@ -104,9 +105,14 @@ const CLAIM_STATE_SQL = `
     JOIN review_bots b ON b.id = t.bot_id
    WHERE c.id = ?`;
 
-/** Statement 1 of the batch: the consume, with every predicate inside it. */
+/**
+ * Statement 1 of the batch: the consume, with every predicate inside it. The
+ * request's own token is written with the instant because the INSTANT is not an
+ * identity — two requests in the same millisecond capture the same ISO `now`,
+ * and statements 2–3 must not accept the loser's claim on that coincidence.
+ */
 const CONSUME_SQL = `
-  UPDATE install_claims SET consumed_at = ?
+  UPDATE install_claims SET consumed_at = ?, consumed_token = ?
    WHERE id = ? AND user_id = ?
      AND consumed_at IS NULL AND expires_at > ?
      AND EXISTS (
@@ -117,22 +123,22 @@ const CONSUME_SQL = `
 
 /**
  * Statement 2: the installation row, keyed by the target's bot and the
- * delivery's installation. `DO UPDATE` touches neither `account_login` (the
- * webhook may already hold the authoritative login) nor `id`, and clearing
- * `removed_at` makes a reinstall visible again.
+ * delivery's installation, gated on THIS request's token. `DO UPDATE` touches
+ * neither `account_login` (the webhook may already hold the authoritative
+ * login) nor `id`, and clearing `removed_at` makes a reinstall visible again.
  */
 const UPSERT_INSTALLATION_SQL = `
   INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
   SELECT ?, t.bot_id, ?, NULL, ?, NULL
     FROM install_claims c JOIN review_targets t ON t.id = c.target_id
-   WHERE c.id = ? AND c.consumed_at = ? AND c.user_id = ?
+   WHERE c.id = ? AND c.consumed_token = ? AND c.user_id = ?
   ON CONFLICT (bot_id, installation_id) DO UPDATE SET
     seen_at = excluded.seen_at, removed_at = NULL`;
 
 /**
- * Statement 3: the binding. `account_login` is copied from `bot_installations`
- * — the value the webhook recorded — because the setup redirect carries no
- * login; it is NULL until the webhook arrives.
+ * Statement 3: the binding, gated on the same token. `account_login` is copied
+ * from `bot_installations` — the value the webhook recorded — because the setup
+ * redirect carries no login; it is NULL until the webhook arrives.
  */
 const BIND_TARGET_SQL = `
   UPDATE review_targets SET
@@ -143,7 +149,7 @@ const BIND_TARGET_SQL = `
    WHERE id = ? AND deleted_at IS NULL
      AND (installation_id IS NULL OR installation_id = ?)
      AND EXISTS (SELECT 1 FROM install_claims
-                  WHERE id = ? AND consumed_at = ? AND user_id = ?)`;
+                  WHERE id = ? AND consumed_token = ? AND user_id = ?)`;
 
 type ClaimState = {
   user_id: string;
@@ -210,19 +216,23 @@ export function createInstallClaimsStore(db: DashboardD1): InstallClaimsStore {
       const refusal = refusalOf(state, userId, installationId, now);
       if (refusal !== null) return refusal;
       const targetId = state.target_id;
+      // The ownership proof for statements 2–3. `now` cannot serve: two
+      // requests in the same millisecond capture the same instant, and the
+      // loser's writes would then match the winner's consumed row.
+      const token = crypto.randomUUID();
 
       let results: DashboardD1BatchResult[];
       try {
         // ONE batch on purpose: a failed bind must not leave a consumed claim,
         // and D1 rolls the whole batch back on a thrown statement.
         results = await db.batch([
-          db.prepare(CONSUME_SQL).bind(now, claimId, userId, now, installationId),
+          db.prepare(CONSUME_SQL).bind(now, token, claimId, userId, now, installationId),
           db
             .prepare(UPSERT_INSTALLATION_SQL)
-            .bind(crypto.randomUUID(), installationId, now, claimId, now, userId),
+            .bind(crypto.randomUUID(), installationId, now, claimId, token, userId),
           db
             .prepare(BIND_TARGET_SQL)
-            .bind(installationId, installationId, now, targetId, installationId, claimId, now, userId),
+            .bind(installationId, installationId, now, targetId, installationId, claimId, token, userId),
         ]);
       } catch (err) {
         // The target partial unique index refused a second target of this

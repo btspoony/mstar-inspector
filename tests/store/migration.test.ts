@@ -3396,7 +3396,7 @@ describe("install_claims (migrations/0059_install_claims.sql)", () => {
       .run(id, consumedAt);
   }
 
-  test("install_claims carries the contract's seven columns, a NULL consumed_at and its two indexes", () => {
+  test("install_claims carries the contract's eight columns, a NULL consume pair and its two indexes", () => {
     const db = createMigratedTestD1();
     const columns = db.raw.query("PRAGMA table_info(install_claims)").all() as Array<{
       name: string;
@@ -3411,13 +3411,16 @@ describe("install_claims (migrations/0059_install_claims.sql)", () => {
       "created_at",
       "expires_at",
       "consumed_at",
+      "consumed_token",
     ]);
     for (const column of ["user_id", "workspace_id", "target_id", "created_at", "expires_at"]) {
       expect(columns.find((c) => c.name === column)?.notnull, column).toBe(1);
     }
     // `consumed_at` is the live predicate: unclaimed means NULL, and nothing
-    // writes a default into it.
+    // writes a default into it. `consumed_token` is the consuming REQUEST's
+    // identity — the instant alone cannot prove ownership inside the batch.
     expect(columns.find((c) => c.name === "consumed_at")).toMatchObject({ notnull: 0, dflt_value: null });
+    expect(columns.find((c) => c.name === "consumed_token")).toMatchObject({ notnull: 0, dflt_value: null });
 
     const indexNames = (
       db.raw.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'install_claims'").all() as Array<{
@@ -3450,8 +3453,9 @@ describe("install_claims (migrations/0059_install_claims.sql)", () => {
     const db = createMigratedTestD1();
     seedClaimParents(db);
     insertClaim(db, "claim-live");
-    expect(db.raw.query("SELECT consumed_at FROM install_claims WHERE id = 'claim-live'").get()).toEqual({
+    expect(db.raw.query("SELECT consumed_at, consumed_token FROM install_claims WHERE id = 'claim-live'").get()).toEqual({
       consumed_at: null,
+      consumed_token: null,
     });
 
     // A second LIVE claim for the same (user, target) is refused: "N claims"

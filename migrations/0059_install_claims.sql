@@ -21,18 +21,25 @@
 -- while consumed history may stack freely. `install_claims_user_open` is the
 -- setup callback's scan for one user's live claims.
 --
+-- `consumed_token` is the consume's proof of ownership for the batch's second
+-- and third statements. The consumed INSTANT cannot serve: two callbacks in the
+-- same millisecond write the same `consumed_at`, so the losing request would
+-- still pass an `= :now` gate and touch `bot_installations`. One token per call
+-- makes that match impossible.
+--
 -- Only the claim batch writes `review_targets.installation_id`; no webhook does.
 --
 -- Forward-only. Must apply AFTER 0058: the bind reads `review_bots.scope`.
 
 CREATE TABLE install_claims (
-  id           TEXT PRIMARY KEY,
-  user_id      TEXT NOT NULL REFERENCES users(id),
-  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-  target_id    TEXT NOT NULL REFERENCES review_targets(id),
-  created_at   TEXT NOT NULL,
-  expires_at   TEXT NOT NULL,
-  consumed_at  TEXT
+  id             TEXT PRIMARY KEY,
+  user_id        TEXT NOT NULL REFERENCES users(id),
+  workspace_id   TEXT NOT NULL REFERENCES workspaces(id),
+  target_id      TEXT NOT NULL REFERENCES review_targets(id),
+  created_at     TEXT NOT NULL,
+  expires_at     TEXT NOT NULL,
+  consumed_at    TEXT,
+  consumed_token TEXT
 );
 CREATE INDEX install_claims_user_open ON install_claims(user_id, consumed_at);
 CREATE UNIQUE INDEX install_claims_live_target

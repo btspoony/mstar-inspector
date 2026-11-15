@@ -359,3 +359,123 @@ test("listLiveClaims returns exactly the live-claim columns", async () => {
   const [row] = await store.listLiveClaims(userId, NOW);
   expect(Object.keys(row!).sort()).toEqual([...LIVE_CLAIM_COLUMNS].sort());
 });
+
+/**
+ * The test double brackets a batch's transaction by hand (`BEGIN` … `COMMIT`
+ * around awaited statements), so two batches in flight cannot nest. D1
+ * serializes batches per database; this wrapper queues them, which is what lets
+ * the concurrent calls below model two requests instead of a harness artifact.
+ */
+function serializedBatches(db: TestD1): TestD1 {
+  let tail: Promise<unknown> = Promise.resolve();
+  return {
+    ...db,
+    batch(statements) {
+      const run = tail.then(() => db.batch(statements));
+      tail = run.catch(() => undefined);
+      return run;
+    },
+  };
+}
+
+/**
+ * The consume's proof of ownership.
+ *
+ * Two callbacks can capture the same ISO `now` (same millisecond). The instant
+ * therefore cannot authorize statements 2–3: if it did, the losing request
+ * would still upsert `bot_installations` — and clear a `removed_at` stamp — and
+ * only then report `claim_not_found`. The interleaving below is deterministic:
+ * `Promise.all` lets both calls run their pre-read before either batch, which
+ * is exactly the window the defect needs.
+ */
+describe("concurrent consumes of one claim", () => {
+  /** Same returned row on both paths — the fixture only reads it back. */
+  function botInstallations(db: TestD1): Array<{
+    installation_id: number;
+    account_login: string | null;
+    seen_at: string;
+    removed_at: string | null;
+  }> {
+    return db.raw
+      .query(
+        `SELECT installation_id, account_login, seen_at, removed_at FROM bot_installations
+          ORDER BY installation_id`,
+      )
+      .all() as Array<{
+      installation_id: number;
+      account_login: string | null;
+      seen_at: string;
+      removed_at: string | null;
+    }>;
+  }
+
+  test("the loser binds nothing when both requests share the instant and name different installations", async () => {
+    const { db, botId, userId, targetId, store } = await seedWorld();
+    const claim = await store.createOrRefreshClaim({ userId, workspaceId: WS, targetId, now: NOW });
+    const concurrent = createInstallClaimsStore(serializedBatches(db));
+
+    // Both requests pass their pre-read before either batch runs; the batches
+    // themselves serialize, the way D1 serializes them.
+    const [winner, loser] = await Promise.all([
+      concurrent.consumeAndBind({ claimId: claim.id, userId, installationId: 4242, now: NOW }),
+      concurrent.consumeAndBind({ claimId: claim.id, userId, installationId: 5555, now: NOW }),
+    ]);
+
+    expect(winner).toEqual({ outcome: "bound", targetId });
+    expect(loser).toEqual({ outcome: "claim_not_found" });
+    // The loser wrote no installation row of its own...
+    expect(botInstallations(db)).toEqual([
+      { installation_id: 4242, account_login: null, seen_at: NOW, removed_at: null },
+    ]);
+    expect(botInstallations(db).some((row) => row.installation_id === 5555)).toBe(false);
+    expect(targetBinding(db, targetId).installation_id).toBe(4242);
+    expect(installationRow(db, botId, 5555)).toBeNull();
+  });
+
+  test("the loser cannot revive a removed installation stamp under the shared instant", async () => {
+    const { db, botId, userId, targetId, store } = await seedWorld();
+    // The losing request's installation is already known and stamped removed;
+    // its upsert would clear the stamp, which is the visible damage.
+    await db
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+         VALUES ('install-loser', ?, 5555, 'acme', '2026-02-01T00:00:00.000Z', '2026-02-02T00:00:00.000Z')`,
+      )
+      .bind(botId)
+      .run();
+    const claim = await store.createOrRefreshClaim({ userId, workspaceId: WS, targetId, now: NOW });
+    const concurrent = createInstallClaimsStore(serializedBatches(db));
+
+    const [winner, loser] = await Promise.all([
+      concurrent.consumeAndBind({ claimId: claim.id, userId, installationId: 4242, now: NOW }),
+      concurrent.consumeAndBind({ claimId: claim.id, userId, installationId: 5555, now: NOW }),
+    ]);
+
+    expect(winner).toEqual({ outcome: "bound", targetId });
+    expect(loser).toEqual({ outcome: "claim_not_found" });
+    // The removed row is exactly as it was: no `seen_at` touch, no cleared stamp.
+    expect(installationRow(db, botId, 5555)).toEqual({
+      account_login: "acme",
+      seen_at: "2026-02-01T00:00:00.000Z",
+      removed_at: "2026-02-02T00:00:00.000Z",
+    });
+    expect(targetBinding(db, targetId).installation_id).toBe(4242);
+  });
+
+  test("the loser binds nothing when both requests name the same installation", async () => {
+    const { db, userId, targetId, store } = await seedWorld();
+    const claim = await store.createOrRefreshClaim({ userId, workspaceId: WS, targetId, now: NOW });
+    const concurrent = createInstallClaimsStore(serializedBatches(db));
+
+    const [winner, loser] = await Promise.all([
+      concurrent.consumeAndBind({ claimId: claim.id, userId, installationId: 4242, now: NOW }),
+      concurrent.consumeAndBind({ claimId: claim.id, userId, installationId: 4242, now: NOW }),
+    ]);
+
+    expect(winner).toEqual({ outcome: "bound", targetId });
+    expect(loser).toEqual({ outcome: "claim_not_found" });
+    // One installation row, one binding: the duplicate request is harmless.
+    expect(botInstallations(db)).toHaveLength(1);
+    expect(targetBinding(db, targetId).installation_id).toBe(4242);
+  });
+});
