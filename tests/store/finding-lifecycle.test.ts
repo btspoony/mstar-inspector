@@ -580,7 +580,10 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     let reads = 0;
     const applied = await applyPublishedLifecycle(db, "pub-1", lease, 2000, () => {
       reads += 1;
-      if (reads === 3) {
+      // Probe order: entry, the artifact's own chunk, then each lifecycle
+      // chunk. The rival claims at the fourth read — after the artifact chunk
+      // and the FIRST lifecycle chunk committed.
+      if (reads === 4) {
         db.raw
           .prepare(`UPDATE review_publications SET holder = 'other', lease_epoch = lease_epoch + 1 WHERE id = 'pub-1'`)
           .run();
@@ -588,12 +591,10 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
       return 2000;
     });
 
-    expect(reads).toBe(3); // entry fence, first chunk, aborted second chunk
+    expect(reads).toBe(4); // entry, artifact chunk, first lifecycle chunk, aborted second
     expect(applied).toBe(false); // the stale invocation never marks complete
-    // Only the first chunk's writes landed; the second chunk never ran. The
-    // chunk budget is 25 statements and the artifact's two (the review INSERT
-    // and its public finding) lead it: 23 seen upserts, then the rest.
-    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(23);
+    // Only the first lifecycle chunk's writes landed; the second never ran.
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number }).n).toBe(1);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM review_threads").get() as { n: number }).n).toBe(0);
@@ -609,13 +610,13 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     let reads = 0;
     const applied = await applyPublishedLifecycle(db, "pub-1", lease, 2000, () => {
       reads += 1;
-      return reads < 3 ? 2000 : lease.untilMs + 1; // the second chunk finds the lease expired
+      return reads < 4 ? 2000 : lease.untilMs + 1; // the second lifecycle chunk finds it expired
     });
 
     expect(applied).toBe(false);
-    expect(reads).toBe(3);
-    // First chunk = the artifact's two statements + 23 seen upserts.
-    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(23);
+    expect(reads).toBe(4); // entry, artifact chunk, first lifecycle chunk, aborted second
+    // The first lifecycle chunk landed; the artifact committed in its own chunk.
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
     expect(publicationRow(db, "pub-1").phase).toBe("confirmed");
   });
@@ -740,7 +741,9 @@ describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () 
     let writes = 0;
     const raced = leaseMutationAtWriteBoundary(db, () => {
       writes += 1;
-      if (writes === 2) {
+      // Batch order is the artifact's chunk, then the lifecycle chunks: the
+      // rival claims before the SECOND lifecycle chunk.
+      if (writes === 3) {
         db.raw
           .prepare(`UPDATE review_publications SET holder = 'rival', lease_epoch = lease_epoch + 1 WHERE id = 'pub-1'`)
           .run();
@@ -748,8 +751,8 @@ describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () 
     });
 
     expect(await applyPublishedLifecycle(raced, "pub-1", lease, 2000)).toBe(false);
-    // Only the first chunk (25 seen upserts) committed; the second chunk's
-    // statements are refused by their own predicate, not by a later probe.
+    // Only the first lifecycle chunk (25 seen upserts) committed; the second
+    // chunk's statements are refused by their own predicate, not by a probe.
     expect(count(db, "review_findings")).toBe(25);
     expect(count(db, "review_threads")).toBe(0);
     expect(publicationRow(db, "pub-1")).toMatchObject({ phase: "confirmed", applied_ms: null });
@@ -1776,11 +1779,29 @@ describe("target attribution is fixed at first record (rebind)", () => {
     });
   });
 
-  test("a failed apply rolls the review row back with its findings, and the retry files both on the new target", async () => {
+  /**
+   * The artifact half is its OWN chunk(s), and it is composed on every attempt:
+   * a failed lifecycle chunk leaves a complete, idempotent artifact, and the
+   * retry re-runs it as a no-op and finishes the lifecycle. The rebind lands
+   * BEFORE the first attempt, so both attempts record under the live target.
+   */
+  test("a failed lifecycle chunk leaves the artifact, and the retry converges", async () => {
     const db = fixedAttributionFixture({ withBPullRequest: true });
-    // An assessment gives the batch a statement AFTER the review insert and
-    // the finding upsert, so the failure lands mid-batch.
-    const pay1 = payload({
+    rebind(db); // the live binding is B for both attempts
+    // 30 public findings ⇒ 31 artifact statements ⇒ TWO artifact chunks; the
+    // payload's frozen target still names A, so the binding must win.
+    const manyFindings = Array.from({ length: 30 }, (_, i) => ({
+      mergeClass: "should-fix" as const,
+      category: "logic",
+      file_path: `src/f${i}.ts`,
+      line_start: i + 1,
+      line_end: i + 2,
+      title: `Finding ${i}`,
+      body: "body",
+      fingerprint_hint: `fp-${i}`,
+    }));
+    const pay = payload({
+      artifact: artifactDoc({ payload: enginePayload({ findings: manyFindings }) }),
       lifecycle: lifecycleRound({
         selectedRowIds: ["row-1"],
         seen: [seenEntry("row-1", "f-1")],
@@ -1795,34 +1816,104 @@ describe("target attribution is fixed at first record (rebind)", () => {
         ],
       }),
     });
-    const lease = await stageClaimProve(db, "pub-1", pay1, 1000);
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
     db.raw.exec(
       "CREATE TRIGGER boom BEFORE INSERT ON review_finding_rounds BEGIN SELECT RAISE(ABORT, 'boom'); END",
     );
     await expect(applyPublishedLifecycle(db, "pub-1", lease, 2000)).rejects.toThrow(/boom/);
 
-    // ONE transaction: the review row the batch had already inserted is gone
-    // with its findings — nothing is left for a retry to re-attribute.
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 0 });
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 0 });
+    // The artifact chunks committed (both of them); the lifecycle chunk did not.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 30 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get()).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT DISTINCT target_id FROM reviews").all()).toEqual([{ target_id: TARGET_B_ID }]);
 
-    // The rebind lands before the recovery retry of the SAME confirmed
-    // publication; one batch now resolves the binding once and writes both
-    // halves on B.
+    // Retry after the failure: the artifact re-runs as a no-op, the lifecycle
+    // half completes.
     db.raw.exec("DROP TRIGGER boom");
-    rebind(db);
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 3000)).toBe(true);
 
-    expect(db.raw.query("SELECT head_sha, target_id FROM reviews").all()).toEqual([
-      { head_sha: SHA, target_id: TARGET_B_ID },
-    ]);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 30 });
+    // Every public finding still belongs to the ONE review row, written once.
+    expect(db.raw.query("SELECT COUNT(DISTINCT review_id) AS n FROM findings").get()).toEqual({ n: 1 });
     expect(db.raw.query("SELECT finding_id, target_id FROM review_findings").all()).toEqual([
       { finding_id: "f-1", target_id: TARGET_B_ID },
     ]);
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings WHERE target_id = ?").get(TARGET_ID)).toEqual({
-      n: 0,
+  });
+
+  /**
+   * The artifact is re-composed and re-run on every attempt, keyed by the
+   * review's natural key and a deterministic finding id — so an attempt that
+   * dies between two artifact chunks is REPAIRED by the next one instead of
+   * leaving the review perpetually short of findings.
+   */
+  test("a partially committed artifact is repaired by the next attempt", async () => {
+    const db = fixedAttributionFixture();
+    const manyFindings = Array.from({ length: 30 }, (_, i) => ({
+      mergeClass: "should-fix" as const,
+      category: "logic",
+      file_path: `src/h${i}.ts`,
+      line_start: i + 1,
+      line_end: i + 2,
+      title: `Finding ${i}`,
+      body: "body",
+      fingerprint_hint: `fp-${i}`,
+    }));
+    const pay = payload({
+      artifact: artifactDoc({ payload: enginePayload({ findings: manyFindings }) }),
+      lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }),
     });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    // The second artifact chunk (findings 24..29) fails: the first 24 landed.
+    db.raw.exec(
+      "CREATE TRIGGER boom BEFORE INSERT ON findings WHEN (SELECT COUNT(*) FROM findings) >= 24 BEGIN SELECT RAISE(ABORT, 'boom'); END",
+    );
+    await expect(applyPublishedLifecycle(db, "pub-1", lease, 2000)).rejects.toThrow(/boom/);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 24 });
+
+    // The retry no-ops the 24 already-present rows and writes the missing six.
+    db.raw.exec("DROP TRIGGER boom");
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 3000)).toBe(true);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 30 });
+    expect(db.raw.query("SELECT COUNT(DISTINCT review_id) AS n FROM findings").get()).toEqual({ n: 1 });
+  });
+
+  /**
+   * The artifact's inserts carry the same inline lease guard as the lifecycle
+   * statements. A trigger supersedes the lease right after the review INSERT
+   * commits inside its chunk, so the findings that follow in the SAME chunk
+   * must be fenced out — the guard is evaluated by each statement, not by the
+   * pre-chunk probe.
+   */
+  test("a superseded lease aborts the artifact chunk too", async () => {
+    const db = fixedAttributionFixture();
+    const twoFindings = [0, 1].map((i) => ({
+      mergeClass: "should-fix" as const,
+      category: "logic",
+      file_path: `src/g${i}.ts`,
+      line_start: i + 1,
+      line_end: i + 2,
+      title: `Finding ${i}`,
+      body: "body",
+      fingerprint_hint: `fp-${i}`,
+    }));
+    const pay = payload({ artifact: artifactDoc({ payload: enginePayload({ findings: twoFindings }) }) });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    db.raw.exec(
+      `CREATE TRIGGER rival_after_review AFTER INSERT ON reviews BEGIN
+         UPDATE review_publications SET holder = 'rival', lease_epoch = lease_epoch + 1 WHERE id = 'pub-1';
+       END`,
+    );
+
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(false);
+    // The review row's guard passed when it ran; the findings' did not.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get()).toEqual({ n: 0 });
+    expect(publicationRow(db, "pub-1")).toMatchObject({ phase: "confirmed", applied_ms: null });
   });
 
   test("a genuinely new fingerprint after the rebind lands on the new target", async () => {

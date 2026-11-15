@@ -241,6 +241,14 @@ export type ComposedStatement = {
 export type ArtifactPutOptions = {
   /** Overrides `doc.targetId` with an expression evaluated at insert time. */
   targetIdExpression?: TargetIdExpression;
+  /**
+   * An inline predicate (with its binds, in text order) that FENCES the
+   * artifact inserts: the review INSERT becomes `SELECT … WHERE <guard>` and
+   * each finding INSERT gains `AND <guard>`, so a caller that owns a lease
+   * cannot commit an artifact under a lease it no longer holds. The lifecycle
+   * apply passes its `APPLY_LEASE_GUARD_SQL`.
+   */
+  guard?: { sql: string; binds: unknown[] };
 };
 
 /** The D1 store face: the engine `ArtifactStore` plus the consumer's pre-check. */
@@ -338,9 +346,18 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
     const targetIdSql = options?.targetIdExpression?.sql ?? "?";
     const targetIdBinds: readonly unknown[] =
       options?.targetIdExpression === undefined ? [doc.targetId] : options.targetIdExpression.binds;
+    const reviewColumns = `(id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, bot_id, target_id, model, provider, context_incomplete, duration_ms, round)`;
+    const reviewValues = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${targetIdSql}, ?, ?, ?, ?, ?`;
+    // Without a guard the row is a plain VALUES insert; with one it is a
+    // fenced SELECT, so a superseded lease holder writes nothing.
     const reviewStmt: ComposedStatement = {
-      sql: `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, bot_id, target_id, model, provider, context_incomplete, duration_ms, round)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${targetIdSql}, ?, ?, ?, ?, ?)
+      sql:
+        options?.guard === undefined
+          ? `INSERT INTO reviews ${reviewColumns}
+           VALUES (${reviewValues})
+           ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO NOTHING`
+          : `INSERT INTO reviews ${reviewColumns}
+           SELECT ${reviewValues} WHERE ${options.guard.sql}
            ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO NOTHING`,
       binds: [
         reviewId,
@@ -372,22 +389,28 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
         // The publication round, so the findings and reviews faces share one
         // ordinal space; NULL on rows written before migration 0050.
         doc.round ?? null,
+        ...(options?.guard?.binds ?? []),
       ],
     };
     // raw_output stays NULL on the v1 path: the envelope is authoritative
     // (its 64KB truncation is not losslessly restorable).
 
-    // Findings are guarded by WHERE EXISTS on the review id: on a UNIQUE
-    // no-op the review insert writes 0 rows, the new UUID does not exist,
-    // and each findings statement writes 0 rows — the batch succeeds and
-    // the idempotent put resolves below.
-    const findingStmts: ComposedStatement[] = payload.findings.map((finding) => ({
+    // Findings attach to the review by its NATURAL key, not by this attempt's
+    // generated id: the review INSERT is an idempotent no-op when the row
+    // already exists (a retry after a partial artifact write), and the finding
+    // then attaches to THAT row. The id is deterministic
+    // (`<idem key>#<envelope index>`), so `ON CONFLICT (id) DO NOTHING` writes
+    // a missing finding once and never duplicates one — a retry converges
+    // instead of skipping the artifact.
+    const findingStmts: ComposedStatement[] = payload.findings.map((finding, index) => ({
       sql: `INSERT INTO findings (id, review_id, severity, category, file_path, line_start, line_end, title, body, fingerprint)
-             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-             WHERE EXISTS (SELECT 1 FROM reviews WHERE id = ?)`,
+             SELECT ?, r.id, ?, ?, ?, ?, ?, ?, ?, ?
+               FROM reviews r
+              WHERE r.installation_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ? AND r.head_sha = ?
+                ${options?.guard === undefined ? "" : `AND ${options.guard.sql}`}
+             ON CONFLICT (id) DO NOTHING`,
       binds: [
-          crypto.randomUUID(),
-          reviewId,
+          `${doc.key}#${index}`,
           // THE vocab-switch mapping point (architect-locked): v1 rows
           // carry the harness merge class in the legacy `severity` column.
           finding.mergeClass,
@@ -405,7 +428,12 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           // by the pure function; a blank or [REDACTED]-marker hint falls
           // back to the normalized FNV-1a fingerprint (W-1).
           computeFindingFingerprint(finding),
-          reviewId,
+          key.installation_id,
+          key.owner,
+          key.repo,
+          key.pr_number,
+          key.head_sha,
+          ...(options?.guard?.binds ?? []),
       ],
     }));
 
