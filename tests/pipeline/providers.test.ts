@@ -456,16 +456,19 @@ describe("omp provider union (third generator input)", () => {
       expect(entry!.envName, providerId).toBeNull();
       expect(CUSTOM_PROVIDER_ID_PATTERN.test(providerId), providerId).toBe(true);
       // The default protocol is the base record (the one whose id is the
-      // provider id); its scalars are the row's own.
-      const base = records.find((record) => record.id === providerId);
-      expect(base, providerId).toBeDefined();
-      expect([...CUSTOM_PROVIDER_API_IDS] as string[], providerId).toContain(base!.api);
-      expect(entry!.api, providerId).toBe(base!.api);
-      expect(entry!.baseUrl, providerId).toBe(base!.baseUrl);
-      expect(entry!.label, providerId).toBe(base!.label);
+      // provider id) when the group ships one; the generator deliberately falls
+      // back to the first shipped record when it does not, so the row's scalars
+      // are pinned against whichever record that contract chose. (This
+      // snapshot ships every record of every group, so the first record IS the
+      // first shipped one.)
+      const defaultRecord = records.find((record) => record.id === providerId) ?? records[0]!;
+      expect([...CUSTOM_PROVIDER_API_IDS] as string[], providerId).toContain(defaultRecord.api);
+      expect(entry!.api, providerId).toBe(defaultRecord.api);
+      expect(entry!.baseUrl, providerId).toBe(defaultRecord.baseUrl);
+      expect(entry!.label, providerId).toBe(defaultRecord.label);
       expect(entry!.label.length, providerId).toBeGreaterThan(0);
       // Prefill is the vendored vocabulary verbatim — no prefix cap.
-      expect(entry!.models, providerId).toEqual(base!.models);
+      expect(entry!.models, providerId).toEqual(defaultRecord.models);
       // No per-protocol id is a row of its own: the split this shape removes.
       for (const record of records) {
         if (record.id === providerId) continue;

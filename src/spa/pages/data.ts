@@ -1720,15 +1720,6 @@ function isCatalogModelLimits(value: unknown): value is Record<string, CatalogMo
   return isRecord(value) && Object.values(value).every(isCatalogModelLimit);
 }
 
-/**
- * Row-level guard for the catalog: tier + eligibility are the
- * load-bearing discriminators, and the Add Provider UI renders/branches on
- * `models` / `verifiable` / `base_url` / `api`, so a drifted row missing any
- * of them fails the parse instead of breaking the page. Review handoff S2:
- * `display_group` is word-checked too — the picker groups on
- * it, so a row without the stamp (or with a stray value) must fail the
- * parse rather than silently drop out of both groups.
- */
 /** One protocol option: a named api, its endpoint and its vocabulary. */
 function isCatalogProtocolOptions(value: unknown): value is CatalogProtocolOption[] {
   return (
@@ -1744,6 +1735,17 @@ function isCatalogProtocolOptions(value: unknown): value is CatalogProtocolOptio
   );
 }
 
+/**
+ * Row-level guard for the catalog: tier + eligibility are the
+ * load-bearing discriminators, and the Add Provider UI renders/branches on
+ * `models` / `verifiable` / `base_url` / `api`, so a drifted row missing any
+ * of them fails the parse instead of breaking the page. Review handoff S2:
+ * `display_group` is word-checked too — the picker groups on
+ * it, so a row without the stamp (or with a stray value) must fail the
+ * parse rather than silently drop out of both groups. A merged row's
+ * `protocols` options are row-validated for the same reason: the add form
+ * renders a control per option.
+ */
 function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
   return (
     Array.isArray(value) &&

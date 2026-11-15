@@ -18,9 +18,10 @@
  *
  * Catalog id → family. An unmapped id is `absent` + `no-probe` and NEVER a
  * guessed endpoint: the probe set is exactly ten families over fourteen catalog
- * ids, listed below as thirteen rows because the Z.AI/Zhipuai and MiniMax
- * intl/CN families split by host. A declaration stored under a per-protocol id
- * the catalog collapsed resolves to its provider's row before the lookup.
+ * ids, listed below as twelve rows — the Z.AI and Zhipuai id pairs share one
+ * row each, the MiniMax intl/CN pair splits into two. A declaration stored
+ * under a per-protocol id the catalog collapsed resolves to its provider's row
+ * before the lookup.
  *
  * | catalog ids                                                        | endpoint (auth)                                                        | limits |
  * |--------------------------------------------------------------------|------------------------------------------------------------------------|--------|

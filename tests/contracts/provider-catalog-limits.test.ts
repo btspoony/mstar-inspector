@@ -64,6 +64,14 @@ const legacyId =
     : (Object.keys(LEGACY_PROVIDER_IDS).find((id) => LEGACY_PROVIDER_IDS[id] === merged.providerId) ?? null);
 
 describe("catalogLimitsFor — one row per provider, every protocol's endpoint is the row's", () => {
+  test("the committed catalog carries a merged row and one of its collapsed ids", () => {
+    // Non-vacuity guard for the cases below: a catalog with no multi-protocol
+    // row, or a LEGACY_PROVIDER_IDS map that stopped naming a merged row's
+    // collapsed ids, must fail here instead of skipping them all.
+    expect(merged, "a sized catalog row with two concrete protocol endpoints").not.toBeNull();
+    expect(legacyId, `a collapsed id of ${merged?.providerId ?? "a merged row"}`).not.toBeNull();
+  });
+
   test.skipIf(merged === null)("a declaration on ANY of the row's protocol URLs gets the row's table", () => {
     if (merged === null) return;
     for (const endpoint of merged.endpoints) {
