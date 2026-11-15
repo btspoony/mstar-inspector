@@ -57,6 +57,7 @@ describe("resolveWorkspacePlan", () => {
       id: "free",
       name: "Free",
       includedMembers: 5,
+      sharedBotAllowed: false,
     });
     db.raw.close();
   });
@@ -68,6 +69,7 @@ describe("resolveWorkspacePlan", () => {
       id: "pro",
       name: "Pro",
       includedMembers: 5,
+      sharedBotAllowed: true,
     });
     db.raw.close();
   });
@@ -79,6 +81,7 @@ describe("resolveWorkspacePlan", () => {
       id: "unlimited",
       name: "Unlimited",
       includedMembers: null,
+      sharedBotAllowed: true,
     });
     db.raw.close();
   });
@@ -108,6 +111,7 @@ describe("resolveWorkspacePlan — the mode decides before any read", () => {
       id: UNLIMITED_PLAN_ID,
       name: "Unlimited",
       includedMembers: null,
+      sharedBotAllowed: true,
     });
     db.raw.close();
   });

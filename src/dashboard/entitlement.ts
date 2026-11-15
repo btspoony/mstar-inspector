@@ -1,6 +1,8 @@
 /**
- * Workspace entitlement — one workspace's plan limits plus the two pure slot
- * predicates the creation / invite / acceptance routes call before they write.
+ * Workspace entitlement — one workspace's plan limits, the two pure slot
+ * predicates the creation / invite / acceptance routes call before they write,
+ * and the one shared-bot capability decision those surfaces and the webhook
+ * enqueue both consult.
  *
  * The resolver is the only read: `workspace_subscriptions JOIN plans` keyed by
  * workspace id. Absence-means-free is the contract — no row, or a row that is
@@ -25,8 +27,37 @@ import type { WorkspaceStoreD1 } from "./workspace-store";
  * stay unread here. `includedMembers` follows 0031's NULL-means-unlimited
  * contract: a number is the seat cap, NULL is no cap at all — every consumer
  * must branch on it, never fall back to `0`.
+ *
+ * `sharedBotAllowed` is the shared-bot capability (migration
+ * `0061_plan_shared_bot_allowed.sql`): a boolean, not a quota, so NULL is not
+ * another spelling of unlimited — a plan either includes the shared bot or it
+ * does not.
  */
-export type PlanLimits = { id: string; name: string; includedMembers: number | null };
+export type PlanLimits = {
+  id: string;
+  name: string;
+  includedMembers: number | null;
+  sharedBotAllowed: boolean;
+};
+
+/** The read's row shape: SQLite carries the capability as a 0/1 INTEGER. */
+type PlanLimitsRow = Omit<PlanLimits, "sharedBotAllowed"> & {
+  workspaceId?: string;
+  sharedBotAllowed: number;
+};
+
+/**
+ * One row → the limits the decisions read, converting the column's 0/1 into
+ * the boolean at the boundary (the `allowlist_enabled !== 0` precedent).
+ */
+function planLimits(row: PlanLimitsRow): PlanLimits {
+  return {
+    id: row.id,
+    name: row.name,
+    includedMembers: row.includedMembers,
+    sharedBotAllowed: row.sharedBotAllowed !== 0,
+  };
+}
 
 /** The seeded free plan's id — the one plan id an absent subscription resolves to. */
 export const FREE_PLAN_ID = "free";
@@ -52,6 +83,10 @@ const UNLIMITED_LIMITS: PlanLimits = {
   id: UNLIMITED_PLAN_ID,
   name: "Unlimited",
   includedMembers: null,
+  // The tier includes the shared bot, and this constant is what makes
+  // `self-hosted` answer before any read: the capability never consults a
+  // column in that mode.
+  sharedBotAllowed: true,
 };
 
 /**
@@ -117,35 +152,69 @@ export async function resolveWorkspacePlans(
     const placeholders = chunk.map(() => "?").join(", ");
     const subscribed = await db
       .prepare(
-        `SELECT s.workspace_id AS workspaceId, p.id AS id, p.name AS name, p.included_members AS includedMembers
+        `SELECT s.workspace_id AS workspaceId, p.id AS id, p.name AS name, p.included_members AS includedMembers,
+                p.shared_bot_allowed AS sharedBotAllowed
            FROM workspace_subscriptions s
            JOIN plans p ON p.id = s.plan_id
           WHERE s.workspace_id IN (${placeholders}) AND s.status = 'active'`,
       )
       .bind(...chunk)
-      .all<PlanLimits & { workspaceId: string }>();
+      .all<PlanLimitsRow & { workspaceId: string }>();
     for (const row of subscribed.results) {
-      // Explicit fields: `workspaceId` is the key, not part of the limits.
-      resolved.set(row.workspaceId, { id: row.id, name: row.name, includedMembers: row.includedMembers });
+      // `workspaceId` is the key, not part of the limits.
+      resolved.set(row.workspaceId, planLimits(row));
     }
   }
 
   let free: PlanLimits | null = null;
   for (const id of workspaceIds) {
     if (resolved.has(id)) continue;
-    free ??= await db
-      .prepare(
-        `SELECT id AS id, name AS name, included_members AS includedMembers
-           FROM plans WHERE id = ?`,
-      )
-      .bind(FREE_PLAN_ID)
-      .first<PlanLimits>();
     if (free === null) {
-      throw new Error("plans is missing the seeded 'free' row; apply migration 0031_plans_usage.sql");
+      const row = await db
+        .prepare(
+          `SELECT id AS id, name AS name, included_members AS includedMembers,
+                  shared_bot_allowed AS sharedBotAllowed
+             FROM plans WHERE id = ?`,
+        )
+        .bind(FREE_PLAN_ID)
+        .first<PlanLimitsRow>();
+      if (row === null) {
+        throw new Error("plans is missing the seeded 'free' row; apply migration 0031_plans_usage.sql");
+      }
+      free = planLimits(row);
     }
     resolved.set(id, free);
   }
   return resolved;
+}
+
+/**
+ * Why a workspace may not use the shared bot: the plan that lacks the
+ * capability. A value, not a thrown error — the two call sites answer on
+ * different surfaces (a 400 body, a terminal delivery skip), so the decision
+ * stays surface-free and each site maps it.
+ */
+export type SharedBotRefusal = { kind: "shared-bot-not-included"; planId: string };
+
+/**
+ * THE shared-bot decision: `null` = allowed, a {@link SharedBotRefusal} = not.
+ * Both call sites — creating a target on a shared bot
+ * (`targets-store.createOnSharedBot`) and enqueueing a review for one
+ * (`worker/handlers.handleReviewJob`, from the webhook route) — call this and
+ * never re-derive the rule.
+ *
+ * The mode decides first, through {@link resolveWorkspacePlan}: `self-hosted`
+ * resolves the unlimited constant before any DB read, so that mode never reads
+ * the column at all. Every other mode reads the workspace's plan, so a plan
+ * change reaches the next attempt with no restart and no cache.
+ */
+export async function assertSharedBotAllowed(
+  db: WorkspaceStoreD1,
+  workspaceId: string,
+  mode: DeploymentMode,
+): Promise<SharedBotRefusal | null> {
+  const plan = await resolveWorkspacePlan(db, workspaceId, mode);
+  return plan.sharedBotAllowed ? null : { kind: "shared-bot-not-included", planId: plan.id };
 }
 
 /** One free workspace per login, so the second free membership is the last. */
@@ -209,6 +278,20 @@ export function MEMBER_CAP_REFUSAL(includedMembers: number): string {
  */
 export function ACCEPT_MEMBER_CAP_REFUSAL(includedMembers: number): string {
   return `You were not added. This workspace is at its plan's limit of ${includedMembers} members. An owner or admin must remove a member, or the workspace must move to a larger plan, before this invite can be accepted. The invite is still pending.`;
+}
+
+/**
+ * The Product copy for a target creation the shared-bot capability refuses,
+ * verbatim (§ Refusal copy). Answered as the 400 body of the form-POST family,
+ * which carries no error-code field — so this text IS the refusal.
+ *
+ * It names the plan because this reader can act on it: use an App the
+ * workspace owns, or have an operator move the workspace to a plan that
+ * includes the shared bot. The plan id interpolates as stored; every
+ * server-built refusal body on this surface is English.
+ */
+export function SHARED_BOT_REFUSAL(planId: string): string {
+  return `This target was not created on the shared bot. The shared bot is not included in this workspace's plan (${planId}). Use a GitHub App this workspace owns, or move the workspace to a plan that includes the shared bot.`;
 }
 
 /** Refusal for a creation / acceptance that would exceed the free slot: a 409 body. */

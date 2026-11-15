@@ -45,6 +45,9 @@ export const TAIL_PREREQUISITES = [
   // `workspaces` FK parent is created later by 0026 — SQLite resolves a
   // foreign key at DML, not at CREATE, so the early slot is inert).
   "0029_operator_support.sql",
+  // 0061 alters `plans` and updates its seeded rows; 0031 creates the table
+  // and seeds `free`/`pro`. The DML is why the guard cannot see this one.
+  "0031_plans_usage.sql",
 ] as const;
 
 /** The directory-derived tail after the shared anchor. */
@@ -176,8 +179,7 @@ export const SPA_PAGE_APIS_MIGRATIONS = shape("spa-page-apis", [
   "0028_workspace_invites.sql",
   // The shell boot reads the support-grant table, the plan catalogue +
   // subscriptions and `server_flags`, so the dispatch face runs on the
-  // production shape. 0029 already rides `TAIL_PREREQUISITES`.
-  "0031_plans_usage.sql",
+  // production shape. 0029 and 0031 already ride `TAIL_PREREQUISITES`.
   "0032_unlimited_plan.sql",
   "0033_platform_admin.sql",
   // 0036: github_apps.slug → webhook_path plus the cached github_slug.
@@ -397,8 +399,11 @@ export const APP_CREDENTIAL_RESOLUTION_MIGRATIONS = shape("app-credential-resolu
   "0024_provider_multi_key.sql",
   // 0026: createApp also writes the App's workspace mapping.
   "0026_workspaces.sql",
-  // 0029: `audit_events`, which the derived tail's 0060 alters.
+  // 0029: `audit_events`, which the derived tail's 0060 alters. 0031: the
+  // plan catalogue, whose rows the tail's 0061 alters — the DML is invisible
+  // to the shape guard, so the creating migration is named here.
   "0029_operator_support.sql",
+  "0031_plans_usage.sql",
   "0036_app_identity.sql",
   // Every later migration, derived from the directory (0040–… included):
   // the consumer's per-message admission reads the runtime caps and writes
