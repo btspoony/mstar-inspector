@@ -94,8 +94,11 @@ export { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stage
  * resolution (the column is NOT NULL without the 0001 `CHECK (head_sha <>
  * '')` — a failure row exists precisely for runs that never produced a
  * reviewable sha). `error` is the attempt's structured error detail.
+ * `target_id` is the `review_targets` row the run was executing for: the
+ * tenant faces bind it, so a row without one belongs to no workspace.
  */
 export type ReviewFailureInput = {
+  target_id: string;
   installation_id: number;
   owner: string;
   repo: string;
@@ -218,11 +221,12 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
       }
       await db
         .prepare(
-          `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           crypto.randomUUID(),
+          input.target_id,
           input.installation_id,
           input.owner,
           input.repo,

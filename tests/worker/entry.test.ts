@@ -16,7 +16,7 @@ import type { D1Database, ExecutionContext, ScheduledController } from "@cloudfl
 import "../helpers/cloudflare-workers-mock";
 import { createFailureStore } from "../../src/store/failure-store";
 import { SWEEP_FAILURE_THRESHOLD } from "../../src/worker/sweep";
-import { createMigratedTestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedBot, seedTarget } from "../store/helpers";
 import { defaultSweepLog } from "../../src/worker/sweep";
 
 const { default: worker, Sandbox, SandboxV1 } = await import("../../src/worker/entry");
@@ -85,10 +85,14 @@ describe("worker entry scheduled wiring", () => {
 
   test("scheduled runs the sweep over the bound DB and POSTs the alert to ALERT_WEBHOOK_URL on breach", async () => {
     const db = createMigratedTestD1();
+    // The write contract names a target; the FK parent is this bot's target.
+    seedBot(db, "bot-entry", 9401);
+    seedTarget(db, "bot-entry", { id: "target-entry" });
     const store = createFailureStore(db);
     // One row past the sweep's threshold: the breach is what this case pins.
     for (let i = 0; i < SWEEP_FAILURE_THRESHOLD + 1; i++) {
       await store.record({
+        target_id: "target-entry",
         installation_id: 1,
         owner: "acme",
         repo: "widgets",

@@ -598,8 +598,17 @@ export async function applyPublishedLifecycle(
   // FINAL batch, under the lease. Small payloads (the common case) still
   // run as ONE batch. The guard above narrowed `payload.lifecycle` to
   // non-null; it is passed explicitly so the helper's signature carries
-  // that invariant.
-  const statements = lifecycleApplyBatch(db, row, payload, payload.lifecycle, nowMs, lease);
+  // that invariant, and the artifact's own `targetId` names the target the
+  // finding rows are attributed to (the same id the review row carries).
+  const statements = lifecycleApplyBatch(
+    db,
+    row,
+    payload,
+    payload.lifecycle,
+    payload.artifact.targetId,
+    nowMs,
+    lease,
+  );
   const results: D1BatchResult[] = [];
   for (let start = 0; start < statements.length; start += LIFECYCLE_APPLY_BATCH_STATEMENTS) {
     // Per-chunk fence (§7.11.1): the apply may span a real time window, and
@@ -698,6 +707,10 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
  * the mutation cannot slip a finding/round/association write through. The
  * guard binds are the LAST four parameters of each statement, in the order
  * `(publicationId, holder, leaseEpoch, operationNow)`.
+ *
+ * `targetId` is the `review_targets` row this publication ran for — the
+ * tenant faces bind `review_findings.target_id`, so a finding written
+ * without it belongs to no workspace.
  */
 function lifecycleApplyBatch(
   db: D1Like,
@@ -705,6 +718,7 @@ function lifecycleApplyBatch(
   payload: PublicationPayload,
   /** The caller-narrowed non-null `payload.lifecycle` (review kind only). */
   lifecycle: LifecycleRound,
+  targetId: string,
   nowMs: number,
   lease: Lease,
 ): D1StatementLike[] {
@@ -723,8 +737,8 @@ function lifecycleApplyBatch(
           `INSERT INTO review_findings
              (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
               first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
-              first_seen_round, last_seen_round, state, created_ms, updated_ms)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?
+              first_seen_round, last_seen_round, state, created_ms, updated_ms, target_id)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?
            WHERE ${APPLY_LEASE_GUARD_SQL}
            ON CONFLICT(bot_id, installation_id, owner, repo, pr_number, finding_id) DO UPDATE SET
              last_publication_id = excluded.last_publication_id,
@@ -743,7 +757,7 @@ function lifecycleApplyBatch(
         .bind(
           seen.rowId, scope.appId, scope.installationId, scope.owner, scope.repo,
           scope.prNumber, seen.findingId, JSON.stringify(seen.original),
-          pubId, pubId, headSha, headSha, round, round, nowMs, nowMs,
+          pubId, pubId, headSha, headSha, round, round, nowMs, nowMs, targetId,
           ...guard,
         ),
     );

@@ -20,15 +20,30 @@ import {
   createFailureStore,
   type AdmissionDropReason,
 } from "../../src/store/failure-store";
-import { createMigratedTestD1 } from "./helpers";
+import { createMigratedTestD1, seedBot, seedTarget } from "./helpers";
+
+/** The target every recorded row is attributed to (its FK parent is seeded below). */
+const TARGET_ID = "target-failures";
 
 const BASE = {
+  target_id: TARGET_ID,
   installation_id: 123,
   owner: "acme",
   repo: "widgets",
   pr_number: 42,
   head_sha: "0123456789abcdef0123456789abcdef01234567",
 };
+
+/**
+ * A migrated DB with the target a failure row names. `target_id` is part of the
+ * write contract, so every recording fixture needs its `review_targets` row.
+ */
+function createFailureDb() {
+  const db = createMigratedTestD1();
+  seedBot(db, "bot-failures", 9201);
+  seedTarget(db, "bot-failures", { id: TARGET_ID });
+  return db;
+}
 
 /**
  * The `review_failures.error` shape a terminal admission drop carries
@@ -43,7 +58,7 @@ function dropError(reason: AdmissionDropReason): string {
 
 describe("createFailureStore", () => {
   test("record persists every column; id is a uuid; created_at defaults to datetime('now')", async () => {
-    const db = createMigratedTestD1();
+    const db = createFailureDb();
     const store = createFailureStore(db);
     await store.record({ ...BASE, stage: "parse", error: "not valid ReviewOutput JSON" });
 
@@ -65,7 +80,7 @@ describe("createFailureStore", () => {
   });
 
   test("record appends — per-attempt events share the five-tuple (no UNIQUE)", async () => {
-    const db = createMigratedTestD1();
+    const db = createFailureDb();
     const store = createFailureStore(db);
     for (const attempt of [1, 2, 3]) {
       await store.record({ ...BASE, stage: "runner", error: `runner failed: exit ${attempt}` });
@@ -74,7 +89,7 @@ describe("createFailureStore", () => {
   });
 
   test("record rejects an off-vocabulary stage BEFORE any row is written (producer-side enforcement)", async () => {
-    const db = createMigratedTestD1();
+    const db = createFailureDb();
     const store = createFailureStore(db);
     await expect(store.record({ ...BASE, stage: "not-a-stage" as never, error: "boom" })).rejects.toThrow(
       /not on the producer vocabulary/,
@@ -83,7 +98,7 @@ describe("createFailureStore", () => {
   });
 
   test("listRecent returns newest-first with a rowid tiebreak, bounded by limit", async () => {
-    const db = createMigratedTestD1();
+    const db = createFailureDb();
     const store = createFailureStore(db);
     const ids: string[] = [];
     for (const stage of ["parse", "runner", "sandbox", "pipeline"] as const) {
@@ -100,7 +115,7 @@ describe("createFailureStore", () => {
   });
 
   test("countAdmissionDrops24h reads every reason at zero on an empty log", async () => {
-    const store = createFailureStore(createMigratedTestD1());
+    const store = createFailureStore(createFailureDb());
     expect(await store.countAdmissionDrops24h()).toEqual({
       "pr-held": 0,
       "system-cap": 0,
@@ -110,7 +125,7 @@ describe("createFailureStore", () => {
   });
 
   test("countAdmissionDrops24h groups the terminal drops by reason over the trailing 24h", async () => {
-    const db = createMigratedTestD1();
+    const db = createFailureDb();
     const store = createFailureStore(db);
     // Three forced refusals of distinct reasons — the operator's contract.
     for (const reason of ["pr-held", "system-cap", "workspace-cap"] as const) {
@@ -156,7 +171,7 @@ describe("createFailureStore", () => {
   });
 
   test("countGithubRateLimited24h counts only the secondary prefix inside the trailing 24h", async () => {
-    const db = createMigratedTestD1();
+    const db = createFailureDb();
     const store = createFailureStore(db);
     // The metric's three in-window rows: the single catch's delivery failure
     // and the degraded delete sweep's own `rate-limit` attribution — this count
@@ -196,7 +211,7 @@ describe("createFailureStore", () => {
   });
 
   test("the trailing-24h pipeline read is served by its partial window index (0048)", () => {
-    const db = createMigratedTestD1();
+    const db = createFailureDb();
     const index = db.raw
       .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_failures_pipeline_created'")
       .get() as { sql: string } | null;
