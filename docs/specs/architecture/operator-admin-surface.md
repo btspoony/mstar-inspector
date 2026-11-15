@@ -143,6 +143,12 @@ and not a boolean flag.
   `409 {"error":"bot is outside the official workspace"}`; a revoke without
   `confirm: true` is `400 {"error":"unsharing requires confirm: true"}`. A
   refused write appends no audit row.
+- Every condition is re-checked inside the write's own `batch`, so the
+  designation a share is authorized by is the one in force when the row is
+  written: clearing or re-pointing it between the console's read and its write
+  refuses the share instead of letting it land against a stale value. The FROM
+  scope is guarded the same way, so two identical transitions land once — the
+  loser reports the state the winner persisted, with no second audit row.
 - Unsharing is deliberately NOT gated on the official workspace: a stale share
   must stay revocable by the only role that can revoke it.
 - The flag is a platform authorization, never workspace self-service. No

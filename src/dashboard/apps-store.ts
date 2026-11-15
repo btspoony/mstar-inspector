@@ -17,8 +17,8 @@
  * partition), which bound the sandbox_image_id value domain and keep the
  * failure-count/history SQL off hand-written stage literals, plus
  * src/contracts/review-gate.ts for the create path's score floor, and
- * ./runtime-config-store for the official-workspace read — `setBotScope` must
- * not become a second parser of that row.
+ * ./runtime-config-store for the official-workspace key — `setBotScope`'s guard
+ * names that row rather than guessing it, and this module never parses it.
  * The `db` parameter is a locally-declared narrow D1 face (types
  * only, zero imports) — a real `D1Database`, the bun:sqlite test double
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
@@ -130,7 +130,7 @@ import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
 import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
-import { readOfficialWorkspaceId } from "./runtime-config-store";
+import { OFFICIAL_WORKSPACE_KEY } from "./runtime-config-store";
 
 /** A row of `review_bots` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
@@ -1974,11 +1974,27 @@ const BOT_SCOPE_LIST_SQL = `
    ORDER BY b.name, b.id`;
 
 /**
- * Audit row + scope write, in ONE batch, both carrying the same guard — the
- * bot is live and (for a share) it belongs to the named official workspace — so
- * a refused write appends nothing. `before` is a subquery against the
- * not-yet-updated row: a bind cannot read the old value after the write, and
- * the `after` pair is the value the writer computed, never a re-read.
+ * The share's own guard, evaluated INSIDE the batch by both statements: the
+ * bot's workspace IS the official workspace right now, and that workspace is
+ * live. Reading the designation before the batch would let a share commit
+ * against a value an operator had already cleared or re-pointed, so the row is
+ * resolved in the same transaction that writes. The key comes from
+ * `runtime-config-store`; this module never parses that row.
+ */
+const officialWorkspaceGuardSql = (botIdRef: string) => `EXISTS (
+           SELECT 1 FROM bot_workspaces w
+             JOIN review_runtime_settings s
+               ON s.key = '${OFFICIAL_WORKSPACE_KEY}' AND s.value = w.workspace_id
+             JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL
+            WHERE w.bot_id = ${botIdRef})`;
+
+/**
+ * Audit row + scope write, in ONE batch, both carrying the same guards: the bot
+ * is live, its current scope is still the transition's FROM state (so two
+ * identical transitions land once), and — for a share — it belongs to the live
+ * official workspace. A refused write therefore appends nothing. `before` is a
+ * subquery against the not-yet-updated row: a bind cannot read the old value
+ * after the write, and the `after` pair is the value the writer computed.
  */
 const BOT_SCOPE_SHARE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
@@ -1989,14 +2005,14 @@ const BOT_SCOPE_SHARE_AUDIT_SQL = `
                                  'shared_at', (SELECT shared_at FROM review_bots WHERE id = ?3)),
            'after', json_object('scope', 'shared', 'shared_at', ?4)),
          ?5
-   WHERE EXISTS (SELECT 1 FROM review_bots b JOIN bot_workspaces w ON w.bot_id = b.id
-                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND w.workspace_id = ?6)`;
+   WHERE EXISTS (SELECT 1 FROM review_bots b
+                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'shared'
+                    AND ${officialWorkspaceGuardSql("b.id")})`;
 
 const BOT_SCOPE_SHARE_SQL = `
   UPDATE review_bots SET scope = 'shared', shared_at = ?2
-   WHERE id = ?1 AND deleted_at IS NULL
-     AND EXISTS (SELECT 1 FROM bot_workspaces w
-                  WHERE w.bot_id = review_bots.id AND w.workspace_id = ?3)`;
+   WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'shared'
+     AND ${officialWorkspaceGuardSql("review_bots.id")}`;
 
 const BOT_SCOPE_UNSHARE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
@@ -2007,15 +2023,17 @@ const BOT_SCOPE_UNSHARE_AUDIT_SQL = `
                                  'shared_at', (SELECT shared_at FROM review_bots WHERE id = ?3)),
            'after', json_object('scope', 'owned', 'shared_at', NULL)),
          ?4
-   WHERE EXISTS (SELECT 1 FROM review_bots WHERE id = ?3 AND deleted_at IS NULL)`;
+   WHERE EXISTS (SELECT 1 FROM review_bots b
+                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'owned')`;
 
 /**
  * Unsharing is NOT gated on the official workspace: a stale share must stay
- * revocable by the only role that can revoke it.
+ * revocable by the only role that can revoke it. It is gated on the FROM state,
+ * so a second revoke changes nothing.
  */
 const BOT_SCOPE_UNSHARE_SQL = `
   UPDATE review_bots SET scope = 'owned', shared_at = NULL
-   WHERE id = ?1 AND deleted_at IS NULL`;
+   WHERE id = ?1 AND deleted_at IS NULL AND scope <> 'owned'`;
 
 /**
  * Move one bot between `owned` and `shared`, auditing accepted writes in the
@@ -2037,34 +2055,38 @@ export async function setBotScope(
   if (current.scope === scope) return { outcome: "ok", scope, sharedAt: current.shared_at };
   if (scope === "owned" && input.confirm !== true) return { outcome: "confirm_required" };
 
-  let officialWorkspaceId: string | null = null;
-  if (scope === "shared") {
-    officialWorkspaceId = await readOfficialWorkspaceId(db);
-    if (officialWorkspaceId === null) return { outcome: "outside_official_workspace" };
-  }
-
+  // Every precondition is re-checked inside the batch, so the pre-read above
+  // only names the refusal early — it authorizes nothing.
   const [, write] =
     scope === "shared"
       ? await db.batch([
           db
             .prepare(BOT_SCOPE_SHARE_AUDIT_SQL)
-            .bind(crypto.randomUUID(), actor, botId, now, now, officialWorkspaceId),
-          db.prepare(BOT_SCOPE_SHARE_SQL).bind(botId, now, officialWorkspaceId),
+            .bind(crypto.randomUUID(), actor, botId, now, now),
+          db.prepare(BOT_SCOPE_SHARE_SQL).bind(botId, now),
         ])
       : await db.batch([
           db.prepare(BOT_SCOPE_UNSHARE_AUDIT_SQL).bind(crypto.randomUUID(), actor, botId, now),
           db.prepare(BOT_SCOPE_UNSHARE_SQL).bind(botId),
         ]);
 
-  // The write lost its guard, so nothing was written and nothing was audited.
-  // Re-read to name which precondition failed: a bot retired between the read
-  // above and the batch is "not found", a live one can only have left the
-  // official workspace (an unshare's only guard is `deleted_at IS NULL`).
-  if ((write?.meta.changes ?? 0) === 0) {
-    const live = await db.prepare(BOT_SCOPE_READ_SQL).bind(botId).first<{ scope: BotScope }>();
-    return live === null ? { outcome: "bot_not_found" } : { outcome: "outside_official_workspace" };
+  if ((write?.meta.changes ?? 0) > 0) {
+    return { outcome: "ok", scope, sharedAt: scope === "shared" ? now : null };
   }
-  return { outcome: "ok", scope, sharedAt: scope === "shared" ? now : null };
+
+  // The guarded write changed nothing, so it appended no audit row either.
+  // Re-read to say why: a bot retired in between is "not found"; a row that
+  // already holds the target scope means a concurrent identical transition won,
+  // which is this call's outcome too, carrying the state that was persisted;
+  // otherwise the share's designation guard refused it (the only other guard,
+  // since an unshare's FROM state is checked in the same statement).
+  const persisted = await db
+    .prepare(BOT_SCOPE_READ_SQL)
+    .bind(botId)
+    .first<{ scope: BotScope; shared_at: string | null }>();
+  if (persisted === null) return { outcome: "bot_not_found" };
+  if (persisted.scope === scope) return { outcome: "ok", scope, sharedAt: persisted.shared_at };
+  return { outcome: "outside_official_workspace" };
 }
 
 /** Every live bot with its scope, name-ordered — the operator console's list. */
