@@ -137,6 +137,8 @@ export const en = {
     /** The page's name in the document title (`common.pageTitle` slot). */
     documentPage: "App",
     backToApps: "Back to Apps",
+    /** The link from the target detail to the bot's own settings page. */
+    botSettingsLink: "Bot settings",
     tabSettings: "Settings",
     tabInstallations: "Installed",
     tabInsights: "Insights",
@@ -155,7 +157,7 @@ export const en = {
     scopeOwned: "Owned",
     scopeShared: "Shared",
     /** Shown whenever `can_manage` is false — a shared bot, or a non-manager. */
-    readOnly: "This bot's configuration is read-only here. A shared bot is configured by its owning workspace only.",
+    readOnly: "Configuration here is read-only. A shared bot is configured by its owning workspace only.",
     health: "Credentials health",
     healthCopy: "Deliveries GitHub sent to this bot's webhook, and the ones it refused.",
     sandboxCopy: "The runtime harness every review of this bot runs under.",
@@ -942,10 +944,18 @@ export const en = {
     confirmRemoveCustomTitle: "Remove provider {provider}?",
     confirmRemoveCustomBody:
       "The provider and every key in its pool are removed. To free one slot only, remove that key's own row. Chains referencing its models fail on save.",
+    /**
+     * The review trigger — TARGET-scoped: when a delivery starts a review. The
+     * bot's sandbox image now lives on the bot page (`botSettings`), so this
+     * section carries the mention + mode controls alone.
+     */
+    reviewTrigger: "Review trigger",
+    reviewTriggerCopy:
+      "How a review starts: on a pull request opening, on every push, or only when someone mentions the bot in a comment.",
     runtimeHarness: "Runtime harness",
     runtimeHarnessCopy:
       "The {id} runtime harness mounted into the sandbox image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked in.",
-    runtimeHarnessValue: "This App's reviews run under the {id} runtime harness.",
+    runtimeHarnessValue: "Reviews for this App run under the {id} runtime harness.",
     saveRuntimeHarness: "Save runtime harness",
     /**
      * GitHub identity card. `{name}`/`{id}`/`{time}` carry the

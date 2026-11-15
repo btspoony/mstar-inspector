@@ -109,7 +109,6 @@ function renderDetail(payload: SettingsPayload, canManage: boolean, tab: AppDeta
       locale: "en",
       appId: "1",
       payload,
-      groups: [],
       notice: null,
       search: { ...search, tab },
       onReload: noReload,
@@ -276,7 +275,6 @@ describe("tab shell rendering (static SSR)", () => {
             },
           ],
         },
-        groups: [],
         onReload: noReload,
       }),
     );
@@ -285,7 +283,7 @@ describe("tab shell rendering (static SSR)", () => {
     expect(settingsOnly).not.toContain("acme/web");
   });
 
-  test("the Installed tab renders the installations table and leads each delivery with its source repo", () => {
+  test("the Installed tab keeps the install block and the allowlist; the installations table moved to the bot page", () => {
     const installed = renderDetail(
       {
         ...managePayload,
@@ -301,34 +299,41 @@ describe("tab shell rendering (static SSR)", () => {
             repository_full_name: "acme/web",
             created_at: "2026-01-01 00:00:00",
           },
-          {
-            event_name: "ping",
-            outcome: "ignored",
-            status_code: null,
-            repository_full_name: null,
-            created_at: "2026-01-01 00:00:00",
-          },
         ],
       },
       true,
       "installations",
     );
     expect(installed).toContain(">Installed</button>");
-    // The table lives in the installations panel, and that panel is the ACTIVE
-    // one when the Installed tab is selected (the other panels are mounted but
-    // inactive — the forceMount idiom).
-    const at = installed.indexOf(t("en", "settings.installationsAccount"));
-    const panelTag = installed.slice(
-      installed.lastIndexOf("<div", installed.lastIndexOf('data-slot="tabs-content"', at)),
-      at,
-    );
-    expect(panelTag).toContain('data-state="active"');
-    expect(installed).toContain(t("en", "settings.installationsAccount"));
-    expect(installed).toContain("acme");
-    // The delivery line leads with its repo; a pre-0043 row (NULL source)
-    // falls back to the unknown-source label rather than a blank line.
-    expect(installed).toContain("acme/web");
-    expect(installed).toContain(t("en", "settings.unknownSource"));
+    // The target keeps what it owns: the install entry point and the owner
+    // allowlist. The bot's installation table and its delivery list are
+    // bot-scoped and live on the bot page.
+    expect(installed).toContain(t("en", "settings.install"));
+    expect(installed).toContain(t("en", "settings.allowlist"));
+    expect(installed).not.toContain(t("en", "settings.installationsAccount"));
+    expect(installed).not.toContain(t("en", "settings.recentDeliveries"));
+    expect(installed).not.toContain("acme/web");
+  });
+
+  test("the detail links to the bot's own settings page", () => {
+    for (const [payload, canManage] of [
+      [managePayload, true],
+      [identityPayload, false],
+    ] as const) {
+      const markup = renderToStaticMarkup(
+        createElement(AppDetailView, {
+          locale: "en",
+          appId: "1",
+          payload,
+          notice: null,
+          search,
+          onReload: noReload,
+          onSearch: noSearch,
+        }),
+      );
+      expect(markup, `can_manage=${canManage}`).toContain(`href="${apiBase()}/apps/1/bot"`);
+      expect(markup, `can_manage=${canManage}`).toContain(t("en", "appDetail.botSettingsLink"));
+    }
   });
 
   test("the identity status pill renders the shared primitive from the single derivation", () => {
@@ -348,19 +353,25 @@ describe("tab shell rendering (static SSR)", () => {
     });
   });
 
-  test("the settings face renders its own section titles (workspace rename moved out)", () => {
+  test("the settings face renders its own (target-scoped) section titles", () => {
     const manage = renderDetail(managePayload, true);
     // The App-side SectionCard titles, resolved through the dictionary — the
-    // heading/stat migration may not drop or rename a section.
+    // heading/stat migration may not drop or rename a section. The bot-scoped
+    // sections (providers, chains, seats, sandbox image) live on the bot page.
     for (const key of [
       "settings.appInfo",
+      "settings.reviewTrigger",
+      "settings.reviewDepth",
+      "settings.reviewGate",
       "settings.ops",
-      "settings.runtimeHarness",
-      "settings.providers.title",
-      "settings.modelChains",
-      "settings.seats",
     ] as const) {
       expect(manage).toContain(t("en", key));
+    }
+    // The header's metric band still labels the installations / chains counts
+    // (the payload keeps those keys), so only the SECTION titles are asserted
+    // absent here.
+    for (const key of ["settings.providers.title", "settings.seats"] as const) {
+      expect(manage).not.toContain(t("en", key));
     }
     // The workspace settings live on /dashboard/<ref>/settings; the App
     // settings tab must not keep a second entry point to them.
@@ -548,7 +559,6 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       locale: "en",
       appId: "1",
       payload: managePayload,
-      groups: [],
       notice: null,
       search: tabSearch,
       onReload: noReload,
@@ -621,14 +631,15 @@ describe("tab shell mounted behaviour (forceMount)", () => {
         (button) => button.textContent === t("en", "settings.addChain"),
       );
       await click(win, addChain);
-      const input = () =>
-        container.querySelector(`input[placeholder="${t("en", "settings.chainNamePlaceholder")}"]`);
+      // The typed field is a target-scoped control the settings tab still owns:
+      // the review gate's score input.
+      const input = () => container.querySelector('input[type="number"]');
       const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
       await act(async () => {
-        setValue?.call(input(), "deep-review");
+        setValue?.call(input(), "42");
         input()?.dispatchEvent(new win.Event("input", { bubbles: true }));
       });
-      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+      expect((input() as HTMLInputElement | null)?.value).toBe("42");
       const settingsPanel = panelOf(container, input());
       expect(settingsPanel?.getAttribute("data-state")).toBe("active");
 
@@ -643,12 +654,12 @@ describe("tab shell mounted behaviour (forceMount)", () => {
         "inactive",
         "inactive",
       ]);
-      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+      expect((input() as HTMLInputElement | null)?.value).toBe("42");
 
       // …and back: the value survived a full round trip.
       await click(win, tabTrigger(container, t("en", "appDetail.tabSettings")));
       expect(settingsPanel?.getAttribute("data-state")).toBe("active");
-      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+      expect((input() as HTMLInputElement | null)?.value).toBe("42");
     } finally {
       await act(async () => root.unmount());
       cleanup();
@@ -830,7 +841,6 @@ describe("tab shell mounted behaviour (forceMount)", () => {
             locale: "en",
             appId: "1",
             payload,
-            groups: [],
             notice: null,
             search: { ...search, tab: "settings" },
             onReload: noReload,
@@ -1009,7 +1019,7 @@ describe("workspace switch on the App detail page (SF-1)", () => {
     }) as unknown as typeof fetch;
     try {
       const loaded = await loadAppDetail(apiBase(pathname), "1");
-      expect(loaded?.payload.can_manage).toBe(false);
+      expect(loaded?.can_manage).toBe(false);
       return calls;
     } finally {
       globalThis.fetch = realFetch;
@@ -1028,23 +1038,17 @@ describe("workspace switch on the App detail page (SF-1)", () => {
     ]);
   });
 
-  test("the manage face reads the model options off the SAME base", async () => {
+  test("the manage face reads the settings payload only — the model options belong to the bot page", async () => {
     const calls: string[] = [];
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async (input: unknown) => {
-      const url = String(input);
-      calls.push(url);
-      return new Response(
-        JSON.stringify(url.endsWith("/models") ? { groups: [] } : managePayload),
-        { status: 200 },
-      );
+      calls.push(String(input));
+      return new Response(JSON.stringify(managePayload), { status: 200 });
     }) as unknown as typeof fetch;
     try {
-      await loadAppDetail("/dashboard/beta", "1");
-      expect(calls).toEqual([
-        "/dashboard/beta/api/apps/1/settings",
-        "/dashboard/beta/api/apps/1/models",
-      ]);
+      const loaded = await loadAppDetail("/dashboard/beta", "1");
+      expect(loaded?.can_manage).toBe(true);
+      expect(calls).toEqual(["/dashboard/beta/api/apps/1/settings"]);
     } finally {
       globalThis.fetch = realFetch;
     }

@@ -117,6 +117,8 @@ export const zhCN: Dictionary = {
     /** 页面在文档标题中的名称（`common.pageTitle` 的 page 槽）。 */
     documentPage: "应用",
     backToApps: "返回应用",
+    /** 从目标详情指向机器人设置页的链接。 */
+    botSettingsLink: "机器人设置",
     tabSettings: "应用设置",
     tabInstallations: "已安装",
     tabInsights: "洞察",
@@ -131,7 +133,7 @@ export const zhCN: Dictionary = {
     scopeOwned: "自有",
     scopeShared: "共享",
     /** `can_manage` 为 false 时显示（共享机器人，或非管理员）。 */
-    readOnly: "此机器人的配置在此只读。共享机器人只由其所属工作区配置。",
+    readOnly: "此页配置为只读。共享机器人只由其所属工作区配置。",
     health: "凭据健康",
     healthCopy: "GitHub 发到该机器人 webhook 的投递，以及被拒绝的投递。",
     sandboxCopy: "该机器人的每次评审所用的运行时沙箱。",
@@ -787,6 +789,9 @@ export const zhCN: Dictionary = {
     confirmRemoveCustomTitle: "移除 provider {provider}？",
     confirmRemoveCustomBody:
       "该 provider 及其密钥池中的全部密钥都将被移除。若只想腾出一个槽位，请移除该密钥所在的行。引用其模型的链在保存时会校验失败。",
+    /** 评审触发——属于「目标」：一次投递何时开始评审。机器人的沙箱镜像现在位于机器人设置页。 */
+    reviewTrigger: "评审触发",
+    reviewTriggerCopy: "评审的启动方式：拉取请求打开时、每次推送时，或仅当有人在评论中提及机器人时。",
     runtimeHarness: "运行时 harness",
     runtimeHarnessCopy:
       "执行此 App 审查的沙盒镜像中挂载的 {id} 运行时 harness。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",

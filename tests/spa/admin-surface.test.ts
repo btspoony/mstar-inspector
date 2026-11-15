@@ -215,7 +215,6 @@ describe("the release version lives on the console only", () => {
       createElement(SettingsView, {
         locale: "en",
         payload: TENANT_PAYLOAD,
-        groups: [],
         onReload: async () => true,
       }),
     );

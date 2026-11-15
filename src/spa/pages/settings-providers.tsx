@@ -6,7 +6,7 @@ import { GroupCard, GroupCardBody, GroupCardHeader } from "../components/GroupCa
 import { ListRow, ListRowGroup } from "../components/ListRow";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
-import { catalogEndpoints, modelsForProtocol, type CatalogProvider, type SettingsManagePayload } from "./data";
+import { catalogEndpoints, modelsForProtocol, type CatalogProvider, type BotConfigSections } from "./data";
 import { NoticeRegion, type OpNotice } from "./PageNotice";
 import { AddKeyDialog, AddProviderDialog } from "./providers-dialogs";
 import { ProviderModelsDialog } from "./provider-models-dialog";
@@ -59,7 +59,7 @@ export function ProvidersSection({
   onOutcome,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsManagePayload;
+  payload: BotConfigSections;
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onPending: (action: PendingAction) => void;

@@ -33,7 +33,7 @@ import {
   selectedCatalogProvider,
   type CatalogProvider,
   type ProviderKeyRow,
-  type SettingsManagePayload,
+  type BotConfigSections,
 } from "./data";
 import { NoticeRegion, SaveInFlight, type OpNotice } from "./PageNotice";
 
@@ -68,7 +68,7 @@ export function AddProviderDialog({
   locale: SpaBoot["locale"];
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  payload: SettingsManagePayload;
+  payload: BotConfigSections;
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome: (notice: OpNotice) => void;
@@ -81,7 +81,7 @@ export function AddProviderDialog({
   const [customPrefill, setCustomPrefill] = useState<CatalogProvider | null>(null);
   const selected = selectedCatalogProvider(payload.provider_catalog, selectedId);
   const imageId = payload.app.sandbox_image_id;
-  const customById: Record<string, SettingsManagePayload["custom_providers"][number]> = {};
+  const customById: Record<string, BotConfigSections["custom_providers"][number]> = {};
   for (const row of payload.custom_providers) customById[row.provider_id] = row;
 
   function close(): void {
@@ -354,7 +354,7 @@ export function CustomProviderDialog({
   locale: SpaBoot["locale"];
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  payload: SettingsManagePayload;
+  payload: BotConfigSections;
   /** A console-only catalog entry's declaration seed (protocol + URL shape). */
   prefill?: { label: string; baseUrl: string; api: string | null };
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
@@ -527,7 +527,7 @@ export function ProviderConfigForm({
   provider: CatalogProvider;
   /** EVERY stored key of the selected provider — one masked line per row. */
   storedKeys: ProviderKeyRow[];
-  custom: SettingsManagePayload["custom_providers"][number] | undefined;
+  custom: BotConfigSections["custom_providers"][number] | undefined;
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome: (notice: OpNotice) => void;
