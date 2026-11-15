@@ -84,6 +84,18 @@ export type InstallClaimsStore = {
     installationId: number;
     now: string;
   }): Promise<InstallBindOutcome>;
+  /**
+   * The target page's one-action bind: create (or refresh) the caller's claim
+   * for this target, then consume it in the same request. It adds no bind SQL
+   * of its own — the consume-and-bind batch stays the only writer.
+   */
+  claimAndBind(input: {
+    userId: string;
+    workspaceId: string;
+    targetId: string;
+    installationId: number;
+    now: string;
+  }): Promise<InstallBindOutcome>;
   unbindTarget(input: { targetId: string; actor: string; now: string }): Promise<UnbindOutcome>;
 };
 
@@ -238,7 +250,7 @@ export function createInstallClaimsStore(db: DashboardD1): InstallClaimsStore {
     return null;
   }
 
-  return {
+  const store: InstallClaimsStore = {
     async createOrRefreshClaim({ userId, workspaceId, targetId, now }) {
       const expiresAt = new Date(Date.parse(now) + INSTALL_CLAIM_TTL_MS).toISOString();
       const row = await db
@@ -316,5 +328,17 @@ export function createInstallClaimsStore(db: DashboardD1): InstallClaimsStore {
       const live = await db.prepare(TARGET_LIVE_SQL).bind(targetId).first<{ id: string }>();
       return live === null ? { outcome: "target_not_found" } : { outcome: "not_bound" };
     },
+
+    /**
+     * The target page's one-action bind. The claim's origin is the only thing
+     * that differs from the setup callback: it records the intent here, then
+     * consumes it in the same request, so the batch below stays the ONE writer
+     * of `review_targets.installation_id`.
+     */
+    async claimAndBind({ userId, workspaceId, targetId, installationId, now }) {
+      const claim = await store.createOrRefreshClaim({ userId, workspaceId, targetId, now });
+      return store.consumeAndBind({ claimId: claim.id, userId, installationId, now });
+    },
   };
+  return store;
 }

@@ -2593,10 +2593,54 @@ function canManageApp(scope: WorkspaceScope): boolean {
 }
 
 /**
+ * Bot-scope WRITE authority — the ONE predicate every bot-owned mutation
+ * checks: lifecycle (disable / enable / delete), the settings family's
+ * bot-scoped ops (providers, chains, keys, sandbox image), provider-key
+ * verification and the forced metadata refresh.
+ *
+ * It is deliberately INDEPENDENT of the App resolver. The resolver admits a
+ * workspace's retained target on another workspace's bot (the revoked-share
+ * read), but a target grants its own review configuration, never the bot:
+ * the caller's workspace must be the bot's OWNING workspace (its
+ * `bot_workspaces` mapping), read off the same joined row. `shared` is
+ * platform-authorised, so it is read-only here for its owner too; the
+ * platform operator's own write path is `/_internal_admin`, which no member
+ * route reaches.
+ *
+ * Target-owned settings (trigger mode, depth, Check gate, allowlist, pause,
+ * park) do NOT use this predicate: the target's workspace role governs them.
+ */
+function canWriteBotScope(
+  app: Pick<GithubAppRow, "workspace_id" | "scope">,
+  scope: WorkspaceScope,
+): boolean {
+  return app.scope === "owned" && app.workspace_id === scope.workspaceId;
+}
+
+/**
+ * Bot-scope READ authority for the one bot-owned operation that consumes the
+ * bot's stored credentials without writing (`POST /keys/usage`): the owning
+ * workspace, or a `shared` bot any workspace may use. A retained target on
+ * another workspace's `owned` bot grants neither.
+ */
+function canReadBotScope(
+  app: Pick<GithubAppRow, "workspace_id" | "scope">,
+  scope: WorkspaceScope,
+): boolean {
+  return app.workspace_id === scope.workspaceId || app.scope === "shared";
+}
+
+/**
  * Resolve the App addressed by an App route. The segment is GitHub's immutable
  * numeric App id — the only App identifier an operator sees that never changes.
- * A non-numeric segment, an App from another workspace and a soft-deleted row
- * are all equally invisible (404).
+ * A non-numeric segment, a soft-deleted row, a bot the workspace neither owns
+ * nor holds a live target on, and an App with no target in the session
+ * workspace are all equally invisible (404).
+ *
+ * The resolve is bot-scope aware (the store's `getScopedAppByGithubId`): a
+ * workspace reaches the target it created on a `shared` bot, and the target it
+ * still holds after a share was revoked, while another workspace's `owned` bot
+ * is never widened.
  */
 async function resolveScopedApp(
   apps: ReturnType<typeof createReviewBotsStore>,
@@ -2605,10 +2649,7 @@ async function resolveScopedApp(
 ): Promise<GithubAppRow | null> {
   const githubAppId = parseGithubAppId(appIdParam);
   if (githubAppId === null) return null;
-  const app = await apps.getAppByGithubId(githubAppId);
-  if (!app || app.deleted_at !== null) return null;
-  if (app.workspace_id !== scope.workspaceId) return null;
-  return app;
+  return apps.getScopedAppByGithubId(githubAppId, scope.workspaceId);
 }
 
 /**
@@ -2623,6 +2664,23 @@ function appDisplayName(
 }
 
 /**
+ * Whether the target's bot still serves it, derived on every read: a bot that
+ * is `owned` by ANOTHER workspace no longer reviews this target (the
+ * resolver's guard). Nothing stores this — a re-share clears it on the next
+ * read, and keeping a projection would be a second source of truth.
+ */
+type BlockedReason = "bot_not_shared";
+
+function blockedReasonFor(
+  app: Pick<GithubAppRow, "scope" | "workspace_id">,
+  targetWorkspaceId: string,
+): BlockedReason | null {
+  return app.scope === "owned" && app.workspace_id !== targetWorkspaceId
+    ? "bot_not_shared"
+    : null;
+}
+
+/**
  * The Apps list with the health column data (AL-20-2): every row
  * carries its health summary (the App's newest review-verdict
  * webhook_deliveries row — outcome tier, see the store's deliverySummaries —
@@ -2634,7 +2692,9 @@ function appDisplayName(
  * (QC wave 1, W-1): exactly TWO D1 statements for any N instead
  * of the per-App 2N fan-out — this helper runs on GET /api/apps (the SPA
  * JSON face), so the statement count must not scale with the App count.
- * A request lists only its own workspace's Apps.
+ * A request lists the workspace's own bots plus every `shared` bot it holds a
+ * live target on (`targetedBotIds`) — the target is the entitlement, so a
+ * target created on an official bot does not vanish from this list.
  * shortcut: the workspace filter runs over the joined list in memory
  * (single-tenant scale today); upgrade to a workspace-filtered store query
  * when a workspace can hold enough Apps for the scan to matter.
@@ -2642,8 +2702,13 @@ function appDisplayName(
 async function appsListWithHealth(
   apps: ReturnType<typeof createReviewBotsStore>,
   scope: WorkspaceScope,
+  targetedBotIds: ReadonlySet<string>,
 ): Promise<Array<GithubAppRow & { health: DeliverySummary }>> {
-  const rows = (await apps.listApps()).filter((app) => app.workspace_id === scope.workspaceId);
+  const rows = (await apps.listApps()).filter(
+    (app) =>
+      app.workspace_id === scope.workspaceId ||
+      (app.scope === "shared" && targetedBotIds.has(app.id)),
+  );
   const summaries = await apps.deliverySummaries(rows.map((app) => app.id));
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
@@ -2652,18 +2717,22 @@ async function appsListWithHealth(
 const appListRoute = async (c: DashboardContext) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const rows = await appsListWithHealth(createReviewBotsStore(gate.db), gate.scope);
-  // The pause the list renders is the TARGET's business pause — the one the
-  // pause/resume routes write. A bot has one target today, so the map is
-  // one-to-one. A bot with no live target emits NO `review_enabled`: the row
-  // carries no pause state, and inventing one would show a switch position the
-  // database does not hold.
+  const apps = createReviewBotsStore(gate.db);
+  // The workspace's live targets, keyed by bot: the list reads THIS
+  // workspace's pause state per bot, and a shared bot's row is in the list
+  // exactly because one of these targets exists.
   const targetByBot = new Map(
     (await createTargetsStore(gate.db).list(gate.scope.workspaceId)).map((target) => [
       target.bot_id,
       target,
     ]),
   );
+  const rows = await appsListWithHealth(apps, gate.scope, new Set(targetByBot.keys()));
+  // The pause the list renders is the TARGET's business pause — the one the
+  // pause/resume routes write. A bot has one target today, so the map is
+  // one-to-one. A bot with no live target emits NO `review_enabled`: the row
+  // carries no pause state, and inventing one would show a switch position the
+  // database does not hold.
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
     apps: rows.map((app) => {
@@ -2691,6 +2760,10 @@ const appListRoute = async (c: DashboardContext) => {
         },
       };
     }),
+    // The creation chooser's official mode: the `shared` bots this workspace
+    // may put a target on, each with its own live-target count here. Additive
+    // and always present — `[]` when the platform shares none.
+    shared_bots: await apps.listSharedBots(gate.scope.workspaceId),
   });
 };
 
@@ -2712,10 +2785,9 @@ async function appStatusAction(
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
-  // A shared bot's lifecycle is platform-authorised like its scope: retiring or
-  // disabling it would reach every workspace using it, so the owning
-  // workspace's manager gets the same read-only refusal as its configuration.
-  if (app.scope === "shared") return botReadOnlyResponse(c);
+  // A bot's lifecycle belongs to its OWNING workspace (and a `shared` bot to
+  // the platform): a target on it is not authority over it.
+  if (!canWriteBotScope(app, gate.scope)) return botReadOnlyResponse(c);
   if (action === "delete") {
     await apps.softDeleteApp(app.id);
   } else {
@@ -3668,6 +3740,11 @@ const appSettingsRoute = async (c: DashboardContext) => {
   // catch-all, so no metadata failure can reach this route's 500 face
   // (AD-531 fail-open by structure).
   const app = await refreshGithubMetadataForRead(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY);
+  // Derived per read, never stored: a target whose bot is `owned` by ANOTHER
+  // workspace reviews nothing (the resolver's guard), and the page has to say
+  // so. The two facts are already in hand — the bot row's scope + owning
+  // workspace and the target's workspace — so this costs no extra query.
+  const blockedReason = blockedReasonFor(app, gate.target.workspace_id);
   try {
     c.header("Cache-Control", "private, no-store");
     if (!canManageApp(gate.scope)) {
@@ -3688,6 +3765,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // The SPA parses it as required: the settings a manager edits belong to
         // a target, and a payload that cannot name it is not a settings read.
         target_id: gate.target.id,
+        // Why this target reviews nothing, if it does. Both faces carry it:
+        // a member must know why the App is silent, not only the manager.
+        blocked: blockedReason !== null,
+        blocked_reason: blockedReason,
         app: {
           github_app_id: app.github_app_id,
           status: app.status,
@@ -3806,6 +3887,13 @@ const appSettingsRoute = async (c: DashboardContext) => {
               account_login: boundInstallation.account_login,
               removed: boundInstallation.removed_at !== null,
             },
+      // The bot's live installations that no live target references — the
+      // target page's bind source. Empty for a bot this workspace may not use,
+      // and always present so the block renders an empty set honestly.
+      pending_installations: await apps.listPendingInstallations(app.id, gate.scope.workspaceId),
+      // The derived Blocked state (no stored column): see blockedReasonFor.
+      blocked: blockedReason !== null,
+      blocked_reason: blockedReason,
     };
     if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
       return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
@@ -3927,6 +4015,9 @@ const appBotRoute = async (c: DashboardContext) => {
 const appRefreshMetadataRoute = async (c: DashboardContext): Promise<Response> => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
+  // The refresh writes the bot row and reconciles its installation list — a
+  // bot-scope mutation, so the owning workspace's manager is required.
+  if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const apps = createReviewBotsStore(gate.db);
   const refresh = await refreshGithubMetadata(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY, {
     force: true,
@@ -4027,9 +4118,9 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
   if (!gate.ok) return gate.response;
   // Verify is a bot-scoped WRITE on both of its paths: the builtin branch
   // stores the verified key, and the declared/custom branch appends to that
-  // provider's pool. A shared bot takes the settings family's refusal before
-  // the body is parsed — no probe, no store touch.
-  if (gate.app.scope === "shared") return botReadOnlyResponse(c);
+  // provider's pool. The bot-scope predicate refuses before the body is
+  // parsed — no probe, no store touch.
+  if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const plainKey = typeof form.key === "string" ? form.key.trim() : "";
@@ -4139,6 +4230,10 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
 const appKeyUsageRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
+  // The probe decrypts the bot's stored key and asks the vendor: usable for
+  // the owning workspace or a shared bot, never for a bot reached only through
+  // a retained target.
+  if (!canReadBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const keyId = typeof form.keyId === "string" ? form.keyId.trim() : "";
@@ -4244,11 +4339,11 @@ const REVIEW_LEVEL_INHERIT = "inherit";
  * posts keep the 302); the re-rendered HTML page is retired.
  */
 /**
- * The BOT-scoped settings ops. A `shared` bot accepts none of them: its
- * configuration belongs to its owning workspace, and every other workspace —
- * the owner included, while the bot is shared — reads it. The target-scoped
- * ops (review level, Check gate, owner allowlist) stay available, because the
- * target is what this workspace owns.
+ * The BOT-scoped settings ops. They require `canWriteBotScope`: only the bot's
+ * owning workspace, while it is `owned`, may run one. A retained target on
+ * another workspace's bot grants none of them, and a `shared` bot belongs to
+ * the platform. The target-scoped ops (review level, Check gate, owner
+ * allowlist) stay available, because the target is what this workspace owns.
  */
 const BOT_SCOPED_SETTINGS_OPS: ReadonlySet<string> = new Set([
   "add-key",
@@ -4279,7 +4374,9 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
   // exact current behavior.
   const form = await c.req.parseBody({ all: true });
   const op = typeof form.op === "string" ? form.op : "";
-  if (gate.app.scope === "shared" && BOT_SCOPED_SETTINGS_OPS.has(op)) return botReadOnlyResponse(c);
+  if (BOT_SCOPED_SETTINGS_OPS.has(op) && !canWriteBotScope(gate.app, gate.scope)) {
+    return botReadOnlyResponse(c);
+  }
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   if (op === "add-key") {
     const provider = typeof form.provider === "string" ? form.provider.trim() : "";
@@ -5160,7 +5257,7 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
   // Removing a stored key is a bot-scoped write like any other.
-  if (gate.app.scope === "shared") return botReadOnlyResponse(c);
+  if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   // The key identity is the delete target: the (App, provider) pool holds one
@@ -5420,6 +5517,71 @@ const appClaimRoute = async (c: DashboardContext): Promise<Response> => {
 };
 
 /**
+ * `POST /api/apps/:appId/bind-installation` — the target page's bind action:
+ * a workspace manager picks one pending installation of the bot and binds it to
+ * the workspace's target without leaving the dashboard.
+ *
+ * The write is the setup callback's OWN batch — `claimAndBind` records the
+ * caller's claim and consumes it in this request — so the unique index, the
+ * one-installation-per-target rule and the shared-bot guard all still decide.
+ * This route adds one guard of its own: the installation must answer the
+ * pending read, because the batch's upsert is conflict-tolerant and would
+ * accept an id the bot never reported.
+ *
+ * Refusals keep the family's vocabulary: an unknown, foreign or soft-deleted
+ * App is `404 unknown app`; a caller who cannot manage it is `403 forbidden`;
+ * a bot that is not `shared` advertises nothing (`404 bot is not shared`); no
+ * single live target is `404 no target`; an unreadable id is `400`; an id the
+ * pending read does not answer is `404 unknown installation`; a target that
+ * already holds a binding is `409 target already bound`, and a losing race for
+ * the same installation is the batch's `409 installation already bound`.
+ */
+const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const apps = createReviewBotsStore(member.db);
+  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", member.scope);
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  if (app.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
+  const target = await createTargetsStore(member.db).resolveInWorkspace(
+    member.scope.workspaceId,
+    app.id,
+  );
+  if (!target) return c.json({ error: "no target" }, 404);
+  if (target.installation_id !== null) return c.json({ error: "target already bound" }, 409);
+  const form = await c.req.parseBody();
+  const raw = form["installationId"];
+  const installationId = typeof raw === "string" ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(installationId) || installationId <= 0) {
+    return c.json({ error: "installationId required" }, 400);
+  }
+  const pending = await apps.listPendingInstallations(app.id, member.scope.workspaceId);
+  if (!pending.some((row) => row.installation_id === installationId)) {
+    return c.json({ error: "unknown installation" }, 404);
+  }
+  const bound = await createInstallClaimsStore(member.db).claimAndBind({
+    userId: member.user.id,
+    workspaceId: member.scope.workspaceId,
+    targetId: target.id,
+    installationId,
+    now: new Date().toISOString(),
+  });
+  switch (bound.outcome) {
+    case "bound":
+      return c.json({ targetId: bound.targetId });
+    case "installation_already_bound":
+      return c.json({ error: "installation already bound" }, 409);
+    case "target_not_bindable":
+      return c.json({ error: "target already bound" }, 409);
+    case "bot_not_shared":
+      return c.json({ error: "bot is not shared" }, 404);
+    case "claim_not_found":
+      return c.json({ error: "claim not found" }, 404);
+  }
+};
+
+/**
  * `POST /apps/:appId/park` — the workspace manager's repair for an overlapping
  * owner claim: pause the target and retire its `account_login`, with one
  * `target.park` audit row, all in one batch.
@@ -5470,6 +5632,52 @@ const appParkRoute = async (c: DashboardContext): Promise<Response> => {
     scopedAppPath(c, `/dashboard/apps/${app.github_app_id}/settings`),
     "ok",
   );
+};
+
+/**
+ * `POST /api/targets` — the workspace manager's target on a `shared` bot, the
+ * chooser's official mode. `{ botId }` is the whole body: the workspace is the
+ * request's own, and the bot is one the platform already shares.
+ *
+ * Refusals reuse the pinned-post vocabulary: a body without a `botId` is a
+ * `400`; a bot the store would not write (unknown, soft-deleted or not
+ * shared) is the same `404 unknown app` an unknown App answers; a workspace
+ * that already holds a live target on the bot is the family's `409`. A caller
+ * who is not owner/admin is refused by the manage gate before any read, and
+ * the store's own guard re-checks the bot inside the write, so a bot unshared
+ * between page load and submit writes nothing.
+ */
+const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  if (!canManageRole(member.scope.role)) {
+    return c.html(forbiddenPage(member.session.login, requestLocale(c)), 403);
+  }
+  const form = await c.req.parseBody();
+  const botId = typeof form.botId === "string" ? form.botId.trim() : "";
+  if (botId === "") {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "bot id required", 400);
+  }
+  // The floor a new target starts at is the workspace's own; a degraded read
+  // would silently widen a floor the tenant may have set higher, so it fails
+  // closed before anything is written (the manifest commit's rule).
+  const floor = await getWorkspaceCheckMinScore(member.db, member.scope.workspaceId);
+  if (floor.degraded) {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "workspace floor unreadable", 500);
+  }
+  const created = await createTargetsStore(member.db).createOnSharedBot({
+    workspaceId: member.scope.workspaceId,
+    botId,
+    createdBy: member.user.github_login,
+    checkMinScore: floor.minScore,
+  });
+  if (created.outcome === "bot_not_shared") {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "unknown app", 404);
+  }
+  if (created.outcome === "target_exists") {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "target exists", 409);
+  }
+  return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "ok");
 };
 
 /** The ledger scope the PR faces bind: the resolved target, its workspace, its bot. */
@@ -5774,12 +5982,16 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/pause", handler: (c) => appReviewAction(c, "pause"), access: "write" },
   { method: "post", path: "/apps/:appId/resume", handler: (c) => appReviewAction(c, "resume"), access: "write" },
   { method: "post", path: "/apps/:appId/park", handler: appParkRoute, access: "write" },
+  // Workspace-scoped target creation on a shared bot — not App-addressed: the
+  // body names the bot, and the route re-checks its scope inside the write.
+  { method: "post", path: "/api/targets", handler: targetCreateRoute, access: "write" },
   { method: "post", path: "/apps/:appId/review-trigger-mode", handler: appReviewTriggerModeAction, access: "write" },
   { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/claim", handler: appClaimRoute, access: "write" },
+  { method: "post", path: "/api/apps/:appId/bind-installation", handler: appBindInstallationRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/keys/verify", handler: appKeyVerifyRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/keys/usage", handler: appKeyUsageRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },

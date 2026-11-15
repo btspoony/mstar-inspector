@@ -184,3 +184,162 @@ describe("POST /dashboard/:workspaceRef/api/apps/:appId/claim", () => {
     expect(claimCount(db)).toBe(0);
   });
 });
+
+/**
+ * `POST /dashboard/:workspaceRef/api/apps/:appId/bind-installation` — the
+ * target page's second bind entry point. It composes the claim store's
+ * create-then-consume call, so the ONLY writer of
+ * `review_targets.installation_id` stays the setup callback's batch: the
+ * unique index, the one-target-per-installation rule and the shared-bot guard
+ * all still speak here.
+ *
+ * Pinned: one pending installation of the bot binds (and the claim it created
+ * is consumed); an id the pending read does not answer is 404 with nothing
+ * written; a bound target keeps its existing 409 vocabulary; a non-manager and
+ * an unshared bot are refused before any write.
+ */
+describe("POST /dashboard/:workspaceRef/api/apps/:appId/bind-installation", () => {
+  /** One live installation of the world's bot, optionally already removed. */
+  function seedInstallation(db: TestD1, botId: string, installationId: number, removed = false): void {
+    db.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+         VALUES (?, ?, ?, 'acme', '2026-01-01T00:00:00.000Z', ${removed ? "datetime('now')" : "NULL"})`,
+      )
+      .run(crypto.randomUUID(), botId, installationId);
+  }
+
+  async function postBind(
+    db: TestD1,
+    login: string,
+    fields: Record<string, string>,
+    appId = String(APP_ID),
+  ): Promise<Response> {
+    return worker.fetch(
+      new Request(`https://worker.local/dashboard/default/api/apps/${appId}/bind-installation`, {
+        method: "POST",
+        headers: {
+          Cookie: `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams(fields),
+      }),
+      makeEnv(db),
+    );
+  }
+
+  function targetBinding(db: TestD1, targetId: string): number | null {
+    const row = db.raw
+      .query("SELECT installation_id FROM review_targets WHERE id = ?")
+      .get(targetId) as { installation_id: number | null } | null;
+    return row?.installation_id ?? null;
+  }
+
+  test("binds one pending installation to the workspace's target in one action", async () => {
+    const { db, botId, targetId } = await seededWorld({});
+    seedInstallation(db, botId, 4321);
+
+    const res = await postBind(db, "mallory", { installationId: "4321" });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ targetId });
+    expect(targetBinding(db, targetId)).toBe(4321);
+    // The composed claim was consumed by the same call; the installation row
+    // the batch upserted is the bot's live one.
+    expect(claimCount(db)).toBe(1);
+    const installation = db.raw
+      .query("SELECT removed_at FROM bot_installations WHERE bot_id = ? AND installation_id = 4321")
+      .get(botId) as { removed_at: string | null } | null;
+    expect(installation).toEqual({ removed_at: null });
+  });
+
+  test("an installation the pending read does not answer is 404 and writes nothing", async () => {
+    const { db, botId, targetId } = await seededWorld({});
+    seedInstallation(db, botId, 1111);
+    // Removed, and never seen at all: neither is the route's to bind.
+    seedInstallation(db, botId, 2222, true);
+    // 1111 is held by ANOTHER workspace's target: cross-workspace
+    // installations are never listed, so it is not this target's to bind.
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'ws-other', NULL, datetime('now'))`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets (id, workspace_id, bot_id, name, installation_id, created_by, created_at, updated_at)
+         VALUES ('target-elsewhere', 'ws-other', ?, 'elsewhere', 1111, 'fixture', datetime('now'), datetime('now'))`,
+      )
+      .run(botId);
+
+    for (const installationId of ["1111", "2222", "3333"]) {
+      const res = await postBind(db, "mallory", { installationId });
+      expect(res.status, installationId).toBe(404);
+      expect(await res.json()).toEqual({ error: "unknown installation" });
+    }
+    expect(claimCount(db)).toBe(0);
+    expect(targetBinding(db, targetId)).toBeNull();
+  });
+
+  test("a malformed installation id is a 400 and writes nothing", async () => {
+    const { db } = await seededWorld({});
+    const malformed: Array<Record<string, string>> = [
+      {},
+      { installationId: "abc" },
+      { installationId: "0" },
+      { installationId: "-1" },
+    ];
+    for (const fields of malformed) {
+      const res = await postBind(db, "mallory", fields);
+      expect(res.status, JSON.stringify(fields)).toBe(400);
+    }
+    expect(claimCount(db)).toBe(0);
+  });
+
+  test("a target that already holds a binding keeps 409 target already bound", async () => {
+    const { db, botId, targetId } = await seededWorld({});
+    seedInstallation(db, botId, 4321);
+    db.raw.prepare("UPDATE review_targets SET installation_id = 9999 WHERE id = ?").run(targetId);
+
+    const res = await postBind(db, "mallory", { installationId: "4321" });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "target already bound" });
+    expect(claimCount(db)).toBe(0);
+    expect(targetBinding(db, targetId)).toBe(9999);
+  });
+
+  test("an owned bot answers 404 bot is not shared and writes nothing", async () => {
+    const { db, botId } = await seededWorld({ scope: "owned" });
+    seedInstallation(db, botId, 4321);
+
+    const res = await postBind(db, "mallory", { installationId: "4321" });
+
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "bot is not shared" });
+    expect(claimCount(db)).toBe(0);
+  });
+
+  test("a plain member is refused before any claim exists", async () => {
+    const { db, botId, targetId } = await seededWorld({});
+    seedInstallation(db, botId, 4321);
+
+    const res = await postBind(db, "trudy", { installationId: "4321" });
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "forbidden" });
+    expect(claimCount(db)).toBe(0);
+    expect(targetBinding(db, targetId)).toBeNull();
+  });
+
+  test("an unknown or non-numeric App id stays the same 404", async () => {
+    const { db } = await seededWorld({});
+    for (const appId of ["999999", "not-a-number"]) {
+      const res = await postBind(db, "mallory", { installationId: "4321" }, appId);
+      expect(res.status, appId).toBe(404);
+      expect(await res.json()).toEqual({ error: "unknown app" });
+    }
+    expect(claimCount(db)).toBe(0);
+  });
+});

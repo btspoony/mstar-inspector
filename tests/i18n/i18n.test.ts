@@ -282,3 +282,42 @@ describe("App detail IA copy", () => {
     expect(t("zh_CN", "insights.filterRepoAll")).toBe("全部");
   });
 });
+
+describe("creation chooser copy", () => {
+  /** Every key the two-mode chooser renders, both locales. */
+  const KEYS = [
+    "apps.createDialog.title",
+    "apps.createDialog.description",
+    "apps.createDialog.modeOfficial",
+    "apps.createDialog.modeSelfHosted",
+    "apps.createDialog.botLabel",
+    "apps.createDialog.botPlaceholder",
+    "apps.createDialog.botTargetOne",
+    "apps.createDialog.botTargets",
+    "apps.createDialog.noSharedBots",
+    "apps.createDialog.submit",
+    "apps.createDialog.selfHostedSubmit",
+    "apps.createDialog.failed",
+  ] as const;
+
+  test("every chooser key exists in both locales", () => {
+    for (const key of KEYS) {
+      expect(isDictionaryKey(key), key).toBe(true);
+      expect(t("en", key).length, key).toBeGreaterThan(0);
+      expect(t("zh_CN", key).length, key).toBeGreaterThan(0);
+    }
+  });
+
+  test("the bot option carries its name and this workspace's target count", () => {
+    expect(t("en", "apps.createDialog.botTargetOne", { name: "Platform", count: 1 })).toContain("Platform");
+    expect(t("en", "apps.createDialog.botTargetOne", { name: "Platform", count: 1 })).toContain("1");
+    expect(t("en", "apps.createDialog.botTargets", { name: "Platform", count: 3 })).toContain("3");
+    expect(t("zh_CN", "apps.createDialog.botTargets", { name: "Platform", count: 3 })).toContain("3");
+  });
+
+  test("the existing Create label and its unavailable reasons are not reworded", () => {
+    expect(t("en", "apps.create")).toBe("Create GitHub App");
+    expect(t("zh_CN", "apps.create")).toBe("创建 GitHub App");
+    expect(t("en", "apps.createUnavailable.role")).toContain("owner or admin");
+  });
+});

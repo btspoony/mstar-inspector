@@ -66,6 +66,8 @@ const identityPayload: SettingsPayload = {
   can_manage: false,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
+  blocked: false,
+  blocked_reason: null,
   app: IDENTITY_APP,
 };
 
@@ -73,6 +75,7 @@ const managePayload = {
   ...identityPayload,
   can_manage: true,
   installation: null,
+  pending_installations: [],
   app: {
     ...IDENTITY_APP,
     last_webhook_at: null,

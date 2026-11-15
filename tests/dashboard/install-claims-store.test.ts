@@ -489,3 +489,70 @@ describe("concurrent consumes of one claim", () => {
     expect(targetBinding(db, targetId).installation_id).toBe(4242);
   });
 });
+
+/**
+ * `claimAndBind` — the target page's one-action bind. It composes the two
+ * public steps instead of writing a second bind: create (or refresh) the
+ * caller's claim, then consume it. The consume still owns the batch, its own
+ * token and every refusal, so this call adds no new bind SQL.
+ */
+describe("claimAndBind (the target page's one action)", () => {
+  test("creates its own claim, consumes it and binds the target", async () => {
+    const { db, botId, userId, targetId, store } = await seedWorld();
+
+    const outcome = await store.claimAndBind({
+      userId,
+      workspaceId: WS,
+      targetId,
+      installationId: 4242,
+      now: NOW,
+    });
+
+    expect(outcome).toEqual({ outcome: "bound", targetId });
+    // One claim, consumed by this call: the composition leaves no live row.
+    expect(count(db, "install_claims")).toBe(1);
+    expect(await store.listLiveClaims(userId, NOW)).toEqual([]);
+    expect(installationRow(db, botId, 4242)).toEqual({
+      account_login: null,
+      seen_at: NOW,
+      removed_at: null,
+    });
+    expect(targetBinding(db, targetId).installation_id).toBe(4242);
+  });
+
+  test("a target that already holds a binding refuses and edits nothing", async () => {
+    const { db, userId, targetId, store } = await seedWorld({ boundInstallation: 5555 });
+
+    const outcome = await store.claimAndBind({
+      userId,
+      workspaceId: WS,
+      targetId,
+      installationId: 4242,
+      now: NOW,
+    });
+
+    expect(outcome).toEqual({ outcome: "target_not_bindable" });
+    expect(targetBinding(db, targetId).installation_id).toBe(5555);
+    expect(count(db, "bot_installations")).toBe(0);
+  });
+
+  test("the row the batch refuses leaves the refreshed claim live for the setup callback", async () => {
+    const { db, botId, userId, targetId, store } = await seedWorld();
+    // A second target already holds 4242: the batch's unique index refuses.
+    const secondTarget = addSecondTarget(db, botId, "bot-claims-second-target");
+    db.raw.prepare("UPDATE review_targets SET installation_id = 4242 WHERE id = ?").run(secondTarget);
+
+    const outcome = await store.claimAndBind({
+      userId,
+      workspaceId: WS,
+      targetId,
+      installationId: 4242,
+      now: NOW,
+    });
+
+    expect(outcome).toEqual({ outcome: "installation_already_bound" });
+    // The refusal rolled the batch back: the claim is still live, unbound.
+    expect((await store.listLiveClaims(userId, NOW)).map((row) => row.target_id)).toEqual([targetId]);
+    expect(targetBinding(db, targetId).installation_id).toBeNull();
+  });
+});

@@ -47,8 +47,11 @@ const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
   installation: null,
+  pending_installations: [],
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
+  blocked: false,
+  blocked_reason: null,
   app: {
     github_slug: "demo",
     id: "app-demo",

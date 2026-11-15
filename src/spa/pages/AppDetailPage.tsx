@@ -21,6 +21,7 @@ import {
   parseAppDetailSearch,
   parseSettings,
   type AppDetailSearch,
+  type BlockedReason,
   type SettingsPayload,
 } from "./data";
 
@@ -287,6 +288,15 @@ export function BotSettingsLink({ locale, appId }: { locale: SpaBoot["locale"]; 
 }
 
 /**
+ * The derived Blocked state's copy: the server names the one cause it can
+ * derive, and the banner prints that name. A closed map, so a new reason
+ * cannot render silently as nothing.
+ */
+const BLOCKED_REASON_KEYS = {
+  bot_not_shared: "appDetail.blockedBotNotShared",
+} as const satisfies Record<BlockedReason, string>;
+
+/**
  * The tabbed face — pure `t()` + data rendering, no window/router
  * access, so tests can static-render it (the AppInfoCard idiom). The
  * identity header (appId h1 + status + creator) belongs to the shell and
@@ -315,6 +325,12 @@ export function AppDetailView({
   // the view never renders an insights face for a non-manager.
   const tab = canManage ? search.tab : "settings";
   const pill = appStatusPill(locale, payload.app);
+  // Why this target reviews nothing, if it does. The server derives it on
+  // every read (no stored status), so the banner cannot go stale.
+  const blockedMessage =
+    payload.blocked && payload.blocked_reason
+      ? t(locale, BLOCKED_REASON_KEYS[payload.blocked_reason])
+      : null;
 
   function onTabChange(next: string): void {
     if (next !== "settings" && next !== "installations" && next !== "insights" && next !== "pull-requests") {
@@ -355,13 +371,16 @@ export function AppDetailView({
         actions={
           <>
             {/* The bot's own configuration has its own page: the target keeps
-                the workspace's review policy and links across for the rest. */}
-            <BotSettingsLink locale={locale} appId={appId} />
+                the workspace's review policy and links across for the rest. A
+                Blocked target's bot page is not readable from here (the bot
+                serves another workspace now), so the dead link is not offered. */}
+            {blockedMessage ? null : <BotSettingsLink locale={locale} appId={appId} />}
             <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
           </>
         }
         metrics={<MetricBand metrics={metrics} />}
       />
+      {blockedMessage ? <PageNotice kind="warn" message={blockedMessage} /> : null}
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       <Tabs value={tab} onValueChange={onTabChange}>
         {/* Page-level tab face (DESIGN.md ### Tabs, line-tab idiom): the
@@ -415,6 +434,9 @@ export function AppDetailView({
                 appId={appId}
                 app={payload.app}
                 installation={payload.installation}
+                pendingInstallations={payload.pending_installations}
+                blocked={payload.blocked}
+                onReload={onReload}
               />
               <AllowlistSection
                 locale={locale}

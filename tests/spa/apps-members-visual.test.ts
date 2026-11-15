@@ -562,13 +562,15 @@ describe("Create action is a boot capability (I-000082)", () => {
     );
   }
 
-  test("a manager sees the Create form in the header and, when empty, in the guidance", () => {
-    // Header slot (a non-empty list) and the empty-state action are ONE form
-    // component — never both at once.
-    expect(renderFace(true, 1)).toContain('action="/dashboard/manifest/start"');
+  test("a manager sees the Create control in the header and, when empty, in the guidance", () => {
+    // Header slot (a non-empty list) and the empty-state action are ONE
+    // control — never both at once. It opens the two-mode chooser, so the
+    // manifest form is the chooser's self-hosted mode and the closed dialog
+    // carries no form in this markup.
+    expect(renderFace(true, 1)).toContain('data-slot="create-app-chooser"');
     const empty = renderFace(true, 0);
-    expect(empty).toContain('action="/dashboard/manifest/start"');
-    expect(empty.match(/action="\/dashboard\/manifest\/start"/g)?.length).toBe(1);
+    expect(empty).toContain('data-slot="create-app-chooser"');
+    expect(empty.match(/data-slot="create-app-chooser"/g)?.length).toBe(1);
   });
 
   test("a caller who cannot create sees the control DISABLED with the reason, never a silent gap", () => {
@@ -636,7 +638,7 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
     expect(t("zh_CN", "apps.detail")).toBe("详情");
   });
 
-  test("the empty Apps face keeps one Create form — creation is the only path", () => {
+  test("the empty Apps face keeps one Create control — creation is the only path", () => {
     const renderFace = (apps: number): string =>
       renderToStaticMarkup(
         createElement(AppsView, {
@@ -650,8 +652,8 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
       );
     for (const apps of [0, 1]) {
       const html = renderFace(apps);
-      expect(html.match(/<form/g)?.length, `apps=${apps}`).toBe(1);
-      expect(html, `apps=${apps}`).toContain("manifest/start");
+      expect(html.match(/data-slot="create-app-chooser"/g)?.length, `apps=${apps}`).toBe(1);
+      expect(html, `apps=${apps}`).toContain(t("en", "apps.create"));
     }
     expect(renderFace(0)).toContain(t("en", "apps.emptyTitle"));
     // The guidance sentence rides the rendered face, not just the dictionary:

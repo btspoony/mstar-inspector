@@ -264,8 +264,11 @@ const APPS_PAYLOAD: AppsPayload = {
 const SETTINGS_PAYLOAD: SettingsManagePayload = {
   can_manage: true,
   installation: null,
+  pending_installations: [],
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
+  blocked: false,
+  blocked_reason: null,
   app: {
     github_slug: "acme-app",
     id: "app-acme",

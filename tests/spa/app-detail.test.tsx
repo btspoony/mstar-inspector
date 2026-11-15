@@ -61,6 +61,10 @@ const identityPayload = {
   can_manage: false as const,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-1",
+  // The derived Blocked state rides BOTH faces: a member must know why the
+  // target reviews nothing.
+  blocked: false as const,
+  blocked_reason: null,
   app: IDENTITY_APP,
 };
 
@@ -70,6 +74,9 @@ const BOOT = { locale: "en" as const, login: "mallory", name: null };
 const managePayload = {
   can_manage: true as const,
   installation: null,
+  pending_installations: [],
+  blocked: false as const,
+  blocked_reason: null,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-1",
   app: {
@@ -1195,5 +1202,111 @@ describe("install claim entry (static SSR)", () => {
     ).toBeNull();
     // `null` is the unbound state, and it stays legal.
     expect(parseSettings({ ...sharedPayload(), installation: null })?.can_manage).toBe(true);
+  });
+});
+
+/**
+ * The derived Blocked state and the pending-installation bind entry.
+ *
+ * Blocked is server-derived per read (`review_bots.scope = 'owned'` and the
+ * target's workspace is another one): the page names the reason and the
+ * install block offers no action, while the review settings stay readable.
+ * A pending installation — the bot's live installation no target references —
+ * is the install block's second action, and it exists only while the target
+ * holds no binding.
+ */
+describe("Blocked and pending installations (static SSR)", () => {
+  const blockedPayload = (): SettingsManagePayload => ({
+    ...managePayload,
+    blocked: true,
+    blocked_reason: "bot_not_shared",
+    app: { ...managePayload.app, scope: "owned" },
+  });
+
+  const sharedPayload = (): SettingsManagePayload => ({
+    ...managePayload,
+    app: { ...managePayload.app, scope: "shared" },
+    installation: null,
+  });
+
+  test("the Blocked banner names the reason on both faces", () => {
+    const manager = renderDetail(blockedPayload(), true, "settings");
+    expect(manager).toContain(t("en", "appDetail.blockedBotNotShared"));
+    // The bot page is not readable from a blocked workspace (its bot serves
+    // another one now), so the header does not offer a link that 404s.
+    expect(manager).not.toContain(t("en", "appDetail.botSettingsLink"));
+
+    const member = renderToStaticMarkup(
+      createElement(AppDetailView, {
+        locale: "en",
+        appId: "1",
+        payload: {
+          ...identityPayload,
+          blocked: true,
+          blocked_reason: "bot_not_shared",
+        },
+        notice: null,
+        search,
+        onReload: noReload,
+        onSearch: noSearch,
+      }),
+    );
+    expect(member).toContain(t("en", "appDetail.blockedBotNotShared"));
+  });
+
+  test("a Blocked target hides the install and claim actions, and keeps its review settings", () => {
+    const installed = renderDetail(blockedPayload(), true, "installations");
+    expect(installed).not.toContain(t("en", "settings.installClaim"));
+    expect(installed).not.toContain(t("en", "settings.installLink"));
+    expect(installed).not.toContain('href="https://github.com/apps/demo/installations/new"');
+    // Nothing is pending for a bot this workspace may not use.
+    expect(installed).not.toContain(t("en", "settings.installPendingBind"));
+
+    // The review configuration is still readable — Blocked hides an action,
+    // not the settings a manager can inspect.
+    const settingsTab = renderDetail(blockedPayload(), true, "settings");
+    expect(settingsTab).toContain(t("en", "settings.reviewGate"));
+  });
+
+  test("an unbound shared target renders one bind action per pending installation", () => {
+    const pending: SettingsManagePayload = {
+      ...sharedPayload(),
+      pending_installations: [
+        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+        { installation_id: 501, account_login: null, seen_at: "2026-01-01 00:00:00" },
+      ],
+    };
+    const markup = renderDetail(pending, true, "installations");
+    expect(markup.match(new RegExp(t("en", "settings.installPendingBind"), "g"))).toHaveLength(2);
+    expect(markup).toContain("acme");
+    expect(markup).toContain(t("en", "settings.installPendingUnknownAccount", { id: "501" }));
+
+    // A bound target binds nothing more: the operator's unbind is the repair.
+    const bound = renderDetail(
+      { ...pending, installation: { id: 4242, account_login: "acme", removed: false } },
+      true,
+      "installations",
+    );
+    expect(bound).not.toContain(t("en", "settings.installPendingBind"));
+  });
+
+  test("the new fields parse fail-closed", () => {
+    expect(parseSettings(managePayload)?.can_manage).toBe(true);
+    expect(parseSettings(identityPayload)?.can_manage).toBe(false);
+    // The flag and its reason are one invariant: blocked ⇔ a named reason.
+    expect(parseSettings({ ...managePayload, blocked: "yes" })).toBeNull();
+    expect(parseSettings({ ...managePayload, blocked: true, blocked_reason: null })).toBeNull();
+    expect(parseSettings({ ...managePayload, blocked: false, blocked_reason: "bot_not_shared" })).toBeNull();
+    expect(parseSettings({ ...managePayload, blocked_reason: "other" })).toBeNull();
+    // A pending row without a usable installation id would render an action
+    // the route cannot address.
+    expect(
+      parseSettings({
+        ...managePayload,
+        pending_installations: [{ installation_id: "500", account_login: null, seen_at: "x" }],
+      }),
+    ).toBeNull();
+    const { pending_installations: _pending, ...withoutPending } = managePayload;
+    expect(parseSettings(withoutPending)).toBeNull();
   });
 });

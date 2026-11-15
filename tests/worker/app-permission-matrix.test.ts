@@ -47,6 +47,15 @@ const PLAIN_KEY_ID = await keyIdOf(PLAIN_KEY);
 
 /** The App's immutable GitHub App id — the only App address form (D0). */
 const APP_ID = 1001;
+/** The bot the platform shares: the create-target route's subject. */
+const SHARED_BOT_ID = "bot-shared-matrix";
+/** The shared bot's immutable GitHub App id — its App-addressed routes. */
+const SHARED_BOT_APP_ID = 1099;
+/** One pending installation of that bot, seeded with the world. */
+const SHARED_INSTALLATION_ID = 1200;
+/** A second shared bot with no target here — the create-target route's subject. */
+const CREATE_BOT_ID = "bot-create-matrix";
+const CREATE_BOT_APP_ID = 1098;
 const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
 const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
 const USAGE = `/dashboard/default/api/apps/${APP_ID}/keys/usage`;
@@ -102,6 +111,49 @@ async function seededWorld(): Promise<TestD1> {
     state: "open",
     headSha: "sha-1",
   });
+  // Two shared bots owned by a second workspace. The first already carries
+  // THIS workspace's target and one pending installation (the bind route's
+  // subject); the second carries no target here, so the create-target route's
+  // 200 side is its own first write.
+  db.raw
+    .prepare(
+      `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+       VALUES ('ws-shared', 'ws-shared', 'Shared', 'octocat', datetime('now'))`,
+    )
+    .run();
+  for (const [botId, githubAppId] of [
+    [SHARED_BOT_ID, SHARED_BOT_APP_ID],
+    [CREATE_BOT_ID, CREATE_BOT_APP_ID],
+  ] as const) {
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+            created_by, status, scope, shared_at, created_at, updated_at)
+         VALUES (?, 'platform-app', ?, 'platform-app', 'enc', 'enc', 'octocat', 'active',
+                 'shared', datetime('now'), datetime('now'), datetime('now'))`,
+      )
+      .run(botId, githubAppId);
+    db.raw
+      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'ws-shared')")
+      .run(botId);
+  }
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+       VALUES ('target-platform', 'default', ?, 'platform-app', 'octocat',
+               datetime('now'), datetime('now'))`,
+    )
+    .run(SHARED_BOT_ID);
+  // One installation the bot already carries, bound to no target: the bind
+  // route's pending read is what admits it (the sweep's 200 side).
+  db.raw
+    .prepare(
+      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+       VALUES ('install-matrix', ?, ?, 'acme', '2026-01-01 00:00:00', NULL)`,
+    )
+    .run(SHARED_BOT_ID, SHARED_INSTALLATION_ID);
   return db;
 }
 
@@ -175,6 +227,10 @@ function expectZeroAppMutations(db: TestD1): void {
   expect(appStatus(db, APP_ID)).toBe("active");
   expect(reviewEnabled(db, APP_ID)).toBe(1);
   for (const table of MUTABLE_APP_TABLES) expect(rawCount(db, table), table).toBe(0);
+  // The seeded world holds exactly two targets: the App's, and the one this
+  // workspace already has on the platform bot (the bind route's subject). A
+  // deny path that reached a create/bind write would show a third.
+  expect(rawCount(db, "review_targets")).toBe(2);
 }
 
 type MatrixRoute = {
@@ -244,6 +300,18 @@ const MATRIX_ROUTES: MatrixRoute[] = [
   // side additionally calls api.github.com (GET /app + the bot avatar leg), so
   // the sweep's stub answers those URLs too.
   { name: "refresh-metadata", path: `/dashboard/default/api/apps/${APP_ID}/refresh-metadata` },
+  // --- workspace-scoped target creation (the shared bot's chooser) ---
+  // Not App-addressed: the body names the bot, and the route's own gates
+  // decide. A manager's 200 side writes one target on a SHARED bot, which is
+  // why the seeded world carries one.
+  { name: "create target on a shared bot", path: "/dashboard/default/api/targets", fields: { botId: CREATE_BOT_ID } },
+  // The target page's bind entry: the world's shared bot carries one pending
+  // installation, and the create above gave this workspace its target.
+  {
+    name: "bind-installation",
+    path: `/dashboard/default/api/apps/${SHARED_BOT_APP_ID}/bind-installation`,
+    fields: { installationId: String(SHARED_INSTALLATION_ID) },
+  },
   // --- ops family: pinned action paths ---
   { name: "pause", path: `/dashboard/default/apps/${APP_ID}/pause` },
   { name: "resume", path: `/dashboard/default/apps/${APP_ID}/resume` },
@@ -381,7 +449,16 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
       target_id: unknown;
       app: Record<string, unknown>;
     };
-    expect(Object.keys(body).sort()).toEqual(["app", "can_manage", "target_id", "workspace_id"]);
+    // The derived Blocked pair rides both faces: a member must know why the
+    // target is silent, so it is part of the identity set.
+    expect(Object.keys(body).sort()).toEqual([
+      "app",
+      "blocked",
+      "blocked_reason",
+      "can_manage",
+      "target_id",
+      "workspace_id",
+    ]);
     // The delivery URL's workspace segment: the server-resolved stable id.
     expect(body.workspace_id).toBe("default");
     // The review configuration this App resolved to inside that workspace.

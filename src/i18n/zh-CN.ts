@@ -123,6 +123,8 @@ export const zhCN: Dictionary = {
     tabInstallations: "已安装",
     tabInsights: "洞察",
     tabPullRequests: "拉取请求",
+    blockedBotNotShared:
+      "该机器人已不再共享给本工作区，因此此目标不会进行任何评审。请联系平台运营者重新共享。",
   },
   /** 机器人设置页：机器人自身拥有的配置（凭据健康、提供方、模型链、沙箱镜像、安装）。使用该机器人的工作区可读，但不能配置。 */
   botSettings: {
@@ -331,6 +333,21 @@ export const zhCN: Dictionary = {
     tableHealth: "健康",
     tableCreator: "创建者",
     openAria: "打开 {name} 详情",
+    /** 创建选择器（见 en.ts 同名字段）。 */
+    createDialog: {
+      title: "创建审查目标",
+      description: "使用平台已共享的 App，或连接你自己的 GitHub App。",
+      modeOfficial: "官方 App",
+      modeSelfHosted: "我的 GitHub App",
+      botLabel: "App",
+      botPlaceholder: "选择 App",
+      botTargetOne: "{name} · {count} 个目标",
+      botTargets: "{name} · {count} 个目标",
+      noSharedBots: "平台尚未共享任何 App — 请改为连接你自己的 GitHub App。",
+      submit: "创建目标",
+      selfHostedSubmit: "前往 GitHub",
+      failed: "未能创建目标 — 请重试。",
+    },
   },
   members: {
     heading: "成员",
@@ -840,6 +857,11 @@ export const zhCN: Dictionary = {
     installBoundAccount: "已绑定的安装账号：{account}",
     installBoundNoAccount: "已绑定安装 {id}；GitHub 尚未上报其账号。",
     installRemoved: "GitHub 已不存在此安装，审查已暂停。重新安装后，本 target 会恢复审查。",
+    // 已安装标签页：机器人已有、但尚未绑定到任何目标的安装。绑定其中之一即可在仪表盘内一步完成，无需再走 GitHub 的安装流程。
+    installPending: "等待绑定",
+    installPendingUnknownAccount: "安装 {id}（GitHub 尚未报告其账号）",
+    installPendingBind: "绑定到本目标",
+    installBindFailed: "安装绑定失败。请刷新本页后重试。",
     // 已安装标签页：仓库所有者允许名单（迁移 0045）。
     allowlist: "所有者允许名单",
     allowlistCopy: "开关打开时，仅审查这些仓库所有者发起的交付。",

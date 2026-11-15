@@ -92,6 +92,9 @@
  *     panel: this App's PRESENT installations (`removed_at IS NULL`), most
  *     recently seen first. markInstallationRemoved / reconcileInstallations
  *     stamp the rows GitHub no longer has — never delete them.
+ *   - listPendingInstallations is the target page's bind source: the live
+ *     installations of this bot that no live target references. Binding them
+ *     still goes through `install-claims-store`'s consume-and-bind batch.
  *   - softDeleteApp is idempotent — the FIRST deleted_at wins; returns
  *     whether THIS call performed the delete. It stamps the bot AND every
  *     target the bot owns in ONE batch: the user-facing delete removes one
@@ -644,6 +647,17 @@ export const APP_READ_SQL = {
 } as const;
 
 /**
+ * The workspace-scoped App resolve the target pages use: the bot the addressed
+ * workspace OWNS, or one it holds a live target on. The second arm is the
+ * entitlement a target carries — it is how a target created on a `shared` bot
+ * (and a target whose share was revoked) stays readable from the workspace
+ * that created it. A bot with neither arm stays invisible, so another
+ * workspace's `owned` bot is never widened and an owned bot's own workspace
+ * keeps the owning mapping's `workspace_id`.
+ */
+const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.bot_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
+
+/**
  * The two `upsertInstallation` statements. Which one runs is chosen BEFORE
  * `prepare` from `input.authoritative`, so no value ever enters the SQL text.
  *
@@ -673,6 +687,31 @@ const UPSERT_INSTALLATION_SQL = {
       account_login = COALESCE(account_login, excluded.account_login),
       seen_at = strftime('%Y-%m-%d %H:%M:%f','now')`,
 } as const;
+
+/**
+ * One `shared` bot as a workspace's creation chooser lists it (contract § 7.1).
+ * `target_count` is the ADDRESSED workspace's live targets on that bot, so the
+ * same bot reads a different number in each workspace that may use it.
+ */
+export type SharedBotRow = {
+  id: string;
+  github_slug: string | null;
+  name: string;
+  target_count: number;
+};
+
+/**
+ * Every live `shared` bot with that per-workspace count. `owned` and
+ * soft-deleted bots are not offered: the set is the platform-wide share, which
+ * is the same for every workspace by contract. One D1 read, no GitHub call.
+ */
+const SHARED_BOT_LIST_SQL = `
+  SELECT b.id, b.github_slug, b.name,
+         (SELECT COUNT(*) FROM review_targets t
+           WHERE t.bot_id = b.id AND t.workspace_id = ?1 AND t.deleted_at IS NULL) AS target_count
+    FROM review_bots b
+   WHERE b.scope = 'shared' AND b.deleted_at IS NULL
+   ORDER BY b.name, b.id`;
 
 /** Create the review_bots / bot_installations store over one D1 handle. */
 export function createReviewBotsStore(db: AppsStoreD1) {
@@ -923,6 +962,32 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
+     * The target pages' resolve: the workspace's own bot, or one it holds a
+     * live target on (a shared bot it created a target on, or a bot whose
+     * share was revoked). `null` for a soft-deleted bot, another workspace's
+     * `owned` bot it has no target on, or a non-existent id.
+     */
+    async getScopedAppByGithubId(
+      githubAppId: number,
+      workspaceId: string,
+    ): Promise<GithubAppTenantRow | null> {
+      return db
+        .prepare(SCOPED_APP_SQL)
+        .bind(githubAppId, workspaceId)
+        .first<GithubAppTenantRow>();
+    },
+
+    /**
+     * The `shared` bots this workspace may create a target on, each carrying
+     * how many live targets the workspace already holds on it. The chooser's
+     * list: a read, never a `review_bots` write.
+     */
+    async listSharedBots(workspaceId: string): Promise<SharedBotRow[]> {
+      const res = await db.prepare(SHARED_BOT_LIST_SQL).bind(workspaceId).all<SharedBotRow>();
+      return res.results;
+    },
+
+    /**
      * By id; resolves soft-deleted and disabled App rows too (callers
      * filter), but NOT an App whose workspace is soft-deleted.
      */
@@ -1170,6 +1235,34 @@ export function createReviewBotsStore(db: AppsStoreD1) {
            WHERE bot_id = ? AND removed_at IS NULL ORDER BY seen_at DESC, installation_id`,
         )
         .bind(appId)
+        .all<AppInstallationRow>();
+      return res.results;
+    },
+
+    /**
+     * The target page's bind source: this bot's live installations that NO
+     * live target of the bot references, most recently seen first. A bound
+     * installation is invisible because some target already holds it; a
+     * removed one because GitHub no longer has it. Empty for a bot the
+     * addressed workspace may not use — its visible set is the workspace's
+     * own bots plus every `shared` bot.
+     */
+    async listPendingInstallations(appId: string, workspaceId: string): Promise<AppInstallationRow[]> {
+      const res = await db
+        .prepare(
+          `SELECT i.installation_id, i.account_login, i.seen_at FROM bot_installations i
+             JOIN review_bots b ON b.id = i.bot_id
+            WHERE i.bot_id = ?1 AND i.removed_at IS NULL
+              AND (b.scope = 'shared'
+                   OR EXISTS (SELECT 1 FROM bot_workspaces w
+                               WHERE w.bot_id = b.id AND w.workspace_id = ?2))
+              AND NOT EXISTS (SELECT 1 FROM review_targets t
+                               WHERE t.bot_id = i.bot_id
+                                 AND t.installation_id = i.installation_id
+                                 AND t.deleted_at IS NULL)
+            ORDER BY i.seen_at DESC, i.installation_id`,
+        )
+        .bind(appId, workspaceId)
         .all<AppInstallationRow>();
       return res.results;
     },

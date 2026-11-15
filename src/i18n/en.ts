@@ -143,6 +143,10 @@ export const en = {
     tabInstallations: "Installed",
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
+    // The derived Blocked banner: the server reads the bot's scope and the
+    // target's workspace on every read, so the copy names the one cause.
+    blockedBotNotShared:
+      "This bot is no longer shared with this workspace, so this target reviews nothing. Ask the platform operator to share it again.",
   },
   /**
    * The bot settings page: the bot-owned configuration (credentials health,
@@ -381,6 +385,26 @@ export const en = {
     tableHealth: "Health",
     tableCreator: "Creator",
     openAria: "Open {name} detail",
+    /**
+     * The creation chooser behind the Create control: official mode puts a
+     * target on a bot the platform already shares, self-hosted is the GitHub
+     * App manifest flow. `botTarget*` label one shared bot with this
+     * workspace's live target count.
+     */
+    createDialog: {
+      title: "Create a review target",
+      description: "Use an App this platform already shares, or connect your own GitHub App.",
+      modeOfficial: "Official App",
+      modeSelfHosted: "My own GitHub App",
+      botLabel: "App",
+      botPlaceholder: "Select an App",
+      botTargetOne: "{name} · {count} target",
+      botTargets: "{name} · {count} targets",
+      noSharedBots: "This platform shares no App yet — connect your own GitHub App instead.",
+      submit: "Create target",
+      selfHostedSubmit: "Continue to GitHub",
+      failed: "The target was not created — try again.",
+    },
   },
   members: {
     heading: "Members",
@@ -1011,6 +1035,13 @@ export const en = {
     installBoundNoAccount: "Bound to installation {id}; GitHub has not reported its account yet.",
     installRemoved:
       "GitHub no longer has this installation, so reviews are paused. Installing it again resumes them on this target.",
+    // Installed tab: installations the bot already carries that no target has
+    // bound yet. Binding one is the dashboard's one-action alternative to the
+    // GitHub setup round trip.
+    installPending: "Waiting to be bound",
+    installPendingUnknownAccount: "Installation {id} (account not reported yet)",
+    installPendingBind: "Bind to this target",
+    installBindFailed: "The installation could not be bound. Reload this page and try again.",
     // Installed tab: the owner allowlist (migration 0045).
     allowlist: "Owner allowlist",
     allowlistCopy: "With the switch on, only these repository owners are reviewed.",

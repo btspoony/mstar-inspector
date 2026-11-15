@@ -23,6 +23,7 @@ import {
   parseInsightsSearch,
   parseMembers,
   parseSettings,
+  parseSharedBots,
   PR_VERDICTS as SPA_PR_VERDICTS,
   providerFormKind,
   providerKeyRows,
@@ -227,6 +228,33 @@ describe("members/apps/settings parsers", () => {
     expect(parseApps({ apps: [] })).toBeNull();
   });
 
+  test("parseSharedBots is all-or-nothing, and a missing block is the empty list", () => {
+    const row = { id: "bot-1", github_slug: "platform-app", name: "Platform", target_count: 2 };
+    expect(parseSharedBots([row])).toEqual([row]);
+    // One unusable row invalidates the list: a partially parsed block would
+    // offer a bot the create route answers 404 for.
+    expect(parseSharedBots([row, { id: "", github_slug: null, name: "x", target_count: 0 }])).toEqual([]);
+    expect(parseSharedBots([{ ...row, target_count: "2" }])).toEqual([]);
+    expect(parseSharedBots(undefined)).toEqual([]);
+    expect(parseSharedBots({ rows: [row] })).toEqual([]);
+  });
+
+  test("parseApps normalizes the shared-bot block: absent or malformed reads as none", () => {
+    expect(parseApps({ viewer: { login: "mallory", role: "member" }, apps: [] })?.shared_bots).toEqual([]);
+    const malformed = parseApps({
+      viewer: { login: "mallory", role: "member" },
+      apps: [],
+      shared_bots: [{ id: 7 }],
+    });
+    expect(malformed?.shared_bots).toEqual([]);
+    const ok = parseApps({
+      viewer: { login: "mallory", role: "member" },
+      apps: [],
+      shared_bots: [{ id: "bot-1", github_slug: null, name: "Platform", target_count: 1 }],
+    });
+    expect(ok?.shared_bots).toEqual([{ id: "bot-1", github_slug: null, name: "Platform", target_count: 1 }]);
+  });
+
   test("parseApps rows carry the D6 GitHub identity fields (github_name / github_slug / github_avatar_url)", () => {
     const ok = parseApps({
       viewer: { login: "mallory", role: "member" },
@@ -261,8 +289,11 @@ describe("members/apps/settings parsers", () => {
     const ok = parseSettings({
       can_manage: true,
       installation: null,
+      pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
+      blocked: false,
+      blocked_reason: null,
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -316,8 +347,11 @@ describe("members/apps/settings parsers", () => {
     const manageBase = {
       can_manage: true,
       installation: null,
+      pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
+      blocked: false,
+      blocked_reason: null,
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -369,8 +403,11 @@ describe("members/apps/settings parsers", () => {
     const base = {
       can_manage: true,
       installation: null,
+      pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
+      blocked: false,
+      blocked_reason: null,
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -439,8 +476,11 @@ describe("members/apps/settings parsers", () => {
     const base = {
       can_manage: true,
       installation: null,
+      pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
+      blocked: false,
+      blocked_reason: null,
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -520,6 +560,8 @@ describe("members/apps/settings parsers", () => {
       can_manage: false,
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
+      blocked: false,
+      blocked_reason: null,
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -554,8 +596,11 @@ describe("members/apps/settings parsers", () => {
     const manageBase = {
       can_manage: true,
       installation: null,
+      pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
+      blocked: false,
+      blocked_reason: null,
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -696,6 +741,8 @@ describe("members/apps/settings parsers", () => {
     const readOnly = parseSettings({
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
+      blocked: false,
+      blocked_reason: null,
       can_manage: false,
       app: identityApp,
     });
@@ -709,6 +756,8 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings({
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
+      blocked: false,
+      blocked_reason: null,
       can_manage: false,
       app: withoutCreated,
     })).toBeNull();
@@ -717,8 +766,11 @@ describe("members/apps/settings parsers", () => {
       parseSettings({
         can_manage: true,
         installation: null,
+        pending_installations: [],
         workspace_id: "ws_0123456789abcdefghijkl",
         target_id: "rt-501",
+        blocked: false,
+        blocked_reason: null,
         app: {
           github_slug: "demo",
           id: "app-demo",
@@ -802,8 +854,11 @@ describe("provider catalog rows + add selection", () => {
   const manageBase = {
     can_manage: true,
     installation: null,
+    pending_installations: [],
     workspace_id: "ws_0123456789abcdefghijkl",
     target_id: "rt-501",
+    blocked: false,
+    blocked_reason: null,
     app: {
       github_slug: "demo",
       id: "app-demo",
