@@ -155,14 +155,24 @@ consult it, and neither re-derives the rule:
 - enqueueing a review for a target on a shared bot: the webhook route decides
   ONCE, before the enqueue, from the TARGET's workspace (the bot's workspace is
   another fact). `handleReviewJob` then takes no KV claim and writes no comment
-  claim, still attaches the Check, settles it `neutral` through
-  `CheckLifecycle.settleSkipped`, records one terminal `entitlement` failure
-  row, and sends nothing.
+  claim, still attaches the Check, and the route chains that Check's `neutral`
+  settlement onto the attach (the webhook may have stopped waiting for it),
+  records one terminal `entitlement` failure row, and sends nothing.
+
+The gate reads the bot's scope first: only a bot the platform SHARES consults
+the plan. A workspace's own bot never does — a Free workspace keeps reviewing
+with its own App exactly as before, with no plan read on that path.
 
 `self-hosted` answers before any read: `resolveWorkspacePlans` returns the
 unlimited constant, so that mode never touches the column. Every other mode
 reads the plan on each attempt, so an Operator Admin plan change — in either
 direction — applies to the next attempt with no restart and no cache.
+
+Deploy order is migration first, then the Worker
+(`migrations/0061_plan_shared_bot_allowed.sql` before the code that reads it).
+A Worker that lands first reads a column that does not exist and every plan read
+throws — fail-closed, but a 500 on the webhook and dashboard faces rather than
+the refusal this gate exists to give.
 
 The creation check is the early, human-facing refusal; the enqueue check is what
 makes the rule durable. A target created before the rule existed, a workspace

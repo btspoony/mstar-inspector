@@ -28,6 +28,7 @@ import { reconcileReviewLifecycle } from "./lifecycle-reconcile";
 import { reconcileReviewChecks } from "./check-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
+import { SHARED_BOT_ENTITLEMENT_SKIP_REASON } from "../contracts/failure-stages";
 import type { PipelineEnv } from "../pipeline/consumer";
 import {
   classifyWebhook,
@@ -310,6 +311,40 @@ async function attachCheckOnAcceptance(input: {
       redactSecrets(detail),
       "check attach failed — delivery unaffected (best-effort)",
     );
+  }
+}
+
+/**
+ * Settle the refused delivery's Check AFTER this delivery's attach resolves.
+ *
+ * The webhook stops waiting at `CHECK_ATTACH_INLINE_BUDGET_MS` and the
+ * invocation keeps the attach running; a settlement started inline would race a
+ * create that is still in flight and find no settleable row (`review-checks`
+ * claims only a row whose create state is `known` and that carries a run id).
+ * The row would then be left to the recovery lane, which closes it as a
+ * FAILURE instead of the neutral skip a refusal owes. Chaining keeps exactly
+ * one settlement, on this delivery's own attach identity, inside the same
+ * invocation — the claim condition itself is untouched.
+ *
+ * Best-effort by contract: an attach is already fully caught by
+ * {@link attachCheckOnAcceptance}, and a settlement fault is one structured
+ * warn. Nothing here can change the 2xx the route already owes GitHub.
+ */
+export async function settleRefusedAfterAttach(input: {
+  attach: Promise<unknown>;
+  settle: () => Promise<unknown>;
+  warn: (detail: string) => void;
+}): Promise<void> {
+  try {
+    await input.attach;
+  } catch {
+    // The attach logs its own fault and does not reject today; a rejected one
+    // still counts as finished, so the settlement below runs and finds nothing.
+  }
+  try {
+    await input.settle();
+  } catch (err) {
+    input.warn(err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -698,14 +733,17 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     }
   }
   // The shared-bot capability is decided ONCE, here, and only for a job both
-  // switches admitted — the only delivery that could have enqueued. It reads
-  // the TARGET's workspace (the consumer), never the bot's, and it is the very
-  // function the target-creation route calls, so neither surface re-derives
-  // the rule. The refusal feeds the delivery row below and the enqueue call
-  // at the end of this route; a store fault propagates as a 500, exactly like
-  // the allowlist read (an unapplied gate never admits a delivery).
+  // switches admitted on a bot the platform SHARES — the only delivery that
+  // could have enqueued. A workspace's OWN bot is not the shared bot: the
+  // owned path is untouched, and a Free workspace reviews with its own App
+  // exactly as before. It reads the TARGET's workspace (the consumer), never
+  // the bot's, and it is the very function the target-creation route calls, so
+  // neither surface re-derives the rule. The refusal feeds the delivery row
+  // below and the enqueue call at the end of this route; a store fault
+  // propagates as a 500, exactly like the allowlist read (an unapplied gate
+  // never admits a delivery).
   const refusal =
-    outcome.kind === "job" && target !== null && !paused && reviewGlobal
+    outcome.kind === "job" && target !== null && !paused && reviewGlobal && row.scope === "shared"
       ? await assertSharedBotAllowed(db, target.workspace_id, deploymentModeOf(c.env.DEPLOYMENT_MODE))
       : null;
   try {
@@ -874,6 +912,16 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // references only (lock L4: the PEM never leaves the consumer). Every
   // remaining outcome is a `job`, and a job is only produced once the resolver
   // returned a target (the no-target path classifies `ignore`, returned above).
+  // Store-only settlement lifecycle for a refusal (spec §7.9): a `null` adapter
+  // freezes the neutral intent and releases the lease, and the minute
+  // reconciler performs the single remote update — so a refused delivery does
+  // ZERO credential work while its Check still closes honestly.
+  const skipSettlement = createCheckLifecycle({
+    db,
+    nowMs: () => Date.now(),
+    getAdapter: () => null,
+    getCheckGate: async () => null,
+  });
   await handleReviewJob({ ...outcome.payload, botRef: { appId: row.id }, targetId: target!.id }, {
     // `db` is the route's already-narrowed binding (the unbound guard above
     // returned 500): the durable comment claim must never run against a
@@ -893,26 +941,49 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       // still settle it.
       const attachDeliveryId = crypto.randomUUID();
       const attach = attachCheckOnAcceptance({ db, env: c.env, row, payload, deliveryId: attachDeliveryId });
+      const headSha = payload.head_sha;
+      // A refused commit delivery settles the row it just attached, CHAINED
+      // onto that attach: the webhook may already have stopped waiting, and an
+      // inline settlement would race the create it kept running. A bot-mention
+      // delivery attached nothing (no head SHA) and settles nothing.
+      const work =
+        refusal === null || headSha === null
+          ? attach
+          : settleRefusedAfterAttach({
+              attach,
+              settle: () =>
+                skipSettlement.settleSkipped({
+                  scope: {
+                    appId: row.id,
+                    installationId: payload.installation_id,
+                    owner: payload.owner,
+                    repo: payload.repo,
+                    prNumber: payload.pr_number,
+                  },
+                  headSha,
+                  triggeredBy: payload.triggered_by,
+                  action: payload.action,
+                  attachDeliveryId,
+                  reason: SHARED_BOT_ENTITLEMENT_SKIP_REASON,
+                }),
+              warn: (detail) =>
+                webhookWarn(
+                  "check_skip_settle_failed",
+                  redactSecrets(detail),
+                  "check skip settlement failed — the run is left to the reconciler",
+                ),
+            });
       try {
-        c.executionCtx.waitUntil(attach);
+        c.executionCtx.waitUntil(work);
       } catch {
-        // No invocation context (tests, a non-Worker host): the attach is
-        // already running detached and is best-effort either way.
-        void attach;
+        // No invocation context (tests, a non-Worker host): the attach (and,
+        // on a refusal, its chained settlement) is already running detached
+        // and is best-effort either way.
+        void work;
       }
       await withinBudget(attach, CHECK_ATTACH_INLINE_BUDGET_MS);
       return { ...payload, attachDeliveryId };
     },
-    // A refused delivery settles the row it just attached (§7.9) — store-only,
-    // because a `null` adapter freezes the neutral intent and the minute
-    // reconciler performs the single remote update. That is what keeps a
-    // refusal free of credential work while its Check still closes honestly.
-    settleSkipped: createCheckLifecycle({
-      db,
-      nowMs: () => Date.now(),
-      getAdapter: () => null,
-      getCheckGate: async () => null,
-    }).settleSkipped,
   }, refusal);
   return c.text("accepted", 200);
 });

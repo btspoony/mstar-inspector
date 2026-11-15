@@ -23,8 +23,9 @@
  *   unprovable, so it propagates and GitHub retries.
  * - A refused delivery (the target's plan does not include the shared bot)
  *   takes none of the above: no KV pre-check, no comment claim, no send. Its
- *   Check is still attached, settled `neutral`, and the refusal lands as one
- *   terminal `entitlement` failure row — see `refuseDelivery`.
+ *   Check is still attached (the route chains the `neutral` settlement onto
+ *   that attach) and the refusal lands as one terminal `entitlement` failure
+ *   row — see `refuseDelivery`.
  * - Ordering invariant: the D1 comment claim is inserted BEFORE
  *   `REVIEW_QUEUE.send` (so a duplicate is refused before any work) and the
  *   KV key is claimed only AFTER it resolves (so a failed send leaves no KV
@@ -39,7 +40,7 @@ import {
 } from "../contracts/failure-stages";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { SharedBotRefusal } from "../dashboard/entitlement";
-import { CHECK_SUMMARIES, type CheckLifecycle } from "../pipeline/checks";
+import { CHECK_SUMMARIES } from "../pipeline/checks";
 import { createFailureStore } from "../store/failure-store";
 import type { Env } from "./env";
 
@@ -94,14 +95,6 @@ export type HandlerDeps = {
    * outcome.
    */
   beforeEnqueue?: (payload: ReviewJobPayload) => Promise<ReviewJobPayload | void>;
-  /**
-   * §7.9 skip settlement, supplied by the route and used ONLY when the route
-   * refuses the delivery (below): the Check attached at acceptance is settled
-   * `neutral` with the refusal reason. Production supplies the store-only
-   * lifecycle (`getAdapter: () => null`), so a refusal does no credential work
-   * and the minute reconciler performs the single remote update.
-   */
-  settleSkipped?: CheckLifecycle["settleSkipped"];
 };
 
 export type HandleOutcome =
@@ -204,47 +197,25 @@ async function runBeforeEnqueue(
  * 1. NO KV pre-check and NO `comment_trigger_claims` insert — no claim row
  *    means the cron sweep has no outbox record to re-send.
  * 2. The Check is still attached, exactly as an admitted delivery's would be.
- * 3. That row is settled `neutral` through `settleSkipped` carrying THIS
- *    delivery's attach identity, so the refusal is never a verdict on the
- *    commit. A bot-mention delivery attached nothing (no head SHA) and settles
- *    nothing.
- * 4. One terminal `entitlement` failure row explains the delivery on the
+ *    Its `neutral` settlement is NOT started here: the route chains it onto
+ *    that attach (which may outlive the webhook's inline wait), so the
+ *    settlement can never race the create and the row is never left for the
+ *    recovery lane to close as a failure.
+ * 3. One terminal `entitlement` failure row explains the delivery on the
  *    operator face; its `error` is the same sentence the Check carries.
- * 5. `skipped` — no queue send, no claim, no runner, no spend.
+ * 4. `skipped` — no queue send, no claim, no runner, no spend.
  */
 async function refuseDelivery(
   payload: ReviewJobPayload,
   deps: HandlerDeps,
   fields: WorkerEventLog,
 ): Promise<HandleOutcome> {
-  const outgoing = await runBeforeEnqueue(
+  await runBeforeEnqueue(
     payload,
     deps,
     fields,
     "pre-enqueue hook failed — the refusal still holds",
   );
-
-  if (deps.settleSkipped !== undefined && payload.head_sha !== null) {
-    try {
-      await deps.settleSkipped({
-        scope: {
-          appId: payload.botRef.appId,
-          installationId: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          prNumber: payload.pr_number,
-        },
-        headSha: payload.head_sha,
-        triggeredBy: payload.triggered_by,
-        action: payload.action,
-        attachDeliveryId: outgoing.attachDeliveryId,
-        reason: SHARED_BOT_ENTITLEMENT_SKIP_REASON,
-      });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `check skip settlement failed (the row is left to the recovery lane): ${detail}`);
-    }
-  }
 
   // Best-effort like every other bookkeeping write on the delivery path: the
   // refusal is already decided and the answer must stay 2xx.
