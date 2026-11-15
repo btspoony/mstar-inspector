@@ -174,6 +174,17 @@ plan); a target's `bot_id` cannot — it is written once by an INSERT
 writer of that column must consult this same function rather than add a second
 guard.
 
+Operational consequence, known and accepted: `entitlement` joins the failure
+vocabulary and deliberately stays OUTSIDE `PAGING_EXCLUDED_STAGES`, so the cron
+sweep counts these rows and its global ops alert — more than
+`SWEEP_FAILURE_THRESHOLD` (7) rows across ALL tenants in 24 h — can fire on the
+8th refusal within a day for a workspace that simply left its plan. A
+workspace-level condition is presented as a platform-wide one. That is the
+intended trade (refusals must stay countable and listable on the dashboard);
+the future lever is a separate alert-only exclusion list, never a change to
+`PAGING_EXCLUDED_STAGES`, which would also hide the rows from the dashboard's
+failure counts and PR history.
+
 ## Invariants
 
 - Free slots count memberships, not ownership.

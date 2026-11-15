@@ -25,6 +25,11 @@ import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
+import {
+  SHARED_BOT_ENTITLEMENT_SKIP_REASON,
+  SHARED_BOT_ENTITLEMENT_STAGE,
+} from "../../src/contracts/failure-stages";
+import { CHECK_SUMMARIES } from "../../src/pipeline/checks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
@@ -278,6 +283,46 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(ledger).toEqual([
       { owner: "test-owner", repo: "test-repo", pr_number: 42, state: "open", head_sha: "abc123" },
     ]);
+  });
+
+  test("saas: a plan without the shared bot skips the delivery — 200, outcome skipped, no send, one entitlement failure", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    // The production `saas` shape: the capability is read from the resolved
+    // plan, and this workspace holds no subscription row → the seeded `free`
+    // plan, which does not include the shared bot.
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    // Verified, admitted by both switches, then refused: GitHub sees a healthy
+    // 2xx and retries nothing, and no consumer ever starts.
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(0);
+
+    // The delivery row distinguishes a refusal from a pause or a plain ignore.
+    const delivery = db.raw
+      .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .get(appRow.id) as { outcome: string };
+    expect(delivery.outcome).toBe("skipped");
+
+    // One terminal failure row in the PAGED vocabulary, carrying the same
+    // sentence the delivery's Check does.
+    const failures = db.raw
+      .query("SELECT stage, target_id, error FROM review_failures ORDER BY rowid")
+      .all() as Array<{ stage: string; target_id: string; error: string }>;
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
+    expect(failures[0]!.target_id).toBe(appRow.targetId);
+    expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(SHARED_BOT_ENTITLEMENT_SKIP_REASON));
   });
 
   test("the queued head_at is byte-identical to the ledger's head_at (offset normalized)", async () => {

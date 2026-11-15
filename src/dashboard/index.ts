@@ -5700,9 +5700,12 @@ const appParkRoute = async (c: DashboardContext): Promise<Response> => {
  *
  * Refusals reuse the pinned-post vocabulary: a body without a `botId` is a
  * `400`; a workspace whose plan does not include the shared bot is the same
- * `400` carrying the plan-named refusal, with nothing written; a bot the store
- * would not write (unknown, soft-deleted or not shared) is the same
- * `404 unknown app` an unknown App answers; a workspace that already holds a
+ * `400` carrying the plan-named refusal, with nothing written — the capability
+ * is decided BEFORE the bot row is read (the right order: no read for a
+ * workspace that may not use the feature), so the `404 unknown app` below is
+ * reachable only when the plan grants the capability; a bot the store would
+ * not write (unknown, soft-deleted or not shared) is the same `404 unknown
+ * app` an unknown App answers; a workspace that already holds a
  * live target on the bot is the family's `409`. A caller who is not
  * owner/admin is refused by the manage gate before any read, and the store's
  * own guard re-checks the bot inside the write, so a bot unshared between page
