@@ -1707,3 +1707,165 @@ describe("target attribution on a re-seen finding (rebind)", () => {
     expect((await store.listPullRequestFindings(scopeA, "acme", "widgets", 42, PAGE))!.items).toEqual([]);
   });
 });
+
+/**
+ * The two faces of the same rule: attribution follows the LIVE BINDING.
+ *
+ * A publication's `artifact.targetId` is frozen at compose time, and the M8
+ * recovery lane can apply a still-confirmed OLDER round after a newer one. The
+ * binding — not the payload — therefore decides the tenant, on every apply.
+ */
+describe("live-binding attribution on re-seen findings", () => {
+  const TARGET_B_ID = "11111111-2222-3333-4444-999999999999";
+  const WORKSPACE_B = "ws-b-live";
+  const PAGE = { offset: 0, limit: 10 };
+  const scopeA = { targetId: TARGET_ID, workspaceId: "default", botId: APP_ID };
+  const scopeB = { targetId: TARGET_B_ID, workspaceId: WORKSPACE_B, botId: APP_ID };
+
+  /** Bot APP_ID, one target per workspace, A holding the installation, one PR row each. */
+  function liveBindingFixture(): TestD1 {
+    const db = createMigratedTestD1();
+    seedAppRow(db, APP_ID);
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES (?, ?, ?, NULL, datetime('now'))`,
+      )
+      .run(WORKSPACE_B, WORKSPACE_B, WORKSPACE_B);
+    seedTarget(db, APP_ID, { id: TARGET_ID });
+    seedTarget(db, APP_ID, { id: TARGET_B_ID, workspaceId: WORKSPACE_B });
+    db.raw
+      .prepare("UPDATE review_targets SET installation_id = ? WHERE id = ?")
+      .run(SCOPE.installationId, TARGET_ID);
+    for (const targetId of [TARGET_ID, TARGET_B_ID]) {
+      db.raw
+        .prepare(
+          `INSERT INTO pull_requests
+             (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+           VALUES (?, ?, ?, 'acme', 'widgets', 42, 'PR', 'open', 'sha', datetime('now'), datetime('now'))`,
+        )
+        .run(`pr-${targetId}`, APP_ID, targetId);
+    }
+    return db;
+  }
+
+  /** The installation leaves A's target and lands on B's — the rebind. */
+  function rebind(db: TestD1): void {
+    db.raw.prepare("UPDATE review_targets SET installation_id = NULL WHERE id = ?").run(TARGET_ID);
+    db.raw
+      .prepare("UPDATE review_targets SET installation_id = ? WHERE id = ?")
+      .run(SCOPE.installationId, TARGET_B_ID);
+  }
+
+  /** Round 1 composed while A held the installation (its payload names A). */
+  function roundOne(seen: Array<{ rowId: string; findingId: string }>): PublicationPayload {
+    return payload({
+      lifecycle: lifecycleRound({
+        selectedRowIds: seen.map((entry) => entry.rowId),
+        seen: seen.map((entry) => seenEntry(entry.rowId, entry.findingId)),
+      }),
+    });
+  }
+
+  /** Round 2 at a new SHA, composed after the rebind (its payload names B). */
+  function roundTwo(seen: Array<{ rowId: string; findingId: string }>): PublicationPayload {
+    return payload({
+      headSha: SHA2,
+      round: 2,
+      artifact: artifactDoc({
+        key: idemKey({
+          installation_id: SCOPE.installationId,
+          owner: SCOPE.owner,
+          repo: SCOPE.repo,
+          pr_number: SCOPE.prNumber,
+          head_sha: SHA2,
+        }),
+        targetId: TARGET_B_ID,
+      }),
+      lifecycle: lifecycleRound({ seen: seen.map((entry) => seenEntry(entry.rowId, entry.findingId)) }),
+    });
+  }
+
+  test("a late apply of an older round cannot re-point the rows", async () => {
+    const db = liveBindingFixture();
+    // Both rounds are confirmed before either applies — the recovery lane can
+    // hold an older `confirmed` publication while a newer one lands.
+    const lease1 = await stageClaimProve(db, "pub-1", roundOne([{ rowId: "row-1", findingId: "f-1" }]), 1000);
+    rebind(db);
+    const lease2 = await stageClaimProve(db, "pub-2", roundTwo([{ rowId: "row-1", findingId: "f-1" }]), 10_000);
+
+    // The newer round lands first, on B.
+    expect(await applyPublishedLifecycle(db, "pub-2", lease2, 11_000)).toBe(true);
+    expect(
+      (db.raw.prepare("SELECT target_id FROM review_findings WHERE id = 'row-1'").get() as { target_id: string })
+        .target_id,
+    ).toBe(TARGET_B_ID);
+
+    // The OLDER round applies late, carrying target A in its frozen payload:
+    // the live binding still names B, so nothing moves back.
+    expect(await applyPublishedLifecycle(db, "pub-1", lease1, 12_000)).toBe(true);
+    expect(publicationRow(db, "pub-1").phase).toBe("applied");
+    expect(
+      (db.raw.prepare("SELECT target_id FROM review_findings WHERE id = 'row-1'").get() as { target_id: string })
+        .target_id,
+    ).toBe(TARGET_B_ID);
+
+    const store = createReviewBotsStore(db);
+    expect((await store.countPullRequestRecords(scopeB, "acme", "widgets", 42)).findings).toBe(1);
+    expect((await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).findings).toBe(0);
+  });
+
+  test("one re-seen row moves the whole fingerprint scope, findings and failures", async () => {
+    const db = liveBindingFixture();
+    const lease1 = await stageClaimProve(
+      db,
+      "pub-1",
+      roundOne([
+        { rowId: "row-1", findingId: "f-1" },
+        { rowId: "row-2", findingId: "f-2" },
+        { rowId: "row-3", findingId: "f-3" },
+      ]),
+      1000,
+    );
+    expect(await applyPublishedLifecycle(db, "pub-1", lease1, 2000)).toBe(true);
+    // A failure row from that era, attributed to A's target.
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures
+           (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+         VALUES ('failure-1', ?, 'acme', 'widgets', 42, ?, 'runner', 'boom', ?)`,
+      )
+      .run(SCOPE.installationId, SHA, TARGET_ID);
+
+    rebind(db);
+    const lease2 = await stageClaimProve(db, "pub-2", roundTwo([{ rowId: "row-1", findingId: "f-1" }]), 10_000);
+    expect(await applyPublishedLifecycle(db, "pub-2", lease2, 11_000)).toBe(true);
+
+    // Rows 2 and 3 were NOT re-seen by round 2, yet they follow the binding.
+    expect(
+      db.raw.query("SELECT finding_id, target_id FROM review_findings ORDER BY finding_id").all(),
+    ).toEqual([
+      { finding_id: "f-1", target_id: TARGET_B_ID },
+      { finding_id: "f-2", target_id: TARGET_B_ID },
+      { finding_id: "f-3", target_id: TARGET_B_ID },
+    ]);
+    expect(db.raw.query("SELECT target_id FROM review_failures WHERE id = 'failure-1'").get()).toEqual({
+      target_id: TARGET_B_ID,
+    });
+
+    // One tenant owns the PR: B reads the three findings, A reads none of them
+    // even though its own ledger row for the PR is still on the books.
+    const store = createReviewBotsStore(db);
+    expect((await store.countPullRequestRecords(scopeB, "acme", "widgets", 42)).findings).toBe(3);
+    expect(
+      ((await store.listPullRequestFindings(scopeB, "acme", "widgets", 42, PAGE))!.items.map(
+        (row) => row.finding_id,
+      )).sort(),
+    ).toEqual(["f-1", "f-2", "f-3"]);
+    expect(
+      db.raw.query("SELECT COUNT(*) AS n FROM pull_requests WHERE target_id = ?").get(TARGET_ID),
+    ).toEqual({ n: 1 });
+    expect((await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).findings).toBe(0);
+    expect((await store.listPullRequestFindings(scopeA, "acme", "widgets", 42, PAGE))!.items).toEqual([]);
+  });
+});
