@@ -2,7 +2,7 @@
 
 ## Scope
 
-The SaaS-only `/_internal_admin` authorization boundary, flags, plan assignment, read lists, support grants and audit ledgers.
+The SaaS-only `/_internal_admin` authorization boundary, flags, plan assignment, bot scope, platform settings, read lists, support grants and audit ledgers.
 
 ## Current state
 ### 1. Identity and authorization
@@ -85,8 +85,11 @@ forbidden.
   member count, pending invite count, `planId`, `createdAt`.
 - `GET /_internal_admin/api/users` — login, first-seen (`users.created_at`),
   workspace count, `isOperator` (from the env list), active support-grant count.
+- `GET /_internal_admin/api/bots` — bot id, name, GitHub App id, workspace,
+  `scope`, `sharedAt`, `deletedAt` for every non-deleted bot (§ 3.5).
 
-Both are single-statement reads with the counts resolved in SQL, not N+1.
+Both workspace and user reads are single-statement reads with the counts
+resolved in SQL, not N+1; the bot read is a single name-ordered join.
 
 ### 3.4 Support grants
 
@@ -98,12 +101,92 @@ Both are single-statement reads with the counts resolved in SQL, not N+1.
 - Grant writes append to the existing `audit_events` table with the target
   `workspace_id` (that table requires one).
 
+### 3.5 Bot scope and platform settings
+
+A review bot carries a scope: `owned` serves its own workspace, `shared` is
+offered platform-wide. Only a bot inside the platform's official workspace may
+be shared, and the designation is global platform state — not a tenant column
+and not a boolean flag.
+
+`PATCH /_internal_admin/api/official-workspace` with `{ workspaceId }`:
+
+- The value is the one row `review_runtime_settings["platform.official_workspace_id"]`.
+  `src/dashboard/runtime-config-store.ts` is its only parser and writer; no
+  handler, route or SPA code queries that row.
+- An id must name a live (`deleted_at IS NULL`) workspace. An unknown, retired
+  or malformed id is `400 {"error":"workspace not found"}` with no write and no
+  audit row.
+- `null` clears the row — a DELETE of the key, never an insert of an empty
+  value — and is idempotent: an absent row still answers `200` with no audit
+  row. An empty string is a body-shape error, never "clear".
+- Success is `200 {"workspaceId":<id>|null}`; the value and its audit row land
+  in ONE `batch`.
+- An absent row means "no official workspace". It disables new shares and
+  nothing else: it does not revoke an existing share and does not disturb a
+  bound installation.
+- The read degrades rather than refusing: an id naming a soft-deleted workspace
+  reads as "none", so a tenant retired after the write cannot keep platform-wide
+  sharing enabled through a stale value. Only the write refuses.
+
+`PATCH /_internal_admin/api/bots/:botId/scope` with `{ scope, confirm }`:
+
+| From → to | Conditions | Writes |
+|-----------|------------|--------|
+| `owned → owned`, `shared → shared` | bot live | none: `200` with the current row, no audit row |
+| `owned → shared` | bot live, official workspace set, and the bot's `bot_workspaces.workspace_id` is that id | `scope='shared'`, `shared_at` = now |
+| `shared → owned` | bot live, `confirm: true` | `scope='owned'`, `shared_at = NULL` |
+
+- Refusals, with their exact bodies: invalid scope is
+  `400 {"error":"body must be { scope: \"owned\" | \"shared\" }"}`; an unknown or
+  soft-deleted bot is `404 {"error":"bot not found"}`; a share outside the
+  official workspace (or with none designated) is
+  `409 {"error":"bot is outside the official workspace"}`; a revoke without
+  `confirm: true` is `400 {"error":"unsharing requires confirm: true"}`. A
+  refused write appends no audit row.
+- Every condition is re-checked inside the write's own `batch`, so the
+  designation a share is authorized by is the one in force when the row is
+  written: clearing or re-pointing it between the console's read and its write
+  refuses the share instead of letting it land against a stale value. The FROM
+  scope is guarded the same way, so two identical transitions land once — the
+  loser reports the state the winner persisted, with no second audit row.
+- Unsharing is deliberately NOT gated on the official workspace: a stale share
+  must stay revocable by the only role that can revoke it.
+- The flag is a platform authorization, never workspace self-service. No
+  dashboard route, workspace-owner path or API key writes `scope`, and no
+  per-bot or per-workspace operator scope exists to widen it.
+- Success is `200 {"botId","scope","sharedAt"}`; the row and its audit row land
+  in ONE `batch`, and a re-share stamps a new `shared_at` — the earlier instant
+  survives only in the audit ledger.
+
+`GET /_internal_admin/api/bots` lists every bot with `deleted_at IS NULL`,
+ordered by `name, id`, as
+`{"bots":[{"botId","name","githubAppId","workspaceId","scope","sharedAt","deletedAt"}]}`;
+the console read is unaudited. `GET /_internal_admin/api/runtime` additionally
+states `officialWorkspaceId: string | null`.
+
+Table reuse, deliberate: `review_runtime_settings` is the **platform's parameter
+store**, whose keys group by domain prefix — `review.*` for review behaviour,
+`platform.*` for platform state — and `RUNTIME_SETTING_DOMAINS` /
+`isRuntimeSettingKey` in `runtime-config-store.ts` is what holds that line.
+A fourth settings table would buy a migration, a second audit wiring and a
+second parser while duplicating three rules this table already provides (absent
+row = default, an invalid value fails loud at the writer, write + audit in one
+batch). The table's name is the honest cost; renaming it later is a mechanical
+migration, not a behaviour change.
+
 ### 4. Platform audit
 
 Table `platform_audit_events (id TEXT PRIMARY KEY, actor_login TEXT NOT NULL COLLATE NOCASE, action TEXT NOT NULL, target_type TEXT NOT NULL, target_id TEXT NOT NULL, detail_json TEXT, created_at TEXT NOT NULL)` with an index on `(created_at)`.
 
-Written for: flag toggles, workspace plan changes. Not reused for support grants
-(they already fit `audit_events`).
+Written for: flag toggles, workspace plan changes, and the two runtime
+decisions — `runtime.official_workspace.set` (`target_type` `runtime`,
+`target_id` `platform.official_workspace_id`, `detail_json`
+`{"before":<id>|null,"after":<id>|null}`) and `runtime.bot_scope.set`
+(`target_type` `bot`, `target_id` the bot id, `detail_json`
+`{"before":{"scope","shared_at"},"after":{"scope","shared_at"}}`). Each of those
+writes appends its row in the SAME `batch` as the value change, so a refused
+write appends nothing and an accepted one cannot lose its row. Not reused for
+support grants (they already fit `audit_events`).
 
 The existing `audit_events.workspace_id NOT NULL` is deliberately not relaxed: it
 is a forward-only column contract shared with workspace-level auditing, and
@@ -174,6 +257,10 @@ string — the mode is a separate conjunct.
 - `src/dashboard/index.ts`: session, signup/workspace gates, boot visibility.
 - `migrations/0029_operator_support.sql`: grants and workspace audit.
 - `migrations/0033_platform_admin.sql`: flags and platform audit.
+- `migrations/0058_review_bot_scope.sql`: `review_bots.scope` / `shared_at`.
+- `src/dashboard/runtime-config-store.ts`: the platform parameter store —
+  `platform.official_workspace_id` and the key-domain registry.
+- `src/dashboard/apps-store.ts`: the bot-scope transition and its audit row.
 
 ## Change obligations
 

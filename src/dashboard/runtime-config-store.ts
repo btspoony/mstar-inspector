@@ -60,6 +60,13 @@
  * value off the vocabulary is untrusted — the default with `degraded: true`,
  * never a throw, because a review must still run.
  *
+ * The official workspace is the one non-`review.` key: `platform.*` is a domain
+ * of the same table because the designation is a global platform parameter, not
+ * a switch and not a tenant column. `RUNTIME_SETTING_DOMAINS` is the registry
+ * that keeps that honest — the table is the platform's parameter store whose
+ * keys group by domain prefix, and a future rename is a mechanical migration,
+ * not a behaviour change.
+ *
  * Write discipline: the system value is an integer in 1..SYSTEM_CONCURRENCY_MAX
  * (the platform-wide quota; Cloudflare Queues delivers at most 250 of it at
  * once); the workspace value is an integer in 1..WORKSPACE_CONCURRENCY_MAX.
@@ -1027,4 +1034,142 @@ export async function setDefaultReviewLevel(
     db.prepare(SYSTEM_UPSERT_SQL).bind(REVIEW_LEVEL_KEY, value, now, actor),
   ]);
   return value;
+}
+
+/**
+ * The platform's official workspace: the one tenant whose bots may be offered
+ * platform-wide. It is a global parameter, not a switch and not a tenant
+ * column, so it rides this table as `platform.official_workspace_id`. An
+ * ABSENT row is the legal steady state "no official workspace": it disables new
+ * shares and nothing else.
+ */
+export const OFFICIAL_WORKSPACE_KEY = "platform.official_workspace_id";
+
+/**
+ * The registered domain prefixes of `review_runtime_settings`. The table is the
+ * PLATFORM's parameter store, not a review-only one, and its keys group by
+ * domain: `review.*` for review behaviour, `platform.*` for platform state.
+ * Existing writers keep their constant keys; this registry is what stops the
+ * next writer from turning the table into a general key/value store.
+ */
+export const RUNTIME_SETTING_DOMAINS = ["review.", "platform."] as const;
+
+/** One key segment: lowercase, digits and underscore, never empty. */
+const SETTING_SEGMENT = "[a-z0-9_]+";
+
+/**
+ * `<registered domain><segment>(.<segment>)*`. The domains are interpolated
+ * from the registry above, so adding one is a single edit and the bare
+ * `review` / `platform` / `platform.` forms stay refused.
+ */
+const RUNTIME_SETTING_KEY_PATTERN = new RegExp(
+  `^(?:${RUNTIME_SETTING_DOMAINS.map((domain) => domain.replaceAll(".", "\\.")).join("|")})` +
+    `${SETTING_SEGMENT}(?:\\.${SETTING_SEGMENT})*$`,
+);
+
+/** Is this key a member of a registered domain? See `RUNTIME_SETTING_DOMAINS`. */
+export function isRuntimeSettingKey(key: unknown): key is string {
+  return typeof key === "string" && RUNTIME_SETTING_KEY_PATTERN.test(key);
+}
+
+/** An id the `workspaces` table can hold (the same grammar a slug uses). */
+const OFFICIAL_WORKSPACE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * The official workspace, resolved against live tenants: a stored id naming a
+ * live workspace is that id, and an absent row, an unknown id, a soft-deleted
+ * workspace or an unusable value all read `null`. Degrading rather than
+ * refusing is deliberate — only the write path refuses, so a tenant retired
+ * after the write stops new shares without turning the read into an error.
+ */
+const OFFICIAL_WORKSPACE_READ_SQL = `
+  SELECT w.id AS id
+    FROM review_runtime_settings s
+    JOIN workspaces w ON w.id = s.value AND w.deleted_at IS NULL
+   WHERE s.key = ?`;
+
+export async function readOfficialWorkspaceId(db: DashboardD1): Promise<string | null> {
+  const row = await db
+    .prepare(OFFICIAL_WORKSPACE_READ_SQL)
+    .bind(OFFICIAL_WORKSPACE_KEY)
+    .first<{ id: string }>();
+  return row?.id ?? null;
+}
+
+/**
+ * One operator save, one audit row, in ONE batch. The `before` value is read by
+ * a subquery against the not-yet-written row, and both statements carry the
+ * write's own guard — the target names a live workspace — so a refused write
+ * appends neither row.
+ */
+const OFFICIAL_WORKSPACE_SET_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'runtime.official_workspace.set', 'runtime',
+         '${OFFICIAL_WORKSPACE_KEY}',
+         json_object('before', (SELECT value FROM review_runtime_settings
+                                 WHERE key = '${OFFICIAL_WORKSPACE_KEY}'),
+                     'after', ?3),
+         ?4
+   WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;
+
+const OFFICIAL_WORKSPACE_SET_SQL = `
+  INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+  SELECT ?1, ?2, ?3, ?4
+   WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?2 AND deleted_at IS NULL)
+  ON CONFLICT (key) DO UPDATE SET
+    value = excluded.value,
+    updated_at = excluded.updated_at,
+    updated_by = excluded.updated_by`;
+
+/**
+ * Clearing is a DELETE of the key, never an insert of an empty value, and it is
+ * idempotent: the audit statement's own `WHERE EXISTS` makes an absent row
+ * append nothing.
+ */
+const OFFICIAL_WORKSPACE_CLEAR_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'runtime.official_workspace.set', 'runtime',
+         '${OFFICIAL_WORKSPACE_KEY}',
+         json_object('before', (SELECT value FROM review_runtime_settings
+                                 WHERE key = '${OFFICIAL_WORKSPACE_KEY}'),
+                     'after', NULL),
+         ?3
+   WHERE EXISTS (SELECT 1 FROM review_runtime_settings
+                  WHERE key = '${OFFICIAL_WORKSPACE_KEY}')`;
+
+const OFFICIAL_WORKSPACE_CLEAR_SQL = `DELETE FROM review_runtime_settings WHERE key = ?1`;
+
+/**
+ * Set or clear the official workspace. An id must name a live workspace —
+ * anything else is `unknown_workspace` with zero rows and zero audit rows — and
+ * `null` clears the row. Returns the resulting id.
+ */
+export async function setOfficialWorkspace(
+  db: DashboardD1,
+  input: { workspaceId: string | null; actor: string; now: string },
+): Promise<string | null> {
+  const { workspaceId, actor, now } = input;
+
+  if (workspaceId === null) {
+    await db.batch([
+      db.prepare(OFFICIAL_WORKSPACE_CLEAR_AUDIT_SQL).bind(crypto.randomUUID(), actor, now),
+      db.prepare(OFFICIAL_WORKSPACE_CLEAR_SQL).bind(OFFICIAL_WORKSPACE_KEY),
+    ]);
+    return null;
+  }
+
+  // An id is matched trimmed, so a console field's stray whitespace is not a
+  // different workspace; a malformed one cannot name a workspace and is refused
+  // without a round trip. The batch's own guard covers a workspace retired in
+  // between.
+  const id = workspaceId.trim();
+  if (!OFFICIAL_WORKSPACE_ID_PATTERN.test(id)) throw new UnknownWorkspaceError(workspaceId);
+  const [, upsert] = await db.batch([
+    db.prepare(OFFICIAL_WORKSPACE_SET_AUDIT_SQL).bind(crypto.randomUUID(), actor, id, now),
+    db.prepare(OFFICIAL_WORKSPACE_SET_SQL).bind(OFFICIAL_WORKSPACE_KEY, id, now, actor),
+  ]);
+  if ((upsert?.meta.changes ?? 0) === 0) throw new UnknownWorkspaceError(workspaceId);
+  return id;
 }

@@ -20,9 +20,9 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
-import { createReviewBotsStore } from "../../src/dashboard/apps-store";
+import { createReviewBotsStore, listBotScopes, setBotScope } from "../../src/dashboard/apps-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
-import { getWorkspaceCheckMinScore } from "../../src/dashboard/runtime-config-store";
+import { getWorkspaceCheckMinScore, setOfficialWorkspace } from "../../src/dashboard/runtime-config-store";
 import type { TestD1 } from "../store/helpers";
 
 const WS = "default";
@@ -149,5 +149,450 @@ describe("GitHub App visibility (migration 0045)", () => {
 
     expect(await store.getGithubVisibility("unknown-app")).toBeNull();
     expect(await store.saveGithubVisibility("unknown-app", "public")).toBe(false);
+  });
+});
+
+// --- bot scope (migration 0058, contract § 7.1) ------------------------------
+
+const NOW = "2026-02-01T00:00:00.000Z";
+const LATER = "2026-02-02T00:00:00.000Z";
+const OFFICIAL_KEY = "platform.official_workspace_id";
+
+/** A second live workspace beside the seeded `default`. */
+function seedWorkspace(db: TestD1, id: string, deleted = false): void {
+  db.raw
+    .prepare(
+      `INSERT INTO workspaces (id, slug, name, created_at, deleted_at)
+       VALUES (?, ?, ?, '2026-01-01T00:00:00.000Z', ${deleted ? "'2026-01-02T00:00:00.000Z'" : "NULL"})`,
+    )
+    .run(id, id, id);
+}
+
+/** The official-workspace row, written raw: audited writers are their own test. */
+function seedOfficialWorkspace(db: TestD1, workspaceId: string): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+       VALUES (?, ?, ?, 'fixture')`,
+    )
+    .run(OFFICIAL_KEY, workspaceId, NOW);
+}
+
+/** A fresh numeric App id per seeded bot: `github_app_id` is UNIQUE. */
+let nextGithubAppId = 6100;
+
+/** One bot plus its `bot_workspaces` mapping. */
+function seedScopedBot(
+  db: TestD1,
+  id: string,
+  options: { workspaceId?: string; deleted?: boolean; scope?: string; sharedAt?: string | null } = {},
+): void {
+  nextGithubAppId += 1;
+  seedApp(db, id, { githubAppId: nextGithubAppId, deleted: options.deleted });
+  if (options.workspaceId !== undefined) {
+    db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)").run(id, options.workspaceId);
+  }
+  if (options.scope !== undefined) {
+    db.raw
+      .prepare("UPDATE review_bots SET scope = ?, shared_at = ? WHERE id = ?")
+      .run(options.scope, options.sharedAt ?? null, id);
+  }
+}
+
+type ScopeAudit = { action: string; target_type: string; target_id: string; detail: unknown };
+
+function scopeAudits(db: TestD1): ScopeAudit[] {
+  return (
+    db.raw
+      .prepare(
+        `SELECT action, target_type, target_id, detail_json
+           FROM platform_audit_events ORDER BY rowid`,
+      )
+      .all() as Array<{ action: string; target_type: string; target_id: string; detail_json: string | null }>
+  ).map((row) => ({
+    action: row.action,
+    target_type: row.target_type,
+    target_id: row.target_id,
+    detail: JSON.parse(row.detail_json ?? "null"),
+  }));
+}
+
+function storedScope(db: TestD1, botId: string): { scope: string; shared_at: string | null } {
+  return db.raw.query("SELECT scope, shared_at FROM review_bots WHERE id = ?").get(botId) as {
+    scope: string;
+    shared_at: string | null;
+  };
+}
+
+describe("bot scope transitions (contract § 7.1)", () => {
+  test("owned → shared inside the official workspace writes scope, shared_at and one audit row", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-share", { workspaceId: WS });
+    seedOfficialWorkspace(db, WS);
+
+    const outcome = await setBotScope(db, {
+      botId: "bot-share",
+      scope: "shared",
+      actor: "operator",
+      now: NOW,
+    });
+
+    expect(outcome).toEqual({ outcome: "ok", scope: "shared", sharedAt: NOW });
+    expect(storedScope(db, "bot-share")).toEqual({ scope: "shared", shared_at: NOW });
+    expect(scopeAudits(db)).toEqual([
+      {
+        action: "runtime.bot_scope.set",
+        target_type: "bot",
+        target_id: "bot-share",
+        detail: {
+          before: { scope: "owned", shared_at: null },
+          after: { scope: "shared", shared_at: NOW },
+        },
+      },
+    ]);
+  });
+
+  test("shared → owned needs confirm: true", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-unshare", { workspaceId: WS, scope: "shared", sharedAt: NOW });
+
+    for (const confirm of [undefined, false]) {
+      const refused = await setBotScope(db, {
+        botId: "bot-unshare",
+        scope: "owned",
+        confirm,
+        actor: "operator",
+        now: LATER,
+      });
+      expect(refused).toEqual({ outcome: "confirm_required" });
+    }
+    expect(storedScope(db, "bot-unshare")).toEqual({ scope: "shared", shared_at: NOW });
+    expect(scopeAudits(db)).toEqual([]);
+
+    const accepted = await setBotScope(db, {
+      botId: "bot-unshare",
+      scope: "owned",
+      confirm: true,
+      actor: "operator",
+      now: LATER,
+    });
+    expect(accepted).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
+    expect(storedScope(db, "bot-unshare")).toEqual({ scope: "owned", shared_at: null });
+    expect(scopeAudits(db)).toEqual([
+      {
+        action: "runtime.bot_scope.set",
+        target_type: "bot",
+        target_id: "bot-unshare",
+        detail: {
+          before: { scope: "shared", shared_at: NOW },
+          after: { scope: "owned", shared_at: null },
+        },
+      },
+    ]);
+  });
+
+  test("a same-value transition is a no-op that appends no audit row", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-owned", { workspaceId: WS });
+    seedScopedBot(db, "bot-still-shared", { workspaceId: WS, scope: "shared", sharedAt: NOW });
+    seedOfficialWorkspace(db, WS);
+
+    expect(
+      await setBotScope(db, { botId: "bot-owned", scope: "owned", actor: "operator", now: LATER }),
+    ).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
+    expect(
+      await setBotScope(db, { botId: "bot-still-shared", scope: "shared", actor: "operator", now: LATER }),
+    ).toEqual({ outcome: "ok", scope: "shared", sharedAt: NOW });
+
+    expect(storedScope(db, "bot-owned")).toEqual({ scope: "owned", shared_at: null });
+    expect(storedScope(db, "bot-still-shared")).toEqual({ scope: "shared", shared_at: NOW });
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
+  test("sharing is refused outside the official workspace, and with none designated", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "other");
+    seedScopedBot(db, "bot-elsewhere", { workspaceId: "other" });
+    seedScopedBot(db, "bot-home", { workspaceId: WS });
+
+    // No official workspace at all.
+    expect(
+      await setBotScope(db, { botId: "bot-home", scope: "shared", actor: "operator", now: NOW }),
+    ).toEqual({ outcome: "outside_official_workspace" });
+
+    // The official workspace is someone else's.
+    seedOfficialWorkspace(db, WS);
+    expect(
+      await setBotScope(db, { botId: "bot-elsewhere", scope: "shared", actor: "operator", now: NOW }),
+    ).toEqual({ outcome: "outside_official_workspace" });
+
+    expect(storedScope(db, "bot-home")).toEqual({ scope: "owned", shared_at: null });
+    expect(storedScope(db, "bot-elsewhere")).toEqual({ scope: "owned", shared_at: null });
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
+  test("unsharing stays allowed after the official workspace moved away", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "other");
+    seedScopedBot(db, "bot-stale-share", { workspaceId: WS, scope: "shared", sharedAt: NOW });
+    seedOfficialWorkspace(db, "other");
+
+    expect(
+      await setBotScope(db, {
+        botId: "bot-stale-share",
+        scope: "owned",
+        confirm: true,
+        actor: "operator",
+        now: LATER,
+      }),
+    ).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
+    expect(storedScope(db, "bot-stale-share")).toEqual({ scope: "owned", shared_at: null });
+    expect(scopeAudits(db)).toHaveLength(1);
+  });
+
+  test("a re-share after a revoke stamps a new shared_at", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-cycle", { workspaceId: WS });
+    seedOfficialWorkspace(db, WS);
+
+    await setBotScope(db, { botId: "bot-cycle", scope: "shared", actor: "operator", now: NOW });
+    await setBotScope(db, { botId: "bot-cycle", scope: "owned", confirm: true, actor: "operator", now: LATER });
+    const reShared = await setBotScope(db, {
+      botId: "bot-cycle",
+      scope: "shared",
+      actor: "operator",
+      now: "2026-03-01T00:00:00.000Z",
+    });
+
+    expect(reShared).toEqual({ outcome: "ok", scope: "shared", sharedAt: "2026-03-01T00:00:00.000Z" });
+    expect(storedScope(db, "bot-cycle")).toEqual({
+      scope: "shared",
+      shared_at: "2026-03-01T00:00:00.000Z",
+    });
+    // The earlier instant survives only in the ledger.
+    expect(scopeAudits(db)).toHaveLength(3);
+  });
+
+  test("a missing or soft-deleted bot is bot_not_found and writes nothing", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-gone", { workspaceId: WS, deleted: true });
+    seedOfficialWorkspace(db, WS);
+
+    expect(
+      await setBotScope(db, { botId: "bot-absent", scope: "shared", actor: "operator", now: NOW }),
+    ).toEqual({ outcome: "bot_not_found" });
+    expect(
+      await setBotScope(db, { botId: "bot-gone", scope: "shared", actor: "operator", now: NOW }),
+    ).toEqual({ outcome: "bot_not_found" });
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
+  test("a bot deleted between the read and the write is bot_not_found, not a scope refusal", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-raced", { workspaceId: WS });
+    seedOfficialWorkspace(db, WS);
+
+    // A competing writer that commits the moment the transition submits its
+    // batch — i.e. after the pre-read, before the batch's own statements run.
+    let fired = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("UPDATE review_bots SET deleted_at = ? WHERE id = 'bot-raced'").run(NOW);
+        }
+        return db.batch(statements);
+      },
+    };
+
+    expect(
+      await setBotScope(racingDb, { botId: "bot-raced", scope: "shared", actor: "operator", now: NOW }),
+    ).toEqual({ outcome: "bot_not_found" });
+    expect(fired).toBe(true);
+    expect(storedScope(db, "bot-raced")).toEqual({ scope: "owned", shared_at: null });
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
+  test("a designation cleared between the read and the write refuses the share", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-stale-designation", { workspaceId: WS });
+    seedOfficialWorkspace(db, WS);
+
+    // A competing operator clears the designation the moment this transition
+    // submits its batch — i.e. after the pre-read, before the batch's own
+    // statements run.
+    let fired = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          db.raw.prepare("DELETE FROM review_runtime_settings WHERE key = ?").run(OFFICIAL_KEY);
+        }
+        return db.batch(statements);
+      },
+    };
+
+    expect(
+      await setBotScope(racingDb, {
+        botId: "bot-stale-designation",
+        scope: "shared",
+        actor: "operator",
+        now: NOW,
+      }),
+    ).toEqual({ outcome: "outside_official_workspace" });
+    expect(fired).toBe(true);
+    expect(storedScope(db, "bot-stale-designation")).toEqual({ scope: "owned", shared_at: null });
+    expect(scopeAudits(db)).toEqual([]);
+  });
+
+  test("two concurrent shares land once, keeping the first shared_at and one audit row", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-double-share", { workspaceId: WS });
+    seedOfficialWorkspace(db, WS);
+
+    // The first operator's share commits while this one is in flight: both read
+    // `owned`, so both saw the same FROM state.
+    let fired = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          expect(
+            await setBotScope(db, {
+              botId: "bot-double-share",
+              scope: "shared",
+              actor: "operator",
+              now: NOW,
+            }),
+          ).toEqual({ outcome: "ok", scope: "shared", sharedAt: NOW });
+        }
+        return db.batch(statements);
+      },
+    };
+
+    // The loser reports the winner's state rather than rewriting shared_at.
+    expect(
+      await setBotScope(racingDb, {
+        botId: "bot-double-share",
+        scope: "shared",
+        actor: "operator",
+        now: LATER,
+      }),
+    ).toEqual({ outcome: "ok", scope: "shared", sharedAt: NOW });
+    expect(fired).toBe(true);
+    expect(storedScope(db, "bot-double-share")).toEqual({ scope: "shared", shared_at: NOW });
+    expect(scopeAudits(db)).toEqual([
+      {
+        action: "runtime.bot_scope.set",
+        target_type: "bot",
+        target_id: "bot-double-share",
+        detail: {
+          before: { scope: "owned", shared_at: null },
+          after: { scope: "shared", shared_at: NOW },
+        },
+      },
+    ]);
+  });
+
+  test("two concurrent revokes land once", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-double-revoke", { workspaceId: WS, scope: "shared", sharedAt: NOW });
+
+    let fired = false;
+    const racingDb: TestD1 = {
+      raw: db.raw,
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements) => {
+        if (!fired) {
+          fired = true;
+          expect(
+            await setBotScope(db, {
+              botId: "bot-double-revoke",
+              scope: "owned",
+              confirm: true,
+              actor: "operator",
+              now: NOW,
+            }),
+          ).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
+        }
+        return db.batch(statements);
+      },
+    };
+
+    expect(
+      await setBotScope(racingDb, {
+        botId: "bot-double-revoke",
+        scope: "owned",
+        confirm: true,
+        actor: "operator",
+        now: LATER,
+      }),
+    ).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
+    expect(fired).toBe(true);
+    expect(storedScope(db, "bot-double-revoke")).toEqual({ scope: "owned", shared_at: null });
+    expect(scopeAudits(db)).toEqual([
+      {
+        action: "runtime.bot_scope.set",
+        target_type: "bot",
+        target_id: "bot-double-revoke",
+        detail: {
+          before: { scope: "shared", shared_at: NOW },
+          after: { scope: "owned", shared_at: null },
+        },
+      },
+    ]);
+  });
+
+  test("a shared bot survives a designation clear: no revocation, no new share, still revocable", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-orphan-share", { workspaceId: WS, scope: "shared", sharedAt: NOW });
+    seedScopedBot(db, "bot-new", { workspaceId: WS });
+    seedOfficialWorkspace(db, WS);
+
+    // Clearing the designation is legal platform state: the existing share is
+    // not revoked and its instant is untouched.
+    expect(await setOfficialWorkspace(db, { workspaceId: null, actor: "operator", now: LATER })).toBeNull();
+    expect(storedScope(db, "bot-orphan-share")).toEqual({ scope: "shared", shared_at: NOW });
+
+    // A new share has nowhere to be authorized from.
+    expect(
+      await setBotScope(db, { botId: "bot-new", scope: "shared", actor: "operator", now: LATER }),
+    ).toEqual({ outcome: "outside_official_workspace" });
+    expect(storedScope(db, "bot-new")).toEqual({ scope: "owned", shared_at: null });
+
+    // The stale share stays revocable by the only role that can revoke it.
+    expect(
+      await setBotScope(db, {
+        botId: "bot-orphan-share",
+        scope: "owned",
+        confirm: true,
+        actor: "operator",
+        now: LATER,
+      }),
+    ).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
+    expect(storedScope(db, "bot-orphan-share")).toEqual({ scope: "owned", shared_at: null });
+  });
+
+  test("the console list carries every live bot with its scope, ordered by name then id", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-b", { workspaceId: WS, scope: "shared", sharedAt: NOW });
+    seedScopedBot(db, "bot-a", { workspaceId: WS });
+    seedScopedBot(db, "bot-dead", { workspaceId: WS, deleted: true });
+
+    const rows = await listBotScopes(db);
+    expect(rows.map((row) => row.id)).toEqual(["bot-a", "bot-b"]);
+    expect(rows[1]).toMatchObject({
+      id: "bot-b",
+      workspace_id: WS,
+      scope: "shared",
+      shared_at: NOW,
+      deleted_at: null,
+    });
   });
 });

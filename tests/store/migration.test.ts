@@ -3277,3 +3277,83 @@ describe("migrations/0057_review_targets.sql", () => {
     }
   });
 });
+
+describe("migrations/0058_review_bot_scope.sql", () => {
+  const SCOPE_MIGRATION = "0058_review_bot_scope.sql";
+
+  /** Production's shape at 0057: every file before this one, in order. */
+  function preScopeDb(): TestD1 {
+    const db = createTestD1();
+    for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
+      (migration) => migrationNumber(migration) < migrationNumber(SCOPE_MIGRATION),
+    )) {
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  function botColumns(db: TestD1): Array<{ name: string; notnull: number; dflt_value: unknown }> {
+    return db.raw.query("PRAGMA table_info(review_bots)").all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: unknown;
+    }>;
+  }
+
+  test("adds the two columns with the contract's NOT NULL default and nothing else", () => {
+    const db = preScopeDb();
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+            status, created_at, updated_at)
+         VALUES ('bot-pre-scope', 9001, 'bot-pre-scope', 'enc', 'enc', 'acme',
+                 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, SCOPE_MIGRATION), "utf8"));
+
+    const columns = botColumns(db);
+    expect(columns.find((c) => c.name === "scope")).toMatchObject({ notnull: 1 });
+    expect(columns.find((c) => c.name === "scope")?.dflt_value).toBe("'owned'");
+    expect(columns.find((c) => c.name === "shared_at")).toMatchObject({ notnull: 0, dflt_value: null });
+
+    // A pre-column bot is owned and has never been shared: the default is the
+    // whole backfill.
+    expect(db.raw.query("SELECT scope, shared_at FROM review_bots WHERE id = 'bot-pre-scope'").get()).toEqual({
+      scope: "owned",
+      shared_at: null,
+    });
+  });
+
+  test("the CHECK refuses an unknown scope and admits both contract values", () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+            status, created_at, updated_at)
+         VALUES ('bot-scope-check', 9002, 'bot-scope-check', 'enc', 'enc', 'acme',
+                 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+
+    expect(db.raw.query("SELECT scope, shared_at FROM review_bots WHERE id = 'bot-scope-check'").get()).toEqual({
+      scope: "owned",
+      shared_at: null,
+    });
+
+    for (const scope of ["shared", "owned"] as const) {
+      db.raw.prepare("UPDATE review_bots SET scope = ? WHERE id = 'bot-scope-check'").run(scope);
+      expect(db.raw.query("SELECT scope FROM review_bots WHERE id = 'bot-scope-check'").get()).toEqual({ scope });
+    }
+
+    for (const bad of ["global", "SHARED", "", "owned ", 1]) {
+      expect(
+        () => db.raw.prepare("UPDATE review_bots SET scope = ? WHERE id = 'bot-scope-check'").run(bad),
+        `scope = ${String(bad)}`,
+      ).toThrow();
+    }
+  });
+});
