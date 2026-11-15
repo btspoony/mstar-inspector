@@ -107,6 +107,7 @@ import {
   INVITE_FREE_SLOT_REFUSAL,
   MEMBER_CAP_REFUSAL,
   MemberCapError,
+  SHARED_BOT_REFUSAL,
   WORKSPACE_CREATION_CLOSED_REFUSAL,
   freeSlotAvailable,
   isFreeTierPlan,
@@ -5707,12 +5708,17 @@ const appParkRoute = async (c: DashboardContext): Promise<Response> => {
  * request's own, and the bot is one the platform already shares.
  *
  * Refusals reuse the pinned-post vocabulary: a body without a `botId` is a
- * `400`; a bot the store would not write (unknown, soft-deleted or not
- * shared) is the same `404 unknown app` an unknown App answers; a workspace
- * that already holds a live target on the bot is the family's `409`. A caller
- * who is not owner/admin is refused by the manage gate before any read, and
- * the store's own guard re-checks the bot inside the write, so a bot unshared
- * between page load and submit writes nothing.
+ * `400`; a workspace whose plan does not include the shared bot is the same
+ * `400` carrying the plan-named refusal, with nothing written — the capability
+ * is decided BEFORE the bot row is read (the right order: no read for a
+ * workspace that may not use the feature), so the `404 unknown app` below is
+ * reachable only when the plan grants the capability; a bot the store would
+ * not write (unknown, soft-deleted or not shared) is the same `404 unknown
+ * app` an unknown App answers; a workspace that already holds a
+ * live target on the bot is the family's `409`. A caller who is not
+ * owner/admin is refused by the manage gate before any read, and the store's
+ * own guard re-checks the bot inside the write, so a bot unshared between page
+ * load and submit writes nothing.
  */
 const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
@@ -5736,8 +5742,14 @@ const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
     workspaceId: member.scope.workspaceId,
     botId,
     createdBy: member.user.github_login,
+    mode: deploymentModeOf(c.env.DEPLOYMENT_MODE),
     checkMinScore: floor.minScore,
   });
+  if (created.outcome === "plan_refused") {
+    // The shared-bot capability is the plan's, so the refusal names the plan
+    // this reader can change (own App, or an operator moves it).
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, SHARED_BOT_REFUSAL(created.planId), 400);
+  }
   if (created.outcome === "bot_not_shared") {
     return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "unknown app", 404);
   }

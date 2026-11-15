@@ -340,7 +340,10 @@ export type AppInstallationState = {
  * review switch is off (2xx ignore, zero enqueue), `ignored` = verified but
  * not a reviewable event (e.g. ping), `rejected` = the classifier refused
  * the delivery (400|401|500 — "sent but refused" is the R2 visibility
- * core). Enforced producer-side: an off-vocabulary outcome throws BEFORE
+ * core), `skipped` = verified and admitted by every switch, then refused by
+ * the shared-bot capability (200, zero enqueue — neither `ok`, which would
+ * claim a job, nor `paused`, which would blame a switch that is on).
+ * Enforced producer-side: an off-vocabulary outcome throws BEFORE
  * any row is written; the schema has no CHECK (0010 precedent).
  */
 export const DELIVERY_OUTCOMES: readonly string[] = Object.freeze([
@@ -348,9 +351,10 @@ export const DELIVERY_OUTCOMES: readonly string[] = Object.freeze([
   "paused",
   "ignored",
   "rejected",
+  "skipped",
 ]);
 
-export type DeliveryOutcome = "ok" | "paused" | "ignored" | "rejected";
+export type DeliveryOutcome = "ok" | "paused" | "ignored" | "rejected" | "skipped";
 
 /**
  * Outcome tier rank shared by BOTH delivery health faces: 0 = the row carries
@@ -764,7 +768,9 @@ export function createReviewBotsStore(db: AppsStoreD1) {
    * every outcome that carries a real verdict — `ok` (review enqueued),
    * `paused` (the App's switch is off, a state worth surfacing) and
    * `rejected` (the classifier refused the delivery, the failure signal);
-   * tier 1 is `ignored`. So an App with any verdict reports the newest of
+   * tier 1 is `ignored` and `skipped` (a delivery the shared-bot capability
+   * refused: verified, but no review ran for it, so it carries no verdict of
+   * its own). So an App with any verdict reports the newest of
    * those, an App that has only ever produced noise still falls back to its
    * newest row, and an App with no rows → latest null, rejected24h 0;
    * unknown ids are absent from the result unless the caller asked for them

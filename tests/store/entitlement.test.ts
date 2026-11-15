@@ -57,6 +57,7 @@ describe("resolveWorkspacePlan", () => {
       id: "free",
       name: "Free",
       includedMembers: 5,
+      sharedBotAllowed: false,
     });
     db.raw.close();
   });
@@ -68,6 +69,7 @@ describe("resolveWorkspacePlan", () => {
       id: "pro",
       name: "Pro",
       includedMembers: 5,
+      sharedBotAllowed: true,
     });
     db.raw.close();
   });
@@ -79,6 +81,7 @@ describe("resolveWorkspacePlan", () => {
       id: "unlimited",
       name: "Unlimited",
       includedMembers: null,
+      sharedBotAllowed: true,
     });
     db.raw.close();
   });
@@ -108,6 +111,7 @@ describe("resolveWorkspacePlan — the mode decides before any read", () => {
       id: UNLIMITED_PLAN_ID,
       name: "Unlimited",
       includedMembers: null,
+      sharedBotAllowed: true,
     });
     db.raw.close();
   });
@@ -389,10 +393,12 @@ describe("migration 0032 (unlimited plan)", () => {
       created_at: "2026-10-24T00:00:00.000Z",
     };
 
-    // Both seeded rows survive the rebuild byte-identically.
+    // Both seeded rows survive the rebuild byte-identically. `shared_bot_allowed`
+    // is migration 0061's later seed, not 0032's rebuild — it is what
+    // distinguishes the two tiers, so neither row is the other's copy.
     expect(db.raw.prepare("SELECT * FROM plans WHERE id <> 'unlimited' ORDER BY id").all()).toEqual([
-      { ...seeded, id: "free", name: "Free", monthly_price_cents: 0 },
-      { ...seeded, id: "pro", name: "Pro" },
+      { ...seeded, id: "free", name: "Free", monthly_price_cents: 0, shared_bot_allowed: 0 },
+      { ...seeded, id: "pro", name: "Pro", shared_bot_allowed: 1 },
     ]);
 
     // The column is relaxed — the reason the table was rebuilt at all ...

@@ -335,6 +335,7 @@ export const zhCN: Dictionary = {
         paused: "已暂停",
         ignored: "已忽略",
         rejected: "已拒绝",
+        skipped: "已跳过",
       },
     },
     tableName: "应用",

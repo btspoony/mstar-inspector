@@ -7,21 +7,27 @@ Plan catalogue, nullable seat limits, membership-based free slots, and SaaS/self
 ## Current state
 ### 1. Plan catalogue
 
-`plans` rows are the only plan definitions. Code reads exactly one column today:
-`included_members`. NULL on a quota column means unlimited (migration
-`0031_plans_usage.sql` header, lines 4-11, which names `platform_key_limit`,
-`reviews_included` and `apps_per_workspace`). Migration `0032_unlimited_plan.sql` extends that
-contract to `included_members`: the original column is `INTEGER NOT NULL`
-(`0031_plans_usage.sql:56`), so `0032_unlimited_plan.sql` relaxes it to nullable first (SQLite
-table rebuild under `PRAGMA defer_foreign_keys`; the seeded rows and the
-`workspace_subscriptions` FK are preserved) and then inserts the `unlimited`
-row.
+`plans` rows are the only plan definitions. Code reads two columns:
+`included_members` and the boolean `shared_bot_allowed`. NULL on a quota column
+means unlimited (migration `0031_plans_usage.sql` header, lines 4-11, which
+names `platform_key_limit`, `reviews_included` and `apps_per_workspace`).
+Migration `0032_unlimited_plan.sql` extends that contract to
+`included_members`: the original column is `INTEGER NOT NULL`
+(`0031_plans_usage.sql:56`), so `0032_unlimited_plan.sql` relaxes it to nullable
+first (SQLite table rebuild under `PRAGMA defer_foreign_keys`; the seeded rows
+and the `workspace_subscriptions` FK are preserved) and then inserts the
+`unlimited` row.
 
-| id | included_members | meaning |
-|----|------------------|---------|
-| `free` | 5 | SaaS default for a newly created workspace |
-| `pro` | 5 | SaaS sellable tier; seeded seat count |
-| `unlimited` | NULL | no seat cap; assigned to every self-hosted workspace |
+| id | included_members | shared_bot_allowed | meaning |
+|----|------------------|--------------------|---------|
+| `free` | 5 | 0 | SaaS default for a newly created workspace |
+| `pro` | 5 | 1 | SaaS sellable tier; seeded seat count |
+| `unlimited` | NULL | 1 | no seat cap; assigned to every self-hosted workspace |
+
+`shared_bot_allowed` (migration `0061_plan_shared_bot_allowed.sql`) is a
+capability, not a quota: the column is `NOT NULL DEFAULT 0`, so NULL is never
+another spelling of unlimited, and the default is what keeps every plan added
+later closed until someone says otherwise.
 
 `unlimited` is added as a catalogue row plus a code constant. It is not a
 sentinel: no code may treat `-1`, `0` or `Infinity` as "unlimited".
@@ -41,6 +47,11 @@ edit `plans` rows.
 
 - `null` → no seat cap. `memberSlotAvailable` returns true unconditionally.
 - `number` → existing rule: members + live pending invites `< limit`.
+
+`PlanLimits.sharedBotAllowed` is the resolved shared-bot capability (a boolean;
+§5). It rides the same three read points as the seat limit — the subscription
+`SELECT`, the seeded-`free` `SELECT` and the `self-hosted` constant — so the
+mode and the plan cannot disagree about it.
 
 Every seat-cap enforcement point must accept `null`, not just the UI:
 
@@ -130,21 +141,70 @@ Mode-switch behavior:
   free-row workspaces created while self-hosted must drop to one before
   creating another. The rows stay truthful; the guards key on them again.
 
+### 5. Shared-bot capability
+
+A workspace may attach a review target to a bot the platform shares only when
+its resolved plan includes that bot. `assertSharedBotAllowed(db, workspaceId,
+mode)` in `src/dashboard/entitlement.ts` is THE decision: `null` = allowed, a
+typed refusal carrying the resolved plan id = refused. Exactly two call sites
+consult it, and neither re-derives the rule:
+
+- creating a target on a shared bot (`targetsStore.createOnSharedBot`), which
+  decides before writing anything, so a refusal leaves no target and no audit
+  row, and answers the plan-named `400` body;
+- enqueueing a review for a target on a shared bot: the webhook route decides
+  ONCE, before the enqueue, from the TARGET's workspace (the bot's workspace is
+  another fact). `handleReviewJob` then takes no KV claim and writes no comment
+  claim, still attaches the Check, settles it `neutral` through
+  `CheckLifecycle.settleSkipped`, records one terminal `entitlement` failure
+  row, and sends nothing.
+
+`self-hosted` answers before any read: `resolveWorkspacePlans` returns the
+unlimited constant, so that mode never touches the column. Every other mode
+reads the plan on each attempt, so an Operator Admin plan change — in either
+direction — applies to the next attempt with no restart and no cache.
+
+The creation check is the early, human-facing refusal; the enqueue check is what
+makes the rule durable. A target created before the rule existed, a workspace
+moved to a plan without the capability, and a bot unshared after the fact are
+all closed on the next delivery. The capability's other inputs can change after
+creation (`plans.shared_bot_allowed`, `review_bots.scope`, the workspace's
+plan); a target's `bot_id` cannot — it is written once by an INSERT
+([review targets](../feature/review-targets.md) § Invariants), so the next
+writer of that column must consult this same function rather than add a second
+guard.
+
+Operational consequence, known and accepted: `entitlement` joins the failure
+vocabulary and deliberately stays OUTSIDE `PAGING_EXCLUDED_STAGES`, so the cron
+sweep counts these rows and its global ops alert — more than
+`SWEEP_FAILURE_THRESHOLD` (7) rows across ALL tenants in 24 h — can fire on the
+8th refusal within a day for a workspace that simply left its plan. A
+workspace-level condition is presented as a platform-wide one. That is the
+intended trade (refusals must stay countable and listable on the dashboard);
+the future lever is a separate alert-only exclusion list, never a change to
+`PAGING_EXCLUDED_STAGES`, which would also hide the rows from the dashboard's
+failure counts and PR history.
+
 ## Invariants
 
 - Free slots count memberships, not ownership.
 - `usage_events` is counts-only metering, not enforcement.
 - Workspace soft deletion and `PLATFORM_OPERATORS` / `isPlatformOperator` parsing are unchanged.
 - Unlimited means `null`, never a numeric sentinel.
+- The shared-bot capability has exactly one decision function
+  (`assertSharedBotAllowed`); a second spelling in a route, a store or the SPA
+  is a defect.
 
 ## Where it lives
 
-- `src/dashboard/entitlement.ts`: `resolveWorkspacePlan`, `resolveWorkspacePlans`, `memberSlotAvailable`.
+- `src/dashboard/entitlement.ts`: `resolveWorkspacePlan`, `resolveWorkspacePlans`, `memberSlotAvailable`, `assertSharedBotAllowed`.
+- `src/dashboard/targets-store.ts`: `createOnSharedBot` (the creation refusal).
+- `src/worker/index.ts` + `src/worker/handlers.ts`: the enqueue refusal (`deliveryOutcomeFromWebhook`, `handleReviewJob`).
 - `src/dashboard/invite-store.ts`: `createInvite`, `acceptInvite`, seat/free-slot SQL guards.
 - `src/dashboard/workspace-store.ts`: `createWorkspace` and subscription writes.
 - `src/dashboard/index.ts`: members/invite routes and plan rendering.
 - `src/worker/env.ts`: `deploymentModeOf`.
-- `migrations/0031_plans_usage.sql`, `migrations/0032_unlimited_plan.sql`: catalogue and nullable column.
+- `migrations/0031_plans_usage.sql`, `migrations/0032_unlimited_plan.sql`, `migrations/0061_plan_shared_bot_allowed.sql`: catalogue, nullable column, capability.
 
 ## Change obligations
 

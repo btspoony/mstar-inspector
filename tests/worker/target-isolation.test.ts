@@ -16,6 +16,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createInsightsStore } from "../../src/dashboard/insights-store";
+import { SHARED_BOT_REFUSAL } from "../../src/dashboard/entitlement";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
@@ -31,13 +32,13 @@ const WORKSPACE_A = "default";
 /** The second workspace, which owns the second target only. */
 const WORKSPACE_B = "ws-b";
 
-function envFor(db: TestD1): Env {
+function envFor(db: TestD1, mode: "saas" | "self-hosted" = "self-hosted"): Env {
   return {
     REVIEW_QUEUE: { send: async () => {} },
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
-    DEPLOYMENT_MODE: "self-hosted",
+    DEPLOYMENT_MODE: mode,
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
     DB: db,
@@ -507,6 +508,7 @@ describe("POST /api/targets — a target on a shared bot", () => {
     path: string,
     login: string | null,
     fields: Record<string, string>,
+    mode: "saas" | "self-hosted" = "self-hosted",
   ): Promise<Response> {
     const headers: Record<string, string> = { "Content-Type": "application/x-www-form-urlencoded" };
     if (login !== null) {
@@ -518,7 +520,7 @@ describe("POST /api/targets — a target on a shared bot", () => {
         headers,
         body: new URLSearchParams(fields),
       }),
-      envFor(db),
+      envFor(db, mode),
     );
   }
 
@@ -617,6 +619,38 @@ describe("POST /api/targets — a target on a shared bot", () => {
     const second = await postTarget(db, CREATE, "octocat", { botId: BOT });
     expect(second.status).toBe(409);
     expect(liveTargets(db)).toHaveLength(2);
+  });
+
+  test("a workspace on the free plan answers the plan-named 400 and writes no target", async () => {
+    const { db } = isolationFixture();
+    seedPlatformBot(db);
+    seedTarget(db, BOT, { id: "target-platform-a", workspaceId: WORKSPACE_A });
+    // No subscription row for B → the seeded `free` plan, which does not
+    // include the shared bot (migration 0061).
+    expect(
+      db.raw.query("SELECT COUNT(*) AS n FROM workspace_subscriptions WHERE workspace_id = ?").get(WORKSPACE_B),
+    ).toEqual({ n: 0 });
+    const before = liveTargets(db);
+
+    const res = await postTarget(db, CREATE, "octocat", { botId: BOT }, "saas");
+
+    // The form-POST channel carries no error-code field, so this text IS the
+    // refusal: it names the plan this reader can change.
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe(SHARED_BOT_REFUSAL("free"));
+    // Nothing written: the bot holds only the fixture's target.
+    expect(liveTargets(db)).toEqual(before);
+
+    // The capability is the plan's, read per attempt: the same request creates
+    // once an operator moves the workspace to a plan that includes the bot.
+    seed(
+      db,
+      `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+       VALUES (?, 'pro', 'active', datetime('now'), datetime('now'))`,
+      WORKSPACE_B,
+    );
+    expect((await postTarget(db, CREATE, "octocat", { botId: BOT }, "saas")).status).toBe(200);
+    expect(liveTargets(db)).toHaveLength(before.length + 1);
   });
 
   test("an owned or unknown bot is the unknown-app 404, and a plain member is refused before any write", async () => {
