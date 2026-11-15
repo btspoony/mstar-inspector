@@ -6,12 +6,11 @@ import { GroupCard, GroupCardBody, GroupCardHeader } from "../components/GroupCa
 import { ListRow, ListRowGroup } from "../components/ListRow";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
-import { catalogEndpoints, modelsForProtocol, type CatalogProvider, type SettingsManagePayload } from "./data";
+import { modelsForProtocol, type CatalogProvider, type SettingsManagePayload } from "./data";
 import { NoticeRegion, type OpNotice } from "./PageNotice";
 import { AddKeyDialog, AddProviderDialog } from "./providers-dialogs";
 import { ProviderModelsDialog } from "./provider-models-dialog";
 import { providerGroups, type ProviderGroup } from "./providers-groups";
-import { catalogEndpointsMatch } from "../../contracts/provider-model-limits";
 import type { PendingAction } from "./SettingsPage";
 import { UsagePanel } from "./usage-panel";
 
@@ -433,15 +432,9 @@ function ProviderGroupCard({
           storedModelIds={group.declaration.model_ids}
           storedModelsMeta={group.declaration.models_meta}
           catalogModelIds={modelsForProtocol(catalog, group.declaration.api)}
-          catalogLimits={
-            // The Worker only trusts the vendor table when the declaration's
-            // endpoint is one of the catalog row's own (a protocol's endpoint
-            // included); the dialog must not pre-fill numbers a save would
-            // then refuse.
-            catalogEndpointsMatch(catalogEndpoints(catalog), group.declaration.base_url)
-              ? (catalog?.model_limits ?? {})
-              : {}
-          }
+          // The same id-only rule the Worker applies: the sizes belong to the
+          // model, so the dialog pre-fills them whatever endpoint is declared.
+          catalogLimits={catalog?.model_limits ?? {}}
           limitsSnapshot={limitsSnapshot}
           onSettings={onSettings}
           onOutcome={onOutcome}

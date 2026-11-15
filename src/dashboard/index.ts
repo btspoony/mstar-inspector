@@ -3722,9 +3722,6 @@ const appSettingsRoute = async (c: DashboardContext) => {
             base_url: meta.baseUrl,
             api: meta.api,
             models: [...meta.models],
-            // The row's own endpoint: the SPA applies the same base-URL
-            // predicate the Worker does before it trusts `model_limits`.
-            catalog_base_url: meta.baseUrl,
             // The per-model sizes the vendor directory states, keyed by model
             // id. The model dialog pre-fills its blank fields from here and
             // posts no override for a value the operator leaves untouched.
@@ -3755,7 +3752,6 @@ const appSettingsRoute = async (c: DashboardContext) => {
             base_url: meta.baseUrl,
             api: meta.api,
             models: [...meta.models],
-            catalog_base_url: meta.baseUrl,
             model_limits: MODEL_LIMITS[id] ?? {},
             ...(meta.protocols === undefined
               ? {}
