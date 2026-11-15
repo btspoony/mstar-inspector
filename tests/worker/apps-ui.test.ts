@@ -823,6 +823,44 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     expect(target.review_level).toBe("quick");
   });
 
+  test("keys/verify is refused for a shared bot on both paths, before any probe or store write", async () => {
+    const db = await seededWorld();
+    shareBot(db, MALLORY_APP_ID);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      for (const provider of ["anthropic", "matrix-custom"]) {
+        const res = await postForm(
+          `/dashboard/default/api/apps/${MALLORY_APP_ID}/keys/verify`,
+          cookie,
+          makeEnv(db),
+          { provider, key: `test-matrix-${provider}` },
+        );
+        expect(res.status, provider).toBe(403);
+        const body = (await res.json()) as { key: unknown };
+        expect(body.key, provider).toBe("settings.error.botReadOnly");
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    // Neither pool gained a row: the refusal precedes the verify-then-store.
+    expect(
+      (db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).n,
+    ).toBe(0);
+  });
+
+  test("lifecycle actions on a shared bot are refused for its owning manager too", async () => {
+    const db = await seededWorld();
+    shareBot(db, MALLORY_APP_ID);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    for (const action of ["disable", "enable", "delete"]) {
+      const res = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/${action}`, cookie, makeEnv(db));
+      expect(res.status, action).toBe(403);
+    }
+    expect(appStatus(db, MALLORY_APP_ID)).toBe("active");
+  });
+
   test("no session → 302 to login", async () => {
     const db = await seededWorld();
     const res = await get(botFace("default", MALLORY_APP_ID), "", makeEnv(db));

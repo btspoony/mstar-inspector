@@ -3663,6 +3663,61 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
     );
   });
 
+  test("refuses a failure whose installation resolves to two different targets", () => {
+    const db = preLedgerTargetDb();
+    seedParents(db);
+    // A second bot in a second workspace, holding the SAME installation id and
+    // its own pull-request row at the same key, pointing at its own target.
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'ws-other', 'acme', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+            status, created_at, updated_at)
+         VALUES ('bot-b', 9102, 'bot-b', 'enc', 'enc', 'acme', 'active',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-b', 'ws-other')").run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES ('target-b', 'ws-other', 'bot-b', 'target-b', 'acme',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+         VALUES ('install-b', 'bot-b', 123, 'acme', datetime('now'))`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests
+           (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+         VALUES ('pr-b', 'bot-b', 'target-b', 'acme', 'widgets', 42, 'PR', 'open', 'sha',
+                 datetime('now'), datetime('now'))`,
+      )
+      .run();
+    seedPullRequest(db, "pr-a", 42);
+    seedFailure(db, "failure-42", 42);
+
+    // One row of several is NOT an attribution: the guard refuses before the
+    // UPDATE, so nothing is written and no workspace reads a borrowed row.
+    expect(() => applyLedgerTargetMigration(db)).toThrow(
+      "CHECK constraint failed: guard_failures_ambiguous_target",
+    );
+    expect(db.raw.query("SELECT id, target_id FROM review_failures").all()).toEqual([
+      { id: "failure-42", target_id: null },
+    ]);
+  });
+
   test("the tenant predicate is served by each ledger's own target index", () => {
     const db = createMigratedTestD1();
     for (const [index, table] of [

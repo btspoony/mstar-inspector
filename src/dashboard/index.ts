@@ -2712,6 +2712,10 @@ async function appStatusAction(
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
+  // A shared bot's lifecycle is platform-authorised like its scope: retiring or
+  // disabling it would reach every workspace using it, so the owning
+  // workspace's manager gets the same read-only refusal as its configuration.
+  if (app.scope === "shared") return botReadOnlyResponse(c);
   if (action === "delete") {
     await apps.softDeleteApp(app.id);
   } else {
@@ -4021,6 +4025,11 @@ function verifyKeyed400(
 const appKeyVerifyRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
+  // Verify is a bot-scoped WRITE on both of its paths: the builtin branch
+  // stores the verified key, and the declared/custom branch appends to that
+  // provider's pool. A shared bot takes the settings family's refusal before
+  // the body is parsed — no probe, no store touch.
+  if (gate.app.scope === "shared") return botReadOnlyResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const plainKey = typeof form.key === "string" ? form.key.trim() : "";

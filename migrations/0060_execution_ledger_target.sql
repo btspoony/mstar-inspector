@@ -12,10 +12,18 @@
 -- The backfill is EXACT and fails instead of skipping: a row left without a
 -- target would be invisible to every workspace face (the predicate is
 -- `target_id = ?`), silently dropping a finding or a failure an operator needs.
--- The two guards below are the CHECK-constrained tables the 0057 recipe uses —
--- a non-zero count fails the statement, aborting the migration:
+-- The guards below are the CHECK-constrained tables the 0057 recipe uses — a
+-- non-zero count fails the statement, aborting the migration:
 --   findings → `CHECK constraint failed: guard_findings_without_target`
 --   failures → `CHECK constraint failed: guard_failures_without_target`
+--   ambiguous failure candidates → `CHECK constraint failed: guard_failures_ambiguous_target`
+--
+-- The ambiguity guard runs BEFORE the failure UPDATE: the same installation id
+-- can be recorded under two bots, each with its own pull-request row at the
+-- same (owner, repo, pr_number) but pointing at different targets in different
+-- workspaces. The scalar subquery would then silently pick one row of several,
+-- and the row would vanish from the other workspace's face — the exact leak
+-- this file exists to close — while a NULL guard still passed.
 --
 -- `review_failures` carries no bot id of its own: it is resolved through
 -- `bot_installations` (installation → bot), then the pull-request row.
@@ -48,6 +56,26 @@ SET target_id = (
     AND p.repo = review_findings.repo
     AND p.pr_number = review_findings.pr_number
 );
+
+-- The candidate set must resolve to EXACTLY one distinct target. Two bots
+-- holding the same installation id, with a pull-request row each at the same
+-- key but different targets, is the case SQLite would answer with one row of
+-- several — refused here, before any attribution is written.
+CREATE TABLE guard_failures_ambiguous_target (
+  n INTEGER NOT NULL CONSTRAINT guard_failures_ambiguous_target CHECK (n = 0)
+);
+INSERT INTO guard_failures_ambiguous_target (n)
+SELECT COUNT(*) FROM review_failures f
+WHERE (
+  SELECT COUNT(DISTINCT p.target_id)
+  FROM bot_installations i
+  JOIN pull_requests p ON p.bot_id = i.bot_id
+  WHERE i.installation_id = f.installation_id
+    AND p.owner = f.owner
+    AND p.repo = f.repo
+    AND p.pr_number = f.pr_number
+) > 1;
+DROP TABLE guard_failures_ambiguous_target;
 
 -- A failure names the installation it ran under, not the bot: resolve
 -- installation → bot, then the same PR key.
