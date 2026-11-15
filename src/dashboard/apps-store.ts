@@ -632,6 +632,14 @@ export const APP_READ_SQL = {
   getAppById: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
   getAppForWebhook: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
   getAppByGithubId: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
+  /**
+   * The shared-set-aware resolve: the bot the session workspace owns, else a
+   * `shared` bot it may use, else nothing. Non-deleted bots only. The owning
+   * mapping wins the join when a bot carries both (the ORDER BY), so the
+   * returned `workspace_id` is the caller's own whenever it has one and the
+   * bot's owner otherwise.
+   */
+  getVisibleBotByGithubId: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR g.scope = 'shared') ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`,
   listApps: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
 
@@ -895,6 +903,22 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return db
         .prepare(APP_READ_SQL.getAppByGithubId)
         .bind(githubAppId)
+        .first<GithubAppTenantRow>();
+    },
+
+    /**
+     * By GitHub's numeric App id, resolved against the shared set: the bot's
+     * own (live) mapping OR — when the bot is `shared` — any workspace, so a
+     * tenant face can read a bot it does not own. `null` for a soft-deleted or
+     * `owned` bot outside the caller's workspace.
+     */
+    async getVisibleBotByGithubId(
+      githubAppId: number,
+      workspaceId: string,
+    ): Promise<GithubAppTenantRow | null> {
+      return db
+        .prepare(APP_READ_SQL.getVisibleBotByGithubId)
+        .bind(githubAppId, workspaceId)
         .first<GithubAppTenantRow>();
     },
 

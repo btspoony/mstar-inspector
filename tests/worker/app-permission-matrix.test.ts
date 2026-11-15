@@ -472,6 +472,49 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
   }
 });
 
+// --- Bot settings read face: GET /api/apps/:appId/bot ---
+// The page that carries the bot-owned sections renders for every member; the
+// payload's `can_manage` decides whether the SPA offers bot-scoped writes, and
+// the bot-scoped POST family refuses them for a shared bot anyway.
+describe("Bot settings read-face permission matrix", () => {
+  const FACE = `/dashboard/default/api/apps/${APP_ID}/bot`;
+
+  async function getFace(login: string, env: Env): Promise<Response> {
+    return worker.fetch(
+      new Request(`https://worker.local${FACE}`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}` },
+      }),
+      env,
+    );
+  }
+
+  test("workspace owner → 200, can_manage true", async () => {
+    const res = await getFace("octocat", makeEnv(await seededWorld()));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { can_manage: unknown };
+    expect(body.can_manage).toBe(true);
+  });
+
+  test("plain member → 200 with the same sections, can_manage false", async () => {
+    const res = await getFace("hubot", makeEnv(await seededWorld()));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { can_manage: unknown; keys: unknown; installations: unknown };
+    expect(body.can_manage).toBe(false);
+    expect(body.keys).toEqual([]);
+    expect(body.installations).toEqual([]);
+  });
+
+  test("unknown App id → 404", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/default/api/apps/9999/bot", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("hubot", null, SESSION_SECRET)}` },
+      }),
+      makeEnv(await seededWorld()),
+    );
+    expect(res.status).toBe(404);
+  });
+});
+
 // --- PR-ledger read faces: the list and one-PR detail (migration 0039) ---
 // Same canManageApp rule as every other App read: the workspace role decides,
 // and App authorship grants nothing. The detail address is the ledger's own

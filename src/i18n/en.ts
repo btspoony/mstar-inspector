@@ -143,6 +143,26 @@ export const en = {
     tabPullRequests: "Pull requests",
   },
   /**
+   * The bot settings page: the bot-owned configuration (credentials health,
+   * providers, chains, sandbox image, installations) that a target's workspace
+   * may use but not configure. The target-scoped labels stay under `settings.*`.
+   */
+  botSettings: {
+    /** The page's name in the document title (`common.pageTitle` slot). */
+    botPage: "Bot settings",
+    backToDetail: "Back to the target",
+    subtitle: "Configuration this bot owns — the workspace's review policy lives on the target.",
+    scopeOwned: "Owned",
+    scopeShared: "Shared",
+    /** Shown whenever `can_manage` is false — a shared bot, or a non-manager. */
+    readOnly: "This bot's configuration is read-only here. A shared bot is configured by its owning workspace only.",
+    health: "Credentials health",
+    healthCopy: "Deliveries GitHub sent to this bot's webhook, and the ones it refused.",
+    sandboxCopy: "The runtime harness every review of this bot runs under.",
+    providersNone: "No provider key or custom provider yet.",
+    chainsCopy: "The model chains this bot's reviews select their models from.",
+  },
+  /**
    * Per-App Pull requests tab: the ledger of every PR the App received.
    * The detail face is addressed by owner/repo/number (one App can see the
    * same number on several repos) and rides the URL as `pr=owner/repo/number`.

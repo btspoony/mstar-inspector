@@ -122,6 +122,22 @@ export const zhCN: Dictionary = {
     tabInsights: "洞察",
     tabPullRequests: "拉取请求",
   },
+  /** 机器人设置页：机器人自身拥有的配置（凭据健康、提供方、模型链、沙箱镜像、安装）。使用该机器人的工作区可读，但不能配置。 */
+  botSettings: {
+    /** 页面在文档标题中的名称（`common.pageTitle` 的 page 槽）。 */
+    botPage: "机器人设置",
+    backToDetail: "返回目标",
+    subtitle: "此机器人自身拥有的配置——工作区的评审策略保留在目标上。",
+    scopeOwned: "自有",
+    scopeShared: "共享",
+    /** `can_manage` 为 false 时显示（共享机器人，或非管理员）。 */
+    readOnly: "此机器人的配置在此只读。共享机器人只由其所属工作区配置。",
+    health: "凭据健康",
+    healthCopy: "GitHub 发到该机器人 webhook 的投递，以及被拒绝的投递。",
+    sandboxCopy: "该机器人的每次评审所用的运行时沙箱。",
+    providersNone: "还没有提供方密钥或自定义提供方。",
+    chainsCopy: "该机器人的评审用来选择模型的模型链。",
+  },
   /** Per-App 拉取请求标签页：App 收到的所有 PR 台账。详情以 owner/repo/number 寻址（同一 App 可能在多个仓库见到同一个编号），并以 `pr=owner/repo/number` 挂在 URL 上。 */
   pullRequests: {
     backToList: "返回列表",
