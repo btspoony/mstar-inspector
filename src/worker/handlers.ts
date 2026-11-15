@@ -21,6 +21,10 @@
  *   anyway (the D1 fallback covers duplicate commits). A D1 claim failure is
  *   NOT conservative: without the durable claim the at-most-once invariant is
  *   unprovable, so it propagates and GitHub retries.
+ * - A refused delivery (the target's plan does not include the shared bot)
+ *   takes none of the above: no KV pre-check, no comment claim, no send. Its
+ *   Check is still attached, settled `neutral`, and the refusal lands as one
+ *   terminal `entitlement` failure row — see `refuseDelivery`.
  * - Ordering invariant: the D1 comment claim is inserted BEFORE
  *   `REVIEW_QUEUE.send` (so a duplicate is refused before any work) and the
  *   KV key is claimed only AFTER it resolves (so a failed send leaves no KV
@@ -29,7 +33,14 @@
  */
 import type { D1Database, KVNamespace } from "@cloudflare/workers-types";
 import { idemCommentKey, idemKey, IDEMPOTENCY_SECONDS, IDEM_ENQUEUED, isEnqueuedClaim } from "../contracts/idem";
+import {
+  SHARED_BOT_ENTITLEMENT_SKIP_REASON,
+  SHARED_BOT_ENTITLEMENT_STAGE,
+} from "../contracts/failure-stages";
 import type { ReviewJobPayload } from "../contracts/review-job";
+import type { SharedBotRefusal } from "../dashboard/entitlement";
+import { CHECK_SUMMARIES, type CheckLifecycle } from "../pipeline/checks";
+import { createFailureStore } from "../store/failure-store";
 import type { Env } from "./env";
 
 /** Seven-field structured event log (along M0 gateway semantics). */
@@ -83,6 +94,14 @@ export type HandlerDeps = {
    * outcome.
    */
   beforeEnqueue?: (payload: ReviewJobPayload) => Promise<ReviewJobPayload | void>;
+  /**
+   * §7.9 skip settlement, supplied by the route and used ONLY when the route
+   * refuses the delivery (below): the Check attached at acceptance is settled
+   * `neutral` with the refusal reason. Production supplies the store-only
+   * lifecycle (`getAdapter: () => null`), so a refusal does no credential work
+   * and the minute reconciler performs the single remote update.
+   */
+  settleSkipped?: CheckLifecycle["settleSkipped"];
 };
 
 export type HandleOutcome =
@@ -157,6 +176,100 @@ export async function claimIdempotency(
 }
 
 /**
+ * Run the delivery's pre-enqueue step (the Check attach) and hand back what it
+ * returned. A throw is one warn and changes nothing: the hook never decides an
+ * outcome, so both callers continue with the payload they already had.
+ */
+async function runBeforeEnqueue(
+  payload: ReviewJobPayload,
+  deps: HandlerDeps,
+  fields: WorkerEventLog,
+  onFailure: string,
+): Promise<ReviewJobPayload> {
+  if (deps.beforeEnqueue === undefined) return payload;
+  try {
+    return (await deps.beforeEnqueue(payload)) ?? payload;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `${onFailure}: ${detail}`);
+    return payload;
+  }
+}
+
+/**
+ * The refused-delivery tail, in the order the product fixes. The route has
+ * already decided the capability (one call, on the reference surface), so
+ * nothing here re-derives it:
+ *
+ * 1. NO KV pre-check and NO `comment_trigger_claims` insert — no claim row
+ *    means the cron sweep has no outbox record to re-send.
+ * 2. The Check is still attached, exactly as an admitted delivery's would be.
+ * 3. That row is settled `neutral` through `settleSkipped` carrying THIS
+ *    delivery's attach identity, so the refusal is never a verdict on the
+ *    commit. A bot-mention delivery attached nothing (no head SHA) and settles
+ *    nothing.
+ * 4. One terminal `entitlement` failure row explains the delivery on the
+ *    operator face; its `error` is the same sentence the Check carries.
+ * 5. `skipped` — no queue send, no claim, no runner, no spend.
+ */
+async function refuseDelivery(
+  payload: ReviewJobPayload,
+  deps: HandlerDeps,
+  fields: WorkerEventLog,
+): Promise<HandleOutcome> {
+  const outgoing = await runBeforeEnqueue(
+    payload,
+    deps,
+    fields,
+    "pre-enqueue hook failed — the refusal still holds",
+  );
+
+  if (deps.settleSkipped !== undefined && payload.head_sha !== null) {
+    try {
+      await deps.settleSkipped({
+        scope: {
+          appId: payload.botRef.appId,
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        },
+        headSha: payload.head_sha,
+        triggeredBy: payload.triggered_by,
+        action: payload.action,
+        attachDeliveryId: outgoing.attachDeliveryId,
+        reason: SHARED_BOT_ENTITLEMENT_SKIP_REASON,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `check skip settlement failed (the row is left to the recovery lane): ${detail}`);
+    }
+  }
+
+  // Best-effort like every other bookkeeping write on the delivery path: the
+  // refusal is already decided and the answer must stay 2xx.
+  try {
+    await createFailureStore(deps.env.DB).record({
+      target_id: payload.targetId,
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      // A refusal can predate any sha (`ReviewFailureInput`'s "" convention).
+      head_sha: payload.head_sha ?? "",
+      stage: SHARED_BOT_ENTITLEMENT_STAGE,
+      error: CHECK_SUMMARIES.skippedByDelivery(SHARED_BOT_ENTITLEMENT_SKIP_REASON),
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `entitlement refusal not recorded — delivery still skipped: ${detail}`);
+  }
+
+  deps.log.info(fields, "shared bot not included in the target's plan — skipping enqueue");
+  return { kind: "skipped", reason: SHARED_BOT_ENTITLEMENT_SKIP_REASON };
+}
+
+/**
  * Handle a classified review job: log the seven-field structured event, run
  * the idempotency pre-check (by commit sha, else by comment id), take the
  * durable claim, enqueue, then write the KV key.
@@ -165,12 +278,18 @@ export async function claimIdempotency(
  * The row — not the KV key — is the "at most one review per comment id" proof
  * under concurrent deliveries, and its stored payload is the outbox record the
  * cron sweep re-sends if this isolate dies between the claim and the send.
+ *
+ * `refusal` is the route's shared-bot verdict: non-null skips the whole
+ * idempotency surface and takes the {@link refuseDelivery} tail above.
  */
 export async function handleReviewJob(
   payload: ReviewJobPayload,
   deps: HandlerDeps,
+  refusal: SharedBotRefusal | null = null,
 ): Promise<HandleOutcome> {
   const fields = toEventLog(payload);
+
+  if (refusal !== null) return refuseDelivery(payload, deps, fields);
 
   // A commit job claims its sha; a bot-mention job (no sha) claims its comment
   // id — KV as a 24h fast path, D1 as the durable claim below.
@@ -237,17 +356,13 @@ export async function handleReviewJob(
 
   // Pre-enqueue step (the Check attach): it runs BEFORE the send so an
   // admitted message finds the row it will adopt instead of racing its
-  // creator. It never changes the outcome — a throw is one warn and the
-  // enqueue proceeds.
-  let outgoing = payload;
-  if (deps.beforeEnqueue !== undefined) {
-    try {
-      outgoing = (await deps.beforeEnqueue(payload)) ?? payload;
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `pre-enqueue hook failed — enqueueing anyway: ${detail}`);
-    }
-  }
+  // creator. It never changes the outcome.
+  const outgoing = await runBeforeEnqueue(
+    payload,
+    deps,
+    fields,
+    "pre-enqueue hook failed — enqueueing anyway",
+  );
 
   try {
     await deps.env.REVIEW_QUEUE.send(outgoing);

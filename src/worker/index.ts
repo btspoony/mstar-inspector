@@ -22,7 +22,7 @@
  */
 import { Hono } from "hono";
 import type { D1Database, ExecutionContext, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
-import type { Env, ScheduledEnv } from "./env";
+import { deploymentModeOf, type Env, type ScheduledEnv } from "./env";
 import { defaultSweepLog, runSweep } from "./sweep";
 import { reconcileReviewLifecycle } from "./lifecycle-reconcile";
 import { reconcileReviewChecks } from "./check-reconcile";
@@ -47,7 +47,8 @@ import {
   type GithubAppTenantRow,
 } from "../dashboard/apps-store";
 import { createTargetsStore, type OwnerAllowlist, type ReviewTargetRow } from "../dashboard/targets-store";
-import { attachCheckAtAcceptance } from "../pipeline/checks";
+import { assertSharedBotAllowed } from "../dashboard/entitlement";
+import { attachCheckAtAcceptance, createCheckLifecycle } from "../pipeline/checks";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
@@ -88,16 +89,23 @@ app.use("*", spaDispatch());
  * off makes a `job` read `paused`: `ok` means "job enqueued", so recording it
  * for a delivery the global flag blocked would overstate the platform exactly
  * as the per-App pause would.
+ *
+ * `sharedBotRefused` is the third gate: a job both switches admitted and the
+ * shared-bot capability then refused reads `skipped`. `ok` would claim a job
+ * was enqueued, and `paused` would tell an operator a switch is off while it
+ * is on.
  */
 export function deliveryOutcomeFromWebhook(
   outcome: { kind: WebhookOutcome["kind"] },
   reviewEnabled: number,
   reviewGlobal: boolean,
+  sharedBotRefused = false,
 ): DeliveryOutcome {
   if (outcome.kind === "reject") return "rejected";
   if (outcome.kind === "ignore") return "ignored";
   if (outcome.kind === "installation" || outcome.kind === "installation_removed") return "ignored";
-  return reviewEnabled === 0 || !reviewGlobal ? "paused" : "ok";
+  if (reviewEnabled === 0 || !reviewGlobal) return "paused";
+  return sharedBotRefused ? "skipped" : "ok";
 }
 
 /**
@@ -689,11 +697,22 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       );
     }
   }
+  // The shared-bot capability is decided ONCE, here, and only for a job both
+  // switches admitted — the only delivery that could have enqueued. It reads
+  // the TARGET's workspace (the consumer), never the bot's, and it is the very
+  // function the target-creation route calls, so neither surface re-derives
+  // the rule. The refusal feeds the delivery row below and the enqueue call
+  // at the end of this route; a store fault propagates as a 500, exactly like
+  // the allowlist read (an unapplied gate never admits a delivery).
+  const refusal =
+    outcome.kind === "job" && target !== null && !paused && reviewGlobal
+      ? await assertSharedBotAllowed(db, target.workspace_id, deploymentModeOf(c.env.DEPLOYMENT_MODE))
+      : null;
   try {
     await appsStore.recordDelivery({
       appId: row.id,
       eventName,
-      outcome: deliveryOutcomeFromWebhook(outcome, paused ? 0 : 1, reviewGlobal),
+      outcome: deliveryOutcomeFromWebhook(outcome, paused ? 0 : 1, reviewGlobal, refusal !== null),
       statusCode: outcome.kind === "reject" ? outcome.status : null,
       // The diagnostics face's "which repo did this come from?" answer, read
       // off the classifier's own single parse of the body — null when the
@@ -884,7 +903,17 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       await withinBudget(attach, CHECK_ATTACH_INLINE_BUDGET_MS);
       return { ...payload, attachDeliveryId };
     },
-  });
+    // A refused delivery settles the row it just attached (§7.9) — store-only,
+    // because a `null` adapter freezes the neutral intent and the minute
+    // reconciler performs the single remote update. That is what keeps a
+    // refusal free of credential work while its Check still closes honestly.
+    settleSkipped: createCheckLifecycle({
+      db,
+      nowMs: () => Date.now(),
+      getAdapter: () => null,
+      getCheckGate: async () => null,
+    }).settleSkipped,
+  }, refusal);
   return c.text("accepted", 200);
 });
 

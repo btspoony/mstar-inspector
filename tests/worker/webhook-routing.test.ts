@@ -160,6 +160,9 @@ function makeEnv(db: TestD1, overrides: Partial<RouteEnv> = {}): RouteEnv {
     REVIEW_QUEUE: queue as never,
     DB: db as never,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
+    // Self-hosted: the shared-bot capability is unconditional in this mode,
+    // so these routing cases carry no plan fixture of their own.
+    DEPLOYMENT_MODE: "self-hosted",
     ...overrides,
   };
 }

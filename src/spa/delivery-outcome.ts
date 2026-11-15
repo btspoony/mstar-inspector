@@ -3,7 +3,8 @@
  * vocabulary is DELIVERY_OUTCOMES in src/dashboard/apps-store.ts (enforced
  * there before any row is written): `ok` = job enqueued, `paused` = the
  * App's review switch is off (2xx ignore), `ignored` = verified but not a
- * reviewable event, `rejected` = the classifier refused the delivery. Both
+ * reviewable event, `rejected` = the classifier refused the delivery,
+ * `skipped` = the shared-bot capability refused it (2xx, zero enqueue). Both
  * health surfaces (AppsPage latest-delivery cell, SettingsPage recent
  * deliveries) label the outcome through this one map; an off-vocabulary
  * value falls back to the raw string — fail-visible, never blank.
@@ -15,6 +16,7 @@ const OUTCOME_KEYS = {
   paused: "apps.health.outcome.paused",
   ignored: "apps.health.outcome.ignored",
   rejected: "apps.health.outcome.rejected",
+  skipped: "apps.health.outcome.skipped",
 } as const;
 
 type OutcomeKey = (typeof OUTCOME_KEYS)[keyof typeof OUTCOME_KEYS];

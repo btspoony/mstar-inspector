@@ -53,6 +53,9 @@ function makeEnv(db: unknown): Env {
     REVIEW_QUEUE: { send: mock(async () => {}) } as never,
     DB: db as never,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
+    // Self-hosted: the shared-bot capability is unconditional in this mode, so
+    // these ledger cases carry no plan fixture of their own.
+    DEPLOYMENT_MODE: "self-hosted",
   };
 }
 
