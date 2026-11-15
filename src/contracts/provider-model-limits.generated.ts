@@ -9,12 +9,12 @@
  * generated provider catalog lists are carried here — the table exists to fill
  * an operator's blank size fields, not to mirror the whole directory.
  *
- * Coverage: 232 of 250 catalog providers, 8557 model entries. The omitted
- * 18 providers carry no models.dev model row at all (their
+ * Coverage: 236 of 244 catalog providers, 8823 model entries. The omitted
+ * 8 providers carry no models.dev model row at all (their
  * vocabulary comes from the vendored omp provider snapshot, or the row is
  * local-only metadata), so the table states no number for them instead of
  * inventing one:
- *   cursor, qwen-portal, firepass, commandcode, commandcode-anthropic, commandcode-responses, commandcode-typesafe, helmcode, deepinfra, qianfan, coreweave, zenmux, zenmux-anthropic, opencode-go, opencode-go-anthropic, opencode-go-responses, yolo-auto, typesafe
+ *   cursor, qwen-portal, firepass, helmcode, qianfan, coreweave, yolo-auto, typesafe
  *
  * Static data, zero imports, zero network: the Worker, the dashboard and the
  * sandbox image only ever import this module.
@@ -34718,6 +34718,1078 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "openai/gpt-5.5": {
       "contextWindow": 1050000,
       "maxTokens": 128000
+    }
+  },
+  "commandcode": {
+    "MiniMaxAI/MiniMax-M2.5": {
+      "contextWindow": 200000,
+      "maxTokens": 131072
+    },
+    "MiniMaxAI/MiniMax-M2.7": {
+      "contextWindow": 200000,
+      "maxTokens": 131072
+    },
+    "Qwen/Qwen3.8-27B": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    "Qwen/Qwen3.8-Flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "Qwen/Qwen3.8-Max": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "Qwen/Qwen3.8-Max-0902": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "Qwen/Qwen3.8-Omni-Flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "deepseek/deepseek-v4-flash-fast": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "google/gemini-3.7-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "google/gemini-4-argon": {
+      "contextWindow": 1000000,
+      "maxTokens": 65536
+    },
+    "gpt-6.1-sol": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "meta/muse-wonder-1.0": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "mistral/mistral-large-4": {
+      "contextWindow": 524288,
+      "maxTokens": 262144
+    },
+    "moonshotai/Kimi-K2.7-Code": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
+    "moonshotai/Kimi-K2.7-Code-Highspeed": {
+      "contextWindow": 262000,
+      "maxTokens": 262000
+    },
+    "nvidia/nemotron-3-ultra-550b-a55b": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "stepfun/Step-3.5-Flash": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
+    "stepfun/Step-3.7-Flash": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
+    "tencent/hy3-paid": {
+      "contextWindow": 256000,
+      "maxTokens": 128000
+    },
+    "tencent/hy4-preview": {
+      "contextWindow": 1024000,
+      "maxTokens": 64000
+    },
+    "thinkingmachines/inkling": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
+    "thinkingmachines/inkling-small": {
+      "contextWindow": 1000000,
+      "maxTokens": 1000000
+    },
+    "z-ai/glm-5.3-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "zai-org/GLM-5.2-Fast": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "claude-fable-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-fable-5-1": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-haiku-4-5-20251001": {
+      "contextWindow": 200000,
+      "maxTokens": 64000
+    },
+    "claude-haiku-5-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-opus-4-7": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-opus-4-8": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-opus-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-opus-5-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-sonnet-4-6": {
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
+    "claude-sonnet-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-sonnet-5-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "MiniMaxAI/MiniMax-M3": {
+      "contextWindow": 1000000,
+      "maxTokens": 512000
+    },
+    "deepseek/deepseek-v4-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "deepseek/deepseek-v4-flash-vision-exp": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "deepseek/deepseek-v4-pro": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "deepseek/deepseek-v4.1-flash-fast": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "google/gemini-3.1-flash-lite": {
+      "contextWindow": 1000000,
+      "maxTokens": 65536
+    },
+    "google/gemini-3.5-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 65536
+    },
+    "google/gemini-3.5-flash-lite": {
+      "contextWindow": 1000000,
+      "maxTokens": 65536
+    },
+    "google/gemini-3.6-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 65536
+    },
+    "google/gemini-3.8-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 65536
+    },
+    "gpt-5.3-codex": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5.4": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5.4-mini": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5.5": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "gpt-5.6-luna": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-5.6-sol": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-5.6-terra": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6-astra": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6-luna": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6-sol": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "meta/muse-spark-1.1": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "meta/muse-spark-1.2": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "meta/muse-spark-1.2-contributor": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "meta/muse-spark-1.3": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "meta/muse-spark-1.3-contributor": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "moonshotai/Kimi-K3": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "sakana/fugu-ultra": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "stepfun/Step-5-Preview": {
+      "contextWindow": 1000000,
+      "maxTokens": 1000000
+    },
+    "xai/grok-4.5": {
+      "contextWindow": 500000,
+      "maxTokens": 500000
+    },
+    "xai/grok-4.6": {
+      "contextWindow": 500000,
+      "maxTokens": 500000
+    },
+    "xai/grok-4.7": {
+      "contextWindow": 500000,
+      "maxTokens": 500000
+    },
+    "z-ai/glm-5.3-flashx": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "zai-org/GLM-5.2": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "zai-org/GLM-5.3": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    }
+  },
+  "deepinfra": {
+    "ByteDance/Seed-2.0-code": {
+      "contextWindow": 256000,
+      "maxTokens": 131072
+    },
+    "ByteDance/Seed-2.0-mini": {
+      "contextWindow": 256000,
+      "maxTokens": 32000
+    },
+    "ByteDance/Seed-2.0-pro": {
+      "contextWindow": 256000,
+      "maxTokens": 128000
+    },
+    "MiniMaxAI/MiniMax-M3": {
+      "contextWindow": 524288,
+      "maxTokens": 512000
+    },
+    "Qwen/Qwen3-235B-A22B-Instruct-2507": {
+      "contextWindow": 262144,
+      "maxTokens": 16384
+    },
+    "Qwen/Qwen3-30B-A3B": {
+      "contextWindow": 40960,
+      "maxTokens": 16384
+    },
+    "Qwen/Qwen3-32B": {
+      "contextWindow": 40960,
+      "maxTokens": 16384
+    },
+    "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo": {
+      "contextWindow": 262144,
+      "maxTokens": 66536
+    },
+    "Qwen/Qwen3-Next-80B-A3B-Instruct": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    "Qwen/Qwen3-VL-235B-A22B-Instruct": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    "Qwen/Qwen3.5-27B": {
+      "contextWindow": 262144,
+      "maxTokens": 65536
+    },
+    "Qwen/Qwen3.5-35B-A3B": {
+      "contextWindow": 262144,
+      "maxTokens": 81920
+    },
+    "Qwen/Qwen3.5-397B-A17B": {
+      "contextWindow": 262144,
+      "maxTokens": 81920
+    },
+    "Qwen/Qwen3.5-9B": {
+      "contextWindow": 262144,
+      "maxTokens": 65536
+    },
+    "Qwen/Qwen3.6-27B": {
+      "contextWindow": 262144,
+      "maxTokens": 65536
+    },
+    "Qwen/Qwen3.6-35B-A3B": {
+      "contextWindow": 262144,
+      "maxTokens": 81920
+    },
+    "Qwen/Qwen3.7-Max": {
+      "contextWindow": 256000,
+      "maxTokens": 131072
+    },
+    "Qwen/Qwen3.8-27B": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    "Qwen/Qwen3.8-Flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "Qwen/Qwen3.8-Max": {
+      "contextWindow": 256000,
+      "maxTokens": 131072
+    },
+    "XiaomiMiMo/MiMo-V2.6-Flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "XiaomiMiMo/MiMo-V2.6-Pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "anthropic/claude-fable-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "deepseek-ai/DeepSeek-R1-0528": {
+      "contextWindow": 163840,
+      "maxTokens": 64000
+    },
+    "deepseek-ai/DeepSeek-V3": {
+      "contextWindow": 163840,
+      "maxTokens": 8192
+    },
+    "deepseek-ai/DeepSeek-V3.1": {
+      "contextWindow": 163840,
+      "maxTokens": 8192
+    },
+    "deepseek-ai/DeepSeek-V3.2": {
+      "contextWindow": 163840,
+      "maxTokens": 64000
+    },
+    "deepseek-ai/DeepSeek-V4-Flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 16384
+    },
+    "deepseek-ai/DeepSeek-V4-Flash-0731": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "deepseek-ai/DeepSeek-V4-Pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 16384
+    },
+    "deepseek-ai/DeepSeek-V4-Pro-0813": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "deepseek-ai/DeepSeek-V4.1-Flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
+    "google/gemma-3-12b-it": {
+      "contextWindow": 131072,
+      "maxTokens": 131072
+    },
+    "google/gemma-3-27b-it": {
+      "contextWindow": 131072,
+      "maxTokens": 131072
+    },
+    "google/gemma-3-4b-it": {
+      "contextWindow": 131072,
+      "maxTokens": 131072
+    },
+    "google/gemma-4-26B-A4B-it": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    "google/gemma-4-31B-it": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    "meta-llama/Llama-3.3-70B-Instruct-Turbo": {
+      "contextWindow": 131072,
+      "maxTokens": 16384
+    },
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
+      "contextWindow": 327680,
+      "maxTokens": 16384
+    },
+    "meta-llama/Llama-Guard-4-12B": {
+      "contextWindow": 163840,
+      "maxTokens": 163840
+    },
+    "mistralai/Mistral-Small-24B-Instruct-2501": {
+      "contextWindow": 32768,
+      "maxTokens": 16384
+    },
+    "moonshotai/Kimi-K2.6": {
+      "contextWindow": 262144,
+      "maxTokens": 16384
+    },
+    "moonshotai/Kimi-K3": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "openai/gpt-oss-120b": {
+      "contextWindow": 131072,
+      "maxTokens": 16384
+    },
+    "openai/gpt-oss-20b": {
+      "contextWindow": 131072,
+      "maxTokens": 16384
+    },
+    "stepfun-ai/Step-5-Preview": {
+      "contextWindow": 1048576,
+      "maxTokens": 1000000
+    },
+    "tencent/Hy4-preview": {
+      "contextWindow": 1048576,
+      "maxTokens": 64000
+    },
+    "thinkingmachines/Inkling-Small": {
+      "contextWindow": 524288,
+      "maxTokens": 1048576
+    },
+    "zai-org/GLM-4.6": {
+      "contextWindow": 202752,
+      "maxTokens": 131072
+    },
+    "zai-org/GLM-4.7": {
+      "contextWindow": 202752,
+      "maxTokens": 16384
+    },
+    "zai-org/GLM-5.2": {
+      "contextWindow": 1048576,
+      "maxTokens": 32768
+    },
+    "zai-org/GLM-5.3": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "zai-org/GLM-5.3-Flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    }
+  },
+  "zenmux": {
+    "baidu/ernie-5.0-thinking-preview": {
+      "contextWindow": 128000,
+      "maxTokens": 64000
+    },
+    "bytedance/doubao-seed-1.8": {
+      "contextWindow": 256000,
+      "maxTokens": 32000
+    },
+    "bytedance/doubao-seed-2.0-code": {
+      "contextWindow": 256000,
+      "maxTokens": 32000
+    },
+    "bytedance/doubao-seed-2.0-lite": {
+      "contextWindow": 256000,
+      "maxTokens": 32000
+    },
+    "bytedance/doubao-seed-2.0-mini": {
+      "contextWindow": 256000,
+      "maxTokens": 32000
+    },
+    "bytedance/doubao-seed-2.0-pro": {
+      "contextWindow": 256000,
+      "maxTokens": 32000
+    },
+    "bytedance/doubao-seed-code": {
+      "contextWindow": 256000,
+      "maxTokens": 32000
+    },
+    "deepseek/deepseek-v3.2": {
+      "contextWindow": 128000,
+      "maxTokens": 8000
+    },
+    "deepseek/deepseek-v3.2-exp": {
+      "contextWindow": 163000,
+      "maxTokens": 64000
+    },
+    "deepseek/deepseek-v4-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "deepseek/deepseek-v4-pro": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "google/gemini-2.5-flash": {
+      "contextWindow": 1048000,
+      "maxTokens": 65535
+    },
+    "google/gemini-2.5-flash-lite": {
+      "contextWindow": 1048000,
+      "maxTokens": 65535
+    },
+    "google/gemini-2.5-pro": {
+      "contextWindow": 1048000,
+      "maxTokens": 65535
+    },
+    "google/gemini-3-flash-preview": {
+      "contextWindow": 1048000,
+      "maxTokens": 65535
+    },
+    "google/gemini-3.1-flash-lite": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "google/gemini-3.1-pro-preview": {
+      "contextWindow": 1048000,
+      "maxTokens": 65535
+    },
+    "google/gemini-3.5-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "inclusionai/ring-2.6-1t": {
+      "contextWindow": 262000,
+      "maxTokens": 65000
+    },
+    "minimax/minimax-m2": {
+      "contextWindow": 204000,
+      "maxTokens": 128000
+    },
+    "minimax/minimax-m2.1": {
+      "contextWindow": 204000,
+      "maxTokens": 131072
+    },
+    "minimax/minimax-m2.5": {
+      "contextWindow": 204800,
+      "maxTokens": 131072
+    },
+    "minimax/minimax-m2.5-lightning": {
+      "contextWindow": 204800,
+      "maxTokens": 131072
+    },
+    "minimax/minimax-m2.7": {
+      "contextWindow": 204800,
+      "maxTokens": 131070
+    },
+    "minimax/minimax-m2.7-highspeed": {
+      "contextWindow": 204800,
+      "maxTokens": 131070
+    },
+    "minimax/minimax-m3": {
+      "contextWindow": 1000000,
+      "maxTokens": 512000
+    },
+    "minimax/minimax-m3.1-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 512000
+    },
+    "moonshotai/kimi-k2.6": {
+      "contextWindow": 262140,
+      "maxTokens": 262140
+    },
+    "moonshotai/kimi-k2.7-code": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "moonshotai/kimi-k2.7-code-highspeed": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "moonshotai/kimi-k3": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "openai/chat-latest": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5-codex": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.1": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.1-codex": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.1-codex-mini": {
+      "contextWindow": 400000,
+      "maxTokens": 100000
+    },
+    "openai/gpt-5.2": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.2-codex": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.2-pro": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.3-codex": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.4": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.4-mini": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.4-nano": {
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.4-pro": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.5": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.5-pro": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.6-luna": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.6-sol": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5.6-terra": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-6-astra": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-6-sol": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "qwen/qwen3-coder-plus": {
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
+    "qwen/qwen3-max": {
+      "contextWindow": 256000,
+      "maxTokens": 64000
+    },
+    "qwen/qwen3.5-flash": {
+      "contextWindow": 1020000,
+      "maxTokens": 1020000
+    },
+    "qwen/qwen3.5-plus": {
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
+    "qwen/qwen3.6-plus": {
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
+    "qwen/qwen3.7-max": {
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
+    "qwen/qwen3.7-plus": {
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
+    "stepfun/step-3.5-flash": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
+    "stepfun/step-3.7-flash": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
+    "volcengine/doubao-seed-1.8": {
+      "contextWindow": 256000,
+      "maxTokens": 64000
+    },
+    "volcengine/doubao-seed-2.0-code": {
+      "contextWindow": 256000,
+      "maxTokens": 32000
+    },
+    "volcengine/doubao-seed-2.0-lite": {
+      "contextWindow": 256000,
+      "maxTokens": 64000
+    },
+    "volcengine/doubao-seed-2.0-mini": {
+      "contextWindow": 256000,
+      "maxTokens": 64000
+    },
+    "volcengine/doubao-seed-2.0-pro": {
+      "contextWindow": 256000,
+      "maxTokens": 64000
+    },
+    "volcengine/doubao-seed-code": {
+      "contextWindow": 256000,
+      "maxTokens": 64000
+    },
+    "x-ai/grok-4.2-fast": {
+      "contextWindow": 2000000,
+      "maxTokens": 30000
+    },
+    "x-ai/grok-4.2-fast-non-reasoning": {
+      "contextWindow": 2000000,
+      "maxTokens": 30000
+    },
+    "x-ai/grok-4.3": {
+      "contextWindow": 1000000,
+      "maxTokens": 1000000
+    },
+    "x-ai/grok-4.5": {
+      "contextWindow": 500000,
+      "maxTokens": 500000
+    },
+    "x-ai/grok-4.6": {
+      "contextWindow": 500000,
+      "maxTokens": 500000
+    },
+    "x-ai/grok-build-0.1": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
+    "x-ai/grok-voice-stt-1.0": {
+      "contextWindow": 15000,
+      "maxTokens": 15000
+    },
+    "x-ai/grok-voice-tts-1.0": {
+      "contextWindow": 15000,
+      "maxTokens": 15000
+    },
+    "xiaomi/mimo-v2.5": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "xiaomi/mimo-v2.5-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "xiaomi/mimo-v2.6-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "z-ai/glm-4.5": {
+      "contextWindow": 128000,
+      "maxTokens": 96000
+    },
+    "z-ai/glm-4.5-air": {
+      "contextWindow": 128000,
+      "maxTokens": 96000
+    },
+    "z-ai/glm-4.6": {
+      "contextWindow": 200000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-4.6v": {
+      "contextWindow": 200000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-4.6v-flash": {
+      "contextWindow": 200000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-4.6v-flash-free": {
+      "contextWindow": 200000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-4.7": {
+      "contextWindow": 200000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-4.7-flash-free": {
+      "contextWindow": 200000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-4.7-flashx": {
+      "contextWindow": 200000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-5": {
+      "contextWindow": 200000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-5-turbo": {
+      "contextWindow": 200000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-5.1": {
+      "contextWindow": 200000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-5.2": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-5.3": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-5.3-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-5.3-flashx": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "z-ai/glm-5v-turbo": {
+      "contextWindow": 200000,
+      "maxTokens": 128000
+    },
+    "anthropic/claude-fable-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "anthropic/claude-fable-5.1": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "anthropic/claude-haiku-4.5": {
+      "contextWindow": 200000,
+      "maxTokens": 64000
+    },
+    "anthropic/claude-opus-4.1": {
+      "contextWindow": 200000,
+      "maxTokens": 32000
+    },
+    "anthropic/claude-opus-4.5": {
+      "contextWindow": 200000,
+      "maxTokens": 32000
+    },
+    "anthropic/claude-opus-4.6": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "anthropic/claude-opus-4.7": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "anthropic/claude-opus-4.8": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "anthropic/claude-opus-5.5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "anthropic/claude-sonnet-4.5": {
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
+    "anthropic/claude-sonnet-4.6": {
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
+    "anthropic/claude-sonnet-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    }
+  },
+  "opencode-go": {
+    "beam-free": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "cat-jam-free": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "deepseek-v4-pro": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "deepseek-v4.1-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 384000
+    },
+    "glm-5.2": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "glm-5.3": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "glm-5.3-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "hy3": {
+      "contextWindow": 256000,
+      "maxTokens": 128000
+    },
+    "hy4-preview": {
+      "contextWindow": 1024000,
+      "maxTokens": 64000
+    },
+    "kimi-k2.7-code": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "kimi-k3": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "longcat-2.0": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "longcat-2.5-preview-free": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "mimo-v2.5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "mimo-v2.5-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 128000
+    },
+    "mimo-v2.6-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "mimo-v2.6-pro": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "minimax-m2.7": {
+      "contextWindow": 204800,
+      "maxTokens": 131072
+    },
+    "minimax-m3": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "minimax-m3.1-flash-free": {
+      "contextWindow": 1000000,
+      "maxTokens": 512000
+    },
+    "space-bunny": {
+      "contextWindow": 1048576,
+      "maxTokens": 524288
+    },
+    "step-5-preview": {
+      "contextWindow": 1000000,
+      "maxTokens": 65536
+    },
+    "step-5-preview-free": {
+      "contextWindow": 1000000,
+      "maxTokens": 65536
+    },
+    "claude-haiku-5-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "qwen3.7-plus": {
+      "contextWindow": 1000000,
+      "maxTokens": 65536
+    },
+    "qwen3.8-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "qwen3.8-max": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "gpt-5.6-luna": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "gpt-6-luna": {
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "grok-4.7": {
+      "contextWindow": 500000,
+      "maxTokens": 500000
+    },
+    "muse-spark-1.2-contributor": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
+    },
+    "muse-spark-1.3-contributor": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
     }
   }
 });

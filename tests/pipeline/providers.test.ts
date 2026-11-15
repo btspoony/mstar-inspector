@@ -21,7 +21,11 @@ import {
   TEMPLATE_PROVIDERS,
   providerEnvName,
 } from "../../src/pipeline/provider-catalog";
-import { PROVIDER_IDS_BUILTIN, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
+import {
+  LEGACY_PROVIDER_IDS,
+  PROVIDER_IDS_BUILTIN,
+  PROVIDER_IDS_COMMON,
+} from "../../src/contracts/provider-catalog.generated";
 import { MODEL_LIMITS, MODEL_LIMITS_SNAPSHOT } from "../../src/contracts/provider-model-limits.generated";
 import { CUSTOM_PROVIDER_API_IDS, CUSTOM_PROVIDER_ID_PATTERN } from "../../src/dashboard/app-config-store";
 import { PROVIDER_VERIFY_ENDPOINTS } from "../../src/dashboard/provider-verify";
@@ -51,6 +55,10 @@ const OMP_SNAPSHOT = JSON.parse(
     notMaterializable: Record<string, string>;
   };
 };
+
+/** The union's row ids: one per provider group (records group by
+ *  `sourceProviderId ?? id`). Order follows the vendored file. */
+const OMP_ROW_IDS = [...new Set(OMP_SNAPSHOT.providers.map((record) => record.sourceProviderId ?? record.id))];
 
 /** The pinned models.dev snapshot the generator reads (the provenance pin).
  *  The date is derived, never restated: exactly one snapshot lives beside the
@@ -110,12 +118,12 @@ describe("provider catalog tiers (spec §5; breadth)", () => {
     // union row (all new, by construction) plus everything that was already
     // template-tier before the union.
     expect(builtin).toHaveLength(19);
-    const unionIds = OMP_SNAPSHOT.providers.map((record) => record.id);
+    const unionIds = OMP_ROW_IDS;
     for (const id of unionIds) {
       expect(template.map(([entryId]) => entryId), id).toContain(id);
       expect(PROVIDER_CATALOG[id]!.tier, id).toBe("template");
     }
-    // workers-ai + the committed breadth rows + the union rows.
+    // workers-ai + the committed breadth rows + one row per union provider.
     expect(template).toHaveLength(1 + BREADTH_KEYS.length + unionIds.length);
     expect(Object.keys(PROVIDER_CATALOG)).toHaveLength(19 + template.length);
     expect(Object.keys(PROVIDERS)).toEqual(builtin.map(([id]) => id));
@@ -219,7 +227,13 @@ describe("PROVIDER_IDS_COMMON display tier (AD-547)", () => {
     expect(PROVIDER_IDS_BUILTIN).toHaveLength(19);
     expect(PROVIDER_ENV_NAMES).toHaveLength(19);
     for (const [id, entry] of Object.entries(PROVIDER_CATALOG)) {
-      expect(Object.keys(entry).sort(), id).toEqual(["api", "baseUrl", "doc", "envName", "label", "models", "tier"]);
+      // `protocols` is the ONLY addition to the seven-key entry shape, and only
+      // where the provider ships more than one protocol.
+      const expected =
+        entry.protocols === undefined
+          ? ["api", "baseUrl", "doc", "envName", "label", "models", "tier"]
+          : ["api", "baseUrl", "doc", "envName", "label", "models", "protocols", "tier"];
+      expect(Object.keys(entry).sort(), id).toEqual(expected);
     }
   });
 });
@@ -256,8 +270,8 @@ describe("provider catalog breadth enumeration (spec § Providers contract 2)", 
       expect(templateIds.has(key), key).toBe(true);
       expect(PROVIDER_CATALOG[key]!.tier, key).toBe("template");
     }
-    // breadth rows + 19 builtin + 1 curated template + the omp union rows.
-    expect(templateIds.size).toBe(BREADTH_KEYS.length + 1 + OMP_SNAPSHOT.providers.length);
+    // breadth rows + 1 curated template + one row per omp provider group.
+    expect(templateIds.size).toBe(BREADTH_KEYS.length + 1 + OMP_ROW_IDS.length);
   });
 
   test("snapshot-derived entries follow the breadth mapping (label/baseUrl/api/models/doc, full model vocabulary)", () => {
@@ -423,79 +437,98 @@ describe("generator breadth-collision guard (audit DEBT-46-05)", () => {
 });
 
 describe("omp provider union (third generator input)", () => {
-  const unionIds = OMP_SNAPSHOT.providers.map((record) => record.id);
+  const unionIds = OMP_ROW_IDS;
   const snapshotOnly = JSON.parse(
     readFileSync(SNAPSHOT_PATH, "utf8"),
   ) as Record<string, never>;
+  /** The vendored records grouped by the provider row that carries them. */
+  const groups = new Map<string, typeof OMP_SNAPSHOT.providers>();
+  for (const record of OMP_SNAPSHOT.providers) {
+    const providerId = record.sourceProviderId ?? record.id;
+    groups.set(providerId, [...(groups.get(providerId) ?? []), record]);
+  }
 
-  test("every union record is a template row with a valid id, a materializable api and a label", () => {
-    for (const record of OMP_SNAPSHOT.providers) {
-      const entry = PROVIDER_CATALOG[record.id];
-      expect(entry, record.id).toBeDefined();
-      expect(entry!.tier, record.id).toBe("template");
-      expect(entry!.envName, record.id).toBeNull();
-      expect(CUSTOM_PROVIDER_ID_PATTERN.test(record.id), record.id).toBe(true);
-      expect([...CUSTOM_PROVIDER_API_IDS] as string[], record.id).toContain(record.api);
-      expect(entry!.api, record.id).toBe(record.api);
-      expect(entry!.baseUrl, record.id).toBe(record.baseUrl);
-      expect(entry!.label.length, record.id).toBeGreaterThan(0);
+  test("every provider group is exactly ONE template row under the provider id, carrying its default protocol", () => {
+    for (const [providerId, records] of groups) {
+      const entry = PROVIDER_CATALOG[providerId];
+      expect(entry, providerId).toBeDefined();
+      expect(entry!.tier, providerId).toBe("template");
+      expect(entry!.envName, providerId).toBeNull();
+      expect(CUSTOM_PROVIDER_ID_PATTERN.test(providerId), providerId).toBe(true);
+      // The default protocol is the base record (the one whose id is the
+      // provider id); its scalars are the row's own.
+      const base = records.find((record) => record.id === providerId);
+      expect(base, providerId).toBeDefined();
+      expect([...CUSTOM_PROVIDER_API_IDS] as string[], providerId).toContain(base!.api);
+      expect(entry!.api, providerId).toBe(base!.api);
+      expect(entry!.baseUrl, providerId).toBe(base!.baseUrl);
+      expect(entry!.label, providerId).toBe(base!.label);
+      expect(entry!.label.length, providerId).toBeGreaterThan(0);
       // Prefill is the vendored vocabulary verbatim — no prefix cap.
-      expect(entry!.models, record.id).toEqual(record.models);
+      expect(entry!.models, providerId).toEqual(base!.models);
+      // No per-protocol id is a row of its own: the split this shape removes.
+      for (const record of records) {
+        if (record.id === providerId) continue;
+        expect(Object.hasOwn(PROVIDER_CATALOG, record.id), record.id).toBe(false);
+      }
     }
   });
 
-  test("a multi-row provider labels every row with its protocol; a single-row provider keeps its snapshot label", () => {
-    const groups = new Map<string, typeof OMP_SNAPSHOT.providers>();
-    for (const record of OMP_SNAPSHOT.providers) {
-      const providerId = record.sourceProviderId ?? record.id;
-      groups.set(providerId, [...(groups.get(providerId) ?? []), record]);
-    }
-    let multiRowGroups = 0;
+  test("a label carries no protocol suffix — the protocol is a row option, not part of the name", () => {
     for (const [providerId, records] of groups) {
-      // Only the rows that actually ship decide the label: a record another
-      // pass already covers does not make its provider "multi-protocol".
-      const shipped = records.filter((record) => Object.hasOwn(PROVIDER_CATALOG, record.id));
-      if (shipped.length > 1) {
-        multiRowGroups += 1;
-        const labels = shipped.map((record) => {
-          expect(PROVIDER_CATALOG[record.id]!.label, record.id).toBe(`${record.label} — ${record.api}`);
-          return PROVIDER_CATALOG[record.id]!.label;
-        });
-        // The picker lists one entry per row: identical labels would make the
-        // rows indistinguishable.
-        expect(new Set(labels).size, providerId).toBe(shipped.length);
-      } else if (shipped.length === 1) {
-        expect(PROVIDER_CATALOG[shipped[0]!.id]!.label, shipped[0]!.id).toBe(shipped[0]!.label);
+      const label = PROVIDER_CATALOG[providerId]!.label;
+      for (const record of records) {
+        expect(label, record.id).not.toContain(record.api);
+      }
+    }
+  });
+
+  test("protocols carry every materializable protocol, the default FIRST, the rest in api order", () => {
+    let multiProtocolGroups = 0;
+    for (const [providerId, records] of groups) {
+      const entry = PROVIDER_CATALOG[providerId]!;
+      const apis = records.map((record) => record.api);
+      if (records.length === 1) {
+        // A single-protocol row keeps the seven-key shape: its own scalars ARE
+        // its one option.
+        expect(entry.protocols, providerId).toBeUndefined();
+        continue;
+      }
+      multiProtocolGroups += 1;
+      const options = entry.protocols!;
+      expect(options, providerId).toHaveLength(records.length);
+      // The default option is byte-equal to the row's own scalars.
+      expect(entry.api, providerId).toBe(options[0]!.api);
+      expect(options[0]!.baseUrl, providerId).toBe(entry.baseUrl);
+      expect(options[0]!.models, providerId).toEqual(entry.models);
+      // Every protocol is named exactly once, and the remaining options follow
+      // in code-unit api order — never the snapshot's incidental order.
+      expect([...options.map((option) => option.api)].sort(), providerId).toEqual([...apis].sort());
+      const rest = options.slice(1).map((option) => option.api);
+      expect(rest, providerId).toEqual([...rest].sort());
+      for (const option of options) {
+        const record = records.find((candidate) => candidate.api === option.api)!;
+        expect(option.baseUrl, `${providerId}/${option.api}`).toBe(record.baseUrl);
+        expect(option.models, `${providerId}/${option.api}`).toEqual(record.models);
       }
     }
     // The committed snapshot really does carry mixed-protocol providers — the
     // rule above is not vacuously true.
-    expect(multiRowGroups).toBeGreaterThan(0);
+    expect(multiProtocolGroups).toBeGreaterThan(0);
   });
 
-  test("commandcode is mixed-protocol: one row per protocol, no typesafe prefill", () => {
-    // One custom-provider declaration carries exactly one protocol, so every
-    // served protocol is a separate template row.
-    expect(PROVIDER_CATALOG["commandcode"]).toMatchObject({
-      tier: "template",
-      api: "openai-completions",
-      baseUrl: "https://api.commandcode.ai/provider/v1",
-    });
-    expect(PROVIDER_CATALOG["commandcode-anthropic"]).toMatchObject({
-      tier: "template",
-      api: "anthropic-messages",
-      baseUrl: "https://api.commandcode.ai/provider",
-    });
-    expect(PROVIDER_CATALOG["commandcode-responses"]).toMatchObject({
-      tier: "template",
-      api: "openai-responses",
-    });
-    for (const id of ["commandcode", "commandcode-anthropic", "commandcode-responses"]) {
-      expect(PROVIDER_CATALOG[id]!.models.length, id).toBeGreaterThan(0);
-      expect(PROVIDER_CATALOG[id]!.models as readonly string[], id).not.toContain("typesafe/jev");
+  test("the collapsed record ids map back to the provider row that absorbed them", () => {
+    // Derived from the vendored snapshot, never hand-listed: every record whose
+    // id is not its provider id is collapsed into that provider's row.
+    const expected: Record<string, string> = {};
+    for (const record of OMP_SNAPSHOT.providers) {
+      const providerId = record.sourceProviderId ?? record.id;
+      if (record.id === providerId) continue;
+      expected[record.id] = providerId;
     }
-    // The judge wire keeps its own row.
-    expect(PROVIDER_CATALOG["commandcode-typesafe"]).toMatchObject({ tier: "template", api: "typesafe" });
+    expect(Object.keys(expected).length).toBeGreaterThan(0);
+    expect({ ...LEGACY_PROVIDER_IDS }).toEqual(expected);
+    expect(Object.isFrozen(LEGACY_PROVIDER_IDS)).toBe(true);
   });
 
   test("an owned models.dev key is only taken over when a materializable record replaces it", () => {
@@ -605,11 +638,15 @@ describe("per-model size table (provider-model-limits.generated)", () => {
   });
 
   test("every catalog provider id resolves in the table or is named in the explicit skip list", () => {
-    // Skipped by rule, not by accident: the omp provider union ships its own
-    // model vocabulary (the directory carries no row for those ids) and
-    // `cursor` is local-only metadata — the table states no size for
-    // either rather than inventing one.
-    const SKIPPED_PROVIDERS = new Set(["cursor", ...OMP_SNAPSHOT.providers.map((record) => record.id)]);
+    // Skipped by rule, not by accident: a union row whose provider id is not a
+    // models.dev key has no directory row to draw numbers from (a merged row
+    // whose id IS a key draws them, see the next test) and `cursor` is
+    // local-only metadata — the table states no size for either rather than
+    // inventing one.
+    const SKIPPED_PROVIDERS = new Set([
+      "cursor",
+      ...OMP_ROW_IDS.filter((id) => !Object.hasOwn(SNAPSHOT, id)),
+    ]);
     const missing = Object.keys(PROVIDER_CATALOG)
       .filter((id) => !Object.hasOwn(MODEL_LIMITS, id))
       .sort();
@@ -621,12 +658,35 @@ describe("per-model size table (provider-model-limits.generated)", () => {
     expect(skipHits).toEqual([]);
   });
 
+  test("a merged provider row draws sizes from the models.dev key its id names, over every protocol's vocabulary", () => {
+    // The union owns the vocabulary, the directory only donates numbers, so a
+    // provider that used to ship one row per protocol has real sizes here.
+    const owned = OMP_SNAPSHOT.ownsSnapshotKeys ?? [];
+    expect(owned.length).toBeGreaterThan(0);
+    for (const key of owned) {
+      const entry = PROVIDER_CATALOG[key]!;
+      const row = MODEL_LIMITS[key];
+      expect(row, key).toBeDefined();
+      const sizes = Object.keys(row!);
+      expect(sizes.length, key).toBeGreaterThan(0);
+      const vocabulary = [...entry.models, ...(entry.protocols ?? []).flatMap((option) => option.models)];
+      for (const modelId of sizes) expect(vocabulary, `${key}/${modelId}`).toContain(modelId);
+      // A non-default protocol's ids are sized too: the table iterates the
+      // union vocabulary, not just the row's own scalar list.
+      if (entry.protocols !== undefined) {
+        const secondary = new Set(entry.protocols.slice(1).flatMap((option) => option.models));
+        expect(sizes.some((modelId) => secondary.has(modelId)), key).toBe(true);
+      }
+    }
+  });
+
   test("the table carries no model id its catalog entry does not list", () => {
     for (const [providerId, row] of Object.entries(MODEL_LIMITS)) {
       expect(PROVIDER_CATALOG[providerId], providerId).toBeDefined();
-      const models = PROVIDER_CATALOG[providerId]!.models as readonly string[];
+      const entry = PROVIDER_CATALOG[providerId]!;
+      const vocabulary = [...entry.models, ...(entry.protocols ?? []).flatMap((option) => option.models)];
       for (const modelId of Object.keys(row)) {
-        expect(models, `${providerId}/${modelId}`).toContain(modelId);
+        expect(vocabulary, `${providerId}/${modelId}`).toContain(modelId);
       }
     }
   });
