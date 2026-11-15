@@ -193,8 +193,11 @@ const LIVE_TARGET = "id = ? AND workspace_id = ? AND deleted_at IS NULL";
 
 /**
  * The park predicate: a live target IN the addressed workspace whose account
- * claim another live target in that workspace duplicates, on a bot that owns
- * more than one live target. Every statement of the park batch repeats it, so a
+ * claim another live target in that workspace ALSO carries. That duplicate is
+ * the whole invariant — the two claims normally belong to different bots, so
+ * refusing on a per-bot target count would block the repair this exists for.
+ * Leaving the login with at least one live claimant is what keeps the review
+ * surface; every statement of the park batch repeats the predicate, so a
  * concurrent delete, a workspace mix-up or a claim that stopped overlapping
  * fails the whole park instead of writing half of it.
  */
@@ -204,11 +207,7 @@ const PARKABLE_TARGET = `id = ? AND workspace_id = ? AND deleted_at IS NULL
                 WHERE o.workspace_id = review_targets.workspace_id
                   AND o.id <> review_targets.id
                   AND o.deleted_at IS NULL
-                  AND o.account_login = review_targets.account_login)
-   AND EXISTS (SELECT 1 FROM review_targets s
-                WHERE s.bot_id = review_targets.bot_id
-                  AND s.id <> review_targets.id
-                  AND s.deleted_at IS NULL)`;
+                  AND o.account_login = review_targets.account_login)`;
 
 /**
  * The park's audit row. It runs FIRST in the batch: its predicate reads the
@@ -403,9 +402,9 @@ export function createTargetsStore(db: TargetsStoreD1) {
      * route.
      *
      * Refusals write nothing and name their reason: a target that is not live
-     * in this workspace, a bot whose only live target this is (parking it would
-     * disable the bot rather than repair a claim), and a target whose claim no
-     * other live target in the workspace duplicates.
+     * in this workspace, a login this target is the workspace's only live
+     * claimant of (parking it would retire the claim rather than resolve a
+     * duplicate), and a target that carries no claim at all.
      */
     async park(
       workspaceId: string,
@@ -416,8 +415,6 @@ export function createTargetsStore(db: TargetsStoreD1) {
       const state = await db
         .prepare(
           `SELECT t.account_login,
-                  (SELECT COUNT(*) FROM review_targets s
-                    WHERE s.bot_id = t.bot_id AND s.deleted_at IS NULL) AS live_targets,
                   EXISTS (SELECT 1 FROM review_targets o
                            WHERE o.workspace_id = t.workspace_id
                              AND o.id <> t.id
@@ -427,12 +424,12 @@ export function createTargetsStore(db: TargetsStoreD1) {
             WHERE ${LIVE_TARGET}`,
         )
         .bind(targetId, workspaceId)
-        .first<{ account_login: string | null; live_targets: number; overlapped: number }>();
+        .first<{ account_login: string | null; overlapped: number }>();
       if (!state) return { outcome: "refused", reason: "unknown-target" };
-      if (state.live_targets <= 1) return { outcome: "refused", reason: "only-live-target" };
-      if (state.account_login === null || state.overlapped === 0) {
-        return { outcome: "refused", reason: "no-overlap" };
-      }
+      if (state.account_login === null) return { outcome: "refused", reason: "no-overlap" };
+      // The login must keep a live claimant: the other target is what parks'
+      // repair leaves in place.
+      if (state.overlapped === 0) return { outcome: "refused", reason: "only-live-target" };
       const [, update] = await db.batch([
         db.prepare(PARK_AUDIT_SQL).bind(crypto.randomUUID(), workspaceId, actorLogin, now, targetId, workspaceId),
         db.prepare(PARK_TARGET_SQL).bind(targetId, workspaceId),

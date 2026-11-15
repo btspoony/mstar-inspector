@@ -838,10 +838,9 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
  */
 describe("POST /dashboard/:ref/apps/:appId/park", () => {
   /**
-   * The overlap the park repairs: this App's target claims `acme` in `default`,
-   * ANOTHER bot's target claims it too, and the bot keeps a second live target
-   * in a second workspace — so this workspace's target is not the bot's only
-   * live one.
+   * The overlap the park repairs: this App's target claims `acme` in `default`
+   * and ANOTHER bot's target claims it too — the shape the audit reports. Both
+   * bots keep their single target; the duplicate claim is what park settles.
    */
   function seedOverlap(db: ReturnType<typeof createAppsUiD1>, githubAppId: number): string {
     const target = db.raw
@@ -851,12 +850,6 @@ describe("POST /dashboard/:ref/apps/:appId/park", () => {
       )
       .get(githubAppId) as { id: string; bot_id: string };
     db.raw.prepare(`UPDATE review_targets SET account_login = 'acme' WHERE id = ?`).run(target.id);
-    db.raw
-      .prepare(
-        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
-         VALUES ('ws-other', 'ws-other', 'ws-other', 'mallory', datetime('now'))`,
-      )
-      .run();
     const insert = db.raw.prepare(
       `INSERT INTO review_targets
          (id, workspace_id, bot_id, name, installation_id, account_login, review_enabled,
@@ -865,8 +858,6 @@ describe("POST /dashboard/:ref/apps/:appId/park", () => {
        VALUES (?, ?, ?, ?, NULL, 'acme', 1, 'every_push', NULL, 70, '["ship it"]', 0,
                'mallory', datetime('now'), datetime('now'), NULL)`,
     );
-    // Same bot, second workspace: the bot has more than one live target.
-    insert.run("park-elsewhere", "ws-other", target.bot_id, "park-elsewhere");
     // Another bot's target in THIS workspace: the claim it duplicates.
     insert.run("park-rival", "default", "app-mstar-inspector-ada", "park-rival");
     return target.id;
@@ -905,7 +896,8 @@ describe("POST /dashboard/:ref/apps/:appId/park", () => {
       makeEnv(db),
     );
     expect(res.status).toBe(409);
-    expect(await res.text()).toBe("only-live-target");
+    // No account claim at all on this target: nothing to settle.
+    expect(await res.text()).toBe("no-overlap");
     expect((db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n).toBe(auditBefore.n);
     expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(1);
   });
