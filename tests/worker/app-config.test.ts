@@ -4529,7 +4529,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     ]);
   });
 
-  test("update-provider-models stores the declared per-model metadata; a missing required size is refused naming model + fact", async () => {
+  test("update-provider-models stores the declared per-model metadata; an unstated size stores no override", async () => {
     const { db, app } = await seededWorld();
     await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
     const meta = {
@@ -4553,22 +4553,19 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     };
     expect(body.custom_providers.find((p) => p.provider_id === "my-custom")!.models_meta).toEqual(meta);
 
-    // A selected model with no context window: refused, nothing stored, the
-    // previously stored list AND overlay untouched.
-    const refused = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+    // A selected model with no context window and no catalog entry: the save is
+    // ACCEPTED. Only the stated model carries a size entry — fresh-b stores as
+    // unstated, and the runtime's own default applies to it.
+    const unstated = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
       provider: "my-custom",
       model_ids: "fresh-a, fresh-b",
-      models_meta: JSON.stringify({ "fresh-a": { contextWindow: 1, maxTokens: 1 }, "fresh-b": { maxTokens: 4 } }),
+      models_meta: JSON.stringify({ "fresh-a": { contextWindow: 64000, maxTokens: 2048 } }),
     });
-    expect(refused.status).toBe(400);
-    expect(await refused.json()).toMatchObject({
-      key: "settings.error.modelContextWindowRequired",
-      params: { model: "fresh-b" },
-    });
-    const [afterRefusal] = await configStore(db).listCustomProviders(app.id);
-    expect(afterRefusal!.model_ids).toEqual(["fresh-a", "fresh-b"]);
-    expect(afterRefusal!.models_meta).toEqual(meta);
+    expect(unstated.status).toBe(200);
+    const [afterUnstated] = await configStore(db).listCustomProviders(app.id);
+    expect(afterUnstated!.model_ids).toEqual(["fresh-a", "fresh-b"]);
+    expect(afterUnstated!.models_meta).toEqual({ "fresh-a": { contextWindow: 64000, maxTokens: 2048 } });
 
     // A stated but non-positive size is refused with the invalid-value key.
     const invalid = await postForm(SETTINGS, await mallory(), makeEnv(db), {
@@ -4584,48 +4581,46 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     });
   });
 
-  test("update-provider-models refuses an all-blank statement (and an absent one) and keeps the stored ids + overlay", async () => {
+  test("an all-blank (or omitted) overlay saves the ids and stores no size at all", async () => {
     const { db, app } = await seededWorld();
     await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
     const store = configStore(db);
-    const before = await store.listCustomProviders(app.id);
-    // The form submits an overlay with every size blank: the required-fact
-    // rule cannot be bypassed by omitting the fields.
+    // The form submits an overlay with every size blank: the declaration saves
+    // as unstated — a missing number is never a save precondition.
     const allBlank = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
       provider: "my-custom",
       model_ids: "fresh-a",
       models_meta: JSON.stringify({ "fresh-a": {} }),
     });
-    expect(allBlank.status).toBe(400);
-    expect(await allBlank.json()).toMatchObject({
-      key: "settings.error.modelContextWindowRequired",
-      params: { model: "fresh-a" },
-    });
-    // An omitted overlay is not "no statement" either — it is the same
-    // incomplete declaration, and it must not smuggle a new id set in.
+    expect(allBlank.status).toBe(200);
+    const [afterBlank] = await store.listCustomProviders(app.id);
+    expect(afterBlank!.model_ids).toEqual(["fresh-a"]);
+    // Unstated is stored by carrying no size entry — nothing is invented.
+    expect(afterBlank!.models_meta).toBeUndefined();
+    // An omitted overlay is the same blank statement: it saves too, still with
+    // no size entry, and the ids follow the form.
     const absent = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
       provider: "my-custom",
-      model_ids: "fresh-a",
+      model_ids: "fresh-a, fresh-b",
     });
-    expect(absent.status).toBe(400);
-    expect(await absent.json()).toMatchObject({
-      key: "settings.error.modelContextWindowRequired",
-      params: { model: "fresh-a" },
-    });
-    // Nothing moved: the stored ids AND the (unstated) overlay are untouched.
-    expect(await store.listCustomProviders(app.id)).toEqual(before);
+    expect(absent.status).toBe(200);
+    const [afterAbsent] = await store.listCustomProviders(app.id);
+    expect(afterAbsent!.model_ids).toEqual(["fresh-a", "fresh-b"]);
+    expect(afterAbsent!.models_meta).toBeUndefined();
   });
 
   test.skipIf(coveredCatalogModel() === null)(
-    "a private endpoint reusing a catalog id does NOT inherit the catalog's sizes",
+    "a private endpoint reusing a catalog id never stores the catalog's sizes",
     async () => {
       const covered = coveredCatalogModel();
       if (covered === null) return;
-      const { db } = await seededWorld();
+      const { db, app } = await seededWorld();
       // The catalog's ID, the App's own endpoint: the vendor's numbers
-      // describe the vendor, not this endpoint.
+      // describe the vendor, not this endpoint — so they are neither required
+      // nor copied here. The endpoint gate itself lives on the read side
+      // (catalogLimitsFor and the SPA pre-fill), not on this save.
       const declared = await postForm(SETTINGS, await mallory(), makeEnv(db), {
         op: "add-custom-provider",
         provider_id: covered.provider,
@@ -4635,17 +4630,15 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
         key: sk("shadow-covered-key"),
       });
       expect(declared.status).toBe(200);
-      const refused = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      const saved = await postForm(SETTINGS, await mallory(), makeEnv(db), {
         op: "update-provider-models",
         provider: covered.provider,
         model_ids: covered.model,
         models_meta: JSON.stringify({ [covered.model]: {} }),
       });
-      expect(refused.status).toBe(400);
-      expect(await refused.json()).toMatchObject({
-        key: "settings.error.modelContextWindowRequired",
-        params: { model: covered.model },
-      });
+      expect(saved.status).toBe(200);
+      const [decl] = await configStore(db).listCustomProviders(app.id);
+      expect(decl!.models_meta).toBeUndefined();
     },
   );
 
@@ -4696,23 +4689,36 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     },
   );
 
-  test("a catalog-less model with no stated size keeps the keyed 400", async () => {
+  test("a catalog-less model with no stated size saves as unstated, writes no override and round-trips", async () => {
     const { db, app } = await seededWorld();
     await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
     const before = await configStore(db).listCustomProviders(app.id);
-    // `my-custom` is not in the vendor table; nothing supplies the sizes.
-    const refused = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+    // `my-custom` is not in the vendor table and the form states nothing:
+    // there is no number for the product to ask for, so the save lands as
+    // unstated — the pinned runtime back-fills its own default.
+    const saved = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
       provider: "my-custom",
       model_ids: "deepseek-v4-flash",
       models_meta: JSON.stringify({ "deepseek-v4-flash": {} }),
     });
-    expect(refused.status).toBe(400);
-    expect(await refused.json()).toMatchObject({
-      key: "settings.error.modelContextWindowRequired",
-      params: { model: "deepseek-v4-flash" },
-    });
-    expect(await configStore(db).listCustomProviders(app.id)).toEqual(before);
+    expect(saved.status).toBe(200);
+    const [decl] = await configStore(db).listCustomProviders(app.id);
+    expect(decl!.model_ids).toEqual(["deepseek-v4-flash"]);
+    // Unstated is stored as NO size entry: the override never carries a number
+    // the operator did not state.
+    expect(decl!.models_meta).toBeUndefined();
+    // The endpoint and the key pool did not move with the list.
+    expect(decl!.base_url).toBe(before[0]!.base_url);
+    expect(decl!.has_keys).toBe(true);
+    // The settings payload the SPA re-seeds from round-trips the unstated model.
+    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const body = (await payload.json()) as {
+      custom_providers: Array<{ provider_id: string; model_ids: string[]; models_meta?: Record<string, unknown> }>;
+    };
+    const row = body.custom_providers.find((p) => p.provider_id === "my-custom")!;
+    expect(row.model_ids).toEqual(["deepseek-v4-flash"]);
+    expect(row.models_meta).toBeUndefined();
   });
 
   test("the settings payload stamps a per-model size table on every catalog row, plus its snapshot", async () => {
@@ -4739,8 +4745,8 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
 
   test("update-provider-models refuses an undeclared provider with the keyed 400, zero writes", async () => {
     const { db } = await seededWorld();
-    // A complete statement, so the refusal under test is the store's
-    // undeclared-declaration gate rather than the required-fact gate.
+    // A well-formed statement, so the refusal under test is the store's
+    // undeclared-declaration gate rather than the meta shape gate.
     const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
       provider: "ghost",
@@ -4815,17 +4821,17 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(decl!.model_ids).toEqual([model!]);
     // The catalog's numbers are never copied into the stored override.
     expect(decl!.models_meta).toBeUndefined();
-    // The same blank statement for a model neither side sizes stays refused.
-    const refused = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+    // The same blank statement for a model neither side sizes also saves:
+    // stored as unstated, with no copy of anyone's number.
+    const unstated = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
       provider: group!.legacyId,
       model_ids: "no-catalog-number-for-this-one",
     });
-    expect(refused.status).toBe(400);
-    expect(await refused.json()).toMatchObject({
-      key: "settings.error.modelContextWindowRequired",
-      params: { model: "no-catalog-number-for-this-one" },
-    });
+    expect(unstated.status).toBe(200);
+    const [unstatedDecl] = await configStore(db).listCustomProviders(app.id);
+    expect(unstatedDecl!.model_ids).toEqual(["no-catalog-number-for-this-one"]);
+    expect(unstatedDecl!.models_meta).toBeUndefined();
   });
 
   test("remove-custom-provider deletes the row; an unknown id is a tolerant no-op", async () => {

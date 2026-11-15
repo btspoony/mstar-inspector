@@ -189,9 +189,8 @@ describe("ProviderModelsDialog", () => {
       expect(legacy?.checked).toBe(true);
       // Saving keeps the orphan id in the POST body.
       await view.click(view.saveButton());
-      // The overlay carries only stated facts: neither model states one, so
-      // the map is empty — and the server still refuses the first one that
-      // has no stated AND no catalog size, naming it.
+      // The overlay carries only stated facts: neither model states a size, so
+      // the map is empty — the save lands and both models store as unstated.
       expect(view.calls).toEqual([
         {
           op: "update-provider-models",
@@ -205,17 +204,18 @@ describe("ProviderModelsDialog", () => {
     }
   });
 
-  test("a legacy id-only declaration shows the not-usable note and blank size fields", async () => {
+  test("a legacy id-only declaration shows the unstated note and blank size fields", async () => {
     const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"] });
     try {
       await view.click(view.detailsToggle());
       // The sentence is a DATA statement about the declaration, never a
       // runtime promise: the pinned registry back-fills its own defaults for
-      // an id-only model, so claiming the file blocks failover would be false.
+      // an id-only model, so claiming the save is blocked or the file blocks
+      // failover would be false.
       const sizesUnstated = t(locale, "settings.providers.models.sizesUnstated");
       expect(view.dialog()?.textContent).toContain(sizesUnstated);
       expect(sizesUnstated).toContain("unstated");
-      expect(sizesUnstated).toContain("incomplete");
+      expect(sizesUnstated).toMatch(/runtime/i);
       expect(sizesUnstated).not.toMatch(/not usable|failover/i);
       expect(view.field("m-1", "contextWindow")?.value).toBe("");
       expect(view.field("m-1", "maxTokens")?.value).toBe("");
@@ -371,8 +371,8 @@ describe("ProviderModelsDialog", () => {
       expect(closed).not.toContain(t(locale, "settings.providers.models.requirements"));
       expect(closed).not.toContain(t(locale, "settings.providers.models.sizesUnstated"));
 
-      // Opening reveals the required-sizes statement, one picker over the
-      // selected ids and exactly the picked model's fields.
+      // Opening reveals the sizes statement, one picker over the selected ids
+      // and exactly the picked model's fields.
       await view.click(toggle);
       expect(view.detailsToggle()?.getAttribute("aria-expanded")).toBe("true");
       expect(view.detailSelect()?.value).toBe("m-1");
@@ -600,8 +600,6 @@ describe("ProviderModelsDialog", () => {
     // what the fact does (or what the save left out).
     for (const loc of ["en", "zh_CN"] as const) {
       for (const key of [
-        "settings.error.modelContextWindowRequired",
-        "settings.error.modelMaxTokensRequired",
         "settings.providers.models.requirements",
         "settings.providers.models.sizesUnstated",
         "settings.providers.models.sizesFromCatalog",
@@ -611,13 +609,16 @@ describe("ProviderModelsDialog", () => {
         expect(copy).not.toContain("猜测");
       }
     }
-    // The required-sizes line says what the numbers do, not just that they are required.
+    // The sizes line says what the numbers do and that a blank one is not a
+    // save precondition.
     expect(t(locale, "settings.providers.models.requirements")).toMatch(/compacted/);
     expect(t(locale, "settings.providers.models.requirements")).toMatch(/reply/);
-    // The incomplete note keeps the data statement and adds no blame.
+    expect(t(locale, "settings.providers.models.requirements")).toContain("unstated");
+    // The unstated note states the behaviour (the save lands, the runtime
+    // default applies) and adds no blame.
     const unstated = t(locale, "settings.providers.models.sizesUnstated");
     expect(unstated).toContain("unstated");
-    expect(unstated).toContain("incomplete");
+    expect(unstated).toMatch(/runtime/i);
     expect(unstated).not.toMatch(/not usable|failover/i);
     // The catalog label names the snapshot the values came from.
     expect(t(locale, "settings.providers.models.sizesFromCatalog", { snapshot: "2026-11-13" })).toContain("2026-11-13");

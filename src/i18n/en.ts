@@ -644,8 +644,6 @@ export const en = {
       modelIdsRequired: "Enter at least one model id for the custom provider.",
       modelIdsTooMany: "Too many model ids ({count}) — at most {limit}. Nothing was stored.",
       modelIdTooLong: "Model ids are limited to {limit} characters each. Nothing was stored.",
-      modelContextWindowRequired: "{model} needs a context window. Nothing was stored.",
-      modelMaxTokensRequired: "{model} needs a max token count. Nothing was stored.",
       modelMetaInvalid: "{model}'s {field} is not a valid value — nothing was stored.",
       modelMetaMalformed: "The per-model details could not be read — nothing was stored.",
       customProviderDeclRejected: "The custom provider was rejected — nothing was stored.",
@@ -775,24 +773,26 @@ export const en = {
         save: "Save models",
         /**
          * The folded per-model facts group: its toggle, the single-model picker
-         * and the required-size statement. Required sizes come first; the
+         * and what the sizes do. A blank size is NOT a save precondition — the
+         * copy states the behaviour (catalog pre-fill, blank saves as
+         * unstated) and never asks for a number the product already has. The
          * optional facts stay blank when the owner states nothing (we do not
-         * invent a name or a capability). Refusal wording direction: name the
-         * model, name the fact, then "Nothing was stored."
+         * invent a name or a capability). Refusal wording direction for a
+         * MALFORMED fact: name the model, name the fact, then "Nothing was
+         * stored."
          */
         detailsToggle: "Edit model details",
         detailsSelectLabel: "Model to edit",
         requirements:
-          "Every selected model needs a context window and a max token count — they set when context gets compacted and how long one reply can run.",
+          "Context window and max token count set when context gets compacted and how long one reply can run — a catalog size is pre-filled, and a blank one saves as unstated.",
         /**
-         * A DATA statement, not a runtime promise: the pinned omp registry
-         * back-fills its own defaults for an id-only model, so the copy must
-         * not claim the file blocks a failover candidate. It says only what
-         * this product does — keeps the declaration, shows it incomplete, and
-         * does not invent the numbers.
+         * A DATA statement, not a runtime promise: an unstated size is the
+         * pinned omp runtime's own default, and the save is never refused for
+         * a missing number. The copy says only what this product does — keeps
+         * the declaration as unstated and does not invent the numbers.
          */
         sizesUnstated:
-          "Saved. The context window and max token count are unstated — the declaration is incomplete until both are given.",
+          "No size stated — this model saves as unstated and the runtime's own defaults apply.",
         /** The provenance label under the two size fields (catalog names its snapshot). */
         sizesFromCatalog:
           "These sizes come from the model catalog snapshot {snapshot} — edit a value to override it.",
