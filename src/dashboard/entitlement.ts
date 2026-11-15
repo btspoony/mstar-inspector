@@ -217,6 +217,24 @@ export async function assertSharedBotAllowed(
   return plan.sharedBotAllowed ? null : { kind: "shared-bot-not-included", planId: plan.id };
 }
 
+/**
+ * The shared-bot row's state on the usage card (spec
+ * [entitlement and deployment modes](../../docs/specs/architecture/entitlement-and-deployment-modes.md)
+ * §5). The plan answers first, because only that state is the reader's to
+ * change: `not-in-plan` moves with the workspace's plan, `not-designated`
+ * waits for a platform operator, `available` needs both.
+ *
+ * `self-hosted` never reaches the card at all — the console that designates a
+ * shared bot is not registered in that mode — so the row is absent there by
+ * deployment, not a fourth state here.
+ */
+export type SharedBotAvailability = "available" | "not-in-plan" | "not-designated";
+
+export function sharedBotAvailability(limits: PlanLimits, sharedBotExists: boolean): SharedBotAvailability {
+  if (!limits.sharedBotAllowed) return "not-in-plan";
+  return sharedBotExists ? "available" : "not-designated";
+}
+
 /** One free workspace per login, so the second free membership is the last. */
 export function freeSlotAvailable(freeMembershipCount: number): boolean {
   return freeMembershipCount < 1;

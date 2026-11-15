@@ -174,6 +174,21 @@ plan); a target's `bot_id` cannot — it is written once by an INSERT
 writer of that column must consult this same function rather than add a second
 guard.
 
+The usage card's shared-bot status row reads the capability through the same
+resolution: `resolveWorkspacePlan` answers `sharedBotAllowed`, and
+`sharedBotAvailability` turns that answer plus "does any live `shared` bot
+exist" into one of three states. `available` = the plan grants the capability
+and a `shared` bot is designated. `not-in-plan` = the resolved plan excludes it,
+so the reader can still act: use an own App, or move plans. `not-designated` =
+the capability is granted but no operator has shared a bot yet, so the reader
+waits for a platform operator and has nothing to buy. The two unavailable
+states never share copy because they differ in who can fix them. A plan change
+or a designation therefore moves the card on the next read with no cache,
+exactly as both move `assertSharedBotAllowed`; `self-hosted` renders no
+shared-bot row at all, because the console that designates one is not
+registered in that mode — the absence is a property of the deployment, not a
+fourth state of the workspace.
+
 Operational consequence, known and accepted: `entitlement` joins the failure
 vocabulary and deliberately stays OUTSIDE `PAGING_EXCLUDED_STAGES`, so the cron
 sweep counts these rows and its global ops alert — more than
@@ -197,7 +212,8 @@ failure counts and PR history.
 
 ## Where it lives
 
-- `src/dashboard/entitlement.ts`: `resolveWorkspacePlan`, `resolveWorkspacePlans`, `memberSlotAvailable`, `assertSharedBotAllowed`.
+- `src/dashboard/entitlement.ts`: `resolveWorkspacePlan`, `resolveWorkspacePlans`, `memberSlotAvailable`, `assertSharedBotAllowed`, `sharedBotAvailability`.
+- `src/dashboard/review-usage-store.ts`: `readReviewUsage` (the counts the usage card and the console's usage page read).
 - `src/dashboard/targets-store.ts`: `createOnSharedBot` (the creation refusal).
 - `src/worker/index.ts` + `src/worker/handlers.ts`: the enqueue refusal (`deliveryOutcomeFromWebhook`, `handleReviewJob`).
 - `src/dashboard/invite-store.ts`: `createInvite`, `acceptInvite`, seat/free-slot SQL guards.

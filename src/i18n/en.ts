@@ -523,6 +523,25 @@ export const en = {
     inviteAcceptFailed: "Could not accept the invitation — try again.",
     /** The manager gate on `/dashboard/<ref>/settings` — a plain member sees it. */
     settingsOwnerOnly: "Only workspace owners and admins can change these settings.",
+    /**
+     * The read-only usage card (spec bot-scope-and-claiming § Review usage):
+     * this UTC month, the two counts, and the shared-bot row's state. The two
+     * unavailable states keep distinct copy — one is the reader's plan to
+     * change, the other waits for a platform operator.
+     */
+    usageHeading: "Review usage",
+    /** {month} = the UTC calendar month, e.g. 2026-11. */
+    usageWindow: "Reviews · {month} (UTC)",
+    usageSharedReviews: "Shared bot reviews",
+    usageOwnReviews: "Own bot reviews",
+    usageSharedStatus: "Shared bot status",
+    usageAvailable: "Available",
+    usageNotInPlan: "Not in this plan",
+    usageNotInPlanHint:
+      "This workspace's plan does not include the shared bot. Use a GitHub App this workspace owns, or move to a plan that includes it.",
+    usageNotDesignated: "Not available yet",
+    usageNotDesignatedHint:
+      "No shared bot is designated on this platform. A platform operator designates it; until then your own GitHub Apps review your pull requests.",
     /** The owner's name card — the label the top-bar switcher shows. */
     nameHeading: "Workspace name",
     nameDescription:
@@ -1194,6 +1213,7 @@ export const en = {
       flags: "Server flags",
       runtime: "Runtime parameters",
       workspaces: "Workspaces",
+      usage: "Review usage",
       users: "Users",
       supportGrants: "Support access",
     },
@@ -1373,6 +1393,15 @@ export const en = {
       cancelAction: "Cancel",
       /** Fallback when the slug write fails with an unrecognised error. */
       slugChangeFailed: "Could not change the slug for {name}.",
+    },
+    /** Review usage page (spec bot-scope-and-claiming § Review usage). */
+    usage: {
+      /** {month} = the UTC calendar month the read answered for, e.g. 2026-11. */
+      window: "Reviews per workspace · {month} (UTC)",
+      loadFailed: "Could not load the review usage.",
+      workspaceColumn: "Workspace",
+      sharedColumn: "Shared bot",
+      ownColumn: "Own bots",
     },
     /** Users page. */
     users: {

@@ -2499,6 +2499,27 @@ export function parseStoredCheckMinScore(body: string): number | null {
   }
 }
 
+/**
+ * The settings usage card's payload: the UTC month, the two counts and the
+ * shared-bot row's state. A drifted field fails the parse into the card's
+ * error face instead of rendering an undefined number.
+ */
+export type ReviewUsage = {
+  month: string;
+  sharedReviews: number;
+  ownReviews: number;
+  sharedBot: "available" | "not-in-plan" | "not-designated";
+};
+
+export function parseReviewUsage(data: unknown): ReviewUsage | null {
+  if (!isRecord(data)) return null;
+  const { month, sharedReviews, ownReviews, sharedBot } = data;
+  if (typeof month !== "string") return null;
+  if (typeof sharedReviews !== "number" || typeof ownReviews !== "number") return null;
+  if (sharedBot !== "available" && sharedBot !== "not-in-plan" && sharedBot !== "not-designated") return null;
+  return { month, sharedReviews, ownReviews, sharedBot };
+}
+
 export function splitModelChain(raw: string | null | undefined): string[] {
   if (!raw) return [];
   return raw

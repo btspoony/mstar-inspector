@@ -444,6 +444,24 @@ export const zhCN: Dictionary = {
     inviteAcceptFailed: "接受邀请失败，请重试。",
     /** `/dashboard/<ref>/settings` 的管理者门禁——普通成员看到此文案。 */
     settingsOwnerOnly: "只有工作区所有者和管理员可以修改这些设置。",
+    /**
+     * 只读的用量卡片（spec bot-scope-and-claiming § Review usage）：本月（UTC）、
+     * 两个计数，以及共享机器人一行的状态。两个不可用状态文案不同——一个由读者
+     * 自己的套餐决定，另一个要等平台运营者。
+     */
+    usageHeading: "审查用量",
+    /** {month} = UTC 月份，例如 2026-11。 */
+    usageWindow: "审查 · {month}（UTC）",
+    usageSharedReviews: "共享机器人审查",
+    usageOwnReviews: "自有机器人审查",
+    usageSharedStatus: "共享机器人状态",
+    usageAvailable: "可用",
+    usageNotInPlan: "当前套餐不含",
+    usageNotInPlanHint:
+      "此工作区的套餐不包含共享机器人。请使用本工作区自有的 GitHub App，或迁移到包含共享机器人的套餐。",
+    usageNotDesignated: "暂不可用",
+    usageNotDesignatedHint:
+      "此平台尚未指定共享机器人。共享机器人由平台运营者指定；在此之前，由你自有的 GitHub App 审查你的拉取请求。",
     /** 所有者的名称卡片——顶部切换器显示的名称。 */
     nameHeading: "工作区名称",
     nameDescription: "顶部工作区切换器显示的名称。此工作区的网址是其 id，不会改变。",
@@ -975,6 +993,7 @@ export const zhCN: Dictionary = {
       flags: "服务器开关",
       runtime: "运行时参数",
       workspaces: "工作区",
+      usage: "审查用量",
       users: "用户",
       supportGrants: "支持访问",
     },
@@ -1144,6 +1163,15 @@ export const zhCN: Dictionary = {
       cancelAction: "取消",
       /** slug 写入失败且错误无法识别时的兜底文案。 */
       slugChangeFailed: "无法更改 {name} 的 slug。",
+    },
+    /** 审查用量页（spec bot-scope-and-claiming § Review usage）。 */
+    usage: {
+      /** {month} = 本次读取对应的 UTC 月份，例如 2026-11。 */
+      window: "每个工作区的审查 · {month}（UTC）",
+      loadFailed: "无法加载审查用量。",
+      workspaceColumn: "工作区",
+      sharedColumn: "共享机器人",
+      ownColumn: "自有机器人",
     },
     /** 用户页。 */
     users: {

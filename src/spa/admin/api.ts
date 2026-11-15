@@ -462,6 +462,34 @@ export async function readWorkspaces(): Promise<WorkspaceRow[]> {
   }));
 }
 
+/** One `GET /api/usage` row: a live workspace's reviews this UTC month. */
+export type UsageRow = {
+  workspaceId: string;
+  workspaceName: string;
+  workspaceSlug: string;
+  sharedReviews: number;
+  ownReviews: number;
+};
+
+/**
+ * The month the route answered for plus every live workspace's two counts, in
+ * the server's decided order. One request, no paging: the screen filters what
+ * it was given.
+ */
+export async function readUsage(): Promise<{ month: string; rows: UsageRow[] }> {
+  const body = map(await fetchJson(`${BASE}/usage`), "usage response");
+  return {
+    month: text(body, "month"),
+    rows: list(body.workspaces, "usage").map((row) => ({
+      workspaceId: text(row, "workspaceId"),
+      workspaceName: text(row, "workspaceName"),
+      workspaceSlug: text(row, "workspaceSlug"),
+      sharedReviews: num(row, "sharedReviews"),
+      ownReviews: num(row, "ownReviews"),
+    })),
+  };
+}
+
 export async function readUsers(): Promise<UserRow[]> {
   const body = map(await fetchJson(`${BASE}/users`), "users response");
   return list(body.users, "users").map((row) => ({
