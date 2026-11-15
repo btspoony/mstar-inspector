@@ -63,7 +63,11 @@ import {
 } from "../../src/dashboard/app-config-store";
 import { enabledSandboxImages, getSandboxImage } from "../../src/contracts/sandbox-images";
 import { composeModelOptions, findFailingSelector } from "../../src/dashboard/model-membership";
-import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
+import {
+  LEGACY_PROVIDER_IDS,
+  PROVIDER_CATALOG,
+  PROVIDER_IDS_BUILTIN,
+} from "../../src/contracts/provider-catalog.generated";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../src/contracts/provider-models";
 import { MODEL_LIMITS } from "../../src/contracts/provider-model-limits.generated";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -2502,11 +2506,14 @@ describe("duplication locks", () => {
     // list UI and the materialization route consume it.
     expect(Object.keys(PROVIDER_META).filter((id) => PROVIDER_META[id]!.tier === "builtin")).toHaveLength(19);
     expect(PROVIDER_META["workers-ai"]!.tier).toBe("template");
-    // A union row (and the mixed-protocol Command Code split) is reachable
-    // through the mirror the picker renders from.
-    for (const id of ["commandcode", "commandcode-anthropic", "typesafe"]) {
+    // A union row is reachable through the mirror the picker renders from. A
+    // mixed-protocol provider is ONE row whose `protocols` are its options —
+    // the per-protocol ids are not rows of the mirror.
+    for (const id of ["commandcode", "typesafe"]) {
       expect(PROVIDER_META[id]!.tier, id).toBe("template");
     }
+    expect(PROVIDER_META["commandcode"]!.protocols!.map((option) => option.api)).toContain("anthropic-messages");
+    expect(PROVIDER_META["commandcode-anthropic"]).toBeUndefined();
   });
 
   test("parseModelChain behaves exactly like the runtime-omp parseModelSelectors", () => {
@@ -4772,6 +4779,53 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     });
     // Neither refusal touched the stored declaration.
     expect(await configStore(db).listCustomProviders(app.id)).toEqual(before);
+  });
+
+  test("a declaration on a collapsed per-protocol id's endpoint saves a catalog-known model without a stated size", async () => {
+    // The live case: a declaration created when the catalog still shipped one
+    // row per protocol. The row that absorbed its id states the sizes, and the
+    // declaration sits on one of that row's protocol endpoints — so a blank
+    // size field saves instead of demanding a hand-typed number.
+    const { db, app } = await seededWorld();
+    const group = Object.entries(LEGACY_PROVIDER_IDS)
+      .map(([legacyId, providerId]) => ({ legacyId, providerId, entry: PROVIDER_CATALOG[providerId], table: MODEL_LIMITS[providerId] }))
+      .find(({ entry, table }) => table !== undefined && entry?.protocols !== undefined);
+    expect(group).toBeDefined();
+    const option = group!.entry!.protocols![1]!;
+    expect(option.baseUrl).not.toBeNull();
+    const model = option.models.find((modelId) => group!.table![modelId] !== undefined);
+    expect(model).toBeDefined();
+    await configStore(db).upsertCustomProvider(
+      app.id,
+      {
+        provider_id: group!.legacyId,
+        base_url: option.baseUrl!,
+        api: option.api as (typeof CUSTOM_PROVIDER_API_IDS)[number],
+        model_ids: [model!],
+      },
+      sk("legacy-endpoint-key"),
+    );
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: group!.legacyId,
+      model_ids: model!,
+    });
+    expect(res.status).toBe(200);
+    const [decl] = await configStore(db).listCustomProviders(app.id);
+    expect(decl!.model_ids).toEqual([model!]);
+    // The catalog's numbers are never copied into the stored override.
+    expect(decl!.models_meta).toBeUndefined();
+    // The same blank statement for a model neither side sizes stays refused.
+    const refused = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: group!.legacyId,
+      model_ids: "no-catalog-number-for-this-one",
+    });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toMatchObject({
+      key: "settings.error.modelContextWindowRequired",
+      params: { model: "no-catalog-number-for-this-one" },
+    });
   });
 
   test("remove-custom-provider deletes the row; an unknown id is a tolerant no-op", async () => {

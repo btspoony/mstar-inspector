@@ -7,13 +7,18 @@ import { createMigratedTestD1, seedDefaultMemberships } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import {
+  CUSTOM_PROVIDER_API_IDS,
   MAX_KEYS_PER_PROVIDER,
   createAppConfigStore,
   MODEL_ROLE_IDS,
 } from "../../src/dashboard/app-config-store";
 import { composeModelOptions, findFailingSelector, selectorBase } from "../../src/dashboard/model-membership";
 import { PROVIDER_IDS } from "../../src/dashboard/app-config-store";
-import { PROVIDER_CATALOG, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
+import {
+  LEGACY_PROVIDER_IDS,
+  PROVIDER_CATALOG,
+  PROVIDER_IDS_COMMON,
+} from "../../src/contracts/provider-catalog.generated";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../src/contracts/provider-models";
 import { hasUsageProbe } from "../../src/dashboard/provider-usage";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -931,6 +936,79 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
     });
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("incomplete");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+  });
+
+  /** A catalog template row that ships more than one protocol — derived, never pinned. */
+  const mergedTemplate = (() => {
+    for (const [id, entry] of Object.entries(PROVIDER_CATALOG)) {
+      if (entry.tier !== "template" || entry.protocols === undefined || entry.protocols.length < 2) continue;
+      const secondary = entry.protocols
+        .slice(1)
+        .find((option) => option.baseUrl !== null && !option.baseUrl.includes("{") && option.models.length > 0);
+      if (secondary === undefined) continue;
+      return { id, entry, secondary };
+    }
+    return null;
+  })();
+
+  test.skipIf(mergedTemplate === null)("a chosen protocol materializes ITS endpoint and ITS vocabulary", async () => {
+    if (mergedTemplate === null) return;
+    const { db, app } = await seededWorld();
+    fetchSpy = mockStatus(200, { data: [] });
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: mergedTemplate.id,
+      api: mergedTemplate.secondary.api,
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(200);
+    const declared = await createAppConfigStore(db, TEST_KEY).listCustomProviders(app.id);
+    expect(declared).toHaveLength(1);
+    expect(declared[0]!.provider_id).toBe(mergedTemplate.id);
+    expect(declared[0]!.api).toBe(mergedTemplate.secondary.api as typeof declared[number]["api"]);
+    expect(mergedTemplate.secondary.baseUrl).toBe(declared[0]!.base_url);
+    expect(declared[0]!.model_ids).toEqual(
+      [...mergedTemplate.secondary.models].slice(0, MAX_CUSTOM_PROVIDER_MODEL_IDS),
+    );
+  });
+
+  test.skipIf(mergedTemplate === null)("an absent protocol keeps the row's default protocol", async () => {
+    if (mergedTemplate === null) return;
+    const { db, app } = await seededWorld();
+    fetchSpy = mockStatus(200, { data: [] });
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: mergedTemplate.id,
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(200);
+    const declared = await createAppConfigStore(db, TEST_KEY).listCustomProviders(app.id);
+    expect(declared[0]!.api).toBe(mergedTemplate.entry.api as typeof declared[number]["api"]);
+    expect(mergedTemplate.entry.baseUrl).toBe(declared[0]!.base_url);
+    expect(declared[0]!.model_ids).toEqual([...mergedTemplate.entry.models].slice(0, MAX_CUSTOM_PROVIDER_MODEL_IDS));
+  });
+
+  test("a protocol the row does not ship → the unsupported-api 400, zero rows stored", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+      throw new Error("fetch must not be called for an unsupported protocol");
+    }) as unknown as typeof fetch);
+    // A single-protocol row: the api it does not serve must be refused, not
+    // silently materialized under the row's default.
+    const single = Object.entries(PROVIDER_CATALOG).find(
+      ([, entry]) => entry.tier === "template" && entry.protocols === undefined && entry.api !== null,
+    )!;
+    const foreign = [...CUSTOM_PROVIDER_API_IDS].find((id) => id !== single[1].api)!;
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: single[0],
+      api: foreign,
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ key: "settings.error.templateApiUnsupported" });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
@@ -1870,7 +1948,6 @@ describe("GET settings provider_catalog usage_probe (per-key usage action)", () 
   /** Every catalog id with a usage endpoint — the explicit contract the stamp must match. */
   const MAPPED = [
     "commandcode",
-    "commandcode-anthropic",
     "opencode-go",
     "zai",
     "zai-coding-plan",
@@ -1916,5 +1993,80 @@ describe("GET settings provider_catalog usage_probe (per-key usage action)", () 
     );
     // An unmapped provider is stamped false, never left undefined.
     expect(rows.find((row) => row.id === "anthropic")?.usage_probe).toBe(false);
+  });
+});
+
+describe("GET settings provider_catalog — one row per provider, protocol as an option", () => {
+  type CatalogRow = {
+    id: string;
+    api: string | null;
+    base_url: string | null;
+    models: string[];
+    protocols?: Array<{ api: string; base_url: string | null; models: string[] }>;
+  };
+
+  async function catalogRows(env: Env): Promise<CatalogRow[]> {
+    const res = await getJson(SETTINGS_JSON, "mallory", env);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { provider_catalog: CatalogRow[] };
+    return body.provider_catalog;
+  }
+
+  test("a mixed-protocol row carries its options (snake_case endpoints, default first); a single-protocol row carries none", async () => {
+    const { db } = await seededWorld();
+    const rows = await catalogRows(makeEnv(db));
+    const merged = rows.filter((row) => row.protocols !== undefined);
+    expect(merged.length).toBeGreaterThan(0);
+    for (const row of merged) {
+      const options = row.protocols!;
+      expect(options.length, row.id).toBeGreaterThan(1);
+      // The default option IS the row's own scalars, so a consumer that knows
+      // nothing about protocols keeps the default's behaviour.
+      expect(row.api, row.id).toBe(options[0]!.api);
+      expect(row.base_url, row.id).toBe(options[0]!.base_url);
+      expect(options[0]!.models, row.id).toEqual(row.models);
+      // Every option names its own protocol, endpoint and vocabulary.
+      expect(new Set(options.map((option) => option.api)).size, row.id).toBe(options.length);
+    }
+    // Absent, never an empty array: the single-protocol rows are unchanged.
+    expect(rows.some((row) => row.protocols === undefined)).toBe(true);
+    for (const row of rows) if (row.protocols === undefined) expect(row.protocols, row.id).toBeUndefined();
+  });
+
+  test("a declaration stored under a collapsed id carries legacy_of and resolves to the provider row", async () => {
+    const { db, app } = await seededWorld();
+    // The add routes no longer offer a per-protocol id, so the compatibility
+    // case is seeded through the store — exactly what an older row looks like.
+    const mergedGroup = Object.entries(PROVIDER_CATALOG).find(([providerId, entry]) => {
+      if (entry.protocols === undefined || entry.protocols.length < 2) return false;
+      if (!Object.values(LEGACY_PROVIDER_IDS).includes(providerId)) return false;
+      return entry.protocols.every((option) => option.baseUrl !== null && !option.baseUrl.includes("{"));
+    });
+    expect(mergedGroup).toBeDefined();
+    const [providerId, entry] = mergedGroup!;
+    const legacyId = Object.keys(LEGACY_PROVIDER_IDS).find((id) => LEGACY_PROVIDER_IDS[id] === providerId)!;
+    const option = entry!.protocols![1]!;
+    await createAppConfigStore(db, TEST_KEY).upsertCustomProvider(
+      app.id,
+      {
+        provider_id: legacyId,
+        base_url: option.baseUrl!,
+        api: option.api as (typeof CUSTOM_PROVIDER_API_IDS)[number],
+        model_ids: ["m1"],
+      },
+      PLAIN_KEY,
+    );
+    const res = await getJson(SETTINGS_JSON, "mallory", makeEnv(db));
+    const body = (await res.json()) as {
+      custom_providers: Array<{ provider_id: string; legacy_of?: string }>;
+      provider_catalog: CatalogRow[];
+    };
+    const declaration = body.custom_providers.find((row) => row.provider_id === legacyId)!;
+    expect(declaration).toBeDefined();
+    // The resolver the SPA labels, seeds and probes the group through.
+    expect(declaration.legacy_of).toBe(providerId);
+    // The stored id is not a catalog row of its own any more.
+    expect(body.provider_catalog.some((row) => row.id === legacyId)).toBe(false);
+    expect(body.provider_catalog.some((row) => row.id === providerId)).toBe(true);
   });
 });

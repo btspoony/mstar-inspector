@@ -160,7 +160,7 @@ import {
 } from "./app-config-store";
 // Display-only picker grouping (AD-547). Never a mechanics input —
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
-import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
+import { LEGACY_PROVIDER_IDS, PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { isFindingSeverity } from "../contracts/finding-severity";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS, resolveModelSize } from "../contracts/provider-models";
 import { MODEL_LIMITS, MODEL_LIMITS_SNAPSHOT } from "../contracts/provider-model-limits.generated";
@@ -3650,6 +3650,12 @@ const appSettingsRoute = async (c: DashboardContext) => {
         base_url,
         api,
         model_ids: [...model_ids],
+        // A declaration still stored under a per-protocol catalog id resolves
+        // to the provider row that absorbed it (label, vocabulary, sizes) —
+        // read-only, so the stored id and its keys are untouched.
+        ...(Object.hasOwn(LEGACY_PROVIDER_IDS, provider_id)
+          ? { legacy_of: LEGACY_PROVIDER_IDS[provider_id]! }
+          : {}),
         // Absent when the owner stated nothing: the form seeds blank sizes and
         // shows the row as saved-but-not-usable instead of inventing a number.
         ...(models_meta === undefined ? {} : { models_meta }),
@@ -3712,6 +3718,17 @@ const appSettingsRoute = async (c: DashboardContext) => {
             // id. The model dialog pre-fills its blank fields from here and
             // posts no override for a value the operator leaves untouched.
             model_limits: MODEL_LIMITS[id] ?? {},
+            // Mixed-protocol rows only: the protocol choice the add form
+            // offers, default first. Absent = a single-protocol row.
+            ...(meta.protocols === undefined
+              ? {}
+              : {
+                  protocols: meta.protocols.map((option) => ({
+                    api: option.api,
+                    base_url: option.baseUrl,
+                    models: [...option.models],
+                  })),
+                }),
             verifiable: PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported",
             usage_probe: hasUsageProbe(id),
             eligibility: ompRuntime ? meta.tier : "unavailable",
@@ -3729,6 +3746,15 @@ const appSettingsRoute = async (c: DashboardContext) => {
             models: [...meta.models],
             catalog_base_url: meta.baseUrl,
             model_limits: MODEL_LIMITS[id] ?? {},
+            ...(meta.protocols === undefined
+              ? {}
+              : {
+                  protocols: meta.protocols.map((option) => ({
+                    api: option.api,
+                    base_url: option.baseUrl,
+                    models: [...option.models],
+                  })),
+                }),
             verifiable: true,
             usage_probe: hasUsageProbe(id),
             eligibility: ompRuntime ? meta.tier : "unavailable",
@@ -4513,9 +4539,10 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // materializes with is the form's `base_url` override when provided,
     // else the entry's catalog prefill; the account id is demanded only
     // when the effective base URL carries the {account_id} placeholder
-    // (Workers-AI-shaped URLs) and is substituted into it. The save flow
-    // pins the template's api protocol, prefills model_ids from the
-    // template's representative models, and stores the key under the
+    // (Workers-AI-shaped URLs) and is substituted into it. A template that
+    // ships several protocols takes the operator's choice (absent = the row's
+    // default), prefills model_ids from THAT protocol's vocabulary, and stores
+    // the key under the
     // provider's credential-payload pool (under its provider id)
     // via the same upsertCustomProvider path as add-custom-provider
     // (verify-first custom probe — every bound below mirrors the
@@ -4528,7 +4555,23 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     if (template === undefined || template.tier !== "template") {
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateUnknown);
     }
-    const baseUrlTemplate = formBaseUrl !== "" ? formBaseUrl : template.baseUrl;
+    // The protocol the operator picked in the add form: absent = the row's
+    // default protocol (its own api/baseUrl/models), present = one of the row's
+    // protocol options, whose endpoint and vocabulary the declaration
+    // materializes with. Any other value is the unsupported-api refusal, before
+    // anything is written.
+    const requestedApi = typeof form.api === "string" ? form.api.trim() : "";
+    const protocolOptions = template.protocols ?? [
+      { api: template.api, baseUrl: template.baseUrl, models: template.models },
+    ];
+    const protocol =
+      requestedApi === "" ? protocolOptions[0] : protocolOptions.find((option) => option.api === requestedApi);
+    if (protocol === undefined) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateApiUnsupported, {
+        api: requestedApi,
+      });
+    }
+    const baseUrlTemplate = formBaseUrl !== "" ? formBaseUrl : protocol.baseUrl;
     if (baseUrlTemplate === null || baseUrlTemplate === "") {
       // Only a template whose catalog base URL is absent AND whose form
       // override is empty is unmaterializable (breadth rows may ship with a
@@ -4562,17 +4605,18 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         limit: MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
       });
     }
-    if (!CUSTOM_PROVIDER_API_IDS.includes(template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
-      // template.api is `string | null` (catalog snapshot shape) — String()
+    if (!CUSTOM_PROVIDER_API_IDS.includes(protocol.api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
+      // protocol.api is `string | null` (catalog snapshot shape) — String()
       // keeps the former `${template.api}` face for the null case verbatim.
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateApiUnsupported, {
-        api: String(template.api),
+        api: String(protocol.api),
       });
     }
     // The catalog now carries each template's FULL vocabulary — clip it to the
     // store's own bound so a widened snapshot can never trip the 400 below (the
-    // operator edits the list afterwards through update-provider-models).
-    const modelIds = [...template.models].slice(0, MAX_CUSTOM_PROVIDER_MODEL_IDS);
+    // operator edits the list afterwards through update-provider-models). For a
+    // chosen protocol this is THAT protocol's vocabulary, not the default's.
+    const modelIds = [...protocol.models].slice(0, MAX_CUSTOM_PROVIDER_MODEL_IDS);
     if (modelIds.length === 0) {
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateNoModels);
     }
@@ -4616,7 +4660,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // protocol differing from the catalog's would trip the endpoint lock on a
     // form that displays no protocol control at all. The first-time CREATE
     // path keeps the catalog materialization.
-    const declApi = storedDeclaration?.api ?? (template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number]);
+    const declApi = storedDeclaration?.api ?? (protocol.api as (typeof CUSTOM_PROVIDER_API_IDS)[number]);
     const declModelIds = storedDeclaration?.model_ids ?? modelIds;
     try {
       const verified = await verifyProviderKey(
@@ -4692,9 +4736,10 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // Per-model facts (compass D10): checked BEFORE the store so a save that
     // omits a required size writes nothing at all (ids included). A size the
     // operator left blank is resolved from the provider's catalog entry — but
-    // only when this declaration IS that catalog row (same base URL): a private
-    // endpoint reusing a catalog id must not inherit the vendor's numbers. Only
-    // a model with no size on either side is refused.
+    // only when this declaration sits on one of that row's OWN endpoints (a
+    // protocol's base URL included): a private endpoint reusing a catalog id
+    // must not inherit the vendor's numbers. Only a model with no size on
+    // either side is refused.
     const declarationBaseUrl = (await store.listCustomProviders(gate.app.id)).find(
       (row) => row.provider_id === providerId,
     )?.base_url;

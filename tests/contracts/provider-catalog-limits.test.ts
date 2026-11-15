@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { catalogLimitsFor } from "../../src/contracts/provider-catalog-limits";
 import { catalogBaseUrlMatches } from "../../src/contracts/provider-model-limits";
-import { PROVIDER_CATALOG } from "../../src/contracts/provider-catalog.generated";
+import { LEGACY_PROVIDER_IDS, PROVIDER_CATALOG } from "../../src/contracts/provider-catalog.generated";
 import { MODEL_LIMITS } from "../../src/contracts/provider-model-limits.generated";
 
 /**
@@ -39,6 +39,58 @@ describe("catalogLimitsFor — the vendor's numbers describe the vendor's endpoi
 
   test("an id outside the catalog gets nothing", () => {
     expect(catalogLimitsFor("no-such-provider", "https://example.com/v1")).toBeUndefined();
+  });
+});
+
+/**
+ * A merged (multi-protocol) row the size table covers — derived at runtime, no
+ * vendor id or URL is pinned.
+ */
+const merged = (() => {
+  for (const [providerId, entry] of Object.entries(PROVIDER_CATALOG)) {
+    const protocols = entry.protocols;
+    if (protocols === undefined || protocols.length < 2) continue;
+    if (MODEL_LIMITS[providerId] === undefined) continue;
+    if (protocols.some((option) => option.baseUrl === null || option.baseUrl.includes("{"))) continue;
+    return { providerId, endpoints: protocols.map((option) => option.baseUrl!) };
+  }
+  return null;
+})();
+
+/** A collapsed per-protocol id whose provider row the size table covers. */
+const legacyId =
+  merged === null
+    ? null
+    : (Object.keys(LEGACY_PROVIDER_IDS).find((id) => LEGACY_PROVIDER_IDS[id] === merged.providerId) ?? null);
+
+describe("catalogLimitsFor — one row per provider, every protocol's endpoint is the row's", () => {
+  test.skipIf(merged === null)("a declaration on ANY of the row's protocol URLs gets the row's table", () => {
+    if (merged === null) return;
+    for (const endpoint of merged.endpoints) {
+      expect(catalogLimitsFor(merged.providerId, endpoint), endpoint).toBe(MODEL_LIMITS[merged.providerId]!);
+    }
+  });
+
+  test.skipIf(legacyId === null)("a collapsed per-protocol id resolves to the row that absorbed it", () => {
+    if (merged === null || legacyId === null) return;
+    for (const endpoint of merged.endpoints) {
+      expect(catalogLimitsFor(legacyId, endpoint), endpoint).toBe(MODEL_LIMITS[merged.providerId]!);
+    }
+  });
+
+  test.skipIf(merged === null)("a URL one path segment off the row's endpoints gets nothing", () => {
+    if (merged === null) return;
+    expect(catalogLimitsFor(merged.providerId, `${merged.endpoints[0]}/extra`)).toBeUndefined();
+    if (legacyId !== null) expect(catalogLimitsFor(legacyId, `${merged.endpoints[0]}/extra`)).toBeUndefined();
+  });
+
+  test.skipIf(legacyId === null)("a private endpoint reusing a collapsed id gets nothing", () => {
+    if (legacyId === null) return;
+    expect(catalogLimitsFor(legacyId, "https://private.example.com/v1")).toBeUndefined();
+  });
+
+  test("a prototype-chain id is never a row or an alias", () => {
+    expect(catalogLimitsFor("constructor", "https://api.example.com/v1")).toBeUndefined();
   });
 });
 

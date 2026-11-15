@@ -78,7 +78,6 @@ describe("shared normalizers", () => {
 describe("usage probe table", () => {
   const covered = [
     "commandcode",
-    "commandcode-anthropic",
     "opencode-go",
     "zai",
     "zai-coding-plan",
@@ -94,8 +93,18 @@ describe("usage probe table", () => {
     "cursor",
   ];
 
-  test("covers exactly the ten families' fifteen catalog ids", () => {
+  test("covers exactly the ten families' fourteen catalog ids", () => {
     expect(covered.filter((id) => hasUsageProbe(id))).toEqual(covered);
+  });
+
+  test("a declaration stored under a collapsed per-protocol id probes its provider's endpoint", () => {
+    // The catalog emits one row per provider, so the probe table is keyed by
+    // the canonical id only; a legacy id resolves to it before the lookup.
+    expect(hasUsageProbe("commandcode-anthropic")).toBe(true);
+    expect(usageProbeHosts("commandcode-anthropic")).toEqual(usageProbeHosts("commandcode"));
+    expect(hasUsageProbe("opencode-go-anthropic")).toBe(true);
+    // An id with no collapsed row still has none.
+    expect(hasUsageProbe("commandcode-nonsense")).toBe(false);
   });
 
   test("every other id has no probe (own-property lookup, no proto leak)", () => {
@@ -111,7 +120,7 @@ describe("usage probe table", () => {
     // hand-kept list that could drift from the request code.
     const families: Array<{ ids: string[]; urls: string[]; responses: () => Response[] }> = [
       {
-        ids: ["commandcode", "commandcode-anthropic"],
+        ids: ["commandcode"],
         urls: ["https://api.commandcode.ai/alpha/whoami", "https://api.commandcode.ai/alpha/billing/credits"],
         responses: () => [json(200, { user: { id: "user-1" } }), json(200, {})],
       },

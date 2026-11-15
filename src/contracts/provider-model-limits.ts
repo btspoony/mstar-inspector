@@ -25,3 +25,15 @@ export function catalogBaseUrlMatches(
     .join("");
   return new RegExp(`^${pattern}$`).test(declared);
 }
+
+/**
+ * Does a declaration's base URL name ONE of a catalog row's own endpoints? A
+ * mixed-protocol row serves several (one per protocol), and the vendor's
+ * numbers describe each of them — a URL outside the set borrows nothing.
+ */
+export function catalogEndpointsMatch(
+  catalogBaseUrls: readonly (string | null | undefined)[],
+  declaredBaseUrl: string,
+): boolean {
+  return catalogBaseUrls.some((catalogBaseUrl) => catalogBaseUrlMatches(catalogBaseUrl, declaredBaseUrl));
+}
