@@ -16,7 +16,9 @@
  * and src/contracts/failure-stages.ts — the `review_failures` stage
  * partition), which bound the sandbox_image_id value domain and keep the
  * failure-count/history SQL off hand-written stage literals, plus
- * src/contracts/review-gate.ts for the create path's score floor.
+ * src/contracts/review-gate.ts for the create path's score floor, and
+ * ./runtime-config-store for the official-workspace read — `setBotScope` must
+ * not become a second parser of that row.
  * The `db` parameter is a locally-declared narrow D1 face (types
  * only, zero imports) — a real `D1Database`, the bun:sqlite test double
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
@@ -33,6 +35,11 @@
  * served by `src/dashboard/targets-store.ts`. This store keeps only the
  * execution identity: credentials, model and sandbox configuration,
  * installations, and `review_enabled` as the OPERATIONAL pause.
+ *
+ * A bot also carries a SCOPE (migration 0058): `owned` serves its own workspace
+ * only, `shared` is offered platform-wide. Only a platform operator writes it,
+ * only through `setBotScope`, and only from inside the official workspace —
+ * that is a platform authorization, never workspace self-service.
  *
  * Semantics (route call sites rely on these):
  *   - getAppForWebhook / getAppByGithubId / getAppById return the row
@@ -123,6 +130,7 @@ import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
 import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
+import { readOfficialWorkspaceId } from "./runtime-config-store";
 
 /** A row of `review_bots` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
@@ -1927,6 +1935,142 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       };
     },
   };
+}
+
+// --- bot scope (migration 0058, contract § 7.1) ------------------------------
+
+/** A bot's scope: `owned` serves its workspace only, `shared` is offered platform-wide. */
+export type BotScope = "owned" | "shared";
+
+/**
+ * The scope transition's outcome. Refusals are VALUES, not thrown strings: the
+ * route maps each one to its frozen status/body pair and never parses a message.
+ */
+export type BotScopeOutcome =
+  | { outcome: "ok"; scope: BotScope; sharedAt: string | null }
+  | { outcome: "bot_not_found" }
+  | { outcome: "outside_official_workspace" }
+  | { outcome: "confirm_required" };
+
+/** One live bot as the operator console lists it (contract § 8.3). */
+export type BotScopeRow = {
+  id: string;
+  name: string;
+  github_app_id: number;
+  workspace_id: string | null;
+  scope: BotScope;
+  shared_at: string | null;
+  deleted_at: string | null;
+};
+
+/** The state a transition starts from: the live bot and its current scope. */
+const BOT_SCOPE_READ_SQL = `
+  SELECT scope, shared_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
+
+const BOT_SCOPE_LIST_SQL = `
+  SELECT b.id, b.name, b.github_app_id, w.workspace_id, b.scope, b.shared_at, b.deleted_at
+    FROM review_bots b LEFT JOIN bot_workspaces w ON w.bot_id = b.id
+   WHERE b.deleted_at IS NULL
+   ORDER BY b.name, b.id`;
+
+/**
+ * Audit row + scope write, in ONE batch, both carrying the same guard — the
+ * bot is live and (for a share) it belongs to the named official workspace — so
+ * a refused write appends nothing. `before` is a subquery against the
+ * not-yet-updated row: a bind cannot read the old value after the write, and
+ * the `after` pair is the value the writer computed, never a re-read.
+ */
+const BOT_SCOPE_SHARE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'runtime.bot_scope.set', 'bot', ?3,
+         json_object(
+           'before', json_object('scope', (SELECT scope FROM review_bots WHERE id = ?3),
+                                 'shared_at', (SELECT shared_at FROM review_bots WHERE id = ?3)),
+           'after', json_object('scope', 'shared', 'shared_at', ?4)),
+         ?5
+   WHERE EXISTS (SELECT 1 FROM review_bots b JOIN bot_workspaces w ON w.bot_id = b.id
+                  WHERE b.id = ?3 AND b.deleted_at IS NULL AND w.workspace_id = ?6)`;
+
+const BOT_SCOPE_SHARE_SQL = `
+  UPDATE review_bots SET scope = 'shared', shared_at = ?2
+   WHERE id = ?1 AND deleted_at IS NULL
+     AND EXISTS (SELECT 1 FROM bot_workspaces w
+                  WHERE w.bot_id = review_bots.id AND w.workspace_id = ?3)`;
+
+const BOT_SCOPE_UNSHARE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'runtime.bot_scope.set', 'bot', ?3,
+         json_object(
+           'before', json_object('scope', (SELECT scope FROM review_bots WHERE id = ?3),
+                                 'shared_at', (SELECT shared_at FROM review_bots WHERE id = ?3)),
+           'after', json_object('scope', 'owned', 'shared_at', NULL)),
+         ?4
+   WHERE EXISTS (SELECT 1 FROM review_bots WHERE id = ?3 AND deleted_at IS NULL)`;
+
+/**
+ * Unsharing is NOT gated on the official workspace: a stale share must stay
+ * revocable by the only role that can revoke it.
+ */
+const BOT_SCOPE_UNSHARE_SQL = `
+  UPDATE review_bots SET scope = 'owned', shared_at = NULL
+   WHERE id = ?1 AND deleted_at IS NULL`;
+
+/**
+ * Move one bot between `owned` and `shared`, auditing accepted writes in the
+ * same batch. A same-value transition is a no-op that appends nothing;
+ * `shared → owned` needs an explicit `confirm: true`; `owned → shared` needs the
+ * bot's workspace to BE the official workspace. Unsharing ignores that last
+ * condition on purpose (a stale share stays revocable).
+ */
+export async function setBotScope(
+  db: AppsStoreD1,
+  input: { botId: string; scope: BotScope; confirm?: boolean; actor: string; now: string },
+): Promise<BotScopeOutcome> {
+  const { botId, scope, actor, now } = input;
+  const current = await db
+    .prepare(BOT_SCOPE_READ_SQL)
+    .bind(botId)
+    .first<{ scope: BotScope; shared_at: string | null }>();
+  if (!current) return { outcome: "bot_not_found" };
+  if (current.scope === scope) return { outcome: "ok", scope, sharedAt: current.shared_at };
+  if (scope === "owned" && input.confirm !== true) return { outcome: "confirm_required" };
+
+  let officialWorkspaceId: string | null = null;
+  if (scope === "shared") {
+    officialWorkspaceId = await readOfficialWorkspaceId(db);
+    if (officialWorkspaceId === null) return { outcome: "outside_official_workspace" };
+  }
+
+  const [, write] =
+    scope === "shared"
+      ? await db.batch([
+          db
+            .prepare(BOT_SCOPE_SHARE_AUDIT_SQL)
+            .bind(crypto.randomUUID(), actor, botId, now, now, officialWorkspaceId),
+          db.prepare(BOT_SCOPE_SHARE_SQL).bind(botId, now, officialWorkspaceId),
+        ])
+      : await db.batch([
+          db.prepare(BOT_SCOPE_UNSHARE_AUDIT_SQL).bind(crypto.randomUUID(), actor, botId, now),
+          db.prepare(BOT_SCOPE_UNSHARE_SQL).bind(botId),
+        ]);
+
+  // The write lost its guard, so nothing was written and nothing was audited.
+  // Re-read to name which precondition failed: a bot retired between the read
+  // above and the batch is "not found", a live one can only have left the
+  // official workspace (an unshare's only guard is `deleted_at IS NULL`).
+  if ((write?.meta.changes ?? 0) === 0) {
+    const live = await db.prepare(BOT_SCOPE_READ_SQL).bind(botId).first<{ scope: BotScope }>();
+    return live === null ? { outcome: "bot_not_found" } : { outcome: "outside_official_workspace" };
+  }
+  return { outcome: "ok", scope, sharedAt: scope === "shared" ? now : null };
+}
+
+/** Every live bot with its scope, name-ordered — the operator console's list. */
+export async function listBotScopes(db: AppsStoreD1): Promise<BotScopeRow[]> {
+  const res = await db.prepare(BOT_SCOPE_LIST_SQL).all<BotScopeRow>();
+  return res.results;
 }
 
 /** The `pull_requests` columns the ledger reads (`number` = `pr_number`). */
