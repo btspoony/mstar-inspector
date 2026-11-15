@@ -208,6 +208,13 @@ export type GithubAppRow = {
   sandbox_image_id: string;
   created_at: string;
   updated_at: string;
+  /**
+   * The bot's scope (migration 0058): `owned` serves its own workspace only,
+   * `shared` is offered platform-wide. Only `setBotScope` writes it, and
+   * `targets-store.resolve` is its one review-path reader: a shared bot has no
+   * implicit target, so it resolves nothing until a claim binds an installation.
+   */
+  scope: BotScope;
   /** Owning workspace (migration 0026); present on every execution-facing read. */
   workspace_id?: string;
 };
@@ -308,6 +315,19 @@ export type AppInstallationRow = {
   /** GitHub login of the installation account; NULL = never observed. */
   account_login: string | null;
   seen_at: string;
+};
+
+/**
+ * One installation INCLUDING a removed one — the bound-state read. Unlike
+ * `AppInstallationRow` (the install-health panel's PRESENT rows), a removed
+ * installation is exactly what this answers: a target keeps its binding
+ * through an uninstall, and the settings block says reviews stopped.
+ */
+export type AppInstallationState = {
+  installation_id: number;
+  account_login: string | null;
+  /** NULL = GitHub still has it; a timestamp = observed absent (migration 0055). */
+  removed_at: string | null;
 };
 
 /**
@@ -1141,6 +1161,25 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .bind(appId)
         .all<AppInstallationRow>();
       return res.results;
+    },
+
+    /**
+     * One installation of this bot INCLUDING a removed one — the settings
+     * block's bound-state read. `removed_at IS NULL` is the present case; a
+     * stamped row still answers, because a target keeps its binding through an
+     * uninstall and the block has to say that reviews stopped.
+     */
+    async getInstallation(
+      appId: string,
+      installationId: number,
+    ): Promise<AppInstallationState | null> {
+      return db
+        .prepare(
+          `SELECT installation_id, account_login, removed_at FROM bot_installations
+           WHERE bot_id = ? AND installation_id = ?`,
+        )
+        .bind(appId, installationId)
+        .first<AppInstallationState>();
     },
 
     /**

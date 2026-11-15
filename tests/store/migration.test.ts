@@ -3357,3 +3357,115 @@ describe("migrations/0058_review_bot_scope.sql", () => {
     }
   });
 });
+
+describe("install_claims (migrations/0059_install_claims.sql)", () => {
+  /** The claim's three foreign keys need a user, a bot, its workspace and a target. */
+  function seedClaimParents(db: TestD1): void {
+    db.raw
+      .prepare(
+        `INSERT INTO users (id, github_login, role, created_at)
+         VALUES ('user-claims', 'mallory', 'member', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+            status, created_at, updated_at)
+         VALUES ('bot-claims', 9101, 'bot-claims', 'enc', 'enc', 'acme', 'active',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw.prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-claims', 'default')`).run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES ('target-claims', 'default', 'bot-claims', 'target-claims', 'acme',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+  }
+
+  function insertClaim(db: TestD1, id: string, consumedAt: string | null = null): void {
+    db.raw
+      .prepare(
+        `INSERT INTO install_claims (id, user_id, workspace_id, target_id, created_at, expires_at, consumed_at)
+         VALUES (?, 'user-claims', 'default', 'target-claims',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z', ?)`,
+      )
+      .run(id, consumedAt);
+  }
+
+  test("install_claims carries the contract's seven columns, a NULL consumed_at and its two indexes", () => {
+    const db = createMigratedTestD1();
+    const columns = db.raw.query("PRAGMA table_info(install_claims)").all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: unknown;
+    }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "id",
+      "user_id",
+      "workspace_id",
+      "target_id",
+      "created_at",
+      "expires_at",
+      "consumed_at",
+    ]);
+    for (const column of ["user_id", "workspace_id", "target_id", "created_at", "expires_at"]) {
+      expect(columns.find((c) => c.name === column)?.notnull, column).toBe(1);
+    }
+    // `consumed_at` is the live predicate: unclaimed means NULL, and nothing
+    // writes a default into it.
+    expect(columns.find((c) => c.name === "consumed_at")).toMatchObject({ notnull: 0, dflt_value: null });
+
+    const indexNames = (
+      db.raw.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'install_claims'").all() as Array<{
+        name: string;
+      }>
+    ).map((row) => row.name);
+    expect(indexNames).toContain("install_claims_user_open");
+    expect(indexNames).toContain("install_claims_live_target");
+
+    const openColumns = (
+      db.raw.query("PRAGMA index_info(install_claims_user_open)").all() as Array<{ name: string }>
+    ).map((row) => row.name);
+    expect(openColumns).toEqual(["user_id", "consumed_at"]);
+
+    const liveColumns = (
+      db.raw.query("PRAGMA index_info(install_claims_live_target)").all() as Array<{ name: string }>
+    ).map((row) => row.name);
+    expect(liveColumns).toEqual(["user_id", "target_id"]);
+    const liveSqlRow = db.raw
+      .query("SELECT sql FROM sqlite_master WHERE name = 'install_claims_live_target'")
+      .get();
+    if (liveSqlRow === null || typeof liveSqlRow !== "object" || !("sql" in liveSqlRow) || typeof liveSqlRow.sql !== "string") {
+      throw new Error("install_claims_live_target is missing from the migrated schema");
+    }
+    // Partial: only an UNCONSUMED claim holds the slot.
+    expect(liveSqlRow.sql).toContain("WHERE consumed_at IS NULL");
+  });
+
+  test("install_claims_live_target refuses a second live claim for one target and admits consumed rows", () => {
+    const db = createMigratedTestD1();
+    seedClaimParents(db);
+    insertClaim(db, "claim-live");
+    expect(db.raw.query("SELECT consumed_at FROM install_claims WHERE id = 'claim-live'").get()).toEqual({
+      consumed_at: null,
+    });
+
+    // A second LIVE claim for the same (user, target) is refused: "N claims"
+    // always means N different targets.
+    expect(() => insertClaim(db, "claim-live-2")).toThrow();
+
+    // Consuming the first frees the slot, so the same target can be claimed again.
+    db.raw
+      .prepare("UPDATE install_claims SET consumed_at = '2026-01-01T00:05:00.000Z' WHERE id = 'claim-live'")
+      .run();
+    insertClaim(db, "claim-live-3");
+    // A consumed row is outside the partial index: history may stack.
+    insertClaim(db, "claim-consumed", "2026-01-01T00:06:00.000Z");
+
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM install_claims").get()).toEqual({ n: 3 });
+  });
+});

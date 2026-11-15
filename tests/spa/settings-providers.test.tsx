@@ -46,6 +46,7 @@ const keyRow = (provider: string, keyId: string, overrides: Partial<ProviderKeyR
 function managePayload(overrides: Partial<SettingsManagePayload> = {}): SettingsManagePayload {
   return {
     can_manage: true,
+    installation: null,
     workspace_id: "ws_test",
     target_id: "rt-501",
     app: {
@@ -54,6 +55,7 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
       review_enabled: true,
       created_by: "mallory",
       last_webhook_at: null,
+      scope: "owned" as const,
       id: "app-test",
       sandbox_image_id: "omp",
       review_trigger_mode: "every_push",

@@ -51,6 +51,7 @@ import { attachCheckAtAcceptance } from "../pipeline/checks";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
+import { handleSetupGet, handleSetupPost } from "./install-setup";
 import { adminApp } from "../admin/index";
 import { isFlagEnabled } from "../admin/flags";
 import { trailingSlashRedirect } from "./redirects";
@@ -311,6 +312,12 @@ app.get("/healthz", (c) => c.json({ ok: true, version: `v${APP_VERSION}` }));
 // 08 B0: GitHub OAuth + dashboard shell. Route isolation: the dashboard
 // module never imports pipeline/store/review (architect decision Q2).
 app.route("/dashboard", dashboardApp);
+// GitHub's Setup URL (`{origin}/bot/setup`, configured in the App's settings —
+// not by this code). Mounted on `app` so it serves both deployment modes: a
+// callback carries no `:workspaceRef`, and an `APP_ROUTES` entry would widen
+// the operator-read ceiling for workspace routes.
+app.get("/bot/setup", handleSetupGet);
+app.post("/bot/setup", handleSetupPost);
 
 /**
  * Per-App webhook face (spec § Multi-App 契约; the ONLY HTTP review

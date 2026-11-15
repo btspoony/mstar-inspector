@@ -77,6 +77,7 @@ const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat"
 /** A manage-face settings payload — the full settings tab body renders. */
 const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
+  installation: null,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
   app: {
@@ -92,6 +93,7 @@ const detailPayload = (): SettingsManagePayload => ({
     github_avatar_url: null,
     github_metadata_synced_at: null,
     last_webhook_at: null,
+    scope: "owned" as const,
     sandbox_image_id: "omp",
     review_trigger_mode: "every_push",
     review_level: null,
@@ -2021,6 +2023,7 @@ describe("GitHub App identity card", () => {
       review_enabled: true,
       created_by: "alice",
       last_webhook_at: null,
+      scope: "owned" as const,
       sandbox_image_id: "omp",
       review_trigger_mode: "every_push",
       review_level: null,

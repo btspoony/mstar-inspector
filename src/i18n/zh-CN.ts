@@ -801,6 +801,15 @@ export const zhCN: Dictionary = {
     installLink: "打开安装页面",
     installLinkAria: "在新标签页中于 GitHub 安装 {name}",
     installNoSlug: "此 App 尚无 GitHub slug，因此没有安装链接。请先刷新 GitHub 身份，再分享链接。",
+    // 已安装标签页：平台共享机器人的认领。GitHub 的 Setup 重定向不带 state，
+    // 认领记录是唯一能说明“这次安装属于哪个 target”的载体，因此先记认领再跳转。
+    installClaim: "认领一个安装",
+    installClaimCopy:
+      "此机器人已平台共享。认领会记录你接下来创建的安装归属哪个 target，然后打开 GitHub。",
+    installClaimFailed: "认领创建失败。请刷新本页后重试。",
+    installBoundAccount: "已绑定的安装账号：{account}",
+    installBoundNoAccount: "已绑定安装 {id}；GitHub 尚未上报其账号。",
+    installRemoved: "GitHub 已不存在此安装，审查已暂停。重新安装后，本 target 会恢复审查。",
     // 已安装标签页：仓库所有者允许名单（迁移 0045）。
     allowlist: "所有者允许名单",
     allowlistCopy: "开关打开时，仅审查这些仓库所有者发起的交付。",
