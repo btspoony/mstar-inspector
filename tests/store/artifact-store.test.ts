@@ -588,6 +588,50 @@ describe("createArtifactStore().put — publication round", () => {
   });
 });
 
+  test("an envelope with several findings round-trips, and a repeat put writes nothing new", async () => {
+    const db = createSeededTestD1();
+    const store = createArtifactStore(db);
+    const twoFindings = payload({
+      findings: [
+        {
+          mergeClass: "should-fix",
+          category: "logic",
+          file_path: "src/a.ts",
+          line_start: 1,
+          line_end: 2,
+          title: "First",
+          body: "a",
+          fingerprint_hint: "fp-a",
+        },
+        {
+          mergeClass: "nit",
+          category: "style",
+          file_path: "src/b.ts",
+          line_start: 3,
+          line_end: 4,
+          title: "Second",
+          body: "b",
+          fingerprint_hint: "fp-b",
+        },
+      ],
+    });
+    const doc = reviewDoc({ payload: twoFindings });
+
+    // The unguarded `put` path is the one no other test drives at the
+    // statement level: both finding INSERTs share ONE batch with the review.
+    await store.put(doc);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 2 });
+    expect(db.raw.query("SELECT COUNT(DISTINCT review_id) AS n FROM findings").get()).toEqual({ n: 1 });
+    // The envelope is readable back through the stored row.
+    expect(await store.get({ kind: "review", key: KEY })).toEqual(twoFindings);
+
+    // A repeat write is a no-op at both levels (review id, finding ids).
+    await store.put(doc);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 2 });
+  });
+
 describe("createArtifactStore().get", () => {
   test("returns the parsed envelope for a v1 row", async () => {
     const db = createSeededTestD1();

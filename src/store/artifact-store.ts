@@ -413,7 +413,7 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
              SELECT ?, COALESCE((SELECT id FROM reviews
                                   WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?), ?),
                     ?, ?, ?, ?, ?, ?, ?, ?
-                ${options?.guard === undefined ? "" : `WHERE ${options.guard.sql}`}
+                ${options?.guard === undefined ? "WHERE 1" : `WHERE ${options.guard.sql}`}
              ON CONFLICT (id) DO NOTHING`,
       binds: [
           `${doc.key}#${index}`,
