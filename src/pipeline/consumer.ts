@@ -3394,9 +3394,9 @@ function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomP
     api: provider.api,
     model_ids: [...provider.model_ids],
   };
-  // The vendor's numbers describe the vendor's endpoint; a private endpoint
-  // reusing a catalog id must not inherit them.
-  const catalog = catalogLimitsFor(provider.provider_id, provider.base_url);
+  // The vendor's numbers describe the MODEL, so the id alone resolves them —
+  // whatever endpoint the declaration points at.
+  const catalog = catalogLimitsFor(provider.provider_id);
   const meta: CustomProviderModelsMeta = {};
   for (const modelId of provider.model_ids) {
     const declared = provider.models_meta?.[modelId];

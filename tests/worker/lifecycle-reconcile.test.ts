@@ -490,7 +490,7 @@ describe("publication lane — confirmed apply", () => {
     expect(pubRow(db, "pub-1")).toMatchObject({ phase: "applied", recovery_state: "done" });
   });
 
-  test("re-apply is idempotent; a crash between store.put and the applied mark skips the review INSERT", async () => {
+  test("re-apply is idempotent; a crash between store.put and the applied mark re-runs the artifact as a no-op", async () => {
     const db = createMigratedTestD1();
     seedApp(db, APP);
     await seedConfirmedCrashed(db, "pub-1", reviewPayload(SCOPE));
@@ -499,9 +499,10 @@ describe("publication lane — confirmed apply", () => {
     expect(first.applied).toBe(1);
 
     // Simulate a crash between store.put and the applied mark: reset the
-    // applied row to confirmed/pending, then reconcile again — the review
-    // row exists, so the store.put INSERT must be SKIPPED (§7.11.1) and no
-    // finding/round may duplicate.
+    // applied row to confirmed/pending, then reconcile again. The artifact is
+    // composed on EVERY attempt (both ids derive from the apply key), so its
+    // review INSERT runs and writes nothing — `ON CONFLICT DO NOTHING` — and
+    // no review/finding/round may duplicate.
     db.raw
       .prepare(
         `UPDATE review_publications SET phase = 'confirmed', recovery_state = 'pending',
@@ -525,7 +526,8 @@ describe("publication lane — confirmed apply", () => {
     );
 
     expect(second.applied).toBe(1);
-    expect(inserts).toHaveLength(0); // store.put skipped — the review row exists
+    // The statement is attempted and is an idempotent no-op (the row exists).
+    expect(inserts).toHaveLength(1);
     const reviews = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     const findings = db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number };
     const rounds = db.raw.query("SELECT COUNT(*) AS n FROM review_finding_rounds").get() as { n: number };

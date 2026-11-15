@@ -164,9 +164,8 @@ import {
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
 import { LEGACY_PROVIDER_IDS, PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { isFindingSeverity } from "../contracts/finding-severity";
-import { MAX_CUSTOM_PROVIDER_MODEL_IDS, resolveModelSize } from "../contracts/provider-models";
+import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../contracts/provider-models";
 import { MODEL_LIMITS, MODEL_LIMITS_SNAPSHOT } from "../contracts/provider-model-limits.generated";
-import { catalogLimitsFor } from "../contracts/provider-catalog-limits";
 import { enabledSandboxImages, getSandboxImage } from "../contracts/sandbox-images";
 import { isCommandConfigKey } from "../../packages/shared/src/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
@@ -3114,8 +3113,6 @@ const SETTINGS_400_KEYS = {
   modelIdTooLong: "settings.error.modelIdTooLong",
   customProviderDeclRejected: "settings.error.customProviderDeclRejected",
   customProviderUndeclared: "settings.error.customProviderUndeclared",
-  modelContextWindowRequired: "settings.error.modelContextWindowRequired",
-  modelMaxTokensRequired: "settings.error.modelMaxTokensRequired",
   modelMetaInvalid: "settings.error.modelMetaInvalid",
   modelMetaMalformed: "settings.error.modelMetaMalformed",
   providerEndpointLocked: "settings.error.providerEndpointLocked",
@@ -3149,7 +3146,7 @@ const SETTINGS_400_KEYS = {
   usageProbeUnreadableEndpoint: "settings.error.usageProbeUnreadableEndpoint",
 } as const satisfies Record<string, DictionaryKey>;
 
-/** The two REQUIRED per-model sizes and the field label a refusal names. */
+/** The two per-model size fields and the field label a shape refusal names. */
 const MODEL_SIZE_FIELDS = [
   ["contextWindow", "context window"],
   ["maxTokens", "max token count"],
@@ -3157,22 +3154,19 @@ const MODEL_SIZE_FIELDS = [
 
 /**
  * The per-model facts an `update-provider-models` form states (compass D10).
- * A blank/absent size is resolved from the provider's catalog entry
- * (`MODEL_LIMITS`): when the catalog supplies the fact the stored override
- * OMITS it — a catalog number is never written as if the operator stated it.
- * Only a size neither side supplies is refused (the model and the fact are
- * named, nothing is written); an out-of-shape one names the field. Optional
- * facts stay optional and stay unstated when blank.
+ * ONLY what the form states is kept; a blank size is simply not part of the
+ * statement. Resolution (declared > catalog > absent) happens on the read side
+ * — the stored override never carries a catalog number as if the operator had
+ * stated it — and an absent size is NOT a save precondition: the pinned omp
+ * runtime back-fills its own default for a model that states none, so storing
+ * the model as unstated is the ordinary outcome. A STATED size must still be a
+ * positive integer; an out-of-shape one names the field.
  */
 function parseCustomProviderModelsMeta(
   raw: string,
   modelIds: readonly string[],
-  catalogLimits: Readonly<Record<string, { contextWindow?: number; maxTokens?: number }>> = {},
 ): { meta: CustomProviderModelsMeta } | { error: DictionaryKey; params: Record<string, string> } {
-  // A blank overlay is the same EMPTY statement, not a refusal by itself: each
-  // selected model resolves from its own entry (present or not) plus the
-  // catalog, so a catalog-covered model saves while one with no size on either
-  // side is refused below.
+  // A blank overlay is the same EMPTY statement.
   let entries: Record<string, unknown> = {};
   if (raw.trim() !== "") {
     let parsed: unknown;
@@ -3193,8 +3187,8 @@ function parseCustomProviderModelsMeta(
   const meta: CustomProviderModelsMeta = {};
   for (const modelId of modelIds) {
     const entry = entries[modelId];
-    // An absent entry is a blank statement, not a second shape: the catalog
-    // may still supply every size the model needs.
+    // An absent entry is a blank statement, not a second shape: the model
+    // saves as unstated and the runtime default applies.
     if (entry !== undefined && entry !== null && (typeof entry !== "object" || Array.isArray(entry))) {
       return invalid(modelId, "model metadata");
     }
@@ -3202,22 +3196,13 @@ function parseCustomProviderModelsMeta(
     const statement: CustomProviderModelMeta = {};
     for (const [field, label] of MODEL_SIZE_FIELDS) {
       const value = record[field];
-      // A blank size is resolved against the catalog below; only a stated one
-      // is shape-checked and kept on the override.
+      // A blank size stays unstated; only a stated one is shape-checked and
+      // kept on the override.
       if (value === undefined || value === null) continue;
       if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
         return invalid(modelId, label);
       }
       statement[field] = value;
-    }
-    // The one completeness rule: the statement OR the catalog must supply each
-    // size. The catalog's number is never copied into the stored override.
-    const resolved = resolveModelSize(statement, catalogLimits[modelId]);
-    if (resolved.contextWindow === undefined) {
-      return { error: SETTINGS_400_KEYS.modelContextWindowRequired, params: { model: modelId } };
-    }
-    if (resolved.maxTokens === undefined) {
-      return { error: SETTINGS_400_KEYS.modelMaxTokensRequired, params: { model: modelId } };
     }
     if (record.name !== undefined) {
       if (typeof record.name !== "string") return invalid(modelId, "display name");
@@ -3238,9 +3223,9 @@ function parseCustomProviderModelsMeta(
         return invalid(modelId, key);
       }
     }
-    // Only a stated fact makes an override entry; a model whose sizes all came
-    // from the catalog stores NOTHING (the store reads that as unstated, and
-    // the next read re-resolves from the same catalog).
+    // Only a stated fact makes an override entry: a model that states no size
+    // stores NOTHING (the store reads that as unstated, the read side
+    // re-resolves declared > catalog > absent, and the runtime default applies).
     if (Object.keys(statement).length > 0) meta[modelId] = statement;
   }
   // An entry for an id the form did not select is unreachable data: the row's
@@ -3608,8 +3593,9 @@ async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionK
       ...(Object.hasOwn(LEGACY_PROVIDER_IDS, provider_id)
         ? { legacy_of: LEGACY_PROVIDER_IDS[provider_id]! }
         : {}),
-      // Absent when the owner stated nothing: the form seeds blank sizes and
-      // shows the row as saved-but-not-usable instead of inventing a number.
+      // Absent when the owner stated nothing: the sizes are unstated (the
+      // runtime's own default applies), the form seeds them blank, and no
+      // number is invented for the row.
       ...(models_meta === undefined ? {} : { models_meta }),
     })),
     // Clean cutover: the App's PERSISTED provider state only — a stored
@@ -3665,7 +3651,6 @@ async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionK
           models: [...meta.models],
           // The row's own endpoint: the SPA applies the same base-URL
           // predicate the Worker does before it trusts `model_limits`.
-          catalog_base_url: meta.baseUrl,
           // The per-model sizes the vendor directory states, keyed by model
           // id. The model dialog pre-fills its blank fields from here and
           // posts no override for a value the operator leaves untouched.
@@ -3696,7 +3681,6 @@ async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionK
           base_url: meta.baseUrl,
           api: meta.api,
           models: [...meta.models],
-          catalog_base_url: meta.baseUrl,
           model_limits: MODEL_LIMITS[id] ?? {},
           ...(meta.protocols === undefined
             ? {}
@@ -5047,26 +5031,43 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         limit: MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
       });
     }
-    // Per-model facts (compass D10): checked BEFORE the store so a save that
-    // omits a required size writes nothing at all (ids included). A size the
-    // operator left blank is resolved from the provider's catalog entry — but
-    // only when this declaration sits on one of that row's OWN endpoints (a
-    // protocol's base URL included): a private endpoint reusing a catalog id
-    // must not inherit the vendor's numbers. Only a model with no size on
-    // either side is refused.
-    const declarationBaseUrl = (await store.listCustomProviders(gate.app.id)).find(
-      (row) => row.provider_id === providerId,
-    )?.base_url;
-    const stated = parseCustomProviderModelsMeta(
-      typeof form.models_meta === "string" ? form.models_meta : "",
-      modelIds,
-      declarationBaseUrl === undefined ? {} : (catalogLimitsFor(providerId, declarationBaseUrl) ?? {}),
-    );
-    if ("error" in stated) {
-      return settings400Response(c, gate.app.github_app_id, stated.error, stated.params);
+    // Per-model facts (compass D10): shape-checked BEFORE the store so a
+    // malformed statement writes nothing at all (ids included). A blank size
+    // is not a refusal — it stores as unstated (see the parser) — and the
+    // catalog is resolved on the READ side instead: the SPA pre-fill gates it
+    // by endpoint, and the runner synthesis re-resolves it per declaration.
+    //
+    // What a models_meta field MEANS, in one place (the store's contract is
+    // "absent = state nothing"):
+    // - missing          → undefined: the store CARRIES the stored overlay
+    //                      across, pruned to the surviving ids (an id-only row
+    //                      stays id-only). A save that only edits the id list
+    //                      must never wipe sizes the operator never touched.
+    // - string, blank    → undefined: an empty form field is how a browser
+    //                      submits "this form has no size fields filled in", not
+    //                      an instruction to clear what is stored.
+    // - string, JSON obj → the statement, REPLACING the overlay whole ("{}"
+    //                      is the explicit "states nothing for these models").
+    // - anything else    → 400 malformed, zero writes: a repeated field arrives
+    //                      as string[] and a file part as File — a submission
+    //                      this route cannot read is refused, never silently
+    //                      downgraded to "states nothing".
+    let statedMeta: CustomProviderModelsMeta | undefined;
+    const rawMeta = form.models_meta;
+    if (rawMeta !== undefined) {
+      if (typeof rawMeta !== "string") {
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelMetaMalformed);
+      }
+      if (rawMeta.trim() !== "") {
+        const stated = parseCustomProviderModelsMeta(rawMeta, modelIds);
+        if ("error" in stated) {
+          return settings400Response(c, gate.app.github_app_id, stated.error, stated.params);
+        }
+        statedMeta = stated.meta;
+      }
     }
     try {
-      await store.updateCustomProviderModels(gate.app.id, providerId, modelIds, stated.meta);
+      await store.updateCustomProviderModels(gate.app.id, providerId, modelIds, statedMeta);
     } catch (err) {
       logSettingsFailure("update_provider_models", gate.app.id, err);
       if (err instanceof InvalidCustomProviderError) {

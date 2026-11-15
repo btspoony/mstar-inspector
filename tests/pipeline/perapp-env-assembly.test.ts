@@ -1309,8 +1309,9 @@ describe("custom provider credential transport + runner input threading (AL-23-1
       },
       sk("custom-fixture-AAA"),
     );
-    // A second declaration states NOTHING about its models: it is the "saved,
-    // not usable" row, and the input must not claim it stated an empty set.
+    // A second declaration states NOTHING about its models: the sizes are
+    // unstated (the runtime's own default applies), and the input must not
+    // claim it stated an empty set.
     await store.upsertCustomProvider(
       appX.id,
       {
@@ -1604,15 +1605,15 @@ describe("custom provider sizes resolve from the catalog at the runner boundary"
   const covered = (() => {
     for (const [providerId, table] of Object.entries(MODEL_LIMITS)) {
       const entry = PROVIDER_CATALOG[providerId];
-      if (entry?.tier !== "template" || entry.baseUrl === null || entry.baseUrl.includes("{")) continue;
+      if (entry?.tier !== "template") continue;
       const modelId = Object.keys(table).find((id) => id !== "" && !id.includes("/"));
-      if (modelId !== undefined) return { providerId, modelId, baseUrl: entry.baseUrl, limit: table[modelId]! };
+      if (modelId !== undefined) return { providerId, modelId, limit: table[modelId]! };
     }
     return null;
   })();
 
   test.skipIf(covered === null)(
-    "a declaration that states no size reaches the runner with the catalog's sizes",
+    "a declaration on an endpoint the catalog does not list still reaches the runner with the model's sizes",
     async () => {
       if (covered === null) return;
       reset();
@@ -1622,9 +1623,10 @@ describe("custom provider sizes resolve from the catalog at the runner boundary"
       await store.upsertCustomProvider(
         appX.id,
         {
-          // The catalog's own endpoint: only that row's sizes describe it.
+          // An endpoint of the operator's own under the catalog's id: the
+          // endpoint is not a size key, the model id is.
           provider_id: covered.providerId,
-          base_url: covered.baseUrl,
+          base_url: "https://private.example.com/v1",
           api: "openai-completions",
           model_ids: [covered.modelId],
         },
