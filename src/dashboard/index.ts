@@ -3730,7 +3730,9 @@ async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionK
  * set (list-face fields + created_at + the cached public GitHub profile)
  * with `can_manage: false`; a manager gets the full base+health payload
  * (app meta, installations, deliveries) plus the settings payload (masked
- * keys, chains, providers). Writes stay behind requireAppSettings. Both
+ * keys, chains, providers). A Blocked target (its bot is `owned` by another
+ * workspace) gets a third, target-owned face: same manager gates, but no
+ * bot-owned section at all. Writes stay behind requireAppSettings. Both
  * faces are served from D1 after the lazy 24h-TTL refresh above. */
 const appSettingsRoute = async (c: DashboardContext) => {
   const gate = await requireAppVisible(c);
@@ -3738,8 +3740,14 @@ const appSettingsRoute = async (c: DashboardContext) => {
   const apps = createReviewBotsStore(gate.db);
   // Outside the render try on purpose: the refresh leg carries its own
   // catch-all, so no metadata failure can reach this route's 500 face
-  // (AD-531 fail-open by structure).
-  const app = await refreshGithubMetadataForRead(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY);
+  // (AD-531 fail-open by structure). It is a bot-scope WRITE (the bot row's
+  // profile columns plus the installation reconcile) driven by the bot's own
+  // credentials, so a workspace that reaches the bot only through a retained
+  // target never triggers it — it serves the stored row and gets the Blocked
+  // face below.
+  const app = canReadBotScope(gate.app, gate.scope)
+    ? await refreshGithubMetadataForRead(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY)
+    : gate.app;
   // Derived per read, never stored: a target whose bot is `owned` by ANOTHER
   // workspace reviews nothing (the resolver's guard), and the page has to say
   // so. The two facts are already in hand — the bot row's scope + owning
@@ -3784,7 +3792,11 @@ const appSettingsRoute = async (c: DashboardContext) => {
           github_description: app.github_description ?? null,
           github_html_url: app.github_html_url ?? null,
           github_avatar_url: app.github_avatar_url ?? null,
-          github_metadata_synced_at: app.github_metadata_synced_at ?? null,
+          // A Blocked target's face omits the bot's own metadata stamp: the
+          // bot's GitHub bookkeeping is the owning workspace's.
+          ...(blockedReason === null
+            ? { github_metadata_synced_at: app.github_metadata_synced_at ?? null }
+            : {}),
         },
       });
     }
@@ -3822,6 +3834,57 @@ const appSettingsRoute = async (c: DashboardContext) => {
     // control's inherit face names it, so a manager never needs the operator
     // console to know what "follow the operator default" currently runs.
     const defaultReviewLevel = (await readDefaultReviewLevel(gate.db)).value;
+    const installationPayload =
+      boundInstallation === null
+        ? null
+        : {
+            id: boundInstallation.installation_id,
+            account_login: boundInstallation.account_login,
+            removed: boundInstallation.removed_at !== null,
+          };
+    // Whether the park action would land for this target (target-owned).
+    const ownerOverlap = await createTargetsStore(gate.db).hasOwnerOverlap(
+      gate.scope.workspaceId,
+      gate.target.id,
+    );
+    if (blockedReason !== null) {
+      // The Blocked manager face: this workspace's target on another
+      // workspace's bot. It carries the target's OWN review configuration and
+      // the identity needed to name the page — never the bot's sections
+      // (installations, deliveries, provider keys, chains, sandbox image,
+      // metadata), which belong to the owning workspace.
+      return c.json({
+        can_manage: true,
+        blocked: true,
+        blocked_reason: blockedReason,
+        workspace_id: gate.scope.workspaceId,
+        target_id: gate.target.id,
+        app: {
+          github_app_id: app.github_app_id,
+          id: app.id,
+          status: app.status,
+          created_by: app.created_by,
+          review_enabled: gate.target.review_enabled !== 0,
+          review_trigger_mode: gate.target.review_trigger_mode,
+          review_level: parseTargetReviewLevel(gate.target.review_level),
+          default_review_level: defaultReviewLevel,
+          scope: app.scope,
+          github_name: app.github_name ?? null,
+          github_slug: app.github_slug ?? null,
+          github_description: app.github_description ?? null,
+          github_html_url: app.github_html_url ?? null,
+          github_avatar_url: app.github_avatar_url ?? null,
+          github_visibility: githubVisibility,
+        },
+        installation: installationPayload,
+        check_gate:
+          checkGate === null
+            ? null
+            : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+        allowlist: { enabled: allowlist.enabled, owners: [...allowlist.owners] },
+        owner_overlap: ownerOverlap,
+      });
+    }
     const base = {
       // The stable workspace id the App belongs to (server-resolved scope,
       // never the request's path segment): with `app.id` it composes the
@@ -3879,14 +3942,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
       },
       // The target's bound installation (`null` = unbound). `removed` is the
       // `bot_installations.removed_at` stamp: the binding stays, reviews stop.
-      installation:
-        boundInstallation === null
-          ? null
-          : {
-              id: boundInstallation.installation_id,
-              account_login: boundInstallation.account_login,
-              removed: boundInstallation.removed_at !== null,
-            },
+      installation: installationPayload,
       // The bot's live installations that no live target references — the
       // target page's bind source. Empty for a bot this workspace may not use,
       // and always present so the block renders an empty set honestly.
@@ -3914,10 +3970,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
       allowlist: { enabled: allowlist.enabled, owners: [...allowlist.owners] },
       // Whether the park action would be accepted for this target: its account
       // claim is duplicated by another live target of a multi-target bot.
-      owner_overlap: await createTargetsStore(gate.db).hasOwnerOverlap(
-        gate.scope.workspaceId,
-        gate.target.id,
-      ),
+      owner_overlap: ownerOverlap,
     });
   } catch (err) {
     logSettingsFailure("api_render", gate.app.id, err);
@@ -4031,6 +4084,10 @@ const appRefreshMetadataRoute = async (c: DashboardContext): Promise<Response> =
 const appModelsRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
+  // Every model this face lists is the bot's own (verified key evidence and
+  // declared providers), so a workspace that reaches the bot only through a
+  // retained target gets nothing — the settings face's same rule.
+  if (!canReadBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
     const verified = await store.getVerifiedModels(gate.app.id);

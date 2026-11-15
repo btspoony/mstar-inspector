@@ -292,7 +292,7 @@ describe("members/apps/settings parsers", () => {
       pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
-      blocked: false,
+      blocked: false as const,
       blocked_reason: null,
       app: {
         github_slug: "demo",
@@ -330,7 +330,7 @@ describe("members/apps/settings parsers", () => {
     });
     expect(ok?.app.id).toBe("app-demo");
     expect(ok?.can_manage).toBe(true);
-    expect(ok && ok.can_manage && ok.deliveries).toEqual([delivery]);
+    expect(ok && ok.can_manage && !ok.blocked && ok.deliveries).toEqual([delivery]);
     expect(
       parseSettings({
         app: { github_slug: "demo", id: "app-demo", status: "active", review_enabled: 1, last_webhook_at: null },
@@ -350,7 +350,7 @@ describe("members/apps/settings parsers", () => {
       pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
-      blocked: false,
+      blocked: false as const,
       blocked_reason: null,
       app: {
         github_slug: "demo",
@@ -396,7 +396,7 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings({ ...manageBase, sandbox_images: "omp" })).toBeNull();
     // A well-formed list parses and keeps the rows verbatim.
     const ok = parseSettings(manageBase);
-    expect(ok && ok.can_manage && ok.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
+    expect(ok && ok.can_manage && !ok.blocked && ok.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
   });
 
   test("parseSettings requires the review trigger mode and review depth on the manage face; off-vocabulary fails the parse", () => {
@@ -406,7 +406,7 @@ describe("members/apps/settings parsers", () => {
       pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
-      blocked: false,
+      blocked: false as const,
       blocked_reason: null,
       app: {
         github_slug: "demo",
@@ -454,7 +454,7 @@ describe("members/apps/settings parsers", () => {
     // today's required-field contract.
     for (const mode of REVIEW_TRIGGER_MODES) {
       const manage = parseSettings({ ...base, app: { ...base.app, review_trigger_mode: mode } });
-      expect(manage && manage.can_manage && manage.app.review_trigger_mode).toBe(mode);
+      expect(manage && manage.can_manage && !manage.blocked && manage.app.review_trigger_mode).toBe(mode);
     }
     // The review depth and the operator default it inherits (migration 0047)
     // are the same class of required manager fields; `null` is the inherit
@@ -466,10 +466,10 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings({ ...base, app: { ...base.app, default_review_level: undefined } })).toBeNull();
     for (const level of REVIEW_LEVELS) {
       const manage = parseSettings({ ...base, app: { ...base.app, review_level: level } });
-      expect(manage && manage.can_manage && manage.app.review_level).toBe(level);
+      expect(manage && manage.can_manage && !manage.blocked && manage.app.review_level).toBe(level);
     }
     const inherit = parseSettings(base);
-    expect(inherit && inherit.can_manage && inherit.app.review_level).toBeNull();
+    expect(inherit && inherit.can_manage && !inherit.blocked && inherit.app.review_level).toBeNull();
   });
 
   test("parseSettings requires the review gate, allowlist and visibility on the manage face; malformed values fail the parse", () => {
@@ -479,7 +479,7 @@ describe("members/apps/settings parsers", () => {
       pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
-      blocked: false,
+      blocked: false as const,
       blocked_reason: null,
       app: {
         github_slug: "demo",
@@ -514,9 +514,9 @@ describe("members/apps/settings parsers", () => {
       sandbox_images: [{ id: "omp", enabled: true }],
     };
     const ok = parseSettings(base);
-    expect(ok && ok.can_manage && ok.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it", "needs fixes"] });
-    expect(ok && ok.can_manage && ok.allowlist).toEqual({ enabled: true, owners: ["acme"] });
-    expect(ok && ok.can_manage && ok.app.github_visibility).toBe("public");
+    expect(ok && ok.can_manage && !ok.blocked && ok.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it", "needs fixes"] });
+    expect(ok && ok.can_manage && !ok.blocked && ok.allowlist).toEqual({ enabled: true, owners: ["acme"] });
+    expect(ok && ok.can_manage && !ok.blocked && ok.app.github_visibility).toBe("public");
     // Each new field is REQUIRED on the manage face.
     const { check_gate: _noGate, ...withoutGate } = base;
     expect(parseSettings(withoutGate)).toBeNull();
@@ -540,7 +540,7 @@ describe("members/apps/settings parsers", () => {
     // server's honest degradation — and still parses, so the section can
     // render its read-only notice instead of failing the whole face.
     const unreadable = parseSettings({ ...base, check_gate: null });
-    expect(unreadable && unreadable.can_manage && unreadable.check_gate).toBeNull();
+    expect(unreadable && unreadable.can_manage && !unreadable.blocked && unreadable.check_gate).toBeNull();
     expect(parseSettings({ ...base, allowlist: { ...base.allowlist, enabled: "yes" } })).toBeNull();
     expect(parseSettings({ ...base, allowlist: { ...base.allowlist, owners: [7] } })).toBeNull();
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "hidden" } })).toBeNull();
@@ -548,7 +548,7 @@ describe("members/apps/settings parsers", () => {
     // settings control submits exactly these strings back on save.
     for (const verdict of SPA_PR_VERDICTS) {
       const parsed = parseSettings({ ...base, check_gate: { min_score: 80, pass_verdicts: [verdict] } });
-      expect(parsed && parsed.can_manage && parsed.check_gate?.pass_verdicts).toEqual([verdict]);
+      expect(parsed && parsed.can_manage && !parsed.blocked && parsed.check_gate?.pass_verdicts).toEqual([verdict]);
     }
     // A never-probed App reads as 'unknown' and a failed read as null — both parse.
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "unknown" } })).not.toBeNull();
@@ -560,7 +560,7 @@ describe("members/apps/settings parsers", () => {
       can_manage: false,
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
-      blocked: false,
+      blocked: false as const,
       blocked_reason: null,
       app: {
         github_slug: "demo",
@@ -599,7 +599,7 @@ describe("members/apps/settings parsers", () => {
       pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
-      blocked: false,
+      blocked: false as const,
       blocked_reason: null,
       app: {
         github_slug: "demo",
@@ -655,8 +655,8 @@ describe("members/apps/settings parsers", () => {
         { ...catalogRow, id: "workers-ai", tier: "template", eligibility: "template" },
       ],
     });
-    expect(unconfigured && unconfigured.can_manage && unconfigured.configured_providers).toEqual([]);
-    expect(unconfigured && unconfigured.can_manage && unconfigured.provider_catalog).toHaveLength(2);
+    expect(unconfigured && unconfigured.can_manage && !unconfigured.blocked && unconfigured.configured_providers).toEqual([]);
+    expect(unconfigured && unconfigured.can_manage && !unconfigured.blocked && unconfigured.provider_catalog).toHaveLength(2);
     // Both collections are REQUIRED (clean cutover — no legacy shape).
     const { configured_providers: _droppedConfigured, ...withoutConfigured } = manageBase;
     expect(parseSettings(withoutConfigured)).toBeNull();
@@ -741,7 +741,7 @@ describe("members/apps/settings parsers", () => {
     const readOnly = parseSettings({
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
-      blocked: false,
+      blocked: false as const,
       blocked_reason: null,
       can_manage: false,
       app: identityApp,
@@ -756,7 +756,7 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings({
       workspace_id: "ws_0123456789abcdefghijkl",
       target_id: "rt-501",
-      blocked: false,
+      blocked: false as const,
       blocked_reason: null,
       can_manage: false,
       app: withoutCreated,
@@ -769,7 +769,7 @@ describe("members/apps/settings parsers", () => {
         pending_installations: [],
         workspace_id: "ws_0123456789abcdefghijkl",
         target_id: "rt-501",
-        blocked: false,
+        blocked: false as const,
         blocked_reason: null,
         app: {
           github_slug: "demo",
@@ -857,7 +857,7 @@ describe("provider catalog rows + add selection", () => {
     pending_installations: [],
     workspace_id: "ws_0123456789abcdefghijkl",
     target_id: "rt-501",
-    blocked: false,
+    blocked: false as const,
     blocked_reason: null,
     app: {
       github_slug: "demo",
@@ -1058,14 +1058,14 @@ describe("provider catalog rows + add selection", () => {
         { ...catalogRow, id: "workers-ai", label: "Workers AI", tier: "template", eligibility: "template" },
       ],
     });
-    const rows = saved && saved.can_manage ? saved.configured_providers : [];
+    const rows = saved && saved.can_manage && !saved.blocked ? saved.configured_providers : [];
     expect(rows).toHaveLength(2);
     const [keyRow, customRow] = rows;
     expect(keyRow).toMatchObject({ kind: "key", provider: "anthropic", last4: "9988" });
     expect(customRow && customRow.kind === "custom" && customRow.provider_id).toBe("workers-ai");
     // The refreshed payload keeps catalog vs configured disjoint even after
     // a save: both catalog rows remain discovery-only.
-    const catalogRows = saved && saved.can_manage ? saved.provider_catalog : [];
+    const catalogRows = saved && saved.can_manage && !saved.blocked ? saved.provider_catalog : [];
     expect(catalogRows).toHaveLength(2);
   });
 
@@ -1130,7 +1130,7 @@ describe("provider catalog rows + add selection", () => {
       verified_status: null,
     };
     const parsed = parseSettings({ ...manageBase, configured_providers: [customKeyRow] });
-    expect(parsed === null || !parsed.can_manage ? null : parsed.configured_providers).toEqual([customKeyRow]);
+    expect(parsed === null || !parsed.can_manage || parsed.blocked ? null : parsed.configured_providers).toEqual([customKeyRow]);
   });
 
   test("removal feedback locates the row by the full (provider, key_id) identity, not the id alone", () => {

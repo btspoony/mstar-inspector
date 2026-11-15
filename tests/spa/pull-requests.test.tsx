@@ -27,6 +27,7 @@ import {
   type PullRequestDetail,
   type PullRequestReviewing,
   type PullRequestRow,
+  type SettingsManagePayload,
   type SettingsPayload,
 } from "../../src/spa/pages/data";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
@@ -66,14 +67,16 @@ const identityPayload: SettingsPayload = {
   can_manage: false,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
-  blocked: false,
+  blocked: false as const,
   blocked_reason: null,
   app: IDENTITY_APP,
 };
 
-const managePayload = {
+const managePayload: SettingsManagePayload = {
   ...identityPayload,
   can_manage: true,
+  blocked: false,
+  blocked_reason: null,
   installation: null,
   pending_installations: [],
   app: {

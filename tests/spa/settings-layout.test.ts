@@ -83,7 +83,7 @@ const detailPayload = (): SettingsManagePayload => ({
   pending_installations: [],
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
-  blocked: false,
+  blocked: false as const,
   blocked_reason: null,
   app: {
     github_slug: "acme-app",
@@ -128,7 +128,7 @@ const memberPayload = (): SettingsReadOnlyPayload => ({
   can_manage: false,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
-  blocked: false,
+  blocked: false as const,
   blocked_reason: null,
   app: {
     github_app_id: 1,
@@ -2377,8 +2377,10 @@ describe("GitHub App settings link wiring (AD-623)", () => {
     // Presentation-layer threading only — the payload contract gains nothing.
     // Threading is presentation-only: the card gets the payload's own
     // `can_manage` and `workspace_id` (never a path-derived value).
+    // `canManage` is the bot's writability, not the workspace role: a Blocked
+    // target is a manager face whose bot-scope actions must not render.
     expect(source).toContain(
-      "<AppInfoSection\n          locale={locale}\n          app={app}\n          workspaceId={payload.workspace_id}\n          canManage={payload.can_manage}\n          onReload={() => onReload({ background: true })}\n        />",
+      "<AppInfoSection\n          locale={locale}\n          app={app}\n          workspaceId={payload.workspace_id}\n          canManage={!blocked}\n          onReload={blocked ? undefined : () => onReload({ background: true })}\n        />",
     );
     // The card body routes the manager target through the pure helper (the
     // forbidden derivations — github_name / the local slug — cannot reach the

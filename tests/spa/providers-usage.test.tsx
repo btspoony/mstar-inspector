@@ -73,7 +73,7 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
     pending_installations: [],
     workspace_id: "ws_test",
     target_id: "rt-501",
-    blocked: false,
+    blocked: false as const,
     blocked_reason: null,
     app: {
       github_app_id: 42,

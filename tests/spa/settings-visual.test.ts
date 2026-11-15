@@ -50,7 +50,7 @@ const detailPayload = (): SettingsManagePayload => ({
   pending_installations: [],
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
-  blocked: false,
+  blocked: false as const,
   blocked_reason: null,
   app: {
     github_slug: "demo",

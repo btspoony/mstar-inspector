@@ -30,6 +30,7 @@ import {
   type AppDetailSearch,
   type AppDetailTab,
   type InsightsSummary,
+  type SettingsBlockedPayload,
   type SettingsManagePayload,
   type SettingsPayload,
 } from "../../src/spa/pages/data";
@@ -1216,11 +1217,34 @@ describe("install claim entry (static SSR)", () => {
  * holds no binding.
  */
 describe("Blocked and pending installations (static SSR)", () => {
-  const blockedPayload = (): SettingsManagePayload => ({
-    ...managePayload,
+  /** The Blocked manager face: target-owned sections only, no bot sections. */
+  const blockedPayload = (): SettingsBlockedPayload => ({
+    can_manage: true,
     blocked: true,
     blocked_reason: "bot_not_shared",
-    app: { ...managePayload.app, scope: "owned" },
+    workspace_id: managePayload.workspace_id,
+    target_id: managePayload.target_id,
+    app: {
+      github_app_id: managePayload.app.github_app_id,
+      id: managePayload.app.id,
+      status: managePayload.app.status,
+      created_by: managePayload.app.created_by,
+      review_enabled: managePayload.app.review_enabled,
+      review_trigger_mode: managePayload.app.review_trigger_mode,
+      review_level: managePayload.app.review_level,
+      default_review_level: managePayload.app.default_review_level,
+      scope: "owned",
+      github_name: managePayload.app.github_name,
+      github_slug: managePayload.app.github_slug,
+      github_description: managePayload.app.github_description,
+      github_html_url: managePayload.app.github_html_url,
+      github_avatar_url: managePayload.app.github_avatar_url,
+      github_visibility: managePayload.app.github_visibility,
+    },
+    installation: null,
+    check_gate: managePayload.check_gate,
+    allowlist: managePayload.allowlist,
+    owner_overlap: false,
   });
 
   const sharedPayload = (): SettingsManagePayload => ({
@@ -1235,6 +1259,12 @@ describe("Blocked and pending installations (static SSR)", () => {
     // The bot page is not readable from a blocked workspace (its bot serves
     // another one now), so the header does not offer a link that 404s.
     expect(manager).not.toContain(t("en", "appDetail.botSettingsLink"));
+    // The metric band's figures are all the bot's: none render, and no zero is
+    // fabricated in their place.
+    expect(manager).not.toContain(t("en", "settings.installations"));
+    expect(manager).not.toContain(t("en", "settings.metricKeys"));
+    // The review settings are the target's, so they stay.
+    expect(manager).toContain(t("en", "settings.reviewGate"));
 
     const member = renderToStaticMarkup(
       createElement(AppDetailView, {
@@ -1254,7 +1284,7 @@ describe("Blocked and pending installations (static SSR)", () => {
     expect(member).toContain(t("en", "appDetail.blockedBotNotShared"));
   });
 
-  test("a Blocked target hides the install and claim actions, and keeps its review settings", () => {
+  test("a Blocked target hides the install and claim actions, and keeps its review settings", async () => {
     const installed = renderDetail(blockedPayload(), true, "installations");
     expect(installed).not.toContain(t("en", "settings.installClaim"));
     expect(installed).not.toContain(t("en", "settings.installLink"));
@@ -1266,6 +1296,19 @@ describe("Blocked and pending installations (static SSR)", () => {
     // not the settings a manager can inspect.
     const settingsTab = renderDetail(blockedPayload(), true, "settings");
     expect(settingsTab).toContain(t("en", "settings.reviewGate"));
+
+    // The bot-shaped parts of the identity card are gone with the bot data:
+    // the delivery URL and the refresh are bot-scope writes this workspace
+    // cannot make, and the installation table states WHY it is empty instead
+    // of claiming the bot has none.
+    expect(installed).not.toContain(t("en", "settings.appInfoDeliveryUrl"));
+    expect(installed).not.toContain(t("en", "settings.appInfoRefresh"));
+    // Copy carries an apostrophe (SSR escapes it), so read the rendered text.
+    const installedText = await withMarkup(installed, (container) => container.textContent ?? "");
+    expect(installedText).toContain(t("en", "settings.installationsNotVisible"));
+    expect(installedText).not.toContain(t("en", "settings.noInstallations"));
+    // The allowlist itself stays editable (target-owned).
+    expect(installed).toContain(t("en", "settings.allowlistSave"));
   });
 
   test("an unbound shared target renders one bind action per pending installation", () => {
@@ -1290,14 +1333,35 @@ describe("Blocked and pending installations (static SSR)", () => {
     expect(bound).not.toContain(t("en", "settings.installPendingBind"));
   });
 
-  test("the new fields parse fail-closed", () => {
+  test("the new fields parse fail-closed on both manager faces", () => {
     expect(parseSettings(managePayload)?.can_manage).toBe(true);
     expect(parseSettings(identityPayload)?.can_manage).toBe(false);
-    // The flag and its reason are one invariant: blocked ⇔ a named reason.
-    expect(parseSettings({ ...managePayload, blocked: "yes" })).toBeNull();
-    expect(parseSettings({ ...managePayload, blocked: true, blocked_reason: null })).toBeNull();
-    expect(parseSettings({ ...managePayload, blocked: false, blocked_reason: "bot_not_shared" })).toBeNull();
-    expect(parseSettings({ ...managePayload, blocked_reason: "other" })).toBeNull();
+    // The blocked face is accepted, and both manager faces keep their own
+    // required keys: a blocked payload carrying the bot sections is still a
+    // blocked payload (the extras are ignored), but dropping a TARGET-owned
+    // key fails the read.
+    expect(parseSettings(blockedPayload())?.blocked).toBe(true);
+    for (const broken of [
+      { ...blockedPayload(), blocked: false },
+      { ...blockedPayload(), blocked_reason: "other" },
+      { ...blockedPayload(), owner_overlap: "no" },
+      { ...blockedPayload(), app: { ...blockedPayload().app, review_trigger_mode: "sometimes" } },
+      { ...blockedPayload(), installation: { id: "1", account_login: null, removed: false } },
+    ]) {
+      expect(parseSettings(broken)).toBeNull();
+    }
+    // The bot's metadata stamp is the OWNER's: a Blocked face omits it, and a
+    // readable face must carry it.
+    const { github_metadata_synced_at: _stamp, ...identityWithoutStamp } = identityPayload.app;
+    expect(parseSettings({ ...identityPayload, app: identityWithoutStamp })).toBeNull();
+    expect(
+      parseSettings({
+        ...identityPayload,
+        blocked: true,
+        blocked_reason: "bot_not_shared",
+        app: identityWithoutStamp,
+      }),
+    ).not.toBeNull();
     // A pending row without a usable installation id would render an action
     // the route cannot address.
     expect(
