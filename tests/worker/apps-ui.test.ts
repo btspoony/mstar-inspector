@@ -1142,3 +1142,106 @@ describe("a target on a shared bot is visible to the workspace that created it",
   });
 });
 
+/**
+ * The settings payload's `pending_installations` (target page's bind source):
+ * the bot's live installations no live target references, additively beside
+ * the keys the payload already carried.
+ */
+describe("the settings payload's pending installations", () => {
+  const SHARED_APP_ID = 1099;
+
+  function seedInstallation(
+    db: ReturnType<typeof createAppsUiD1>,
+    botId: string,
+    installationId: number,
+    removed = false,
+  ): void {
+    db.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+         VALUES (?, ?, ?, 'acme', '2026-01-01 00:00:00', ${removed ? "datetime('now')" : "NULL"})`,
+      )
+      .run(`install-${installationId}`, botId, installationId);
+  }
+
+  /** One shared bot owned by `ws-other`, plus `default`'s live target on it. */
+  function seedWorldWithBot(db: ReturnType<typeof createAppsUiD1>): void {
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'ws-other', NULL, datetime('now'))`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+            created_by, status, scope, shared_at, created_at, updated_at)
+         VALUES ('app-platform', 'platform-app', ?, 'Platform App', 'enc', 'enc', 'hubot',
+                 'active', 'shared', datetime('now'), datetime('now'), datetime('now'))`,
+      )
+      .run(SHARED_APP_ID);
+    db.raw
+      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('app-platform', 'ws-other')")
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES ('target-default', 'default', 'app-platform', 'Platform App', 'hubot',
+                 datetime('now'), datetime('now'))`,
+      )
+      .run();
+  }
+
+  async function settingsOf(db: ReturnType<typeof createAppsUiD1>): Promise<Record<string, unknown>> {
+    const res = await get(
+      `/dashboard/default/api/apps/${SHARED_APP_ID}/settings`,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  test("lists the bot's unbound live installations and keeps every existing key", async () => {
+    const db = await seededWorld();
+    seedWorldWithBot(db);
+    seedInstallation(db, "app-platform", 500);
+    seedInstallation(db, "app-platform", 600, true);
+    // Bound by another workspace's target: not this target's to bind, and
+    // never listed cross-workspace.
+    seedInstallation(db, "app-platform", 700);
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, installation_id, created_by, created_at, updated_at)
+         VALUES ('target-other', 'ws-other', 'app-platform', 'Other', 700, 'hubot',
+                 datetime('now'), datetime('now'))`,
+      )
+      .run();
+
+    const body = await settingsOf(db);
+    expect(body.pending_installations).toEqual([
+      { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+    ]);
+    // Additive: the keys the payload already carried are unchanged.
+    expect(body.installation).toBeNull();
+    expect(body.target_id).toBe("target-default");
+    expect(body.workspace_id).toBe("default");
+  });
+
+  test("an empty pending set is [], never omitted", async () => {
+    const db = await seededWorld();
+    seedWorldWithBot(db);
+    expect((await settingsOf(db)).pending_installations).toEqual([]);
+
+    // An owned bot the workspace may use answers the same, empty shape.
+    const owned = await get(
+      `/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+    );
+    expect(((await owned.json()) as Record<string, unknown>).pending_installations).toEqual([]);
+  });
+});

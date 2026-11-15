@@ -585,6 +585,48 @@ export type BoundInstallation = {
   removed: boolean;
 };
 
+/**
+ * One installation the bot already carries that no live target references —
+ * the install block's bind source. `account_login` is NULL until the webhook
+ * reports it, exactly like the bound row.
+ */
+export type PendingInstallation = {
+  installation_id: number;
+  account_login: string | null;
+  seen_at: string;
+};
+
+/**
+ * Why a target's bot no longer serves it, as the server derives it on every
+ * read (no stored status): the bot is `owned` and the target belongs to
+ * another workspace. Closed vocabulary — a re-share clears it.
+ */
+export const BLOCKED_REASONS = ["bot_not_shared"] as const;
+export type BlockedReason = (typeof BLOCKED_REASONS)[number];
+
+export function isBlockedReason(value: unknown): value is BlockedReason {
+  return (BLOCKED_REASONS as readonly unknown[]).includes(value);
+}
+
+/**
+ * The pending rows, all-or-nothing: a row without a usable installation id
+ * would render an action the bind route cannot address.
+ */
+function isPendingInstallationList(value: unknown): value is PendingInstallation[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (row) =>
+        isRecord(row) &&
+        typeof row.installation_id === "number" &&
+        Number.isSafeInteger(row.installation_id) &&
+        row.installation_id > 0 &&
+        isNullableString(row.account_login) &&
+        typeof row.seen_at === "string",
+    )
+  );
+}
+
 export type SettingsAppMeta = {
   github_app_id: number;
   status: string;
@@ -725,6 +767,13 @@ export type SettingsReadOnlyPayload = {
   /** The App's stable workspace id — server-resolved, never a path segment. */
   workspace_id: string;
   /**
+   * Why this target reviews nothing, if it does (derived per read, never
+   * stored). Both faces carry it: a member must know why the App is silent,
+   * not only the manager.
+   */
+  blocked: boolean;
+  blocked_reason: BlockedReason | null;
+  /**
    * The review configuration's id in this workspace — the settings a manager
    * edits belong to a target. Required on both faces: a payload that cannot
    * name its target is not a settings read.
@@ -760,6 +809,18 @@ export type SettingsManagePayload = {
    * stopped — the binding itself survives an uninstall.
    */
   installation: BoundInstallation | null;
+  /**
+   * The bot's live installations that no live target references — the install
+   * block's bind source. Always present; `[]` when there is nothing to bind
+   * (or when this workspace may not use the bot).
+   */
+  pending_installations: PendingInstallation[];
+  /**
+   * Why this target reviews nothing, if it does (derived per read, never
+   * stored). Both faces carry it.
+   */
+  blocked: boolean;
+  blocked_reason: BlockedReason | null;
   /**
    * The review gate (migration 0045) — the Check's pass condition. `null` =
    * the stored verdict list is unreadable: the section renders a read-only
@@ -2051,6 +2112,12 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // GitHub fact (NULL = never synced).
   if (typeof data.app.id !== "string") return null;
   if (!isNullableString(data.app.github_slug)) return null;
+  // The derived Blocked state rides BOTH faces, and the flag and its reason
+  // are one invariant: blocked ⇔ a named reason. An off-vocabulary reason
+  // fails the read instead of rendering a copy nobody wrote.
+  if (typeof data.blocked !== "boolean") return null;
+  if (data.blocked_reason !== null && !isBlockedReason(data.blocked_reason)) return null;
+  if (data.blocked !== (data.blocked_reason !== null)) return null;
   if (!data.can_manage) {
     // Identity-only non-manager face (App detail IA): the D4
     // identity set — created_at joins the required keys; everything from
@@ -2099,6 +2166,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // the install block never renders an action the server would refuse.
   if (!isBotScope(data.app.scope)) return null;
   if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
+  if (!isPendingInstallationList(data.pending_installations)) return null;
   if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
   if (!isProviderKeyRowList(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;

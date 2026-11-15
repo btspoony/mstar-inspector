@@ -724,3 +724,49 @@ describe("the workspace-scoped App resolve", () => {
     expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
   });
 });
+// --- the target page's pending installations ------------------------------
+
+/** One `bot_installations` row; `removed` stamps the removal. */
+function seedInstallation(db: TestD1, botId: string, installationId: number, removed = false): void {
+  db.raw
+    .prepare(
+      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+       VALUES (?, ?, ?, NULL, '2026-01-01T00:00:00.000Z', ${removed ? "datetime('now')" : "NULL"})`,
+    )
+    .run(crypto.randomUUID(), botId, installationId);
+}
+
+describe("pending installations of a bot", () => {
+  test("lists the live installations no live target references, and nothing else", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-pending", { workspaceId: WS });
+    seedInstallation(db, "bot-pending", 100);
+    seedInstallation(db, "bot-pending", 200, true);
+    seedInstallation(db, "bot-pending", 300);
+    seedInstallation(db, "bot-pending", 400);
+    // 300 is held by a live target, 400 only by a soft-deleted one.
+    seedPendingTarget(db, "bot-pending", WS, { installationId: 300 });
+    seedPendingTarget(db, "bot-pending", WS, { installationId: 400, deleted: true });
+
+    const rows = await createReviewBotsStore(db).listPendingInstallations("bot-pending", WS);
+    expect(rows.map((row) => row.installation_id).sort()).toEqual([100, 400]);
+  });
+
+  test("answers nothing for a bot the addressed workspace may not use", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-other");
+    // Another workspace's owned bot: out of the caller's visible set.
+    seedScopedBot(db, "bot-foreign", { workspaceId: "ws-other" });
+    seedInstallation(db, "bot-foreign", 501);
+    // A shared bot: usable from every workspace, so its pending rows read.
+    seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
+    seedInstallation(db, "bot-shared", 502);
+
+    const store = createReviewBotsStore(db);
+    expect(await store.listPendingInstallations("bot-foreign", WS)).toEqual([]);
+    expect(
+      (await store.listPendingInstallations("bot-shared", WS)).map((row) => row.installation_id),
+    ).toEqual([502]);
+  });
+});
+

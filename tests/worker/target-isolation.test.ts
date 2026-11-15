@@ -446,6 +446,52 @@ describe("the dashboard routes resolve the target inside the session workspace",
 });
 
 /**
+ * The derived Blocked state: a target whose bot is `owned` by ANOTHER
+ * workspace reviews nothing (the resolver's guard), so its detail face says
+ * so. Nothing is stored — the flag is read off the bot's scope and the two
+ * workspaces' ids on every read.
+ */
+describe("a target whose bot is no longer shared reads Blocked", () => {
+  test("blocked is true exactly when the bot is owned and the target is elsewhere", async () => {
+    const { db } = isolationFixture();
+    const env = envFor(db);
+    const read = async (workspace: string) => {
+      const response = await worker.fetch(await request(`/dashboard/${workspace}/api/apps/${GITHUB_APP_ID}/settings`, "octocat"), env);
+      expect(response.status, workspace).toBe(200);
+      return (await response.json()) as {
+        blocked: boolean;
+        blocked_reason: string | null;
+        workspace_id: string;
+        app: { scope: string };
+        check_gate: { min_score: number } | null;
+      };
+    };
+
+    // The fixture's bot is `owned` (the column default) and mapped to ws-a;
+    // target-b lives in ws-b, so ws-b is the revoked-share reader.
+    const fromB = await read(WORKSPACE_B);
+    expect(fromB.app.scope).toBe("owned");
+    expect(fromB.workspace_id).toBe(WORKSPACE_B);
+    expect(fromB.blocked).toBe(true);
+    expect(fromB.blocked_reason).toBe("bot_not_shared");
+    // Review configuration stays readable: Blocked hides the install action,
+    // not the settings a manager can still inspect.
+    expect(fromB.check_gate).not.toBeNull();
+
+    // The bot's own workspace is not blocked.
+    const fromA = await read(WORKSPACE_A);
+    expect(fromA.blocked).toBe(false);
+    expect(fromA.blocked_reason).toBeNull();
+
+    // A re-share clears it with no stored status to migrate.
+    seed(db, "UPDATE review_bots SET scope = 'shared' WHERE id = ?", BOT_ID);
+    const reshared = await read(WORKSPACE_B);
+    expect(reshared.blocked).toBe(false);
+    expect(reshared.blocked_reason).toBeNull();
+  });
+});
+
+/**
  * The create route's second-target case: a `shared` bot carries one live
  * target per workspace, written by that workspace's manager. The fixture
  * supplies workspace A's target and the route writes B's, so the two-target

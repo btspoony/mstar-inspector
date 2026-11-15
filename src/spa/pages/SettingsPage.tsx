@@ -650,17 +650,53 @@ export function AppInstallSection({
   appId,
   app,
   installation,
+  pendingInstallations,
+  blocked,
+  onReload,
 }: {
   locale: SpaBoot["locale"];
   appId: string;
   app: SettingsManagePayload["app"];
   installation: SettingsManagePayload["installation"];
+  /** The bot's live installations no target references — the bind source. */
+  pendingInstallations: SettingsManagePayload["pending_installations"];
+  /** The server-derived Blocked state: no install/claim action while true. */
+  blocked: boolean;
+  onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const slug = app.github_slug;
   const name = appDisplayName(app);
   const href = slug ? `https://github.com/apps/${encodeURIComponent(slug)}/installations/new` : null;
   const [claiming, setClaiming] = useState(false);
   const [claimFailed, setClaimFailed] = useState(false);
+  /** The installation id being bound, so one row's action is not doubled. */
+  const [binding, setBinding] = useState<number | null>(null);
+  const [bindFailed, setBindFailed] = useState(false);
+
+  /**
+   * Bind one pending installation to this target. The route runs the same
+   * consume-and-bind batch the GitHub setup redirect does, so a refusal (a
+   * lost race, an unshared bot) is reported here instead of silently
+   * reloading.
+   */
+  async function bindInstallation(installationId: number): Promise<void> {
+    setBinding(installationId);
+    setBindFailed(false);
+    try {
+      const res = await postForm(`${apiBase()}/apps/${encodeURIComponent(appId)}/bind-installation`, {
+        installationId: String(installationId),
+      });
+      if (res.status !== 200) {
+        setBindFailed(true);
+        return;
+      }
+      await onReload({ background: true });
+    } catch {
+      setBindFailed(true);
+    } finally {
+      setBinding(null);
+    }
+  }
 
   /** Record the claim, then leave for GitHub's install page. */
   async function startClaim(): Promise<void> {
@@ -693,7 +729,7 @@ export function AppInstallSection({
         />
         <div className="flex min-w-0 flex-col gap-1">
           <p className="font-semibold">{name}</p>
-          {href === null ? (
+          {blocked ? null : href === null ? (
             <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
           ) : app.scope === "shared" && installation === null ? (
             <>
@@ -712,6 +748,38 @@ export function AppInstallSection({
                   {t(locale, "settings.installClaimFailed")}
                 </p>
               ) : null}
+              {pendingInstallations.length === 0 ? null : (
+                <div className="flex flex-col gap-2">
+                  <p className="text-sm font-medium">{t(locale, "settings.installPending")}</p>
+                  <ul className="flex flex-col gap-2">
+                    {pendingInstallations.map((row) => (
+                      <li key={row.installation_id} className="flex items-center gap-2 text-sm">
+                        <span>
+                          {row.account_login === null
+                            ? t(locale, "settings.installPendingUnknownAccount", {
+                                id: String(row.installation_id),
+                              })
+                            : row.account_login}
+                        </span>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          className="w-fit"
+                          disabled={binding !== null}
+                          onClick={() => void bindInstallation(row.installation_id)}
+                        >
+                          {t(locale, "settings.installPendingBind")}
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                  {bindFailed ? (
+                    <p role="status" className="text-sm text-(--tone-warn-fg)">
+                      {t(locale, "settings.installBindFailed")}
+                    </p>
+                  ) : null}
+                </div>
+              )}
             </>
           ) : (
             <a

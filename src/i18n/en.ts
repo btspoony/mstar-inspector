@@ -143,6 +143,10 @@ export const en = {
     tabInstallations: "Installed",
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
+    // The derived Blocked banner: the server reads the bot's scope and the
+    // target's workspace on every read, so the copy names the one cause.
+    blockedBotNotShared:
+      "This bot is no longer shared with this workspace, so this target reviews nothing. Ask the platform operator to share it again.",
   },
   /**
    * The bot settings page: the bot-owned configuration (credentials health,
@@ -1031,6 +1035,13 @@ export const en = {
     installBoundNoAccount: "Bound to installation {id}; GitHub has not reported its account yet.",
     installRemoved:
       "GitHub no longer has this installation, so reviews are paused. Installing it again resumes them on this target.",
+    // Installed tab: installations the bot already carries that no target has
+    // bound yet. Binding one is the dashboard's one-action alternative to the
+    // GitHub setup round trip.
+    installPending: "Waiting to be bound",
+    installPendingUnknownAccount: "Installation {id} (account not reported yet)",
+    installPendingBind: "Bind to this target",
+    installBindFailed: "The installation could not be bound. Reload this page and try again.",
     // Installed tab: the owner allowlist (migration 0045).
     allowlist: "Owner allowlist",
     allowlistCopy: "With the switch on, only these repository owners are reviewed.",

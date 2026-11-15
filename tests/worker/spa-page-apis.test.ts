@@ -206,7 +206,16 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(otherBody.can_manage).toBe(false);
     expect(otherBody.app.github_app_id).toBe(1001);
     expect(otherBody.app.github_slug).toBe("mstar-inspector-mallory");
-    expect(Object.keys(otherBody).sort()).toEqual(["app", "can_manage", "target_id", "workspace_id"]);
+    // The derived Blocked pair rides both faces, so the identity-only set
+    // names them beside the target id.
+    expect(Object.keys(otherBody).sort()).toEqual([
+      "app",
+      "blocked",
+      "blocked_reason",
+      "can_manage",
+      "target_id",
+      "workspace_id",
+    ]);
     expect(Object.keys(otherBody.app).sort()).toEqual([
       "created_at",
       "created_by",

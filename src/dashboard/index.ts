@@ -2626,6 +2626,23 @@ function appDisplayName(
 }
 
 /**
+ * Whether the target's bot still serves it, derived on every read: a bot that
+ * is `owned` by ANOTHER workspace no longer reviews this target (the
+ * resolver's guard). Nothing stores this — a re-share clears it on the next
+ * read, and keeping a projection would be a second source of truth.
+ */
+type BlockedReason = "bot_not_shared";
+
+function blockedReasonFor(
+  app: Pick<GithubAppRow, "scope" | "workspace_id">,
+  targetWorkspaceId: string,
+): BlockedReason | null {
+  return app.scope === "owned" && app.workspace_id !== targetWorkspaceId
+    ? "bot_not_shared"
+    : null;
+}
+
+/**
  * The Apps list with the health column data (AL-20-2): every row
  * carries its health summary (the App's newest review-verdict
  * webhook_deliveries row — outcome tier, see the store's deliverySummaries —
@@ -3686,6 +3703,11 @@ const appSettingsRoute = async (c: DashboardContext) => {
   // catch-all, so no metadata failure can reach this route's 500 face
   // (AD-531 fail-open by structure).
   const app = await refreshGithubMetadataForRead(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY);
+  // Derived per read, never stored: a target whose bot is `owned` by ANOTHER
+  // workspace reviews nothing (the resolver's guard), and the page has to say
+  // so. The two facts are already in hand — the bot row's scope + owning
+  // workspace and the target's workspace — so this costs no extra query.
+  const blockedReason = blockedReasonFor(app, gate.target.workspace_id);
   try {
     c.header("Cache-Control", "private, no-store");
     if (!canManageApp(gate.scope)) {
@@ -3706,6 +3728,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // The SPA parses it as required: the settings a manager edits belong to
         // a target, and a payload that cannot name it is not a settings read.
         target_id: gate.target.id,
+        // Why this target reviews nothing, if it does. Both faces carry it:
+        // a member must know why the App is silent, not only the manager.
+        blocked: blockedReason !== null,
+        blocked_reason: blockedReason,
         app: {
           github_app_id: app.github_app_id,
           status: app.status,
@@ -3824,6 +3850,13 @@ const appSettingsRoute = async (c: DashboardContext) => {
               account_login: boundInstallation.account_login,
               removed: boundInstallation.removed_at !== null,
             },
+      // The bot's live installations that no live target references — the
+      // target page's bind source. Empty for a bot this workspace may not use,
+      // and always present so the block renders an empty set honestly.
+      pending_installations: await apps.listPendingInstallations(app.id, gate.scope.workspaceId),
+      // The derived Blocked state (no stored column): see blockedReasonFor.
+      blocked: blockedReason !== null,
+      blocked_reason: blockedReason,
     };
     if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
       return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);

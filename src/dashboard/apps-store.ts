@@ -92,6 +92,9 @@
  *     panel: this App's PRESENT installations (`removed_at IS NULL`), most
  *     recently seen first. markInstallationRemoved / reconcileInstallations
  *     stamp the rows GitHub no longer has — never delete them.
+ *   - listPendingInstallations is the target page's bind source: the live
+ *     installations of this bot that no live target references. Binding them
+ *     still goes through `install-claims-store`'s consume-and-bind batch.
  *   - softDeleteApp is idempotent — the FIRST deleted_at wins; returns
  *     whether THIS call performed the delete. It stamps the bot AND every
  *     target the bot owns in ONE batch: the user-facing delete removes one
@@ -1232,6 +1235,34 @@ export function createReviewBotsStore(db: AppsStoreD1) {
            WHERE bot_id = ? AND removed_at IS NULL ORDER BY seen_at DESC, installation_id`,
         )
         .bind(appId)
+        .all<AppInstallationRow>();
+      return res.results;
+    },
+
+    /**
+     * The target page's bind source: this bot's live installations that NO
+     * live target of the bot references, most recently seen first. A bound
+     * installation is invisible because some target already holds it; a
+     * removed one because GitHub no longer has it. Empty for a bot the
+     * addressed workspace may not use — its visible set is the workspace's
+     * own bots plus every `shared` bot.
+     */
+    async listPendingInstallations(appId: string, workspaceId: string): Promise<AppInstallationRow[]> {
+      const res = await db
+        .prepare(
+          `SELECT i.installation_id, i.account_login, i.seen_at FROM bot_installations i
+             JOIN review_bots b ON b.id = i.bot_id
+            WHERE i.bot_id = ?1 AND i.removed_at IS NULL
+              AND (b.scope = 'shared'
+                   OR EXISTS (SELECT 1 FROM bot_workspaces w
+                               WHERE w.bot_id = b.id AND w.workspace_id = ?2))
+              AND NOT EXISTS (SELECT 1 FROM review_targets t
+                               WHERE t.bot_id = i.bot_id
+                                 AND t.installation_id = i.installation_id
+                                 AND t.deleted_at IS NULL)
+            ORDER BY i.seen_at DESC, i.installation_id`,
+        )
+        .bind(appId, workspaceId)
         .all<AppInstallationRow>();
       return res.results;
     },
