@@ -64,6 +64,23 @@ describe("matchSpaRoute", () => {
     expect(matchRoute("/dashboard")).toEqual({ page: "apps", pathname: "/dashboard" });
   });
 
+  test("the bot settings page is its own page id, keeping the numeric appId", () => {
+    expect(matchSpaRoute("/dashboard/apps/12345/bot")).toEqual({
+      page: "bot-settings",
+      pathname: "/dashboard/apps/12345/bot",
+      appId: "12345",
+    });
+    expect(matchSpaRoute("/dashboard/acme/apps/12345/bot")).toEqual({
+      page: "bot-settings",
+      pathname: "/dashboard/acme/apps/12345/bot",
+      appId: "12345",
+      workspaceRef: "acme",
+    });
+    // The detail and its settings deep link stay on the detail page id.
+    expect(matchSpaRoute("/dashboard/apps/12345")?.page).toBe("app-detail");
+    expect(matchSpaRoute("/dashboard/apps/12345/settings")?.page).toBe("app-detail");
+  });
+
   test("does not match nested extras beyond the detail paths", () => {
     expect(matchSpaRoute("/dashboard/apps/acme/settings/key/delete")).toBeNull();
     expect(matchSpaRoute("/dashboard/api/insights/summary")).toBeNull();

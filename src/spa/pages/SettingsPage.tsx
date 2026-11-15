@@ -66,6 +66,7 @@ import {
   splitModelChain,
   type ChainTab,
   type AllowlistSettings,
+  type BotConfigSections,
   type CheckGateSettings,
   type ModelOptionGroup,
   type ReviewLevel,
@@ -80,7 +81,7 @@ import { LoadingNotice, LoadFailedNotice, NoticeRegion, PageNotice, SaveInFlight
 import { ProvidersSection } from "./settings-providers";
 
 export type PendingAction =
-  | { kind: "pause" | "resume" | "disable" | "enable" | "delete" }
+  | { kind: "pause" | "resume" | "disable" | "enable" | "delete" | "park" }
   | { kind: "remove-chain"; name: string }
   | { kind: "remove-key"; provider: string; keyId: string; last4: string }
   | { kind: "remove-custom"; providerId: string };
@@ -187,7 +188,7 @@ export function settingsErrorMessage(locale: SpaBoot["locale"], body: string): s
  * already gone — is a WARNING carrying the localized no-change copy, never
  * "Changes saved."; every other 2xx is the caller's success copy.
  */
-function settingsOpOutcome(
+export function settingsOpOutcome(
   locale: SpaBoot["locale"],
   status: number,
   body: string,
@@ -205,12 +206,10 @@ function settingsOpOutcome(
 export function SettingsView({
   locale,
   payload,
-  groups,
   onReload,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsPayload;
-  groups: ModelOptionGroup[];
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const { app } = payload;
@@ -222,23 +221,14 @@ export function SettingsView({
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState(false);
   // Dialog-confirmed ops report into the card that owns the
-  // action (one notice state per card region). Form-submit outcomes render
-  // through their own form-local regions instead and never pass through here.
-  // The providers card's state keeps only the add-flow (verify /
-  // template) outcomes — the dialog-confirmed removes moved to the row-local
-  // outcome below.
+  // action (one notice state per card region). The target-scoped ops
+  // (pause/resume/disable/enable/delete) are the only ones left here: the
+  // bot-scoped configuration moved to the bot page with its own regions.
   const [opsNotice, setOpsNotice] = useState<OpNotice | null>(null);
-  const [providersNotice, setProvidersNotice] = useState<OpNotice | null>(null);
-  const [chainsNotice, setChainsNotice] = useState<OpNotice | null>(null);
-  // (audit UI-45-05): remove-key / remove-custom outcome plus the
-  // removed row's position. The slot is captured from the pre-POST payload in
-  // onConfirm — the awaited background reload drops the row from
-  // the payload before the outcome resolves, so the position must be
-  // remembered for the card to render the feedback where the row was.
-  const [providersRemoveOutcome, setProvidersRemoveOutcome] = useState<{
-    notice: OpNotice;
-    slot: number;
-  } | null>(null);
+
+  async function runPinned(path: string, fields: Record<string, string> = {}): Promise<OpNotice> {
+    return postPinnedOutcome(path, fields, locale, () => onReload({ background: true }));
+  }
 
   /**
    * Resolve the op's outcome to the caller: the card/cluster that
@@ -269,54 +259,6 @@ export function SettingsView({
   }
 
   /**
-   * The draft create's completion check (the bugbot fix): POST success
-   * alone is not done — the chain is only usable once the awaited background
-   * reload lands it in the payload. A successful POST whose reload failed
-   * resolves the load-failed error instead of success, so the draft panel
-   * stays open with the typed content. Retry is safe: op=add-chain is
-   * create-or-update-in-place, so re-saving the same name converges.
-   */
-  async function createDraftChain(fields: Record<string, string>): Promise<OpNotice> {
-    const outcome = await submitSettings(fields);
-    if (outcome.kind === "success" && !outcome.reloaded) {
-      return { kind: "error", message: t(locale, "common.loadFailed") };
-    }
-    return outcome;
-  }
-
-  // Resolves whether the key was verified AND stored. The refresh
-  // after the POST is a background reload (the card tree stays mounted), so a
-  // failed verify keeps the add panel open with the typed key for correction
-  // while the provider stays unconfigured; only success resets/closes the
-  // form via onDone. The structured reason rides the providers card's region.
-  async function submitVerify(fields: Record<string, string>): Promise<OpNotice> {
-    let status: number;
-    let body: string;
-    // The catch guards only the verify POST — a background reload never
-    // rejects: load() catches its own failures into the page notice.
-    try {
-      ({ status, body } = await postForm(
-        `${apiBase()}/api/apps/${encodeURIComponent(String(app.github_app_id))}/keys/verify`,
-        fields,
-      ));
-    } catch {
-      return { kind: "error", message: t(locale, "common.saveFailed") };
-    }
-    if (status >= 400) {
-      const outcome: OpNotice = { kind: "error", message: verifyRefusalMessage(locale, body) };
-      await onReload({ background: true });
-      return outcome;
-    }
-    const outcome: OpNotice = { kind: "success", message: t(locale, "settings.keyVerified") };
-    await onReload({ background: true });
-    return outcome;
-  }
-
-  async function runPinned(path: string, fields: Record<string, string> = {}): Promise<OpNotice> {
-    return postPinnedOutcome(path, fields, locale, () => onReload({ background: true }));
-  }
-
-  /**
    * The review trigger mode save (spec review-trigger-policy §2): the
    * same pinned-ops POST family as pause/resume — `submitTriggerMode`
    * resolves the keyed 400 (`settings.error.triggerModeUnknown`) through
@@ -330,38 +272,9 @@ export function SettingsView({
   async function onConfirm(): Promise<void> {
     if (!pending || busy) return;
     const action = pending;
-    // The remove actions originate solely from the manage face's
-    // ProvidersSection; the read-only face can never reach a confirm, so the
-    // empty fallback here is unreachable in practice.
-    const configured = payload.can_manage ? payload.configured_providers : [];
     setBusy(true);
     try {
-      if (action.kind === "remove-chain") {
-        setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }));
-      } else if (action.kind === "remove-custom") {
-        // (audit UI-45-05): the remove outcome renders row-locally,
-        // so it carries the row's position — captured from the pre-POST
-        // payload, because the awaited background reload drops the
-        // row before the outcome resolves. A dialog-confirmed row is always
-        // found; the length fallback keeps the outcome visible at the list's
-        // end instead of dropping it.
-        const slot = configured.findIndex((row) => row.kind === "custom" && row.provider_id === action.providerId);
-        setProvidersRemoveOutcome({
-          notice: await submitSettings({ op: "remove-custom-provider", provider_id: action.providerId }),
-          slot: slot >= 0 ? slot : configured.length,
-        });
-      } else if (action.kind === "remove-key") {
-        // Same position capture as remove-custom (see above) — the row is the
-        // identity's, so a pool with a sibling key keeps it.
-        const slot = configuredKeySlot(configured, action.provider, action.keyId);
-        setProvidersRemoveOutcome({
-          notice: await runPinned(`${base}/key/delete`, {
-            provider: action.provider,
-            key_id: action.keyId,
-          }),
-          slot: slot >= 0 ? slot : configured.length,
-        });
-      } else if (action.kind === "delete") {
+      if (action.kind === "delete") {
         // Irreversible outcome with its own copy: "Changes saved." reads wrong
         // after a delete, and the user stays on the deleted App's page.
         // refetch: false — the deleted App's settings GET is a guaranteed 404,
@@ -409,11 +322,10 @@ export function SettingsView({
       {/* Detail-page section flow (r3 baseline § 5): one content plane divided
           by hairlines instead of one framed card per section. Sections are
           direct siblings so FlowSection's first/last edge trimming applies.
-          Order and membership are the plan's: identity, runtime & harness,
-          review depth, review gate, configuration (providers, chains), seats, and the
-          destructive ops zone. The installations / deliveries face lives on
-          its own 已安装 tab (AppDetailPage). Every field, action and data flow
-          is unchanged. */}
+          Order and membership are the owner split's: the target keeps its
+          identity, its review trigger, its depth, its gate and the
+          destructive ops zone — the bot-owned configuration (providers,
+          chains, seats, sandbox image, installations) lives on the bot page. */}
       <div className="flex flex-col">
         <AppInfoSection
           locale={locale}
@@ -423,40 +335,11 @@ export function SettingsView({
           onReload={() => onReload({ background: true })}
         />
 
-        <RuntimeHarnessSection
-          locale={locale}
-          payload={payload}
-          onSettings={submitSettings}
-          onTriggerMode={runTriggerMode}
-        />
+        <ReviewTriggerSection locale={locale} payload={payload} onTriggerMode={runTriggerMode} />
 
         <ReviewDepthSection locale={locale} payload={payload} onSettings={submitSettings} />
 
         <ReviewGateSection locale={locale} payload={payload} onSettings={submitSettings} />
-
-        <ProvidersSection
-          locale={locale}
-          payload={payload}
-          onVerify={submitVerify}
-          onSettings={submitSettings}
-          onPending={setPending}
-          notice={providersNotice}
-          removeOutcome={providersRemoveOutcome}
-          onOutcome={setProvidersNotice}
-        />
-
-        <ChainsSection
-          locale={locale}
-          payload={payload}
-          groups={groups}
-          onSettings={submitSettings}
-          onCreateDraft={createDraftChain}
-          onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
-          notice={chainsNotice}
-          onOutcome={setChainsNotice}
-        />
-
-        <SeatsSection locale={locale} payload={payload} onSettings={submitSettings} />
 
         <OpsSection locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
       </div>
@@ -496,12 +379,21 @@ export function SettingsView({
   );
 }
 
-function pendingConfirmCopy(
+/** The dialog copy for a confirmed action — shared with the bot page's remove actions. */
+export function pendingConfirmCopy(
   locale: SpaBoot["locale"],
   name: string,
   pending: PendingAction | null,
 ): { title: string; body: string; action: string; destructive: boolean } | null {
   if (!pending) return null;
+  if (pending.kind === "park") {
+    return {
+      title: t(locale, "settings.confirmParkTitle", { name }),
+      body: t(locale, "settings.confirmParkBody"),
+      action: t(locale, "settings.confirmParkAction"),
+      destructive: true,
+    };
+  }
   if (pending.kind === "remove-chain") {
     return {
       title: t(locale, "settings.confirmRemoveChainTitle", { name: pending.name }),
@@ -742,122 +634,6 @@ export function AppInfoSection({
 }
 
 /**
- * Installations — the body of the App detail's 已安装 / Installed tab
- * (manager-only): the App's `installations[]` rows as a table, plus the
- * delivery health they explain: the last webhook and the recent deliveries.
- * One row is one installation, and its stored facts are exactly
- * `account_login`, `installation_id` and `seen_at` — the payload carries no
- * per-installation repository count, so no repository column exists
- * (dashboard surface pass, 2026-11-01; compass D13). The fourth column, the
- * availability badge, is derived from the stored owner allowlist
- * (migration 0045), not from the payload's per-row facts. Each delivery line
- * leads with its source repository (migration 0043), or the unknown-source
- * label for rows written before it.
- */
-export function InstallationsSection({
-  locale,
-  payload,
-}: {
-  locale: SpaBoot["locale"];
-  payload: SettingsManagePayload;
-}) {
-  const { app, installations, allowlist } = payload;
-  const columns: DataTableColumn<SettingsManagePayload["installations"][number]>[] = [
-    {
-      header: t(locale, "settings.installationsAccount"),
-      cell: (inst) => inst.account_login ?? t(locale, "common.time.unknown"),
-    },
-    {
-      header: t(locale, "settings.installationsAvailability"),
-      cell: (inst) => {
-        // Admission mirrors the server rule (migration 0045): the switch off
-        // admits everyone; on, only a login on the owners list (GitHub
-        // logins are case-insensitive) is admitted.
-        const login = inst.account_login;
-        const valid =
-          !allowlist.enabled ||
-          (login !== null &&
-            allowlist.owners.some((owner) => owner.toLowerCase() === login.toLowerCase()));
-        return (
-          <StatusBadge tone={valid ? "success" : "neutral"}>
-            {t(locale, valid ? "settings.availabilityValid" : "settings.availabilityInvalid")}
-          </StatusBadge>
-        );
-      },
-    },
-    {
-      header: t(locale, "settings.installationsId"),
-      cell: (inst) => <span className="font-mono tabular-nums">{inst.installation_id}</span>,
-    },
-    {
-      header: t(locale, "settings.installationsLastSync"),
-      cell: (inst) => (
-        <span className="text-muted-foreground tabular-nums">
-          {formatRelativeTime(inst.seen_at, locale)}
-        </span>
-      ),
-    },
-  ];
-
-  return (
-    <FlowSection
-      title={t(locale, "settings.installations")}
-      subtitle={t(
-        locale,
-        installations.length === 1 ? "settings.installationsCountOne" : "settings.installationsCount",
-        { count: installations.length },
-      )}
-    >
-      <p className="text-sm text-muted-foreground">
-        {t(locale, "settings.lastWebhook", { time: formatRelativeTime(app.last_webhook_at, locale) })}
-        {payload.delivery_summary && payload.delivery_summary.rejected24h > 0 ? (
-          // The refusal count is the failure this line reports, so it wears the
-          // alert token; the last-webhook prose beside it stays muted.
-          <>
-            {" · "}
-            <span className="text-(--tone-danger-fg)">
-              {t(locale, "apps.health.rejected24h", { count: payload.delivery_summary.rejected24h })}
-            </span>
-          </>
-        ) : null}
-      </p>
-      <DataTable
-        columns={columns}
-        rows={installations}
-        rowKey={(inst) => String(inst.installation_id)}
-        empty={<p className="text-sm text-muted-foreground">{t(locale, "settings.noInstallations")}</p>}
-      />
-      <div className="flex flex-col gap-1">
-        <h3 className="text-sm font-medium">{t(locale, "settings.recentDeliveries")}</h3>
-        <p className="text-sm text-muted-foreground">{t(locale, "settings.recentDeliveriesCopy")}</p>
-        {payload.deliveries.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t(locale, "settings.noDeliveries")}</p>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {payload.deliveries.map((delivery, index) => (
-              <li key={`${delivery.created_at}-${index}`} className="text-sm">
-                <span className="font-medium">
-                  {delivery.repository_full_name ?? t(locale, "settings.unknownSource")}
-                </span>
-                <span className="text-muted-foreground">
-                  {" "}
-                  · {delivery.event_name ?? t(locale, "settings.unknownEvent")} ·{" "}
-                  {formatRelativeTime(delivery.created_at, locale)} ·{" "}
-                  {deliveryOutcomeLabel(delivery.outcome, locale)} ·{" "}
-                  {t(locale, "settings.status", {
-                    code: delivery.status_code === null ? "—" : String(delivery.status_code),
-                  })}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </FlowSection>
-  );
-}
-
-/**
  * The Installed tab's first block: the GitHub installation entry point.
  *
  * An `owned` bot keeps the plain share link (derived from the cached GitHub
@@ -981,6 +757,7 @@ export function AllowlistSection({
   appId,
   allowlist,
   privateApp,
+  installations,
   onReload,
 }: {
   locale: SpaBoot["locale"];
@@ -988,6 +765,8 @@ export function AllowlistSection({
   allowlist: AllowlistSettings;
   /** The cached visibility is `private` — only the note below changes. */
   privateApp: boolean;
+  /** The bot's installations — the rows this allowlist admits or refuses. */
+  installations: SettingsManagePayload["installations"];
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const [enabled, setEnabled] = useState(allowlist.enabled);
@@ -1076,6 +855,36 @@ export function AllowlistSection({
             {t(locale, "settings.allowlistFailClosed")}
           </p>
         ) : null}
+        {/* Admission, per installation: the allowlist is what decides it, so
+            the verdict renders HERE beside the owners it judges — the bot's
+            installation rows themselves live on the bot page. */}
+        <div className="flex flex-col gap-1">
+          <span className="text-sm font-medium">{t(locale, "settings.installationsAvailability")}</span>
+          {installations.length === 0 ? (
+            <p className="text-sm text-muted-foreground">{t(locale, "settings.noInstallations")}</p>
+          ) : (
+            <ul className="flex flex-col gap-1">
+              {installations.map((inst) => {
+                // Admission mirrors the server rule (migration 0045): the
+                // switch off admits everyone; on, only a login on the owners
+                // list (GitHub logins are case-insensitive) is admitted.
+                const login = inst.account_login;
+                const valid =
+                  !enabled ||
+                  (login !== null &&
+                    listed.some((owner) => owner.toLowerCase() === login.toLowerCase()));
+                return (
+                  <li key={inst.installation_id} className="flex items-center gap-2 text-sm">
+                    <span>{login ?? t(locale, "common.time.unknown")}</span>
+                    <StatusBadge tone={valid ? "success" : "neutral"}>
+                      {t(locale, valid ? "settings.availabilityValid" : "settings.availabilityInvalid")}
+                    </StatusBadge>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
         <div>
           <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
             {t(locale, "settings.allowlistSave")}
@@ -1301,57 +1110,45 @@ function ReviewGateEditor({
 }
 
 /**
- * Runtime & harness: how this App's reviews run — the review trigger cadence
- * (spec review-trigger-policy §2/§3, with the exact mention string) and the
- * runtime-harness selection (the harness mounted into the sandbox image).
- * Manage face only: the identity-only non-manager payload carries neither a
- * `sandbox_image_id` nor a save path, so it renders the read-only line.
- * The payload carries registry ids only — never image-local configuration
- * or secrets.
+ * The review trigger: when a delivery starts a review (spec
+ * review-trigger-policy §2). Target-scoped — the workspace decides it — so it
+ * lives on the target detail; the bot's sandbox image sits beside the rest of
+ * the bot's own configuration on the bot page.
  */
-export function RuntimeHarnessSection({
+export function ReviewTriggerSection({
   locale,
   payload,
-  onSettings,
   onTriggerMode,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
-  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   /** The review-trigger-mode save (the mode control's POST, resolved back to its own region). */
   onTriggerMode: (mode: ReviewTriggerMode) => Promise<OpNotice>;
 }) {
   return (
-    <FlowSection
-      title={t(locale, "settings.runtimeHarness")}
-      subtitle={t(locale, "settings.runtimeHarnessCopy", { id: payload.app.sandbox_image_id })}
-    >
-      {payload.can_manage ? (
-        <>
-          <ReviewTriggerControl
-            locale={locale}
-            slug={payload.app.github_slug}
-            mode={payload.app.review_trigger_mode}
-            onTriggerMode={onTriggerMode}
-          />
-          <RuntimeHarnessEditor locale={locale} payload={payload} onSettings={onSettings} />
-        </>
-      ) : (
-        <p className="text-sm text-muted-foreground">
-          {t(locale, "settings.runtimeHarnessValue", { id: payload.app.sandbox_image_id })}
-        </p>
-      )}
+    <FlowSection title={t(locale, "settings.reviewTrigger")} subtitle={t(locale, "settings.reviewTriggerCopy")}>
+      <ReviewTriggerControl
+        locale={locale}
+        slug={payload.app.github_slug}
+        mode={payload.app.review_trigger_mode}
+        onTriggerMode={onTriggerMode}
+      />
     </FlowSection>
   );
 }
 
-function RuntimeHarnessEditor({
+/**
+ * The runtime-harness selection (the harness mounted into the sandbox image),
+ * rendered inside the bot page's sandbox section. The payload carries registry
+ * ids only — never image-local configuration or secrets.
+ */
+export function RuntimeHarnessEditor({
   locale,
   payload,
   onSettings,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsManagePayload;
+  payload: BotConfigSections;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   const [selected, setSelected] = useState(payload.app.sandbox_image_id);
@@ -1603,6 +1400,16 @@ function OpsSection({
               </Button>
             )}
           </OpsRow>
+          {payload.owner_overlap ? (
+            // Park is the repair for an overlapping owner claim, and the route
+            // refuses it when the claim no longer overlaps — so the control
+            // renders only while the payload proves it would land.
+            <OpsRow title={t(locale, "settings.opsParkTitle")} copy={t(locale, "settings.opsParkCopy")}>
+              <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "park" })}>
+                {t(locale, "settings.opsParkAction")}
+              </Button>
+            </OpsRow>
+          ) : null}
           <OpsRow title={t(locale, "settings.opsDeleteTitle")} copy={t(locale, "settings.opsDeleteCopy")}>
             <Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>
               {t(locale, "apps.actions.delete")}
@@ -2185,7 +1992,11 @@ export function draftChainTabLabel(draftName: string, locale: SpaBoot["locale"])
   return draftName.trim() ? draftName : t(locale, "settings.draftChain");
 }
 
-function ChainsSection({
+/**
+ * The bot's model chains: the Default chain plus every named one, each edited
+ * in place. Bot-scoped — rendered on the bot page, never on the target.
+ */
+export function ChainsSection({
   locale,
   payload,
   groups,
@@ -2196,7 +2007,7 @@ function ChainsSection({
   onOutcome,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsManagePayload;
+  payload: BotConfigSections;
   groups: ModelOptionGroup[];
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   /** Bugbot fix: the draft create — resolves an error when the awaited reload fails, so the panel keeps the draft open. */
@@ -2349,13 +2160,14 @@ function ChainsSection({
  * The save stays the route's full-map contract: one role_<role> field per
  * audit seat, always all seats.
  */
-function SeatsSection({
+/** The seat → chain assignment: which chain each review role selects from. */
+export function SeatsSection({
   locale,
   payload,
   onSettings,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsManagePayload;
+  payload: BotConfigSections;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   const tabs = modelChainTabs(payload.model_chains);

@@ -458,19 +458,6 @@ const PULL_REQUEST_EXISTS_SQL = `SELECT 1 AS found FROM pull_requests p
   WHERE ${ledgerScopeSql("p")} AND p.owner = ? AND p.repo = ? AND p.pr_number = ? LIMIT 1`;
 
 /**
- * The join that reaches a bot-attributed ledger row's target. `review_findings`
- * and `review_failures` keep bot attribution only (execution ledgers), so the
- * target predicate reaches them through the PR row they belong to.
- *
- * Valid while a bot has exactly one live target; a second target needs
- * `target_id` on those execution ledgers instead of this join.
- */
-function prOwnerJoin(alias: string, botExpression: string): string {
-  return `JOIN pull_requests p ON p.bot_id = ${botExpression} AND p.owner = ${alias}.owner
-    AND p.repo = ${alias}.repo AND p.pr_number = ${alias}.pr_number`;
-}
-
-/**
  * Slice to `max` UTF-16 units without leaving half a surrogate pair behind
  * (a lone surrogate cannot round-trip through D1's TEXT as valid UTF-8).
  */
@@ -645,6 +632,14 @@ export const APP_READ_SQL = {
   getAppById: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
   getAppForWebhook: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
   getAppByGithubId: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
+  /**
+   * The shared-set-aware resolve: the bot the session workspace owns, else a
+   * `shared` bot it may use, else nothing. Non-deleted bots only. The owning
+   * mapping wins the join when a bot carries both (the ORDER BY), so the
+   * returned `workspace_id` is the caller's own whenever it has one and the
+   * bot's owner otherwise.
+   */
+  getVisibleBotByGithubId: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR g.scope = 'shared') ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`,
   listApps: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
 
@@ -908,6 +903,22 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return db
         .prepare(APP_READ_SQL.getAppByGithubId)
         .bind(githubAppId)
+        .first<GithubAppTenantRow>();
+    },
+
+    /**
+     * By GitHub's numeric App id, resolved against the shared set: the bot's
+     * own (live) mapping OR — when the bot is `shared` — any workspace, so a
+     * tenant face can read a bot it does not own. `null` for a soft-deleted or
+     * `owned` bot outside the caller's workspace.
+     */
+    async getVisibleBotByGithubId(
+      githubAppId: number,
+      workspaceId: string,
+    ): Promise<GithubAppTenantRow | null> {
+      return db
+        .prepare(APP_READ_SQL.getVisibleBotByGithubId)
+        .bind(githubAppId, workspaceId)
         .first<GithubAppTenantRow>();
     },
 
@@ -1556,12 +1567,12 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * rides the same batch — and binds only `appId` — so opening the list is
      * one round trip, not two.
      *
-     * Failure attribution assumes ONE installation per App. `bot_installations`
-     * permits the same installation id under two App rows, and in that case a
-     * failure row would count toward both — accepted, because the alternative
-     * (a constraint) would refuse a legitimate re-install shape, and a
-     * cross-App duplicate is a config mistake visible in the delivery health
-     * panel, not a silent data problem.
+     * Failure attribution is the row's OWN `target_id` (migration 0060): the
+     * bot-keyed join through `bot_installations` and `pull_requests` is gone,
+     * so a bot with two targets in two workspaces counts each target's
+     * failures once, for that target's workspace only. A row the ledger
+     * cannot attribute carries NULL and is invisible here — the migration's
+     * guards refuse to leave one behind.
      *
      * `PAGING_EXCLUDED_STAGES` rows are NOT failures of the review —
      * each is per-round attribution written for rounds that continued
@@ -1617,14 +1628,12 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             .prepare(
               `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
                FROM review_failures f
-               JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
-               ${prOwnerJoin("f", "i.bot_id")}
-               WHERE ${ledgerScopeSql("p")}
+               WHERE ${ledgerScopeSql("f")}
                  AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                  AND (f.owner, f.repo, f.pr_number) IN (${window})
                GROUP BY f.owner, f.repo, f.pr_number`,
             )
-            .bind(scope.botId, scope.targetId, scope.workspaceId, ...windowBinds),
+            .bind(scope.targetId, scope.workspaceId, ...windowBinds),
           db
             .prepare(
               `SELECT DISTINCT owner, repo FROM pull_requests
@@ -1727,8 +1736,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings rf
-             ${prOwnerJoin("rf", "rf.bot_id")}
-             WHERE ${ledgerScopeSql("p")}
+             WHERE ${ledgerScopeSql("rf")}
                AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'`,
           )
           .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber),
@@ -1741,18 +1749,15 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_failures f
-             JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
-             ${prOwnerJoin("f", "i.bot_id")}
-             WHERE ${ledgerScopeSql("p")}
+             WHERE ${ledgerScopeSql("f")}
                AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
-          .bind(scope.botId, scope.targetId, scope.workspaceId, owner, repo, prNumber),
+          .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings rf
-             ${prOwnerJoin("rf", "rf.bot_id")}
-             WHERE ${ledgerScopeSql("p")}
+             WHERE ${ledgerScopeSql("rf")}
                AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'
                AND json_extract(rf.original_json, '$.mergeClass') = ?`,
           )
@@ -1830,8 +1835,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings rf
-             ${prOwnerJoin("rf", "rf.bot_id")}
-             WHERE ${ledgerScopeSql("p")}
+             WHERE ${ledgerScopeSql("rf")}
                AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}`,
           )
           .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber, ...filterBinds),
@@ -1845,8 +1849,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                     json_extract(rf.original_json, '$.body') AS body,
                     rf.first_seen_round AS review_round
              FROM review_findings rf
-             ${prOwnerJoin("rf", "rf.bot_id")}
-             WHERE ${ledgerScopeSql("p")}
+             WHERE ${ledgerScopeSql("rf")}
                AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}
              ORDER BY rf.rowid DESC
              LIMIT ? OFFSET ?`,
@@ -1946,26 +1949,22 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           .prepare(
             `SELECT COUNT(*) AS n
              FROM review_failures f
-             JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
-             ${prOwnerJoin("f", "i.bot_id")}
-             WHERE ${ledgerScopeSql("p")}
+             WHERE ${ledgerScopeSql("f")}
                AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
-          .bind(scope.botId, scope.targetId, scope.workspaceId, owner, repo, prNumber),
+          .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
-             JOIN bot_installations i ON i.installation_id = f.installation_id AND i.bot_id = ?
-             ${prOwnerJoin("f", "i.bot_id")}
-             WHERE ${ledgerScopeSql("p")}
+             WHERE ${ledgerScopeSql("f")}
                AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC
              LIMIT ? OFFSET ?`,
           )
-          .bind(scope.botId, scope.targetId, scope.workspaceId, owner, repo, prNumber, page.limit, page.offset),
+          .bind(scope.targetId, scope.workspaceId, owner, repo, prNumber, page.limit, page.offset),
       ]);
       if (results[0]!.results.length === 0) return null;
       return {

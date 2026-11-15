@@ -248,8 +248,8 @@ function seedReviews(db: TestD1, count: number): void {
 function seedFailure(db: TestD1, id = "fx-1"): void {
   db.raw
     .prepare(
-      `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-       VALUES (?, 77, 'acme', 'widgets', 131, 'sha-1', 'sandbox', 'timeout')`,
+      `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+       VALUES (?, 77, 'acme', 'widgets', 131, 'sha-1', 'sandbox', 'timeout', 'target-app-acme')`,
     )
     .run(id);
 }
@@ -280,8 +280,8 @@ function seedFindings(
         `INSERT INTO review_findings
            (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
             first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
-            first_seen_round, last_seen_round, state, created_ms, updated_ms)
-         VALUES (?, 'app-acme', 77, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', ?, ?, 'open', 1, 1)`,
+            first_seen_round, last_seen_round, state, created_ms, updated_ms, target_id)
+         VALUES (?, 'app-acme', 77, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', ?, ?, 'open', 1, 1, 'target-app-acme')`,
       )
       .run(
         entry.id,

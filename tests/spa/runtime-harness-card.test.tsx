@@ -1,51 +1,47 @@
 /**
- * The runtime-harness settings section, asserted on the static markup in both
- * locales: the section names the runtime harness (never the image), the
- * description interpolates the persisted registry id, and the selector lists
- * the registry ids from the payload. The section also carries the review
- * trigger control (cadence belongs to how reviews run), so its save and slug
- * arrive as props here.
+ * The sandbox-image section — the bot page's runtime-harness face — asserted on
+ * the static markup in both locales: the section names the runtime harness
+ * (never the image), and a manager gets the registry selector the save uses.
+ * The review trigger control is TARGET-scoped and stayed on the target detail,
+ * so this section carries the image alone.
  */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { SettingsManagePayload } from "../../src/spa/pages/data";
-import { RuntimeHarnessSection } from "../../src/spa/pages/SettingsPage";
+import { t } from "../../src/i18n";
+import type { BotConfigSections } from "../../src/spa/pages/data";
+import { SandboxSection } from "../../src/spa/pages/BotSettingsPage";
 
-// The section reads only these payload fields; the rest of the manage
-// payload belongs to the sibling sections.
-const payload = (sandboxImageId: string): SettingsManagePayload =>
+// The section reads only these payload fields; the rest of the bot payload
+// belongs to the sibling sections.
+const payload = (
+  sandboxImageId: string,
+  canManage: boolean,
+): BotConfigSections & { can_manage: boolean } =>
   ({
-    can_manage: true,
-    installation: null,
-    app: { sandbox_image_id: sandboxImageId, github_slug: "acme", review_trigger_mode: "every_push" },
+    can_manage: canManage,
+    app: { sandbox_image_id: sandboxImageId, github_slug: "acme" },
     sandbox_images: [
       { id: "omp", enabled: true },
       { id: "legacy", enabled: false },
     ],
-  }) as unknown as SettingsManagePayload;
+  }) as unknown as BotConfigSections & { can_manage: boolean };
 
 const noop = async () => ({ kind: "success" as const, message: "" });
 
-const render = (locale: "en" | "zh_CN", sandboxImageId: string): string =>
+const render = (locale: "en" | "zh_CN", sandboxImageId: string, canManage = true): string =>
   renderToStaticMarkup(
-    createElement(RuntimeHarnessSection, {
-      locale,
-      payload: payload(sandboxImageId),
-      onSettings: noop,
-      onTriggerMode: noop,
-    }),
+    createElement(SandboxSection, { locale, payload: payload(sandboxImageId, canManage), onSettings: noop }),
   );
 
-describe("runtime harness section (SSR)", () => {
+describe("sandbox image section (SSR)", () => {
   test("the English face names the runtime harness, not the image", () => {
     const html = render("en", "omp");
-    expect(html).toContain("Runtime harness");
+    expect(html).toContain(t("en", "settings.runtimeHarness"));
     expect(html).not.toContain("Runtime image");
-    // The card copy keeps the true statement: model configuration is read at run time.
-    expect(html).toContain("run time");
-    // The description interpolates the persisted registry id.
-    expect(html).toContain("The omp runtime harness mounted");
+    // The copy keeps the owner: the bot's reviews all run under this harness.
+    expect(html).toContain(t("en", "botSettings.sandboxCopy"));
+    expect(html).toContain(t("en", "settings.saveRuntimeHarness"));
     // The selector shows the persisted registry id as its value (the closed
     // Radix listbox renders its items only on open, client-side).
     expect(html).toContain("omp");
@@ -58,9 +54,9 @@ describe("runtime harness section (SSR)", () => {
     expect(html).toContain("omp");
   });
 
-  test("the description names the persisted id, never a hardcoded registry id", () => {
-    const html = render("en", "other-runtime");
-    expect(html).toContain("The other-runtime runtime harness mounted");
-    expect(html).not.toContain("(omp)");
+  test("the read-only face names the stored id and offers no save control", () => {
+    const html = render("en", "other-runtime", false);
+    expect(html).toContain(t("en", "settings.runtimeHarnessValue", { id: "other-runtime" }));
+    expect(html).not.toContain(t("en", "settings.saveRuntimeHarness"));
   });
 });

@@ -288,6 +288,7 @@ const SETTINGS_PAYLOAD: SettingsManagePayload = {
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
   allowlist: { enabled: false, owners: [] },
+  owner_overlap: false,
   keys: [],
   model_chain: null,
   model_limits_snapshot: "2026-01-01",
@@ -481,7 +482,6 @@ const SURFACES: readonly Surface[] = [
           createElement(SettingsView, {
             locale: "en",
             payload: SETTINGS_PAYLOAD,
-            groups: [],
             onReload: () => Promise.resolve(true),
           }),
         ),

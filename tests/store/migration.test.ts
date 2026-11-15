@@ -3476,3 +3476,262 @@ describe("install_claims (migrations/0059_install_claims.sql)", () => {
     expect(db.raw.query("SELECT COUNT(*) AS n FROM install_claims").get()).toEqual({ n: 3 });
   });
 });
+
+describe("migrations/0060_execution_ledger_target.sql", () => {
+  const LEDGER_TARGET_MIGRATION = "0060_execution_ledger_target.sql";
+
+  /** Production's shape at 0059: every file before this one, in order. */
+  function preLedgerTargetDb(): TestD1 {
+    const db = createTestD1();
+    for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
+      (migration) => migrationNumber(migration) < migrationNumber(LEDGER_TARGET_MIGRATION),
+    )) {
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  function applyLedgerTargetMigration(db: TestD1): void {
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, LEDGER_TARGET_MIGRATION), "utf8"));
+  }
+
+  /**
+   * One bot, its workspace mapping, one target, and the installation the bot
+   * holds — the tuple a failure row reaches its bot through (it carries no
+   * bot id of its own).
+   */
+  function seedParents(db: TestD1): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+            status, created_at, updated_at)
+         VALUES ('bot-a', 9101, 'bot-a', 'enc', 'enc', 'acme', 'active',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-a', 'default')").run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES ('target-a', 'default', 'bot-a', 'target-a', 'acme',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+         VALUES ('install-a', 'bot-a', 123, 'acme', datetime('now'))`,
+      )
+      .run();
+  }
+
+  /** The ledger row an execution row is attributed through. */
+  function seedPullRequest(db: TestD1, id: string, prNumber: number): void {
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests
+           (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+         VALUES (?, 'bot-a', 'target-a', 'acme', 'widgets', ?, 'PR', 'open', 'sha',
+                 datetime('now'), datetime('now'))`,
+      )
+      .run(id, prNumber);
+  }
+
+  function seedPublication(db: TestD1, id: string, prNumber: number): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, created_ms, updated_ms)
+         VALUES (?, 'bot-a', 123, 'acme', 'widgets', ?, 'sha', 'review', 'applied', '{}', 1, 1)`,
+      )
+      .run(id, prNumber);
+  }
+
+  function seedFinding(db: TestD1, id: string, prNumber: number): void {
+    seedPublication(db, `pub-${id}`, prNumber);
+    db.raw
+      .prepare(
+        `INSERT INTO review_findings
+           (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+            first_seen_round, last_seen_round, state, created_ms, updated_ms)
+         VALUES (?, 'bot-a', 123, 'acme', 'widgets', ?, 'finding-1', '{}',
+                 ?, ?, 'sha', 'sha', 1, 1, 'open', 1, 1)`,
+      )
+      .run(id, prNumber, `pub-${id}`, `pub-${id}`);
+  }
+
+  function seedFailure(db: TestD1, id: string, prNumber: number): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+         VALUES (?, 123, 'acme', 'widgets', ?, 'sha', 'runner', 'boom')`,
+      )
+      .run(id, prNumber);
+  }
+
+  function seedAuditEvent(db: TestD1, id: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO audit_events (id, workspace_id, actor_login, action, created_at)
+         VALUES (?, 'default', 'octocat', 'support.read', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run(id);
+  }
+
+  function columns(db: TestD1, table: string): Array<{ name: string; notnull: number; dflt_value: unknown }> {
+    return db.raw.query(`PRAGMA table_info(${table})`).all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: unknown;
+    }>;
+  }
+
+  test("adds a nullable target_id to both execution ledgers and to the audit log, and nothing else", () => {
+    const db = preLedgerTargetDb();
+    const before = {
+      findings: columns(db, "review_findings").map((column) => column.name),
+      failures: columns(db, "review_failures").map((column) => column.name),
+      audit: columns(db, "audit_events").map((column) => column.name),
+    };
+
+    applyLedgerTargetMigration(db);
+
+    for (const [table, prior] of [
+      ["review_findings", before.findings],
+      ["review_failures", before.failures],
+      ["audit_events", before.audit],
+    ] as const) {
+      const after = columns(db, table);
+      // Appended, never inserted mid-table: every pre-migration column keeps
+      // its ordinal, so a `SELECT *` reader's positions do not shift.
+      expect(after.map((column) => column.name).slice(0, prior.length), table).toEqual(prior);
+      expect(after.map((column) => column.name), table).toEqual([...prior, "target_id"]);
+      // Nullable on the add: a NOT NULL add would need a dummy default, and the
+      // guard below is what refuses an unattributed row.
+      expect(after.find((column) => column.name === "target_id"), table).toMatchObject({
+        notnull: 0,
+        dflt_value: null,
+      });
+    }
+  });
+
+  test("attributes every existing finding and failure through its pull-request row", () => {
+    const db = preLedgerTargetDb();
+    seedParents(db);
+    seedPullRequest(db, "pr-42", 42);
+    seedFinding(db, "finding-42", 42);
+    seedFailure(db, "failure-42", 42);
+    // An audit row predates the column and carries no target: the migration
+    // adds the column without inventing attribution for history.
+    seedAuditEvent(db, "audit-1");
+
+    applyLedgerTargetMigration(db);
+
+    expect(db.raw.query("SELECT id, target_id FROM review_findings").all()).toEqual([
+      { id: "finding-42", target_id: "target-a" },
+    ]);
+    expect(db.raw.query("SELECT id, target_id FROM review_failures").all()).toEqual([
+      { id: "failure-42", target_id: "target-a" },
+    ]);
+    expect(db.raw.query("SELECT id, target_id FROM audit_events").all()).toEqual([
+      { id: "audit-1", target_id: null },
+    ]);
+  });
+
+  test("aborts the migration when a finding cannot be attributed, naming the guard", () => {
+    const db = preLedgerTargetDb();
+    seedParents(db);
+    // No pull_requests row for this finding's PR: the bot-keyed join that the
+    // tenant faces are about to lose was the only path to its target.
+    seedFinding(db, "finding-orphan", 77);
+
+    expect(() => applyLedgerTargetMigration(db)).toThrow(
+      "CHECK constraint failed: guard_findings_without_target",
+    );
+  });
+
+  test("aborts the migration when a failure cannot be attributed, naming the guard", () => {
+    const db = preLedgerTargetDb();
+    seedParents(db);
+    seedFailure(db, "failure-orphan", 77);
+
+    expect(() => applyLedgerTargetMigration(db)).toThrow(
+      "CHECK constraint failed: guard_failures_without_target",
+    );
+  });
+
+  test("refuses a failure whose installation resolves to two different targets", () => {
+    const db = preLedgerTargetDb();
+    seedParents(db);
+    // A second bot in a second workspace, holding the SAME installation id and
+    // its own pull-request row at the same key, pointing at its own target.
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'ws-other', 'acme', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+            status, created_at, updated_at)
+         VALUES ('bot-b', 9102, 'bot-b', 'enc', 'enc', 'acme', 'active',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-b', 'ws-other')").run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES ('target-b', 'ws-other', 'bot-b', 'target-b', 'acme',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+         VALUES ('install-b', 'bot-b', 123, 'acme', datetime('now'))`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests
+           (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+         VALUES ('pr-b', 'bot-b', 'target-b', 'acme', 'widgets', 42, 'PR', 'open', 'sha',
+                 datetime('now'), datetime('now'))`,
+      )
+      .run();
+    seedPullRequest(db, "pr-a", 42);
+    seedFailure(db, "failure-42", 42);
+
+    // One row of several is NOT an attribution: the guard refuses before the
+    // UPDATE, so nothing is written and no workspace reads a borrowed row.
+    expect(() => applyLedgerTargetMigration(db)).toThrow(
+      "CHECK constraint failed: guard_failures_ambiguous_target",
+    );
+    expect(db.raw.query("SELECT id, target_id FROM review_failures").all()).toEqual([
+      { id: "failure-42", target_id: null },
+    ]);
+  });
+
+  test("the tenant predicate is served by each ledger's own target index", () => {
+    const db = createMigratedTestD1();
+    for (const [index, table] of [
+      ["idx_review_findings_target", "review_findings"],
+      ["idx_review_failures_target", "review_failures"],
+    ] as const) {
+      expect(
+        db.raw.query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?").get(index),
+        index,
+      ).toEqual({ tbl_name: table });
+      expect(
+        (db.raw.query(`PRAGMA index_info(${index})`).all() as Array<{ name: string }>).map((row) => row.name),
+        index,
+      ).toEqual(["target_id", "owner", "repo", "pr_number"]);
+    }
+  });
+});

@@ -3,7 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import { t } from "../../i18n";
 import { PageHeader } from "@/components/PageHeader";
 import { MetricBand, type Metric } from "@/components/MetricBand";
-import { AllowlistSection, AppInstallSection, InstallationsSection, SettingsView } from "./SettingsPage";
+import { AllowlistSection, AppInstallSection, SettingsView } from "./SettingsPage";
 import { AppInsightsTab } from "./AppInsightsTab";
 import { AppPullRequestsTab } from "./AppPullRequestsTab";
 import { StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from "@design-system";
@@ -19,10 +19,8 @@ import {
   appDisplayName,
   appStatusPill,
   parseAppDetailSearch,
-  parseModels,
   parseSettings,
   type AppDetailSearch,
-  type ModelOptionGroup,
   type SettingsPayload,
 } from "./data";
 
@@ -72,23 +70,8 @@ export function AppDetailShell({
  * and a test can drive the same read under two pathnames.
  * `can_manage` gates the second request: a non-manager sees no model editor.
  */
-export async function loadAppDetail(
-  base: string,
-  appId: string,
-): Promise<{ payload: SettingsPayload; groups: ModelOptionGroup[] } | null> {
-  const parsed = parseSettings(
-    await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/settings`),
-  );
-  if (!parsed) return null;
-  let groups: ModelOptionGroup[] = [];
-  if (parsed.can_manage) {
-    try {
-      groups = parseModels(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/models`))?.groups ?? [];
-    } catch {
-      groups = [];
-    }
-  }
-  return { payload: parsed, groups };
+export async function loadAppDetail(base: string, appId: string): Promise<SettingsPayload | null> {
+  return parseSettings(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/settings`));
 }
 
 /**
@@ -122,7 +105,6 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   // would leave the previous workspace's settings and model chain on screen.
   const base = apiBase();
   const [payload, setPayload] = useState<SettingsPayload | null>(null);
-  const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
@@ -172,8 +154,7 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           else setState("error");
           return false;
         }
-        setPayload(loaded.payload);
-        setGroups(loaded.groups);
+        setPayload(loaded);
         setState("ok");
         // A healthy page has no page-level failure: any successful load —
         // foreground or background — clears the banner a failed background
@@ -277,7 +258,6 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           locale={locale}
           appId={appId}
           payload={payload}
-          groups={groups}
           notice={notice}
           search={search}
           onReload={load}
@@ -285,6 +265,24 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
         />
       ) : null}
     </AppDetailShell>
+  );
+}
+
+/**
+ * The link from the target detail to the bot's own settings page. The href is
+ * derived from the page's own API base, so it is the real target on both the
+ * legacy and the workspace-scoped path.
+ */
+export function BotSettingsLink({ locale, appId }: { locale: SpaBoot["locale"]; appId: string }) {
+  const href = `${apiBase()}/apps/${encodeURIComponent(appId)}/bot`;
+  return (
+    <a
+      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+      href={href}
+      onClick={(event) => spaClick(href, event)}
+    >
+      {t(locale, "appDetail.botSettingsLink")}
+    </a>
   );
 }
 
@@ -299,7 +297,6 @@ export function AppDetailView({
   locale,
   appId,
   payload,
-  groups,
   notice,
   search,
   onReload,
@@ -308,7 +305,6 @@ export function AppDetailView({
   locale: SpaBoot["locale"];
   appId: string;
   payload: SettingsPayload;
-  groups: ModelOptionGroup[];
   notice: { kind: NoticeKind; message: string } | null;
   search: AppDetailSearch;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
@@ -356,7 +352,14 @@ export function AppDetailView({
       <PageHeader
         title={appDisplayName(payload.app)}
         description={t(locale, "apps.by", { login: payload.app.created_by })}
-        actions={<StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>}
+        actions={
+          <>
+            {/* The bot's own configuration has its own page: the target keeps
+                the workspace's review policy and links across for the rest. */}
+            <BotSettingsLink locale={locale} appId={appId} />
+            <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
+          </>
+        }
         metrics={<MetricBand metrics={metrics} />}
       />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
@@ -394,12 +397,7 @@ export function AppDetailView({
             `data-[state=inactive]:hidden` carries the one-visible-panel
             invariant (ui-bugs knowledge pin, source-tested below). */}
         <TabsContent value="settings" forceMount>
-          <SettingsView
-            locale={locale}
-            payload={payload}
-            groups={groups}
-            onReload={onReload}
-          />
+          <SettingsView locale={locale} payload={payload} onReload={onReload} />
         </TabsContent>
         {canManage ? (
           <TabsContent value="installations" forceMount>
@@ -423,9 +421,9 @@ export function AppDetailView({
                 appId={appId}
                 allowlist={payload.allowlist}
                 privateApp={payload.app.github_visibility === "private"}
+                installations={payload.installations}
                 onReload={onReload}
               />
-              <InstallationsSection locale={locale} payload={payload} />
             </div>
           </TabsContent>
         ) : null}

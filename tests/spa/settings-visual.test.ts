@@ -22,8 +22,8 @@ import { t } from "../../src/i18n";
 import { SectionCard } from "../../src/spa/components/SectionCard";
 import { PageNotice, type OpNotice } from "../../src/spa/pages/PageNotice";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
-import type { SettingsManagePayload } from "../../src/spa/pages/data";
-import { InstallationsSection } from "../../src/spa/pages/SettingsPage";
+import type { BotConfigSections, BotSettingsPayload, SettingsManagePayload } from "../../src/spa/pages/data";
+import { BotHealthSection, BotSettingsView } from "../../src/spa/pages/BotSettingsPage";
 import { ProvidersSection } from "../../src/spa/pages/settings-providers";
 import { alertSegments } from "../helpers/token-colour";
 import { withLocation } from "./browser-stub";
@@ -31,9 +31,12 @@ import { withLocation } from "./browser-stub";
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const sectionCard = readFileSync(join(spaRoot, "components/SectionCard.tsx"), "utf8");
 const settingsPageOnly = readFileSync(join(spaRoot, "pages/SettingsPage.tsx"), "utf8");
-/** The settings tab's source: the page plus the providers modules it composes. */
+const botPageOnly = readFileSync(join(spaRoot, "pages/BotSettingsPage.tsx"), "utf8");
+/** Both settings faces: the target's tab and the bot's page, plus the providers
+ * modules they compose — one source for the section idioms both share. */
 const settingsTabSource =
   settingsPageOnly +
+  botPageOnly +
   readFileSync(join(spaRoot, "pages/settings-providers.tsx"), "utf8") +
   readFileSync(join(spaRoot, "pages/providers-dialogs.tsx"), "utf8");
 const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
@@ -68,6 +71,7 @@ const detailPayload = (): SettingsManagePayload => ({
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
   allowlist: { enabled: false, owners: [] },
+  owner_overlap: false,
   keys: [],
   model_chain: null,
   model_limits_snapshot: "2026-01-01",
@@ -165,12 +169,13 @@ describe("settings section flow (r3 baseline § 5)", () => {
       return settingsTabSource.slice(from, to);
     };
     for (const [section, end, titleKey] of [
-      ["export function AppInfoSection", "export function InstallationsSection", "settings.appInfo"],
-      ["export function InstallationsSection", "export function RuntimeHarnessSection", "settings.installations"],
-      ["export function RuntimeHarnessSection", "function RuntimeHarnessEditor", "settings.runtimeHarness"],
-      ["function ChainsSection", "function SeatsSection", "settings.modelChains"],
-      ["function SeatsSection", "function DraftChainPanel", "settings.seats"],
-      ["function OpsSection", "const NAME_MAX_LENGTH", "settings.ops"],
+      ["export function AppInfoSection", "export function AppInstallSection", "settings.appInfo"],
+      ["export function AppInstallSection", "export function AllowlistSection", "settings.install"],
+      ["export function AllowlistSection", "export function ReviewGateSection", "settings.allowlist"],
+      ["export function ReviewTriggerSection", "export function RuntimeHarnessEditor", "settings.reviewTrigger"],
+      ["export function ChainsSection", "export function SeatsSection", "settings.modelChains"],
+      ["export function SeatsSection", "export function DraftChainPanel", "settings.seats"],
+      ["function OpsSection", "export function WorkspaceNameCard", "settings.ops"],
     ] as const) {
       const body = sectionBlock(section, end);
       expect(body, section).toContain("<FlowSection");
@@ -183,16 +188,15 @@ describe("settings section flow (r3 baseline § 5)", () => {
     expect(providersSource).not.toContain("<SectionCard");
   });
 
-  test("the settings tab's section order is the plan's: identity, runtime, configuration, seats, ops", () => {
-    // The installations / deliveries section moved to the App detail's own
-    // Installed tab (AppDetailPage) — it is no longer a settings sibling.
+  test("the target settings tab's section order is identity, trigger, depth, gate, ops", () => {
+    // The bot-owned sections (sandbox image, providers, chains, seats,
+    // installations) live on the bot page; the target keeps its own policy.
     let cursor = -1;
     for (const marker of [
       "<AppInfoSection",
-      "<RuntimeHarnessSection",
-      "<ProvidersSection",
-      "<ChainsSection",
-      "<SeatsSection",
+      "<ReviewTriggerSection",
+      "<ReviewDepthSection",
+      "<ReviewGateSection",
       "<OpsSection",
     ]) {
       const at = settingsTabSource.indexOf(marker, cursor + 1);
@@ -237,7 +241,6 @@ describe("settings heading idiom (QC convergence)", () => {
           locale: "en",
           appId: "1",
           payload: detailPayload(),
-          groups: [],
           notice: null,
           search: { tab: "settings", window: "30", repo: "", pr: "" },
           onReload: async () => true,
@@ -487,12 +490,17 @@ describe("section description wording (A8)", () => {
   });
 });
 
-describe("installations last-webhook line (I-000251)", () => {
+describe("bot credentials-health line (I-000251)", () => {
   const render = (rejected24h: number): string =>
     renderToStaticMarkup(
-      createElement(InstallationsSection, {
+      createElement(BotHealthSection, {
         locale: "en",
-        payload: { ...detailPayload(), delivery_summary: { latest: null, rejected24h } },
+        payload: {
+          app: { last_webhook_at: null },
+          installations: [],
+          deliveries: [],
+          delivery_summary: { latest: null, rejected24h },
+        } as unknown as BotConfigSections,
       }),
     );
 
@@ -508,5 +516,110 @@ describe("installations last-webhook line (I-000251)", () => {
     // Zero refusals is a healthy line: today's muted text, no count rendered.
     expect(alertSegments(render(0), "light")).toEqual([]);
     expect(render(0)).toContain(lastWebhook);
+  });
+});
+
+/**
+ * The moved sections still render — on the bot page, which is now the home of
+ * the bot-owned configuration. Each assertion names a VALUE the section shows,
+ * so a section that renders its title over an empty body still fails.
+ */
+describe("the bot page carries the moved sections", () => {
+  const botPayload = (): BotSettingsPayload => ({
+    can_manage: true,
+    app: {
+      github_app_id: 1,
+      id: "app-demo",
+      status: "active",
+      scope: "owned",
+      sandbox_image_id: "omp",
+      last_webhook_at: null,
+      github_name: "Demo",
+      github_slug: "demo",
+      github_description: null,
+      github_html_url: null,
+      github_avatar_url: null,
+      github_metadata_synced_at: null,
+    },
+    keys: [
+      {
+        provider: "openai",
+        keyId: "0123456789abcdef",
+        last4: "wxyz",
+        updatedAt: null,
+        verifiedAt: null,
+        verifiedStatus: null,
+      },
+    ],
+    model_chain: "openai/gpt-5",
+    model_roles: { "mstar-review-seat": "fast" },
+    model_chains: [
+      { name: "fast", chain: "openai/gpt-5-mini", is_default: false, created_at: "2026-01-01", updated_at: "2026-01-01" },
+    ],
+    custom_providers: [],
+    configured_providers: [
+      {
+        kind: "key",
+        provider: "openai",
+        key_id: "0123456789abcdef",
+        last4: "wxyz",
+        updated_at: null,
+        verified_at: null,
+        verified_status: null,
+      },
+    ],
+    provider_catalog: [],
+    model_limits_snapshot: "2026-01-01",
+    model_role_ids: ["mstar-review-seat"],
+    custom_provider_api_ids: [],
+    sandbox_images: [{ id: "omp", enabled: true }],
+    installations: [{ installation_id: 987654, account_login: "acme", seen_at: "2026-01-01 00:00:00" }],
+    deliveries: [],
+  });
+
+  test("a manager's bot page renders credentials health, providers, chains, seats, sandbox image and installations", () => {
+    const markup = renderToStaticMarkup(
+      createElement(BotSettingsView, {
+        locale: "en",
+        payload: botPayload(),
+        groups: [],
+        notice: null,
+        onReload: async () => true,
+      }),
+    );
+    expect(markup).toContain(t("en", "botSettings.health"));
+    // Providers: a stored key's masked tail is the value the section renders.
+    expect(markup).toContain(t("en", "settings.providers.title"));
+    expect(markup).toContain("wxyz");
+    // Chains: the Default chain's selectors plus the named chain.
+    expect(markup).toContain(t("en", "settings.modelChains"));
+    expect(markup).toContain("openai/gpt-5");
+    expect(markup).toContain("fast");
+    // Seats: the role → chain mapping.
+    expect(markup).toContain(t("en", "settings.seats"));
+    // Sandbox image: the selector carries the stored id.
+    expect(markup).toContain("omp");
+    // Installations: the bot's installation rows.
+    expect(markup).toContain("987654");
+  });
+
+  test("a shared bot's page renders the same sections read-only", () => {
+    const markup = renderToStaticMarkup(
+      createElement(BotSettingsView, {
+        locale: "en",
+        payload: { ...botPayload(), can_manage: false, app: { ...botPayload().app, scope: "shared" } },
+        groups: [],
+        notice: null,
+        onReload: async () => true,
+      }),
+    );
+    expect(markup).toContain(t("en", "botSettings.readOnly"));
+    expect(markup).toContain(t("en", "botSettings.scopeShared"));
+    // Same values, no write affordance: the read-only face names the stored
+    // sandbox image instead of offering the selector, and the keys render
+    // their masked tails without a remove control.
+    expect(markup).toContain(t("en", "settings.runtimeHarnessValue", { id: "omp" }));
+    expect(markup).toContain("wxyz");
+    expect(markup).not.toContain(t("en", "settings.saveRuntimeHarness"));
   });
 });

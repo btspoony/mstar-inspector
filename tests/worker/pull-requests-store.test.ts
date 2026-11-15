@@ -187,8 +187,8 @@ describe("listPullRequests", () => {
     for (const id of ["f1", "f2"]) {
       db.raw
         .prepare(
-          `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-           VALUES (?, 77, 'acme', 'widgets', 131, 'sha-1', 'runner', 'boom')`,
+          `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+           VALUES (?, 77, 'acme', 'widgets', 131, 'sha-1', 'runner', 'boom', 'target-app-pr-ledger')`,
         )
         .run(id);
     }
@@ -219,8 +219,8 @@ describe("listPullRequests", () => {
       // The review itself continued; only this attribution row was written.
       db.raw
         .prepare(
-          `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-           VALUES ('f-attribution', 77, 'acme', 'widgets', 131, 'sha-1', ?, ?)`,
+          `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+           VALUES ('f-attribution', 77, 'acme', 'widgets', 131, 'sha-1', ?, ?, 'target-app-pr-ledger')`,
         )
         .run(stage, error);
 
@@ -249,9 +249,9 @@ describe("listPullRequests", () => {
       .run(APP_ID);
     db.raw
       .prepare(
-        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-         VALUES ('f-recheck', 77, 'acme', 'widgets', 131, 'sha-1', 'recheck', 'skipped: budget: null'),
-                ('f-runner', 77, 'acme', 'widgets', 131, 'sha-1', 'runner', 'boom')`,
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+         VALUES ('f-recheck', 77, 'acme', 'widgets', 131, 'sha-1', 'recheck', 'skipped: budget: null', 'target-app-pr-ledger'),
+                ('f-runner', 77, 'acme', 'widgets', 131, 'sha-1', 'runner', 'boom', 'target-app-pr-ledger')`,
       )
       .run();
 
@@ -279,8 +279,8 @@ describe("listPullRequests", () => {
       .run();
     db.raw
       .prepare(
-        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-         VALUES ('f-other', 88, 'acme', 'widgets', 131, 'sha-x', 'runner', 'boom')`,
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+         VALUES ('f-other', 88, 'acme', 'widgets', 131, 'sha-x', 'runner', 'boom', 'target-other-app')`,
       )
       .run();
 
@@ -411,8 +411,8 @@ describe("listPullRequests", () => {
       .run(total, APP_ID, TARGET_ID);
     db.raw
       .prepare(
-        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-         VALUES ('f-in', 77, 'acme', 'widgets', ?, 'sha-1', 'runner', 'boom')`,
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+         VALUES ('f-in', 77, 'acme', 'widgets', ?, 'sha-1', 'runner', 'boom', 'target-app-pr-ledger')`,
       )
       .run(total);
 
@@ -489,8 +489,8 @@ describe("listPullRequests repository filter + option set", () => {
       .run(APP_ID, TARGET_ID);
     db.raw
       .prepare(
-        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-         VALUES ('f-behind', 77, 'acme', 'behind', 9002, 'sha-1', 'runner', 'boom')`,
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+         VALUES ('f-behind', 77, 'acme', 'behind', 9002, 'sha-1', 'runner', 'boom', 'target-app-pr-ledger')`,
       )
       .run();
     return store;
@@ -640,8 +640,8 @@ describe("pull request detail reads", () => {
       .run(APP_ID);
     db.raw
       .prepare(
-        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-         VALUES ('fx', 99, 'acme', 'widgets', 131, 'sha-1', 'sandbox', 'timeout')`,
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+         VALUES ('fx', 99, 'acme', 'widgets', 131, 'sha-1', 'sandbox', 'timeout', 'target-app-pr-ledger')`,
       )
       .run();
     seedFinding(db, { findingId: "F-1", mergeClass: "must-fix", title: "Null deref", filePath: "src/a.ts", lineStart: 12, body: "guard it" });
@@ -1043,8 +1043,8 @@ function seedFinding(
       `INSERT INTO review_findings
          (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
-          first_seen_round, last_seen_round, state, created_ms, updated_ms)
-       VALUES (?, ?, 99, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', ?, ?, ?, 1, 1)`,
+          first_seen_round, last_seen_round, state, created_ms, updated_ms, target_id)
+       VALUES (?, ?, 99, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', ?, ?, ?, 1, 1, ?)`,
     )
     .run(
       rowId,
@@ -1063,6 +1063,7 @@ function seedFinding(
       firstSeenRound,
       lastSeenRound,
       state,
+      TARGET_ID,
     );
 }
 
@@ -1187,9 +1188,10 @@ describe("reviewing-now projection (D11/D16)", () => {
         // its terminal drop row, and holds no lock.
         db.raw
           .prepare(
-            `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+            `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
              VALUES ('queued', ?, 'acme', 'widgets', 131, 'sha-1', 'pipeline',
-                     'review dropped after 3 refused retries: system-cap (system cap reached)')`,
+                     'review dropped after 3 refused retries: system-cap (system cap reached)',
+                     'target-app-pr-ledger')`,
           )
           .run(INSTALLATION_ID);
       },

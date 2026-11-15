@@ -17,7 +17,7 @@
  * bot_model_roles, read on every settings render by the Role
  * models editor; 0022 is the per-App review trigger mode column).
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { t } from "../../src/i18n";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -629,5 +629,328 @@ describe("GET /dashboard/default/apps/:appId/settings (SPA-owned)", () => {
     const res = await get(SETTINGS, "", makeEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+});
+
+/**
+ * The bot's own settings face: `GET /dashboard/:ref/api/apps/:appId/bot`.
+ *
+ * The target detail keeps the workspace-owned configuration; the bot page reads
+ * the bot-owned sections (credentials health, provider configuration, chains,
+ * sandbox image, installations). A bot the caller's workspace does not own is
+ * reachable exactly when it is SHARED — and then the face is read-only
+ * (`can_manage: false`) whatever the caller's workspace role is.
+ */
+describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)", () => {
+  /** The second workspace a shared bot is used from (its owner is `hubot`). */
+  function seedOtherWorkspace(db: ReturnType<typeof createAppsUiD1>): void {
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'ws-other', 'hubot', datetime('now'))`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+         SELECT 'ws-other', id, 'owner', '2026-01-01T00:00:00.000Z' FROM users WHERE github_login = 'hubot'`,
+      )
+      .run();
+  }
+
+  /** Share one bot WITHOUT the official-workspace designation: only `scope` gates this face. */
+  function shareBot(db: ReturnType<typeof createAppsUiD1>, githubAppId: number): void {
+    db.raw
+      .prepare(`UPDATE review_bots SET scope = 'shared', shared_at = datetime('now') WHERE github_app_id = ?`)
+      .run(githubAppId);
+  }
+
+  const botFace = (ref: string, githubAppId: number) => `/dashboard/${ref}/api/apps/${githubAppId}/bot`;
+
+  test("the owning workspace's manager reads the bot-scoped sections only", async () => {
+    const db = await seededWorld();
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      const res = await get(
+        botFace("default", MALLORY_APP_ID),
+        `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+        makeEnv(db),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
+      expect(body.can_manage).toBe(true);
+      // Bot-scoped sections ride the face…
+      for (const key of [
+        "installations",
+        "deliveries",
+        "delivery_summary",
+        "keys",
+        "model_chain",
+        "model_roles",
+        "model_chains",
+        "custom_providers",
+        "configured_providers",
+        "provider_catalog",
+        "model_limits_snapshot",
+        "model_role_ids",
+        "custom_provider_api_ids",
+        "sandbox_images",
+      ]) {
+        expect(body).toHaveProperty(key);
+      }
+      expect(body.app.sandbox_image_id).toBe("omp");
+      expect(body.app.scope).toBe("owned");
+      expect(body.app.github_slug).toBe("mstar-inspector-mallory");
+      // …and no target-scoped section does: the workspace's review policy
+      // stays on the target detail.
+      for (const key of ["target_id", "check_gate", "allowlist", "installation", "workspace_id"]) {
+        expect(body).not.toHaveProperty(key);
+      }
+      expect(body.app).not.toHaveProperty("review_trigger_mode");
+      expect(body.app).not.toHaveProperty("review_level");
+      // The read face never reaches GitHub: no metadata refresh, no probe.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("a plain member reads the same sections, read-only", async () => {
+    const db = await seededWorld();
+    const res = await get(
+      botFace("default", MALLORY_APP_ID),
+      `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
+    expect(body.can_manage).toBe(false);
+    expect(body).toHaveProperty("keys");
+    expect(body).toHaveProperty("installations");
+    expect(body.app.sandbox_image_id).toBe("omp");
+  });
+
+  test("an owned bot is invisible from another workspace (404 envelope)", async () => {
+    const db = await seededWorld();
+    seedOtherWorkspace(db);
+    const res = await get(
+      botFace("ws-other", MALLORY_APP_ID),
+      `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "unknown app" });
+  });
+
+  test("a shared bot resolves from another workspace, read-only for its owner in that workspace", async () => {
+    const db = await seededWorld();
+    seedOtherWorkspace(db);
+    shareBot(db, MALLORY_APP_ID);
+    const res = await get(
+      botFace("ws-other", MALLORY_APP_ID),
+      `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { can_manage: unknown; app: { scope: unknown } };
+    expect(body.can_manage).toBe(false);
+    expect(body.app.scope).toBe("shared");
+  });
+
+  test("a shared bot is read-only for the owning workspace's manager too", async () => {
+    const db = await seededWorld();
+    shareBot(db, MALLORY_APP_ID);
+    const res = await get(
+      botFace("default", MALLORY_APP_ID),
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { can_manage: unknown };
+    expect(body.can_manage).toBe(false);
+  });
+
+  test("an unknown, non-numeric or foreign (unshared) App answers the same 404 with no GitHub call", async () => {
+    const db = await seededWorld();
+    seedOtherWorkspace(db);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      for (const path of [
+        botFace("default", 9999),
+        "/dashboard/default/api/apps/not-a-number/bot",
+        botFace("default", -1),
+      ]) {
+        const res = await get(path, cookie, makeEnv(db));
+        expect(res.status, path).toBe(404);
+        expect(await res.json()).toEqual({ error: "unknown app" });
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("a bot-scoped op posted for a shared bot is refused server-side, and a target-scoped op still saves", async () => {
+    const db = await seededWorld();
+    shareBot(db, MALLORY_APP_ID);
+    // The owning workspace's manager still cannot configure a shared bot: the
+    // refusal is the route's, not the page's.
+    const refused = await postForm(
+      `/dashboard/default/apps/${MALLORY_APP_ID}/settings`,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      { op: "save-sandbox-image", sandbox_image_id: "omp" },
+    );
+    expect(refused.status).toBe(403);
+    const body = (await refused.json()) as { key: unknown };
+    expect(body.key).toBe("settings.error.botReadOnly");
+    // The target-scoped ops stay available: the target is what this workspace
+    // owns, whatever the bot's scope.
+    const saved = await postForm(
+      `/dashboard/default/apps/${MALLORY_APP_ID}/settings`,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      { op: "save-review-level", level: "quick" },
+    );
+    expect(saved.status).toBe(200);
+    const target = db.raw
+      .prepare(
+        `SELECT t.review_level FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
+          WHERE b.github_app_id = ?`,
+      )
+      .get(MALLORY_APP_ID) as { review_level: string };
+    expect(target.review_level).toBe("quick");
+  });
+
+  test("keys/verify is refused for a shared bot on both paths, before any probe or store write", async () => {
+    const db = await seededWorld();
+    shareBot(db, MALLORY_APP_ID);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      for (const provider of ["anthropic", "matrix-custom"]) {
+        const res = await postForm(
+          `/dashboard/default/api/apps/${MALLORY_APP_ID}/keys/verify`,
+          cookie,
+          makeEnv(db),
+          { provider, key: `test-matrix-${provider}` },
+        );
+        expect(res.status, provider).toBe(403);
+        const body = (await res.json()) as { key: unknown };
+        expect(body.key, provider).toBe("settings.error.botReadOnly");
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    // Neither pool gained a row: the refusal precedes the verify-then-store.
+    expect(
+      (db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).n,
+    ).toBe(0);
+  });
+
+  test("lifecycle actions on a shared bot are refused for its owning manager too", async () => {
+    const db = await seededWorld();
+    shareBot(db, MALLORY_APP_ID);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    for (const action of ["disable", "enable", "delete"]) {
+      const res = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/${action}`, cookie, makeEnv(db));
+      expect(res.status, action).toBe(403);
+    }
+    expect(appStatus(db, MALLORY_APP_ID)).toBe("active");
+  });
+
+  test("no session → 302 to login", async () => {
+    const db = await seededWorld();
+    const res = await get(botFace("default", MALLORY_APP_ID), "", makeEnv(db));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+});
+
+/**
+ * `POST /dashboard/:ref/apps/:appId/park` — the manager's repair for an owner
+ * overlap. The route is a thin shell over the store's batch; the store's own
+ * guards are pinned in tests/dashboard/targets-store.test.ts.
+ */
+describe("POST /dashboard/:ref/apps/:appId/park", () => {
+  /**
+   * The overlap the park repairs: this App's target claims `acme` in `default`
+   * and ANOTHER bot's target claims it too — the shape the audit reports. Both
+   * bots keep their single target; the duplicate claim is what park settles.
+   */
+  function seedOverlap(db: ReturnType<typeof createAppsUiD1>, githubAppId: number): string {
+    const target = db.raw
+      .prepare(
+        `SELECT t.id, t.bot_id FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
+          WHERE b.github_app_id = ?`,
+      )
+      .get(githubAppId) as { id: string; bot_id: string };
+    db.raw.prepare(`UPDATE review_targets SET account_login = 'acme' WHERE id = ?`).run(target.id);
+    const insert = db.raw.prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, installation_id, account_login, review_enabled,
+          review_trigger_mode, review_level, check_min_score, check_pass_verdicts,
+          allowlist_enabled, created_by, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, NULL, 'acme', 1, 'every_push', NULL, 70, '["ship it"]', 0,
+               'mallory', datetime('now'), datetime('now'), NULL)`,
+    );
+    // Another bot's target in THIS workspace: the claim it duplicates.
+    insert.run("park-rival", "default", "app-mstar-inspector-ada", "park-rival");
+    return target.id;
+  }
+
+  test("an overlap is parked: paused, claim cleared, one audit row, zero GitHub calls", async () => {
+    const db = await seededWorld();
+    const targetId = seedOverlap(db, MALLORY_APP_ID);
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      const res = await post(
+        `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
+        `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+        makeEnv(db),
+      );
+      expect(res.status).toBe(200);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    const row = db.raw
+      .query("SELECT review_enabled, account_login FROM review_targets WHERE id = ?")
+      .get(targetId) as { review_enabled: number; account_login: string | null };
+    expect(row).toEqual({ review_enabled: 0, account_login: null });
+    expect(
+      db.raw.query("SELECT action, target_id, actor_login FROM audit_events").all(),
+    ).toEqual([{ action: "target.park", target_id: targetId, actor_login: "mallory" }]);
+  });
+
+  test("a target with no overlapping claim is refused with 409 and zero writes", async () => {
+    const db = await seededWorld();
+    const auditBefore = db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number };
+    const res = await post(
+      `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(409);
+    // No account claim at all on this target: nothing to settle.
+    expect(await res.text()).toBe("no-overlap");
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n).toBe(auditBefore.n);
+    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(1);
+  });
+
+  test("a plain member is refused by the manage gate before any write", async () => {
+    const db = await seededWorld();
+    seedOverlap(db, MALLORY_APP_ID);
+    const res = await post(
+      `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
+      `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(403);
+    expect(
+      (db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n,
+    ).toBe(0);
   });
 });

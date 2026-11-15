@@ -117,10 +117,28 @@ export const zhCN: Dictionary = {
     /** 页面在文档标题中的名称（`common.pageTitle` 的 page 槽）。 */
     documentPage: "应用",
     backToApps: "返回应用",
+    /** 从目标详情指向机器人设置页的链接。 */
+    botSettingsLink: "机器人设置",
     tabSettings: "应用设置",
     tabInstallations: "已安装",
     tabInsights: "洞察",
     tabPullRequests: "拉取请求",
+  },
+  /** 机器人设置页：机器人自身拥有的配置（凭据健康、提供方、模型链、沙箱镜像、安装）。使用该机器人的工作区可读，但不能配置。 */
+  botSettings: {
+    /** 页面在文档标题中的名称（`common.pageTitle` 的 page 槽）。 */
+    botPage: "机器人设置",
+    backToDetail: "返回目标",
+    subtitle: "此机器人自身拥有的配置——工作区的评审策略保留在目标上。",
+    scopeOwned: "自有",
+    scopeShared: "共享",
+    /** `can_manage` 为 false 时显示（共享机器人，或非管理员）。 */
+    readOnly: "此页配置为只读。共享机器人只由其所属工作区配置。",
+    health: "凭据健康",
+    healthCopy: "GitHub 发到该机器人 webhook 的投递，以及被拒绝的投递。",
+    sandboxCopy: "该机器人的每次评审所用的运行时沙箱。",
+    providersNone: "还没有提供方密钥或自定义提供方。",
+    chainsCopy: "该机器人的评审用来选择模型的模型链。",
   },
   /** Per-App 拉取请求标签页：App 收到的所有 PR 台账。详情以 owner/repo/number 寻址（同一 App 可能在多个仓库见到同一个编号），并以 `pr=owner/repo/number` 挂在 URL 上。 */
   pullRequests: {
@@ -580,6 +598,8 @@ export const zhCN: Dictionary = {
         "{owner} 不是有效的 GitHub 登录名 — 请使用 1–39 个字母、数字或连字符。未存储任何内容。",
       fieldDuplicated: "{field} 字段被提交了多次 — 请以单个值重新提交表单。未保存任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
+      /** 对 `shared` 机器人发起的机器人级写入：该页只读。 */
+      botReadOnly: "该机器人已共享——其配置在此只读。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
       concurrencyInvalid: "并发数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
       usageProbeOffVendorHost:
@@ -593,6 +613,12 @@ export const zhCN: Dictionary = {
     opsReviewsCopy: "暂停期间，每次投递都以 2xx 应答并被忽略 — 不会进行任何审查；恢复后此 App 重新开始审查。",
     opsDeliveryTitle: "投递应答",
     opsDeliveryCopy: "停用后，每次投递都以 404 应答，因此不会进行任何审查；重新启用后此 App 重新开始审查。",
+    opsParkTitle: "停放此目标",
+    opsParkCopy: "本工作区中另一个存活目标声明了同一所有者。停放会在一步审计操作中暂停此目标并清除其账号声明；目标及其设置保留。",
+    opsParkAction: "停放目标",
+    confirmParkTitle: "停放 {name}？",
+    confirmParkBody: "此目标将被暂停且账号声明被清除，所有者重叠随之消除。不会删除任何内容，之后仍可恢复评审。",
+    confirmParkAction: "停放",
     opsDeleteTitle: "删除此 App",
     opsDeleteCopy: "软删除 — App 从此列表移除，其所有安装都会被关闭。",
     // 评审触发模式（spec review-trigger-policy §2/§3）：分段标签本地化；
@@ -771,6 +797,9 @@ export const zhCN: Dictionary = {
     confirmRemoveCustomTitle: "移除 provider {provider}？",
     confirmRemoveCustomBody:
       "该 provider 及其密钥池中的全部密钥都将被移除。若只想腾出一个槽位，请移除该密钥所在的行。引用其模型的链在保存时会校验失败。",
+    /** 评审触发——属于「目标」：一次投递何时开始评审。机器人的沙箱镜像现在位于机器人设置页。 */
+    reviewTrigger: "评审触发",
+    reviewTriggerCopy: "评审的启动方式：拉取请求打开时、每次推送时，或仅当有人在评论中提及机器人时。",
     runtimeHarness: "运行时 harness",
     runtimeHarnessCopy:
       "执行此 App 审查的沙盒镜像中挂载的 {id} 运行时 harness。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",

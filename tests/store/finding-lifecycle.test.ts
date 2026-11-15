@@ -435,8 +435,12 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     const finding = db.raw.prepare("SELECT * FROM review_findings WHERE id = 'row-1'").get() as {
       state: string; reopen_count: number; first_publication_id: string; last_publication_id: string;
       first_seen_round: number; last_seen_round: number; last_assessed_ms: number | null; last_scheduled_ms: number | null;
+      target_id: string | null;
     };
     expect(finding.state).toBe("open");
+    // The row names its target: that is the only attribution the tenant read
+    // faces bind, and it rides the publication's own artifact copy.
+    expect(finding.target_id).toBe(TARGET_ID);
     expect(finding.reopen_count).toBe(0);
     expect(finding.first_publication_id).toBe("pub-1");
     expect(finding.last_publication_id).toBe("pub-1");

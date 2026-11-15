@@ -613,6 +613,73 @@ type SettingsHealth = {
   };
 };
 
+/**
+ * The bot's identity as the bot settings face serves it: the cached GitHub
+ * profile plus the bot's own execution identity. A subset of
+ * {@link SettingsAppMeta} — the target detail's payload carries the same fields
+ * with the workspace's review policy added.
+ */
+export type BotSettingsAppMeta = {
+  github_app_id: number;
+  /** The local App UID — the webhook URL's app segment (never a GitHub fact). */
+  id: string;
+  status: string;
+  /** `owned` serves its workspace only; `shared` is offered platform-wide. */
+  scope: BotScope;
+  /** The bot's selected sandbox runtime image (registry id). */
+  sandbox_image_id: string;
+  /** Last verified (2xx) webhook delivery; NULL = never. */
+  last_webhook_at: string | null;
+  github_name: string | null;
+  github_slug: string | null;
+  github_description: string | null;
+  github_html_url: string | null;
+  github_avatar_url: string | null;
+  github_metadata_synced_at: string | null;
+};
+
+/**
+ * The BOT-owned sections. They are one set on purpose: the settings face
+ * composes them with the target's review policy, and the bot page serves them
+ * alone. Every component that renders one of these sections takes this shape,
+ * so both faces feed them the same data.
+ */
+export type BotConfigSections = {
+  app: BotSettingsAppMeta;
+  keys: ProviderKeyRow[];
+  model_chain: string | null;
+  model_roles: Record<string, string>;
+  model_chains: ModelChainEntry[];
+  custom_providers: Array<{
+    provider_id: string;
+    base_url: string;
+    api: string;
+    model_ids: string[];
+    /** Absent when the owner stated nothing about any model (legacy rows). */
+    models_meta?: CustomProviderModelsMeta;
+    /** The provider row a collapsed per-protocol id resolves to (read-only). */
+    legacy_of?: string;
+  }>;
+  /** The App's persisted provider state ONLY — empty is the valid unconfigured case. */
+  configured_providers: ConfiguredProvider[];
+  /** Discovery metadata + eligibility — never configured state. */
+  provider_catalog: CatalogProvider[];
+  /** The vendor snapshot the catalog sizes came from — named beside a pre-filled size. */
+  model_limits_snapshot: string;
+  model_role_ids: readonly string[];
+  custom_provider_api_ids: readonly string[];
+  /** The selector's choices — enabled registry entries only (never yaml/secrets). */
+  sandbox_images: Array<{ id: string; enabled: boolean }>;
+} & SettingsHealth;
+
+/**
+ * The bot page's payload: the bot-owned sections plus the ONE permission bit
+ * that governs bot-scoped writes. `can_manage` is false for a `shared` bot
+ * whatever the caller's workspace role is — a tenant may use a shared bot,
+ * never configure it.
+ */
+export type BotSettingsPayload = { can_manage: boolean } & BotConfigSections;
+
 /** (spec §2): a non-manager gets the identity-only face (no ops stores). */
 export type SettingsReadOnlyPayload = {
   can_manage: false;
@@ -662,31 +729,13 @@ export type SettingsManagePayload = {
   check_gate: CheckGateSettings | null;
   /** The owner allowlist switch + accepted owner logins (migration 0045). */
   allowlist: AllowlistSettings;
-  keys: ProviderKeyRow[];
-  model_chain: string | null;
-  model_roles: Record<string, string>;
-  model_chains: ModelChainEntry[];
-  custom_providers: Array<{
-    provider_id: string;
-    base_url: string;
-    api: string;
-    model_ids: string[];
-    /** Absent when the owner stated nothing about any model (legacy rows). */
-    models_meta?: CustomProviderModelsMeta;
-    /** The provider row a collapsed per-protocol id resolves to (read-only). */
-    legacy_of?: string;
-  }>;
-  /** The App's persisted provider state ONLY — empty is the valid unconfigured case. */
-  configured_providers: ConfiguredProvider[];
-  /** Discovery metadata + eligibility — never configured state. */
-  provider_catalog: CatalogProvider[];
-  /** The vendor snapshot the catalog sizes came from — named beside a pre-filled size. */
-  model_limits_snapshot: string;
-  model_role_ids: readonly string[];
-  custom_provider_api_ids: readonly string[];
-  /** The selector's choices — enabled registry entries only (never yaml/secrets). */
-  sandbox_images: Array<{ id: string; enabled: boolean }>;
-} & SettingsHealth;
+  /**
+   * Whether the park action would be accepted: this target's account claim is
+   * duplicated by another live target of a multi-target bot. The route refuses
+   * it otherwise, so the affordance never offers a write that cannot land.
+   */
+  owner_overlap: boolean;
+} & BotConfigSections;
 
 export type SettingsPayload = SettingsReadOnlyPayload | SettingsManagePayload;
 
@@ -2002,6 +2051,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // rendering a control that cannot round-trip.
   if (data.check_gate !== null && !isCheckGateSettings(data.check_gate)) return null;
   if (!isAllowlistSettings(data.allowlist)) return null;
+  if (typeof data.owner_overlap !== "boolean") return null;
   // Cached visibility is nullable (null = the row read failed); any other
   // value must be on the probe's own vocabulary.
   if (!isNullableGithubVisibility(data.app.github_visibility)) return null;
@@ -2034,6 +2084,44 @@ function isSandboxImageList(value: unknown): value is Array<{ id: string; enable
     Array.isArray(value) &&
     value.every((row) => isRecord(row) && typeof row.id === "string" && typeof row.enabled === "boolean")
   );
+}
+
+/**
+ * The bot page's payload: the bot-owned sections plus `can_manage`. Validated
+ * field by field like {@link parseSettings} — a payload that cannot round-trip
+ * fails the parse instead of rendering a control the server would refuse.
+ */
+export function parseBotSettings(data: unknown): BotSettingsPayload | null {
+  if (!isRecord(data) || !isRecord(data.app)) return null;
+  if (typeof data.can_manage !== "boolean") return null;
+  const app = data.app;
+  if (typeof app.github_app_id !== "number" || typeof app.id !== "string") return null;
+  if (typeof app.status !== "string") return null;
+  if (!isBotScope(app.scope)) return null;
+  if (typeof app.sandbox_image_id !== "string") return null;
+  if (
+    !isNullableString(app.last_webhook_at) ||
+    !isNullableString(app.github_name) ||
+    !isNullableString(app.github_slug) ||
+    !isNullableString(app.github_description) ||
+    !isNullableString(app.github_html_url) ||
+    !isNullableString(app.github_avatar_url) ||
+    !isNullableString(app.github_metadata_synced_at)
+  ) {
+    return null;
+  }
+  if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
+  if (!isProviderKeyRowList(data.keys)) return null;
+  if (data.model_chain !== null && typeof data.model_chain !== "string") return null;
+  if (!isRecord(data.model_roles) || !Array.isArray(data.model_chains)) return null;
+  if (!Array.isArray(data.custom_providers)) return null;
+  if (!isConfiguredProviderList(data.configured_providers)) return null;
+  if (!isCatalogProviderList(data.provider_catalog)) return null;
+  if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
+  if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
+  if (typeof data.model_limits_snapshot !== "string" || data.model_limits_snapshot.length === 0) return null;
+  if (!isSandboxImageList(data.sandbox_images)) return null;
+  return data as BotSettingsPayload;
 }
 
 /** One entry of the verdict vocabulary — an off-vocabulary string fails the parse. */

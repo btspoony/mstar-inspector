@@ -41,6 +41,10 @@ export const TAIL_PREREQUISITES = [
   "0010_review_failures.sql",
   "0020_finding_lifecycle.sql",
   "0021_review_checks.sql",
+  // 0060 appends `target_id` to `audit_events`; 0029 creates the table (its
+  // `workspaces` FK parent is created later by 0026 — SQLite resolves a
+  // foreign key at DML, not at CREATE, so the early slot is inert).
+  "0029_operator_support.sql",
 ] as const;
 
 /** The directory-derived tail after the shared anchor. */
@@ -172,8 +176,7 @@ export const SPA_PAGE_APIS_MIGRATIONS = shape("spa-page-apis", [
   "0028_workspace_invites.sql",
   // The shell boot reads the support-grant table, the plan catalogue +
   // subscriptions and `server_flags`, so the dispatch face runs on the
-  // production shape.
-  "0029_operator_support.sql",
+  // production shape. 0029 already rides `TAIL_PREREQUISITES`.
   "0031_plans_usage.sql",
   "0032_unlimited_plan.sql",
   "0033_platform_admin.sql",
@@ -312,13 +315,14 @@ export const APP_CONFIG_PRE_POOL_MIGRATIONS: readonly string[] = [
 
 /**
  * The config routes' shape: 0024/0025 (the per-key pools and their model
- * evidence), 0029/0031–0033 (the support-grant, plan and `server_flags` tables
- * the SPA boot reads), the index-only 0034/0035, then the derived tail.
+ * evidence), 0031–0033 (the plan and `server_flags` tables the SPA boot
+ * reads), the index-only 0034/0035, then the derived tail. 0029 (the
+ * support-grant and audit tables, 0034's index target) already rides
+ * `TAIL_PREREQUISITES`.
  */
 export const APP_CONFIG_MIGRATIONS: readonly string[] = [
   "0024_provider_multi_key.sql",
   "0025_provider_model_evidence.sql",
-  "0029_operator_support.sql",
   "0031_plans_usage.sql",
   "0032_unlimited_plan.sql",
   "0033_platform_admin.sql",
@@ -393,6 +397,8 @@ export const APP_CREDENTIAL_RESOLUTION_MIGRATIONS = shape("app-credential-resolu
   "0024_provider_multi_key.sql",
   // 0026: createApp also writes the App's workspace mapping.
   "0026_workspaces.sql",
+  // 0029: `audit_events`, which the derived tail's 0060 alters.
+  "0029_operator_support.sql",
   "0036_app_identity.sql",
   // Every later migration, derived from the directory (0040–… included):
   // the consumer's per-message admission reads the runtime caps and writes
@@ -440,6 +446,8 @@ export const CONSUMER_POST_CHAINS_MIGRATIONS: readonly string[] = [
   // App to the 'default' workspace exactly as a real deployment does.
   "0026_workspaces.sql",
   "0027_workspace_backfill.sql",
+  // 0029: `audit_events`, which the derived tail's 0060 alters.
+  "0029_operator_support.sql",
   // 0031 meters every started execution into usage_events.
   "0031_plans_usage.sql",
   "0036_app_identity.sql",

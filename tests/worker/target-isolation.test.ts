@@ -77,6 +77,75 @@ function seedReview(
 }
 
 /**
+ * One lifecycle finding on the target's PR. The row carries its target, which
+ * is the ONLY attribution the tenant faces bind: a finding without one stays
+ * invisible, exactly like a legacy unattributed review.
+ */
+function seedFinding(
+  db: TestD1,
+  input: {
+    id: string;
+    targetId: string | null;
+    owner: string;
+    repo: string;
+    prNumber: number;
+    mergeClass: string;
+    state?: "open" | "addressed";
+  },
+): void {
+  seed(
+    db,
+    `INSERT INTO review_publications
+       (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+        payload_json, created_ms, updated_ms)
+     VALUES (?, ?, 123, ?, ?, ?, ?, 'review', 'applied', '{}', 1, 1)`,
+    `pub-${input.id}`,
+    BOT_ID,
+    input.owner,
+    input.repo,
+    input.prNumber,
+    `sha-${input.id}`,
+  );
+  seed(
+    db,
+    `INSERT INTO review_findings
+       (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+        first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+        first_seen_round, last_seen_round, state, created_ms, updated_ms, target_id)
+     VALUES (?, ?, 123, ?, ?, ?, ?, ?, ?, ?, 'sha', 'sha', 1, 1, ?, 1, 1, ?)`,
+    input.id,
+    BOT_ID,
+    input.owner,
+    input.repo,
+    input.prNumber,
+    `finding-${input.id}`,
+    JSON.stringify({ mergeClass: input.mergeClass, title: input.id }),
+    `pub-${input.id}`,
+    `pub-${input.id}`,
+    input.state ?? "open",
+    input.targetId,
+  );
+}
+
+/** One append-only review-failure row on the target's PR. */
+function seedFailure(
+  db: TestD1,
+  input: { id: string; targetId: string | null; owner: string; repo: string; prNumber: number },
+): void {
+  seed(
+    db,
+    `INSERT INTO review_failures
+       (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+     VALUES (?, 123, ?, ?, ?, 'sha', 'runner', 'boom', ?)`,
+    input.id,
+    input.owner,
+    input.repo,
+    input.prNumber,
+    input.targetId,
+  );
+}
+
+/**
  * Two workspaces, one bot, two targets, and one of each tenant row per target.
  * `octocat` manages BOTH workspaces, so a 404 in `ws-b` is SCOPING, never
  * membership: she could read the row if the workspace were the only gate.
@@ -140,6 +209,16 @@ function isolationFixture() {
       row.number,
     );
   }
+
+  // Execution ledgers: one open must-fix finding and one ordinary failure per
+  // target, plus one unattributed pair that belongs to no workspace.
+  seedFinding(db, { id: "finding-a", targetId: targetA, owner: "acme", repo: "widgets", prNumber: 101, mergeClass: "must-fix" });
+  seedFinding(db, { id: "finding-a2", targetId: targetA, owner: "acme", repo: "widgets", prNumber: 101, mergeClass: "nit", state: "addressed" });
+  seedFailure(db, { id: "failure-a", targetId: targetA, owner: "acme", repo: "widgets", prNumber: 101 });
+  seedFinding(db, { id: "finding-b", targetId: targetB, owner: "other", repo: "lib", prNumber: 202, mergeClass: "should-fix" });
+  seedFailure(db, { id: "failure-b", targetId: targetB, owner: "other", repo: "lib", prNumber: 202 });
+  seedFailure(db, { id: "failure-legacy", targetId: null, owner: "legacy", repo: "old", prNumber: 303 });
+
   return { db, targetA, targetB };
 }
 
@@ -184,15 +263,16 @@ describe("the pull-request ledger is tenant-scoped", () => {
   test("the record counts bind the tenant pair too", async () => {
     const { db } = isolationFixture();
     const store = createReviewBotsStore(db);
-    // The owning scope counts the target's one review…
+    // The owning scope counts the target's one review, one open finding and
+    // one failure…
     expect(await store.countPullRequestRecords(SCOPE_B, "other", "lib", 202)).toEqual({
-      findings: 0,
+      findings: 1,
       reviews: 1,
-      failures: 0,
+      failures: 1,
       must_fix: 0,
     });
-    // …and the crossed pair counts nothing at all, including the two counts
-    // that reach the target through the PR join (findings, failures).
+    // …and the crossed pair counts nothing at all: every count binds
+    // `target_id` and the workspace that owns it.
     expect(await store.countPullRequestRecords(SCOPE_CROSSED, "other", "lib", 202)).toEqual({
       findings: 0,
       reviews: 0,
@@ -219,6 +299,64 @@ describe("the pull-request ledger is tenant-scoped", () => {
     await expect(
       store.upsertPullRequest({ appId: BOT_ID, owner: "acme", repo: "widgets", prNumber: 999, state: "open" } as never),
     ).rejects.toThrow(/target/);
+  });
+});
+
+describe("the execution ledgers are tenant-scoped by their own target", () => {
+  const PAGE = { offset: 0, limit: 10 };
+
+  test("each target counts and pages only its own findings and failures", async () => {
+    const { db } = isolationFixture();
+    const store = createReviewBotsStore(db);
+
+    // The bot holds rows on both targets; target A's face still reads only
+    // target A's, including the per-state and per-severity counts.
+    expect(await store.countPullRequestRecords(SCOPE_A, "acme", "widgets", 101)).toEqual({
+      findings: 1,
+      reviews: 1,
+      failures: 1,
+      must_fix: 1,
+    });
+    expect((await store.listPullRequestFindings(SCOPE_A, "acme", "widgets", 101, PAGE))!.items.map((row) => row.title)).toEqual([
+      "finding-a",
+    ]);
+    expect(
+      (await store.listPullRequestFailures(SCOPE_A, "acme", "widgets", 101, PAGE))!.items.map((row) => row.stage),
+    ).toEqual(["runner"]);
+
+    expect(await store.countPullRequestRecords(SCOPE_B, "other", "lib", 202)).toEqual({
+      findings: 1,
+      reviews: 1,
+      failures: 1,
+      must_fix: 0,
+    });
+    expect((await store.listPullRequestFindings(SCOPE_B, "other", "lib", 202, PAGE))!.items.map((row) => row.title)).toEqual([
+      "finding-b",
+    ]);
+  });
+
+  test("the crossed pair reads none of another workspace's ledger rows", async () => {
+    const { db } = isolationFixture();
+    const store = createReviewBotsStore(db);
+    expect(await store.countPullRequestRecords(SCOPE_CROSSED, "other", "lib", 202)).toEqual({
+      findings: 0,
+      reviews: 0,
+      failures: 0,
+      must_fix: 0,
+    });
+    expect(await store.listPullRequestFindings(SCOPE_CROSSED, "other", "lib", 202, PAGE)).toBeNull();
+    expect(await store.listPullRequestFailures(SCOPE_CROSSED, "other", "lib", 202, PAGE)).toBeNull();
+  });
+
+  test("an unattributed row is written, held, and never counted by a tenant read", async () => {
+    const { db } = isolationFixture();
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 3 });
+    // Nothing a workspace reads includes the NULL-target row: A's and B's
+    // counts sum to the two attributed rows only.
+    const store = createReviewBotsStore(db);
+    const a = await store.countPullRequestRecords(SCOPE_A, "acme", "widgets", 101);
+    const b = await store.countPullRequestRecords(SCOPE_B, "other", "lib", 202);
+    expect(a.failures + b.failures).toBe(2);
   });
 });
 
