@@ -2595,8 +2595,14 @@ function canManageApp(scope: WorkspaceScope): boolean {
 /**
  * Resolve the App addressed by an App route. The segment is GitHub's immutable
  * numeric App id — the only App identifier an operator sees that never changes.
- * A non-numeric segment, an App from another workspace and a soft-deleted row
- * are all equally invisible (404).
+ * A non-numeric segment, a soft-deleted row, a bot the workspace neither owns
+ * nor holds a live target on, and an App with no target in the session
+ * workspace are all equally invisible (404).
+ *
+ * The resolve is bot-scope aware (the store's `getScopedAppByGithubId`): a
+ * workspace reaches the target it created on a `shared` bot, and the target it
+ * still holds after a share was revoked, while another workspace's `owned` bot
+ * is never widened.
  */
 async function resolveScopedApp(
   apps: ReturnType<typeof createReviewBotsStore>,
@@ -2605,10 +2611,7 @@ async function resolveScopedApp(
 ): Promise<GithubAppRow | null> {
   const githubAppId = parseGithubAppId(appIdParam);
   if (githubAppId === null) return null;
-  const app = await apps.getAppByGithubId(githubAppId);
-  if (!app || app.deleted_at !== null) return null;
-  if (app.workspace_id !== scope.workspaceId) return null;
-  return app;
+  return apps.getScopedAppByGithubId(githubAppId, scope.workspaceId);
 }
 
 /**
@@ -2634,7 +2637,9 @@ function appDisplayName(
  * (QC wave 1, W-1): exactly TWO D1 statements for any N instead
  * of the per-App 2N fan-out — this helper runs on GET /api/apps (the SPA
  * JSON face), so the statement count must not scale with the App count.
- * A request lists only its own workspace's Apps.
+ * A request lists the workspace's own bots plus every `shared` bot it holds a
+ * live target on (`targetedBotIds`) — the target is the entitlement, so a
+ * target created on an official bot does not vanish from this list.
  * shortcut: the workspace filter runs over the joined list in memory
  * (single-tenant scale today); upgrade to a workspace-filtered store query
  * when a workspace can hold enough Apps for the scan to matter.
@@ -2642,8 +2647,13 @@ function appDisplayName(
 async function appsListWithHealth(
   apps: ReturnType<typeof createReviewBotsStore>,
   scope: WorkspaceScope,
+  targetedBotIds: ReadonlySet<string>,
 ): Promise<Array<GithubAppRow & { health: DeliverySummary }>> {
-  const rows = (await apps.listApps()).filter((app) => app.workspace_id === scope.workspaceId);
+  const rows = (await apps.listApps()).filter(
+    (app) =>
+      app.workspace_id === scope.workspaceId ||
+      (app.scope === "shared" && targetedBotIds.has(app.id)),
+  );
   const summaries = await apps.deliverySummaries(rows.map((app) => app.id));
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
@@ -2653,18 +2663,21 @@ const appListRoute = async (c: DashboardContext) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
   const apps = createReviewBotsStore(gate.db);
-  const rows = await appsListWithHealth(apps, gate.scope);
-  // The pause the list renders is the TARGET's business pause — the one the
-  // pause/resume routes write. A bot has one target today, so the map is
-  // one-to-one. A bot with no live target emits NO `review_enabled`: the row
-  // carries no pause state, and inventing one would show a switch position the
-  // database does not hold.
+  // The workspace's live targets, keyed by bot: the list reads THIS
+  // workspace's pause state per bot, and a shared bot's row is in the list
+  // exactly because one of these targets exists.
   const targetByBot = new Map(
     (await createTargetsStore(gate.db).list(gate.scope.workspaceId)).map((target) => [
       target.bot_id,
       target,
     ]),
   );
+  const rows = await appsListWithHealth(apps, gate.scope, new Set(targetByBot.keys()));
+  // The pause the list renders is the TARGET's business pause — the one the
+  // pause/resume routes write. A bot has one target today, so the map is
+  // one-to-one. A bot with no live target emits NO `review_enabled`: the row
+  // carries no pause state, and inventing one would show a switch position the
+  // database does not hold.
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
     apps: rows.map((app) => {

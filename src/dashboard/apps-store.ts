@@ -644,6 +644,17 @@ export const APP_READ_SQL = {
 } as const;
 
 /**
+ * The workspace-scoped App resolve the target pages use: the bot the addressed
+ * workspace OWNS, or one it holds a live target on. The second arm is the
+ * entitlement a target carries — it is how a target created on a `shared` bot
+ * (and a target whose share was revoked) stays readable from the workspace
+ * that created it. A bot with neither arm stays invisible, so another
+ * workspace's `owned` bot is never widened and an owned bot's own workspace
+ * keeps the owning mapping's `workspace_id`.
+ */
+const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.bot_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
+
+/**
  * The two `upsertInstallation` statements. Which one runs is chosen BEFORE
  * `prepare` from `input.authoritative`, so no value ever enters the SQL text.
  *
@@ -943,6 +954,22 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     ): Promise<GithubAppTenantRow | null> {
       return db
         .prepare(APP_READ_SQL.getVisibleBotByGithubId)
+        .bind(githubAppId, workspaceId)
+        .first<GithubAppTenantRow>();
+    },
+
+    /**
+     * The target pages' resolve: the workspace's own bot, or one it holds a
+     * live target on (a shared bot it created a target on, or a bot whose
+     * share was revoked). `null` for a soft-deleted bot, another workspace's
+     * `owned` bot it has no target on, or a non-existent id.
+     */
+    async getScopedAppByGithubId(
+      githubAppId: number,
+      workspaceId: string,
+    ): Promise<GithubAppTenantRow | null> {
+      return db
+        .prepare(SCOPED_APP_SQL)
         .bind(githubAppId, workspaceId)
         .first<GithubAppTenantRow>();
     },

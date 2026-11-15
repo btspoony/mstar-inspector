@@ -655,3 +655,72 @@ describe("shared bots a workspace may create a target on", () => {
     expect((await createReviewBotsStore(db).listSharedBots(WS)).map((row) => row.id)).toEqual(["bot-offered"]);
   });
 });
+
+// --- the workspace-scoped App resolve -------------------------------------
+
+/**
+ * One target row in `workspaceId`, optionally bound to `installationId` and/or
+ * soft-deleted. The pending read's whole predicate is "no LIVE target of this
+ * bot references it", so the fixture must be able to produce both halves.
+ */
+function seedPendingTarget(
+  db: TestD1,
+  botId: string,
+  workspaceId: string,
+  opts: { installationId?: number; deleted?: boolean } = {},
+): string {
+  const id = crypto.randomUUID();
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, installation_id, created_by, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, 'fixture', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+               ${opts.deleted ? "'2026-01-02T00:00:00.000Z'" : "NULL"})`,
+    )
+    .run(id, workspaceId, botId, botId, opts.installationId ?? null);
+  return id;
+}
+
+function githubAppIdOf(db: TestD1, botId: string): number {
+  const row = db.raw.query("SELECT github_app_id AS id FROM review_bots WHERE id = ?").get(botId) as {
+    id: number;
+  } | null;
+  if (row === null) throw new Error(`no review_bots row ${botId}`);
+  return row.id;
+}
+
+/**
+ * The resolve the target pages use: the workspace's own bot, or one it holds a
+ * live target on. The second arm is what a target created on a shared bot —
+ * and a target whose share was revoked — is reached through; a bot the
+ * workspace neither owns nor holds a target on stays invisible.
+ */
+describe("the workspace-scoped App resolve", () => {
+  test("resolves the workspace's own bot and a bot it holds a live target on", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-other");
+    seedScopedBot(db, "bot-own", { workspaceId: WS });
+    seedScopedBot(db, "bot-foreign", { workspaceId: "ws-other" });
+    seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
+
+    const store = createReviewBotsStore(db);
+    expect((await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-own"), WS))?.id).toBe("bot-own");
+    // A shared bot with no target here has no configuration to resolve: the
+    // list does not carry it either (the target is the entitlement).
+    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS)).toBeNull();
+    // Owned by another workspace and no target here: not widened.
+    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
+
+    // The workspace's own live target is the entitlement — it makes the bot
+    // (still owned by ws-other) readable, which is the revoked-share case.
+    seedPendingTarget(db, "bot-shared", WS);
+    expect((await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS))?.id).toBe("bot-shared");
+    seedPendingTarget(db, "bot-foreign", WS);
+    const revoked = await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS);
+    expect(revoked?.id).toBe("bot-foreign");
+    expect(revoked?.workspace_id).toBe("ws-other");
+    // A soft-deleted target grants nothing.
+    db.raw.prepare("UPDATE review_targets SET deleted_at = datetime('now') WHERE bot_id = 'bot-foreign'").run();
+    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
+  });
+});

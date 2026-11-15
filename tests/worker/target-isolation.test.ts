@@ -403,16 +403,44 @@ describe("the dashboard routes resolve the target inside the session workspace",
     expect(body.app.review_trigger_mode).toBe("manual");
   });
 
-  test("the bot is invisible from the other workspace: 404 on every face", async () => {
+  test("the bot is invisible from a workspace with no target on it: 404 on every face", async () => {
+    const { db } = isolationFixture();
+    // A third workspace, no target on this bot: the resolution's own verdict,
+    // not a membership failure — octocat owns this workspace too.
+    seed(
+      db,
+      `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+       VALUES ('ws-c', 'ws-c', 'ws-c', NULL, datetime('now'))`,
+    );
+    seed(
+      db,
+      `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+       VALUES ('ws-c', 'user-octocat', 'owner', datetime('now'))`,
+    );
+    const env = envFor(db);
+    for (const path of [
+      `/dashboard/ws-c/api/apps/${GITHUB_APP_ID}/insights/summary`,
+      `/dashboard/ws-c/api/apps/${GITHUB_APP_ID}/pull-requests`,
+      `/dashboard/ws-c/api/apps/${GITHUB_APP_ID}/settings`,
+    ]) {
+      const response = await worker.fetch(await request(path, "octocat"), env);
+      expect(response.status, path).toBe(404);
+    }
+  });
+
+  test("a workspace holding a target on the bot reads it, even when the bot is owned elsewhere", async () => {
     const { db } = isolationFixture();
     const env = envFor(db);
+    // `ws-b` holds target-b on the bot owned by `ws-a`: its own target's
+    // settings are readable (the revoked-share state — Blocked — must name
+    // itself instead of silently reviewing nothing).
     for (const path of [
       `/dashboard/${WORKSPACE_B}/api/apps/${GITHUB_APP_ID}/insights/summary`,
       `/dashboard/${WORKSPACE_B}/api/apps/${GITHUB_APP_ID}/pull-requests`,
       `/dashboard/${WORKSPACE_B}/api/apps/${GITHUB_APP_ID}/settings`,
     ]) {
       const response = await worker.fetch(await request(path, "octocat"), env);
-      expect(response.status).toBe(404);
+      expect(response.status, path).toBe(200);
     }
   });
 });
