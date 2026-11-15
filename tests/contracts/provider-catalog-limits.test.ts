@@ -33,35 +33,32 @@ describe("catalogLimitsFor — a model's sizes belong to the model, not to an en
 });
 
 /**
- * A merged (multi-protocol) row the size table covers — derived at runtime, no
- * vendor id or URL is pinned.
+ * A collapsed per-protocol id AND the merged row it was absorbed into — both
+ * found together at runtime, so the pair is never half-satisfied: a regenerated
+ * catalog whose first sized multi-protocol row lost its alias cannot pick that
+ * row and then fail on the alias. No vendor id or URL is pinned.
  */
-const merged = (() => {
-  for (const [providerId, entry] of Object.entries(PROVIDER_CATALOG)) {
+const aliasRow = (() => {
+  for (const [legacyId, providerId] of Object.entries(LEGACY_PROVIDER_IDS)) {
+    const entry = PROVIDER_CATALOG[providerId];
+    if (entry === undefined) continue;
     if (entry.protocols === undefined || entry.protocols.length < 2) continue;
     if (MODEL_LIMITS[providerId] === undefined) continue;
-    return { providerId };
+    return { providerId, legacyId };
   }
   return null;
 })();
 
-/** A collapsed per-protocol id whose provider row the size table covers. */
-const legacyId =
-  merged === null
-    ? null
-    : (Object.keys(LEGACY_PROVIDER_IDS).find((id) => LEGACY_PROVIDER_IDS[id] === merged.providerId) ?? null);
-
 describe("catalogLimitsFor — one row per provider, every collapsed id follows it", () => {
-  test("the committed catalog carries a merged row and one of its collapsed ids", () => {
-    // Non-vacuity guard for the cases below: a catalog with no multi-protocol
-    // row, or a LEGACY_PROVIDER_IDS map that stopped naming a merged row's
-    // collapsed ids, must fail here instead of skipping them all.
-    expect(merged, "a sized catalog row with two protocol endpoints").not.toBeNull();
-    expect(legacyId, `a collapsed id of ${merged?.providerId ?? "a merged row"}`).not.toBeNull();
+  test("the committed catalog carries a sized multi-protocol row with a collapsed id", () => {
+    // Non-vacuity guard for the case below: a LEGACY_PROVIDER_IDS map that no
+    // longer names an alias of a sized multi-protocol row must fail here
+    // instead of skipping it.
+    expect(aliasRow, "a collapsed id of a sized multi-protocol catalog row").not.toBeNull();
   });
 
-  test.skipIf(legacyId === null)("a collapsed per-protocol id resolves to the row that absorbed it", () => {
-    if (merged === null || legacyId === null) return;
-    expect(catalogLimitsFor(legacyId)).toBe(MODEL_LIMITS[merged.providerId]!);
+  test.skipIf(aliasRow === null)("a collapsed per-protocol id resolves to the row that absorbed it", () => {
+    if (aliasRow === null) return;
+    expect(catalogLimitsFor(aliasRow.legacyId)).toBe(MODEL_LIMITS[aliasRow.providerId]!);
   });
 });

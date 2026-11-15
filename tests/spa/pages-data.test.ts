@@ -916,7 +916,6 @@ describe("provider catalog rows + add selection", () => {
       ...catalogRow,
       tier: "template",
       base_url: "https://api.merged.test/v1",
-      catalog_base_url: "https://api.merged.test/v1",
       api: "openai-completions",
       models: ["a"],
       protocols: [

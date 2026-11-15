@@ -171,8 +171,6 @@ export type CatalogProvider = {
    * posts no override for a value the operator leaves untouched.
    */
   model_limits?: Record<string, CatalogModelLimit>;
-  /** The catalog row's own endpoint. */
-  catalog_base_url?: string | null;
   verifiable: boolean;
   /** The provider answers a per-key usage probe (`/keys/usage`). */
   usage_probe: boolean;
@@ -1782,9 +1780,6 @@ function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
         (row.display_group === "common" || row.display_group === "catalog") &&
         (row.base_url === null || typeof row.base_url === "string") &&
         (row.api === null || typeof row.api === "string") &&
-        (row.catalog_base_url === null ||
-          row.catalog_base_url === undefined ||
-          typeof row.catalog_base_url === "string") &&
         isCatalogModelLimits(row.model_limits) &&
         typeof row.verifiable === "boolean" &&
         typeof row.usage_probe === "boolean" &&

@@ -495,7 +495,6 @@ const mergedRow = (): CatalogProvider =>
   catalogEntry("merged-vendor", "template", {
     label: "Merged Vendor",
     base_url: "https://api.merged.test/v1",
-    catalog_base_url: "https://api.merged.test/v1",
     api: "openai-completions",
     models: ["default-a"],
     model_limits: { "anthropic-a": { contextWindow: 4242, maxTokens: 424 } },
