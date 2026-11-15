@@ -113,7 +113,14 @@ Both detail payload faces carry `blocked` and, when true, `blocked_reason = "bot
 
 ### Shared bots are read-only for their consumers
 
-Every bot-scoped write route — settings operations, key deletion, provider-key verification (`keys/verify`, both the builtin and the custom/declared path), disable/enable and delete — refuses a `shared` bot before parsing, probing or persisting, with zero outbound calls and no storage change. `refresh-metadata` and `keys/usage` are not configuration writes but must still authorize the bot.
+Every bot-scoped write route — settings operations, key deletion, provider-key verification (`keys/verify`, both the builtin and the custom/declared path), disable/enable and delete — refuses a `shared` bot before parsing, probing or persisting, with zero outbound calls and no storage change. `refresh-metadata` and `keys/usage` are not configuration writes but must still authorize the bot. The predicate is `canWriteBotScope` (`src/dashboard/index.ts`), which requires the bot to be `owned` **and** the caller's workspace to be the bot's owning workspace.
+
+Two surfaces carry the two halves of a bot's configuration, and only one of them is refused here:
+
+- The bot page `/dashboard/<workspaceRef>/apps/:appId/bot` (`BotSettingsPage.tsx`) is bot-owned configuration only — credentials health, provider keys, model chains, seats, sandbox image and installations.
+- The target's review policy — trigger mode, depth, Check gate, owner allowlist, pause and park — is **target** data, written on the target surface, the app detail's settings tab (`SettingsPage.tsx`). It is governed by the target's workspace role, not by `canWriteBotScope`.
+
+A consumer workspace may therefore still change its own target policy; only the bot-scoped writes above are refused for a `shared` bot.
 
 ### Execution ledgers
 
@@ -123,4 +130,6 @@ A row's `target_id` is set when it is first recorded and never rewritten; rebind
 
 ### Parking an overlapping target
 
-`POST /api/apps/:appId/park` (manager on the target's workspace, or operator) writes in one batch: one `target.park` audit row, `review_enabled = 0`, and `account_login = NULL`. It refuses `no-overlap` (no other live target in the workspace carries the same `account_login`), `only-live-target` (parking would leave that owner in this workspace with no live target), and a target outside the caller's workspace, all with zero writes. It never sets `deleted_at`, so the rows stay visible.
+`POST /dashboard/<workspaceRef>/apps/:appId/park` (`appParkRoute`, the `APP_ROUTES` entry `{ method: "post", path: "/apps/:appId/park" }` mounted under `/:workspaceRef`; owner or admin of the target's workspace) writes in one batch: one `target.park` audit row, `review_enabled = 0`, and `account_login = NULL`. It refuses `no-overlap` (no other live target in the workspace carries the same `account_login`), `only-live-target` (parking would leave that owner in this workspace with no live target), and a target outside the caller's workspace, all with zero writes. It never sets `deleted_at`, so the rows stay visible. Park is a form action, never a page: the path carries no `/api` segment.
+
+Decision history: [shared bot scope and claiming](../../../.agents/adr/implemented/feature/2026-11-15-shared-bot-scope-and-claiming.md), [derived Blocked and park](../../../.agents/adr/implemented/feature/2026-11-15-derived-blocked-and-park.md).
