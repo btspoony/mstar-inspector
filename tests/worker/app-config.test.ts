@@ -4586,7 +4586,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(afterInvalid!.models_meta).toEqual({ "fresh-a": { contextWindow: 64000, maxTokens: 2048 } });
   });
 
-  test("an all-blank (or omitted) overlay saves the ids and stores no size at all", async () => {
+  test("an all-blank overlay saves the ids and stores no size at all", async () => {
     const { db, app } = await seededWorld();
     await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
     const store = configStore(db);
@@ -4603,17 +4603,37 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(afterBlank!.model_ids).toEqual(["fresh-a"]);
     // Unstated is stored by carrying no size entry — nothing is invented.
     expect(afterBlank!.models_meta).toBeUndefined();
-    // An omitted overlay is the same blank statement: it saves too, still with
-    // no size entry, and the ids follow the form.
-    const absent = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+  });
+
+  test("a save that omits models_meta keeps the stored overlay, pruned to the surviving ids", async () => {
+    const { db, app } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const store = configStore(db);
+    const overlay = {
+      "fresh-a": { contextWindow: 128000, maxTokens: 8192, name: "Fresh A" },
+      "fresh-b": { contextWindow: 32000, maxTokens: 4096, reasoning: true },
+    };
+    const seeded = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
       provider: "my-custom",
       model_ids: "fresh-a, fresh-b",
+      models_meta: JSON.stringify(overlay),
     });
-    expect(absent.status).toBe(200);
-    const [afterAbsent] = await store.listCustomProviders(app.id);
-    expect(afterAbsent!.model_ids).toEqual(["fresh-a", "fresh-b"]);
-    expect(afterAbsent!.models_meta).toBeUndefined();
+    expect(seeded.status).toBe(200);
+    // A caller that edits ONLY the id list (a native form, a script, a client
+    // that never renders the size fields) omits models_meta entirely. That is
+    // "states nothing about the models", not "states nothing for every model":
+    // the surviving id keeps what it stated and the dropped id takes its entry
+    // with it.
+    const idsOnly = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a",
+    });
+    expect(idsOnly.status).toBe(200);
+    const [decl] = await store.listCustomProviders(app.id);
+    expect(decl!.model_ids).toEqual(["fresh-a"]);
+    expect(decl!.models_meta).toEqual({ "fresh-a": overlay["fresh-a"]! });
   });
 
   test.skipIf(coveredCatalogModel() === null)(

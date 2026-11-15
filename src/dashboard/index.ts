@@ -4749,15 +4749,25 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // is not a refusal — it stores as unstated (see the parser) — and the
     // catalog is resolved on the READ side instead: the SPA pre-fill gates it
     // by endpoint, and the runner synthesis re-resolves it per declaration.
-    const stated = parseCustomProviderModelsMeta(
-      typeof form.models_meta === "string" ? form.models_meta : "",
-      modelIds,
-    );
-    if ("error" in stated) {
-      return settings400Response(c, gate.app.github_app_id, stated.error, stated.params);
+    //
+    // A form that carries NO models_meta field states nothing about the models:
+    // the store is handed undefined so it CARRIES the stored overlay across,
+    // pruned to the surviving ids (an id-only row stays id-only). A PRESENT
+    // field — the dialog always sends one, empty object included — is a full
+    // statement and replaces the overlay. Treating a missing field as "{}"
+    // would silently wipe every stored size, name and capability on a save
+    // that only edited the id list.
+    const metaStatement = typeof form.models_meta === "string" ? form.models_meta : undefined;
+    let statedMeta: CustomProviderModelsMeta | undefined;
+    if (metaStatement !== undefined) {
+      const stated = parseCustomProviderModelsMeta(metaStatement, modelIds);
+      if ("error" in stated) {
+        return settings400Response(c, gate.app.github_app_id, stated.error, stated.params);
+      }
+      statedMeta = stated.meta;
     }
     try {
-      await store.updateCustomProviderModels(gate.app.id, providerId, modelIds, stated.meta);
+      await store.updateCustomProviderModels(gate.app.id, providerId, modelIds, statedMeta);
     } catch (err) {
       logSettingsFailure("update_provider_models", gate.app.id, err);
       if (err instanceof InvalidCustomProviderError) {
