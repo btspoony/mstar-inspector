@@ -274,30 +274,51 @@ export function createTargetsStore(db: TargetsStoreD1) {
     /**
      * The target a delivery or an execution lane acts on, by the contract's
      * two steps: the non-deleted row bound to the delivery's installation
-     * when one exists, else the bot's ONLY non-deleted target (today's
-     * behavior: one bot reviews every installation it receives), else null —
-     * a bot with two unbound targets is ambiguous and resolves to nothing
-     * rather than picking one.
+     * when one exists, else the bot's ONLY non-deleted target, else null.
+     *
+     * Two guards sit on those steps and are `resolve`-local on purpose, so the
+     * webhook, the Check reconciler and every dashboard lane agree:
+     *
+     *   - A binding whose `bot_installations` row carries `removed_at` resolves
+     *     NOTHING and does not fall through to the single-target step: falling
+     *     through would silently re-attribute a deletion to another target.
+     *     The target keeps the binding, so a reinstall resumes reviewing
+     *     without a new claim.
+     *   - A `shared` bot loses the single-target fallback entirely. Any
+     *     installation of a shared bot would otherwise review as the official
+     *     workspace's target with no claim, which is exactly the attribution
+     *     the platform forbids: an unclaimed installation is referenced by no
+     *     target. An `owned` bot's fallback is untouched.
      *
      * `installationId` null means "no delivery installation" (a dashboard or
      * lane read): only the single-target step can answer.
      */
     async resolve(botId: string, installationId: number | null): Promise<ReviewTargetRow | null> {
       if (installationId !== null) {
+        // One read for the binding and its installation's removal stamp, so
+        // the guard costs no round trip on the hot path.
         const bound = await db
           .prepare(
-            `SELECT * FROM review_targets
-             WHERE bot_id = ? AND installation_id = ? AND deleted_at IS NULL`,
+            `SELECT t.*, EXISTS (
+                      SELECT 1 FROM bot_installations i
+                       WHERE i.bot_id = t.bot_id AND i.installation_id = t.installation_id
+                         AND i.removed_at IS NOT NULL) AS installation_removed
+               FROM review_targets t
+              WHERE t.bot_id = ? AND t.installation_id = ? AND t.deleted_at IS NULL`,
           )
           .bind(botId, installationId)
-          .first<ReviewTargetRow>();
-        if (bound) return bound;
+          .first<ReviewTargetRow & { installation_removed: number }>();
+        if (bound) {
+          const { installation_removed: removed, ...target } = bound;
+          if (removed !== 0) return null;
+          return target;
+        }
       }
       const rows = await db
         .prepare(
-          `SELECT * FROM review_targets
-           WHERE bot_id = ? AND deleted_at IS NULL
-           LIMIT 2`,
+          `SELECT t.* FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
+            WHERE t.bot_id = ? AND t.deleted_at IS NULL AND b.scope <> 'shared'
+            LIMIT 2`,
         )
         .bind(botId)
         .all<ReviewTargetRow>();

@@ -2196,3 +2196,124 @@ describe("target resolution (webhook → review_targets)", () => {
     expect(bot.review_enabled).toBe(1);
   });
 });
+
+/**
+ * A delivery never writes a binding, and a shared bot's target is only ever
+ * reached through its binding.
+ *
+ * `review_targets.installation_id` has exactly one production writer — the
+ * claim batch. Every webhook path here therefore has to leave it alone: the
+ * installation a delivery names is bookkeeping in `bot_installations` until a
+ * signed-in user claims it for a target.
+ */
+describe("webhook install bookkeeping vs. the target binding", () => {
+  /** The bot's scope decides whether the single-target fallback exists at all. */
+  async function seedSharedBot(
+    db: TestD1,
+    slug: string,
+  ): Promise<{ id: string; targetId: string }> {
+    const row = await seedApp(db, { slug, secret: "secret-x" });
+    db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(row.id);
+    return { id: row.id, targetId: row.targetId };
+  }
+
+  function installationRows(
+    db: TestD1,
+  ): Array<{ bot_id: string; installation_id: number; account_login: string | null; removed_at: string | null }> {
+    return db.raw
+      .query("SELECT bot_id, installation_id, account_login, removed_at FROM bot_installations")
+      .all() as Array<{
+      bot_id: string;
+      installation_id: number;
+      account_login: string | null;
+      removed_at: string | null;
+    }>;
+  }
+
+  /** What the claim batch would have written — the webhook must leave it as is. */
+  function binding(db: TestD1, targetId: string): { installation_id: number | null; account_login: string | null } {
+    const row = db.raw.query("SELECT installation_id, account_login FROM review_targets WHERE id = ?").get(targetId) as {
+      installation_id: number | null;
+      account_login: string | null;
+    } | null;
+    if (row === null) throw new Error(`review target ${targetId} is missing`);
+    return row;
+  }
+
+  test("installation.created for an unbound shared bot records the install and writes no binding", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedSharedBot(db, "app-x");
+    const { queue, sent } = makeQueue();
+    const body = JSON.stringify({ action: "created", installation: { id: 4242, account: { login: "acme" } } });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "installation"),
+      makeEnv(db, { REVIEW_QUEUE: queue as never }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(0);
+    // Bookkeeping lands: the installation row exists with the account the
+    // delivery stated. This is the ONLY table an installation delivery writes.
+    expect(installationRows(db)).toEqual([
+      { bot_id: app.id, installation_id: 4242, account_login: "acme", removed_at: null },
+    ]);
+    // An unclaimed installation is referenced by no target.
+    expect(binding(db, app.targetId)).toEqual({ installation_id: null, account_login: null });
+  });
+
+  test("a bound shared bot resolves nothing for a different installation", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedSharedBot(db, "app-x");
+    // The claim batch bound this installation to the target.
+    db.raw.prepare("UPDATE review_targets SET installation_id = 4242 WHERE id = ?").run(app.targetId);
+    const { queue, sent } = makeQueue();
+    const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 9999 } });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body),
+      makeEnv(db, { REVIEW_QUEUE: queue as never }),
+    );
+
+    // The existing no-target path: 200 ignored, zero enqueue, no ledger row.
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    // Without the shared-scope guard this delivery would review as the bound
+    // target — the single-target fallback is suppressed for a shared bot.
+    expect(binding(db, app.targetId)).toEqual({ installation_id: 4242, account_login: null });
+  });
+
+  test("a removed installation stops reviewing through its binding, which survives", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedSharedBot(db, "app-x");
+    db.raw.prepare("UPDATE review_targets SET installation_id = 4242 WHERE id = ?").run(app.targetId);
+    db.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+         VALUES ('install-removed', ?, 4242, 'acme', datetime('now'), datetime('now'))`,
+      )
+      .run(app.id);
+    const { queue, sent } = makeQueue();
+    const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 4242 } });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body),
+      makeEnv(db, { REVIEW_QUEUE: queue as never }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    // The binding is kept (a reinstall resumes it) and is not re-attributed.
+    expect(binding(db, app.targetId)).toEqual({ installation_id: 4242, account_login: null });
+    expect(installationRows(db)[0]!.removed_at).not.toBeNull();
+  });
+});

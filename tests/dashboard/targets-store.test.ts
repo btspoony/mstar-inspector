@@ -410,6 +410,52 @@ describe("resolve (webhook steps)", () => {
     await store.resolve(botId, null);
     expect(targetRow(db, targetId).installation_id).toBeNull();
   });
+
+  test("a removed installation resolves nothing and does not fall back to the single target", async () => {
+    const db = createMigratedTestD1();
+    const { botId, targetId } = seedBackfilledBot(db, "bot-resolve-removed", {
+      githubAppId: 6306,
+      installationId: 61,
+    });
+    const store = createTargetsStore(db);
+    // GitHub uninstalled it: the row is stamped, never deleted, and the target
+    // keeps its binding (§ 9.5).
+    db.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+         VALUES ('install-removed', ?, 61, 'acme', datetime('now'), datetime('now'))`,
+      )
+      .run(botId);
+
+    // The binding survives; resolution does not — and it must NOT fall through
+    // to the single-target step, which would silently re-attribute a deletion.
+    expect(await store.resolve(botId, 61)).toBeNull();
+    expect(targetRow(db, targetId).installation_id).toBe(61);
+
+    // A different installation of an OWNED bot still reaches the single target:
+    // the removed guard is about the delivery's own binding.
+    expect((await store.resolve(botId, 62))?.id).toBe(targetId);
+  });
+
+  test("a shared bot loses the single-target fallback; an owned bot keeps it", async () => {
+    const db = createMigratedTestD1();
+    const owned = seedBackfilledBot(db, "bot-resolve-owned-fallback", { githubAppId: 6307 });
+    const shared = seedBackfilledBot(db, "bot-resolve-shared", { githubAppId: 6308 });
+    db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(shared.botId);
+    const store = createTargetsStore(db);
+
+    // Unchanged path: one live target answers an unbound delivery.
+    expect((await store.resolve(owned.botId, 71))?.id).toBe(owned.targetId);
+    expect((await store.resolve(owned.botId, null))?.id).toBe(owned.targetId);
+
+    // A shared bot reviews nothing until a claim binds an installation.
+    expect(await store.resolve(shared.botId, 71)).toBeNull();
+    expect(await store.resolve(shared.botId, null)).toBeNull();
+
+    // ...and once bound, the binding is what resolves.
+    db.raw.prepare("UPDATE review_targets SET installation_id = 72 WHERE id = ?").run(shared.targetId);
+    expect((await store.resolve(shared.botId, 72))?.id).toBe(shared.targetId);
+  });
 });
 
 describe("create path (manifest commit)", () => {

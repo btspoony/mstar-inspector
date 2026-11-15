@@ -263,6 +263,7 @@ const APPS_PAYLOAD: AppsPayload = {
 
 const SETTINGS_PAYLOAD: SettingsManagePayload = {
   can_manage: true,
+  installation: null,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
   app: {
@@ -278,6 +279,7 @@ const SETTINGS_PAYLOAD: SettingsManagePayload = {
     github_avatar_url: null,
     github_metadata_synced_at: null,
     last_webhook_at: null,
+    scope: "owned" as const,
     sandbox_image_id: "omp",
     review_trigger_mode: "every_push",
     review_level: null,
