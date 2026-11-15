@@ -190,8 +190,8 @@ export function ProviderModelsDialog({
 
   /**
    * Where the shown sizes come from — the label beside the fields. A blank pair
-   * is "absent" (the declaration is incomplete); "catalog" only when EVERY
-   * shown number is a catalog seed; "declared" when none is; "mixed" when the
+   * is "absent" (the model saves as unstated); "catalog" only when EVERY shown
+   * number is a catalog seed; "declared" when none is; "mixed" when the
    * operator typed one side and the catalog filled the other.
    */
   function sourceOf(id: string): SizeProvenance {
@@ -207,9 +207,9 @@ export function ProviderModelsDialog({
   /**
    * The metadata statement this form carries: ONLY what the operator stated.
    * A size pre-filled from the catalog and left untouched is not posted back —
-   * the server resolves it from the same catalog — and a model whose entry
-   * states nothing carries no entry at all. The server still refuses the first
-   * selected model that has no stated AND no catalog size, naming it.
+   * the read side resolves it from the same catalog — and a model whose entry
+   * states nothing carries no entry at all: the save is accepted and the
+   * declaration stays unstated (the runtime's own default applies).
    */
   function overlayStatement(): string {
     const meta: CustomProviderModelsMeta = {};
