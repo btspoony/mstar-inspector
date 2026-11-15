@@ -9,11 +9,11 @@ The bucket is the decision's fate; the class is its domain. `{bucket}/{class}/<Y
 | Bucket | Holds | Movement |
 |---|---|---|
 | `proposed/` | A decision not yet shipped. | → `implemented/` or `rejected/`, never archived. |
-| `implemented/` | The standing decision, in the present tense. | → `archived/` when fully superseded or its mechanism is gone; stays here (with a supersession line) when a successor replaces it. |
+| `implemented/` | The standing decision, in the present tense. | → `archived/` only when its mechanism is gone and it no longer guides future work; a record with a successor stays here, on a supersession line. |
 | `rejected/` | A proposal that lost, body frozen. | No move. |
 | `archived/` | A decision that is no longer authority; kept only for history. | No move. |
 
-A move is one change: bucket directory, body and header together. The filename never changes across a move. Archiving requires all three of: fully superseded or its mechanism is gone, it no longer guides future work, and it retains historical value — a record that fails the third is deleted, not archived.
+A move is one change: bucket directory, body and header together. The filename never changes across a move. Archiving requires all three of: its mechanism is gone or has no live consumer, it no longer guides future work, and it retains historical value — a record that fails the third is deleted, not archived. A successor is not an archive reason by itself: a record that still guides work stays in its live bucket and carries the supersession.
 
 `superseded` is not a bucket and not a state: a superseded record stays in its live bucket and says so on its header line.
 
@@ -45,7 +45,7 @@ Supersedes: <path> | Superseded-by: <path>   (only where a supersession exists)
 
 **`Supersedes` / `Superseded-by` are mandatory exactly when a supersession exists, in both directions, in one change**: the successor names the predecessor, the predecessor names the successor, on relative paths. Absent otherwise — an empty or placeholder line is a defect, not a marker. A superseded record's body freezes at the supersession, link rot only, because it stays a true statement about what it decided.
 
-**`Spec:`** names the spec and the `###` heading inside it that the decision explains, in the form `Spec: docs/specs/<class>/<file>.md § <section heading>`. The record links that section and never restates it. The obligation binds records filed from 2026-11-16 on: a record filed before this README carries no `Spec:` line, and is not edited to add one — this tree adds records, it does not rewrite old ones.
+**`Spec:`** names the spec and the section heading inside it that the decision explains — any `##` to `####` heading — in the form `Spec: docs/specs/<class>/<file>.md § <section heading>`. The record links that section and never restates it. The obligation binds records filed from 2026-11-16 on: a record filed before this README carries no `Spec:` line, and is not edited to add one — this tree adds records, it does not rewrite old ones.
 
 ## Sections
 
@@ -70,4 +70,4 @@ The buckets are the index: path, class and date are enough to find a record, and
 
 ## Records in this tree
 
-A record states what the code shows. Every claim carries a path or a symbol that exists at the commit the reader has.
+A record states what the code shows. Records filed from 2026-11-16 carry a path or a symbol for every claim, existing at the commit the reader has; older records are read as filed.

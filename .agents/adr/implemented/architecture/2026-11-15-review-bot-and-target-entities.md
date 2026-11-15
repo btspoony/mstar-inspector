@@ -31,6 +31,6 @@ Zero behaviour change, by construction: with one live target per bot the resolve
 ## Consequences
 
 - A bot is addressable by any workspace only through a target it holds; `resolve` (`src/dashboard/targets-store.ts`) is the single attribution point, and the spec's resolution table (bound / removed installation / owned / shared / ambiguous) is that function's contract.
-- Execution ledgers gain `target_id` and tenant reads lose the bot-keyed join: see [target attribution](2026-11-16-review-target-attribution.md).
-- One target per bot is a product constraint, not a schema rule; the execution ledgers do carry `target_id`, so a second target is no longer blocked on schema work: see [target attribution](2026-11-16-review-target-attribution.md).
+- Execution ledgers gain `target_id` and tenant reads lose the bot-keyed join: see [target attribution](2026-11-15-review-target-attribution.md).
+- One target per bot is a product constraint, not a schema rule; the execution ledgers do carry `target_id`, so a second target is no longer blocked on schema work: see [target attribution](2026-11-15-review-target-attribution.md).
 - The split costs a second entity on every route: a route that addresses an App resolves the App *and* its target in the caller's workspace, and a target id from another workspace is a 404 rather than a 403 (spec § Tenant isolation).
