@@ -70,6 +70,7 @@ import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
 import { createArtifactStore, type ReviewArtifactDoc } from "../../src/store/artifact-store";
 import { idemKey } from "../../src/contracts/idem";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createMigratedTestD1, seedTarget, type TestD1 } from "./helpers";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
@@ -1572,5 +1573,96 @@ describe("durable suspension kinds (spec §7.6, P67-QC-007)", () => {
     expect(pairs[0]!.requiresIdentityProof).toBe(true);
     // Withheld: the caller must re-prove identity rather than trust one digest.
     expect(pairs[0]!.credentialFingerprint).toBeNull();
+  });
+});
+
+/**
+ * A re-seen finding follows its TARGET.
+ *
+ * `review_findings` is keyed by (bot, installation, owner, repo, pr, finding) —
+ * the fingerprint — while every tenant face binds `target_id`. A documented
+ * rebind moves the installation to another workspace's target, so the next
+ * review of the same PR re-sees the same fingerprint and MUST move the row
+ * with it: otherwise the new workspace never sees its own finding while the
+ * old workspace inherits a foreign row.
+ */
+describe("target attribution on a re-seen finding (rebind)", () => {
+  const TARGET_B_ID = "11111111-2222-3333-4444-888888888888";
+  const WORKSPACE_B = "ws-b";
+  const PAGE = { offset: 0, limit: 10 };
+
+  /** Bot APP_ID with one target per workspace, plus the PR row each reads through. */
+  function rebindFixture(): TestD1 {
+    const db = createMigratedTestD1();
+    seedAppRow(db, APP_ID);
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES (?, ?, ?, NULL, datetime('now'))`,
+      )
+      .run(WORKSPACE_B, WORKSPACE_B, WORKSPACE_B);
+    seedTarget(db, APP_ID, { id: TARGET_ID });
+    seedTarget(db, APP_ID, { id: TARGET_B_ID, workspaceId: WORKSPACE_B });
+    for (const targetId of [TARGET_ID, TARGET_B_ID]) {
+      db.raw
+        .prepare(
+          `INSERT INTO pull_requests
+             (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+           VALUES (?, ?, ?, 'acme', 'widgets', 42, 'PR', 'open', 'sha', datetime('now'), datetime('now'))`,
+        )
+        .run(`pr-${targetId}`, APP_ID, targetId);
+    }
+    return db;
+  }
+
+  test("the re-seen row moves to the new target and the ledger follows it", async () => {
+    const db = rebindFixture();
+
+    // Round 1 runs for workspace A's target.
+    const pay1 = payload({
+      lifecycle: lifecycleRound({ selectedRowIds: ["row-1"], seen: [seenEntry("row-1", "f-1")] }),
+    });
+    const lease1 = await stageClaimProve(db, "pub-1", pay1, 1000);
+    expect(await applyPublishedLifecycle(db, "pub-1", lease1, 2000)).toBe(true);
+    expect(
+      (db.raw.prepare("SELECT target_id FROM review_findings WHERE id = 'row-1'").get() as { target_id: string }).target_id,
+    ).toBe(TARGET_ID);
+
+    // The rebind: the installation now serves workspace B's target, and the
+    // next review of the same PR re-sees the same fingerprint.
+    const pay2 = payload({
+      headSha: SHA2,
+      round: 2,
+      artifact: artifactDoc({
+        key: idemKey({
+          installation_id: SCOPE.installationId,
+          owner: SCOPE.owner,
+          repo: SCOPE.repo,
+          pr_number: SCOPE.prNumber,
+          head_sha: SHA2,
+        }),
+        targetId: TARGET_B_ID,
+      }),
+      lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }),
+    });
+    const lease2 = await stageClaimProve(db, "pub-2", pay2, 10_000);
+    expect(await applyPublishedLifecycle(db, "pub-2", lease2, 11_000)).toBe(true);
+
+    // One row, now attributed to B's target.
+    expect(
+      db.raw.query("SELECT target_id FROM review_findings WHERE finding_id = 'f-1'").all(),
+    ).toEqual([{ target_id: TARGET_B_ID }]);
+
+    // The ledger binds target + workspace: B's workspace sees the finding, A's
+    // sees none — the old workspace does not inherit a foreign row.
+    const store = createReviewBotsStore(db);
+    const scopeA = { targetId: TARGET_ID, workspaceId: "default", botId: APP_ID };
+    const scopeB = { targetId: TARGET_B_ID, workspaceId: WORKSPACE_B, botId: APP_ID };
+    expect((await store.countPullRequestRecords(scopeB, "acme", "widgets", 42)).findings).toBe(1);
+    expect(
+      (await store.listPullRequestFindings(scopeB, "acme", "widgets", 42, PAGE))!.items.map((row) => row.finding_id),
+    ).toEqual(["f-1"]);
+    expect((await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).findings).toBe(0);
+    expect((await store.listPullRequestFindings(scopeA, "acme", "widgets", 42, PAGE))!.items).toEqual([]);
   });
 });

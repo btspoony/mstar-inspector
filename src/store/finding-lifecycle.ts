@@ -685,10 +685,13 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
  * The §7.2 state machine as ONE batch (knowledge `d1-batch-atomicity`).
  * Order inside the batch matters and is replay-safe:
  *   1. Seen upserts — new rows insert open at the current time; existing
- *      rows update last-seen tracking; a row closed (addressed/dismissed)
- *      under an OLDER publication reopens with reopen_count+1 ("retain
- *      original and assessment history"); rows already updated by THIS
- *      publication (replay) are skipped by the last_publication guard.
+ *      rows update last-seen tracking AND re-attribute to this publication's
+ *      target (a documented rebind moves the finding with the installation —
+ *      the fingerprint never changes, the tenant does); a row closed
+ *      (addressed/dismissed) under an OLDER publication reopens with
+ *      reopen_count+1 ("retain original and assessment history"); rows
+ *      already updated by THIS publication (replay) are skipped by the
+ *      last_publication guard.
  *   2. Per assessment — state transition (addressed/dismissed closes,
  *      unverifiable/identity-drift keeps the row open) guarded by the
  *      rounds row NOT existing yet, then the round-history insert
@@ -741,6 +744,7 @@ function lifecycleApplyBatch(
            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?
            WHERE ${APPLY_LEASE_GUARD_SQL}
            ON CONFLICT(bot_id, installation_id, owner, repo, pr_number, finding_id) DO UPDATE SET
+             target_id = excluded.target_id,
              last_publication_id = excluded.last_publication_id,
              last_seen_sha = excluded.last_seen_sha,
              last_seen_round = excluded.last_seen_round,
