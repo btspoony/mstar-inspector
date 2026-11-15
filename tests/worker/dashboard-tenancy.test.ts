@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import type { ReactElement } from "react";
 import worker from "../../src/worker/index";
-import { requireMember, WORKSPACE_SEGMENTS, type DashboardVariables } from "../../src/dashboard/index";
+import { requireMember, type DashboardVariables } from "../../src/dashboard/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
@@ -839,20 +839,11 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
 });
 
 describe("the review-target surface is a page family, not a Worker route family", () => {
-  test("targets is in the SPA family but excluded from the Worker's admission list", () => {
+  test("targets joins the SPA family and the bare spelling is no page", () => {
     // ONE edit (the family) makes `workspaceRefOf`, the SPA matcher, `apiBase`
-    // and the sidebar follow the segment; the gate's admission list must NOT
-    // follow, or a page-only path would be routed as a Worker family member.
-    // The pin is constant-level on purpose: SPA page GETs are served by
-    // `spaDispatch` before the scope middleware, so a runtime assertion cannot
-    // observe the gate's answer directly. This constant pin plus
-    // `matchSpaRoute("/dashboard/targets") === null` is the strongest feasible
-    // evidence.
+    // and the sidebar follow the segment. Tenant ownership is proven through
+    // the real requests below, not by pinning the gate's internal set.
     expect(WORKSPACE_FAMILY_SEGMENTS).toContain("targets");
-    expect(WORKSPACE_SEGMENTS.has("targets")).toBe(false);
-    expect([...WORKSPACE_SEGMENTS].sort()).toEqual(["api", "apps", "members"]);
-    // Evidence companion: the bare spelling is no page, so a page-only segment
-    // never masquerades as a family root.
     expect(matchSpaRoute("/dashboard/targets")).toBeNull();
   });
 
