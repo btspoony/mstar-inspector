@@ -1194,6 +1194,7 @@ async function handleGuardHeld(
   await settleSkippedRow(deps, message.body, message.body.head_sha, `review admission refused: ${admission.reason}`);
   return deps.failureStore
     .record({
+      target_id: message.body.targetId,
       installation_id: message.body.installation_id,
       owner: message.body.owner,
       repo: message.body.repo,
@@ -5144,6 +5145,7 @@ async function processMessage(
       // failure from reaching the pipeline.
       try {
         await deps.failureStore.record({
+          target_id: payload.targetId,
           installation_id: payload.installation_id,
           owner: payload.owner,
           repo: payload.repo,
@@ -5962,6 +5964,7 @@ async function processMessage(
       const redactedStdout = redactExactSecrets(redactSecrets(run.stdout), secretValues);
       try {
         await deps.failureStore.record({
+          target_id: payload.targetId,
           installation_id: payload.installation_id,
           owner: payload.owner,
           repo: payload.repo,
@@ -6140,6 +6143,7 @@ async function processMessage(
         // Best-effort: the insert must never mask the round (AL-6 pattern).
         try {
           await deps.failureStore.record({
+            target_id: payload.targetId,
             installation_id: payload.installation_id,
             owner: payload.owner,
             repo: payload.repo,
@@ -6640,6 +6644,7 @@ async function processMessage(
           if (count === 0) continue;
           try {
             await deps.failureStore.record({
+              target_id: payload.targetId,
               installation_id: payload.installation_id,
               owner: payload.owner,
               repo: payload.repo,
@@ -6717,6 +6722,7 @@ async function processMessage(
       classifyGithubRateLimit(err) === "secondary" ? `${GITHUB_RATE_LIMIT_PREFIX}${detail}` : detail;
     try {
       await deps.failureStore.record({
+        target_id: payload.targetId,
         installation_id: payload.installation_id,
         owner: payload.owner,
         repo: payload.repo,

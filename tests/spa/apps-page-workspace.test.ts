@@ -16,11 +16,16 @@
  * render and the reads asserted below are the ones those effects issue.
  */
 import { describe, expect, test } from "bun:test";
+import { type Element as DomElement } from "happy-dom";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { t } from "../../src/i18n";
 import type { SpaBoot } from "../../src/spa/boot";
-import { canCreateAppFor, loadApps } from "../../src/spa/pages/AppsPage";
+import { AppsPage, canCreateAppFor, loadApps } from "../../src/spa/pages/AppsPage";
 import { parseApps } from "../../src/spa/pages/data";
 import { workspaceRefOf } from "../../src/spa/routes";
 import { apiBase } from "../../src/spa/workspace-base";
+import { installDom } from "./dom";
 
 const boot: SpaBoot = {
   locale: "en",
@@ -114,5 +119,176 @@ describe("AppsPage create eligibility — addressed workspace", () => {
       url: "/dashboard/beta/api/apps",
       apps: ["beta-app"],
     });
+  });
+});
+
+/**
+ * The creation chooser: two modes on one control. Official mode lists the
+ * shared bots the list payload offered and posts one selection to the
+ * workspace's create route; self-hosted mode is the manifest flow, untouched.
+ * Mounted, because the chooser lives in a Radix dialog portal.
+ */
+describe("AppsPage create chooser", () => {
+  const SHARED = { id: "bot-platform", github_slug: "platform-app", name: "Platform App", target_count: 1 };
+
+  type Sent = { url: string; method: string; body: string };
+
+  /** Mount the page on `pathname`, answering the list read with `sharedBots`. */
+  async function mountPage(pathname: string, sharedBots: unknown) {
+    const { win, cleanup } = installDom(`http://localhost${pathname}`);
+    const sent: Sent[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      sent.push({ url, method, body: String(init?.body ?? "") });
+      if (method === "POST") return new Response("ok", { status: 200 });
+      return new Response(
+        JSON.stringify({
+          viewer: { login: "octocat", role: "admin" },
+          apps: [
+            {
+              github_app_id: 1001,
+              github_slug: "acme-app",
+              github_name: null,
+              github_avatar_url: null,
+              status: "active",
+              review_enabled: 1,
+              created_by: "octocat",
+              health: { latest: null, rejected24h: 0 },
+            },
+          ],
+          shared_bots: sharedBots,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => root.render(createElement(AppsPage, { boot })));
+    await act(async () => {});
+
+    /** One event batch plus the React flush its state update schedules. */
+    const drain = async (run: () => void): Promise<void> => {
+      await act(async () => run());
+      await act(async () => {});
+    };
+    const click = (node: DomElement | null) =>
+      drain(() => {
+        node?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+    const dialog = (): DomElement | null => win.document.querySelector('[role="dialog"]');
+    const modeItem = (label: string): DomElement | null =>
+      [...win.document.querySelectorAll('[data-slot="toggle-group-item"]')].find(
+        (node) => node.textContent === label,
+      ) ?? null;
+
+    return {
+      win,
+      sent,
+      dialog,
+      modeItem,
+      /** Open the chooser from the page's Create control. */
+      async open() {
+        const trigger =
+          [...win.document.querySelectorAll("button")].find(
+            (node) => node.textContent === t("en", "apps.create"),
+          ) ?? null;
+        await click(trigger);
+      },
+      /** The dialog's submit for the ACTIVE mode, found by its label. */
+      submitButton(label: string): DomElement | null {
+        return (
+          [...(dialog()?.querySelectorAll("button") ?? [])].find((node) => node.textContent === label) ?? null
+        );
+      },
+      /** Open the shared-bot Select and choose the option whose text starts with `name`. */
+      async pickBot(name: string) {
+        const trigger = dialog()?.querySelector('[data-slot="select-trigger"]') ?? null;
+        await drain(() => {
+          trigger?.dispatchEvent(
+            new win.PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerType: "mouse" }),
+          );
+          trigger?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+        });
+        const option =
+          [...win.document.querySelectorAll('[role="option"]')].find((node) =>
+            node.textContent?.startsWith(name),
+          ) ?? null;
+        await drain(() => {
+          option?.dispatchEvent(
+            new win.PointerEvent("pointerup", { bubbles: true, cancelable: true, button: 0, pointerType: "mouse" }),
+          );
+          option?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+        });
+      },
+      async submit() {
+        const form = dialog()?.querySelector('[data-slot="create-target-form"]') ?? null;
+        await drain(() => {
+          form?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
+        });
+      },
+      async cleanup() {
+        globalThis.fetch = realFetch;
+        await act(async () => root.unmount());
+        cleanup();
+      },
+    };
+  }
+
+  test("official mode lists the shared bots and needs one selection before it posts", async () => {
+    const page = await mountPage("/dashboard/acme/apps", [SHARED]);
+    try {
+      await page.open();
+      expect(page.dialog()).not.toBeNull();
+      // Two modes; official is the default because the platform shares a bot.
+      expect(page.modeItem(t("en", "apps.createDialog.modeOfficial"))).not.toBeNull();
+      expect(page.modeItem(t("en", "apps.createDialog.modeSelfHosted"))).not.toBeNull();
+
+      // Nothing is selected yet, so the submit stays disabled and a submit
+      // event posts nothing.
+      expect(page.submitButton(t("en", "apps.createDialog.submit"))?.hasAttribute("disabled")).toBe(true);
+      await page.submit();
+      expect(page.sent.filter((request) => request.method === "POST")).toHaveLength(0);
+
+      await page.pickBot("Platform App");
+      expect(page.submitButton(t("en", "apps.createDialog.submit"))?.hasAttribute("disabled")).toBe(false);
+      await page.submit();
+
+      const posts = page.sent.filter((request) => request.method === "POST");
+      expect(posts).toHaveLength(1);
+      expect(posts[0]?.url).toBe("/dashboard/acme/api/targets");
+      expect(new URLSearchParams(posts[0]?.body).get("botId")).toBe(SHARED.id);
+      // The list is re-read once the write lands.
+      expect(page.sent.filter((request) => request.method === "GET")).toHaveLength(2);
+    } finally {
+      await page.cleanup();
+    }
+  });
+
+  test("a malformed shared-bot block disables official mode and leaves self-hosted usable", async () => {
+    const page = await mountPage("/dashboard/acme/apps", [{ id: 7, name: "Broken" }]);
+    try {
+      await page.open();
+      expect(page.modeItem(t("en", "apps.createDialog.modeOfficial"))?.hasAttribute("disabled")).toBe(true);
+      expect(page.modeItem(t("en", "apps.createDialog.modeSelfHosted"))?.hasAttribute("disabled")).toBe(false);
+      // The manifest flow is what this dialog offers instead, unchanged.
+      expect(page.dialog()?.querySelector('form[action="/dashboard/acme/manifest/start"]')).not.toBeNull();
+    } finally {
+      await page.cleanup();
+    }
+  });
+
+  test("a payload with no shared_bots key at all keeps the manifest flow", async () => {
+    const page = await mountPage("/dashboard/acme/apps", undefined);
+    try {
+      await page.open();
+      expect(page.modeItem(t("en", "apps.createDialog.modeOfficial"))?.hasAttribute("disabled")).toBe(true);
+      expect(page.dialog()?.querySelector('form[action="/dashboard/acme/manifest/start"]')).not.toBeNull();
+    } finally {
+      await page.cleanup();
+    }
   });
 });

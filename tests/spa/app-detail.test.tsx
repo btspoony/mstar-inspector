@@ -30,6 +30,7 @@ import {
   type AppDetailSearch,
   type AppDetailTab,
   type InsightsSummary,
+  type SettingsBlockedPayload,
   type SettingsManagePayload,
   type SettingsPayload,
 } from "../../src/spa/pages/data";
@@ -61,6 +62,10 @@ const identityPayload = {
   can_manage: false as const,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-1",
+  // The derived Blocked state rides BOTH faces: a member must know why the
+  // target reviews nothing.
+  blocked: false as const,
+  blocked_reason: null,
   app: IDENTITY_APP,
 };
 
@@ -70,6 +75,9 @@ const BOOT = { locale: "en" as const, login: "mallory", name: null };
 const managePayload = {
   can_manage: true as const,
   installation: null,
+  pending_installations: [],
+  blocked: false as const,
+  blocked_reason: null,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-1",
   app: {
@@ -84,6 +92,7 @@ const managePayload = {
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
   allowlist: { enabled: false, owners: [] },
+  owner_overlap: false,
   keys: [],
   model_chain: null,
   model_limits_snapshot: "2026-01-01",
@@ -109,7 +118,6 @@ function renderDetail(payload: SettingsPayload, canManage: boolean, tab: AppDeta
       locale: "en",
       appId: "1",
       payload,
-      groups: [],
       notice: null,
       search: { ...search, tab },
       onReload: noReload,
@@ -276,7 +284,6 @@ describe("tab shell rendering (static SSR)", () => {
             },
           ],
         },
-        groups: [],
         onReload: noReload,
       }),
     );
@@ -285,7 +292,7 @@ describe("tab shell rendering (static SSR)", () => {
     expect(settingsOnly).not.toContain("acme/web");
   });
 
-  test("the Installed tab renders the installations table and leads each delivery with its source repo", () => {
+  test("the Installed tab keeps the install block and the allowlist; the installations table moved to the bot page", () => {
     const installed = renderDetail(
       {
         ...managePayload,
@@ -301,34 +308,62 @@ describe("tab shell rendering (static SSR)", () => {
             repository_full_name: "acme/web",
             created_at: "2026-01-01 00:00:00",
           },
-          {
-            event_name: "ping",
-            outcome: "ignored",
-            status_code: null,
-            repository_full_name: null,
-            created_at: "2026-01-01 00:00:00",
-          },
         ],
       },
       true,
       "installations",
     );
     expect(installed).toContain(">Installed</button>");
-    // The table lives in the installations panel, and that panel is the ACTIVE
-    // one when the Installed tab is selected (the other panels are mounted but
-    // inactive — the forceMount idiom).
-    const at = installed.indexOf(t("en", "settings.installationsAccount"));
-    const panelTag = installed.slice(
-      installed.lastIndexOf("<div", installed.lastIndexOf('data-slot="tabs-content"', at)),
-      at,
+    // The target keeps what it owns: the install entry point and the owner
+    // allowlist. The bot's installation table and its delivery list are
+    // bot-scoped and live on the bot page.
+    expect(installed).toContain(t("en", "settings.install"));
+    expect(installed).toContain(t("en", "settings.allowlist"));
+    expect(installed).not.toContain(t("en", "settings.installationsAccount"));
+    expect(installed).not.toContain(t("en", "settings.recentDeliveries"));
+    expect(installed).not.toContain("acme/web");
+  });
+
+  test("the detail links to the bot's own settings page", () => {
+    for (const [payload, canManage] of [
+      [managePayload, true],
+      [identityPayload, false],
+    ] as const) {
+      const markup = renderToStaticMarkup(
+        createElement(AppDetailView, {
+          locale: "en",
+          appId: "1",
+          payload,
+          notice: null,
+          search,
+          onReload: noReload,
+          onSearch: noSearch,
+        }),
+      );
+      expect(markup, `can_manage=${canManage}`).toContain(`href="${apiBase()}/apps/1/bot"`);
+      expect(markup, `can_manage=${canManage}`).toContain(t("en", "appDetail.botSettingsLink"));
+    }
+  });
+
+  test("the park action renders only while the owner claim overlaps", () => {
+    const parked = renderToStaticMarkup(
+      createElement(SettingsView, {
+        locale: "en",
+        payload: { ...managePayload, owner_overlap: true },
+        onReload: noReload,
+      }),
     );
-    expect(panelTag).toContain('data-state="active"');
-    expect(installed).toContain(t("en", "settings.installationsAccount"));
-    expect(installed).toContain("acme");
-    // The delivery line leads with its repo; a pre-0043 row (NULL source)
-    // falls back to the unknown-source label rather than a blank line.
-    expect(installed).toContain("acme/web");
-    expect(installed).toContain(t("en", "settings.unknownSource"));
+    // The row names the overlap and offers the action; the confirm copy exists
+    // in the dictionary for the dialog it opens.
+    expect(parked).toContain(t("en", "settings.opsParkTitle"));
+    expect(parked).toContain(t("en", "settings.opsParkAction"));
+    expect(t("en", "settings.confirmParkTitle", { name: "Demo" })).toContain("Demo");
+    expect(t("zh_CN", "settings.opsParkTitle").length).toBeGreaterThan(0);
+    // No overlap → no park affordance (the route would refuse it anyway).
+    const quiet = renderToStaticMarkup(
+      createElement(SettingsView, { locale: "en", payload: managePayload, onReload: noReload }),
+    );
+    expect(quiet).not.toContain(t("en", "settings.opsParkTitle"));
   });
 
   test("the identity status pill renders the shared primitive from the single derivation", () => {
@@ -348,19 +383,25 @@ describe("tab shell rendering (static SSR)", () => {
     });
   });
 
-  test("the settings face renders its own section titles (workspace rename moved out)", () => {
+  test("the settings face renders its own (target-scoped) section titles", () => {
     const manage = renderDetail(managePayload, true);
     // The App-side SectionCard titles, resolved through the dictionary — the
-    // heading/stat migration may not drop or rename a section.
+    // heading/stat migration may not drop or rename a section. The bot-scoped
+    // sections (providers, chains, seats, sandbox image) live on the bot page.
     for (const key of [
       "settings.appInfo",
+      "settings.reviewTrigger",
+      "settings.reviewDepth",
+      "settings.reviewGate",
       "settings.ops",
-      "settings.runtimeHarness",
-      "settings.providers.title",
-      "settings.modelChains",
-      "settings.seats",
     ] as const) {
       expect(manage).toContain(t("en", key));
+    }
+    // The header's metric band still labels the installations / chains counts
+    // (the payload keeps those keys), so only the SECTION titles are asserted
+    // absent here.
+    for (const key of ["settings.providers.title", "settings.seats"] as const) {
+      expect(manage).not.toContain(t("en", key));
     }
     // The workspace settings live on /dashboard/<ref>/settings; the App
     // settings tab must not keep a second entry point to them.
@@ -401,6 +442,7 @@ describe("installed tab configuration surface (static SSR)", () => {
       {
         ...managePayload,
         allowlist: { enabled: true, owners: ["acme"] },
+        owner_overlap: false,
         installations: [
           { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
           { installation_id: 456, account_login: "intruder", seen_at: "2026-01-01 00:00:00" },
@@ -417,6 +459,7 @@ describe("installed tab configuration surface (static SSR)", () => {
       {
         ...managePayload,
         allowlist: { enabled: true, owners: ["ACME"] },
+        owner_overlap: false,
         installations: [
           { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
         ],
@@ -432,6 +475,7 @@ describe("installed tab configuration surface (static SSR)", () => {
       {
         ...managePayload,
         allowlist: { enabled: false, owners: ["someone-else"] },
+        owner_overlap: false,
         installations: [
           { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
           { installation_id: 456, account_login: null, seen_at: "2026-01-01 00:00:00" },
@@ -548,7 +592,6 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       locale: "en",
       appId: "1",
       payload: managePayload,
-      groups: [],
       notice: null,
       search: tabSearch,
       onReload: noReload,
@@ -621,14 +664,15 @@ describe("tab shell mounted behaviour (forceMount)", () => {
         (button) => button.textContent === t("en", "settings.addChain"),
       );
       await click(win, addChain);
-      const input = () =>
-        container.querySelector(`input[placeholder="${t("en", "settings.chainNamePlaceholder")}"]`);
+      // The typed field is a target-scoped control the settings tab still owns:
+      // the review gate's score input.
+      const input = () => container.querySelector('input[type="number"]');
       const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
       await act(async () => {
-        setValue?.call(input(), "deep-review");
+        setValue?.call(input(), "42");
         input()?.dispatchEvent(new win.Event("input", { bubbles: true }));
       });
-      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+      expect((input() as HTMLInputElement | null)?.value).toBe("42");
       const settingsPanel = panelOf(container, input());
       expect(settingsPanel?.getAttribute("data-state")).toBe("active");
 
@@ -643,12 +687,12 @@ describe("tab shell mounted behaviour (forceMount)", () => {
         "inactive",
         "inactive",
       ]);
-      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+      expect((input() as HTMLInputElement | null)?.value).toBe("42");
 
       // …and back: the value survived a full round trip.
       await click(win, tabTrigger(container, t("en", "appDetail.tabSettings")));
       expect(settingsPanel?.getAttribute("data-state")).toBe("active");
-      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+      expect((input() as HTMLInputElement | null)?.value).toBe("42");
     } finally {
       await act(async () => root.unmount());
       cleanup();
@@ -830,7 +874,6 @@ describe("tab shell mounted behaviour (forceMount)", () => {
             locale: "en",
             appId: "1",
             payload,
-            groups: [],
             notice: null,
             search: { ...search, tab: "settings" },
             onReload: noReload,
@@ -1009,7 +1052,7 @@ describe("workspace switch on the App detail page (SF-1)", () => {
     }) as unknown as typeof fetch;
     try {
       const loaded = await loadAppDetail(apiBase(pathname), "1");
-      expect(loaded?.payload.can_manage).toBe(false);
+      expect(loaded?.can_manage).toBe(false);
       return calls;
     } finally {
       globalThis.fetch = realFetch;
@@ -1028,23 +1071,17 @@ describe("workspace switch on the App detail page (SF-1)", () => {
     ]);
   });
 
-  test("the manage face reads the model options off the SAME base", async () => {
+  test("the manage face reads the settings payload only — the model options belong to the bot page", async () => {
     const calls: string[] = [];
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async (input: unknown) => {
-      const url = String(input);
-      calls.push(url);
-      return new Response(
-        JSON.stringify(url.endsWith("/models") ? { groups: [] } : managePayload),
-        { status: 200 },
-      );
+      calls.push(String(input));
+      return new Response(JSON.stringify(managePayload), { status: 200 });
     }) as unknown as typeof fetch;
     try {
-      await loadAppDetail("/dashboard/beta", "1");
-      expect(calls).toEqual([
-        "/dashboard/beta/api/apps/1/settings",
-        "/dashboard/beta/api/apps/1/models",
-      ]);
+      const loaded = await loadAppDetail("/dashboard/beta", "1");
+      expect(loaded?.can_manage).toBe(true);
+      expect(calls).toEqual(["/dashboard/beta/api/apps/1/settings"]);
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -1166,5 +1203,174 @@ describe("install claim entry (static SSR)", () => {
     ).toBeNull();
     // `null` is the unbound state, and it stays legal.
     expect(parseSettings({ ...sharedPayload(), installation: null })?.can_manage).toBe(true);
+  });
+});
+
+/**
+ * The derived Blocked state and the pending-installation bind entry.
+ *
+ * Blocked is server-derived per read (`review_bots.scope = 'owned'` and the
+ * target's workspace is another one): the page names the reason and the
+ * install block offers no action, while the review settings stay readable.
+ * A pending installation — the bot's live installation no target references —
+ * is the install block's second action, and it exists only while the target
+ * holds no binding.
+ */
+describe("Blocked and pending installations (static SSR)", () => {
+  /** The Blocked manager face: target-owned sections only, no bot sections. */
+  const blockedPayload = (): SettingsBlockedPayload => ({
+    can_manage: true,
+    blocked: true,
+    blocked_reason: "bot_not_shared",
+    workspace_id: managePayload.workspace_id,
+    target_id: managePayload.target_id,
+    app: {
+      github_app_id: managePayload.app.github_app_id,
+      id: managePayload.app.id,
+      status: managePayload.app.status,
+      created_by: managePayload.app.created_by,
+      review_enabled: managePayload.app.review_enabled,
+      review_trigger_mode: managePayload.app.review_trigger_mode,
+      review_level: managePayload.app.review_level,
+      default_review_level: managePayload.app.default_review_level,
+      scope: "owned",
+      github_name: managePayload.app.github_name,
+      github_slug: managePayload.app.github_slug,
+      github_description: managePayload.app.github_description,
+      github_html_url: managePayload.app.github_html_url,
+      github_avatar_url: managePayload.app.github_avatar_url,
+      github_visibility: managePayload.app.github_visibility,
+    },
+    installation: null,
+    check_gate: managePayload.check_gate,
+    allowlist: managePayload.allowlist,
+    owner_overlap: false,
+  });
+
+  const sharedPayload = (): SettingsManagePayload => ({
+    ...managePayload,
+    app: { ...managePayload.app, scope: "shared" },
+    installation: null,
+  });
+
+  test("the Blocked banner names the reason on both faces", () => {
+    const manager = renderDetail(blockedPayload(), true, "settings");
+    expect(manager).toContain(t("en", "appDetail.blockedBotNotShared"));
+    // The bot page is not readable from a blocked workspace (its bot serves
+    // another one now), so the header does not offer a link that 404s.
+    expect(manager).not.toContain(t("en", "appDetail.botSettingsLink"));
+    // The metric band's figures are all the bot's: none render, and no zero is
+    // fabricated in their place.
+    expect(manager).not.toContain(t("en", "settings.installations"));
+    expect(manager).not.toContain(t("en", "settings.metricKeys"));
+    // The review settings are the target's, so they stay.
+    expect(manager).toContain(t("en", "settings.reviewGate"));
+
+    const member = renderToStaticMarkup(
+      createElement(AppDetailView, {
+        locale: "en",
+        appId: "1",
+        payload: {
+          ...identityPayload,
+          blocked: true,
+          blocked_reason: "bot_not_shared",
+        },
+        notice: null,
+        search,
+        onReload: noReload,
+        onSearch: noSearch,
+      }),
+    );
+    expect(member).toContain(t("en", "appDetail.blockedBotNotShared"));
+  });
+
+  test("a Blocked target hides the install and claim actions, and keeps its review settings", async () => {
+    const installed = renderDetail(blockedPayload(), true, "installations");
+    expect(installed).not.toContain(t("en", "settings.installClaim"));
+    expect(installed).not.toContain(t("en", "settings.installLink"));
+    expect(installed).not.toContain('href="https://github.com/apps/demo/installations/new"');
+    // Nothing is pending for a bot this workspace may not use.
+    expect(installed).not.toContain(t("en", "settings.installPendingBind"));
+
+    // The review configuration is still readable — Blocked hides an action,
+    // not the settings a manager can inspect.
+    const settingsTab = renderDetail(blockedPayload(), true, "settings");
+    expect(settingsTab).toContain(t("en", "settings.reviewGate"));
+
+    // The bot-shaped parts of the identity card are gone with the bot data:
+    // the delivery URL and the refresh are bot-scope writes this workspace
+    // cannot make, and the installation table states WHY it is empty instead
+    // of claiming the bot has none.
+    expect(installed).not.toContain(t("en", "settings.appInfoDeliveryUrl"));
+    expect(installed).not.toContain(t("en", "settings.appInfoRefresh"));
+    // Copy carries an apostrophe (SSR escapes it), so read the rendered text.
+    const installedText = await withMarkup(installed, (container) => container.textContent ?? "");
+    expect(installedText).toContain(t("en", "settings.installationsNotVisible"));
+    expect(installedText).not.toContain(t("en", "settings.noInstallations"));
+    // The allowlist itself stays editable (target-owned).
+    expect(installed).toContain(t("en", "settings.allowlistSave"));
+  });
+
+  test("an unbound shared target renders one bind action per pending installation", () => {
+    const pending: SettingsManagePayload = {
+      ...sharedPayload(),
+      pending_installations: [
+        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+        { installation_id: 501, account_login: null, seen_at: "2026-01-01 00:00:00" },
+      ],
+    };
+    const markup = renderDetail(pending, true, "installations");
+    expect(markup.match(new RegExp(t("en", "settings.installPendingBind"), "g"))).toHaveLength(2);
+    expect(markup).toContain("acme");
+    expect(markup).toContain(t("en", "settings.installPendingUnknownAccount", { id: "501" }));
+
+    // A bound target binds nothing more: the operator's unbind is the repair.
+    const bound = renderDetail(
+      { ...pending, installation: { id: 4242, account_login: "acme", removed: false } },
+      true,
+      "installations",
+    );
+    expect(bound).not.toContain(t("en", "settings.installPendingBind"));
+  });
+
+  test("the new fields parse fail-closed on both manager faces", () => {
+    expect(parseSettings(managePayload)?.can_manage).toBe(true);
+    expect(parseSettings(identityPayload)?.can_manage).toBe(false);
+    // The blocked face is accepted, and both manager faces keep their own
+    // required keys: a blocked payload carrying the bot sections is still a
+    // blocked payload (the extras are ignored), but dropping a TARGET-owned
+    // key fails the read.
+    expect(parseSettings(blockedPayload())?.blocked).toBe(true);
+    for (const broken of [
+      { ...blockedPayload(), blocked: false },
+      { ...blockedPayload(), blocked_reason: "other" },
+      { ...blockedPayload(), owner_overlap: "no" },
+      { ...blockedPayload(), app: { ...blockedPayload().app, review_trigger_mode: "sometimes" } },
+      { ...blockedPayload(), installation: { id: "1", account_login: null, removed: false } },
+    ]) {
+      expect(parseSettings(broken)).toBeNull();
+    }
+    // The bot's metadata stamp is the OWNER's: a Blocked face omits it, and a
+    // readable face must carry it.
+    const { github_metadata_synced_at: _stamp, ...identityWithoutStamp } = identityPayload.app;
+    expect(parseSettings({ ...identityPayload, app: identityWithoutStamp })).toBeNull();
+    expect(
+      parseSettings({
+        ...identityPayload,
+        blocked: true,
+        blocked_reason: "bot_not_shared",
+        app: identityWithoutStamp,
+      }),
+    ).not.toBeNull();
+    // A pending row without a usable installation id would render an action
+    // the route cannot address.
+    expect(
+      parseSettings({
+        ...managePayload,
+        pending_installations: [{ installation_id: "500", account_login: null, seen_at: "x" }],
+      }),
+    ).toBeNull();
+    const { pending_installations: _pending, ...withoutPending } = managePayload;
+    expect(parseSettings(withoutPending)).toBeNull();
   });
 });

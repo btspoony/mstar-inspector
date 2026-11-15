@@ -10,7 +10,7 @@
  * admits those paths and this matcher serves their shell. History fallback is
  * this matcher, not wrangler `not_found_handling`.
  */
-export const SPA_PAGES = ["apps", "members", "settings", "login", "app-detail"] as const;
+export const SPA_PAGES = ["apps", "members", "settings", "login", "app-detail", "bot-settings"] as const;
 
 export type SpaPageId = (typeof SPA_PAGES)[number];
 
@@ -24,7 +24,8 @@ export type SpaRoute =
   | { page: "members"; pathname: string; workspaceRef: string }
   | { page: "settings"; pathname: string; workspaceRef: string }
   | { page: "login"; pathname: "/dashboard/login" }
-  | { page: "app-detail"; pathname: string; appId: string; workspaceRef?: string };
+  | { page: "app-detail"; pathname: string; appId: string; workspaceRef?: string }
+  | { page: "bot-settings"; pathname: string; appId: string; workspaceRef?: string };
 
 /**
  * First path segments that can never name a workspace (today's routes). ONE
@@ -85,11 +86,16 @@ export function replaceWorkspaceRef(pathname: string, nextRef: string): string |
   return `/dashboard/${nextRef}${match[2] ?? ""}`;
 }
 
-const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)(?:\/settings)?$/;
+const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)(?:\/settings|\/bot)?$/;
 const WORKSPACE_APPS_PATH = /^\/dashboard\/([^/]+)\/apps$/;
 const WORKSPACE_MEMBERS_PATH = /^\/dashboard\/([^/]+)\/members$/;
 const WORKSPACE_SETTINGS_PATH = /^\/dashboard\/([^/]+)\/settings$/;
-const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)(?:\/settings)?$/;
+const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)(?:\/settings|\/bot)?$/;
+
+/** The page an App sub-path opens: the bot page, else the detail page. */
+function appPageOf(pathname: string): "app-detail" | "bot-settings" {
+  return pathname.endsWith("/bot") ? "bot-settings" : "app-detail";
+}
 
 /**
  * ONE matcher entry / page id serves both detail paths: the bare
@@ -116,12 +122,12 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
     if (WORKSPACE_MEMBERS_PATH.test(pathname)) return { page: "members", pathname, workspaceRef };
     if (WORKSPACE_SETTINGS_PATH.test(pathname)) return { page: "settings", pathname, workspaceRef };
     const appId = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
-    if (appId) return { page: "app-detail", pathname, appId, workspaceRef };
+    if (appId) return { page: appPageOf(pathname), pathname, appId, workspaceRef };
     return null;
   }
   const appId = APP_DETAIL_PATH.exec(pathname)?.[1];
   if (!appId) return null;
-  return { page: "app-detail", pathname, appId };
+  return { page: appPageOf(pathname), pathname, appId };
 }
 
 /**

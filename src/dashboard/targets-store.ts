@@ -191,6 +191,75 @@ type TargetsStoreD1 = {
  */
 const LIVE_TARGET = "id = ? AND workspace_id = ? AND deleted_at IS NULL";
 
+/**
+ * The park predicate: a live target IN the addressed workspace whose account
+ * claim another live target in that workspace ALSO carries. That duplicate is
+ * the whole invariant — the two claims normally belong to different bots, so
+ * refusing on a per-bot target count would block the repair this exists for.
+ * Leaving the login with at least one live claimant is what keeps the review
+ * surface; every statement of the park batch repeats the predicate, so a
+ * concurrent delete, a workspace mix-up or a claim that stopped overlapping
+ * fails the whole park instead of writing half of it.
+ */
+const PARKABLE_TARGET = `id = ? AND workspace_id = ? AND deleted_at IS NULL
+   AND account_login IS NOT NULL
+   AND EXISTS (SELECT 1 FROM review_targets o
+                WHERE o.workspace_id = review_targets.workspace_id
+                  AND o.id <> review_targets.id
+                  AND o.deleted_at IS NULL
+                  AND o.account_login = review_targets.account_login)`;
+
+/**
+ * The park's audit row. It runs FIRST in the batch: its predicate reads the
+ * pre-park `account_login`, which the UPDATE clears.
+ */
+const PARK_AUDIT_SQL = `INSERT INTO audit_events (id, workspace_id, actor_login, action, target_id, created_at)
+  SELECT ?, ?, ?, 'target.park', id, ? FROM review_targets WHERE ${PARKABLE_TARGET}`;
+
+const PARK_TARGET_SQL = `UPDATE review_targets
+   SET review_enabled = 0, account_login = NULL, updated_at = datetime('now')
+   WHERE ${PARKABLE_TARGET}`;
+
+/** Why a park refused — the reasons the route maps onto its own vocabulary. */
+export type ParkRefusal = "unknown-target" | "only-live-target" | "no-overlap";
+
+/**
+ * The shared-bot create's outcome. Refusals are VALUES, like every other store
+ * refusal here, so the route maps each onto its status/body pair instead of
+ * parsing a message.
+ */
+export type CreateSharedTargetOutcome =
+  | { outcome: "created"; target: ReviewTargetRow }
+  | { outcome: "bot_not_shared" }
+  | { outcome: "target_exists" };
+
+/**
+ * The guarded insert behind `createOnSharedBot`: ONE statement decides and
+ * writes, so a bot unshared between the page load and the submit — or a
+ * workspace that already holds a live target on it — writes nothing. The name
+ * is the bot's own, as the manifest path names its target; `installation_id`
+ * and `account_login` keep their NULL defaults because this path binds no
+ * installation. Policy columns keep the DDL defaults; only the score floor is
+ * caller-supplied.
+ */
+const CREATE_SHARED_TARGET_SQL = `
+  INSERT INTO review_targets
+    (id, workspace_id, bot_id, name, check_min_score, created_by, created_at, updated_at)
+  SELECT ?1, ?2, b.id, b.name, ?3, ?4, datetime('now'), datetime('now')
+    FROM review_bots b
+   WHERE b.id = ?5
+     AND b.deleted_at IS NULL
+     AND b.scope = 'shared'
+     AND NOT EXISTS (SELECT 1 FROM review_targets t
+                      WHERE t.bot_id = b.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)`;
+
+/** The refusal's cause: the bot's own row, read only after the guard refused. */
+const CREATE_SHARED_TARGET_CAUSE_SQL = `
+  SELECT b.deleted_at, b.scope,
+         EXISTS (SELECT 1 FROM review_targets t
+                  WHERE t.bot_id = b.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL) AS has_target
+    FROM review_bots b WHERE b.id = ?1`;
+
 /** Create the review_targets / target_owner_allowlist store over one D1 handle. */
 export function createTargetsStore(db: TargetsStoreD1) {
   return {
@@ -225,6 +294,46 @@ export function createTargetsStore(db: TargetsStoreD1) {
         .first<ReviewTargetRow>();
       if (!row) throw new Error("targets-store: create target row vanished on read-back");
       return row;
+    },
+
+    /**
+     * Create one target on a `shared` bot — the workspace's own target on a
+     * bot the platform shares. ONE guarded statement decides and writes (see
+     * the SQL), then the row it wrote is read back. Refusals are values so the
+     * route owns their statuses.
+     */
+    async createOnSharedBot(input: {
+      workspaceId: string;
+      botId: string;
+      createdBy: string;
+      /** The workspace's floor, read by the route; omitted → the product default. */
+      checkMinScore?: number;
+    }): Promise<CreateSharedTargetOutcome> {
+      const id = crypto.randomUUID();
+      const minScore = isCheckMinScoreValue(input.checkMinScore)
+        ? input.checkMinScore
+        : DEFAULT_CHECK_MIN_SCORE;
+      const res = await db
+        .prepare(CREATE_SHARED_TARGET_SQL)
+        .bind(id, input.workspaceId, minScore, input.createdBy, input.botId)
+        .run();
+      if (res.meta.changes === 0) {
+        // The guard refused, so the cause is read only now: a bot that is
+        // still shared means the workspace's own target is what blocked it.
+        const cause = await db
+          .prepare(CREATE_SHARED_TARGET_CAUSE_SQL)
+          .bind(input.botId, input.workspaceId)
+          .first<{ deleted_at: string | null; scope: string; has_target: number }>();
+        return cause !== null && cause.deleted_at === null && cause.scope === "shared"
+          ? { outcome: "target_exists" }
+          : { outcome: "bot_not_shared" };
+      }
+      const row = await db
+        .prepare(`SELECT * FROM review_targets WHERE ${LIVE_TARGET}`)
+        .bind(id, input.workspaceId)
+        .first<ReviewTargetRow>();
+      if (!row) throw new Error("targets-store: shared target row vanished on read-back");
+      return { outcome: "created", target: row };
     },
 
     /** One live target of this workspace; another workspace's id reads null. */
@@ -359,6 +468,64 @@ export function createTargetsStore(db: TargetsStoreD1) {
         .bind(enabled ? 1 : 0, targetId, workspaceId)
         .run();
       return res.meta.changes > 0;
+    },
+
+    /**
+     * Park an overlapping target: pause it and retire its account claim, with
+     * ONE `audit_events` row naming the target — all in one batch. Parking is
+     * the repair `scripts/audit-owner-overlap.sql` names for a workspace where
+     * one account owns more than one live target; it deletes nothing, so the
+     * bot keeps its target and the pause stays reversible through the resume
+     * route.
+     *
+     * Refusals write nothing and name their reason: a target that is not live
+     * in this workspace, a login this target is the workspace's only live
+     * claimant of (parking it would retire the claim rather than resolve a
+     * duplicate), and a target that carries no claim at all.
+     */
+    async park(
+      workspaceId: string,
+      targetId: string,
+      actorLogin: string,
+      now: string,
+    ): Promise<{ outcome: "parked" } | { outcome: "refused"; reason: ParkRefusal }> {
+      const state = await db
+        .prepare(
+          `SELECT t.account_login,
+                  EXISTS (SELECT 1 FROM review_targets o
+                           WHERE o.workspace_id = t.workspace_id
+                             AND o.id <> t.id
+                             AND o.deleted_at IS NULL
+                             AND o.account_login = t.account_login) AS overlapped
+             FROM review_targets t
+            WHERE ${LIVE_TARGET}`,
+        )
+        .bind(targetId, workspaceId)
+        .first<{ account_login: string | null; overlapped: number }>();
+      if (!state) return { outcome: "refused", reason: "unknown-target" };
+      if (state.account_login === null) return { outcome: "refused", reason: "no-overlap" };
+      // The login must keep a live claimant: the other target is what parks'
+      // repair leaves in place.
+      if (state.overlapped === 0) return { outcome: "refused", reason: "only-live-target" };
+      const [, update] = await db.batch([
+        db.prepare(PARK_AUDIT_SQL).bind(crypto.randomUUID(), workspaceId, actorLogin, now, targetId, workspaceId),
+        db.prepare(PARK_TARGET_SQL).bind(targetId, workspaceId),
+      ]);
+      // Both statements share the predicate, so the UPDATE's change count is
+      // the park's only success signal: zero means a concurrent delete or an
+      // already-cleared claim, and the audit insert matched nothing either.
+      return update!.meta.changes === 1
+        ? { outcome: "parked" }
+        : { outcome: "refused", reason: "no-overlap" };
+    },
+
+    /** Whether `park` would accept this target — the target face's affordance. */
+    async hasOwnerOverlap(workspaceId: string, targetId: string): Promise<boolean> {
+      const row = await db
+        .prepare(`SELECT 1 AS parkable FROM review_targets WHERE ${PARKABLE_TARGET}`)
+        .bind(targetId, workspaceId)
+        .first<{ parkable: number }>();
+      return row !== null;
     },
 
     /**

@@ -66,8 +66,11 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
   return {
     can_manage: true,
     installation: null,
+    pending_installations: [],
     workspace_id: "ws_test",
     target_id: "rt-501",
+    blocked: false as const,
+    blocked_reason: null,
     app: {
       github_app_id: 1,
       status: "active",
@@ -90,6 +93,7 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
     },
     check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
     allowlist: { enabled: false, owners: [] },
+    owner_overlap: false,
     keys: [],
     model_chain: null,
     model_limits_snapshot: "2026-01-01",

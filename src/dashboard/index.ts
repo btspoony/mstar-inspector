@@ -66,6 +66,7 @@ import {
   createReviewBotsStore,
   type DeliverySummary,
   type GithubAppRow,
+  type GithubAppTenantRow,
   type LedgerScope,
   type PullRequestReviewing,
 } from "./apps-store";
@@ -2591,26 +2592,63 @@ function canManageApp(scope: WorkspaceScope): boolean {
 }
 
 /**
+ * Bot-scope WRITE authority — the ONE predicate every bot-owned mutation
+ * checks: lifecycle (disable / enable / delete), the settings family's
+ * bot-scoped ops (providers, chains, keys, sandbox image), provider-key
+ * verification and the forced metadata refresh.
+ *
+ * It is deliberately INDEPENDENT of the App resolver. The resolver admits a
+ * workspace's retained target on another workspace's bot (the revoked-share
+ * read), but a target grants its own review configuration, never the bot:
+ * the caller's workspace must be the bot's OWNING workspace (its
+ * `bot_workspaces` mapping), read off the same joined row. `shared` is
+ * platform-authorised, so it is read-only here for its owner too; the
+ * platform operator's own write path is `/_internal_admin`, which no member
+ * route reaches.
+ *
+ * Target-owned settings (trigger mode, depth, Check gate, allowlist, pause,
+ * park) do NOT use this predicate: the target's workspace role governs them.
+ */
+function canWriteBotScope(
+  app: Pick<GithubAppRow, "workspace_id" | "scope">,
+  scope: WorkspaceScope,
+): boolean {
+  return app.scope === "owned" && app.workspace_id === scope.workspaceId;
+}
+
+/**
+ * Bot-scope READ authority for the one bot-owned operation that consumes the
+ * bot's stored credentials without writing (`POST /keys/usage`): the owning
+ * workspace, or a `shared` bot any workspace may use. A retained target on
+ * another workspace's `owned` bot grants neither.
+ */
+function canReadBotScope(
+  app: Pick<GithubAppRow, "workspace_id" | "scope">,
+  scope: WorkspaceScope,
+): boolean {
+  return app.workspace_id === scope.workspaceId || app.scope === "shared";
+}
+
+/**
  * Resolve the App addressed by an App route. The segment is GitHub's immutable
  * numeric App id — the only App identifier an operator sees that never changes.
- * A non-numeric segment, an App from another workspace and a soft-deleted row
- * are all equally invisible (404).
+ * A non-numeric segment, a soft-deleted row, a bot the workspace neither owns
+ * nor holds a live target on, and an App with no target in the session
+ * workspace are all equally invisible (404).
+ *
+ * The resolve is bot-scope aware (the store's `getScopedAppByGithubId`): a
+ * workspace reaches the target it created on a `shared` bot, and the target it
+ * still holds after a share was revoked, while another workspace's `owned` bot
+ * is never widened.
  */
 async function resolveScopedApp(
   apps: ReturnType<typeof createReviewBotsStore>,
   appIdParam: string,
   scope: WorkspaceScope,
 ): Promise<GithubAppRow | null> {
-  // Digits only: `Number("")` is 0 and `Number("1001abc")` is NaN, but
-  // `Number("0x1f")`, `Number("1e3")` and `Number(" 5 ")` are all finite
-  // integers — those spellings would alias one App id under several URLs.
-  if (!/^[0-9]+$/.test(appIdParam)) return null;
-  const githubAppId = Number(appIdParam);
-  if (!Number.isSafeInteger(githubAppId) || githubAppId <= 0) return null;
-  const app = await apps.getAppByGithubId(githubAppId);
-  if (!app || app.deleted_at !== null) return null;
-  if (app.workspace_id !== scope.workspaceId) return null;
-  return app;
+  const githubAppId = parseGithubAppId(appIdParam);
+  if (githubAppId === null) return null;
+  return apps.getScopedAppByGithubId(githubAppId, scope.workspaceId);
 }
 
 /**
@@ -2625,6 +2663,23 @@ function appDisplayName(
 }
 
 /**
+ * Whether the target's bot still serves it, derived on every read: a bot that
+ * is `owned` by ANOTHER workspace no longer reviews this target (the
+ * resolver's guard). Nothing stores this — a re-share clears it on the next
+ * read, and keeping a projection would be a second source of truth.
+ */
+type BlockedReason = "bot_not_shared";
+
+function blockedReasonFor(
+  app: Pick<GithubAppRow, "scope" | "workspace_id">,
+  targetWorkspaceId: string,
+): BlockedReason | null {
+  return app.scope === "owned" && app.workspace_id !== targetWorkspaceId
+    ? "bot_not_shared"
+    : null;
+}
+
+/**
  * The Apps list with the health column data (AL-20-2): every row
  * carries its health summary (the App's newest review-verdict
  * webhook_deliveries row — outcome tier, see the store's deliverySummaries —
@@ -2636,7 +2691,9 @@ function appDisplayName(
  * (QC wave 1, W-1): exactly TWO D1 statements for any N instead
  * of the per-App 2N fan-out — this helper runs on GET /api/apps (the SPA
  * JSON face), so the statement count must not scale with the App count.
- * A request lists only its own workspace's Apps.
+ * A request lists the workspace's own bots plus every `shared` bot it holds a
+ * live target on (`targetedBotIds`) — the target is the entitlement, so a
+ * target created on an official bot does not vanish from this list.
  * shortcut: the workspace filter runs over the joined list in memory
  * (single-tenant scale today); upgrade to a workspace-filtered store query
  * when a workspace can hold enough Apps for the scan to matter.
@@ -2644,8 +2701,13 @@ function appDisplayName(
 async function appsListWithHealth(
   apps: ReturnType<typeof createReviewBotsStore>,
   scope: WorkspaceScope,
+  targetedBotIds: ReadonlySet<string>,
 ): Promise<Array<GithubAppRow & { health: DeliverySummary }>> {
-  const rows = (await apps.listApps()).filter((app) => app.workspace_id === scope.workspaceId);
+  const rows = (await apps.listApps()).filter(
+    (app) =>
+      app.workspace_id === scope.workspaceId ||
+      (app.scope === "shared" && targetedBotIds.has(app.id)),
+  );
   const summaries = await apps.deliverySummaries(rows.map((app) => app.id));
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
@@ -2654,18 +2716,22 @@ async function appsListWithHealth(
 const appListRoute = async (c: DashboardContext) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const rows = await appsListWithHealth(createReviewBotsStore(gate.db), gate.scope);
-  // The pause the list renders is the TARGET's business pause — the one the
-  // pause/resume routes write. A bot has one target today, so the map is
-  // one-to-one. A bot with no live target emits NO `review_enabled`: the row
-  // carries no pause state, and inventing one would show a switch position the
-  // database does not hold.
+  const apps = createReviewBotsStore(gate.db);
+  // The workspace's live targets, keyed by bot: the list reads THIS
+  // workspace's pause state per bot, and a shared bot's row is in the list
+  // exactly because one of these targets exists.
   const targetByBot = new Map(
     (await createTargetsStore(gate.db).list(gate.scope.workspaceId)).map((target) => [
       target.bot_id,
       target,
     ]),
   );
+  const rows = await appsListWithHealth(apps, gate.scope, new Set(targetByBot.keys()));
+  // The pause the list renders is the TARGET's business pause — the one the
+  // pause/resume routes write. A bot has one target today, so the map is
+  // one-to-one. A bot with no live target emits NO `review_enabled`: the row
+  // carries no pause state, and inventing one would show a switch position the
+  // database does not hold.
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
     apps: rows.map((app) => {
@@ -2693,6 +2759,10 @@ const appListRoute = async (c: DashboardContext) => {
         },
       };
     }),
+    // The creation chooser's official mode: the `shared` bots this workspace
+    // may put a target on, each with its own live-target count here. Additive
+    // and always present — `[]` when the platform shares none.
+    shared_bots: await apps.listSharedBots(gate.scope.workspaceId),
   });
 };
 
@@ -2714,6 +2784,9 @@ async function appStatusAction(
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
+  // A bot's lifecycle belongs to its OWNING workspace (and a `shared` bot to
+  // the platform): a target on it is not authority over it.
+  if (!canWriteBotScope(app, gate.scope)) return botReadOnlyResponse(c);
   if (action === "delete") {
     await apps.softDeleteApp(app.id);
   } else {
@@ -3441,12 +3514,209 @@ async function refreshGithubMetadataForRead(
   return refresh.row;
 }
 
+/**
+ * The BOT-owned sections of the settings faces: installations, delivery
+ * health, provider keys / model chains / custom providers, and the
+ * sandbox-image selector. The target's review policy (trigger, depth, gate,
+ * allowlist, pause) is not here — it belongs to the workspace's target, so the
+ * target detail's payload composes these sections with it and the bot page
+ * serves them alone.
+ */
+async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionKey: string) {
+  const apps = createReviewBotsStore(db);
+  const installations = await apps.listInstallations(app.id);
+  const deliveries = await apps.listRecentDeliveries(app.id, 10);
+  const deliverySummary = await apps.deliverySummary(app.id);
+  const store = createAppConfigStore(db, encryptionKey);
+  const maskedKeys = await store.listProviderKeys(app.id);
+  const modelChain = await store.getModelChain(app.id);
+  const modelChainSeats = await store.getModelChainSeats(app.id);
+  const modelChains = await store.getModelChains(app.id);
+  const customProviders = await store.listCustomProviders(app.id);
+  // The custom/template pools' own masked rows — the declaration list above
+  // carries no key material, so without this read a custom provider rendered
+  // one declaration row whatever its pool size: no key identity, mask or
+  // per-key verification state, and no way to drop one key instead of the
+  // whole pool.
+  const customKeys = await store.listCustomProviderKeys(app.id);
+  const keyRows = [...maskedKeys, ...customKeys];
+  // (spec § Provider configuration contract): eligibility is judged
+  // against the App's SELECTED runtime harness, never an inferred filter. The
+  // registry entry's runtime kind is the contract: an omp-selected App
+  // consumes builtin entries via env names and materializes templates
+  // through the custom-provider machinery; any other runtime would leave
+  // every row unavailable (zero such rows today — omp is the only
+  // registry entry, and the persisted id is store-validated against it).
+  const ompRuntime = isOmpRuntimeImage(app.sandbox_image_id);
+  return {
+    installations,
+    deliveries: deliveries.map((d) => ({
+      event_name: d.event_name,
+      outcome: d.outcome,
+      status_code: d.status_code,
+      repository_full_name: d.repository_full_name,
+      created_at: d.created_at,
+    })),
+    delivery_summary: {
+      latest: deliverySummary.latest
+        ? {
+            event_name: deliverySummary.latest.event_name,
+            outcome: deliverySummary.latest.outcome,
+            status_code: deliverySummary.latest.status_code,
+            created_at: deliverySummary.latest.created_at,
+          }
+        : null,
+      rejected24h: deliverySummary.rejected24h,
+    },
+    // Every stored key row of the App — built-in and custom pools alike:
+    // the add flow lists a selected provider's rows from this face (a
+    // materialized template's pool included), so a custom pool's rows must
+    // ride it too.
+    keys: keyRows,
+    model_chain: modelChain,
+    // (spec §4.4): the role editor's data is now seat → chain
+    // reference (blank = default chain); the chains list carries every
+    // chain (default + named) for the chains management UI.
+    model_roles: modelChainSeats,
+    model_chains: modelChains,
+    // The declaration face of the settings payload keeps its existing shape:
+    // `has_keys` is a membership-gate input for the models / chain faces, not
+    // a UI field, so it never rides this response (the store read is shared).
+    custom_providers: customProviders.map(({ provider_id, base_url, api, model_ids, models_meta }) => ({
+      provider_id,
+      base_url,
+      api,
+      model_ids: [...model_ids],
+      // A declaration still stored under a per-protocol catalog id resolves
+      // to the provider row that absorbed it (label, vocabulary, sizes) —
+      // read-only, so the stored id and its keys are untouched.
+      ...(Object.hasOwn(LEGACY_PROVIDER_IDS, provider_id)
+        ? { legacy_of: LEGACY_PROVIDER_IDS[provider_id]! }
+        : {}),
+      // Absent when the owner stated nothing: the sizes are unstated (the
+      // runtime's own default applies), the form seeds them blank, and no
+      // number is invented for the row.
+      ...(models_meta === undefined ? {} : { models_meta }),
+    })),
+    // Clean cutover: the App's PERSISTED provider state only — a stored
+    // key (masked tail) or a saved custom-provider declaration. No
+    // plaintext keys, and catalog rows never appear here; an empty array is
+    // the valid unconfigured-App state. Key rows cover BOTH pools: a custom
+    // or template provider's rows are here, each with its own identity, so
+    // one key can be removed without removing the declaration.
+    configured_providers: [
+      ...keyRows.map((key) => ({
+        kind: "key" as const,
+        provider: key.provider,
+        key_id: key.keyId,
+        last4: key.last4,
+        updated_at: key.updatedAt,
+        verified_at: key.verifiedAt,
+        verified_status: key.verifiedStatus,
+      })),
+      ...customProviders.map((row) => ({
+        kind: "custom" as const,
+        provider_id: row.provider_id,
+        base_url: row.base_url,
+        api: row.api,
+        model_ids: [...row.model_ids],
+      })),
+    ],
+    // Discovery metadata (the retired `providers` dump) plus
+    // eligibility vs the App's selected image. Builtin ids in PROVIDER_IDS
+    // order, then the template tier (the hand-curated workers-ai entry
+    // followed by the snapshot breadth — the catalog's own key order).
+    // `verifiable: false` marks the console-only providers (no probeable
+    // endpoint: azure-openai / ai-gateway — the old
+    // addKeyProviderIds filter); templates verify via
+    // the custom probe, so always verifiable.
+    // (AD-547): every entry also carries a display-only
+    // `display_group` ("common" = the 5-entry 常用提供方 tier, "catalog" =
+    // everything else, in both tiers). Array order is unchanged and the
+    // field drives ONLY picker grouping — the add/verify/save mechanics
+    // keep branching on `tier`/`eligibility`, never on `display_group`.
+    // `usage_probe` marks the providers whose own quota endpoint the
+    // per-key usage action can ask (the probe table's catalog ids); it is
+    // derived, never a second hand-kept list.
+    provider_catalog: [
+      ...PROVIDER_IDS.map((id) => {
+        const meta = PROVIDER_META[id];
+        if (!meta) throw new Error(`PROVIDER_META missing ${id}`);
+        return {
+          id,
+          label: meta.label,
+          tier: meta.tier,
+          base_url: meta.baseUrl,
+          api: meta.api,
+          models: [...meta.models],
+          // The row's own endpoint: the SPA applies the same base-URL
+          // predicate the Worker does before it trusts `model_limits`.
+          // The per-model sizes the vendor directory states, keyed by model
+          // id. The model dialog pre-fills its blank fields from here and
+          // posts no override for a value the operator leaves untouched.
+          model_limits: MODEL_LIMITS[id] ?? {},
+          // Mixed-protocol rows only: the protocol choice the add form
+          // offers, default first. Absent = a single-protocol row.
+          ...(meta.protocols === undefined
+            ? {}
+            : {
+                protocols: meta.protocols.map((option) => ({
+                  api: option.api,
+                  base_url: option.baseUrl,
+                  models: [...option.models],
+                })),
+              }),
+          verifiable: PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported",
+          usage_probe: hasUsageProbe(id),
+          eligibility: ompRuntime ? meta.tier : "unavailable",
+          display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
+        };
+      }),
+      ...Object.entries(PROVIDER_META)
+        .filter(([id, meta]) => meta.tier === "template" && !PROVIDER_IDS.includes(id))
+        .map(([id, meta]) => ({
+          id,
+          label: meta.label,
+          tier: meta.tier,
+          base_url: meta.baseUrl,
+          api: meta.api,
+          models: [...meta.models],
+          model_limits: MODEL_LIMITS[id] ?? {},
+          ...(meta.protocols === undefined
+            ? {}
+            : {
+                protocols: meta.protocols.map((option) => ({
+                  api: option.api,
+                  base_url: option.baseUrl,
+                  models: [...option.models],
+                })),
+              }),
+          verifiable: true,
+          usage_probe: hasUsageProbe(id),
+          eligibility: ompRuntime ? meta.tier : "unavailable",
+          display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
+        })),
+    ],
+    // The vendor snapshot the per-model sizes came from: the model dialog
+    // names it beside a catalog-supplied value so the operator can judge
+    // how fresh it is.
+    model_limits_snapshot: MODEL_LIMITS_SNAPSHOT,
+    model_role_ids: MODEL_ROLE_IDS,
+    custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
+    // (spec § Technical interfaces): the manage face's selector
+    // choices — enabled registry entries only, as { id, enabled } rows.
+    sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
+  };
+}
+
 /** SPA JSON face (spec §2 read face): any member can load the face, but the
  * payload splits on `canManageApp` — a non-manager gets the identity-only
  * set (list-face fields + created_at + the cached public GitHub profile)
  * with `can_manage: false`; a manager gets the full base+health payload
  * (app meta, installations, deliveries) plus the settings payload (masked
- * keys, chains, providers). Writes stay behind requireAppSettings. Both
+ * keys, chains, providers). A Blocked target (its bot is `owned` by another
+ * workspace) gets a third, target-owned face: same manager gates, but no
+ * bot-owned section at all. Writes stay behind requireAppSettings. Both
  * faces are served from D1 after the lazy 24h-TTL refresh above. */
 const appSettingsRoute = async (c: DashboardContext) => {
   const gate = await requireAppVisible(c);
@@ -3454,8 +3724,19 @@ const appSettingsRoute = async (c: DashboardContext) => {
   const apps = createReviewBotsStore(gate.db);
   // Outside the render try on purpose: the refresh leg carries its own
   // catch-all, so no metadata failure can reach this route's 500 face
-  // (AD-531 fail-open by structure).
-  const app = await refreshGithubMetadataForRead(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY);
+  // (AD-531 fail-open by structure). It is a bot-scope WRITE (the bot row's
+  // profile columns plus the installation reconcile) driven by the bot's own
+  // credentials, so a workspace that reaches the bot only through a retained
+  // target never triggers it — it serves the stored row and gets the Blocked
+  // face below.
+  const app = canReadBotScope(gate.app, gate.scope)
+    ? await refreshGithubMetadataForRead(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY)
+    : gate.app;
+  // Derived per read, never stored: a target whose bot is `owned` by ANOTHER
+  // workspace reviews nothing (the resolver's guard), and the page has to say
+  // so. The two facts are already in hand — the bot row's scope + owning
+  // workspace and the target's workspace — so this costs no extra query.
+  const blockedReason = blockedReasonFor(app, gate.target.workspace_id);
   try {
     c.header("Cache-Control", "private, no-store");
     if (!canManageApp(gate.scope)) {
@@ -3476,6 +3757,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // The SPA parses it as required: the settings a manager edits belong to
         // a target, and a payload that cannot name it is not a settings read.
         target_id: gate.target.id,
+        // Why this target reviews nothing, if it does. Both faces carry it:
+        // a member must know why the App is silent, not only the manager.
+        blocked: blockedReason !== null,
+        blocked_reason: blockedReason,
         app: {
           github_app_id: app.github_app_id,
           status: app.status,
@@ -3491,13 +3776,17 @@ const appSettingsRoute = async (c: DashboardContext) => {
           github_description: app.github_description ?? null,
           github_html_url: app.github_html_url ?? null,
           github_avatar_url: app.github_avatar_url ?? null,
-          github_metadata_synced_at: app.github_metadata_synced_at ?? null,
+          // A Blocked target's face omits the bot's own metadata stamp: the
+          // bot's GitHub bookkeeping is the owning workspace's.
+          ...(blockedReason === null
+            ? { github_metadata_synced_at: app.github_metadata_synced_at ?? null }
+            : {}),
         },
       });
     }
-    const installations = await apps.listInstallations(app.id);
-    const deliveries = await apps.listRecentDeliveries(app.id, 10);
-    const deliverySummary = await apps.deliverySummary(app.id);
+    // The bot-owned sections (installations, delivery health, provider
+    // configuration) come from `botScopedSections` below, the same builder the
+    // bot page serves.
     // The review gate and the owner allowlist are the TARGET's configuration
     // (the gate resolved with the request); the cached GitHub visibility is a
     // bot fact. The two nulls do NOT mean the same thing — `getCheckGate` is
@@ -3529,6 +3818,57 @@ const appSettingsRoute = async (c: DashboardContext) => {
     // control's inherit face names it, so a manager never needs the operator
     // console to know what "follow the operator default" currently runs.
     const defaultReviewLevel = (await readDefaultReviewLevel(gate.db)).value;
+    const installationPayload =
+      boundInstallation === null
+        ? null
+        : {
+            id: boundInstallation.installation_id,
+            account_login: boundInstallation.account_login,
+            removed: boundInstallation.removed_at !== null,
+          };
+    // Whether the park action would land for this target (target-owned).
+    const ownerOverlap = await createTargetsStore(gate.db).hasOwnerOverlap(
+      gate.scope.workspaceId,
+      gate.target.id,
+    );
+    if (blockedReason !== null) {
+      // The Blocked manager face: this workspace's target on another
+      // workspace's bot. It carries the target's OWN review configuration and
+      // the identity needed to name the page — never the bot's sections
+      // (installations, deliveries, provider keys, chains, sandbox image,
+      // metadata), which belong to the owning workspace.
+      return c.json({
+        can_manage: true,
+        blocked: true,
+        blocked_reason: blockedReason,
+        workspace_id: gate.scope.workspaceId,
+        target_id: gate.target.id,
+        app: {
+          github_app_id: app.github_app_id,
+          id: app.id,
+          status: app.status,
+          created_by: app.created_by,
+          review_enabled: gate.target.review_enabled !== 0,
+          review_trigger_mode: gate.target.review_trigger_mode,
+          review_level: parseTargetReviewLevel(gate.target.review_level),
+          default_review_level: defaultReviewLevel,
+          scope: app.scope,
+          github_name: app.github_name ?? null,
+          github_slug: app.github_slug ?? null,
+          github_description: app.github_description ?? null,
+          github_html_url: app.github_html_url ?? null,
+          github_avatar_url: app.github_avatar_url ?? null,
+          github_visibility: githubVisibility,
+        },
+        installation: installationPayload,
+        check_gate:
+          checkGate === null
+            ? null
+            : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+        allowlist: { enabled: allowlist.enabled, owners: [...allowlist.owners] },
+        owner_overlap: ownerOverlap,
+      });
+    }
     const base = {
       // The stable workspace id the App belongs to (server-resolved scope,
       // never the request's path segment): with `app.id` it composes the
@@ -3584,199 +3924,25 @@ const appSettingsRoute = async (c: DashboardContext) => {
         github_avatar_url: app.github_avatar_url ?? null,
         github_metadata_synced_at: app.github_metadata_synced_at ?? null,
       },
-      installations,
       // The target's bound installation (`null` = unbound). `removed` is the
       // `bot_installations.removed_at` stamp: the binding stays, reviews stop.
-      installation:
-        boundInstallation === null
-          ? null
-          : {
-              id: boundInstallation.installation_id,
-              account_login: boundInstallation.account_login,
-              removed: boundInstallation.removed_at !== null,
-            },
-      deliveries: deliveries.map((d) => ({
-        event_name: d.event_name,
-        outcome: d.outcome,
-        status_code: d.status_code,
-        repository_full_name: d.repository_full_name,
-        created_at: d.created_at,
-      })),
-      delivery_summary: {
-        latest: deliverySummary.latest
-          ? {
-              event_name: deliverySummary.latest.event_name,
-              outcome: deliverySummary.latest.outcome,
-              status_code: deliverySummary.latest.status_code,
-              created_at: deliverySummary.latest.created_at,
-            }
-          : null,
-        rejected24h: deliverySummary.rejected24h,
-      },
+      installation: installationPayload,
+      // The bot's live installations that no live target references — the
+      // target page's bind source. Empty for a bot this workspace may not use,
+      // and always present so the block renders an empty set honestly.
+      pending_installations: await apps.listPendingInstallations(app.id, gate.scope.workspaceId),
+      // The derived Blocked state (no stored column): see blockedReasonFor.
+      blocked: blockedReason !== null,
+      blocked_reason: blockedReason,
     };
     if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
       return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
     }
-    const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
-    const maskedKeys = await store.listProviderKeys(gate.app.id);
-    const modelChain = await store.getModelChain(gate.app.id);
-    const modelChainSeats = await store.getModelChainSeats(gate.app.id);
-    const modelChains = await store.getModelChains(gate.app.id);
-    const customProviders = await store.listCustomProviders(gate.app.id);
-    // The custom/template pools' own masked rows — the declaration list above
-    // carries no key material, so without this read a custom provider rendered
-    // one declaration row whatever its pool size: no key identity, mask or
-    // per-key verification state, and no way to drop one key instead of the
-    // whole pool.
-    const customKeys = await store.listCustomProviderKeys(gate.app.id);
-    const keyRows = [...maskedKeys, ...customKeys];
-    // (spec § Provider configuration contract): eligibility is judged
-    // against the App's SELECTED runtime harness, never an inferred filter. The
-    // registry entry's runtime kind is the contract: an omp-selected App
-    // consumes builtin entries via env names and materializes templates
-    // through the custom-provider machinery; any other runtime would leave
-    // every row unavailable (zero such rows today — omp is the only
-    // registry entry, and the persisted id is store-validated against it).
-    const ompRuntime = isOmpRuntimeImage(gate.app.sandbox_image_id);
+    const botSections = await botScopedSections(gate.db, gate.app, c.env.DASHBOARD_ENCRYPTION_KEY);
     return c.json({
       can_manage: true,
       ...base,
-      // Every stored key row of the App — built-in and custom pools alike:
-      // the add flow lists a selected provider's rows from this face (a
-      // materialized template's pool included), so a custom pool's rows must
-      // ride it too.
-      keys: keyRows,
-      model_chain: modelChain,
-      // (spec §4.4): the role editor's data is now seat → chain
-      // reference (blank = default chain); the chains list carries every
-      // chain (default + named) for the chains management UI.
-      model_roles: modelChainSeats,
-      model_chains: modelChains,
-      // The declaration face of the settings payload keeps its existing shape:
-      // `has_keys` is a membership-gate input for the models / chain faces, not
-      // a UI field, so it never rides this response (the store read is shared).
-      custom_providers: customProviders.map(({ provider_id, base_url, api, model_ids, models_meta }) => ({
-        provider_id,
-        base_url,
-        api,
-        model_ids: [...model_ids],
-        // A declaration still stored under a per-protocol catalog id resolves
-        // to the provider row that absorbed it (label, vocabulary, sizes) —
-        // read-only, so the stored id and its keys are untouched.
-        ...(Object.hasOwn(LEGACY_PROVIDER_IDS, provider_id)
-          ? { legacy_of: LEGACY_PROVIDER_IDS[provider_id]! }
-          : {}),
-        // Absent when the owner stated nothing: the sizes are unstated (the
-        // runtime's own default applies), the form seeds them blank, and no
-        // number is invented for the row.
-        ...(models_meta === undefined ? {} : { models_meta }),
-      })),
-      // Clean cutover: the App's PERSISTED provider state only — a stored
-      // key (masked tail) or a saved custom-provider declaration. No
-      // plaintext keys, and catalog rows never appear here; an empty array is
-      // the valid unconfigured-App state. Key rows cover BOTH pools: a custom
-      // or template provider's rows are here, each with its own identity, so
-      // one key can be removed without removing the declaration.
-      configured_providers: [
-        ...keyRows.map((key) => ({
-          kind: "key" as const,
-          provider: key.provider,
-          key_id: key.keyId,
-          last4: key.last4,
-          updated_at: key.updatedAt,
-          verified_at: key.verifiedAt,
-          verified_status: key.verifiedStatus,
-        })),
-        ...customProviders.map((row) => ({
-          kind: "custom" as const,
-          provider_id: row.provider_id,
-          base_url: row.base_url,
-          api: row.api,
-          model_ids: [...row.model_ids],
-        })),
-      ],
-      // Discovery metadata (the retired `providers` dump) plus
-      // eligibility vs the App's selected image. Builtin ids in PROVIDER_IDS
-      // order, then the template tier (the hand-curated workers-ai entry
-      // followed by the snapshot breadth — the catalog's own key order).
-      // `verifiable: false` marks the console-only providers (no probeable
-      // endpoint: azure-openai / ai-gateway — the old
-      // addKeyProviderIds filter); templates verify via
-      // the custom probe, so always verifiable.
-      // (AD-547): every entry also carries a display-only
-      // `display_group` ("common" = the 5-entry 常用提供方 tier, "catalog" =
-      // everything else, in both tiers). Array order is unchanged and the
-      // field drives ONLY picker grouping — the add/verify/save mechanics
-      // keep branching on `tier`/`eligibility`, never on `display_group`.
-      // `usage_probe` marks the providers whose own quota endpoint the
-      // per-key usage action can ask (the probe table's catalog ids); it is
-      // derived, never a second hand-kept list.
-      provider_catalog: [
-        ...PROVIDER_IDS.map((id) => {
-          const meta = PROVIDER_META[id];
-          if (!meta) throw new Error(`PROVIDER_META missing ${id}`);
-          return {
-            id,
-            label: meta.label,
-            tier: meta.tier,
-            base_url: meta.baseUrl,
-            api: meta.api,
-            models: [...meta.models],
-            // The per-model sizes the vendor directory states, keyed by model
-            // id. The model dialog pre-fills its blank fields from here and
-            // posts no override for a value the operator leaves untouched.
-            model_limits: MODEL_LIMITS[id] ?? {},
-            // Mixed-protocol rows only: the protocol choice the add form
-            // offers, default first. Absent = a single-protocol row.
-            ...(meta.protocols === undefined
-              ? {}
-              : {
-                  protocols: meta.protocols.map((option) => ({
-                    api: option.api,
-                    base_url: option.baseUrl,
-                    models: [...option.models],
-                  })),
-                }),
-            verifiable: PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported",
-            usage_probe: hasUsageProbe(id),
-            eligibility: ompRuntime ? meta.tier : "unavailable",
-            display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
-          };
-        }),
-        ...Object.entries(PROVIDER_META)
-          .filter(([id, meta]) => meta.tier === "template" && !PROVIDER_IDS.includes(id))
-          .map(([id, meta]) => ({
-            id,
-            label: meta.label,
-            tier: meta.tier,
-            base_url: meta.baseUrl,
-            api: meta.api,
-            models: [...meta.models],
-            model_limits: MODEL_LIMITS[id] ?? {},
-            ...(meta.protocols === undefined
-              ? {}
-              : {
-                  protocols: meta.protocols.map((option) => ({
-                    api: option.api,
-                    base_url: option.baseUrl,
-                    models: [...option.models],
-                  })),
-                }),
-            verifiable: true,
-            usage_probe: hasUsageProbe(id),
-            eligibility: ompRuntime ? meta.tier : "unavailable",
-            display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
-          })),
-      ],
-      // The vendor snapshot the per-model sizes came from: the model dialog
-      // names it beside a catalog-supplied value so the operator can judge
-      // how fresh it is.
-      model_limits_snapshot: MODEL_LIMITS_SNAPSHOT,
-      model_role_ids: MODEL_ROLE_IDS,
-      custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
-      // (spec § Technical interfaces): the manage face's selector
-      // choices — enabled registry entries only, as { id, enabled } rows.
-      sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
+      ...botSections,
       // Migration 0045: the review gate (the Check's pass condition) and the
       // owner allowlist (switch + accepted logins) — manager face only.
       // `check_gate: null` = the stored verdict list is unreadable; the SPA
@@ -3786,11 +3952,91 @@ const appSettingsRoute = async (c: DashboardContext) => {
           ? null
           : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
       allowlist: { enabled: allowlist.enabled, owners: [...allowlist.owners] },
+      // Whether the park action would be accepted for this target: its account
+      // claim is duplicated by another live target of a multi-target bot.
+      owner_overlap: ownerOverlap,
     });
   } catch (err) {
     logSettingsFailure("api_render", gate.app.id, err);
     return c.text("the app settings could not be read from encrypted storage", 500);
   }
+};
+
+/**
+ * The App-id segment as a GitHub numeric App id: decimal digits only, so one
+ * App id has exactly one URL spelling. `Number("")` is 0 and
+ * `Number("1001abc")` is NaN, but `Number("0x1f")`, `Number("1e3")` and
+ * `Number(" 5 ")` are all finite integers — those spellings would alias one
+ * App id under several URLs.
+ */
+function parseGithubAppId(appIdParam: string): number | null {
+  if (!/^[0-9]+$/.test(appIdParam)) return null;
+  const githubAppId = Number(appIdParam);
+  return Number.isSafeInteger(githubAppId) && githubAppId > 0 ? githubAppId : null;
+}
+
+/**
+ * Resolve the bot the bot settings page addresses: the session workspace's own
+ * bot, or a `shared` bot the workspace may use. Everything else — a
+ * non-numeric segment, a soft-deleted bot, another workspace's `owned` bot — is
+ * equally invisible (404).
+ */
+async function resolveVisibleBot(
+  apps: ReturnType<typeof createReviewBotsStore>,
+  appIdParam: string,
+  scope: WorkspaceScope,
+): Promise<GithubAppTenantRow | null> {
+  const githubAppId = parseGithubAppId(appIdParam);
+  if (githubAppId === null) return null;
+  return apps.getVisibleBotByGithubId(githubAppId, scope.workspaceId);
+}
+
+/**
+ * `GET /api/apps/:appId/bot` — the bot's own settings face. It carries the
+ * bot-owned sections only (credentials health, provider configuration, chains,
+ * sandbox image, installations); the workspace-owned review policy stays on the
+ * target detail, which links to this page.
+ *
+ * `can_manage` governs BOT-scoped writes only, and it is `false` for a `shared`
+ * bot whatever the caller's workspace role is: a tenant may use a shared bot,
+ * never configure it. The bot-scoped POST family enforces the same rule
+ * server-side — hiding the page's controls is not the gate.
+ */
+const appBotRoute = async (c: DashboardContext) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const app = await resolveVisibleBot(
+    createReviewBotsStore(member.db),
+    c.req.param("appId") ?? "",
+    member.scope,
+  );
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
+    return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
+  }
+  const sections = await botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY);
+  return c.json({
+    can_manage:
+      app.scope === "owned" &&
+      app.workspace_id === member.scope.workspaceId &&
+      canManageApp(member.scope),
+    app: {
+      github_app_id: app.github_app_id,
+      // The local App UID — the webhook URL's app segment.
+      id: app.id,
+      status: app.status,
+      scope: app.scope,
+      sandbox_image_id: app.sandbox_image_id,
+      last_webhook_at: app.last_webhook_at ?? null,
+      github_name: app.github_name ?? null,
+      github_slug: app.github_slug ?? null,
+      github_description: app.github_description ?? null,
+      github_html_url: app.github_html_url ?? null,
+      github_avatar_url: app.github_avatar_url ?? null,
+      github_metadata_synced_at: app.github_metadata_synced_at ?? null,
+    },
+    ...sections,
+  });
 };
 
 /**
@@ -3806,6 +4052,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
 const appRefreshMetadataRoute = async (c: DashboardContext): Promise<Response> => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
+  // The refresh writes the bot row and reconciles its installation list — a
+  // bot-scope mutation, so the owning workspace's manager is required.
+  if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const apps = createReviewBotsStore(gate.db);
   const refresh = await refreshGithubMetadata(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY, {
     force: true,
@@ -3819,6 +4068,10 @@ const appRefreshMetadataRoute = async (c: DashboardContext): Promise<Response> =
 const appModelsRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
+  // Every model this face lists is the bot's own (verified key evidence and
+  // declared providers), so a workspace that reaches the bot only through a
+  // retained target gets nothing — the settings face's same rule.
+  if (!canReadBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
     const verified = await store.getVerifiedModels(gate.app.id);
@@ -3904,6 +4157,11 @@ function verifyKeyed400(
 const appKeyVerifyRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
+  // Verify is a bot-scoped WRITE on both of its paths: the builtin branch
+  // stores the verified key, and the declared/custom branch appends to that
+  // provider's pool. The bot-scope predicate refuses before the body is
+  // parsed — no probe, no store touch.
+  if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const plainKey = typeof form.key === "string" ? form.key.trim() : "";
@@ -4013,6 +4271,10 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
 const appKeyUsageRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
+  // The probe decrypts the bot's stored key and asks the vendor: usable for
+  // the owning workspace or a shared bot, never for a bot reached only through
+  // a retained target.
+  if (!canReadBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const keyId = typeof form.keyId === "string" ? form.keyId.trim() : "";
@@ -4117,6 +4379,32 @@ const REVIEW_LEVEL_INHERIT = "inherit";
  * (400s are keyed JSON via settings400Response — native form
  * posts keep the 302); the re-rendered HTML page is retired.
  */
+/**
+ * The BOT-scoped settings ops. They require `canWriteBotScope`: only the bot's
+ * owning workspace, while it is `owned`, may run one. A retained target on
+ * another workspace's bot grants none of them, and a `shared` bot belongs to
+ * the platform. The target-scoped ops (review level, Check gate, owner
+ * allowlist) stay available, because the target is what this workspace owns.
+ */
+const BOT_SCOPED_SETTINGS_OPS: ReadonlySet<string> = new Set([
+  "add-key",
+  "save-chain",
+  "save-roles",
+  "add-chain",
+  "remove-chain",
+  "add-custom-provider",
+  "add-custom-provider-key",
+  "add-template-provider",
+  "update-provider-models",
+  "remove-custom-provider",
+  "save-sandbox-image",
+]);
+
+/** The read-only refusal, in the keyed body the SPA resolves in its locale. */
+function botReadOnlyResponse(c: DashboardContext): Response {
+  return c.json({ key: "settings.error.botReadOnly", message: t("en", "settings.error.botReadOnly") }, 403);
+}
+
 const appSettingsSaveRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
@@ -4127,6 +4415,9 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
   // exact current behavior.
   const form = await c.req.parseBody({ all: true });
   const op = typeof form.op === "string" ? form.op : "";
+  if (BOT_SCOPED_SETTINGS_OPS.has(op) && !canWriteBotScope(gate.app, gate.scope)) {
+    return botReadOnlyResponse(c);
+  }
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   if (op === "add-key") {
     const provider = typeof form.provider === "string" ? form.provider.trim() : "";
@@ -5023,6 +5314,8 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
 const appKeyDeleteRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
+  // Removing a stored key is a bot-scoped write like any other.
+  if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   // The key identity is the delete target: the (App, provider) pool holds one
@@ -5279,6 +5572,170 @@ const appClaimRoute = async (c: DashboardContext): Promise<Response> => {
     expiresAt: claim.expiresAt,
     installationUrl: `https://github.com/apps/${encodeURIComponent(app.github_slug)}/installations/new`,
   });
+};
+
+/**
+ * `POST /api/apps/:appId/bind-installation` — the target page's bind action:
+ * a workspace manager picks one pending installation of the bot and binds it to
+ * the workspace's target without leaving the dashboard.
+ *
+ * The write is the setup callback's OWN batch — `claimAndBind` records the
+ * caller's claim and consumes it in this request — so the unique index, the
+ * one-installation-per-target rule and the shared-bot guard all still decide.
+ * This route adds one guard of its own: the installation must answer the
+ * pending read, because the batch's upsert is conflict-tolerant and would
+ * accept an id the bot never reported.
+ *
+ * Refusals keep the family's vocabulary: an unknown, foreign or soft-deleted
+ * App is `404 unknown app`; a caller who cannot manage it is `403 forbidden`;
+ * a bot that is not `shared` advertises nothing (`404 bot is not shared`); no
+ * single live target is `404 no target`; an unreadable id is `400`; an id the
+ * pending read does not answer is `404 unknown installation`; a target that
+ * already holds a binding is `409 target already bound`, and a losing race for
+ * the same installation is the batch's `409 installation already bound`.
+ */
+const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const apps = createReviewBotsStore(member.db);
+  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", member.scope);
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  if (app.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
+  const target = await createTargetsStore(member.db).resolveInWorkspace(
+    member.scope.workspaceId,
+    app.id,
+  );
+  if (!target) return c.json({ error: "no target" }, 404);
+  if (target.installation_id !== null) return c.json({ error: "target already bound" }, 409);
+  const form = await c.req.parseBody();
+  const raw = form["installationId"];
+  const installationId = typeof raw === "string" ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(installationId) || installationId <= 0) {
+    return c.json({ error: "installationId required" }, 400);
+  }
+  const pending = await apps.listPendingInstallations(app.id, member.scope.workspaceId);
+  if (!pending.some((row) => row.installation_id === installationId)) {
+    return c.json({ error: "unknown installation" }, 404);
+  }
+  const bound = await createInstallClaimsStore(member.db).claimAndBind({
+    userId: member.user.id,
+    workspaceId: member.scope.workspaceId,
+    targetId: target.id,
+    installationId,
+    now: new Date().toISOString(),
+  });
+  switch (bound.outcome) {
+    case "bound":
+      return c.json({ targetId: bound.targetId });
+    case "installation_already_bound":
+      return c.json({ error: "installation already bound" }, 409);
+    case "target_not_bindable":
+      return c.json({ error: "target already bound" }, 409);
+    case "bot_not_shared":
+      return c.json({ error: "bot is not shared" }, 404);
+    case "claim_not_found":
+      return c.json({ error: "claim not found" }, 404);
+  }
+};
+
+/**
+ * `POST /apps/:appId/park` — the workspace manager's repair for an overlapping
+ * owner claim: pause the target and retire its `account_login`, with one
+ * `target.park` audit row, all in one batch.
+ *
+ * The refusals keep the pinned-post vocabulary: an unknown, foreign,
+ * soft-deleted or non-numeric App is `404 unknown app`; a caller who cannot
+ * manage it is the family's 403; a target the store refused (not live here, the
+ * bot's only live target, or a claim nobody duplicates) answers that reason as
+ * `409`, and wrote nothing.
+ */
+const appParkRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const app = await resolveScopedApp(
+    createReviewBotsStore(member.db),
+    c.req.param("appId") ?? "",
+    member.scope,
+  );
+  if (!app) {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+  }
+  if (!canManageApp(member.scope)) {
+    return c.html(forbiddenPage(member.session.login, requestLocale(c)), 403);
+  }
+  const target = await createTargetsStore(member.db).resolveInWorkspace(
+    member.scope.workspaceId,
+    app.id,
+  );
+  if (!target) {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+  }
+  const parked = await createTargetsStore(member.db).park(
+    member.scope.workspaceId,
+    target.id,
+    member.user.github_login,
+    new Date().toISOString(),
+  );
+  if (parked.outcome === "refused") {
+    return pinnedPostMutationResponse(
+      c,
+      scopedAppPath(c, `/dashboard/apps/${app.github_app_id}/settings`),
+      parked.reason,
+      409,
+    );
+  }
+  return pinnedPostMutationResponse(
+    c,
+    scopedAppPath(c, `/dashboard/apps/${app.github_app_id}/settings`),
+    "ok",
+  );
+};
+
+/**
+ * `POST /api/targets` — the workspace manager's target on a `shared` bot, the
+ * chooser's official mode. `{ botId }` is the whole body: the workspace is the
+ * request's own, and the bot is one the platform already shares.
+ *
+ * Refusals reuse the pinned-post vocabulary: a body without a `botId` is a
+ * `400`; a bot the store would not write (unknown, soft-deleted or not
+ * shared) is the same `404 unknown app` an unknown App answers; a workspace
+ * that already holds a live target on the bot is the family's `409`. A caller
+ * who is not owner/admin is refused by the manage gate before any read, and
+ * the store's own guard re-checks the bot inside the write, so a bot unshared
+ * between page load and submit writes nothing.
+ */
+const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  if (!canManageRole(member.scope.role)) {
+    return c.html(forbiddenPage(member.session.login, requestLocale(c)), 403);
+  }
+  const form = await c.req.parseBody();
+  const botId = typeof form.botId === "string" ? form.botId.trim() : "";
+  if (botId === "") {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "bot id required", 400);
+  }
+  // The floor a new target starts at is the workspace's own; a degraded read
+  // would silently widen a floor the tenant may have set higher, so it fails
+  // closed before anything is written (the manifest commit's rule).
+  const floor = await getWorkspaceCheckMinScore(member.db, member.scope.workspaceId);
+  if (floor.degraded) {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "workspace floor unreadable", 500);
+  }
+  const created = await createTargetsStore(member.db).createOnSharedBot({
+    workspaceId: member.scope.workspaceId,
+    botId,
+    createdBy: member.user.github_login,
+    checkMinScore: floor.minScore,
+  });
+  if (created.outcome === "bot_not_shared") {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "unknown app", 404);
+  }
+  if (created.outcome === "target_exists") {
+    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "target exists", 409);
+  }
+  return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "ok");
 };
 
 /** The ledger scope the PR faces bind: the resolved target, its workspace, its bot. */
@@ -5582,11 +6039,17 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/delete", handler: (c) => appStatusAction(c, "delete"), access: "write" },
   { method: "post", path: "/apps/:appId/pause", handler: (c) => appReviewAction(c, "pause"), access: "write" },
   { method: "post", path: "/apps/:appId/resume", handler: (c) => appReviewAction(c, "resume"), access: "write" },
+  { method: "post", path: "/apps/:appId/park", handler: appParkRoute, access: "write" },
+  // Workspace-scoped target creation on a shared bot — not App-addressed: the
+  // body names the bot, and the route re-checks its scope inside the write.
+  { method: "post", path: "/api/targets", handler: targetCreateRoute, access: "write" },
   { method: "post", path: "/apps/:appId/review-trigger-mode", handler: appReviewTriggerModeAction, access: "write" },
   { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
+  { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/claim", handler: appClaimRoute, access: "write" },
+  { method: "post", path: "/api/apps/:appId/bind-installation", handler: appBindInstallationRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/keys/verify", handler: appKeyVerifyRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/keys/usage", handler: appKeyUsageRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },

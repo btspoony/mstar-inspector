@@ -26,11 +26,12 @@
  *
  * Replay semantics: `stagePublication` conflicts return the existing
  * immutable payload; `applyPublishedLifecycle` is proof-gated, gates on the
- * publication phase, and makes every lifecycle write replay-safe (rounds
- * and association intents `ON CONFLICT DO NOTHING`, the seen upsert and the
- * scheduling update skip already-applied publications), so a replay after
- * `store.put` but before the lifecycle batch never duplicates findings and
- * a publication replay never increments `reopen_count` twice.
+ * publication phase, and makes BOTH halves replay-safe (the artifact's review
+ * and public-finding inserts are `ON CONFLICT DO NOTHING`; rounds and
+ * association intents `ON CONFLICT DO NOTHING`; the seen upsert and the
+ * scheduling update skip already-applied publications), so a replay — mid
+ * artifact, after the artifact but before the lifecycle, or after the applied
+ * marker — never duplicates a row and never increments `reopen_count` twice.
  */
 
 import type { Assessment, Coverage, OriginalFinding, RecheckTarget, ThreadSnapshot } from "../../packages/shared/src/recheck-wire";
@@ -513,17 +514,46 @@ export async function findPublicationJournal(
 }
 
 /**
- * Proof-gated idempotent apply — the frozen §7.7 step 9 local sequence:
- * (1) the existing atomic `store.put` for the review artifact (idempotent
- * UNIQUE no-op — a replay after store.put but before the lifecycle apply
- * does not duplicate findings; skipped entirely when the review row already
- * exists), then (2) the lifecycle writes in batches of at most 25 row
- * transitions (§7.11.1), whose FINAL statement marks the publication applied
- * under the lease. Degraded proof creates no
+ * Proof-gated idempotent apply — the frozen §7.7 step 9 local sequence, run
+ * as two separately-chunked halves that NEVER share a chunk:
+ *
+ *   (1) the artifact half — the review INSERT and one INSERT per public
+ *       finding, composed by `createArtifactStore().statementsFor()` on EVERY
+ *       attempt. The review row's `id` IS the apply's idempotency key, so the
+ *       first attempt and every retry compute the same id and `ON CONFLICT DO
+ *       NOTHING` keeps the first-written row. A public finding's own id is
+ *       `<key>#<envelope index>` and it attaches to the review that ACTUALLY
+ *       exists for that head — the natural-key lookup first (a historically
+ *       written review carries a UUID id; the UNIQUE admits at most one
+ *       candidate), else this attempt's derived id — with `ON CONFLICT DO
+ *       NOTHING`. A retry therefore writes the missing findings and re-runs a
+ *       complete artifact as a no-op. Its statements carry the same inline
+ *       lease fence as the lifecycle's, and they are emitted as their own
+ *       leading chunk(s), so a failed LIFECYCLE chunk never leaves a
+ *       partially written artifact.
+ *   (2) the lifecycle half — batches of at most 25 row transitions (§7.11.1),
+ *       each preceded by a lease-fence probe, whose FINAL statement marks the
+ *       publication applied under the lease.
+ *
+ * A retry therefore CONVERGES: the artifact half no-ops or completes, the
+ * lifecycle half resumes, and the applied marker is only ever written last.
+ * Within one attempt the review row and the new findings rows resolve the
+ * live binding with the same expression, so they agree. Degraded proof creates no
  * normal review/lifecycle rows — it only marks applied. Rows absent from
- * `seen` are never deleted. Returns false (and writes nothing) when the
- * row is unknown, the lease is not live, proof is missing, or the payload
- * is not a complete review publication; the previously-applied row
+ * `seen` are never deleted and never rewritten: `review_findings.target_id`
+ * and `reviews.target_id` are set when the row is FIRST recorded and are not
+ * migrated afterwards. Within one apply the two agree by construction — the
+ * new review row (step 1) and the new findings rows (step 2) both take the
+ * live installation binding, falling back to the artifact's target only when
+ * nothing is bound. A rebind therefore affects future publications only —
+ * each target keeps the history it actually reviewed — which is also why the
+ * ledger's `(target_id, owner, repo, pr_number)` key stays correct. The
+ * binding is resolved in-batch (a scalar subquery in the inserting statement)
+ * so a concurrent unbind/claim cannot be frozen; the frozen
+ * `payload.artifact.targetId` is only the hint a NEW row takes when nothing is
+ * bound, never a migration instruction. Returns false (and writes nothing)
+ * when the row is unknown, the lease is not live, proof is missing, or the
+ * payload is not a complete review publication; the previously-applied row
  * short-circuits to true (idempotent replay).
  *
  * The lease fence is ATOMIC, not a read-then-write window: every lifecycle
@@ -571,22 +601,29 @@ export async function applyPublishedLifecycle(
     return false;
   }
 
-  // Step 1 — the existing atomic store.put (review kind only), a separate
-  // idempotent step, never described as part of the lifecycle batch.
-  // §7.11.1: skipped entirely when the review row already exists — the
-  // UNIQUE(installation_id, owner, repo, pr_number, head_sha) row IS the
-  // review, so the put would be a pure no-op batch.
-  const stored = await db
-    .prepare(
-      `SELECT 1 AS present FROM reviews
-       WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?`,
+  // Step 1 — the review artifact's statements, composed on EVERY attempt and
+  // emitted as their own leading chunk(s), never mixed with the lifecycle's.
+  // The review id is DERIVED from the apply key and a finding is
+  // `<key>#<index>`; a finding attaches to the review that exists for the head
+  // (a historically written UUID row, else this attempt's derived id), so a
+  // retry computes the same rows and `ON CONFLICT … DO NOTHING` repairs a
+  // partial artifact instead of skipping it. They carry the same inline lease
+  // guard as the lifecycle statements, so a superseded holder cannot commit
+  // them, and a failed lifecycle chunk leaves them complete rather than
+  // half-written.
+  const leaseGuard = [row.id, lease.holder, lease.epoch, nowMs] as const;
+  const artifactStatements = createArtifactStore(db)
+    .statementsFor(
+      { ...payload.artifact, round: payload.round },
+      {
+        targetIdExpression: {
+          sql: `COALESCE(${LIVE_BINDING_TARGET_SQL}, ?)`,
+          binds: [payload.scope.appId, payload.scope.installationId, payload.artifact.targetId],
+        },
+        guard: { sql: APPLY_LEASE_GUARD_SQL, binds: [...leaseGuard] },
+      },
     )
-    .bind(payload.scope.installationId, payload.scope.owner, payload.scope.repo, payload.scope.prNumber, payload.headSha)
-    .first<{ present: number }>();
-  if (stored === null) {
-    const store = createArtifactStore(db);
-    await store.put({ ...payload.artifact, round: payload.round });
-  }
+    .map((statement) => db.prepare(statement.sql).bind(...statement.binds));
 
   // Step 2 — the lifecycle writes in db.batches of at most
   // LIFECYCLE_APPLY_BATCH_STATEMENTS statements each (§7.11.1: "Local apply
@@ -597,11 +634,24 @@ export async function applyPublishedLifecycle(
   // transitions skip and the applied mark stays the FINAL statement of the
   // FINAL batch, under the lease. Small payloads (the common case) still
   // run as ONE batch. The guard above narrowed `payload.lifecycle` to
-  // non-null; it is passed explicitly so the helper's signature carries
-  // that invariant.
-  const statements = lifecycleApplyBatch(db, row, payload, payload.lifecycle, nowMs, lease);
+  // non-null; it is passed explicitly so the helper's signature carries that
+  // invariant. Attribution: the live binding is resolved INSIDE the batch by
+  // every INSERTING statement (a scalar subquery in this review row's INSERT
+  // and in the findings insert); the artifact's own `targetId` is only the
+  // hint a new row falls back to when nothing is bound.
+  // The artifact's chunk(s) come FIRST and never mix with the lifecycle's:
+  // a failed lifecycle chunk therefore leaves a COMPLETE, idempotent artifact
+  // (the next attempt no-ops it), and a failed artifact chunk is repaired by
+  // the next attempt because composition is unconditional.
+  const chunks = [
+    ...chunkStatements(artifactStatements, LIFECYCLE_APPLY_BATCH_STATEMENTS),
+    ...chunkStatements(
+      lifecycleApplyBatch(db, row, payload, payload.lifecycle, payload.artifact.targetId, nowMs, lease),
+      LIFECYCLE_APPLY_BATCH_STATEMENTS,
+    ),
+  ];
   const results: D1BatchResult[] = [];
-  for (let start = 0; start < statements.length; start += LIFECYCLE_APPLY_BATCH_STATEMENTS) {
+  for (const chunk of chunks) {
     // Per-chunk fence (§7.11.1): the apply may span a real time window, and
     // once the 120s lease expires another invocation can claim a NEWER epoch.
     // Re-prove the SAME live holder/epoch before this chunk writes, so a
@@ -610,7 +660,7 @@ export async function applyPublishedLifecycle(
     // the applied mark as its last statement — its SQL re-checks the same
     // predicate, so a replacement mid-chunk can never mark complete.
     if (!(await publicationLeaseIsLive(db, id, lease, nowAt()))) return false;
-    results.push(...(await db.batch(statements.slice(start, start + LIFECYCLE_APPLY_BATCH_STATEMENTS))));
+    results.push(...(await db.batch(chunk)));
   }
   const applied = results[results.length - 1]!;
   return applied.meta.changes > 0;
@@ -629,6 +679,19 @@ export async function applyPublishedLifecycle(
 const APPLY_LEASE_GUARD_SQL = `EXISTS (SELECT 1 FROM review_publications AS apply_lease
        WHERE apply_lease.id = ? AND apply_lease.holder = ? AND apply_lease.lease_epoch = ?
          AND apply_lease.lease_until_ms IS NOT NULL AND apply_lease.lease_until_ms > ?)`;
+
+/**
+ * The live-binding scalar subquery — the attribution source for a NEWLY
+ * recorded row. It is embedded in the inserting statement, so the binding is
+ * read when that statement runs, inside the same batch and transaction as the
+ * write it feeds: a read taken before the batch could be stranded by a
+ * concurrent unbind/claim. It is never used to rewrite an existing row's
+ * `target_id` — a row's tenant is fixed when it is first recorded. Binds, in
+ * order: `(botId, installationId)`; it yields NULL when nothing is bound (a
+ * target that keeps `installation_id` but is soft-deleted holds nothing).
+ */
+const LIVE_BINDING_TARGET_SQL = `(SELECT id FROM review_targets
+       WHERE bot_id = ? AND installation_id = ? AND deleted_at IS NULL)`;
 
 /**
  * The live-lease fence probe (§7.11.1) — the read twin of the applied
@@ -672,11 +735,28 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
     .bind(nowMs, nowMs, id, lease.holder, lease.epoch, nowMs);
 }
 
+/** Split statements into chunks of at most `size`, order preserved. */
+function chunkStatements<T>(items: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let start = 0; start < items.length; start += size) chunks.push(items.slice(start, start + size));
+  return chunks;
+}
+
 /**
  * The §7.2 state machine as ONE batch (knowledge `d1-batch-atomicity`).
  * Order inside the batch matters and is replay-safe:
- *   1. Seen upserts — new rows insert open at the current time; existing
- *      rows update last-seen tracking; a row closed (addressed/dismissed)
+ *   0. Attribution — fixed at FIRST record. A statement that INSERTS a row
+ *      embeds `LIVE_BINDING_TARGET_SQL`, the scalar subquery for the target
+ *      that currently holds this fingerprint's `(bot, installation)` (read
+ *      in-batch, so a concurrent unbind/claim cannot be frozen into an
+ *      applied state), falling back to the payload's `artifact.targetId` as a
+ *      hint when nothing is bound. The review row this apply inserts is
+ *      composed into the same batch with the same expression, so one apply
+ *      never files a review under one tenant and its findings under another. No statement rewrites `target_id` on an existing row: a rebind
+ *      moves FUTURE publications, never history — each target's ledger is the
+ *      record of what that target reviewed.
+ *   1. Seen upserts — new rows insert open at the current time; existing rows
+ *      update last-seen tracking only. A row closed (addressed/dismissed)
  *      under an OLDER publication reopens with reopen_count+1 ("retain
  *      original and assessment history"); rows already updated by THIS
  *      publication (replay) are skipped by the last_publication guard.
@@ -698,6 +778,13 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
  * the mutation cannot slip a finding/round/association write through. The
  * guard binds are the LAST four parameters of each statement, in the order
  * `(publicationId, holder, leaseEpoch, operationNow)`.
+ *
+ * Attribution is fixed at FIRST record. A newly inserted row is stamped with
+ * the live binding for the fingerprint's `(bot, installation)` — resolved by a
+ * scalar subquery inside the inserting statement, so a concurrent unbind/claim
+ * cannot be frozen — and `hintTargetId` is only the fallback a new row takes
+ * when nothing is bound. No statement here rewrites `target_id` on an existing
+ * row.
  */
 function lifecycleApplyBatch(
   db: D1Like,
@@ -705,6 +792,8 @@ function lifecycleApplyBatch(
   payload: PublicationPayload,
   /** The caller-narrowed non-null `payload.lifecycle` (review kind only). */
   lifecycle: LifecycleRound,
+  /** The payload's own target — the hint a NEW row takes when nothing is bound. */
+  hintTargetId: string,
   nowMs: number,
   lease: Lease,
 ): D1StatementLike[] {
@@ -723,8 +812,9 @@ function lifecycleApplyBatch(
           `INSERT INTO review_findings
              (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
               first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
-              first_seen_round, last_seen_round, state, created_ms, updated_ms)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?
+              first_seen_round, last_seen_round, state, created_ms, updated_ms, target_id)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?,
+                  COALESCE(${LIVE_BINDING_TARGET_SQL}, ?)
            WHERE ${APPLY_LEASE_GUARD_SQL}
            ON CONFLICT(bot_id, installation_id, owner, repo, pr_number, finding_id) DO UPDATE SET
              last_publication_id = excluded.last_publication_id,
@@ -744,6 +834,9 @@ function lifecycleApplyBatch(
           seen.rowId, scope.appId, scope.installationId, scope.owner, scope.repo,
           scope.prNumber, seen.findingId, JSON.stringify(seen.original),
           pubId, pubId, headSha, headSha, round, round, nowMs, nowMs,
+          // The INSERT's target: the binding read in this statement, else the
+          // payload hint.
+          scope.appId, scope.installationId, hintTargetId,
           ...guard,
         ),
     );

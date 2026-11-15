@@ -2799,6 +2799,9 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   // bot, its workspace mapping and its one target in one batch, and the delete
   // stamps both rows.
   "0057_review_targets.sql",
+  // 0058: the App list's shared-bot block reads `review_bots.scope`, so this
+  // fixture must carry the column or every list read 500s.
+  "0058_review_bot_scope.sql",
 ] as const;
 
 function createDashboardTestD1(

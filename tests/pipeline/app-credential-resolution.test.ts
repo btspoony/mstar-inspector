@@ -773,7 +773,9 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     db.raw.prepare("DELETE FROM review_findings WHERE bot_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM review_publications WHERE bot_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM bot_workspaces WHERE bot_id = ?").run(appX.id);
-    // The target is a child of the bot (NO ACTION FK): it goes first.
+    // The target is a child of the bot (NO ACTION FK): it goes first. 0060
+    // attributes the execution ledgers to it, so their rows go first too.
+    db.raw.prepare("DELETE FROM review_failures WHERE target_id = ?").run(appX.targetId);
     db.raw.prepare("DELETE FROM target_owner_allowlist WHERE target_id = ?").run(appX.targetId);
     db.raw.prepare("DELETE FROM review_targets WHERE bot_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM review_bots WHERE id = ?").run(appX.id);

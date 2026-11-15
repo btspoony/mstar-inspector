@@ -136,7 +136,46 @@ export type AppsPayload = {
       rejected24h: number;
     };
   }>;
+  /**
+   * The `shared` bots the creation chooser may offer (official mode). The
+   * server always sends the key; `parseApps` normalizes it so a stale or
+   * malformed payload reads as none instead of reaching the chooser raw.
+   */
+  shared_bots?: SharedBotRow[];
 };
+
+/** One `shared` bot the workspace may create a target on. */
+export type SharedBotRow = {
+  id: string;
+  github_slug: string | null;
+  name: string;
+  /** The workspace's live targets on this bot — the chooser shows it. */
+  target_count: number;
+};
+
+function isSharedBotRow(value: unknown): value is SharedBotRow {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    value.id !== "" &&
+    (value.github_slug === null || typeof value.github_slug === "string") &&
+    typeof value.name === "string" &&
+    typeof value.target_count === "number"
+  );
+}
+
+/**
+ * The chooser's shared-bot list, all-or-nothing: one row that does not carry
+ * a usable id would offer a bot the create route answers `404` for, so a
+ * partially readable list is no list. A missing or non-array block is the
+ * empty list — official mode is then unavailable and the manifest flow stays
+ * usable.
+ */
+export function parseSharedBots(value: unknown): SharedBotRow[] {
+  if (!Array.isArray(value)) return [];
+  const rows = value.filter(isSharedBotRow);
+  return rows.length === value.length ? rows : [];
+}
 
 /**
  * (spec § Provider configuration contract): whether a catalog entry
@@ -444,7 +483,26 @@ export type SettingsIdentityAppMeta = {
   github_description: string | null;
   github_html_url: string | null;
   github_avatar_url: string | null;
-  github_metadata_synced_at: string | null;
+  /**
+   * The bot's own metadata sync stamp. A Blocked face omits it (the stamp is
+   * the owning workspace's), so presence is parser-enforced per face.
+   */
+  github_metadata_synced_at?: string | null;
+};
+
+/**
+ * The fields the identity card reads. Every face carries them; a Blocked face
+ * omits the bot's metadata stamp, so the field is optional at the type level
+ * and required-when-readable in `parseSettings`.
+ */
+export type AppIdentityCardApp = {
+  github_app_id: number;
+  id: string;
+  github_name: string | null;
+  github_description: string | null;
+  github_html_url: string | null;
+  github_avatar_url: string | null;
+  github_metadata_synced_at?: string | null;
 };
 
 /**
@@ -529,6 +587,107 @@ export type BoundInstallation = {
   removed: boolean;
 };
 
+/**
+ * One installation the bot already carries that no live target references —
+ * the install block's bind source. `account_login` is NULL until the webhook
+ * reports it, exactly like the bound row.
+ */
+export type PendingInstallation = {
+  installation_id: number;
+  account_login: string | null;
+  seen_at: string;
+};
+
+/**
+ * Why a target's bot no longer serves it, as the server derives it on every
+ * read (no stored status): the bot is `owned` and the target belongs to
+ * another workspace. Closed vocabulary — a re-share clears it.
+ */
+export const BLOCKED_REASONS = ["bot_not_shared"] as const;
+export type BlockedReason = (typeof BLOCKED_REASONS)[number];
+
+export function isBlockedReason(value: unknown): value is BlockedReason {
+  return (BLOCKED_REASONS as readonly unknown[]).includes(value);
+}
+
+/**
+ * The review configuration a TARGET owns — the sections a Blocked face still
+ * carries. Shared by both manager faces, so the review controls accept either.
+ */
+type TargetOwnedSections = {
+  check_gate: CheckGateSettings | null;
+  allowlist: AllowlistSettings;
+  /** Whether the park action would land for this target (owner overlap). */
+  owner_overlap: boolean;
+};
+
+/**
+ * The identity a Blocked face carries: enough to name and link the App, plus
+ * the target-owned review switches. Deliberately absent: `sandbox_image_id`,
+ * `last_webhook_at` and `github_metadata_synced_at` — the bot's own data.
+ */
+export type AppInstallApp = {
+  github_app_id: number;
+  id: string;
+  github_name: string | null;
+  github_slug: string | null;
+  github_avatar_url: string | null;
+  scope: BotScope;
+};
+
+export type BlockedAppIdentity = {
+  github_app_id: number;
+  id: string;
+  status: string;
+  created_by: string;
+  review_enabled: boolean;
+  review_trigger_mode: ReviewTriggerMode;
+  review_level: ReviewLevel | null;
+  default_review_level: ReviewLevel;
+  scope: BotScope;
+  github_name: string | null;
+  github_slug: string | null;
+  github_description: string | null;
+  github_html_url: string | null;
+  github_avatar_url: string | null;
+  github_visibility: GithubVisibility | null;
+  /** Absent on the wire: the bot's metadata stamp is the owner's. */
+  github_metadata_synced_at?: string | null;
+};
+
+/**
+ * The target-owned slice every review-policy control reads. Both manager faces
+ * carry it, so one component serves the full face and the Blocked face.
+ */
+export type TargetReviewSlice = {
+  app: Pick<
+    BlockedAppIdentity,
+    "status" | "review_enabled" | "review_trigger_mode" | "review_level" | "default_review_level" | "github_slug"
+  >;
+  check_gate: CheckGateSettings | null;
+  allowlist: AllowlistSettings;
+  owner_overlap: boolean;
+};
+
+/**
+ * The pending rows, all-or-nothing: a row without a usable installation id
+ * would render an action the bind route cannot address.
+ */
+function isPendingInstallationList(value: unknown): value is PendingInstallation[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (row) =>
+        isRecord(row) &&
+        typeof row.installation_id === "number" &&
+        Number.isSafeInteger(row.installation_id) &&
+        row.installation_id > 0 &&
+        isNullableString(row.account_login) &&
+        typeof row.seen_at === "string",
+    )
+  );
+}
+
 export type SettingsAppMeta = {
   github_app_id: number;
   status: string;
@@ -596,11 +755,85 @@ type SettingsHealth = {
   };
 };
 
+/**
+ * The bot's identity as the bot settings face serves it: the cached GitHub
+ * profile plus the bot's own execution identity. A subset of
+ * {@link SettingsAppMeta} — the target detail's payload carries the same fields
+ * with the workspace's review policy added.
+ */
+export type BotSettingsAppMeta = {
+  github_app_id: number;
+  /** The local App UID — the webhook URL's app segment (never a GitHub fact). */
+  id: string;
+  status: string;
+  /** `owned` serves its workspace only; `shared` is offered platform-wide. */
+  scope: BotScope;
+  /** The bot's selected sandbox runtime image (registry id). */
+  sandbox_image_id: string;
+  /** Last verified (2xx) webhook delivery; NULL = never. */
+  last_webhook_at: string | null;
+  github_name: string | null;
+  github_slug: string | null;
+  github_description: string | null;
+  github_html_url: string | null;
+  github_avatar_url: string | null;
+  github_metadata_synced_at: string | null;
+};
+
+/**
+ * The BOT-owned sections. They are one set on purpose: the settings face
+ * composes them with the target's review policy, and the bot page serves them
+ * alone. Every component that renders one of these sections takes this shape,
+ * so both faces feed them the same data.
+ */
+export type BotConfigSections = {
+  app: BotSettingsAppMeta;
+  keys: ProviderKeyRow[];
+  model_chain: string | null;
+  model_roles: Record<string, string>;
+  model_chains: ModelChainEntry[];
+  custom_providers: Array<{
+    provider_id: string;
+    base_url: string;
+    api: string;
+    model_ids: string[];
+    /** Absent when the owner stated nothing about any model (legacy rows). */
+    models_meta?: CustomProviderModelsMeta;
+    /** The provider row a collapsed per-protocol id resolves to (read-only). */
+    legacy_of?: string;
+  }>;
+  /** The App's persisted provider state ONLY — empty is the valid unconfigured case. */
+  configured_providers: ConfiguredProvider[];
+  /** Discovery metadata + eligibility — never configured state. */
+  provider_catalog: CatalogProvider[];
+  /** The vendor snapshot the catalog sizes came from — named beside a pre-filled size. */
+  model_limits_snapshot: string;
+  model_role_ids: readonly string[];
+  custom_provider_api_ids: readonly string[];
+  /** The selector's choices — enabled registry entries only (never yaml/secrets). */
+  sandbox_images: Array<{ id: string; enabled: boolean }>;
+} & SettingsHealth;
+
+/**
+ * The bot page's payload: the bot-owned sections plus the ONE permission bit
+ * that governs bot-scoped writes. `can_manage` is false for a `shared` bot
+ * whatever the caller's workspace role is — a tenant may use a shared bot,
+ * never configure it.
+ */
+export type BotSettingsPayload = { can_manage: boolean } & BotConfigSections;
+
 /** (spec §2): a non-manager gets the identity-only face (no ops stores). */
 export type SettingsReadOnlyPayload = {
   can_manage: false;
   /** The App's stable workspace id — server-resolved, never a path segment. */
   workspace_id: string;
+  /**
+   * Why this target reviews nothing, if it does (derived per read, never
+   * stored). Both faces carry it: a member must know why the App is silent,
+   * not only the manager.
+   */
+  blocked: boolean;
+  blocked_reason: BlockedReason | null;
   /**
    * The review configuration's id in this workspace — the settings a manager
    * edits belong to a target. Required on both faces: a payload that cannot
@@ -638,6 +871,19 @@ export type SettingsManagePayload = {
    */
   installation: BoundInstallation | null;
   /**
+   * The bot's live installations that no live target references — the install
+   * block's bind source. Always present; `[]` when there is nothing to bind
+   * (or when this workspace may not use the bot).
+   */
+  pending_installations: PendingInstallation[];
+  /**
+   * Why this target reviews nothing, if it does (derived per read, never
+   * stored). This face is the readable one; the Blocked face is its own
+   * variant, so the discriminant is a literal here.
+   */
+  blocked: false;
+  blocked_reason: null;
+  /**
    * The review gate (migration 0045) — the Check's pass condition. `null` =
    * the stored verdict list is unreadable: the section renders a read-only
    * notice, since a gate that cannot be read cannot be edited.
@@ -645,33 +891,33 @@ export type SettingsManagePayload = {
   check_gate: CheckGateSettings | null;
   /** The owner allowlist switch + accepted owner logins (migration 0045). */
   allowlist: AllowlistSettings;
-  keys: ProviderKeyRow[];
-  model_chain: string | null;
-  model_roles: Record<string, string>;
-  model_chains: ModelChainEntry[];
-  custom_providers: Array<{
-    provider_id: string;
-    base_url: string;
-    api: string;
-    model_ids: string[];
-    /** Absent when the owner stated nothing about any model (legacy rows). */
-    models_meta?: CustomProviderModelsMeta;
-    /** The provider row a collapsed per-protocol id resolves to (read-only). */
-    legacy_of?: string;
-  }>;
-  /** The App's persisted provider state ONLY — empty is the valid unconfigured case. */
-  configured_providers: ConfiguredProvider[];
-  /** Discovery metadata + eligibility — never configured state. */
-  provider_catalog: CatalogProvider[];
-  /** The vendor snapshot the catalog sizes came from — named beside a pre-filled size. */
-  model_limits_snapshot: string;
-  model_role_ids: readonly string[];
-  custom_provider_api_ids: readonly string[];
-  /** The selector's choices — enabled registry entries only (never yaml/secrets). */
-  sandbox_images: Array<{ id: string; enabled: boolean }>;
-} & SettingsHealth;
+  /**
+   * Whether the park action would be accepted: this target's account claim is
+   * duplicated by another live target of a multi-target bot. The route refuses
+   * it otherwise, so the affordance never offers a write that cannot land.
+   */
+  owner_overlap: boolean;
+} & BotConfigSections;
 
-export type SettingsPayload = SettingsReadOnlyPayload | SettingsManagePayload;
+/**
+ * The Blocked manager face: this workspace's target on another workspace's
+ * bot. It carries the target's own review configuration and the identity the
+ * page needs, and NOTHING the bot owns — no installations, deliveries, keys,
+ * chains, custom providers, sandbox image or metadata. Those belong to the
+ * owning workspace, so their absence is the contract, not a degradation.
+ */
+export type SettingsBlockedPayload = {
+  can_manage: true;
+  blocked: true;
+  blocked_reason: BlockedReason;
+  workspace_id: string;
+  target_id: string;
+  app: BlockedAppIdentity;
+  /** The target's own binding (`null` = unbound) — target-owned state. */
+  installation: BoundInstallation | null;
+} & TargetOwnedSections;
+
+export type SettingsPayload = SettingsReadOnlyPayload | SettingsManagePayload | SettingsBlockedPayload;
 
 export type ModelOptionSource = "verified" | "probe" | "custom";
 
@@ -1638,7 +1884,7 @@ export function parseApps(data: unknown): AppsPayload | null {
   const login = data.viewer.login;
   const role = data.viewer.role;
   if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
-  return data as AppsPayload;
+  return { ...(data as AppsPayload), shared_bots: parseSharedBots(data.shared_bots) };
 }
 
 /**
@@ -1943,6 +2189,22 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // GitHub fact (NULL = never synced).
   if (typeof data.app.id !== "string") return null;
   if (!isNullableString(data.app.github_slug)) return null;
+  // The derived Blocked state rides BOTH faces, and the flag and its reason
+  // are one invariant: blocked ⇔ a named reason. An off-vocabulary reason
+  // fails the read instead of rendering a copy nobody wrote.
+  if (typeof data.blocked !== "boolean") return null;
+  if (data.blocked_reason !== null && !isBlockedReason(data.blocked_reason)) return null;
+  if (data.blocked !== (data.blocked_reason !== null)) return null;
+  // A Blocked face omits the bot's own metadata stamp; the identity face
+  // still requires it (nullable — NULL = never synced), exactly as before.
+  if (data.blocked) {
+    if (
+      data.app.github_metadata_synced_at !== undefined &&
+      !isNullableString(data.app.github_metadata_synced_at)
+    ) {
+      return null;
+    }
+  }
   if (!data.can_manage) {
     // Identity-only non-manager face (App detail IA): the D4
     // identity set — created_at joins the required keys; everything from
@@ -1955,11 +2217,36 @@ export function parseSettings(data: unknown): SettingsPayload | null {
       !isNullableString(data.app.github_name) ||
       !isNullableString(data.app.github_description) ||
       !isNullableString(data.app.github_html_url) ||
-      !isNullableString(data.app.github_avatar_url) ||
-      !isNullableString(data.app.github_metadata_synced_at)
+      !isNullableString(data.app.github_avatar_url)
     ) {
       return null;
     }
+    // The bot's metadata stamp is required on a readable identity face and
+    // absent on a Blocked one (its presence rule is the shared check above).
+    if (!data.blocked && !isNullableString(data.app.github_metadata_synced_at)) return null;
+    return data as SettingsPayload;
+  }
+  if (data.blocked) {
+    // The Blocked manager face: the target's own review configuration and the
+    // identity the page needs. The bot-owned sections are ABSENT by contract,
+    // so nothing here requires — or tolerates a guess for — them.
+    if (
+      !isNullableString(data.app.github_name) ||
+      !isNullableString(data.app.github_description) ||
+      !isNullableString(data.app.github_html_url) ||
+      !isNullableString(data.app.github_avatar_url) ||
+      !isNullableGithubVisibility(data.app.github_visibility)
+    ) {
+      return null;
+    }
+    if (!isBotScope(data.app.scope)) return null;
+    if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
+    if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
+    if (!isReviewLevel(data.app.default_review_level)) return null;
+    if (data.check_gate !== null && !isCheckGateSettings(data.check_gate)) return null;
+    if (!isAllowlistSettings(data.allowlist)) return null;
+    if (typeof data.owner_overlap !== "boolean") return null;
+    if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
     return data as SettingsPayload;
   }
   // The selected runtime-image id rides the MANAGER face (registry id
@@ -1982,6 +2269,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // rendering a control that cannot round-trip.
   if (data.check_gate !== null && !isCheckGateSettings(data.check_gate)) return null;
   if (!isAllowlistSettings(data.allowlist)) return null;
+  if (typeof data.owner_overlap !== "boolean") return null;
   // Cached visibility is nullable (null = the row read failed); any other
   // value must be on the probe's own vocabulary.
   if (!isNullableGithubVisibility(data.app.github_visibility)) return null;
@@ -1990,6 +2278,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // the install block never renders an action the server would refuse.
   if (!isBotScope(data.app.scope)) return null;
   if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
+  if (!isPendingInstallationList(data.pending_installations)) return null;
   if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
   if (!isProviderKeyRowList(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
@@ -2014,6 +2303,44 @@ function isSandboxImageList(value: unknown): value is Array<{ id: string; enable
     Array.isArray(value) &&
     value.every((row) => isRecord(row) && typeof row.id === "string" && typeof row.enabled === "boolean")
   );
+}
+
+/**
+ * The bot page's payload: the bot-owned sections plus `can_manage`. Validated
+ * field by field like {@link parseSettings} — a payload that cannot round-trip
+ * fails the parse instead of rendering a control the server would refuse.
+ */
+export function parseBotSettings(data: unknown): BotSettingsPayload | null {
+  if (!isRecord(data) || !isRecord(data.app)) return null;
+  if (typeof data.can_manage !== "boolean") return null;
+  const app = data.app;
+  if (typeof app.github_app_id !== "number" || typeof app.id !== "string") return null;
+  if (typeof app.status !== "string") return null;
+  if (!isBotScope(app.scope)) return null;
+  if (typeof app.sandbox_image_id !== "string") return null;
+  if (
+    !isNullableString(app.last_webhook_at) ||
+    !isNullableString(app.github_name) ||
+    !isNullableString(app.github_slug) ||
+    !isNullableString(app.github_description) ||
+    !isNullableString(app.github_html_url) ||
+    !isNullableString(app.github_avatar_url) ||
+    !isNullableString(app.github_metadata_synced_at)
+  ) {
+    return null;
+  }
+  if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
+  if (!isProviderKeyRowList(data.keys)) return null;
+  if (data.model_chain !== null && typeof data.model_chain !== "string") return null;
+  if (!isRecord(data.model_roles) || !Array.isArray(data.model_chains)) return null;
+  if (!Array.isArray(data.custom_providers)) return null;
+  if (!isConfiguredProviderList(data.configured_providers)) return null;
+  if (!isCatalogProviderList(data.provider_catalog)) return null;
+  if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
+  if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
+  if (typeof data.model_limits_snapshot !== "string" || data.model_limits_snapshot.length === 0) return null;
+  if (!isSandboxImageList(data.sandbox_images)) return null;
+  return data as BotSettingsPayload;
 }
 
 /** One entry of the verdict vocabulary — an off-vocabulary string fails the parse. */

@@ -608,3 +608,165 @@ describe("bot scope transitions (contract § 7.1)", () => {
     expect(rows[1]).toMatchObject({ id: "bot-a", name: "Zulu" });
   });
 });
+
+// --- the creation chooser's shared-bot list --------------------------------
+
+describe("shared bots a workspace may create a target on", () => {
+  /** One target on `botId` in `workspaceId`, stamped when `deleted`. */
+  function seedTargetIn(db: TestD1, botId: string, workspaceId: string, deleted = false): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, created_by, created_at, updated_at, deleted_at)
+         VALUES (?, ?, ?, ?, 'fixture', datetime('now'), datetime('now'),
+                 ${deleted ? "datetime('now')" : "NULL"})`,
+      )
+      .run(crypto.randomUUID(), workspaceId, botId, botId);
+  }
+
+  test("each live shared bot carries the ADDRESSED workspace's live target count", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-other");
+    seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW, name: "Alpha" });
+    db.raw.prepare("UPDATE review_bots SET github_slug = 'alpha-app' WHERE id = 'bot-shared'").run();
+    // One live target here, one soft-deleted here, one live in the owner's own
+    // workspace: only the first is the count this workspace reads.
+    seedTargetIn(db, "bot-shared", WS);
+    seedTargetIn(db, "bot-shared", WS, true);
+    seedTargetIn(db, "bot-shared", "ws-other");
+    seedTargetIn(db, "bot-shared", "ws-other");
+
+    const store = createReviewBotsStore(db);
+    expect(await store.listSharedBots(WS)).toEqual([
+      { id: "bot-shared", github_slug: "alpha-app", name: "Alpha", target_count: 1 },
+    ]);
+    // The same bot reads the other workspace's own count, not WS's.
+    expect(await store.listSharedBots("ws-other")).toEqual([
+      { id: "bot-shared", github_slug: "alpha-app", name: "Alpha", target_count: 2 },
+    ]);
+  });
+
+  test("an owned, soft-deleted or absent bot is never offered", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-owned", { workspaceId: WS, name: "Owned" });
+    seedScopedBot(db, "bot-gone", { workspaceId: WS, deleted: true, scope: "shared", sharedAt: NOW, name: "Gone" });
+    seedScopedBot(db, "bot-offered", { workspaceId: WS, scope: "shared", sharedAt: NOW, name: "Offered" });
+
+    expect((await createReviewBotsStore(db).listSharedBots(WS)).map((row) => row.id)).toEqual(["bot-offered"]);
+  });
+});
+
+// --- the workspace-scoped App resolve -------------------------------------
+
+/**
+ * One target row in `workspaceId`, optionally bound to `installationId` and/or
+ * soft-deleted. The pending read's whole predicate is "no LIVE target of this
+ * bot references it", so the fixture must be able to produce both halves.
+ */
+function seedPendingTarget(
+  db: TestD1,
+  botId: string,
+  workspaceId: string,
+  opts: { installationId?: number; deleted?: boolean } = {},
+): string {
+  const id = crypto.randomUUID();
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, installation_id, created_by, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, 'fixture', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+               ${opts.deleted ? "'2026-01-02T00:00:00.000Z'" : "NULL"})`,
+    )
+    .run(id, workspaceId, botId, botId, opts.installationId ?? null);
+  return id;
+}
+
+function githubAppIdOf(db: TestD1, botId: string): number {
+  const row = db.raw.query("SELECT github_app_id AS id FROM review_bots WHERE id = ?").get(botId) as {
+    id: number;
+  } | null;
+  if (row === null) throw new Error(`no review_bots row ${botId}`);
+  return row.id;
+}
+
+/**
+ * The resolve the target pages use: the workspace's own bot, or one it holds a
+ * live target on. The second arm is what a target created on a shared bot —
+ * and a target whose share was revoked — is reached through; a bot the
+ * workspace neither owns nor holds a target on stays invisible.
+ */
+describe("the workspace-scoped App resolve", () => {
+  test("resolves the workspace's own bot and a bot it holds a live target on", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-other");
+    seedScopedBot(db, "bot-own", { workspaceId: WS });
+    seedScopedBot(db, "bot-foreign", { workspaceId: "ws-other" });
+    seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
+
+    const store = createReviewBotsStore(db);
+    expect((await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-own"), WS))?.id).toBe("bot-own");
+    // A shared bot with no target here has no configuration to resolve: the
+    // list does not carry it either (the target is the entitlement).
+    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS)).toBeNull();
+    // Owned by another workspace and no target here: not widened.
+    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
+
+    // The workspace's own live target is the entitlement — it makes the bot
+    // (still owned by ws-other) readable, which is the revoked-share case.
+    seedPendingTarget(db, "bot-shared", WS);
+    expect((await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS))?.id).toBe("bot-shared");
+    seedPendingTarget(db, "bot-foreign", WS);
+    const revoked = await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS);
+    expect(revoked?.id).toBe("bot-foreign");
+    expect(revoked?.workspace_id).toBe("ws-other");
+    // A soft-deleted target grants nothing.
+    db.raw.prepare("UPDATE review_targets SET deleted_at = datetime('now') WHERE bot_id = 'bot-foreign'").run();
+    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
+  });
+});
+// --- the target page's pending installations ------------------------------
+
+/** One `bot_installations` row; `removed` stamps the removal. */
+function seedInstallation(db: TestD1, botId: string, installationId: number, removed = false): void {
+  db.raw
+    .prepare(
+      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+       VALUES (?, ?, ?, NULL, '2026-01-01T00:00:00.000Z', ${removed ? "datetime('now')" : "NULL"})`,
+    )
+    .run(crypto.randomUUID(), botId, installationId);
+}
+
+describe("pending installations of a bot", () => {
+  test("lists the live installations no live target references, and nothing else", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-pending", { workspaceId: WS });
+    seedInstallation(db, "bot-pending", 100);
+    seedInstallation(db, "bot-pending", 200, true);
+    seedInstallation(db, "bot-pending", 300);
+    seedInstallation(db, "bot-pending", 400);
+    // 300 is held by a live target, 400 only by a soft-deleted one.
+    seedPendingTarget(db, "bot-pending", WS, { installationId: 300 });
+    seedPendingTarget(db, "bot-pending", WS, { installationId: 400, deleted: true });
+
+    const rows = await createReviewBotsStore(db).listPendingInstallations("bot-pending", WS);
+    expect(rows.map((row) => row.installation_id).sort()).toEqual([100, 400]);
+  });
+
+  test("answers nothing for a bot the addressed workspace may not use", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-other");
+    // Another workspace's owned bot: out of the caller's visible set.
+    seedScopedBot(db, "bot-foreign", { workspaceId: "ws-other" });
+    seedInstallation(db, "bot-foreign", 501);
+    // A shared bot: usable from every workspace, so its pending rows read.
+    seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
+    seedInstallation(db, "bot-shared", 502);
+
+    const store = createReviewBotsStore(db);
+    expect(await store.listPendingInstallations("bot-foreign", WS)).toEqual([]);
+    expect(
+      (await store.listPendingInstallations("bot-shared", WS)).map((row) => row.installation_id),
+    ).toEqual([502]);
+  });
+});
+

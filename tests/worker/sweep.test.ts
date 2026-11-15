@@ -39,9 +39,21 @@ import {
   COMMENT_CLAIM_RETRY_DEFAULT,
   type CommentClaimSettingsLogFields,
 } from "../../src/pipeline/comment-claim-settings-reader";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+
+/**
+ * A migrated DB carrying the target every recorded row names (its FK parent).
+ * The sweep itself reads no target, but the write contract requires one.
+ */
+function failureDb(): TestD1 {
+  const db = createMigratedTestD1();
+  seedBot(db, "bot-sweep", 9301);
+  seedTarget(db, "bot-sweep", { id: BASE.target_id });
+  return db;
+}
 
 const BASE = {
+  target_id: "target-sweep",
   installation_id: 123,
   owner: "acme",
   repo: "widgets",
@@ -144,7 +156,7 @@ describe("runSweep", () => {
     });
   });
   test("flips lapsed pending invites in every workspace in one run, and flips none on the second", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     db.raw
       .query(`INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
               VALUES ('ws-2', 'ws-2', 'Second', NULL, '2026-10-21T00:00:00.000Z', NULL)`)
@@ -190,7 +202,7 @@ describe("runSweep", () => {
   });
 
   test("a backlog larger than one run's cap drains across successive runs, losing nothing", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     db.raw
       .query(`INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
               VALUES ('ws-2', 'ws-2', 'Second', NULL, '2026-10-21T00:00:00.000Z', NULL)`)
@@ -243,7 +255,7 @@ describe("runSweep", () => {
   });
 
   test("a continuously-fed backlog still serves the OLDEST lapsed row first (no starvation)", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     const insert = db.raw.prepare(
       `INSERT INTO workspace_invites
          (id, workspace_id, github_login, role, status, invited_by,
@@ -303,7 +315,7 @@ describe("runSweep", () => {
   });
 
   test("leaves a live pending invite untouched (real D1)", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     db.raw
       .prepare(
         `INSERT INTO workspace_invites
@@ -321,7 +333,7 @@ describe("runSweep", () => {
   });
 
   test("the invite lapse failure degrades to a warn and the failure-sweep still runs", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
     const { log, calls } = captureLog();
     const wrapped: D1Like = {
@@ -397,7 +409,7 @@ describe("runSweep", () => {
   });
 
   test("retention deletes only rows older than 30 days (real D1)", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     db.raw
       .query(
         `INSERT INTO review_bots (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
@@ -430,7 +442,7 @@ describe("runSweep", () => {
   });
 
   test("PR-ledger retention drops only TERMINAL rows older than the window", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     db.raw
       .query(
         `INSERT INTO review_bots (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
@@ -461,7 +473,7 @@ describe("runSweep", () => {
   });
 
   test("retention failure degrades to a warn and the failure-sweep still runs (breach alert fires)", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
     const { log, calls } = captureLog();
     const wrapped: D1Like = {
@@ -485,7 +497,7 @@ describe("runSweep", () => {
   });
 
   test("counts only in-window rows, across the infra-failure stages (parse + runner/sandbox/pipeline)", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     const store = createFailureStore(db);
     for (const stage of ["parse", "runner", "sandbox", "pipeline"] as const) {
       await store.record({ ...BASE, stage, error: `boom-${stage}` });
@@ -505,7 +517,7 @@ describe("runSweep", () => {
   // one set of assertions.
   for (const stage of ["recheck", "usage", "rate-limit"] as const) {
     test(`${stage} rows never page ops; a runner row still counts`, async () => {
-      const db = createMigratedTestD1();
+      const db = failureDb();
       const store = createFailureStore(db);
       // Six degraded-but-successful rounds is a normal day: each writes one
       // excluded row and nothing else. None of them is a review failure.
@@ -530,7 +542,7 @@ describe("runSweep", () => {
   }
 
   test("threshold boundary: ONE fully-failed message's rows do not alert", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     // The threshold's own case: a single DLQ'd job leaves exactly this many rows
     // (one per delivery), and one failed message must never page an operator.
     await seedInWindow(db, QUEUE_MAX_ATTEMPTS);
@@ -547,7 +559,7 @@ describe("runSweep", () => {
   });
 
   test("breach (one row past the threshold) emits the ops_sweep_alert event; absent webhook = log-only", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
     const { log, calls } = captureLog();
     const fetchImpl = mock(() => Promise.resolve(new Response("ok")));
@@ -570,7 +582,7 @@ describe("runSweep", () => {
   });
 
   test("breach with webhook POSTs the alert payload as JSON with a timeout signal", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
     const { log } = captureLog();
     const seen: Array<{ url: string; init?: RequestInit }> = [];
@@ -595,7 +607,7 @@ describe("runSweep", () => {
   });
 
   test("webhook failure degrades to a warn log and never throws", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
     const { log, calls } = captureLog();
     const fetchImpl = (async () => {
@@ -610,7 +622,7 @@ describe("runSweep", () => {
   });
 
   test("webhook non-2xx response is NOT posted — warn + failed disposition (qc W-2/F-001)", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
     const { log, calls } = captureLog();
     const fetchImpl = (async () => new Response("sink degraded", { status: 503 })) as unknown as typeof fetch;
@@ -624,7 +636,7 @@ describe("runSweep", () => {
   });
 
   test("the configured alertUrl is exact-string-redacted from the failure detail (SEC-02)", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
     const { log, calls } = captureLog();
     const url = "https://ops.example/hook?token=abc123";
@@ -726,7 +738,7 @@ describe("runSweep — comment-claim outbox", () => {
   }
 
   test("re-sends a stale claim with its stored payload and bumps the attempt", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     seedClaim(db);
     const { queue, sent } = fakeQueue();
     const { log, calls } = captureLog();
@@ -749,7 +761,7 @@ describe("runSweep — comment-claim outbox", () => {
   });
 
   test("a claim inside the retry window is left for the send in flight", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     seedClaim(db, { ageMs: 1_000 });
     const { queue, sent } = fakeQueue();
     const { log, calls } = captureLog();
@@ -762,7 +774,7 @@ describe("runSweep — comment-claim outbox", () => {
   });
 
   test("a claim at the stored attempt cap expires instead of being re-sent", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     // The cap is an operator setting on the runtime-config surface, not a
     // source constant: a stored 1 expires a claim one attempt in.
     seedSettings(db, { maxAttempts: 1 });
@@ -780,7 +792,7 @@ describe("runSweep — comment-claim outbox", () => {
   });
 
   test("a consumed row is never re-sent, however old", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     seedClaim(db, { state: "consumed", ageMs: 10 * COMMENT_CLAIM_RETRY_DEFAULT });
     const { queue, sent } = fakeQueue();
 
@@ -791,7 +803,7 @@ describe("runSweep — comment-claim outbox", () => {
   });
 
   test("a failing send still counts the attempt, so the claim cannot be retried forever", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     seedClaim(db);
     const { queue } = fakeQueue(true);
     const { log, calls } = captureLog();
@@ -806,7 +818,7 @@ describe("runSweep — comment-claim outbox", () => {
   });
 
   test("the stored retry window drives the scan, not a source constant", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     // 60 s old: fresh under the 300 s absent-row default, stale under a stored
     // 30 s window.
     seedClaim(db, { ageMs: 60_000 });
@@ -825,7 +837,7 @@ describe("runSweep — comment-claim outbox", () => {
   });
 
   test("the stored outbox cap bounds one sweep", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     seedSettings(db, { outboxCap: 1 });
     seedClaim(db, { commentId: 9001 });
     seedClaim(db, { commentId: 9002 });
@@ -840,7 +852,7 @@ describe("runSweep — comment-claim outbox", () => {
   });
 
   test("a degraded settings read falls back to the documented defaults with ONE warn", async () => {
-    const db = createMigratedTestD1();
+    const db = failureDb();
     // One corrupt stored value degrades the whole trio (the store's trust rule).
     db.raw
       .prepare(

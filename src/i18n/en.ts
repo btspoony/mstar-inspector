@@ -137,10 +137,36 @@ export const en = {
     /** The page's name in the document title (`common.pageTitle` slot). */
     documentPage: "App",
     backToApps: "Back to Apps",
+    /** The link from the target detail to the bot's own settings page. */
+    botSettingsLink: "Bot settings",
     tabSettings: "Settings",
     tabInstallations: "Installed",
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
+    // The derived Blocked banner: the server reads the bot's scope and the
+    // target's workspace on every read, so the copy names the one cause.
+    blockedBotNotShared:
+      "This bot is no longer shared with this workspace, so this target reviews nothing. Ask the platform operator to share it again.",
+  },
+  /**
+   * The bot settings page: the bot-owned configuration (credentials health,
+   * providers, chains, sandbox image, installations) that a target's workspace
+   * may use but not configure. The target-scoped labels stay under `settings.*`.
+   */
+  botSettings: {
+    /** The page's name in the document title (`common.pageTitle` slot). */
+    botPage: "Bot settings",
+    backToDetail: "Back to the target",
+    subtitle: "Configuration this bot owns — the workspace's review policy lives on the target.",
+    scopeOwned: "Owned",
+    scopeShared: "Shared",
+    /** Shown whenever `can_manage` is false — a shared bot, or a non-manager. */
+    readOnly: "Configuration here is read-only. A shared bot is configured by its owning workspace only.",
+    health: "Credentials health",
+    healthCopy: "Deliveries GitHub sent to this bot's webhook, and the ones it refused.",
+    sandboxCopy: "The runtime harness every review of this bot runs under.",
+    providersNone: "No provider key or custom provider yet.",
+    chainsCopy: "The model chains this bot's reviews select their models from.",
   },
   /**
    * Per-App Pull requests tab: the ledger of every PR the App received.
@@ -359,6 +385,26 @@ export const en = {
     tableHealth: "Health",
     tableCreator: "Creator",
     openAria: "Open {name} detail",
+    /**
+     * The creation chooser behind the Create control: official mode puts a
+     * target on a bot the platform already shares, self-hosted is the GitHub
+     * App manifest flow. `botTarget*` label one shared bot with this
+     * workspace's live target count.
+     */
+    createDialog: {
+      title: "Create a review target",
+      description: "Use an App this platform already shares, or connect your own GitHub App.",
+      modeOfficial: "Official App",
+      modeSelfHosted: "My own GitHub App",
+      botLabel: "App",
+      botPlaceholder: "Select an App",
+      botTargetOne: "{name} · {count} target",
+      botTargets: "{name} · {count} targets",
+      noSharedBots: "This platform shares no App yet — connect your own GitHub App instead.",
+      submit: "Create target",
+      selfHostedSubmit: "Continue to GitHub",
+      failed: "The target was not created — try again.",
+    },
   },
   members: {
     heading: "Members",
@@ -562,6 +608,10 @@ export const en = {
     /** Metric-band label for the provider-key count on the App detail face. */
     metricKeys: "Keys",
     noInstallations: "No installations yet.",
+    // A Blocked target: the bot's installation rows belong to its owning
+    // workspace, so the table states the absence instead of a false "none".
+    installationsNotVisible:
+      "This bot's installations belong to its owning workspace, so they are not listed here.",
     recentDeliveries: "Recent deliveries",
     recentDeliveriesCopy:
       "Up to 10 webhook deliveries — outcomes that report a verdict (OK / Paused / Rejected) come first, then the rest newest first.",
@@ -678,6 +728,8 @@ export const en = {
       fieldDuplicated:
         "The {field} field was submitted more than once — resubmit the form with one value. Nothing was saved.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
+      /** A bot-scoped write against a `shared` bot: the page is read-only. */
+      botReadOnly: "This bot is shared — its configuration is read-only here.",
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
       concurrencyInvalid: "Concurrency must be a whole number from {min} to {max}. Nothing was stored.",
@@ -698,6 +750,14 @@ export const en = {
     opsDeliveryTitle: "Delivery responses",
     opsDeliveryCopy:
       "A disabled App answers 404 to every delivery, so nothing is reviewed. Enabling it puts this App back to reviewing.",
+    opsParkTitle: "Park this target",
+    opsParkCopy:
+      "Another live target in this workspace claims the same owner. Park pauses this target and clears its account claim, in one audited step; the target and its settings stay.",
+    opsParkAction: "Park target",
+    confirmParkTitle: "Park {name}?",
+    confirmParkBody:
+      "This target is paused and its account claim is cleared, so the owner overlap is gone. Nothing is deleted, and resuming reviews is available afterwards.",
+    confirmParkAction: "Park",
     opsDeleteTitle: "Delete this App",
     opsDeleteCopy: "A soft delete — the App leaves this list and every installation is closed.",
     // Review trigger mode (spec review-trigger-policy §2/§3): segment
@@ -922,10 +982,18 @@ export const en = {
     confirmRemoveCustomTitle: "Remove provider {provider}?",
     confirmRemoveCustomBody:
       "The provider and every key in its pool are removed. To free one slot only, remove that key's own row. Chains referencing its models fail on save.",
+    /**
+     * The review trigger — TARGET-scoped: when a delivery starts a review. The
+     * bot's sandbox image now lives on the bot page (`botSettings`), so this
+     * section carries the mention + mode controls alone.
+     */
+    reviewTrigger: "Review trigger",
+    reviewTriggerCopy:
+      "How a review starts: on a pull request opening, on every push, or only when someone mentions the bot in a comment.",
     runtimeHarness: "Runtime harness",
     runtimeHarnessCopy:
       "The {id} runtime harness mounted into the sandbox image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked in.",
-    runtimeHarnessValue: "This App's reviews run under the {id} runtime harness.",
+    runtimeHarnessValue: "Reviews for this App run under the {id} runtime harness.",
     saveRuntimeHarness: "Save runtime harness",
     /**
      * GitHub identity card. `{name}`/`{id}`/`{time}` carry the
@@ -971,6 +1039,13 @@ export const en = {
     installBoundNoAccount: "Bound to installation {id}; GitHub has not reported its account yet.",
     installRemoved:
       "GitHub no longer has this installation, so reviews are paused. Installing it again resumes them on this target.",
+    // Installed tab: installations the bot already carries that no target has
+    // bound yet. Binding one is the dashboard's one-action alternative to the
+    // GitHub setup round trip.
+    installPending: "Waiting to be bound",
+    installPendingUnknownAccount: "Installation {id} (account not reported yet)",
+    installPendingBind: "Bind to this target",
+    installBindFailed: "The installation could not be bound. Reload this page and try again.",
     // Installed tab: the owner allowlist (migration 0045).
     allowlist: "Owner allowlist",
     allowlistCopy: "With the switch on, only these repository owners are reviewed.",

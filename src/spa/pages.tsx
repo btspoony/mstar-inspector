@@ -4,6 +4,7 @@ import { t } from "../i18n";
 import styles from "./pages.module.css";
 import { AppDetailPage } from "./pages/AppDetailPage";
 import { AppsPage } from "./pages/AppsPage";
+import { BotSettingsPage } from "./pages/BotSettingsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { MembersPage } from "./pages/MembersPage";
 import { SupportPage } from "./pages/SupportPage";
@@ -33,6 +34,8 @@ export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBo
       return <LoginPage boot={boot} />;
     case "app-detail":
       return <AppDetailPage boot={boot} appId={route.appId} />;
+    case "bot-settings":
+      return <BotSettingsPage boot={boot} appId={route.appId} />;
     default:
       return <h1 className={styles.heading}>{t(boot.locale, "nav.brand")}</h1>;
   }

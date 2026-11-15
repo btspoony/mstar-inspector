@@ -70,6 +70,7 @@ import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
 import { createArtifactStore, type ReviewArtifactDoc } from "../../src/store/artifact-store";
 import { idemKey } from "../../src/contracts/idem";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createMigratedTestD1, seedTarget, type TestD1 } from "./helpers";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
@@ -435,8 +436,12 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     const finding = db.raw.prepare("SELECT * FROM review_findings WHERE id = 'row-1'").get() as {
       state: string; reopen_count: number; first_publication_id: string; last_publication_id: string;
       first_seen_round: number; last_seen_round: number; last_assessed_ms: number | null; last_scheduled_ms: number | null;
+      target_id: string | null;
     };
     expect(finding.state).toBe("open");
+    // The row names its target: that is the only attribution the tenant read
+    // faces bind, and it rides the publication's own artifact copy.
+    expect(finding.target_id).toBe(TARGET_ID);
     expect(finding.reopen_count).toBe(0);
     expect(finding.first_publication_id).toBe("pub-1");
     expect(finding.last_publication_id).toBe("pub-1");
@@ -575,7 +580,10 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     let reads = 0;
     const applied = await applyPublishedLifecycle(db, "pub-1", lease, 2000, () => {
       reads += 1;
-      if (reads === 3) {
+      // Probe order: entry, the artifact's own chunk, then each lifecycle
+      // chunk. The rival claims at the fourth read — after the artifact chunk
+      // and the FIRST lifecycle chunk committed.
+      if (reads === 4) {
         db.raw
           .prepare(`UPDATE review_publications SET holder = 'other', lease_epoch = lease_epoch + 1 WHERE id = 'pub-1'`)
           .run();
@@ -583,10 +591,12 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
       return 2000;
     });
 
-    expect(reads).toBe(3); // entry fence, first chunk, aborted second chunk
+    expect(reads).toBe(4); // entry, artifact chunk, first lifecycle chunk, aborted second
     expect(applied).toBe(false); // the stale invocation never marks complete
-    // Only the first chunk's writes landed; the second chunk never ran.
+    // Only the first lifecycle chunk's writes landed; the second never ran.
     expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number }).n).toBe(1);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM review_threads").get() as { n: number }).n).toBe(0);
     expect(publicationRow(db, "pub-1").phase).toBe("confirmed"); // never marked applied
   });
@@ -600,12 +610,14 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     let reads = 0;
     const applied = await applyPublishedLifecycle(db, "pub-1", lease, 2000, () => {
       reads += 1;
-      return reads < 3 ? 2000 : lease.untilMs + 1; // the second chunk finds the lease expired
+      return reads < 4 ? 2000 : lease.untilMs + 1; // the second lifecycle chunk finds it expired
     });
 
     expect(applied).toBe(false);
-    expect(reads).toBe(3);
+    expect(reads).toBe(4); // entry, artifact chunk, first lifecycle chunk, aborted second
+    // The first lifecycle chunk landed; the artifact committed in its own chunk.
     expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
     expect(publicationRow(db, "pub-1").phase).toBe("confirmed");
   });
 });
@@ -729,7 +741,9 @@ describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () 
     let writes = 0;
     const raced = leaseMutationAtWriteBoundary(db, () => {
       writes += 1;
-      if (writes === 2) {
+      // Batch order is the artifact's chunk, then the lifecycle chunks: the
+      // rival claims before the SECOND lifecycle chunk.
+      if (writes === 3) {
         db.raw
           .prepare(`UPDATE review_publications SET holder = 'rival', lease_epoch = lease_epoch + 1 WHERE id = 'pub-1'`)
           .run();
@@ -737,8 +751,8 @@ describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () 
     });
 
     expect(await applyPublishedLifecycle(raced, "pub-1", lease, 2000)).toBe(false);
-    // Only the first chunk (25 seen upserts) committed; the second chunk's
-    // statements are refused by their own predicate, not by a later probe.
+    // Only the first lifecycle chunk (25 seen upserts) committed; the second
+    // chunk's statements are refused by their own predicate, not by a probe.
     expect(count(db, "review_findings")).toBe(25);
     expect(count(db, "review_threads")).toBe(0);
     expect(publicationRow(db, "pub-1")).toMatchObject({ phase: "confirmed", applied_ms: null });
@@ -1568,5 +1582,486 @@ describe("durable suspension kinds (spec §7.6, P67-QC-007)", () => {
     expect(pairs[0]!.requiresIdentityProof).toBe(true);
     // Withheld: the caller must re-prove identity rather than trust one digest.
     expect(pairs[0]!.credentialFingerprint).toBeNull();
+  });
+});
+
+/**
+ * Attribution is fixed at FIRST record (decision B).
+ *
+ * `review_findings.target_id` and `reviews.target_id` name the target that
+ * RECORDED the row. A rebind — the operator unbinds an installation and
+ * another workspace claims the same one — moves FUTURE publications, never
+ * history: the previous target keeps the ledger it reviewed, and the new
+ * target's ledger starts empty. That is also why the ledger key stays
+ * `(target_id, owner, repo, pr_number)`: moving history would have to drag the
+ * PR row across tenants, which the product does not do.
+ */
+describe("target attribution is fixed at first record (rebind)", () => {
+  const TARGET_B_ID = "11111111-2222-3333-4444-aaaaaaaaaaaa";
+  const WORKSPACE_B = "ws-b-fixed";
+  const PAGE = { offset: 0, limit: 10 };
+  const scopeA = { targetId: TARGET_ID, workspaceId: "default", botId: APP_ID };
+  const scopeB = { targetId: TARGET_B_ID, workspaceId: WORKSPACE_B, botId: APP_ID };
+
+  /**
+   * Bot APP_ID with one target per workspace, A holding the installation, and
+   * A's PR ledger row. `withBPullRequest` also seeds B's own row — the one a
+   * delivery FOR the new workspace creates; without it B's detail is the 404
+   * the routes answer for a PR that target never received.
+   */
+  function fixedAttributionFixture(opts: { withBPullRequest?: boolean } = {}): TestD1 {
+    const db = createMigratedTestD1();
+    seedAppRow(db, APP_ID);
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES (?, ?, ?, NULL, datetime('now'))`,
+      )
+      .run(WORKSPACE_B, WORKSPACE_B, WORKSPACE_B);
+    seedTarget(db, APP_ID, { id: TARGET_ID });
+    seedTarget(db, APP_ID, { id: TARGET_B_ID, workspaceId: WORKSPACE_B });
+    db.raw
+      .prepare("UPDATE review_targets SET installation_id = ? WHERE id = ?")
+      .run(SCOPE.installationId, TARGET_ID);
+    const targets = opts.withBPullRequest ? [TARGET_ID, TARGET_B_ID] : [TARGET_ID];
+    for (const targetId of targets) {
+      db.raw
+        .prepare(
+          `INSERT INTO pull_requests
+             (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+           VALUES (?, ?, ?, 'acme', 'widgets', 42, 'PR', 'open', 'sha', datetime('now'), datetime('now'))`,
+        )
+        .run(`pr-${targetId}`, APP_ID, targetId);
+    }
+    return db;
+  }
+
+  /** The installation leaves A's target and lands on B's — the rebind. */
+  function rebind(db: TestD1): void {
+    db.raw.prepare("UPDATE review_targets SET installation_id = NULL WHERE id = ?").run(TARGET_ID);
+    db.raw
+      .prepare("UPDATE review_targets SET installation_id = ? WHERE id = ?")
+      .run(SCOPE.installationId, TARGET_B_ID);
+  }
+
+  /** Round 1 composed and applied while A held the installation. */
+  async function applyRoundOne(db: TestD1, findingId: string): Promise<void> {
+    const pay = payload({
+      lifecycle: lifecycleRound({
+        selectedRowIds: ["row-1"],
+        seen: [seenEntry("row-1", findingId)],
+      }),
+    });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
+  }
+
+  /**
+   * Round 2 at a new SHA. `hintTargetId` is the target frozen into its payload:
+   * B for a publication composed after the rebind, A to model one composed
+   * before it (the recovery lane can apply those late). The payload target is
+   * only a hint — the NEW finding AND the NEW review row this apply inserts
+   * both take the live binding.
+   */
+  function roundTwo(
+    seen: Array<{ rowId: string; findingId: string }>,
+    hintTargetId: string = TARGET_B_ID,
+  ): PublicationPayload {
+    return payload({
+      headSha: SHA2,
+      round: 2,
+      artifact: artifactDoc({
+        key: idemKey({
+          installation_id: SCOPE.installationId,
+          owner: SCOPE.owner,
+          repo: SCOPE.repo,
+          pr_number: SCOPE.prNumber,
+          head_sha: SHA2,
+        }),
+        targetId: hintTargetId,
+      }),
+      lifecycle: lifecycleRound({ seen: seen.map((entry) => seenEntry(entry.rowId, entry.findingId)) }),
+    });
+  }
+
+  test("a rebind does not move history, and leaves no orphan state", async () => {
+    // B has received a delivery for this PR (that is what publishes round 2),
+    // so B's own ledger row exists; A's row is untouched by the rebind.
+    const db = fixedAttributionFixture({ withBPullRequest: true });
+    await applyRoundOne(db, "f-1");
+    rebind(db);
+
+    // Round 2 re-sees the SAME fingerprint at a new SHA.
+    const lease = await stageClaimProve(db, "pub-2", roundTwo([{ rowId: "row-1", findingId: "f-1" }]), 10_000);
+    expect(await applyPublishedLifecycle(db, "pub-2", lease, 11_000)).toBe(true);
+
+    // The row keeps the target that first recorded it: one row, still A.
+    expect(
+      db.raw.query("SELECT target_id FROM review_findings WHERE finding_id = 'f-1'").all(),
+    ).toEqual([{ target_id: TARGET_ID }]);
+    // …and A's own review history row stays with it.
+    expect(
+      (db.raw.prepare("SELECT target_id FROM reviews WHERE head_sha = ?").get(SHA) as { target_id: string })
+        .target_id,
+    ).toBe(TARGET_ID);
+
+    // A's PR detail still resolves and still shows what it reviewed.
+    const store = createReviewBotsStore(db);
+    expect(await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).toEqual({
+      findings: 1,
+      reviews: 1,
+      failures: 0,
+      must_fix: 0,
+    });
+    expect(
+      (await store.listPullRequestFindings(scopeA, "acme", "widgets", 42, PAGE))!.items.map((row) => row.finding_id),
+    ).toEqual(["f-1"]);
+
+    // The new workspace's FINDINGS ledger reads zero: the re-seen fingerprint
+    // stayed with the target that recorded it. The one review row B shows is
+    // round 2's own record (a new SHA, newly published after the rebind), not
+    // A's history.
+    const fromB = await store.countPullRequestRecords(scopeB, "acme", "widgets", 42);
+    expect(fromB.findings).toBe(0);
+    expect(fromB.reviews).toBe(1);
+    const fromBFindings = (await store.listPullRequestFindings(scopeB, "acme", "widgets", 42, PAGE))!;
+    expect(fromBFindings.items).toEqual([]);
+    expect(fromBFindings.total).toBe(0);
+    // A PR target B never received has no ledger at all — its detail is the
+    // 404 the routes answer, not an empty fabricated one.
+    expect(await store.listPullRequestFindings(scopeB, "acme", "widgets", 43, PAGE)).toBeNull();
+    // One row, one owner: nothing was duplicated into B's side.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get()).toEqual({ n: 1 });
+  });
+
+  test("the review row records the same binding as its findings", async () => {
+    const db = fixedAttributionFixture({ withBPullRequest: true });
+    await applyRoundOne(db, "f-1");
+    rebind(db);
+
+    // The publication's FROZEN target names A; the live binding names B. The
+    // review row it inserts must follow the binding, like its findings — one
+    // apply cannot split a PR's records across two tenants.
+    const lease = await stageClaimProve(
+      db,
+      "pub-2",
+      roundTwo([{ rowId: "row-2", findingId: "f-2" }], TARGET_ID),
+      10_000,
+    );
+    expect(await applyPublishedLifecycle(db, "pub-2", lease, 11_000)).toBe(true);
+
+    expect(
+      db.raw.query("SELECT head_sha, target_id FROM reviews ORDER BY head_sha").all(),
+    ).toEqual([
+      { head_sha: SHA, target_id: TARGET_ID },
+      { head_sha: SHA2, target_id: TARGET_B_ID },
+    ]);
+    expect(
+      db.raw.query("SELECT finding_id, target_id FROM review_findings ORDER BY finding_id").all(),
+    ).toEqual([
+      { finding_id: "f-1", target_id: TARGET_ID },
+      { finding_id: "f-2", target_id: TARGET_B_ID },
+    ]);
+
+    // The tenants see one consistent record each.
+    const store = createReviewBotsStore(db);
+    expect(await store.countPullRequestRecords(scopeB, "acme", "widgets", 42)).toEqual({
+      findings: 1,
+      reviews: 1,
+      failures: 0,
+      must_fix: 0,
+    });
+    expect(await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).toEqual({
+      findings: 1,
+      reviews: 1,
+      failures: 0,
+      must_fix: 0,
+    });
+  });
+
+  /**
+   * The artifact half is its OWN chunk(s), and it is composed on every attempt:
+   * a failed lifecycle chunk leaves a complete, idempotent artifact, and the
+   * retry re-runs it as a no-op and finishes the lifecycle. The rebind lands
+   * BEFORE the first attempt, so both attempts record under the live target.
+   */
+  test("a failed lifecycle chunk leaves the artifact, and the retry converges", async () => {
+    const db = fixedAttributionFixture({ withBPullRequest: true });
+    rebind(db); // the live binding is B for both attempts
+    // 30 public findings ⇒ 31 artifact statements ⇒ TWO artifact chunks; the
+    // payload's frozen target still names A, so the binding must win.
+    const manyFindings = Array.from({ length: 30 }, (_, i) => ({
+      mergeClass: "should-fix" as const,
+      category: "logic",
+      file_path: `src/f${i}.ts`,
+      line_start: i + 1,
+      line_end: i + 2,
+      title: `Finding ${i}`,
+      body: "body",
+      fingerprint_hint: `fp-${i}`,
+    }));
+    const pay = payload({
+      artifact: artifactDoc({ payload: enginePayload({ findings: manyFindings }) }),
+      lifecycle: lifecycleRound({
+        selectedRowIds: ["row-1"],
+        seen: [seenEntry("row-1", "f-1")],
+        assessments: [
+          {
+            rowId: "row-1",
+            disposition: "unverifiable",
+            reason: "no-evidence",
+            evidence: null,
+            relatedCurrentFindingIndexes: [],
+          },
+        ],
+      }),
+    });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    db.raw.exec(
+      "CREATE TRIGGER boom BEFORE INSERT ON review_finding_rounds BEGIN SELECT RAISE(ABORT, 'boom'); END",
+    );
+    await expect(applyPublishedLifecycle(db, "pub-1", lease, 2000)).rejects.toThrow(/boom/);
+
+    // The artifact chunks committed (both of them); the lifecycle chunk did not.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 30 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get()).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT DISTINCT target_id FROM reviews").all()).toEqual([{ target_id: TARGET_B_ID }]);
+
+    // Retry after the failure: the artifact re-runs as a no-op, the lifecycle
+    // half completes.
+    db.raw.exec("DROP TRIGGER boom");
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 3000)).toBe(true);
+
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 30 });
+    // Every public finding still belongs to the ONE review row, written once.
+    expect(db.raw.query("SELECT COUNT(DISTINCT review_id) AS n FROM findings").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT finding_id, target_id FROM review_findings").all()).toEqual([
+      { finding_id: "f-1", target_id: TARGET_B_ID },
+    ]);
+  });
+
+  /**
+   * The artifact is re-composed and re-run on every attempt, keyed by the
+   * review's natural key and a deterministic finding id — so an attempt that
+   * dies between two artifact chunks is REPAIRED by the next one instead of
+   * leaving the review perpetually short of findings.
+   */
+  test("a partially committed artifact is repaired by the next attempt", async () => {
+    const db = fixedAttributionFixture();
+    const manyFindings = Array.from({ length: 30 }, (_, i) => ({
+      mergeClass: "should-fix" as const,
+      category: "logic",
+      file_path: `src/h${i}.ts`,
+      line_start: i + 1,
+      line_end: i + 2,
+      title: `Finding ${i}`,
+      body: "body",
+      fingerprint_hint: `fp-${i}`,
+    }));
+    const pay = payload({
+      artifact: artifactDoc({ payload: enginePayload({ findings: manyFindings }) }),
+      lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }),
+    });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    // The second artifact chunk (findings 24..29) fails: the first 24 landed.
+    db.raw.exec(
+      "CREATE TRIGGER boom BEFORE INSERT ON findings WHEN (SELECT COUNT(*) FROM findings) >= 24 BEGIN SELECT RAISE(ABORT, 'boom'); END",
+    );
+    await expect(applyPublishedLifecycle(db, "pub-1", lease, 2000)).rejects.toThrow(/boom/);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 24 });
+
+    // The retry no-ops the 24 already-present rows and writes the missing six.
+    db.raw.exec("DROP TRIGGER boom");
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 3000)).toBe(true);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 30 });
+    expect(db.raw.query("SELECT COUNT(DISTINCT review_id) AS n FROM findings").get()).toEqual({ n: 1 });
+  });
+
+  /**
+   * The review id is derived from the apply key (`0001_reviews.sql` allows
+   * exactly ONE review per (installation, owner, repo, pr, head_sha) — its
+   * UNIQUE — independent of target), so a finding names its review without a
+   * lookup and a second target's apply cannot attach findings to another row:
+   * it either names the SAME row (no-op) or writes its own key's rows. What it
+   * can never do is move or grow someone else's finding set.
+   */
+  test("an apply for another target cannot attach findings to a different review", async () => {
+    const db = fixedAttributionFixture();
+    const twoFindings = [0, 1].map((i) => ({
+      mergeClass: "should-fix" as const,
+      category: "logic",
+      file_path: `src/k${i}.ts`,
+      line_start: i + 1,
+      line_end: i + 2,
+      title: `Finding ${i}`,
+      body: "body",
+      fingerprint_hint: `fp-${i}`,
+    }));
+    const artifact = artifactDoc({ payload: enginePayload({ findings: twoFindings }) });
+    // A's review for this head, with its two public findings.
+    await createArtifactStore(db).put(artifact);
+    const reviewId = artifact.key;
+    const aFindings = db.raw.query("SELECT COUNT(*) AS n FROM findings WHERE review_id = ?").get(reviewId);
+    expect(aFindings).toEqual({ n: 2 });
+
+    // A publication for the same head applies after the rebind: its artifact
+    // half is the idempotent no-op, its lifecycle findings follow the binding.
+    rebind(db);
+    const pay = payload({
+      artifact,
+      lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }),
+    });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
+
+    // One review row, first write wins (still A's), and A's findings untouched.
+    expect(db.raw.query("SELECT id, target_id FROM reviews").all()).toEqual([
+      { id: reviewId, target_id: TARGET_ID },
+    ]);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings WHERE review_id = ?").get(reviewId)).toEqual({
+      n: 2,
+    });
+    // The lifecycle row is the new attempt's record, under the live binding.
+    expect(db.raw.query("SELECT finding_id, target_id FROM review_findings").all()).toEqual([
+      { finding_id: "f-1", target_id: TARGET_B_ID },
+    ]);
+    // The schema forbids a second review for the same head, target or not —
+    // the premise of a cross-target capture cannot arise.
+    expect(() =>
+      db.raw
+        .prepare(
+          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id)
+           VALUES ('review-b', ?, 'acme', 'widgets', 42, ?, 'needs fixes', ?, ?)`,
+        )
+        .run(SCOPE.installationId, SHA, APP_ID, TARGET_B_ID),
+    ).toThrow(/UNIQUE/);
+  });
+
+  /**
+   * The artifact's inserts carry the same inline lease guard as the lifecycle
+   * statements. A trigger supersedes the lease right after the review INSERT
+   * commits inside its chunk, so the findings that follow in the SAME chunk
+   * must be fenced out — the guard is evaluated by each statement, not by the
+   * pre-chunk probe.
+   */
+  test("a superseded lease aborts the artifact chunk too", async () => {
+    const db = fixedAttributionFixture();
+    const twoFindings = [0, 1].map((i) => ({
+      mergeClass: "should-fix" as const,
+      category: "logic",
+      file_path: `src/g${i}.ts`,
+      line_start: i + 1,
+      line_end: i + 2,
+      title: `Finding ${i}`,
+      body: "body",
+      fingerprint_hint: `fp-${i}`,
+    }));
+    const pay = payload({ artifact: artifactDoc({ payload: enginePayload({ findings: twoFindings }) }) });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    db.raw.exec(
+      `CREATE TRIGGER rival_after_review AFTER INSERT ON reviews BEGIN
+         UPDATE review_publications SET holder = 'rival', lease_epoch = lease_epoch + 1 WHERE id = 'pub-1';
+       END`,
+    );
+
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(false);
+    // The review row's guard passed when it ran; the findings' did not.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get()).toEqual({ n: 0 });
+    expect(publicationRow(db, "pub-1")).toMatchObject({ phase: "confirmed", applied_ms: null });
+  });
+
+  test("a genuinely new fingerprint after the rebind lands on the new target", async () => {
+    // A delivery for the new workspace created B's own ledger row.
+    const db = fixedAttributionFixture({ withBPullRequest: true });
+    await applyRoundOne(db, "f-1");
+    rebind(db);
+
+    // A publication composed BEFORE the rebind, applied after it: its payload
+    // still names A, and only the live binding can make the new row B's.
+    const lease = await stageClaimProve(
+      db,
+      "pub-2",
+      roundTwo([{ rowId: "row-2", findingId: "f-2" }], TARGET_ID),
+      10_000,
+    );
+    expect(await applyPublishedLifecycle(db, "pub-2", lease, 11_000)).toBe(true);
+
+    // The NEW row takes the live binding; the old row is untouched.
+    expect(
+      db.raw.query("SELECT finding_id, target_id FROM review_findings ORDER BY finding_id").all(),
+    ).toEqual([
+      { finding_id: "f-1", target_id: TARGET_ID },
+      { finding_id: "f-2", target_id: TARGET_B_ID },
+    ]);
+
+    const store = createReviewBotsStore(db);
+    expect(
+      (await store.listPullRequestFindings(scopeB, "acme", "widgets", 42, PAGE))!.items.map((row) => row.finding_id),
+    ).toEqual(["f-2"]);
+    expect(
+      (await store.listPullRequestFindings(scopeA, "acme", "widgets", 42, PAGE))!.items.map((row) => row.finding_id),
+    ).toEqual(["f-1"]);
+  });
+});
+
+/**
+ * A public finding attaches to the review that ACTUALLY exists for its head.
+ *
+ * `reviews` accepts one row per (installation, owner, repo, pr, head_sha)
+ * (`0001_reviews.sql`), so the natural-key lookup has at most one candidate:
+ * a historically written review (UUID id) keeps its findings, and a head with
+ * no review yet gets this attempt's derived id.
+ */
+describe("public findings attach to the review that exists", () => {
+  /** One raw `reviews` row, as a pre-deterministic writer stored it. */
+  function seedHistoricalReview(db: TestD1, id: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO reviews
+           (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id)
+         VALUES (?, ?, 'acme', 'widgets', 42, ?, 'needs fixes', ?, ?)`,
+      )
+      .run(id, SCOPE.installationId, SHA, APP_ID, TARGET_ID);
+  }
+
+  test("a review written under a UUID id adopts this attempt's findings", async () => {
+    const db = createSeededTestD1();
+    const historicalId = crypto.randomUUID();
+    seedHistoricalReview(db, historicalId);
+    const pay = payload({ lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }) });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
+
+    // One review row — the historical one — and every public finding on it.
+    expect(db.raw.query("SELECT id FROM reviews").all()).toEqual([{ id: historicalId }]);
+    expect(
+      db.raw.query("SELECT COUNT(*) AS n, COUNT(DISTINCT review_id) AS reviews FROM findings").get(),
+    ).toEqual({ n: 1, reviews: 1 });
+    expect(db.raw.query("SELECT DISTINCT review_id FROM findings").all()).toEqual([
+      { review_id: historicalId },
+    ]);
+    // The lifecycle half still lands on the live binding's target.
+    expect(db.raw.query("SELECT finding_id, target_id FROM review_findings").all()).toEqual([
+      { finding_id: "f-1", target_id: TARGET_ID },
+    ]);
+  });
+
+  test("a head with no review yet gets this attempt's derived id", async () => {
+    const db = createSeededTestD1();
+    const pay = payload({ lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }) });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
+
+    const derived = pay.artifact!.key;
+    expect(db.raw.query("SELECT id FROM reviews").all()).toEqual([{ id: derived }]);
+    expect(db.raw.query("SELECT DISTINCT review_id FROM findings").all()).toEqual([
+      { review_id: derived },
+    ]);
   });
 });

@@ -2764,6 +2764,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
       can_manage: boolean;
       check_gate: { min_score: number; pass_verdicts: string[] };
       allowlist: { enabled: boolean; owners: string[] };
+      owner_overlap: boolean;
       app: { github_visibility: string | null };
     };
     expect(body.can_manage).toBe(true);
@@ -2772,6 +2773,8 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     // 'unknown'.
     expect(body.check_gate).toEqual({ min_score: 60, pass_verdicts: ["ship it"] });
     expect(body.allowlist).toEqual({ enabled: false, owners: [] });
+    // A lone target claims no account yet, so nothing overlaps.
+    expect(body.owner_overlap).toBe(false);
     expect(body.app.github_visibility).toBe("unknown");
 
     const member = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
@@ -2795,12 +2798,14 @@ describe("review gate + owner allowlist (payload and ops)", () => {
       can_manage: boolean;
       check_gate: unknown;
       allowlist: { enabled: boolean; owners: string[] };
+      owner_overlap: boolean;
       app: { id: string };
     };
     expect(body.can_manage).toBe(true);
     expect(body.check_gate).toBeNull();
     expect(body.app.id).toBe(app.id);
     expect(body.allowlist).toEqual({ enabled: false, owners: [] });
+    expect(body.owner_overlap).toBe(false);
   });
 
   test("save-check-gate: two distinct pass_verdicts persist in submission order, and the next read serves them", async () => {

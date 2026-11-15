@@ -27,6 +27,7 @@ import {
   type PullRequestDetail,
   type PullRequestReviewing,
   type PullRequestRow,
+  type SettingsManagePayload,
   type SettingsPayload,
 } from "../../src/spa/pages/data";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
@@ -66,13 +67,18 @@ const identityPayload: SettingsPayload = {
   can_manage: false,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
+  blocked: false as const,
+  blocked_reason: null,
   app: IDENTITY_APP,
 };
 
-const managePayload = {
+const managePayload: SettingsManagePayload = {
   ...identityPayload,
   can_manage: true,
+  blocked: false,
+  blocked_reason: null,
   installation: null,
+  pending_installations: [],
   app: {
     ...IDENTITY_APP,
     last_webhook_at: null,
@@ -85,6 +91,7 @@ const managePayload = {
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
   allowlist: { enabled: false, owners: [] },
+  owner_overlap: false,
   keys: [],
   model_chain: null,
   model_limits_snapshot: "2026-01-01",
@@ -110,7 +117,6 @@ function renderDetail(payload: SettingsPayload) {
       locale: "en",
       appId: "1",
       payload,
-      groups: [],
       notice: null,
       search,
       onReload: noReload,
@@ -152,7 +158,6 @@ function DetailHarness() {
     locale: "en",
     appId: "1",
     payload: managePayload,
-    groups: [],
     notice: null,
     search,
     onReload: noReload,

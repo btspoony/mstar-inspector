@@ -15,6 +15,8 @@ A review bot's visibility (`owned` / `shared`), the platform's official workspac
 | Authority | Platform operator only, through `/_internal_admin`. A workspace owner cannot mark its own bot shared. |
 | Constraint | `shared` is only accepted for a bot whose workspace is the **official workspace** at write time. The check runs inside the same batch as the write, so a designation changed concurrently cannot authorize a stale share. |
 
+A retained target grants its workspace no bot-scope write; the bot's lifecycle, configuration, keys, metadata, installations and deliveries belong to its owning workspace, and a Blocked target's payload carries only target-owned configuration.
+
 ### Official workspace
 
 `review_runtime_settings["platform.official_workspace_id"]` — the platform parameter store's second key domain. Absent row means "no official workspace": no new share is possible, existing shares stay and remain revocable.
@@ -94,3 +96,31 @@ Dependency: `shared` stops reviewing until an installation is claimed. Operators
 ## Change obligations
 
 Any change to scope authority, the claim lifecycle, the bind batch or the resolution guards updates this page. A chooser for non-operator workspaces, a Blocked state after a designation change, and quota live in later phases and must record their own contract here.
+
+### Resolving a target for a workspace
+
+A workspace may read a target when it holds a live target on that bot, **or** the bot is `shared`. The bot the workspace owns is always reachable through its own mapping. A foreign `owned` bot with no target here is a 404, and the list keeps the narrower rule (own, or shared with a live target here) so a revoked-share target is reachable by URL but not listed.
+
+### Pending installations and binding
+
+`GET`-side payload field `pending_installations` lists live `bot_installations` of the target's bot that no live target references (`removed_at` excluded), and is empty unless the bot is `shared` or mapped to the addressed workspace.
+
+`POST /api/apps/:appId/bind-installation` (manager, `access: write`) creates-or-refreshes a claim and then runs the same guarded batch as the setup confirm. Guard order: unknown or foreign app → 404; non-manager → 403; bot not `shared` → 404 `bot is not shared` (no claim written); no target → 404; malformed id → 400; id absent from the pending read → 404 `unknown installation`; target already bound → 409 `target already bound`; lost race → 409 `installation already bound`. The batch remains the only writer of `review_targets.installation_id`.
+
+### Derived Blocked state
+
+Both detail payload faces carry `blocked` and, when true, `blocked_reason = "bot_not_shared"`. It is derived per request from the bot row and the target's workspace — true exactly when the bot is `owned` and the target's workspace is not the bot's workspace. There is no column and no projection. The page names the reason, hides the install/claim action and the bot-settings link, and still renders trigger, depth, gate and pause.
+
+### Shared bots are read-only for their consumers
+
+Every bot-scoped write route — settings operations, key deletion, provider-key verification (`keys/verify`, both the builtin and the custom/declared path), disable/enable and delete — refuses a `shared` bot before parsing, probing or persisting, with zero outbound calls and no storage change. `refresh-metadata` and `keys/usage` are not configuration writes but must still authorize the bot.
+
+### Execution ledgers
+
+`review_findings` and `review_failures` carry `target_id`, backfilled from their pull-request row and guarded three ways: a row with no resolvable target aborts the migration, a row with several candidate targets aborts it, and only an exactly-one candidate is attributed. Tenant reads bind `target_id` directly; the bot-keyed pull-request join is no longer load-bearing. `audit_events.target_id` is nullable so a park audit can name its target.
+
+A row's `target_id` is set when it is first recorded and never rewritten; rebinding an installation moves future publications, not history.
+
+### Parking an overlapping target
+
+`POST /api/apps/:appId/park` (manager on the target's workspace, or operator) writes in one batch: one `target.park` audit row, `review_enabled = 0`, and `account_login = NULL`. It refuses `no-overlap` (no other live target in the workspace carries the same `account_login`), `only-live-target` (parking would leave that owner in this workspace with no live target), and a target outside the caller's workspace, all with zero writes. It never sets `deleted_at`, so the rows stay visible.

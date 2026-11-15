@@ -7,7 +7,7 @@
  * group, a catalog-only id forms none (the catalog is the discovery surface,
  * not configured state).
  */
-import type { CustomProviderModelsMeta, ProviderKeyRow, SettingsManagePayload } from "./data";
+import type { BotConfigSections, CustomProviderModelsMeta, ProviderKeyRow } from "./data";
 
 export type ProviderGroup = {
   providerId: string;
@@ -48,7 +48,7 @@ function newestStamp(group: ProviderGroup): string | null {
   }, null);
 }
 
-export function providerGroups(payload: SettingsManagePayload): ProviderGroup[] {
+export function providerGroups(payload: BotConfigSections): ProviderGroup[] {
   const catalog = new Map(payload.provider_catalog.map((entry) => [entry.id, entry]));
   const declarations = new Map(payload.custom_providers.map((row) => [row.provider_id, row]));
   const providerIds = new Set([

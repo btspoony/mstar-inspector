@@ -38,6 +38,7 @@ import { ProviderConfigForm } from "../../src/spa/pages/providers-dialogs";
 import type { SpaBoot } from "../../src/spa/boot";
 import { SupportNotice } from "../../src/spa/components/SupportNotice";
 import { AppDetailPage, AppDetailView } from "../../src/spa/pages/AppDetailPage";
+import { BotSettingsView } from "../../src/spa/pages/BotSettingsPage";
 import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
 
@@ -49,6 +50,7 @@ import { installDom } from "./dom";
  */
 const readSettingsSource = () =>
   readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8") +
+  readFileSync(join(import.meta.dir, "../../src/spa/pages/BotSettingsPage.tsx"), "utf8") +
   readFileSync(join(import.meta.dir, "../../src/spa/pages/settings-providers.tsx"), "utf8") +
   readFileSync(join(import.meta.dir, "../../src/spa/pages/providers-dialogs.tsx"), "utf8");
 
@@ -78,8 +80,11 @@ const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat"
 const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
   installation: null,
+  pending_installations: [],
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
+  blocked: false as const,
+  blocked_reason: null,
   app: {
     github_slug: "acme-app",
     id: "app-acme",
@@ -102,6 +107,7 @@ const detailPayload = (): SettingsManagePayload => ({
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
   allowlist: { enabled: false, owners: [] },
+  owner_overlap: false,
   keys: [],
   model_chain: null,
   model_limits_snapshot: "2026-01-01",
@@ -122,6 +128,8 @@ const memberPayload = (): SettingsReadOnlyPayload => ({
   can_manage: false,
   workspace_id: "ws_0123456789abcdefghijkl",
   target_id: "rt-501",
+  blocked: false as const,
+  blocked_reason: null,
   app: {
     github_app_id: 1,
     status: "active",
@@ -399,7 +407,7 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
     // the id alone and one key stored under two providers (ids hash the
     // plaintext) reports the outcome beside the wrong provider's row. The
     // lookup itself is pinned behaviourally in pages-data.test.ts.
-    expect(page).toContain("const slot = configuredKeySlot(configured, action.provider, action.keyId);");
+    expect(page).toContain("const slot = configuredKeySlot(payload.configured_providers, action.provider, action.keyId);");
   });
 
   test("the key row renders the per-key verification state", () => {
@@ -1331,17 +1339,14 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
   test("only the draft panel injects a discard; the stored-chain editors carry none", () => {
     // The Default tab's editor renders on the manage face; the draft panel
     // renders only after 新建链 opens it, so its discard is absent until then.
-    const manage = withLocation("/dashboard/apps/1", () =>
+    const manage = withLocation("/dashboard/apps/1/bot", () =>
       renderToStaticMarkup(
-        createElement(AppDetailView, {
+        createElement(BotSettingsView, {
           locale: "en",
-          appId: "1",
-          payload: detailPayload(),
+          payload: { ...detailPayload(), can_manage: true },
           groups: [],
           notice: null,
-          search: { tab: "settings", window: "30", repo: "", pr: "" },
           onReload: async () => true,
-          onSearch: () => {},
         }),
       ),
     );
@@ -1511,7 +1516,6 @@ describe("ops danger zone: one row per action", () => {
           locale,
           appId: "1",
           payload: { ...payload, app: { ...payload.app, ...app } },
-          groups: [],
           notice: null,
           search: { tab: "settings", window: "30", repo: "", pr: "" },
           onReload: async () => true,
@@ -1712,7 +1716,7 @@ describe("section-scoped op feedback", () => {
     expect(detail.match(/setNotice\(\{/g)?.length).toBe(2);
     const outsideInfoCard = source
       .slice(0, source.indexOf("export function AppInfoSection"))
-      .concat(source.slice(source.indexOf("function InstallationsSection")));
+      .concat(source.slice(source.indexOf("export function BotHealthSection")));
     expect(outsideInfoCard).not.toContain("setNotice({");
     // Bugbot fix: a successful load() — foreground or background —
     // clears the page banner, so a recovered reload never leaves a stale
@@ -1721,7 +1725,7 @@ describe("section-scoped op feedback", () => {
     // commit and its success return), not anywhere in the file.
     expect(detail.match(/setNotice\(null\)/g)?.length).toBe(1);
     const loadSuccessPath = detail.slice(
-      detail.indexOf("setPayload(loaded.payload);"),
+      detail.indexOf("setPayload(loaded);"),
       detail.indexOf("return true;"),
     );
     expect(loadSuccessPath).toContain("setNotice(null);");
@@ -1733,7 +1737,10 @@ describe("section-scoped op feedback", () => {
     // channels plus the identity card's refresh (whose fetch rejects with no
     // status to key a message from).
     expect(source).toContain('message: t(locale, "common.saveFailed")');
-    expect(source.match(/t\(locale, "common\.saveFailed"\)/g)?.length).toBe(4);
+    // Three transport catches per face: the target detail's depth save, gate
+    // save and identity refresh; the bot page's settings save, verify and key
+    // delete.
+    expect(source.match(/t\(locale, "common\.saveFailed"\)/g)?.length).toBe(6);
     // Page-level reload failures keep the load-failed copy: load()'s two
     // background-failure paths and the draft create's reload-failure return.
     expect(source).toContain('message: t(locale, "common.loadFailed")');
@@ -1807,20 +1814,27 @@ describe("section-scoped op feedback", () => {
 
   test("dialog-confirmed ops report into the card that owns the action", () => {
     const source = readSettingsSource();
-    // remove-chain → chains card; remove-key / remove-custom → the providers
-    // card's row-local outcome; pause/resume/disable/enable/
-    // delete (delete with its own copy) → ops zone. Each card renders its own
-    // notice state.
-    const confirmBody = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
-    expect(confirmBody).toContain('setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }))');
-    expect(confirmBody).toContain("setProvidersRemoveOutcome({");
-    expect(confirmBody).toContain("setOpsNotice(");
+    // The two faces own their own confirms: the bot page's removes report into
+    // the chains / providers cards, the target detail's ops into its ops zone.
+    const botView = componentBody(
+      readFileSync(join(import.meta.dir, "../../src/spa/pages/BotSettingsPage.tsx"), "utf8"),
+      "BotSettingsView",
+    );
+    const botConfirm = botView.slice(
+      botView.indexOf("async function onConfirm"),
+      botView.indexOf("const confirmCopy"),
+    );
+    expect(botConfirm).toContain('setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }))');
+    expect(botConfirm).toContain("setProvidersRemoveOutcome({");
+    const targetConfirm = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
+    expect(targetConfirm).toContain("setOpsNotice(");
+    expect(targetConfirm).not.toContain("setProvidersRemoveOutcome(");
     expect(source).toContain("notice={opsNotice}");
     expect(source).toContain("notice={providersNotice}");
     expect(source).toContain("notice={chainsNotice}");
     // the removes no longer write the card-level providers state —
     // that region keeps only the add-flow (verify / template) outcomes.
-    expect(confirmBody).not.toContain("setProvidersNotice(");
+    expect(botConfirm).not.toContain("setProvidersNotice(");
     // The add-flow forms forward their outcome into the providers card's
     // region; the draft panel forwards its SUCCESS into the chains card's
     // region (its own panel unmounts on success).
@@ -1830,19 +1844,26 @@ describe("section-scoped op feedback", () => {
 
   test("provider remove outcomes render beside the removed row's group (audit UI-45-05)", () => {
     const source = readSettingsSource();
-    // The outcome state carries the removed row's slot, captured in onConfirm
-    // from the PRE-POST payload: the awaited background reload
+    // The outcome state carries the removed row's slot, captured in the bot
+    // page's onConfirm from the PRE-POST payload: the awaited background reload
     // drops the row from the payload before the outcome resolves, so the
     // position must be remembered — the row unmounts with the fresh payload
     // while the card (and the region it renders) stay mounted.
-    const confirmBody = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
-    expect(confirmBody).toContain("const configured = payload.can_manage ? payload.configured_providers : [];");
+    const botView = componentBody(
+      readFileSync(join(import.meta.dir, "../../src/spa/pages/BotSettingsPage.tsx"), "utf8"),
+      "BotSettingsView",
+    );
+    const confirmBody = botView.slice(
+      botView.indexOf("async function onConfirm"),
+      botView.indexOf("const confirmCopy"),
+    );
+    expect(confirmBody).toContain("const slot = payload.configured_providers.findIndex(");
     // The captured slot is the row's own identity's — the key path matches the
     // (provider, key_id) pair the POST carries, the custom path its
     // provider_id (both pinned in the multi-key describe / pages-data suite).
-    expect(confirmBody).toContain("const slot = configuredKeySlot(configured, action.provider, action.keyId);");
-    expect(confirmBody).toContain("configured.findIndex((row) => row.kind === \"custom\"");
-    expect(confirmBody).toContain("slot: slot >= 0 ? slot : configured.length");
+    expect(confirmBody).toContain("const slot = configuredKeySlot(payload.configured_providers, action.provider, action.keyId);");
+    expect(confirmBody).toContain("row.kind === \"custom\" && row.provider_id === action.providerId");
+    expect(confirmBody).toContain("slot: slot >= 0 ? slot : payload.configured_providers.length");
     // The card resolves that slot back to the provider it named, so the group
     // card owning the row renders the outcome — through the shared
     // NoticeRegion, so the group-local region inherits the roles
@@ -1937,7 +1958,6 @@ describe("settings header typography", () => {
           locale: "en",
           appId: "1",
           payload: detailPayload(),
-          groups: [],
           notice: null,
           search: { tab: "settings", window: "30", repo: "", pr: "" },
           onReload: async () => true,
@@ -2357,8 +2377,10 @@ describe("GitHub App settings link wiring (AD-623)", () => {
     // Presentation-layer threading only — the payload contract gains nothing.
     // Threading is presentation-only: the card gets the payload's own
     // `can_manage` and `workspace_id` (never a path-derived value).
+    // `canManage` is the bot's writability, not the workspace role: a Blocked
+    // target is a manager face whose bot-scope actions must not render.
     expect(source).toContain(
-      "<AppInfoSection\n          locale={locale}\n          app={app}\n          workspaceId={payload.workspace_id}\n          canManage={payload.can_manage}\n          onReload={() => onReload({ background: true })}\n        />",
+      "<AppInfoSection\n          locale={locale}\n          app={app}\n          workspaceId={payload.workspace_id}\n          canManage={!blocked}\n          onReload={blocked ? undefined : () => onReload({ background: true })}\n        />",
     );
     // The card body routes the manager target through the pure helper (the
     // forbidden derivations — github_name / the local slug — cannot reach the
@@ -2544,12 +2566,63 @@ describe("review depth control", () => {
   test("managers get the depth control; the identity-only face renders none", () => {
     const name = t("en", "settings.reviewDepth");
     const manager = renderToStaticMarkup(
-      createElement(SettingsView, { locale: "en", payload: detailPayload(), groups: [], onReload: async () => true }),
+      createElement(SettingsView, { locale: "en", payload: detailPayload(), onReload: async () => true }),
     );
     expect(manager).toContain(name);
     const member = renderToStaticMarkup(
-      createElement(SettingsView, { locale: "en", payload: memberPayload(), groups: [], onReload: async () => true }),
+      createElement(SettingsView, { locale: "en", payload: memberPayload(), onReload: async () => true }),
     );
     expect(member).not.toContain(name);
+  });
+});
+
+/**
+ * The settings sections split by OWNER: the bot's credentials, providers,
+ * chains, seats, sandbox image and installations are bot-scoped and live on
+ * the bot page; the workspace's review policy (trigger, depth, gate,
+ * allowlist, pause) is what the target detail keeps.
+ */
+describe("bot-scoped sections left the target detail", () => {
+  test("the settings view renders no bot-scoped section, and keeps every target-scoped one", () => {
+    const markup = renderToStaticMarkup(
+      createElement(SettingsView, { locale: "en", payload: detailPayload(), onReload: async () => true }),
+    );
+    for (const key of [
+      "settings.providers.title",
+      "settings.modelChains",
+      "settings.seats",
+      "settings.runtimeHarness",
+      "settings.installations",
+    ] as const) {
+      expect(markup, key).not.toContain(t("en", key));
+    }
+    for (const key of [
+      "settings.appInfo",
+      "settings.reviewTrigger",
+      "settings.reviewDepth",
+      "settings.reviewGate",
+      "settings.ops",
+    ] as const) {
+      expect(markup, key).toContain(t("en", key));
+    }
+  });
+
+  test("the settings view carries no bot-scoped op and no bot-scoped section component", () => {
+    const viewBody = componentBody(
+      readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8"),
+      "SettingsView",
+    );
+    for (const marker of [
+      "<ProvidersSection",
+      "<ChainsSection",
+      "<SeatsSection",
+      "<RuntimeHarnessEditor",
+      "<InstallationsSection",
+    ]) {
+      expect(viewBody, marker).not.toContain(marker);
+    }
+    for (const op of ["save-sandbox-image", "add-key", "add-chain", "save-roles", "add-custom-provider"]) {
+      expect(viewBody, op).not.toContain(op);
+    }
   });
 });
