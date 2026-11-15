@@ -329,8 +329,8 @@ export function createTargetsStore(db: TargetsStoreD1) {
           : { outcome: "bot_not_shared" };
       }
       const row = await db
-        .prepare(`SELECT * FROM review_targets WHERE id = ?`)
-        .bind(id)
+        .prepare(`SELECT * FROM review_targets WHERE ${LIVE_TARGET}`)
+        .bind(id, input.workspaceId)
         .first<ReviewTargetRow>();
       if (!row) throw new Error("targets-store: shared target row vanished on read-back");
       return { outcome: "created", target: row };
